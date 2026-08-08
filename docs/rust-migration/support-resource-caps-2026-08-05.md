@@ -1837,3 +1837,250 @@ not a cap question in either direction.
 11199296506741562956, `make_raking_blade` 13278215294653054002, `make_thin_fin`
 7016743535301716631 — which is the check that matters here: **repricing changes
 charges, never geometry.**
+
+## 16. FU-8f phase G6c (2026-08-08) — the meter beside the charge; the arena's held bytes join the gate peak; no cap moves
+
+**Scope, stated first.** §15 (G5) repriced what the load finalizer's CHARGE
+prices. This section changes neither that charge nor any cap: it adds a
+SECOND, separately-stated number — what a round actually EXECUTES — beside
+the charge every round still states, and adds one new byte term for state
+G6a/G6b's retention now holds across rounds. Pointers: §10–§13 priced the
+gate's operation model this section meters against; §14 counted rounds; §15
+is the repricing this section's charge figure inherits untouched.
+
+### 16.1 The charge stays the admissible worst case; the meter is new
+
+Every gate round — retained or rebuilt — is still charged
+`specialized_load_resource_plan`'s figure over the round's fresh pair counts,
+exactly as G6b landed it (§ above, "charging is deliberately untouched").
+That does not change here. What G6c adds is `GateLoadState::executed_operations`
+and `executed_load_build` (`Rebuilt` | `Retained`):
+
+- **`Rebuilt`:** `executed_operations == baseline_operations`. The full build
+  IS what the charge prices, so the two coincide by construction, not
+  measurement.
+- **`Retained`:** `RetainedLoadTranspose::executed_operations` prices only
+  what `finalize_retained_round` actually runs — the G5-repriced per-cell
+  scan allowance (`LOAD_WITNESS_SLOTS + 5` per retained cell) over `cells`,
+  the O(rows) fill, the O(contacts) hash, and the last `record_commit`'s
+  O(|l| + |r| + contacts) remap. The two eligibility traversals a full build
+  pays twice (`LoadTransposeCounts::count`/`::finish`) are not in this figure
+  — a retained round never runs them (F-G6-2/F-G6-3, §12/§13's own findings
+  on what G1 deliberately left standing).
+
+`executed_operations <= baseline_operations` is checked in both
+`build_gate_load_state` and `evaluate_gate_batch` (`debug_assert!`, the same
+disposition as the G3 executed/charged invariant — compiled out of release,
+enforced by the census meter and a pinned test in debug/test builds), and
+pinned by `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`.
+
+### 16.2 The census meters the run total
+
+`RetainedLoadCensus` gains `charged_operations`/`executed_operations` — `u128`
+running sums over every load-build round of a run, retained or rebuilt —
+printed on the gate's `T0_scaled_cap` row as
+`retained_load_charged_operations=`/`retained_load_executed_operations=`.
+This is the run-level twin of the per-round assertion: a full corpus run's
+totals are now readable from one census invocation rather than re-derived.
+
+### 16.3 The arena's held bytes join the gate peak — a NEW term, a DIFFERENT cap than the design record's own comparison
+
+`RetainedLoadTranspose::retained_bytes` — the carrier's own arena (charged at
+its 2×-compaction CEILING, `2 x cells x 4 B`, never the live length, because
+compaction runs only once waste crosses that bound), `buckets`,
+`contact_witness` and the row invariants, at their REAL sizes — now joins
+`gate_load_state_bytes` (a new `Option<&RetainedLoadTranspose>` parameter)
+whenever retention is live. This term feeds `check_gate_peak`'s
+`load_baseline_bytes` addend, checked against `max_gate_peak_bytes`
+(`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES`, 1 GiB, **UNCHANGED**).
+
+**Stated because it is easy to misread:** the design record's own ~66 MB
+estimate for this term compares itself against `max_load_scratch_bytes`
+(`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`, 512 MiB) for SCALE only. That
+is a DIFFERENT cap, checked only inside `SpecializedLoadBaseline::build`'s
+own internal `finalize_load_rows` check (§1's `load_resource_plan`), which a
+retained round never reaches at all — it calls `finalize_retained_round`
+instead. The arena's bytes are charged against `max_gate_peak_bytes`, not
+`max_load_scratch_bytes`; both are UNCHANGED by this phase.
+
+### 16.4 G1's per-round transpose-scratch term retires on retained rounds — already true since G6b, stated here
+
+The 32,848,040 B term §1's own addendum on
+`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES` describes is charged inside
+`load_resource_plan`, reached only from `SpecializedLoadBaseline::build`. A
+retained round never calls that function, so that check — and the term it
+charges — simply does not run on a retained round. This was already true the
+moment G6b landed the retained fast path; G6c is where it is stated as a
+record fact rather than left to be inferred from the control flow. §16.3's
+new arena term is a SEPARATE charge at a SEPARATE cap and does not
+substitute for it.
+
+### 16.5 What this licenses, and what it does not
+
+- **Licensed:** reading a run's retained-vs-rebuilt split and its
+  charged-vs-executed totals from one census invocation
+  (`retained_load_rounds`/`retained_load_rebuilds`/
+  `retained_load_charged_operations`/`retained_load_executed_operations`).
+- **Licensed:** treating the arena's held-bytes term as bounded and charged,
+  not merely designed-for — `RetainedLoadTranspose::retained_bytes` returns a
+  checked `Result`, same as every other byte term in this file.
+- **NOT licensed:** reading `executed_operations` as a new CHARGE. It is
+  metered, asserted `<=` the charge, and never subtracted from any cap check
+  — the exact "charge the worst case, meter the spend" shape §14's own
+  citation of the G3/FU-8d precedent already named.
+- **NOT licensed:** any cap, floor or coefficient change. None moved.
+- **NOT licensed:** a wall-clock claim. **G6d remains the measuring phase.**
+
+**Gates.** Five gates green, verbatim, tree clean before and after: **1003**
+tests default / **1004** `--all-features`, 0 failed, the **+1** over the G6b
+tip attributed to `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`.
+`make_raking_blade`'s 21 retained rounds ran under the new `debug_assert!`s
+during this same test pass and did not trip either — the invariant held on
+real corpus geometry, not only the fixture.
+
+## 17. FU-8f phase G6d (2026-08-08) — the completed gate, measured twice; no cap moves, and the successor wall is named
+
+**Scope first.** G6d changed **no engine code**. `git diff` over `crates/` at
+its tip is empty. Every per-round and stage-boundary timer was env-gated on
+`PLINTH_G6D_ROUNDS`, was never reachable without it, and was removed by editing
+before the gates — the §14 (G4) precedent, followed exactly. **No cap, floor,
+coefficient, charged number or byte term is raised, lowered or touched by this
+section.** Its whole content is measurement.
+
+### 17.1 The gate completes; the tournament is 823 rounds
+
+Conditions: release, `--features census`,
+`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`, `PLINTH_THREADS=4`,
+RSS watchdog unsandboxed (ruling R-g) sampling every 2 s, armed at 90 GB and
+**never fired**, 600 s timebox, two attempts, at the G6c tip `fe79124`.
+
+| | attempt 1 | attempt 2 |
+|---|---:|---:|
+| whole-run wall-clock | **339 s** | **339 s** |
+| merge rounds committed | **823** | **823** |
+| gate batches | **826** | **826** |
+| contacts, first → tournament exit → after coalesce | 1,366 → 543 → **542** | identical |
+| cumulative proposals gathered | **20,059,412** | **20,059,412** |
+| tournament wall-clock | 183.29 s | 184.22 s |
+| peak RSS | 2,851,632 KB (2.719 GiB) | 2,653,888 KB (2.530 GiB) |
+
+**Zero differing rounds across all 823** on contacts, proposals and the
+retained-load rebuild count; every census counter matches to the unit; only
+wall-clock differs, by 0.51 %. That reproduction — not the pre-run `ps` polling,
+though thirteen polls over twelve minutes found no sibling `cargo`/`rustc` and
+CPU idle stayed 85–92 % — is why the wall-clock here is landed rather than
+marked CONTENDED.
+
+**The tournament ends because no proposal in the final batch is safe**, not
+because proposals ran out and not on a cap: after round 822 the loop gathered
+2 more proposals and the acceptance fold returned no accepted index. Both prior
+predictions are falsified in opposite directions — the blade ratio's 463 too
+low, the 1,365-contact hard bound too high.
+
+### 17.2 No cap binds, and two §14 projections can now be checked against truth
+
+- **`max_merge_total_proposals` = 100,000,000** against the whole tournament's
+  **20,059,412** — a **4.99× margin**, now a total rather than an extrapolation.
+  §14.2 projected "**≈33.0 M** at the hard bound"; the truth is 20.1 M, so that
+  projection over-stated by **64 %**. §14's own measurement (15,544,641 over 436
+  rounds) stands untouched; only its extrapolation is corrected, and **§14 is
+  not retrofitted**.
+- **§14.1's `round_ms = 304.17 + 0.6924 × contacts` is excellent inside its
+  fitted range and does not extrapolate below it.** Its 504.7 s / 1,061.6 s gate
+  projections rested on that extrapolation. The reason it fails is now measured:
+  **proposals collapse superlinearly** (39,223 → 3 over the run; 24,826 → 65
+  over the last 300 rounds), so the round falls far faster than contacts do.
+- **`max_merge_iterations` = 100,000** against 823 tournament merges plus the
+  coalesce pass's one — two orders of magnitude of headroom, now measured.
+- **`specialized_gate_operations`** materialized **35,445,500,736**
+  (`at_floor=false`) and **`specialized_load_operations`** **11,421,470,912** —
+  both unchanged, both admitted every round of both runs.
+- **Every other cap was admitted every round. None is raised, lowered or
+  touched.**
+
+### 17.3 Retention, measured on a whole tournament, with the pre-G6 round as an internal control
+
+826 load builds; **804 retained (97.3 %)**; 22 counted rebuilds — 21 `poisoned`,
+1 `contact_witness`. The `contact_witness` miss is the terminal audit after
+`coalesce_exact_regular_seats`, which is **F-G6-4's predicted site**, once per
+tournament, ≈0.2 s of a 339 s run. Run-wide charge-vs-meter (§16's severance):
+charged **433,886,641,066**, executed **48,520,980,855** — **11.18 %** — with
+`executed ≤ charged` holding every round.
+
+The 21 rebuild rounds **are** the pre-G6 round, measured at this tip in the same
+process; the 15 of them inside §14.1's fitted contact range reproduce §14.1's
+model to a mean of **−0.97 %** (worst −3.2 %). Against that control the retained
+round fits `round_ms = 71.46 + 0.1405 × contacts` (n = 802), means **206.5 ms**
+against **879.6 ms**, and is **4.4–5.2×** cheaper across the fitted range. The
+G6 design's D-G6-5 predicted 0.19 s and a 350–450 s whole run; measured 0.206 s
+and 339 s — **the first prediction in this chain to land**, though it landed on
+the round and **not** on the round *count*, which it priced at 1,365.
+
+### 17.4 Memory: §14.3's open question is closed by falsification, not by explanation
+
+Peak **2.719 GiB** (attempt 1, mid-tournament) and **2.530 GiB** (attempt 2,
+≈10 s after gate-stage entry); watchdog armed at 90 GB, never fired; 2.7 % of
+the 100 GB machine ceiling. §13 recorded 3,479,600 KB and §15 3,538,624 KB, both
+unexplained, and the standing reading was that those runs "got further into the
+tournament". **These two runs go 823 rounds — the entire tournament, 1.9× §14's
+depth and further than any run in this project's history — and peak below both.
+Tournament depth is therefore not the explanation, and that hypothesis is
+retired.** What remains is an observation: the two attempts disagree on *when*
+the peak falls and on its size by 7.4 % while being bit-identical on every
+counter, which is 2 s sampling landing on a transient of a few hundred MB. No
+run has exceeded 3.4 GiB. G6's retained arena is charged and ~66 MB-class and
+explains none of the spread. **Not a cap question in either direction.**
+
+### 17.5 The successor wall — named, derived, and NOT a cap to raise (FU-8g)
+
+`Preparation: Initial(Limit { resource: "work items", required: 232585208,
+limit: 4000000 })`, identically in both attempts, **after** the gate completes.
+`initial::preflight` checks `work = contact_count × 4 + penetration.max_total_work`
+against the **flat** `ContactConstructionLimits::production().max_work_items =
+4_000_000`. With `rays_all = false`, `penetration_requirements` gives `rays = 1`
+and `hits_per_ray = mesh.nfaces()`, so
+
+> `work = contact_count × (4 + nfaces) = 542 × 429,124 = **232,585,208**`
+
+reproducing the printed figure to the unit. The demand is **58.1×** the cap, and
+at 429,120 faces the cap admits at most **9** physical contacts. **This is the
+FU-8b / FU-8c shape a fourth time — a `contacts × faces` product against an
+unscaled flat bound — and the quantity is a preflight *bound*, not a measured
+demand**: `hits_per_ray = nfaces` is "every face could be hit" while the executed
+query is BVH-bounded, the same over-statement §15 corrected on the load term.
+**No cap is raised here.** The standing owner ruling holds; the remedy, when it
+is designed, is §15's remedy — make the bound honest.
+
+### 17.6 Ruling R-f — the precondition is MET; the re-derivation is NOT done
+
+R-f requires a treant run that **completes** the gate. Two now have, with
+counters, reproducibly. **`SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is
+therefore UNBLOCKED and is deliberately NOT re-derived here** — the G6 design's
+D-G6-6 assigns it to its own later phase, and G6d obeys that. **No coefficient
+moved.** The inputs a re-derivation will want (826 gate batches, 20,059,412
+proposals, materialized 35,445,500,736, twice) are recorded in §17.1–§17.2.
+
+### 17.7 The unexercised remainder, still unexercised
+
+`prepare_support_run` still returns `Err`. **There is no treant seal.** Routing,
+rewire, penetration/brace, the CCO anchors, attestation, lowering,
+`routed_contacts`, `final_live_members` and a snapshot digest are all still
+untouched, and **nothing** is measured or claimed about `pen_intervals_one`'s
+predicted 14–32 GB at `T = 4` or the brace's `max_scratch_bytes` of 1e11 sitting
+above the 90 GB watchdog line. Those predictions stand exactly as §14.6 left
+them. The only change is that the pipeline now reaches a **later** refusal than
+it ever has.
+
+### 17.8 Gates
+
+Five gates green, verbatim, tests with `--no-fail-fast`, tree clean before and
+after: **1003** default / **1004** `--all-features`, **0 failed** — identical to
+the G6c tip, as it must be, since G6d adds no test and changes no code. Clippy
+clean at `-D warnings`, `cargo fmt --all -- --check` clean, `git diff --check`
+clean. **G6e is not opened**: D-G6-6 makes it contingent on a whole-run margin
+below ≈1.5× and the measured margin is **600 / 339 = 1.77×** — and more
+decisively, the gate is no longer the binding stage, so the ≈117 ms/round
+baseline sweep would move the stopping point not at all. Design open question 3
+(retiring the per-round `owner_faces`/`pair_starts` rebuild) is **declined
+again, measured**: gather runs 28.6 ms early and 5.7 ms late of a tournament
+that is 183 s of a 339 s run.

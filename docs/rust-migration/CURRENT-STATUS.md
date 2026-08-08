@@ -2478,6 +2478,16 @@ comparison — fails **five** tests with `GateRoutePlanMismatch`, among them
 `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`. The prefix attestation
 is exercised by real corpus geometry on every run, not only by fixtures.
 
+**Correction 2026-08-08 (owed from the FU-8f closer, landed by G6c):** the paragraph above
+over-claims. Mutation (a) — replacing the fold's stop signal with `false` — also fails
+`fu8f_prefix_acceptance_matches_the_full_evaluation`, at `left: 12 right: 2` via its
+`executed_variant_count == index + 2` pin, so "fails the forced test ... and nothing else" is
+wrong: mutation (a) is caught by BOTH tests, mutation (b) only by the second. The suite is
+STRONGER than this paragraph stated, not weaker; nothing here was re-verified vacuous. The same
+correction already stands on `fu8f_forced_late_safe_proposal_stops_at_the_same_index`'s own doc
+comment (`specialized.rs`), dated 2026-08-07 at the verification re-run; this is that correction's
+landing in the record it was owed to, not a second finding.
+
 **OD-8 at this tip — MEASURED ZERO.** All seven frozen census digests byte-identical, each from
 its own `PLINTH_CENSUS_ONLY` invocation of a fresh release `--features census` build: `Sphere`
 17667468971446251870, `Cylinder` 13310185350867878190, `make_box` 9657051231007502658,
@@ -2922,6 +2932,646 @@ release `--features census` build: `Sphere` 17667468971446251870, `Cylinder`
 this phase: **repricing changes charges, never geometry.** Full derivation:
 `support-resource-caps-2026-08-05.md` §15.
 
+### FU-8f phase G6a landed 2026-08-07 — the retention carrier and its four guards, rebuild-always; no charged number moves {#fu8f-g6a-2026-08-07}
+
+**Scope, stated as a limit first.** G6a lands the *plumbing* for cross-round retention of the
+merge gate's load transpose and nothing else. Every round still executes the **full build**
+(rebuild-always), so the phase is **byte-identical in behavior by construction** — there is no
+fast path to be wrong. What it lands is the carrier, its lifecycle, and the four guards that
+will police the fast path when G6b flips it in, each **mutation-proven** before it is trusted.
+Design record: [`fu8f-g6-design-2026-08-07.md`](fu8f-g6-design-2026-08-07.md), landed verbatim
+on this branch with a provenance banner. **No cap, floor or coefficient is raised, lowered or
+touched. No charged number moves.**
+
+**What exists now.** `RetainedLoadTranspose` in `perception.rs`: an append-only arena of
+bucket payloads plus per-contact `(offset, len)` refs, the merge-invariant row invariants
+(`face_id`, `area_mm2`, `centroid_mm`), a `(owner, point_mm)` contact witness, and the mesh
+digest the build ran under. `consolidate` owns exactly one `Option<RetainedLoadTranspose>` on
+its stack, threads it as `&mut` through `evaluate_gate_batch` into `build_gate_load_state`, and
+drops it on return — **retention never escapes the tournament**, and every non-gate load
+finalize is untouched. `record_commit` synchronizes it after each committed merge by an
+**identity walk** over positions on bits, never by comparator re-derivation; anything other
+than "survivors in preserved relative order plus exactly one insertion" **poisons** the carrier
+rather than guessing, and the next round pays one counted rebuild.
+
+**The four guards, and the measurement that says they work.** Census gains
+`retained_load_rounds` / `retained_load_rebuilds` / `retained_load_rebuild_<cause>` on the gate
+row. A guard miss is never silent. Measured on the corpus at this tip
+(`PLINTH_CENSUS=1`, release, `--features census`):
+
+| model | gate batches | retained rounds | counted rebuilds | cause |
+|---|---:|---:|---:|---|
+| `Sphere` | 2 | 2 | 0 | — |
+| `Cylinder` | 2 | 2 | 0 | — |
+| `make_box` | 2 | 2 | 0 | — |
+| `make_overhang_table` | 2 | 2 | 0 | — |
+| `make_toed_slab` | 2 | 2 | **1** | `contact_witness` |
+| `make_raking_blade` | 23 | 23 | **1** | `contact_witness` |
+| `make_thin_fin` | 2 | 2 | 0 | — |
+
+**`make_raking_blade` is the live witness, and it is a stronger one than G6a needed.** Because
+this phase rebuilds unconditionally, the *only* consumer of `record_commit`'s remap is the
+**next** round's guard chain — so a wrong remap could not corrupt geometry, it could only show
+up as a counted rebuild. It did not. Across 23 gate batches (one initial proposal-free
+evaluate, **21 committed merges**, one terminal audit) the remapped witness matched
+`append_variant_load_inputs`'s own freshly-derived `(owner, point_mm)` list on bits **every
+time**, and every specialized bucket length matched the gate's own `contact_rows` every time.
+That is 21 consecutive committed merges of positional contact/owner renumbering reproduced
+exactly, on a real model, as a *counter* rather than an argument.
+
+**The one rebuild on each of two models is the predicted one, not a defect.** Its cause is
+`contact_witness`, and it falls on the **terminal audit** — `coalesce_exact_regular_seats`
+mutates contacts after the tournament loop and behind the retention slot, exactly the hazard
+design finding F-G6-4 named and exactly the reason guard 2 is written as *equality against the
+fresh list* rather than as a round counter that trusts callers. The design predicted this site
+in advance and declined to teach `record_commit` about coalescing (open question 4); the
+measurement confirms the prediction and the cost is one rebuild per tournament.
+
+**A design error was found and corrected at implementation — recorded, not silently fixed.**
+Design finding F-G6-5 states that `build_gate_load_state`'s `contact_rows[c]` is "each
+contact's eligible-row count", making guard 4 a total comparison. **It is not.**
+`contact_rows[c]` is derived from contact `c`'s own `(owner, face)` run, and
+`append_variant_load_inputs` emits such pairs *only* on the branch that resolves a contact
+specialized — a generic seat contributes an empty run, while its transpose bucket is not empty
+at all, because eligibility is a predicate on the `LoadOwner` and a generic island owner is
+eligible for the generic authority's rows. Taken literally, guard 4 would have reported a miss
+on **every round of every batch carrying a generic seat** — which is every real gate batch,
+since the finalizer refuses with `MissingPhysicalContact` unless the generic authority's rows
+have holders — and the rebuild counter would have fired always, destroying the very
+measurement above. Guard 4 is therefore **restricted to the specialized contacts**, which
+keeps every part of F-G6-5 that is true (still `O(contacts)`, still reading a `contact_rows`
+the round computes for `proposal_load_bound` regardless, so still **zero added derivation**)
+and still covers the contacts the update acts on. Restoring totality would require deriving
+each generic island's eligible-row count fresh — an `O(rows × owners)` walk over the row-major
+eligibility, precisely the walk G6 exists to delete — so it is **declined on the design's own
+terms**. The deviation, its justification and both halves of it are recorded in full on
+`RetainedLoadTranspose::cardinality_rebuild_cause` and pinned by
+`fu8f_retained_transpose_rebuilds_when_a_bucket_length_drifts`, whose positive control is an
+**independent** derivation of `contact_rows` — which is what caught this. The design file
+itself is left standing verbatim, per the append-only rule.
+
+**Non-vacuity: the guards are measured, not argued.** Six deliberate mutations were applied at
+this tip, each run, each required to be caught, transcripts recorded in the named test's doc
+comment: **M1** delete guard 1's fingerprint compare; **M2** delete guard 2's witness compare;
+**M2b** replace guard 2's bit comparison with `==` (fails the `-0.0` arm alone, which is that
+arm's whole job); **M3** delete guard 3's merged-resolves-specialized refusal; **M4** delete
+guard 4's cardinality compare; **M6** insert the merged bucket at `p + 1` — the G6a-reachable
+member of the design's mutation triad, member (a). **All six failed the named test.** Also
+proven: **M5**, zeroing the rebuild counter's increment, fails
+`fu8f_retained_transpose_counts_every_guard_miss_as_a_rebuild`, so "a guard miss is a *counted*
+rebuild" is itself pinned. Stated honestly against overclaim: the terminal `survivor.is_some()`
+check in the identity walk is **defense in depth and is not separately reachable** — with the
+list length already pinned to "old minus one", a list leaving a survivor unmatched must also
+diverge twice, which the second-divergence arm refuses first — and it is recorded as unproven
+rather than claimed as proven. Triad members (b) and (c) act on the retained fast path, which
+does not exist until G6b, and land with it.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **998** tests
+default (base `b0324fd` 990) and **999** `--all-features` (base 991), 0 failed — the **+8** in
+both is exactly the eight new tests this phase adds, attributed one for one. Clippy clean with
+`-D warnings`, `cargo fmt --all -- --check` clean, `git diff --check` clean. **All seven frozen
+OD-8 census digests byte-identical**: `Sphere` 17667468971446251870, `Cylinder`
+13310185350867878190, `make_box` 9657051231007502658, `make_overhang_table`
+6686599816688114065, `make_toed_slab` 11199296506741562956, `make_raking_blade`
+13278215294653054002, `make_thin_fin` 7016743535301716631 — together with `routed_contacts`
+and `final_live_members` unmoved on all seven. That is the check that matters for a phase whose
+whole claim is that it changed nothing.
+
+**Two debts carried forward deliberately, so neither is discovered later.** (1) **Held bytes
+are not yet charged.** Retention extends the transpose's lifetime across rounds (~66 MB arena
+ceiling on the treant, plus the row invariants), and `gate_load_state_bytes` does not yet
+carry it — D-G6-4 sequences that into **G6c**, with G6a's rebuild-always meaning the stated
+demand is otherwise unchanged. No cap is approached and none is touched, but the stated peak
+currently understates the held peak by the retained term, and that is a known gap, not an
+oversight. (2) **No wall-clock number is recorded here at all.** Concurrent workflows were
+running on this machine throughout, so per the standing rule only counters and bit-identity are
+landed. G6a is expected to be *slower* than base, not faster — it does the full build **and**
+repopulates the carrier — and the treant's behavior at this tip is **not** measured or claimed.
+**G6d is the measuring phase**; nothing in this section may be read as a performance result.
+
+**A third debt, found by adversarial re-verification of this phase after it was written, and a
+hard precondition for G6b: the identity walk keys on positions alone, and positions are not a
+key.** `record_commit` derives the insertion point `p` by walking the old witness against the
+new contact list comparing **only** `position_bits`. But `compare_contacts`
+(`specialized.rs:7683`) orders by position *and then* by four tie-breakers — primary-regular
+identity, regular routes, normal, demands — so two **distinct** contacts may legitimately carry
+bit-identical `position_mm`. If the committed seat's position coincides on bits with the
+survivor it sorts against at `p`, the greedy walk consumes that survivor at slot `p`, then
+accepts the survivor's own later slot as the insertion (its bits equal the committed position by
+assumption), and derives **`p + 1` instead of `p`** — silently, without poisoning. Neither
+guard necessarily catches it: guard 2 compares the *witness sequence*, which is identical under
+the swap precisely because the two positions agree on bits and owners are recomputed
+positionally; guard 4 catches it only when the two buckets' lengths happen to differ. This is
+the natural-path twin of mutation **M6**, which the test suite catches only because M6 is
+injected.
+
+**In G6a this is provably harmless and is not a defect in what landed** — rebuild-always means
+the *only* consumer of the remap is the next round's guard chain, so a mis-derived `p` can
+produce a counted rebuild and nothing else; geometry cannot move, which is why all seven digests
+are byte-identical above. It is recorded here because **G6b's fast path would consume the remap
+directly**, and there it would serve wrong buckets. It was **not observed** on the corpus: every
+one of `make_raking_blade`'s 21 committed merges remapped exactly, so this is a latent hazard
+argued from the comparator, not a measured failure. **G6b must close it before flipping the fast
+path in** — the cheap fix is to make the walk's survivor test the same total identity
+`compare_contacts` uses (or to carry a stable per-contact identity through the walk) rather than
+position bits alone, and to add a fixture with two tie-broken contacts sharing a position.
+
+### FU-8f phase G6b landed 2026-08-07 — the retained fast path; the gate stops rebuilding what a merge did not change {#fu8f-g6b-2026-08-07}
+
+**What flips.** A gate round every guard accepts no longer executes the full load build. It
+runs `RetainedLoadTranspose::finalize_retained_round` instead: the **same** scan loop body
+(`scan_transposed_load_core`, now shared verbatim between the fresh CSR and the retained
+arena — one implementation, two monomorphizations, so bit-identity travels with the code
+rather than with an argument), the `finalize_load_rows` prologue and tail verbatim (staleness
+comparison, finite/duplicate contact refusals, row fill from the retained
+`row_face_id`/`row_area_mm2`, contact FNV hash), and the **same** baseline post-pass
+(`SpecializedLoadBaseline::assemble`, extracted from `build` so both paths run one code path
+— carried areas re-summed fresh in the fold's own order every round, never adjusted
+incrementally). What falls off retained rounds entirely, per design findings F-G6-2/F-G6-3:
+`GroupedOwnerFaces::from_pairs`, `extend_load_eligibility`, and both
+`LoadTransposeCounts` passes. `face_row`/`row_face` derive from the retained `row_face_id`
+(identical by row-set invariance), `contact_rows` from the same fresh pair walk as before,
+and guard 4 runs against them **before** the branch is taken. Any guard miss is the counted
+full rebuild, unchanged. `record_commit` gains the D-G6-2 step-4 **arena compaction** at the
+2x-waste trigger (one O(cells) copy in bucket order, amortized; trigger and preservation
+pinned by `fu8f_retained_arena_compacts_at_twice_the_live_cells`).
+
+**Charging is deliberately untouched, and stated so.** Retained rounds still charge the full
+build's own figures (`specialized_load_resource_plan` over the fresh pair counts) — D-G6-4's
+"charge the admissible worst case", because no plan can know at plan time whether a guard will
+miss. The full build's *internal* resource refusals do not run on retained rounds, and the
+soundness argument is recorded on `finalize_retained_round` itself: the work a retained round
+executes is a strict subset of what the tournament's first build (or last guard-miss rebuild)
+stated and was admitted for — cells, rows and contacts only shrink under committed merges —
+the FU-8e Q5 a-fortiori shape; every guard-miss round re-enters the full path with every check
+intact. **No cap, floor or coefficient is raised, lowered or touched; no charged number moves.
+G6c lands the retained-round metering, the arena byte ceiling and the record sweep.**
+
+**The G6a position-key hazard is CLOSED, by refusal rather than by re-derivation — a recorded
+deviation from the record's suggested fix.** The paragraphs above proposed making the walk's
+survivor test the comparator's total identity. That would require the witness to retain
+per-contact route/normal/demand state it does not hold, for a case never observed on any
+corpus commit. What landed instead: the walk now **detects** the ambiguity — committed
+position bits equal to the survivor's at a slot where the insertion is still unplaced, which
+is exactly the condition under which "survivor" and "committed seat" are indistinguishable
+from position bits — and **poisons**, one counted rebuild, never a guess. The fast path can
+therefore never consume a mis-derived `p`. Pinned both ways by
+`fu8f_retained_commit_poisons_on_a_position_bit_tie_at_the_insertion_point`: both sort orders
+of the tied pair poison, a distinct position does not; mutation-proven (refusal deleted, both
+tied arms fail, positive arm keeps passing).
+
+**The equivalence proof, landed as specified.**
+`fu8f_retained_transpose_matches_a_fresh_rebuild_after_n_commits` drives the carrier through
+**four committed merges on real fixture geometry** (`make_overhang_table`, the shared
+retention fixture) with **no repopulation between rounds** — the carrier crosses all four on
+`record_commit` alone, which is the retention claim itself. After every commit the retained
+path's full output is compared on `to_bits`, field by field — transpose buckets (payload and
+order, against the fresh CSR), all three witness slots (contact and distance bits), partition
+rows (`face_id`, `contact_id`, `owner`, `carried_area_mm2` bits), `contacts_fingerprint`,
+`winner`/`won_starts`/`won_rows`, per-contact `carried_area_mm2` bits, `violation_count`, row
+invariants — against BOTH the production fresh build AND the retained
+`reference_contacts_x_rows_scan` oracle (the pre-FU-8f `contacts x rows` scan itself). Per
+verifier finding **F-3** (the treant's `safe = Some(0) -> Some(2)` transition at round 46),
+the schedule merges parents at **nonzero** indices ((2, 4) and (1, 3)), inserts at strictly
+interior positions, exercises real dedup unions, and merges already-merged seats so retained
+payloads feed later merges. The **post-sort renumbering arm**
+(`fu8f_committed_renumbering_matches_append_variant_load_inputs`, in `specialized.rs`) runs
+the production commit shape end to end — demand-carrying seats, `commit_merge`,
+`consolidate`'s own splice-and-sort, the guard-3 predicate — and pins the identity-walk `p`
+and remapped witness against the **actual** `append_variant_load_inputs` output over the
+committed list, with the merged seat strictly interior: the *committed* renumbering, distinct
+from FU-8d's merged-LAST *variant* pin, and both stay pinned.
+
+**The mutation triad — applied, caught, reverted; transcripts in the harness doc comment.**
+(a) merged bucket inserted at `p + 1`: caught by **guard 2** (the remapped witness diverges
+from the fresh physical list) — the harness's "no guard fired" assertion fails with
+`Some(ContactWitness)`. (b) `right`'s bucket left in place: caught by **guard 2's length
+arm**, same failure shape. (c) last row dropped from the merged bucket: caught by **guard 4**
+— `Some(BucketCardinality)`. All three failed the harness; a harness green under any of them
+would be vacuous and did not land.
+
+**The live witness: the retained path now actually retains, and geometry does not move.**
+Census at this tip (`PLINTH_CENSUS=1`, release, `--features census`, one
+`PLINTH_CENSUS_ONLY` invocation per model):
+
+| model | rounds | counted rebuilds | retained-path rounds (rounds − first build − rebuilds) |
+|---|---:|---:|---:|
+| `Sphere` | 2 | 0 | 1 |
+| `Cylinder` | 2 | 0 | 1 |
+| `make_box` | 2 | 0 | 1 |
+| `make_overhang_table` | 2 | 0 | 1 |
+| `make_toed_slab` | 2 | **1** (`contact_witness`) | 0 |
+| `make_raking_blade` | 23 | **1** (`contact_witness`) | **21** |
+| `make_thin_fin` | 2 | 0 | 1 |
+
+`make_raking_blade`'s **21 committed merges all rode the retained path** — under G6a these
+same 21 rounds each executed a full build; now they execute none — and its end-to-end digest
+is `13278215294653054002`, **byte-identical**. The no-merge models bank the design's promised
+free round: the terminal audit reuses the initial build when the coalesce changed nothing,
+and `make_toed_slab`'s coalesce-perturbed audit takes the predicted `contact_witness` rebuild
+(F-G6-4), exactly as in G6a. **All seven frozen OD-8 digests byte-identical**: `Sphere`
+17667468971446251870, `Cylinder` 13310185350867878190, `make_box` 9657051231007502658,
+`make_overhang_table` 6686599816688114065, `make_toed_slab` 11199296506741562956,
+`make_raking_blade` 13278215294653054002, `make_thin_fin` 7016743535301716631, with
+`routed_contacts` and `final_live_members` unmoved on all seven.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **1002** tests
+default (G6a tip 998) and **1003** `--all-features` (G6a tip 999), 0 failed — the **+4** in
+both is exactly this phase's four new tests (the harness, the position-bit-tie refusal, the
+compaction pin, the committed-renumbering arm), attributed one for one. Clippy clean with
+`-D warnings`, `cargo fmt --all -- --check` clean, `git diff --check` clean. No wall-clock
+number is recorded anywhere in this section: concurrent workflows were running on this
+machine throughout, so counters and bit-identity are the only landed measurements.
+**G6d remains the measuring phase**; the ~741 ms/round removal predicted by D-G6-5 is a
+prediction until G6d measures it.
+
+### FU-8f phase G6c landed 2026-08-08 — charging honesty under retention; the meter beside the charge, never instead of it {#fu8f-g6c-2026-08-08}
+
+**What lands.** Charging itself is UNCHANGED from G6b: every gate round is still charged the
+full build's own figure (`baseline_resource.operations` from `specialized_load_resource_plan`),
+the admissible worst case, because no plan can know at plan time whether a retention guard
+will miss (D-G6-4, the G3/FU-8d charged/executed severance shape carried over). What G6c adds
+is the OTHER number, stated beside the charge and never fed back into it:
+
+- **`GateLoadState` gains `executed_load_build: ExecutedLoadBuild` (`Rebuilt` | `Retained`) and
+  `executed_operations: usize`.** On a `Rebuilt` round the two are the same figure by
+  construction — the full build IS what `specialized_load_resource_plan` prices, so charged and
+  executed coincide there, not by coincidence. On a `Retained` round
+  `RetainedLoadTranspose::executed_operations` prices only the work the retained path actually
+  performs: the G5-repriced per-cell scan allowance (`LOAD_WITNESS_SLOTS + 5` per retained
+  cell, `LoadTransposeCounts::operations`'s own constant) over `cells`, plus the O(rows) fill
+  and O(contacts) hash `finalize_retained_round` runs, plus the most recent `record_commit`'s
+  own O(|l| + |r| + contacts) remap (`last_update_operations`, `0` on a round that reused a
+  build with no intervening commit). The two eligibility traversals a full build pays twice
+  (`LoadTransposeCounts::count`/`::finish`, F-G6-2) are not in this figure at all — a retained
+  round never runs them.
+- **The invariant `executed_operations <= baseline_operations` is checked twice per round** —
+  once inside `build_gate_load_state` on the locals it just computed, once again in
+  `evaluate_gate_batch` on the `GateLoadState` it was handed back — both `debug_assert!`s,
+  compiled out of release the same way the G3 executed/charged assert is (its own "Appended
+  2026-08-07" note explains the disposition). Pinned as a real test too:
+  `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged` (`perception.rs`) drives one
+  committed merge through the retained path and compares `RetainedLoadTranspose::executed_operations`
+  against `specialized_load_resource_plan` — the SAME function `build_gate_load_state` charges
+  from — on the round's own shape.
+- **The census meters the run total, not just one round.** `RetainedLoadCensus` gains
+  `charged_operations`/`executed_operations` (`u128` running sums, printed on the gate's
+  `T0_scaled_cap` row as `retained_load_charged_operations=`/`retained_load_executed_operations=`),
+  accumulated on both `Rebuilt` and `Retained` rounds via `record_load_build_meter` so a run's
+  rebuild rounds and retained rounds land in the same total.
+- **The retained arena's held bytes join `gate_load_state_bytes`**
+  (`RetainedLoadTranspose::retained_bytes`, a new `Option<&RetainedLoadTranspose>` parameter),
+  charged at the 2×-compaction CEILING (`2 x cells x 4 B`, never the arena's live length —
+  `record_commit` only compacts once waste crosses that bound, so a live-size charge would
+  under-state the peak the arena is actually allowed to reach between compactions) plus the real
+  `buckets`/`contact_witness`/row-invariant sizes (not the design record's `(contacts + 1)`
+  CSR-splice approximation — this carrier is the arena, D-G6-1's recommended shape, not the
+  memcpy-splice fallback, so its own real layout is charged). This term feeds
+  `check_gate_peak`'s `load_baseline_bytes` addend, checked against `max_gate_peak_bytes`
+  (`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES`, 1 GiB, unchanged) — **not**
+  `max_load_scratch_bytes` (`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`, 512 MiB), which the
+  design record's own ~66 MB estimate compares itself against for scale but which is a
+  DIFFERENT cap, checked only inside `SpecializedLoadBaseline::build`'s own internal
+  `finalize_load_rows` check — a check a retained round never reaches, which is the next point.
+- **G1's per-round 32,848,040 B transpose-scratch term is retired on retained rounds — already
+  true by construction since G6b, stated here rather than left implicit.** That term is charged
+  inside `load_resource_plan`, called only from `SpecializedLoadBaseline::build`
+  (`finalize_load_rows`'s own internal check against `max_load_scratch_bytes`). The retained
+  path calls `finalize_retained_round` instead and never reaches `SpecializedLoadBaseline::build`
+  at all, so that internal check — and the term it charges — simply does not run on a retained
+  round. G6c's own addition (the arena's `retained_bytes`, above) is a DIFFERENT term, at a
+  DIFFERENT cap (`max_gate_peak_bytes`), charged only while the carrier is live across rounds;
+  the two are not in competition and neither substitutes for the other's cap.
+- **The FU-8f closer's owed correction is landed**, on the G3 section above (`{#fu8f-g3-2026-08-07}`):
+  the "Non-vacuity is measured by mutation" paragraph's claim that mutation (a) "fails the
+  forced test ... and nothing else" over-claimed — verification proved
+  `fu8f_prefix_acceptance_matches_the_full_evaluation` also fails it. The same correction has
+  stood on `fu8f_forced_late_safe_proposal_stops_at_the_same_index`'s doc comment
+  (`specialized.rs`) since 2026-08-07; this is that correction landing in the record it was
+  owed to.
+
+**No cap, floor or coefficient is raised, lowered or touched — the standing owner ruling holds.**
+Nothing charged moves either: `baseline_operations` is untouched, and every existing pinned
+figure (G5's repriced 795,766,031 / 1,844,748,658 / 4,525,792,233 / 5,709,845,912, and the
+32,848,040 B transpose-bytes term wherever it is quoted for a FULL build) stands exactly as G5
+left it — this section adds a meter and a new byte term beside those figures, it does not
+re-sweep them. `docs/rust-migration/support-resource-caps-2026-08-05.md` §16 carries the same
+account; `crates/plinth-core/src/constants/placeholders.rs`'s
+`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` and `SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`
+registry notes each carry a dated addendum; `constants.md` is regenerated by its producer
+(`cargo run --example render_constants_golden -p plinth-core --offline`) and only note text
+moves, no value column.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **1003** tests
+default (G6b tip 1002) and **1004** `--all-features` (G6b tip 1003), 0 failed — the **+1** in
+both is exactly this phase's one new test, attributed one for one. `make_raking_blade`'s 21
+retained rounds and its terminal `contact_witness` rebuild all still ran under the new
+`debug_assert!`s during this run (`support_runner_integration.rs`'s
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`, debug profile, asserts
+live) without tripping either — the charge-vs-meter invariant held on real corpus geometry, not
+only on the fixture. Clippy clean with `-D warnings`, `cargo fmt --all -- --check` clean,
+`git diff --check` clean. No wall-clock number is recorded anywhere in this section: concurrent
+workflows were running on this machine throughout, so counters and bit-identity are the only
+landed measurements. **G6d remains the measuring phase.**
+
+### FU-8f phase G6d measured 2026-08-08 — THE GATE COMPLETES; the treant's tournament is 823 rounds; the wall moves to the initial-contact preflight {#fu8f-g6d-2026-08-08}
+
+**Scope, stated first. G6d changed no engine code at all**, exactly as G4 did not. It is a
+measurement phase: two treant runs under the 600 s timebox, per-round counters from env-gated
+scratch instrumentation reverted by editing before the gates, and this record. `git diff` over
+`crates/` at this tip is **empty**. No cap, floor, coefficient, charged number or byte term is
+raised, lowered or touched by this phase.
+
+**THE HEADLINE, plainly: the gate completes, and for the first time in this project the Weeping
+Treant's merge tournament runs to its own end.** Both attempts finished the whole model run in
+**339 s against the 600 s box** — a **1.77x whole-run margin** — with the tournament committing
+**823 merges**. The gate is no longer the treant's stopping point. What stops it now is a
+**typed refusal in previously-unexercised code**, recorded below and opened as **FU-8g**, and
+deliberately not fixed.
+
+#### G6d.1 Conditions, and exactly how quiet the machine was
+
+Release, `--features census`, `PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`,
+`PLINTH_THREADS=4`, RSS watchdog unsandboxed (ruling R-g) sampling every 2 s, armed at 90 GB and
+**never fired**, 600 s timebox, two attempts, branch tip `fe79124` (the G6c tip).
+
+**The quiet claim is stated with its evidence rather than asserted.** Two sibling workflows hold
+worktrees on this machine. `ps` was polled for `cargo`/`rustc` thirteen times over the twelve
+minutes before attempt 1 and again at each launch: **zero at every poll**, and CPU idle was
+85–92 % throughout. Two `corespotlightd` (OS indexer) spikes were seen *during the polling
+window* and are recorded rather than hidden. The load-bearing evidence is not the polling
+though — it is that **the two attempts agree to 0.51 % on the tournament wall-clock and are
+bit-identical on every counter** (G6d.2). Wall-clock here is therefore landed, not marked
+CONTENDED.
+
+#### G6d.2 What the two runs did — and they are the same run twice
+
+| | attempt 1 | attempt 2 |
+|---|---:|---:|
+| outcome | **gate COMPLETED**; run stops on a typed refusal in `Initial` | identical |
+| whole-run wall-clock (watchdog, 2 s sampling) | **339 s** | **339 s** |
+| merge rounds committed | **823** | **823** |
+| gate batches (census) | **826** | **826** |
+| contacts, first → tournament exit | 1,366 → 543 | 1,366 → 543 |
+| physical contacts after `coalesce_exact_regular_seats` | **542** | **542** |
+| proposals gathered, first round → last committed round | 39,223 → 3 | 39,223 → 3 |
+| cumulative proposals gathered (census) | **20,059,412** | **20,059,412** |
+| process start → gate stage open | 123.0 s | 124.3 s |
+| tournament wall-clock | **183.29 s** | **184.22 s** |
+| gate close → process exit | ≈31 s | ≈30 s |
+| mean round | 222.6 ms | 223.8 ms |
+| peak RSS | 2,851,632 KB (2.719 GiB) | 2,653,888 KB (2.530 GiB) |
+| watchdog | armed 90 GB, never fired | armed 90 GB, never fired |
+
+**Determinism is measured, not assumed: over all 823 rounds, `contacts`, `proposals` and the
+retained-load rebuild count are identical between the two attempts — zero differing rounds.**
+Every census counter matches to the unit, including `retained_load_charged_operations` and
+`retained_load_executed_operations`. Only wall-clock differs, by 0.51 % on the tournament.
+
+Sampled per-round table (attempt 1; the full 823 rows are in the run transcript, not committed):
+
+| round | contacts | proposals | gather ms | round ms | stage s |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 1,366 | 39,223 | 28.6 | 242.7 | 0.2 |
+| 100 | 1,266 | 38,398 | 27.9 | 241.5 | 28.6 |
+| 200 | 1,166 | 37,319 | 26.9 | 231.0 | 52.9 |
+| 300 | 1,066 | 33,952 | 28.4 | 228.3 | 81.2 |
+| 400 | 966 | 29,885 | 27.1 | 215.8 | 106.8 |
+| 500 | 866 | 24,826 | 25.7 | 208.8 | 128.1 |
+| 600 | 766 | 13,536 | 22.7 | 183.9 | 148.3 |
+| 700 | 666 | 3,035 | 13.9 | 156.1 | 165.5 |
+| 800 | 566 | 65 | 5.6 | 232.9 | 180.4 |
+| 822 | 544 | 3 | 5.7 | 132.0 | 183.3 |
+
+#### G6d.3 WHY the tournament ends — a first, and not for the reason anyone predicted
+
+**The tournament ends because no proposal in the final batch is safe.** It does not run out of
+proposals and it does not meet a cap. The last committed round (822) gathered 3 proposals and
+accepted one; the loop then gathered **2 more** and `GateBatchAcceptance::StopAtFirstNotWorse`
+returned **no accepted index**, so `let Some((proposal_index, _)) = outcome.accepted else
+{ break; }` took the break. Derived to the unit: census `merge_proposals` 20,059,412 minus the
+transcript's sum over the 823 *committed* rounds, 20,059,410, is exactly the 2 proposals of that
+final, non-committing batch.
+
+**This retires a standing claim.** The G6 design record states that "no round has yet failed to
+find a safe proposal", and FU-8f's D1 called a `k > 0` prefix "the one thing the corpus cannot
+supply". The treant has now supplied both: the `Some(0) → Some(2)` transition at round 46 that
+G4 found, and now a **`None`** — the acceptance fold's terminating arm, exercised on real corpus
+geometry for the first time.
+
+**Both prior round predictions are falsified, in opposite directions.** The blade-ratio 463 was
+too low; the 1,365-contact hard bound was too high. The answer is **823**, which is 60.2 % of
+the treant's 1,366 contacts, against `make_raking_blade`'s 33.9 %. The hard bound was never
+reached because the gate stops offering safe merges 542 contacts short of it.
+
+**And G4's round model does not extrapolate, which is why G4's projections were wrong.** G4 fitted
+`round_ms = 304.17 + 0.6924 × contacts` over rounds spanning contacts 931–1,366 and projected
+504.7 s at 463 rounds and 1,061.6 s at the hard bound. Inside its fitted range that model is
+excellent (G6d.5). Outside it, it fails: **proposals collapse superlinearly**, 39,223 → 3 over
+the run and 24,826 → 65 over the last 300 rounds, so the round's cost falls far faster than
+contacts do. Nothing in G4 was wrong at its own tip; the extrapolation simply had no evidence
+under it, and now it does.
+
+#### G6d.4 Retention over the whole tournament: 97.3 % of load builds are retained
+
+From the census, identically in both attempts:
+
+| counter | value |
+|---|---:|
+| `retained_load_rounds` (gate-batch load builds) | **826** |
+| retained (derived) | **804 — 97.3 %** |
+| `retained_load_rebuilds` | **22** |
+| `retained_load_rebuild_poisoned` | **21** |
+| `retained_load_rebuild_contact_witness` | **1** |
+| `retained_load_charged_operations` | **433,886,641,066** |
+| `retained_load_executed_operations` | **48,520,980,855 — 11.18 % of charged** |
+
+- **The single `contact_witness` miss is the one G6a designed for.** It is the terminal
+  proposal-free audit, after `coalesce_exact_regular_seats` mutates contacts behind the carrier —
+  exactly finding **F-G6-4**, exactly guard 2, once per tournament, at a measured ≈0.2 s of a
+  339 s run. Design open question 4 ("should the terminal audit ride retention?") is answered by
+  measurement: **no, and declining it costs nothing.**
+- **The 21 `poisoned` misses are a FINDING and are recorded as one.** They occurred at rounds 36,
+  60, 65, 80, 190, 213, 214, 234, 260, 261, 264, 307, 308, 341, 348, 558, 742, 743, 748, 749 and
+  800 — identically in both attempts, so they are deterministic properties of the geometry, not
+  noise. **The G6b record's parenthetical that the position-bit tie is "a case no corpus commit
+  has ever produced (all 21 `make_raking_blade` remaps were exact)" was true of the blade and is
+  NOT true of the treant**, and that sentence is corrected here rather than rewritten in place.
+  One caveat is owed and stated plainly: **the census cannot say which poison fired.**
+  `RetainedLoadRebuildCause::Poisoned` collapses guard 3 (a generic-resolving merged seat) and
+  every `record_commit` identity-walk refusal — including the position-bit tie — into one label,
+  so this record does **not** claim the tie is the cause. Splitting that label is named as
+  follow-up work in the FU-8g row; it is a one-counter change and would make the next run's
+  transcript self-explaining.
+- **Retention behaved exactly as designed under every miss**: a poison costs one counted full
+  rebuild and the carrier repopulates, so misses are isolated single rounds, never a run of them.
+- **The G6c charge-vs-meter severance holds run-wide.** Executed is 11.18 % of charged over 826
+  rounds and `executed ≤ charged` held every round; no round executed unafforded work.
+
+#### G6d.5 The round, measured — with the pre-G6 round as an internal control
+
+**The 21 rebuild rounds are the pre-G6 round, measured at this tip, in the same process.** That is
+what makes the retention factor a within-run measurement rather than a cross-run comparison. Of
+those 21, the 15 that fall inside G4's fitted contact range reproduce G4's model to a mean of
+**−0.97 %** (worst −3.2 %, best +0.0 %):
+
+| contacts | rebuild round measured (ms) | G4 model (ms) | delta |
+|---:|---:|---:|---:|
+| 1,330 | 1,214.3 | 1,225.1 | −0.9 % |
+| 1,306 | 1,204.7 | 1,208.4 | −0.3 % |
+| 1,301 | 1,203.8 | 1,205.0 | −0.1 % |
+| 1,176 | 1,114.5 | 1,118.4 | −0.4 % |
+| 1,102 | 1,067.5 | 1,067.2 | +0.0 % |
+| 1,018 | 983.3 | 1,009.0 | −2.6 % |
+
+Against that control:
+
+| | measured |
+|---|---|
+| retained round, least squares over all 802 retained rounds | **`round_ms = 71.46 + 0.1405 × contacts`** |
+| retained round mean, whole tournament | **206.5 ms** (attempt 2: 206.4 ms) |
+| rebuild round mean, whole tournament | **879.6 ms** (attempt 2: 887.8 ms) |
+| retained vs the G4 model at 1,366 / 1,000 / 800 contacts | **5.15× / 4.50× / 4.43×** |
+| work removed per round at ≈940 contacts | ≈752 ms |
+
+#### G6d.6 The prediction scorecard — the first in this chain to land, stated against the two that missed
+
+D-G6-5 opened with an honest accounting of why D4 missed, and predicted a ~0.19 s retained round,
+~741 ms removed, and a **350–450 s whole run**. Measured:
+
+| predicted (D-G6-5) | measured | verdict |
+|---|---|---|
+| retained round ~0.19 s | 0.206 s mean | **+8.5 %, lands** |
+| ≈741 ms removed per round | ≈752 ms at ≈940 contacts | **+1.5 %, lands** |
+| whole run 350–450 s | **339 s** | **better than the band** |
+| gate stage 200–260 s at the bound | 183 s for the whole tournament | **better, but for the wrong reason** |
+
+The last row is where the honesty is owed. The gate stage came in under its predicted band
+**not** because the round was cheaper than predicted — it was 8.5 % dearer — but because the
+tournament is **823 rounds, not the 1,365 the design priced**. Two errors of opposite sign
+partly cancelled. The round model was right; the round *count* was not, and no prediction in
+this chain has yet got the count right.
+
+#### G6d.7 Memory: the 3.32 GiB observation is attributed NEGATIVELY, and that is a real narrowing
+
+Peak RSS **2,851,632 KB (2.719 GiB)** at t=243 s (attempt 1, mid-tournament) and **2,653,888 KB
+(2.530 GiB)** at t=134 s (attempt 2, ≈10 s after gate-stage entry). Watchdog armed at 90 GB,
+never fired; 2.7 % of the 100 GB machine ceiling.
+
+The G3 run recorded 3,479,600 KB (3.32 GiB) and the G5 run 3,538,624 KB (3.375 GiB), both
+observed-and-unexplained; G4 recorded 2.554/2.528 GiB and called it a non-reproduction. The
+standing hypothesis — written in the G3 section as "the likeliest reading, that this run simply
+got further into the tournament than any before it" — is **now falsified rather than merely
+unconfirmed.** These two runs go **823 rounds: the entire tournament, 1.9× G4's depth and further
+than any run in this project's history** — and they peak **below** both G3 and G5. **Tournament
+depth is not the explanation, and that hypothesis is retired.**
+
+What is left, stated as observation rather than mechanism: the two G6d attempts do not agree on
+*when* the peak falls (mid-tournament vs gate-stage entry) or on its size (a 7.4 % spread) while
+being bit-identical on every counter, which is the signature of **2 s sampling landing luckily or
+unluckily on a transient of a few hundred MB**. No run has ever exceeded 3.4 GiB. G6's own
+retained arena is charged, is ~66 MB-class, and cannot account for any of the spread. **This is
+not a cap question in either direction, and no memory claim in the G6 record depends on it.**
+
+#### G6d.8 THE NEW WALL — a typed refusal in previously-unexercised code, opened as FU-8g
+
+Both attempts, identically, after the gate completes:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2
+  Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })
+```
+
+**Derived to the unit from source, not guessed.** `initial::preflight`
+(`crates/plinth-support/src/initial.rs`) computes
+`work = contact_count × 4 + penetration.max_total_work`, where `penetration` is
+`surface().penetration_intervals_batch_worst_case_limits(contact_count, 8, interval_cap, false)`.
+Inside `penetration_requirements` (`rust/geom_kernel/src/queries.rs`) with `rays_all = false`:
+`rays = 1`, `hits_per_ray = mesh.nfaces()`, and `work = rows × rays × hits_per_ray`. So
+
+> `work = contact_count × (4 + nfaces)` = **542 × (4 + 429,120) = 542 × 429,124 = 232,585,208**
+
+which reproduces the printed figure exactly, and independently confirms the surviving contact
+count is 542. It is checked against `ContactConstructionLimits::production().max_work_items =
+4_000_000` (`runner.rs`) — a **flat** cap. The demand is **58.1×** the cap.
+
+**The shape is the FU-8b / FU-8c family a fourth time: a `contacts × faces` product measured
+against an unscaled flat bound.** At this mesh's 429,120 faces the cap admits at most
+`4,000,000 / 429,124 = 9` physical contacts. The corpus passes this preflight only because every
+corpus mesh is two to four orders of magnitude smaller in face count; nothing about the treant is
+special except its size. **And the quantity is a preflight *bound*, not a measured demand:**
+`hits_per_ray = nfaces` is the "every face could be hit" worst case, while the executed query is
+BVH-bounded — the same over-statement G5 corrected on the load term, in the same direction.
+
+**It is NOT a cap to raise, and nothing here proposes raising it.** The standing owner ruling
+holds and no cap is touched by this phase. The remedy, when it is designed, is the one FU-8b,
+FU-8c and G5 all took: make the *bound* honest, not the cap bigger. Recorded as **FU-8g**.
+
+#### G6d.9 Caps: none binds, and two projections can now be checked against truth
+
+- **`max_merge_total_proposals` = 100,000,000** against a whole-tournament cumulative gather of
+  **20,059,412** — a **4.99× margin**, and this is the real total rather than an extrapolation.
+  G4 projected "≈33.0 M at the hard bound"; the true figure is 20.1 M, so that projection
+  over-stated by 64 % — for the same reason its wall-clock projections did (G6d.3). Recorded as a
+  correction of a *projection*, not of a measurement: G4's own 15,544,641 over 436 rounds stands.
+- **`max_merge_iterations` = 100,000** against 823 tournament merges plus the coalesce pass's one.
+  Two orders of magnitude of headroom, now measured rather than bounded. Untouched.
+- **`specialized_gate_operations`** materialized **35,445,500,736**, `at_floor=false` — unchanged.
+  **`specialized_load_operations`** materialized **11,421,470,912** — unchanged.
+- Every other cap was admitted every round of both runs. **No cap, floor or coefficient is
+  raised, lowered or touched.**
+
+#### G6d.10 Ruling R-f is now SATISFIABLE — and G6d deliberately does not act on it
+
+**R-f's precondition is met: a treant run has completed the gate, twice, with counters.**
+Re-deriving `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is **explicitly not this phase's work** —
+the G6 design's D-G6-6 says so in the G6d row itself — and it is **not** done here. It is
+recorded as **now unblocked**, with the inputs it will need (826 gate batches, 20,059,412
+proposals, the materialized 35,445,500,736, all reproduced twice) sitting in this section for
+whoever takes it. **No coefficient moved.**
+
+#### G6d.11 G6e is NOT opened, and open question 3 is declined again — both on measurement
+
+- **G6e (retained baseline nearest sweep) does not open.** D-G6-6 makes it contingent on a
+  whole-run margin below ≈1.5×. The measured margin is **600 / 339 = 1.77×**. The stronger reason
+  is that it would now buy nothing that matters: **the gate is no longer the binding stage.** The
+  run stops on a typed refusal ≈30 s after the tournament ends, so removing the ≈117 ms/round
+  sweep would move the stopping point not at all.
+- **Design open question 3** (retire the per-round `owner_faces`/`pair_starts` rebuild) was to be
+  re-measured here. Measured: `gather_pair_proposals` runs 28.6 ms early and 5.7 ms late, and the
+  whole tournament is 183 s of a 339 s run. **Declined again, measured** — the ruling R-c shape.
+
+#### G6d.12 What did NOT happen, recorded so it is not mistaken for a result
+
+**There is no seal. The treant still has no first seal, and this phase does not deliver one.**
+`prepare_support_run` returns `Err` at the initial-contact preflight, so **routing, rewire,
+penetration/brace, the CCO anchors, attestation, lowering, `routed_contacts`,
+`final_live_members` and a snapshot digest are all still unexercised.** No claim whatever is made
+about `pen_intervals_one`'s predicted 14–32 GB at `T = 4`, or about the brace's
+`max_scratch_bytes` of 1e11 sitting above the 90 GB watchdog line. Those remain untested
+predictions, exactly as G4 left them. What changed is only that the pipeline now reaches a
+*later* refusal than it ever has.
+
+**Instrumentation hygiene.** All per-round and stage-boundary timers were env-gated on
+`PLINTH_G6D_ROUNDS` (plus one `#[cfg(feature = "census")]` read-only counter snapshot), were
+never reachable without that variable, and were removed by editing before the gates. `git diff`
+over `crates/` at this tip is empty and the five gates below ran on that tree. The two run
+transcripts and the runner script are scratch and are **not** committed, per the standing rule
+that run outputs never enter git.
+
+**Verification hygiene, recorded 2026-08-08 as an infrastructure lesson from this phase's own
+verification cycle:** two isolated verifiers were launched onto the *same* worktree path and the
+collision destroyed one verifier's in-flight run — so **isolated verifiers must use unique
+per-agent worktree paths**. No branch state was harmed and no measurement above is affected.
+
+#### G6d.13 Gates at this tip
+
+**Five gates green**, verbatim, tests with `--no-fail-fast`: **1003 / 1004 passed (default /
+`--all-features`), 0 failed** — identical to the G6c tip, as it must be, since G6d adds no test
+and changes no code. Clippy clean at `-D warnings`, `cargo fmt --all -- --check` clean,
+`git diff --check` clean, tree clean before and after. Full derivation:
+`support-resource-caps-2026-08-05.md` §17.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
@@ -3141,7 +3791,8 @@ Everything else here is non-blocking.
 | FU-8c | ~~Specialized **merge** gate re-evaluates the whole batch per proposal~~ | **RESOLVED 2026-08-06** (`a3308ec`); the finding as first written is left standing below and the resolution is appended to it, not substituted for it. Opened 2026-08-06 by the FU-8b post-fix measurement, and the successor stopping point for the Weeping Treant. `gate_resource_plan` prices a merge batch at `(samples + demands + 1) × (proposals × (contacts − 1) + contacts)`: every merge proposal re-evaluates the entire contact set against every coverage sample. The treant offers **39,223 proposals** over 1,366 contacts and 405,146 samples, so the plan states **21,755,124,103,146** operations against a materialized cap of 35,445,500,736 — 613× over, and refused. This is the same batch-first violation as FU-8b (a)/(b)/(c) in a fourth dress: a per-item rescan of a whole batch standing in for one batched evaluation. It is **not** a cap to raise — admitting it would need a per-batch-unit coefficient near 39,300, which would multiply every corpus model's cap by the same factor and take the Cylinder (already at 89.6% of the floor), `make_raking_blade` and others off their floors, i.e. it would admit real quadratics on small models. The fix is to price and evaluate the proposal variants incrementally against the base batch rather than re-running it, then re-measure. Note for FU-23: fixing it will change the gate's charged work, so `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` should be re-derived afterwards rather than inherited. **[Resolution appended 2026-08-06 (`a3308ec`).** The proposal factor is gone. `GateBatchIndex` builds the proposal-invariant state — samples by route key, contacts by route key, three satisfying contacts per demand — once per batch; each proposal re-answers only the route keys its own merged pair serves and re-tests each demand once against the merged seat. `gate_resource_plan` is repriced to `(samples + demands + 1) × contacts + measured proposal work`, and the predecessor's per-variant sweep is retained `#[cfg(test)]` as the reference the delta path is compared against row by row on `f64::to_bits`. **No cap was changed** and no cap code was touched. The treant's stated demand fell from 21,755,124,103,146 to **201,480,535,329** — 108× — against the same 35,445,500,736. **It still refuses**: 5.68× over, at the same gate, re-measured byte-identically at `8695398` (124 s, 2.50 GB peak, watchdog never fired). The residual is 97.4 % of the demand and is a *different* defect, opened as **FU-8d**; FU-8c is closed on the defect it named, not on the treant reaching a seal. The FU-23 note above still stands and is now due. See *FU-8c fixed 2026-08-06*.**] |
 | FU-8d | Per-proposal nearest is still `sources × samples` on the perturbed key, `unique_face_finalizer_work` is under-charged, and the per-proposal planning passes are uncharged and doubled | Opened 2026-08-06 by the FU-8c post-fix measurement; the successor stopping point for the Weeping Treant, and both parts are measured rather than predicted. **(1)** After FU-8c the per-proposal work is route-local but still a full `sources × samples` sweep of the perturbed key. On the treant that residual is **196,264,386,588** of the printed 201,480,535,329 — **97.4 %**, averaging 5,003,809 per proposal — because its coverage samples concentrate in a few very large route keys and its merge proposals sit on exactly those. It need not be `sources × samples`: retaining the **three** nearest sources per sample during the baseline sweep answers "nearest among the survivors" for any two-contact removal by inspection, leaving one distance test per touched sample against the merged seat, so the term becomes `samples` on the perturbed key. That is FU-8c's own top-`k` witness argument applied to the nearest instead of the demands. **(2)** The exact fold's `unique_face_finalizer_work` is `variants × faces × contacts` while `gate_resource_plan` charges it as `variants × faces`. On the treant the true term is ≥ 117,741 × 1,365 × 39,223 ≈ 6.3 × 10¹², which is also the arithmetic proving the refusal came from the plan and not from a completed fold. The under-charge is why this term has never been the refusing one; its superlinearity is why it will be as soon as (1) lands, so the two parts should be fixed together. **(3)** *[Third part added 2026-08-06; (1) and (2) are left standing as opened. Deliberately NOT coded yet — recorded so FU-8d is scoped honestly, and the cheapest of the three.]* **The per-proposal planning passes are themselves uncharged, and there are two of them.** `evaluate_gate_batch` runs `plan_proposal_nearest_delta` once per proposal inside `plan_gate_nearest_batch` (`specialized.rs:3553`, to build the plan) and **again** once per proposal inside the `exact_operations` fold (`specialized.rs:3571`, to charge it) — on the treant **2 × 39,223 ≈ 78,446 delta passes** — while the check that refuses the batch, `if exact_operations > gate_operation_limit`, is at `specialized.rs:3629`, **after both**. The entire cost of deciding the treant may not proceed is therefore paid *before* the refusal and **none of it is charged**: the plan charges the delta's *result* (`nearest_work`), never the cost of computing the delta. That is why the treant burns 124 s to state a demand it is then refused on, and it is a hole in what the cap means as much as a cost — a resource plan that cannot be afforded until after it has been executed bounds nothing. The second pass is a **free 2×** to reclaim: the fold recomputes a delta the planning pass already computed for the same proposal, so retaining the planning pass's per-proposal deltas turns two passes into one with no change of result. Sequence it **with (1), not before it** — (1) rewrites what a delta pass *is* (`sources × samples` on the perturbed key becomes `samples`), and halving the count of a pass about to change shape optimizes the wrong thing. Corollary, and the reason this is a part rather than a footnote: after (1) and (3) the planning work is small enough to charge, so **FU-8d should charge it**, rather than leaving the gate free to spend unbounded effort discovering it cannot afford to proceed. A fourth candidate — the per-variant `assess_coverage`, `O(samples)` per variant under its own `max_coverage_operations` cap — is recorded as **unmeasured**, not as a finding, because the treant has never reached it. As with FU-8c none of this is **a cap to raise**. Note for FU-23: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` should be re-derived after FU-8d lands, not after FU-8c. **[Phase F1 landed 2026-08-06 — the finding stays OPEN in all three parts; F1 changes no answer and buys no speed.** The baseline coverage sweep now retains `min(3, source_count)` nearest sources per sample — `(source_slot, squared_distance)` in the kernel's emission order — which is the witness table part (1)'s delta will read; nothing reads it yet. Pinned first by two tests: `fu8d_knn_row_zero_is_k_independent_bit_for_bit` (the kernel's row 0 is bit-identical at k = 1 and k = 3, over engineered exact ties and random clouds — the design's riskiest claim) and `fu8d_three_retained_witnesses_answer_any_two_removal` (three retained slots answer any two-contact removal exactly, against a kernel query over the survivors; it fails if the slot count is set to 2). Charges: **no operation charge moves** — `KnnBatchPlan`'s work is `source_count x query_count`, k-independent (ruling R-a, recorded in the `NEAREST_WITNESS_SLOTS` doc comment). Bytes do move and are charged: `+2 x query_count x 16 B` per route inside `KnnBatchPlan::logical_peak_bytes`, and `samples x 3 x 16 B` per batch as the new `GatePeakUsage::nearest_witness_bytes` (~19 MB on the treant, against the unchanged 1 GiB gate peak). `coverage_route_knn.max_neighbors` goes 1 -> 3 (ruling R-b), stated once in `SpecializedLimits::production`: a `KnnBatchLimits` **shape field, not a cap**, and the `SUPPORT_KNN_MAX_NEIGHBORS` registry note, ledger entry, `constants.md` and §3.10.9 table each carry the dated amendment. **No cap raised, no cap code touched.** Five gates green; all seven frozen OD-8 digests byte-identical; the treant's refusal line unchanged at `required: 201480535329, limit: 35445500736` — that immobility is the phase's proof. See *FU-8d phase F1 landed 2026-08-06*.]** **[Phase F2 landed 2026-08-06 — part (1) is CLOSED; parts (2) and (3) stay OPEN, and part (2) is now the treant's wall.** A merge proposal's nearest is now the minimum of two things: the first surviving retained witness, read as a *value*, and ONE `KnnBatchPlan(1 source, touched_rows queries, k = 1)` over the merged seat covering every perturbed key at once — combined by `f64::total_cmp` with the square root taken once *after* the minimum, so an exact survivor/merged tie is a tie between bit-identical `f64`. Pinned by `fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit` against the retained `#[cfg(test)]` full sweep, on a fixture that asserts it reached a narrow key, a total removal, a displaced holder, a steal, and an exact tie; truncating the witness scan to slot 0, or dropping the merged seat from the minimum, each make it fail. Repriced in `gate_resource_plan`: `nearest_work` becomes `Σ 1 × touched_rows`, `key_visits` is newly charged. Measured on the treant: the per-proposal nearest term **196,264,386,588 → 2,083,167,818 (94.2×)** — reconciling exactly as `195,222,841,902 + 1,041,544,686` — and the stated demand **201,480,535,329 → 7,299,316,559 (27.6×)**, **20.6 % of the unchanged 35,445,500,736**, so that check now PASSES. **No cap raised, no cap code touched.** The refusal moved one site: `variant_specialized_owner_face_count`'s descriptor budget crosses at **variant 275 of 39,224**, printing `required: 35445618202, limit: 35445500736` — a crossing, not a total. Over those 275 variants `unique_face_finalizer_work` is already 3,036,066,151,957, extrapolating to ~4.33 × 10¹⁴, against routed work of 3,912,181: **part (2) is the whole remaining wall.** Rulings recorded: **R-c** measured and NOT adopted (the radius bound removes 42 % of rows, a 1.7× constant, and the margin is 4.9× — over the 2× threshold); **R-d** precondition met (28 of 48 perturbed keys carry ≥ 10 proposals, one carries 26,543) but deliberately not built; **R-f** NOT satisfied — `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` waits for F3 *and* a treant run that COMPLETES the gate, which this is not. Five gates green; all seven frozen OD-8 digests byte-identical, `make_raking_blade`'s 1,402 real merge proposals through the rewritten code being the live witness; treant run 129 s at 2,641,504 KB (2.52 GiB) peak RSS. See *FU-8d phase F2 landed 2026-08-06*.]** **[Phase F3 landed 2026-08-06 — parts (2) and (3) are CLOSED, and with (1) closed at F2 this finding is RESOLVED on the defect it named. The treant's merge gate no longer refuses.** The load partition is finalized **once** per batch, retaining three nearest eligible contacts per row plus each contact's won rows, carried area and violation state; a proposal re-answers only `elig(left) ∪ elig(right)`, which the merged seat serves *exactly* because `parts_serves_owner` is true for an island precisely when `left` or `right` serves it. Rows outside the union keep a bit-identical candidate set in the same order, so their argmin is the baseline's. Carried areas are **re-summed** in the fold's own ascending row order rather than adjusted incrementally, because `f64` addition is not associative. Pinned by `fu8d_load_delta_matches_the_per_variant_finalize` against the whole production finalizer run on hand-renumbered variant inputs, row by row, on `load_violation_count`, and on carried area by `f64::to_bits`; it asserts it reached an exact survivor/survivor tie, an exact survivor/merged-seat tie, a row with no survivor, a displaced holder, a steal, and a row outside the union. The **per-variant window matrices are deleted, not repriced** — `gate_window_matrix_bytes` stated tens of gigabytes against the 512 MiB `max_gate_contact_matrix_bytes` and would have become the next refusal the moment the operations wall fell. Planning is 4 → 1 with a count-derived pre-check (`proposal_planning_precheck`) run *before* the loop, and the per-variant contact/demand rescans are derived (`GateVariantTotals`; a proposal variant's logical contact work is the baseline's minus one, exactly). Repriced to ONE authority: the `variants × faces` load model is replaced by `specialized_load_resource_plan`'s own figure — 4,618,272,984 → **6,592,813,742**, i.e. the honest number is 1.43× the under-charge part (2) named — while `descriptor_operations` falls from 35,445,417,382 at variant 275 (~5.06 × 10¹² extrapolated) to **136,791,451** charged once, and `unique_face_finalizer_work` (~4.33 × 10¹⁴ extrapolated) ceases to exist. Stated demand **9,273,857,317** and `exact_operations` **10,457,910,996** against the **unchanged** 35,445,500,736 — 26.2 % and 29.5 % — and the batch **executes**. `GateRoutePlanMismatch` is re-founded as plan-vs-execution and is explicitly **weaker**; the record says so. **No cap raised, lowered or touched.** The treant planned 8 gate batches (proposal-free + 7 merge rounds, 1,366 → 1,360 contacts, share flat at 26.2 %) inside the 600 s timebox and did **not** finish the tournament: recorded as EXCEEDS-TIMEBOX with counters, ~2.4–2.5 GB peak RSS, watchdog armed at 90 GB and never fired. The successor is the per-variant `assess_coverage` — 39,224 × 405,146 ≈ 1.59 × 10¹⁰ uncharged sample visits per batch — opened as **FU-8e** on this measured evidence. **R-f still NOT satisfied**: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` waits for a run that COMPLETES the gate. Five gates green; all seven frozen OD-8 digests byte-identical, with `make_raking_blade`'s 23 batches and 1,402 proposals through the rewritten *load* path the live corpus witness. See *FU-8d phase F3 landed 2026-08-06*.]** **[Phase F4 measured 2026-08-06 — FU-8d stays RESOLVED; F4 lands no engine code and closes the finding's record rather than its algorithm.** F4's deliverables are a clean treant run at the committed F3 tip and the record sweep F3 still owed. **Outcome (c) EXCEEDS-TIMEBOX, twice** — 607 s / 2.49 GiB and 602 s / 2.48 GiB, `PLINTH_THREADS=4`, watchdog armed at 90 GB and **never fired**, **no typed refusal at any cap in either attempt**, no batch counters (the tip carries no `PLINTH_FU8D_MEASURE` instrumentation, verified absent by grep, so §10's per-batch table stays the counter record). Attempt 2 sampled six windows across the timebox because attempt 1's single window at t = 600 could not separate "dominates the run" from "was running at the end". **The design predicted the wrong frame.** `assess_coverage` (part (4)/P4, the deferred candidate) is real but **second**, at 24–34 % of main-thread samples; the leader at **59–62 %** is **F2's own `fill_proposal_nearest_delta`**, and its cost is construction rather than arithmetic — it builds a fresh `PointCloudIndex` kd-tree over a **one-point** cloud once per proposal, 39,223 constructions and teardowns per gate batch, its call-graph children being `knn_batch_planned` over `_xzm_free`/`_free`/`_xzm_xzone_malloc` allocator traffic. Batched *within* a proposal, unbatched *across* proposals. Both go to **FU-8e**, in measured order. Also recorded, not acted on: `PLINTH_THREADS=4` buys the merge gate nothing (all four rayon workers in `__psynch_cvwait` for the whole gate stage while preparation is genuinely parallel — a note, **not** a reason to raise thread counts), and `merged_violation_count` is a steady third at ~4.6 %. **R-f STILL NOT satisfied** (neither attempt completes the gate, so `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is not re-derived); **R-c revived as a question** — the frame a radius bound would have shrunk is now the measured leader — recorded as FU-8e input and not adopted. **No cap raised, lowered or touched.** F4 also pays what F3's every-record-site sweep missed: `03-physics-and-constants.md` §3.10, the `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` and `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS` registry notes (hence a regenerated `constants.md`), and `specialized.rs`'s `gate_operation_limit` doc comment all still said the treant was refused at the merge gate; and the caps doc's phase-F3 section had landed as a duplicate `## 9`, now **§10**. See *FU-8d phase F4 measured 2026-08-06* and `support-resource-caps-2026-08-05.md` §11.]** |
 | FU-8e | The merge gate's per-proposal kd-tree construction, and the per-variant `assess_coverage`, are both uncharged and both unbatched across proposals | **Opened 2026-08-06 on FU-8d phase F4's measured evidence**, which is the footing the deferral ruling required — and opened on **two** parts in the order the sampler found them, not the one the design predicted. The treant's merge gate no longer refuses anything: since F3 it states 9,273,857,317 against an unchanged 35,445,500,736 and is admitted. What stops the treant is **wall-clock**: two 600 s attempts, both EXCEEDS-TIMEBOX, at 2.5 GiB peak RSS with the 90 GB watchdog never firing. **(1) `fill_proposal_nearest_delta` — 59–62 % of main-thread samples, the leader.** F2 correctly batched a proposal's nearest into one `KnnBatchPlan` covering all its touched rows; it did not batch *across* proposals. Each of the treant's 39,223 proposals constructs a `PointCloudIndex` kd-tree over a **one-point** cloud (`[proposal.position_mm]`), queries it, and drops it — 39,223 constructions and teardowns per gate batch, whose sampled children are `knn_batch_planned` over `_xzm_free` / `_free` / `_xzm_xzone_malloc` and `kiddo`'s `nearest_n_within_recurse` descending a single-node tree. A distance to one point needs no spatial index at all; the batch-first fix is to answer every proposal's touched rows without per-proposal index construction. **(2) `assess_coverage` — 24–34 %, second.** `O(samples)` per variant with ~7 `Vec::with_capacity(405,146)` allocations per call: `39,224 × 405,146 ≈ 1.59 × 10¹⁰` sample visits and of order a terabyte of allocation churn per gate batch, none charged against `gate_operation_limit`. This was the *only* part the design predicted, and F3's record asserted it was "what the 600 s is being spent on"; F4 measured it at about a quarter. Both parts are **uncharged**, so **neither is a cap to raise** — a cap cannot be too tight for work it never prices, and the remedy removes work rather than admitting more. Third and named so it is not a later surprise: `SpecializedLoadBaseline::merged_violation_count` at a steady ~4.6 %. Two riders from FU-8d: **ruling R-c is revived as a question** (§9.5 declined the radius-bounded steal path at a 4.9× margin against a 1.7× constant — F4 makes the frame it would have shrunk the measured leader, so re-measure before deciding), and **`PLINTH_THREADS=4` buys the merge gate nothing** (all four rayon workers sit in `__psynch_cvwait` for the whole gate stage while preparation is genuinely parallel), which is a note about the wall-clock being single-core and **not** a licence to raise thread counts. **Ruling R-f still gates FU-23**: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is re-derived only from a treant run that COMPLETES the gate, and no run yet has. See *FU-8d phase F4 measured 2026-08-06* and `support-resource-caps-2026-08-05.md` §11. **[Phases E1–E4 landed 2026-08-07 — RESOLVED on the defect this row names, and NOT on the treant reaching a seal; every sentence above is left standing, and the two it gets wrong are corrected rather than rewritten.** The gate no longer builds a `PointCloudIndex` per proposal (E1's `knn_single_source_planned_into`, whose bit-identity with the tree's answer is argued in five clauses and pinned by `fu8e_single_source_is_the_tree_answer_bit_for_bit`), and no longer re-runs `assess_coverage` for a variant that cannot have moved the objective (E3's retained baseline objective plus a two-counter probe folded into the delta's own row loop). **First correction: the 62 % was never index construction.** One one-point `PointCloudIndex` costs 83.3 ns and the 39,223 of them total **≈3.27 ms** per batch — the trees were free. **[Arithmetic corrected 2026-08-07 (records fix): this total was published as "16.7 microseconds", an arithmetic slip in the design pass — 39,223 × 83.3 ns = 3.267 ms, and 16.7 µs would have implied 0.426 ns per construction. The per-build 83.3 ns stands as measured; only the product is corrected, and the conclusion is unchanged — 3.27 ms is 0.009 % of the 37.33 s `fill_proposal_nearest_delta` frame, so construction remains negligible and the fix still targets the query loop. Primary note: `support-resource-caps-2026-08-05.md` §12.2.]** The cost was the query loop, ~1.04 × 10⁹ query iterations and ~2.08 × 10⁹ heap allocations per batch across two tree descents and a `sort_by` per query. **Second correction: the 28 % was never allocation churn.** "~7 `Vec::with_capacity(405,146)` per call … of order a terabyte" is six vectors in `RepairNoEvidence` mode over a traversal that visits only uncovered rows; what costs is the two unconditional full scans bracketing it, ≈254 GB of reads per batch ≈ 17 s at memory bandwidth. **The fix was to not scan, not to not allocate.** A third correction was a soundness fix: the design's status-**flip** trigger is unsound because `worst_gap_mm` is a `max` over the nearest *values* of a failing island's samples, so the shipped trigger is the wider "an uncovered row moved". **Measured 2026-08-07 under ruling R-g** (`PLINTH_THREADS=4`, RSS watchdog armed at 90 GB and never fired, one attempt of a permitted two): merge round **63.83 s → 14.68 s (4.35×)**, variant loop **60.23 → 10.73 s (5.6×)**, `fill_proposal_nearest_delta` **37.33 → 4.67 s**, coverage **17.05 → 0.001 s**, `merged_violation_count` **unmoved** at 4.98 s mean. `touched_rows` **1,041,544,686 to the row** in two independent runs; **zero** flipped rows, **zero** moved uncovered rows, **zero** coverage fallbacks across 33 rounds and ~1.29 M variants. **The stated demand did NOT move: 9,273,857,317 against the unchanged 35,445,500,736**, because `plan_proposal_nearest_delta` is untouched — no record site that quotes it moves, and that immobility is the phases' proof. Peak RSS 2.446 GiB. **The outcome is still EXCEEDS-TIMEBOX, at 601 s with 33 merge rounds**, and the arithmetic says it had to be: one merge commits per round, ≤1,365 rounds by the contact bound and ~460 at `make_raking_blade`'s completion ratio, so the gate stage is ≈1.8–5.5 h, 11–33× the box. **Ruling R-f is therefore STILL NOT satisfied and nothing was re-derived.** **R-c NOT adopted** (post-fix it saves at most 1.9 s of a 13.8 s round, and nothing at all if FU-8f lands); **R-d NOT adopted** (no per-key sweep left to amortise; the 6.30 ns row body is gather-dominated); the optional `merged_violation_count` buffer fold-in was **measured at 0.13 % and declined**. The post-fix leader is **`merged_violation_count` at 36 % of the round** — F4 sampled it at 4.6 % and the design predicted 29 %, both low — and the successor is opened as **FU-8f**, a recorded finding awaiting owner ruling. Five gates green; all seven frozen OD-8 digests byte-identical with `make_raking_blade`'s 1,402 real proposals the live witness. See *FU-8e phases E1–E4 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §12.]** |
-| FU-8f | Lazy first-safe gate acceptance, and non-incremental batch preparation | **RECORDED FINDING, 2026-08-07 — AWAITING OWNER RULING. Deliberately NOT implemented.** Opened on FU-8e phase E4's measurement as the treant's successor wall, in two parts, of which only the second is unambiguously an agent's to build. **(1) The gate evaluates 39,224 variants to answer a question that stopped at the first one.** `evaluate_gate_batch` returns a `vectors` array with one `FrozenSpecializedGateVector` per variant, and the tournament consumes it through exactly two lines — `let baseline = vectors[0]` and `first_safe_proposal(&vectors, baseline)`, which is `vectors.iter().skip(1).position(|v| gate_not_worse(*v, baseline))`. It is a `position`, not a search for a best, so everything after the accepted index is built and discarded. **`first_safe_proposal` returned `Some(0)` in every round measured** — 4/4 at the FU-8e tip, 28/28 across two models in the design pass. Lazy evaluation would take the round from 13.8 s to ~3.9 s (≈30 min for 460 rounds against ~1.8 h) and is observationally identical downstream: `SpecializedGateEvidence` retains only `baseline`, `accepted` and counts, and `evaluated_pair_count` is `total_proposals`, the number **gathered** rather than evaluated. **Why it is not built: it severs charged-batch from executed-batch.** FU-8d phase F3 re-founded `GateRoutePlanMismatch` as a plan-vs-execution attestation — every planned proposal executed, once and in order — and lazy evaluation breaks that invariant by construction, requiring the attestation to be re-founded a **second** time, on a weaker claim, two phases running. That is an owner's call, not an agent's, and it is what this row awaits. **(2) Batch preparation is rebuilt from scratch every round, and part (1) is not sufficient without it.** Preparation is **3.88 s of the 13.8 s round** — the 554,926,572-row baseline coverage sweep plus the `GateBatchIndex` — while a merge changes **2 contacts of 1,366**. At 460 rounds that is 1,785 s with the variant loop at zero, already **~3× the 600 s box**, so getting the treant under the timebox needs preparation to become incremental across rounds whatever is ruled on part (1). Part (2) touches no attestation and is the larger win. **Neither part is a cap to raise**: as with FU-8c, FU-8d and FU-8e, none of this work is charged against `gate_operation_limit`, and the remedy removes work rather than admitting more. See *FU-8f opened 2026-08-07* and `support-resource-caps-2026-08-05.md` §12.6. **[Status note 2026-08-07 — the row above was written while FU-8f was design-only and is left standing exactly as written: since it was recorded, phases G1 (the load-partition transpose) and G2 (the fingerprint hoist) have been implemented on the sibling branch `feature/fu8f-load-transpose` and are pending the merge queue, while G3 and later are pending this branch's own merge.]** **[Status note 2026-08-07 (later) — the row above and the note above it are both left standing exactly as written; two of their claims have stopped being true and are corrected here rather than rewritten. **This row is no longer AWAITING OWNER RULING and part (1) is no longer "deliberately NOT implemented".** The ruling came — *"2.1 hours down to 28 minutes seems worth it; anywhere else that we can also still shave more time off?"*, Craig, 2026-08-07 — and **phase G3 landed part (1)**: `GateBatchAcceptance` / `GateBatchOutcome`, the tournament breaking at the first `gate_not_worse` variant, `first_safe_proposal` retained `#[cfg(test)]` as the reference oracle it is proved against, `GateRoutePlanMismatch` re-founded a **second** time on a prefix-wise comparison with the ruling quoted verbatim at every record site, and the telemetry corrected (`evaluated_pair_count` → `gathered_pair_count`, plus a new unhashed `evaluated_variant_count`). **No charged number, cap, floor or coefficient moved**, and the plan still prices — and the refusal still runs against — every variant: charged and executed are severed, and both are stated. Seven frozen OD-8 digests byte-identical, `make_raking_blade`'s 21 real merges the live witness. Part (1)'s own sentence *"evaluated_pair_count is total_proposals, the number gathered rather than evaluated"* is the defect G3's rename fixes. **Part (2) stays OPEN**, and G1+G2 addressed only its cheapest components: a treant run at the G3 tip on a **quiet, uncontended machine** is still **EXCEEDS-TIMEBOX at 600 s**, so the round count remains unmeasured and **ruling R-f remains unsatisfied**. Counting the rounds is G4's. See *FU-8f phase G3 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §13.]** **[Status note 2026-08-07 (G4 measured) — everything above is left standing; G4 changed no engine code, so nothing above can have moved, and what follows is measurement rather than correction. **The rounds are counted at last, and the gate still does not fit.** Two attempts on a **quiet, uncontended machine** — the first frame-level measurements of this stage without a contention caveat — both **EXCEEDS-TIMEBOX at 602 s**, at **436** and **430** merge rounds, contacts 1,366 → 931/937, one merge committed per round without exception, peak RSS 2.554 / 2.528 GiB with the 90 GB watchdog never firing. Mean round **1,099–1,121 ms**, fitting `round_ms = 304.17 + 0.6924 x contacts`, which projects the **gate stage alone** to **8.4 min** at `make_raking_blade`'s 463-round completion ratio and **17.7 min** at the 1,365-round hard bound — **2.8x and 2.0x the design's D4 projection**, and neither inside the box. **Part (1) is confirmed delivered by measurement:** the variant loop is **0.52 ms of a 1,121 ms round**, from 60.23 s at `7aa6b73`, better than the ~1.6 ms D1 predicted; G2's fingerprint hoist is likewise invisible at 0 ms from 166.6. **Part (2) is now attributed to a single frame.** `build_gate_load_state` is **85.5 %** of the round, and inside it the miss against D4 is entirely **G1's transpose *build*, not its scan**: the transposed scan costs **47.4 ms** where the old `contacts x rows` scan cost ~3,090 ms (a **65x** fall, better than the 53x predicted), while sizing and filling the CSR cost **406.4 + 410.5 = 816.9 ms** against a design assumption of ~15 ms. The design's own "largest unattributed residual", `gather_pair_proposals`, is settled at **28.6 ms / 2.5 %** and is not a target. **One design claim is superseded by evidence:** D1 states `first_safe = Some(0)` in every observed round and that a `k > 0` case "is the one thing the corpus cannot supply" — the treant returns `Some(0)` for rounds 0–45 and **`Some(2)` for every round from 46 onward**, identically in both runs, so the treant is now a live 390-round corpus witness for the `k > 0` prefix and the forced fixture is no longer the only one. Nothing in G3 is invalidated: the oracle equivalence is proved for every index. **No cap came near binding and none was touched** — cumulative gather 15,544,641 over 436 rounds against `max_merge_total_proposals` = 100,000,000, projecting ~33.0 M at the hard bound. **No new typed refusal; the pipeline never left the gate stage**, so tournament commit, penetration/brace, CCO anchors, attestation and a first treant seal are all still unexercised and nothing is claimed about them. **Ruling R-f remains UNSATISFIED and `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` was not re-derived.** The next lever is named by measurement rather than by design: **make the CSR sizing pass stop being a second full traversal**, which the design's own D2a notes the gate already nearly holds in `contact_rows`. See *FU-8f phase G4 measured 2026-08-07* and `support-resource-caps-2026-08-05.md` §14.]** **[PHASE G5 LANDED 2026-08-07 — the honest load charge; everything above stands and four quoted numbers move DOWNWARD.** G5 retired `load_resource_plan_from_counts`'s `rows × contacts × (owner_log + 4)` scan term — the model of the dense scan G1 had already replaced, and which G1 deliberately left standing and over-stating — in favour of the transpose's own `Σ\|eligible_owners\| × (log + 2) × 2` search term plus a `cells × (LOAD_WITNESS_SLOTS + 5)` fill-and-scan term charged from the exact cell count. Measured on the treant's round-1 gate batch, quiet machine, one instrumented release run reverted by editing before the gates: load baseline **5,543,831,115 → 795,766,031**, gate load term **6,592,813,742 → 1,844,748,658**, stated demand **9,273,857,317 → 4,525,792,233** (26.2 % → 12.8 %), `exact_operations` **10,457,910,996 → 5,709,845,912** (29.5 % → 16.1 %). The fall is 4,748,065,084 at both, to the unit, and is entirely the load term. **No cap raised, lowered or touched; all seven frozen OD-8 digests byte-identical.** Two findings recorded rather than glossed: (1) the fall is not universal at every checkpoint — `make_box` and `make_thin_fin` each have three tiny load checkpoints that RISE by ≤56 units, though every model's *widest* demand falls and all are >4 million× under the 2,000,000,000 floor; (2) at 795,359,775 the treant's load demand is now **below** that flat floor, so no corpus model leaves it any more — the batch-product scaling is kept unchanged regardless, because re-deriving the coefficient from the cheaper observation would **lower** a cap. **G5 changes no executed work**, so the treant's stopping point is unchanged and still wall-clock; **R-f remains UNSATISFIED** and G5 ran no completion attempt. Open question 4 (`plan.vector_bytes`) is deliberately LEFT, with the follow-up named: metering `check_gate_peak`'s executed `result_bytes` beside the charged bound. See *FU-8f phase G5 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §15.]** |
+| FU-8f | Lazy first-safe gate acceptance, and non-incremental batch preparation | **RECORDED FINDING, 2026-08-07 — AWAITING OWNER RULING. Deliberately NOT implemented.** Opened on FU-8e phase E4's measurement as the treant's successor wall, in two parts, of which only the second is unambiguously an agent's to build. **(1) The gate evaluates 39,224 variants to answer a question that stopped at the first one.** `evaluate_gate_batch` returns a `vectors` array with one `FrozenSpecializedGateVector` per variant, and the tournament consumes it through exactly two lines — `let baseline = vectors[0]` and `first_safe_proposal(&vectors, baseline)`, which is `vectors.iter().skip(1).position(|v| gate_not_worse(*v, baseline))`. It is a `position`, not a search for a best, so everything after the accepted index is built and discarded. **`first_safe_proposal` returned `Some(0)` in every round measured** — 4/4 at the FU-8e tip, 28/28 across two models in the design pass. Lazy evaluation would take the round from 13.8 s to ~3.9 s (≈30 min for 460 rounds against ~1.8 h) and is observationally identical downstream: `SpecializedGateEvidence` retains only `baseline`, `accepted` and counts, and `evaluated_pair_count` is `total_proposals`, the number **gathered** rather than evaluated. **Why it is not built: it severs charged-batch from executed-batch.** FU-8d phase F3 re-founded `GateRoutePlanMismatch` as a plan-vs-execution attestation — every planned proposal executed, once and in order — and lazy evaluation breaks that invariant by construction, requiring the attestation to be re-founded a **second** time, on a weaker claim, two phases running. That is an owner's call, not an agent's, and it is what this row awaits. **(2) Batch preparation is rebuilt from scratch every round, and part (1) is not sufficient without it.** Preparation is **3.88 s of the 13.8 s round** — the 554,926,572-row baseline coverage sweep plus the `GateBatchIndex` — while a merge changes **2 contacts of 1,366**. At 460 rounds that is 1,785 s with the variant loop at zero, already **~3× the 600 s box**, so getting the treant under the timebox needs preparation to become incremental across rounds whatever is ruled on part (1). Part (2) touches no attestation and is the larger win. **Neither part is a cap to raise**: as with FU-8c, FU-8d and FU-8e, none of this work is charged against `gate_operation_limit`, and the remedy removes work rather than admitting more. See *FU-8f opened 2026-08-07* and `support-resource-caps-2026-08-05.md` §12.6. **[Status note 2026-08-07 — the row above was written while FU-8f was design-only and is left standing exactly as written: since it was recorded, phases G1 (the load-partition transpose) and G2 (the fingerprint hoist) have been implemented on the sibling branch `feature/fu8f-load-transpose` and are pending the merge queue, while G3 and later are pending this branch's own merge.]** **[Status note 2026-08-07 (later) — the row above and the note above it are both left standing exactly as written; two of their claims have stopped being true and are corrected here rather than rewritten. **This row is no longer AWAITING OWNER RULING and part (1) is no longer "deliberately NOT implemented".** The ruling came — *"2.1 hours down to 28 minutes seems worth it; anywhere else that we can also still shave more time off?"*, Craig, 2026-08-07 — and **phase G3 landed part (1)**: `GateBatchAcceptance` / `GateBatchOutcome`, the tournament breaking at the first `gate_not_worse` variant, `first_safe_proposal` retained `#[cfg(test)]` as the reference oracle it is proved against, `GateRoutePlanMismatch` re-founded a **second** time on a prefix-wise comparison with the ruling quoted verbatim at every record site, and the telemetry corrected (`evaluated_pair_count` → `gathered_pair_count`, plus a new unhashed `evaluated_variant_count`). **No charged number, cap, floor or coefficient moved**, and the plan still prices — and the refusal still runs against — every variant: charged and executed are severed, and both are stated. Seven frozen OD-8 digests byte-identical, `make_raking_blade`'s 21 real merges the live witness. Part (1)'s own sentence *"evaluated_pair_count is total_proposals, the number gathered rather than evaluated"* is the defect G3's rename fixes. **Part (2) stays OPEN**, and G1+G2 addressed only its cheapest components: a treant run at the G3 tip on a **quiet, uncontended machine** is still **EXCEEDS-TIMEBOX at 600 s**, so the round count remains unmeasured and **ruling R-f remains unsatisfied**. Counting the rounds is G4's. See *FU-8f phase G3 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §13.]** **[Status note 2026-08-07 (G4 measured) — everything above is left standing; G4 changed no engine code, so nothing above can have moved, and what follows is measurement rather than correction. **The rounds are counted at last, and the gate still does not fit.** Two attempts on a **quiet, uncontended machine** — the first frame-level measurements of this stage without a contention caveat — both **EXCEEDS-TIMEBOX at 602 s**, at **436** and **430** merge rounds, contacts 1,366 → 931/937, one merge committed per round without exception, peak RSS 2.554 / 2.528 GiB with the 90 GB watchdog never firing. Mean round **1,099–1,121 ms**, fitting `round_ms = 304.17 + 0.6924 x contacts`, which projects the **gate stage alone** to **8.4 min** at `make_raking_blade`'s 463-round completion ratio and **17.7 min** at the 1,365-round hard bound — **2.8x and 2.0x the design's D4 projection**, and neither inside the box. **Part (1) is confirmed delivered by measurement:** the variant loop is **0.52 ms of a 1,121 ms round**, from 60.23 s at `7aa6b73`, better than the ~1.6 ms D1 predicted; G2's fingerprint hoist is likewise invisible at 0 ms from 166.6. **Part (2) is now attributed to a single frame.** `build_gate_load_state` is **85.5 %** of the round, and inside it the miss against D4 is entirely **G1's transpose *build*, not its scan**: the transposed scan costs **47.4 ms** where the old `contacts x rows` scan cost ~3,090 ms (a **65x** fall, better than the 53x predicted), while sizing and filling the CSR cost **406.4 + 410.5 = 816.9 ms** against a design assumption of ~15 ms. The design's own "largest unattributed residual", `gather_pair_proposals`, is settled at **28.6 ms / 2.5 %** and is not a target. **One design claim is superseded by evidence:** D1 states `first_safe = Some(0)` in every observed round and that a `k > 0` case "is the one thing the corpus cannot supply" — the treant returns `Some(0)` for rounds 0–45 and **`Some(2)` for every round from 46 onward**, identically in both runs, so the treant is now a live 390-round corpus witness for the `k > 0` prefix and the forced fixture is no longer the only one. Nothing in G3 is invalidated: the oracle equivalence is proved for every index. **No cap came near binding and none was touched** — cumulative gather 15,544,641 over 436 rounds against `max_merge_total_proposals` = 100,000,000, projecting ~33.0 M at the hard bound. **No new typed refusal; the pipeline never left the gate stage**, so tournament commit, penetration/brace, CCO anchors, attestation and a first treant seal are all still unexercised and nothing is claimed about them. **Ruling R-f remains UNSATISFIED and `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` was not re-derived.** The next lever is named by measurement rather than by design: **make the CSR sizing pass stop being a second full traversal**, which the design's own D2a notes the gate already nearly holds in `contact_rows`. See *FU-8f phase G4 measured 2026-08-07* and `support-resource-caps-2026-08-05.md` §14.]** **[PHASE G5 LANDED 2026-08-07 — the honest load charge; everything above stands and four quoted numbers move DOWNWARD.** G5 retired `load_resource_plan_from_counts`'s `rows × contacts × (owner_log + 4)` scan term — the model of the dense scan G1 had already replaced, and which G1 deliberately left standing and over-stating — in favour of the transpose's own `Σ\|eligible_owners\| × (log + 2) × 2` search term plus a `cells × (LOAD_WITNESS_SLOTS + 5)` fill-and-scan term charged from the exact cell count. Measured on the treant's round-1 gate batch, quiet machine, one instrumented release run reverted by editing before the gates: load baseline **5,543,831,115 → 795,766,031**, gate load term **6,592,813,742 → 1,844,748,658**, stated demand **9,273,857,317 → 4,525,792,233** (26.2 % → 12.8 %), `exact_operations` **10,457,910,996 → 5,709,845,912** (29.5 % → 16.1 %). The fall is 4,748,065,084 at both, to the unit, and is entirely the load term. **No cap raised, lowered or touched; all seven frozen OD-8 digests byte-identical.** Two findings recorded rather than glossed: (1) the fall is not universal at every checkpoint — `make_box` and `make_thin_fin` each have three tiny load checkpoints that RISE by ≤56 units, though every model's *widest* demand falls and all are >4 million× under the 2,000,000,000 floor; (2) at 795,359,775 the treant's load demand is now **below** that flat floor, so no corpus model leaves it any more — the batch-product scaling is kept unchanged regardless, because re-deriving the coefficient from the cheaper observation would **lower** a cap. **G5 changes no executed work**, so the treant's stopping point is unchanged and still wall-clock; **R-f remains UNSATISFIED** and G5 ran no completion attempt. Open question 4 (`plan.vector_bytes`) is deliberately LEFT, with the follow-up named: metering `check_gate_peak`'s executed `result_bytes` beside the charged bound. See *FU-8f phase G5 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §15.]** **[PHASES G6a–G6c LANDED 2026-08-07/08 and PHASE G6d MEASURED 2026-08-08 — part (2) is CLOSED for the gate stage, and the treant's stopping point has moved out of the gate for the first time.** Everything above is left standing; G6a–G6c landed the cross-round retention of the load transpose (carrier + four mutation-proven guards, the incremental arena update with the bit-identity harness and its mutation triad, and the charge-vs-meter severance) and **G6d changed no engine code at all** — it is the measurement. **THE GATE COMPLETES.** Two attempts on a machine polled clean of sibling `cargo`/`rustc` thirteen times before launch, both finishing the whole model run in **339 s against the 600 s box (1.77× margin)** with the tournament committing **823 merge rounds** over **826 gate batches** — and the two runs are **bit-identical on every counter, with zero differing rounds across all 823 on contacts, proposals and rebuilds**, agreeing to 0.51 % on wall-clock. **804 of 826 load builds are retained (97.3 %)**; the 22 counted rebuilds are 21 `poisoned` and the single `contact_witness` miss at the terminal audit that F-G6-4 predicted by design. Executed work is **11.18 %** of charged run-wide and `executed ≤ charged` held every round. **The tournament ends because no proposal in the final batch is safe** — the acceptance fold's `None` arm, never before exercised — which falsifies **both** standing round predictions in opposite directions (463 too low, the 1,365 hard bound too high; the answer is 823). The retained round is **206.5 ms** against the pre-G6 round measured **in the same process** by the 21 rebuild rounds, which reproduce G4's own model to a mean of −0.97 % — a **4.4–5.2×** fall, and the first prediction in this chain to land (D-G6-5 said 0.19 s and 350–450 s; measured 0.206 s and 339 s). **G6e is NOT opened** (margin 1.77× > 1.5×, and the gate is no longer the binding stage). **Ruling R-f's precondition is now MET and re-deriving `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is UNBLOCKED — G6d deliberately does not do it**, per D-G6-6. **No cap, floor or coefficient is raised, lowered or touched by any G6 phase.** **What stops the treant now is a typed refusal in previously-unexercised code, opened as FU-8g**, and there is still **no seal**. See *FU-8f phase G6d measured 2026-08-08* and `support-resource-caps-2026-08-05.md` §17.]** |
+| FU-8g | The initial-contact preflight bounds work at `contacts x faces` against a **flat** 4,000,000 cap | **Opened 2026-08-08 by FU-8f phase G6d's completed-gate measurement — the treant's successor stopping point, and the first one that is not the merge gate.** With the gate stage no longer binding, the Weeping Treant now stops **after** its tournament with `Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })`, identically in both G6d attempts. **Derived to the unit from source.** `initial::preflight` (`crates/plinth-support/src/initial.rs`) checks `work = contact_count x 4 + penetration.max_total_work` against `ContactConstructionLimits::production().max_work_items = 4_000_000` (`runner.rs`). `penetration` comes from `penetration_intervals_batch_worst_case_limits(contact_count, 8, interval_cap, false)`, and inside `penetration_requirements` (`rust/geom_kernel/src/queries.rs`) with `rays_all = false` that is `rays = 1`, `hits_per_ray = mesh.nfaces()`, `work = rows x rays x hits_per_ray`. So `work = contact_count x (4 + nfaces)` = **542 x (4 + 429,120) = 542 x 429,124 = 232,585,208**, reproducing the printed figure exactly and independently confirming that 542 physical contacts survive the tournament and its terminal coalesce. The demand is **58.1x** the cap. **The shape is the FU-8b / FU-8c family a fourth time: a `contacts x faces` product measured against an unscaled flat bound.** At 429,120 faces this cap admits at most `4,000,000 / 429,124 = 9` physical contacts; the corpus passes only because every corpus mesh is two to four orders of magnitude smaller in face count, so nothing about the treant is special except its size. **And the quantity is a preflight *bound*, not a measured demand** — `hits_per_ray = nfaces` is the "every face could be hit" worst case while the executed query is BVH-bounded, the same over-statement G5 corrected on the load term and in the same direction. **This is NOT a cap to raise**, and nothing in G6d proposes raising it: as with FU-8b, FU-8c, FU-8d, FU-8e and G5, the remedy is to make the bound honest, not the cap bigger, and it is an owner's call whether and when to open it. **Rider, recorded here because G6d found it and it is one counter wide:** `RetainedLoadRebuildCause::Poisoned` collapses guard 3 and every `record_commit` identity-walk refusal — including the G6b position-bit tie — into a single census label, so G6d could count 21 poison-driven rebuilds on the treant but could **not** say which refusal fired. Splitting that label would make the next run's transcript self-explaining. See *FU-8f phase G6d measured 2026-08-08* §G6d.8 and `support-resource-caps-2026-08-05.md` §17. **[Post-verification adjudication 2026-08-08 — the records verifier asked whether a headline resting on uncommitted scratch transcripts is landable; the orchestrator ruled that it is, on the **G4 scratch-transcript precedent** (run outputs never enter git, and G4's own 436/430-round headline landed the same way), and **WIDENED the rider above**: the `Poisoned` split must **also emit a committed-round counter**, so that a future run's transcript proves its own round count rather than resting on scratch.]** |
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
 | FU-11 | Opt-in SDF/remesh repair mode | Roadmap item. |
@@ -3398,6 +4049,32 @@ future verifiers should stop re-deriving this from scratch.
    > point is unchanged and is still wall-clock, **ruling R-f remains UNSATISFIED**, and nothing
    > was re-derived. Full record: *FU-8f phase G3 landed 2026-08-07*, *FU-8f phase G4 measured
    > 2026-08-07*, *FU-8f phase G5 landed 2026-08-07*.
+
+   > **SUPERSEDED AGAIN 2026-08-08 (FU-8f phase G6d measured) — dated addendum; all five blocks
+   > above are left standing exactly as written.** The clause every block above repeats — "the
+   > stopping point is still wall-clock", "ruling R-f remains UNSATISFIED" — has stopped being
+   > true, and is corrected here rather than rewritten there. **The treant's gate stage COMPLETED
+   > for the first time in this project**: the merge tournament ran to its own end at **823
+   > rounds** over 826 gate batches, and the whole model run finished in **339 s against the
+   > 600 s box** — a **1.77× margin** — in **two** attempts that are **identical on every
+   > counter**. **The stopping point has therefore moved OUT of the gate**, to a new typed
+   > refusal in previously-unexercised code, printed identically by both attempts:
+   > `Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })`.
+   > That is opened as **FU-8g** and deliberately not fixed: `initial::preflight` bounds
+   > `work = contact_count × (4 + nfaces)` = **542 × 429,124 = 232,585,208** against a **flat,
+   > unscaled** `max_work_items = 4,000,000` — **58.1×** over, and **the FU-8b / FU-8c shape a
+   > fourth time**, a `contact_count 542 × 429,124 faces` product measured against a bound that
+   > does not scale with the model. It is a preflight **bound**, not a measured demand
+   > (`hits_per_ray = nfaces` is the "every face could be hit" worst case while the executed query
+   > is BVH-bounded), and it is **NOT a cap to raise without measurement**: the remedy, as in
+   > FU-8b, FU-8c and G5, is to make the bound honest rather than the cap bigger. **Ruling R-f's
+   > precondition is now MET** — a treant run has completed the gate, twice, with counters — so
+   > re-deriving `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is **UNBLOCKED**, and the
+   > re-derivation is **deliberately not performed**, per the G6 design's **D-G6-6**; no
+   > coefficient moved. **No cap, floor or coefficient was raised, lowered or touched by any G6
+   > phase**, and all seven frozen OD-8 digests are byte-identical. This item stays on the
+   > critical path and the treant still has **no seal**. Full record: *FU-8f phase G6d measured
+   > 2026-08-08*.
 
 6. **Model-anchor bundle — PR-7 seating + tournament-bias investigation + tripwire
    retirement.** Treat these three as one unit; landing any alone is incoherent. **Organic
