@@ -130,6 +130,7 @@ dependencies = [
  "pyo3",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 
@@ -1149,6 +1150,7 @@ dependencies = [
 name = "plinth-pipeline"
 version = "0.1.0"
 dependencies = [
+ "chitubox_io",
  "plinth-core",
  "plinth-decimate",
  "plinth-emit",
@@ -1156,6 +1158,7 @@ dependencies = [
  "plinth-mesh",
  "plinth-orient",
  "plinth-support",
+ "plinth-verify",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

@@ -17,6 +17,11 @@ use crate::write::serialize;
 
 /// Embedded 420-byte empty-project template.
 const EMPTY_TEMPLATE: &[u8] = include_bytes!("../assets/empty.chitubox");
+/// Opaque preview copied verbatim from the native UI-authored
+/// `two-supports.chitubox` fixture. See `assets/README.md` for provenance and
+/// the pinned SHA-256. This is a compatibility fallback, not a generated
+/// thumbnail format implementation.
+const NATIVE_PREVIEW_FALLBACK: &[u8] = include_bytes!("../assets/two-supports-preview.bin");
 
 /// A ChituBox Basic `.chitubox` project (opaque; holds a `Document`).
 #[derive(Clone, Debug)]
@@ -154,6 +159,13 @@ impl Project {
         // native populated files carry settings-size 420 (empty carries 0)
         if first_add && self.doc.settings_size == 0 {
             self.doc.settings_size = SETTINGS_SIZE_CONST;
+        }
+        // R1 fallback: ChituBox failed to load an empty-preview project in
+        // manual GUI testing. Install the one native opaque preview only when
+        // this first model addition starts from an empty preview. Parsed
+        // projects with a preview retain their bytes verbatim.
+        if first_add && self.doc.preview.is_empty() {
+            self.doc.preview = NATIVE_PREVIEW_FALLBACK.to_vec();
         }
         self.mark_dirty();
         Ok((start..self.doc.models.len()).collect())
