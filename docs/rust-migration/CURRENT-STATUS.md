@@ -3066,6 +3066,115 @@ path in** — the cheap fix is to make the walk's survivor test the same total i
 `compare_contacts` uses (or to carry a stable per-contact identity through the walk) rather than
 position bits alone, and to add a fixture with two tie-broken contacts sharing a position.
 
+### FU-8f phase G6b landed 2026-08-07 — the retained fast path; the gate stops rebuilding what a merge did not change {#fu8f-g6b-2026-08-07}
+
+**What flips.** A gate round every guard accepts no longer executes the full load build. It
+runs `RetainedLoadTranspose::finalize_retained_round` instead: the **same** scan loop body
+(`scan_transposed_load_core`, now shared verbatim between the fresh CSR and the retained
+arena — one implementation, two monomorphizations, so bit-identity travels with the code
+rather than with an argument), the `finalize_load_rows` prologue and tail verbatim (staleness
+comparison, finite/duplicate contact refusals, row fill from the retained
+`row_face_id`/`row_area_mm2`, contact FNV hash), and the **same** baseline post-pass
+(`SpecializedLoadBaseline::assemble`, extracted from `build` so both paths run one code path
+— carried areas re-summed fresh in the fold's own order every round, never adjusted
+incrementally). What falls off retained rounds entirely, per design findings F-G6-2/F-G6-3:
+`GroupedOwnerFaces::from_pairs`, `extend_load_eligibility`, and both
+`LoadTransposeCounts` passes. `face_row`/`row_face` derive from the retained `row_face_id`
+(identical by row-set invariance), `contact_rows` from the same fresh pair walk as before,
+and guard 4 runs against them **before** the branch is taken. Any guard miss is the counted
+full rebuild, unchanged. `record_commit` gains the D-G6-2 step-4 **arena compaction** at the
+2x-waste trigger (one O(cells) copy in bucket order, amortized; trigger and preservation
+pinned by `fu8f_retained_arena_compacts_at_twice_the_live_cells`).
+
+**Charging is deliberately untouched, and stated so.** Retained rounds still charge the full
+build's own figures (`specialized_load_resource_plan` over the fresh pair counts) — D-G6-4's
+"charge the admissible worst case", because no plan can know at plan time whether a guard will
+miss. The full build's *internal* resource refusals do not run on retained rounds, and the
+soundness argument is recorded on `finalize_retained_round` itself: the work a retained round
+executes is a strict subset of what the tournament's first build (or last guard-miss rebuild)
+stated and was admitted for — cells, rows and contacts only shrink under committed merges —
+the FU-8e Q5 a-fortiori shape; every guard-miss round re-enters the full path with every check
+intact. **No cap, floor or coefficient is raised, lowered or touched; no charged number moves.
+G6c lands the retained-round metering, the arena byte ceiling and the record sweep.**
+
+**The G6a position-key hazard is CLOSED, by refusal rather than by re-derivation — a recorded
+deviation from the record's suggested fix.** The paragraphs above proposed making the walk's
+survivor test the comparator's total identity. That would require the witness to retain
+per-contact route/normal/demand state it does not hold, for a case never observed on any
+corpus commit. What landed instead: the walk now **detects** the ambiguity — committed
+position bits equal to the survivor's at a slot where the insertion is still unplaced, which
+is exactly the condition under which "survivor" and "committed seat" are indistinguishable
+from position bits — and **poisons**, one counted rebuild, never a guess. The fast path can
+therefore never consume a mis-derived `p`. Pinned both ways by
+`fu8f_retained_commit_poisons_on_a_position_bit_tie_at_the_insertion_point`: both sort orders
+of the tied pair poison, a distinct position does not; mutation-proven (refusal deleted, both
+tied arms fail, positive arm keeps passing).
+
+**The equivalence proof, landed as specified.**
+`fu8f_retained_transpose_matches_a_fresh_rebuild_after_n_commits` drives the carrier through
+**four committed merges on real fixture geometry** (`make_overhang_table`, the shared
+retention fixture) with **no repopulation between rounds** — the carrier crosses all four on
+`record_commit` alone, which is the retention claim itself. After every commit the retained
+path's full output is compared on `to_bits`, field by field — transpose buckets (payload and
+order, against the fresh CSR), all three witness slots (contact and distance bits), partition
+rows (`face_id`, `contact_id`, `owner`, `carried_area_mm2` bits), `contacts_fingerprint`,
+`winner`/`won_starts`/`won_rows`, per-contact `carried_area_mm2` bits, `violation_count`, row
+invariants — against BOTH the production fresh build AND the retained
+`reference_contacts_x_rows_scan` oracle (the pre-FU-8f `contacts x rows` scan itself). Per
+verifier finding **F-3** (the treant's `safe = Some(0) -> Some(2)` transition at round 46),
+the schedule merges parents at **nonzero** indices ((2, 4) and (1, 3)), inserts at strictly
+interior positions, exercises real dedup unions, and merges already-merged seats so retained
+payloads feed later merges. The **post-sort renumbering arm**
+(`fu8f_committed_renumbering_matches_append_variant_load_inputs`, in `specialized.rs`) runs
+the production commit shape end to end — demand-carrying seats, `commit_merge`,
+`consolidate`'s own splice-and-sort, the guard-3 predicate — and pins the identity-walk `p`
+and remapped witness against the **actual** `append_variant_load_inputs` output over the
+committed list, with the merged seat strictly interior: the *committed* renumbering, distinct
+from FU-8d's merged-LAST *variant* pin, and both stay pinned.
+
+**The mutation triad — applied, caught, reverted; transcripts in the harness doc comment.**
+(a) merged bucket inserted at `p + 1`: caught by **guard 2** (the remapped witness diverges
+from the fresh physical list) — the harness's "no guard fired" assertion fails with
+`Some(ContactWitness)`. (b) `right`'s bucket left in place: caught by **guard 2's length
+arm**, same failure shape. (c) last row dropped from the merged bucket: caught by **guard 4**
+— `Some(BucketCardinality)`. All three failed the harness; a harness green under any of them
+would be vacuous and did not land.
+
+**The live witness: the retained path now actually retains, and geometry does not move.**
+Census at this tip (`PLINTH_CENSUS=1`, release, `--features census`, one
+`PLINTH_CENSUS_ONLY` invocation per model):
+
+| model | rounds | counted rebuilds | retained-path rounds (rounds − first build − rebuilds) |
+|---|---:|---:|---:|
+| `Sphere` | 2 | 0 | 1 |
+| `Cylinder` | 2 | 0 | 1 |
+| `make_box` | 2 | 0 | 1 |
+| `make_overhang_table` | 2 | 0 | 1 |
+| `make_toed_slab` | 2 | **1** (`contact_witness`) | 0 |
+| `make_raking_blade` | 23 | **1** (`contact_witness`) | **21** |
+| `make_thin_fin` | 2 | 0 | 1 |
+
+`make_raking_blade`'s **21 committed merges all rode the retained path** — under G6a these
+same 21 rounds each executed a full build; now they execute none — and its end-to-end digest
+is `13278215294653054002`, **byte-identical**. The no-merge models bank the design's promised
+free round: the terminal audit reuses the initial build when the coalesce changed nothing,
+and `make_toed_slab`'s coalesce-perturbed audit takes the predicted `contact_witness` rebuild
+(F-G6-4), exactly as in G6a. **All seven frozen OD-8 digests byte-identical**: `Sphere`
+17667468971446251870, `Cylinder` 13310185350867878190, `make_box` 9657051231007502658,
+`make_overhang_table` 6686599816688114065, `make_toed_slab` 11199296506741562956,
+`make_raking_blade` 13278215294653054002, `make_thin_fin` 7016743535301716631, with
+`routed_contacts` and `final_live_members` unmoved on all seven.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **1002** tests
+default (G6a tip 998) and **1003** `--all-features` (G6a tip 999), 0 failed — the **+4** in
+both is exactly this phase's four new tests (the harness, the position-bit-tie refusal, the
+compaction pin, the committed-renumbering arm), attributed one for one. Clippy clean with
+`-D warnings`, `cargo fmt --all -- --check` clean, `git diff --check` clean. No wall-clock
+number is recorded anywhere in this section: concurrent workflows were running on this
+machine throughout, so counters and bit-identity are the only landed measurements.
+**G6d remains the measuring phase**; the ~741 ms/round removal predicted by D-G6-5 is a
+prediction until G6d measures it.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
