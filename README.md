@@ -429,6 +429,16 @@ git diff --check
 Most recently green at 940 passing (941 with `--all-features`), clippy, fmt and whitespace
 clean.
 
+> **Dated note, 2026-08-08 — the two counts are now one number.** For the whole life of this
+> workspace the first two commands reported a pair (`N` / `N+1`), because `chitubox_io` had
+> exactly one feature-gated test behind its optional `python` feature, which the default run
+> did not compile. E8 deleted that feature along with the rest of the Python, so both
+> invocations now build an identical test set and report the **same** total. The pair was
+> real and both halves were always correct — see the counting recipe in
+> `docs/rust-migration/CURRENT-STATUS.md` — but from this commit forward, a default and an
+> `--all-features` run that disagree is a signal worth investigating, not the expected ±1.
+> Run both anyway: they still differ in what they compile everywhere else.
+
 **Corpus provisioning.** The eight test models are inputs, not source, and are gitignored
 (`corpus/models/*.stl` — the tree alone is 21 MB). A fresh worktree therefore starts with an
 empty `corpus/models/`; symlink them from the canonical checkout:
@@ -523,6 +533,24 @@ instrumentation is verified result-inert against pre-instrumentation digests.
   final gate requires zero Python. No new Python is written here — see
   [`docs/decisions/2026-07-28-rust-rewrite.md`](docs/decisions/2026-07-28-rust-rewrite.md)
   for the reasoning.
+
+  > **Done 2026-08-08 — dated note; the bullet above is left standing as written.** Python
+  > is gone. Export-path phase E8 deleted the `chitubox_io` PyO3 binding (`src/py.rs`, the
+  > `python` feature, the optional `pyo3`/`numpy` dependencies, the maturin `pyproject.toml`
+  > and `python/` package, and the `build.rs` that fed the extension-staleness gate), the
+  > `scripts/tests` pytest harness, the `scripts/tools` legacy pipeline, the
+  > `scripts/support_placement` engine, and the venv that served them — 101 `.py` files, the
+  > root `pyproject.toml`/`uv.lock`, and 13 crates out of `Cargo.lock`. **No build or test
+  > step in this repository requires a Python interpreter**: the Rust toolchain named in
+  > `rust-toolchain.toml` is now the whole toolchain, and the five-command gate under
+  > *Development* is the complete build surface.
+  >
+  > The "final gate requires zero Python" clause is now a literal test —
+  > `crates/plinth-verify/tests/no_python_guard.rs` walks the tree and fails the suite if a
+  > `.py` file or a `pyo3`/`numpy` manifest declaration reappears. `scripts/tests/fixtures/`
+  > is kept in full (binary specimens the Rust tests load), as are the frozen baselines
+  > under `corpus/baseline/` and the `prep_one.py` provenance strings that record which tool
+  > produced them. The deleted engine remains recoverable from git history.
 
 ## License
 

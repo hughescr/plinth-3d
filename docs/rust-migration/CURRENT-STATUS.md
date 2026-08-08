@@ -3781,6 +3781,143 @@ orientation) `+ 23` (phase-B `plinth-layers`) `− 2` (deleted with the Tier-1 s
 feature-gated test the default run does not build. Gates 3–5 green, tree clean before and
 after.
 
+## Python is eliminated; the two gate counts converge (2026-08-08) {#python-eliminated-2026-08-08}
+
+Export-path phase **E8** landed on `feature/python-elimination`, cut from `develop`
+`8041828`. **The repository contains no Python.** This section is the record of what went,
+what stayed and why, and the gate arithmetic — which has a property this project has never
+had before.
+
+### What was deleted
+
+| Surface | What it was |
+|---|---|
+| `rust/chitubox_io/src/py.rs` | the `#[cfg(feature = "python")]` PyO3 module — binding glue |
+| `rust/chitubox_io` `python` feature + `pyo3`/`numpy` | the optional deps it activated |
+| `rust/chitubox_io/pyproject.toml`, `python/chitubox_io/` | maturin config and the mixed-layout package `_native` was injected into |
+| `rust/chitubox_io/build.rs` | baked `CHITUBOX_IO_SOURCE_DIGEST`, read in exactly one place: `py.rs` |
+| the crate's `cdylib` crate-type | existed only so maturin could package an extension module |
+| `scripts/tests/*.py` | the pytest suite and `conftest.py` (the extension-staleness gate) |
+| `scripts/tools/` | the legacy pipeline entry points — `prep_one.py`, `run_v5.py`, census tooling, the Blender-driven sweeps — plus `host.blend`, the Blender host document for `geometry_sweep.py` |
+| `scripts/support_placement/` | the 35-module frozen engine those entry points drove |
+| `scripts/build_kernel.sh` | a maturin driver that built the extension into `.venv` |
+| `pyproject.toml`, `uv.lock`, `.venv/` | the interpreter and environment that served all of it |
+
+101 `.py` files. `Cargo.lock`, regenerated offline, loses **13 crates**: `pyo3` and its four
+support crates, `numpy`, `ndarray`, `heck`, `indoc`, `memoffset`, `rustc-hash`,
+`target-lexicon`, `unindent`.
+
+`build.rs` deserves its own line, because deleting a build script is not obviously in scope
+for "delete the Python". Its sole product was a source digest read by `py.rs` and recomputed
+by `conftest.py`; with both ends gone it hashed 200 lines of hand-rolled SHA-256 into an
+env var no code could observe. It went the same way, and for the same reason, that
+`rust/geom_kernel`'s `build.rs`, `pyproject.toml` and `py.rs` went together in `4c01975` when
+that crate was de-Pythonised. The precedent is the repository's own.
+
+### What was deliberately KEPT
+
+- **`scripts/tests/fixtures/` — entirely.** Binary `.chitubox` and `.stl` specimens plus
+  frozen JSON, loaded today by Rust tests: `rust/chitubox_io/tests/common/mod.rs:15`,
+  `crates/plinth-verify/tests/format_gate.rs:64`, `crates/plinth-emit/src/lib.rs`,
+  `crates/plinth-support/src/perception.rs`. Only the `.py` files beside them were removed;
+  every one of those paths still resolves, proven by the gates below.
+- **`corpus/baseline/` artifacts**, and the **`scripts/tools/prep_one.py` provenance
+  strings** in `rust/chitubox_io/tests/frozen_baseline.rs:532-551` and `corpus/manifest.json`.
+  These name a tool that no longer exists **on purpose**: they are the frozen baselines'
+  birth certificate, recording which tool at which git revision produced the artifacts the
+  Rust suite is checked against. Deleting the tool does not un-produce the artifacts, and
+  erasing its name would destroy the provenance they are trusted on. Both still pass
+  verbatim.
+- **`chitubox_io::CHITUBOX_API_VERSION`.** A real writer-compatibility contract, matched
+  against `plinth-core`'s `EXPECTED_CHITUBOX_API_VERSION` registry entry. Only its doc
+  comment changed — from describing the pytest staleness gate in the present tense, to
+  recording it as history.
+- **The `.gitignore` Python patterns**, now with a comment saying why: nothing here produces
+  `__pycache__` or a `.venv` any more, but a stray interpreter run should not be able to
+  leave droppings in a checkout.
+
+Nothing was lost with the engine. Its role was oracle-of-record for the Rust ports, and that
+role was already discharged: `frozen_baseline`, `roundtrip`, `synth_compare` and the
+support-parity suite are Rust-native and check against **committed** artifacts, not against a
+running interpreter. The engine remains recoverable from git history — the right place for a
+measuring stick nothing measures against.
+
+### The guard
+
+`crates/plinth-verify/tests/no_python_guard.rs` makes the end state durable rather than
+merely current. It walks the tree from `CARGO_MANIFEST_DIR/../..` (path-portable per the
+hygiene-batch precedent — no hardcoded `/tmp`), skipping only `.git`, `target` and `exports`,
+and asserts zero `*.py` files and no `Cargo.toml` declaring `pyo3` or `numpy` (bare key,
+`[dependencies.<dep>]` header, or feature activation). Ignored paths are deliberately **not**
+skipped: a `.venv` is invisible to git but is still Python in the checkout.
+
+It is one `#[test]`, and deliberately not a naive one — a tree guard that walks the wrong
+directory passes forever. Before asserting anything it proves it can see the repository (six
+anchor paths, and a floor on the file count) and proves both detectors fire on synthetic
+inputs. `#`-comments in manifests are stripped before matching, following
+`plinth-support/tests/retired_formula_guard.rs`, so prose naming the retired binding stays
+searchable while a live declaration does not. Negative control run before committing: a
+one-line `scripts/*.py` dropped into the tree fails the test with that path named.
+
+### Gates at the E8 tip — and the convergence
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --offline --no-fail-fast` | **1041 passed / 0 failed** |
+| `cargo test --workspace --offline --no-fail-fast --all-features` | **1041 passed / 0 failed** |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | clean, exit 0 |
+| `cargo fmt --all -- --check` | clean |
+| `git diff --check` | clean |
+
+Tree clean before and after. Attribution against `develop` `8041828`'s 1040 / 1041:
+
+- **default: 1040 + 1 = 1041.** The one addition is the no-Python guard.
+- **all-features: 1041 + 1 − 1 = 1041.** Plus the guard, minus
+  `chitubox_io::py::tests::every_format_gate_error_has_a_stable_python_kind`, deleted with
+  the module that held it. Verified by name: the guard appears exactly once in each log, the
+  py-glue test appears in neither, and `chitubox_io`'s lib-unit section now reports
+  `running 0 tests` where the all-features run previously reported 1.
+
+**The two numbers are now the same number, for the first time in this project's history.**
+The *Test-count counting recipe* section below documents at length why "the test count" was
+never one number but a pair — `N` default, `N+1` all-features — and that the pair was real
+and both halves correct. The whole of that gap was one feature-gated test behind
+`chitubox_io`'s sole optional feature. That feature is deleted, so both invocations now
+compile an identical test set. Proven stronger than by totals: the two runs' per-binary
+`Running`/`Doc-tests` lines and all **90** `test result: ok. N passed` summaries are
+identical line for line.
+
+That recipe section stays as written — it is the correct history, and its counting method is
+still the canonical one. What changes from this commit forward is only the expectation: a
+default and an `--all-features` run that now *disagree* is a signal worth chasing, not the
+expected ±1. Keep running both; they still differ in what they compile everywhere else, and
+the workspace can grow another optional feature at any time.
+
+### OD-8 corpus census
+
+`cargo run --release --offline --features census --example embed_incidence_census` over the
+provisioned corpus. All **seven** reachable models seal, and every `snapshot_digest` is
+byte-identical to the pre-E8 values — Sphere `17667468971446251870`, Cylinder
+`13310185350867878190`, make_box `9657051231007502658`, make_overhang_table
+`1875674282253663076`, make_toed_slab `2823659516373762066`, make_raking_blade
+`9567737006650358297`, make_thin_fin `8797083662933568276`. Expected, and worth stating: E8
+deleted no Rust that runs, so a digest move would have meant something went wrong.
+
+### What E8 does NOT claim
+
+The export-path design gated E8 on the M1 parity table — baseline artifacts vs
+`plinth prepare` artifacts, as-good-or-better on every metric on every model — and sequenced
+it after E5. **Neither happened, and the record should not be read as if they had.** The
+sequencing changed because the gate's premise did: it existed to stop the measuring stick
+being destroyed before the comparison, and the measuring stick is now the committed frozen
+artifacts, which are still here. But **the M1 as-good-or-better comparison has still not been
+made.** `plinth prepare` has not been scored against the baselines; that work is still owed,
+is still E4/E5's prerequisite for calling the native path a replacement, and is now to be
+done Rust-against-artifacts. E8 settled something narrower: the Python is gone, no build or
+test step needs an interpreter, and no coverage was lost in the removal. See the dated
+LANDED note on the E8 phase entry in
+[`export-path-design-2026-08-07.md`](export-path-design-2026-08-07.md).
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:

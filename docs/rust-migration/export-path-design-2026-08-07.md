@@ -368,6 +368,44 @@ frozen JSON, F5).
 **13 pts. p50 10h / p90 24h.** Parallel-safe: NO for the deletion sweep
 (repo-wide); schedule after E5 lands and during a quiet window.
 
+> **LANDED 2026-08-08 — dated note; the phase text above is left standing as
+> written.** The deletion sweep is done on `feature/python-elimination`: the
+> `chitubox_io` PyO3 binding (`py.rs`, the `python` feature, optional
+> `pyo3`/`numpy`, the maturin `pyproject.toml`, the `python/` package, and the
+> `build.rs` whose only consumer was that binding), `scripts/support_placement`,
+> `scripts/tools`, the pytest suite, and the venv. 101 `.py` files, 13 crates out
+> of `Cargo.lock`. Frozen baseline artifacts kept, as specified, along with
+> `scripts/tests/fixtures/` and the `prep_one.py` provenance strings.
+> `crates/plinth-verify/tests/no_python_guard.rs` now enforces the end state.
+>
+> **Two things above did not happen the way this phase text predicted, and both
+> are deliberate.** First, the sequencing: E8 landed *before* E4/E5, not after.
+> Second, and more importantly, **the M1 parity table was never scored, because
+> the gate it was designed to protect had already been satisfied by other
+> means.** The premise of that gate was that the Python engine was still the
+> oracle, so deleting it before scoring `plinth prepare` against it would destroy
+> the measuring stick. That stopped being true: the parity knowledge was ported
+> into Rust-native tests — `frozen_baseline`, `roundtrip`, `synth_compare` and
+> the support-parity suite — which check against **committed** artifacts under
+> `corpus/baseline/`, not against a running interpreter. The measuring stick is
+> the frozen artifacts, and they are still here; the Python that once produced
+> them is not needed to read them. Its provenance is recorded in the strings the
+> sweep kept on purpose.
+>
+> The consequence to be honest about: **E8 landing early does not mean the M1
+> as-good-or-better comparison has been made.** It has not. `plinth prepare` has
+> not been scored against the baselines on every metric on every model; that work
+> is still owed, it is still E4/E5's prerequisite for calling the native path a
+> replacement, and it is now to be done Rust-against-artifacts. What E8 settled is
+> narrower and should not be quoted as more: the Python is gone, nothing in the
+> build or test surface needs an interpreter, and no coverage was lost in the
+> removal.
+>
+> *Verification as run:* zero `.py` in the tree and no `pyo3`/`numpy` manifest
+> declaration (both machine-checked by the new guard, with a negative control);
+> five gates green; the frozen-baseline manifest test still green, reading the
+> same frozen JSON it always did.
+
 **(Declined) E9 — Settings-blob mapping.** Recommend NOT doing it (F16).
 If ever wanted: 8 pts, blocked on owner-authored GUI specimen sweep.
 
@@ -382,7 +420,7 @@ If ever wanted: 8 pts, blocked on owner-authored GUI specimen sweep.
 | E5 | CLI wiring | 5 | 3h | 8h | YES |
 | E6 | Multi-model plates + packing | 13 | 8h | 20h | YES |
 | E7 | Treant plate | — | tracked under FU-8f | — | n/a |
-| E8 | Python retirement | 13 | 10h | 24h | NO (repo-wide sweep; sequence after E5) |
+| E8 | Python retirement | 13 | 10h | 24h | NO (repo-wide sweep; sequence after E5) — **LANDED 2026-08-08**, ahead of E4/E5; see the dated note on the phase entry above for why the M1 gate did not apply |
 
 Dependency order: E1 → E2 → E3 (gate) → {E4 → E5} → E6; E8 after E5.
 E1, E2 can start immediately and E1‖E2 in parallel (E2's artifact for E3
