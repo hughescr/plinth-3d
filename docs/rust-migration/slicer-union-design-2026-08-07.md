@@ -671,3 +671,144 @@ so a single non-normal loop requantizes every loop in its layer — visible abov
 untouched `18.47520861` → `18.47520864` on the overhang table. A per-solid pass-through would
 shrink the delta to only the merged solids, at the cost of a more complex equality check. It
 would not change which layers merge, and so would not by itself restore any digest.
+
+---
+
+## 8.6 Dated corrections to sec 8.5, and the owner ruling that re-pinned the census (2026-08-08)
+
+**Nothing above is rewritten.** Sec 8.5 stands as it was written on 2026-08-07, including the
+claim this section falsifies. What follows is appended correction and record.
+
+### The ruling
+
+Asked *"How should the frozen digests be re-pinned?"* on 2026-08-08, the owner selected
+**"Re-pin all 4, accept merge (Recommended)"** — explicitly accepting the `make_raking_blade`
+tooth-body merge on the ground that **a 0.029886 mm-deep fusion prints as fused at 0.05 mm
+layers, so the merged solid matches physical reality** (PR-1(a) precedent: sub-layer features
+are not resolvable by the printer). The ruling carried three conditions, discharged in this
+section and in `CURRENT-STATUS.md`'s dated entry of the same date.
+
+Before anything was re-pinned, `develop` `0f24b79` (FU-8f G6) was merged into
+`feature/slicer-union` and **all seven OD-8 census digests were re-measured at the merged
+tip** with a fresh `cargo run --release --offline --features census --example
+embed_incidence_census`, one model per process. G6 moved none of them; all seven reproduce
+the phase-C measurement exactly, so the four re-pinned values below are the merged tip's own
+measurement and not a transcription of the pre-merge run:
+
+| Model | pinned from 2026-08-08 | verdict |
+|---|---|---|
+| `Sphere` | `17667468971446251870` | unmoved, re-measured |
+| `Cylinder` | `13310185350867878190` | unmoved, re-measured |
+| `make_box` | `9657051231007502658` | unmoved, re-measured |
+| `make_overhang_table` | `1875674282253663076` | **re-pinned** (was `6686599816688114065`) |
+| `make_toed_slab` | `2823659516373762066` | **re-pinned** (was `11199296506741562956`) |
+| `make_raking_blade` | `9567737006650358297` | **re-pinned** (was `13278215294653054002`) |
+| `make_thin_fin` | `8797083662933568276` | **re-pinned** (was `7016743535301716631`) |
+
+### Correction (a) — sec 8.5's abutment claim is FALSE for `make_raking_blade`
+
+Sec 8.5 states, of the four first-differing layers: *"In every case the merged outer's area
+equals the arithmetic sum of the legacy loops it absorbed, to within 2e-8 mm² … An
+intersection of measure zero at the 1e-8 mm quantization contract is the signature of
+**abutting**, not overlapping, sub-solids."*
+
+**That is falsified by sec 8.5's own table, for `make_raking_blade`.** Its row reads
+`160.00000000`(8) + `0.30000396`(8) → `160.29743211`(16). The arithmetic sum is
+`160.30000396`; the measured union is `160.29743211`; the gap is **2.5718e-3 mm²** — five
+orders of magnitude outside the stated 2e-8 mm² tolerance, and it is present on all 20 of the
+model's differing layers (`2.571845e-3`, `2.571814e-3`, `2.571831e-3` at layers 90, 95, 109).
+
+The mechanism is a **real area overlap**, not an abutment:
+
+- the rake tooth's upper edge sits at `y = -0.14738962`, the blade body's lower edge at
+  `y = -0.17727587` — the tooth is embedded **0.029886 mm** into the body, over a width of
+  ~0.172 mm;
+- shared-boundary length between the two loops is **zero** — there is no coincident edge for
+  an abutment to occur along;
+- an independent polygon-intersection measurement on a 4000×4000 grid returns
+  **2.5619e-3 / 2.5619e-3 / 2.5719e-3 mm²** at those three layers, agreeing with
+  `sum − union` to grid resolution.
+
+This was measured independently twice and both measurements agree. `make_raking_blade` is
+therefore an **overlap** case (design case D1 proper), not an abutment case. The engine's
+answer is arithmetically correct — the parent double-counted the overlap sliver in
+`Σ area_mm2`; the *narrative* was wrong, and must not be cited as attribution in its
+uncorrected form.
+
+**Secondary correction to the same sentence.** Even for the three models that genuinely do
+abut, the quoted 2e-8 mm² bound is too tight to be a general claim: `make_toed_slab` layer 46
+shows **+1.03e-7 mm²**. The honest bound is approximately *perimeter × quantum*, i.e.
+≈ 4e-7 mm² for a 40 mm loop at the 1e-8 mm quantization contract.
+
+The three abutment models are unaffected by this correction and remain abutments, with
+measured shared-boundary lengths: `make_thin_fin` **10.0000 mm**, `make_overhang_table`
+**4.0000 mm** per absorbed leg, `make_toed_slab` **0.7249–3.6853 mm**.
+
+### Correction (b) — sec 8.5 measurement (3) is a COVERAGE GAP, not a measurement
+
+Sec 8.5 measurement (3) reads: *"The adequacy-probe path moves zero rows on all seven models.
+OQ-3's new consumer contributes nothing to the delta."*
+
+That is true, but **vacuously**, and the sentence does not distinguish "moved zero rows" from
+"ran zero rows". Instrumented at both stitch sites across all seven models:
+
+```
+print-layer rows : 686 + 369 + 269 + 432 + 400 + 600 + 200 = 2956
+adequacy rows    : 0
+```
+
+`find_local_minima` reaches `normalized_slice_layers(SliceStitchSpace::AdequacyProbe, …)` on
+every model, but `probe_heights` is **empty every time** — every local minimum matched a
+birth, `suspects` is empty, and the batch carries zero planes. So the adequacy site's new
+behaviour has **no corpus-level evidence whatsoever**; its only coverage is unit tests. In
+particular the `max_loop_vertices` cap that phase-C deviation 2 adds to that site — a site
+that previously had no loop-vertex cap at all — is a **new refusal path that has never
+executed on real data**.
+
+This is recorded as a coverage gap, not a known defect. It is carried as **FU-29** in the
+follow-ups ledger.
+
+### Correction (c) — errata against the adversarial verification record
+
+Three numbers in the adversarial verification of this attribution are corrected here, all in
+the conservative direction:
+
+1. **`make_toed_slab` material restored is `87.9727 mm²`, not `88.043086 mm²`.** The larger
+   figure was read off the 600×600 rasterization and carries that grid's error. The exact
+   figure is the **sum of the seven false-hole areas** — the areas the legacy stitcher
+   subtracted from the layer under `area_mm2 = |outer| − Σ|holes|` — and is exact, not
+   sampled.
+2. **The shared-edge floor across all merges is `0.7249 mm`, not "≥ 1.0 mm".** The minimum is
+   on `make_toed_slab` layer 244. The "no merge in this corpus rests on a point contact"
+   conclusion is unchanged — 0.7249 mm is still ~14 layer heights and ~38 X pixels — but the
+   ≥ 1.0 mm floor as stated is wrong and must not be quoted.
+3. **The 600×600 conservation grid has a noise floor of ~1e-3 mm² per cell.** Any
+   "zero material lost / gained" claim stated against that grid alone is therefore only
+   resolvable to ~1e-3 mm², which is the same order as the `make_raking_blade` overlap sliver
+   itself. **The conservation claim does not rest on the grid.** It rests on the exact
+   polygon overlay plus a 2e-8 mm erosion probe, which is exact at the quantization contract;
+   the grid is corroboration only. Wherever the conservation claim is stated, this noise
+   floor and the instrument it actually rests on must be stated with it.
+
+### One movement sec 8.5 did not name: the terminal seat-coalescing count
+
+Re-pinning
+`specialized::tests::oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`
+surfaced a predicate the phase-C record and the attribution both passed over: the test
+asserted `coalesced_seat_count == 1` for **both** models, and that number moved.
+
+Measured at the merged tip: `toed slab` **1 → 0**, `raking blade` **1 → 1**. With the
+corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair
+at all, so the terminal coalescing pass is a measured no-op on it. The count is now pinned
+per model. Two consequences, stated rather than argued:
+
+- The gate's own health predicates are unchanged and still hold on both models: non-worsening
+  (`baseline == accepted`), and every contact on a distinct physical position (42 of 42, and
+  33 of 33).
+- **Corpus coverage of `coalesce_exact_regular_seats` halves**: it is now exercised by
+  `make_raking_blade` and this module's unit tests, not by two corpus models. Carried as
+  **FU-30**.
+
+The disappearance of the pair is *consistent with* the four phantom island births removed
+from `make_toed_slab` (print layers 49, 52, 226, 228), but that causal link was **not**
+independently proven. The claim on the record is the measurement.

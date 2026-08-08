@@ -3635,6 +3635,114 @@ Continuing the R-numbered rulings ledger from *Owner caps-landing rulings R1–R
   > Phase-2 tip, structurally rather than by luck. See the FU-25 row and
   > [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §9.
 
+## Owner ruling: the FU-10 phase-C census is RE-PINNED, all four (2026-08-08) {#fu10-repin-2026-08-08}
+
+Asked *"How should the frozen digests be re-pinned?"*, the owner selected **"Re-pin all 4,
+accept merge (Recommended)"** on 2026-08-08 — accepting the `make_raking_blade` tooth-body
+merge, because **a 0.029886 mm-deep fusion prints as fused at 0.05 mm layers, so the merged
+solid matches physical reality** (PR-1(a) precedent: sub-layer features are not resolvable).
+This closes the OD-8 stop-and-report opened by
+[`slicer-union-design-2026-08-07.md`](slicer-union-design-2026-08-07.md) §8.5.
+
+**Everything written before this section stands unamended.** Every earlier citation of
+`6686599816688114065`, `11199296506741562956`, `13278215294653054002` or
+`7016743535301716631` remains correct *as a dated record of what was frozen at the time it
+was written*. The live values are the table below.
+
+### The re-pinned census, re-measured after merging develop
+
+`develop` `0f24b79` (FU-8f G6) was merged into `feature/slicer-union` **before** anything was
+re-pinned, and all seven digests were then re-measured at the merged tip with a fresh
+`cargo run --release --offline --features census --example embed_incidence_census`, one model
+per process. **G6 moved none of them** — all seven reproduce the pre-merge phase-C
+measurement exactly, so the pinned values are the merged tip's own measurement:
+
+| Model | live digest (2026-08-08) | previous | routed / live |
+|---|---|---|---|
+| `Sphere` | `17667468971446251870` | unmoved | 7 / 15 |
+| `Cylinder` | `13310185350867878190` | unmoved | 54 / 119 |
+| `make_box` | `9657051231007502658` | unmoved | 11 / 25 |
+| `make_overhang_table` | `1875674282253663076` | `6686599816688114065` | 73 / 261 (unchanged) |
+| `make_toed_slab` | `2823659516373762066` | `11199296506741562956` | 64 / 170 (was 64 / 179) |
+| `make_raking_blade` | `9567737006650358297` | `13278215294653054002` | 27 / 72 (was 32 / 89) |
+| `make_thin_fin` | `8797083662933568276` | `7016743535301716631` | 17 / 41 (unchanged) |
+
+`make_overhang_table` and `make_thin_fin` produce **byte-identical support** — same contacts,
+members, island births and local minima. Their digests moved only because the plan digest
+hashes slice-layer loop vertices directly, and a per-layer (not per-solid) pass-through
+requantized bystander loops by **five picometres**.
+
+The whole of the remaining delta is the removal of **24 phantom island births**: 20 on
+`make_raking_blade` (layers 90–109, one per layer, the same fused rake tooth re-born on every
+one; its 8 genuine free-standing births at layers 82–89 survive bit-identically) and 4 on
+`make_toed_slab` (layers 49, 52, 226, 228 — the layer immediately after each of the four runs
+where a boundary-degenerate parity probe had labelled a solid toe a void). No material is lost
+anywhere in the corpus; **87.9727 mm²** of real toe material is restored on `make_toed_slab`.
+
+### Three goldens re-pinned from measurement at the merged tip
+
+| Golden | from | to |
+|---|---|---|
+| `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing` | toed `(64, 179, 4826202191472851835)`, raking `(32, 89, 1709218010932846012)` | toed `(64, 170, 13346779153602682749)`, raking `(27, 72, 8660653339934460766)` |
+| `specialized::tests::oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing` | toed `(72, 50688, 9)` digest `18042644323102122916`, shared 4; raking `(40, 35008, 11)` digest `208221774708787011`, shared 3 | toed `(42, 34304, 8)` digest `5397140793948005744`, shared 3; raking `(33, 34176, 8)` digest `9036091150423983742`, shared 3 |
+| `public_coverage_report_is_frozen_without_evidence_loss` | `snapshot_digest` `5304257786453935365` | `5470664714994646368` — **regenerated through the test's own producer path**, then diffed field by field: exactly one field differs, no evidence lost |
+
+`make_toed_slab`'s `plan.contacts().len()` **72 → 42** is FU-7's parked number, digit for
+digit, arrived at from the other direction: FU-7 proposed to *harden* the boundary-degenerate
+containment probe; phase C **retires** it, replacing parity with the union engine's structural
+shape hierarchy. Both land on 42. **The freeze-blocking, digest-moving half of FU-7 is
+discharged here.** The OD-9 `BuriedSurface` 3D `surface.inside` question that shares the FU-7
+row is *not* — that is a different probe on a different question, its code is untouched by
+this cutover, and it should be split out rather than closed by association.
+
+The *Provisional freeze: make_toed_slab* item is therefore retired as of this ruling, on the
+72 → 42 ground it named.
+
+### A movement neither §8.5 nor the attribution named
+
+The specialized golden also asserted `coalesced_seat_count == 1` for **both** models, and that
+number moved: `toed slab` **1 → 0**, `raking blade` **1 → 1**. With the corrected slice
+geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the
+terminal coalescing pass is a measured no-op on it. It is now pinned per model. The gate's own
+health predicates are unchanged and still green on both (non-worsening; every contact on a
+distinct physical position, 42 of 42 and 33 of 33). Corpus coverage of
+`coalesce_exact_regular_seats` halves — see **FU-30**. The disappearance is *consistent with*
+the four removed phantom births but was **not** independently proven to be caused by them.
+
+### Three ruling conditions, all discharged
+
+1. **§8.5's "abutting, not overlapping … within 2e-8 mm²" claim is FALSIFIED for
+   `make_raking_blade`** and is corrected by dated addendum
+   ([§8.6](slicer-union-design-2026-08-07.md), original text left standing). The tooth is
+   embedded 0.029886 mm into the body over ~0.172 mm; shared-boundary length is **zero**; the
+   overlap is **2.5718e-3 mm²**, five orders of magnitude outside the stated bound, verified
+   independently twice. Secondary: the 2e-8 mm² bound is too tight even for the true
+   abutments (`make_toed_slab` L46 shows +1.03e-7 mm²); the honest bound is
+   ≈ perimeter × quantum, ≈ 4e-7 mm² for a 40 mm loop.
+2. **§8.5 measurement (3) is a COVERAGE GAP, not a measurement.** The OQ-3 adequacy consumer
+   ran **zero rows corpus-wide** (2,956 print-layer rows against 0 adequacy rows;
+   `probe_heights` empty on every model), so "moves zero rows" was vacuous, and the newly
+   binding `max_loop_vertices` cap on that site is an **unexercised refusal path**. Dated note
+   in §8.6; carried as **FU-29**.
+3. **Errata against the adversarial verification record**, all in the conservative direction:
+   the restored `make_toed_slab` material is **87.9727 mm²** (exactly the sum of the seven
+   false-hole areas), *not* 88.043086 mm² (a 600×600 grid reading); the shared-edge floor
+   across all merges is **0.7249 mm** (`make_toed_slab` L244), *not* "≥ 1.0 mm"; and that grid
+   carries a **~1e-3 mm²/cell noise floor** — the same order as the raking-blade overlap
+   sliver — so the zero-material-lost conservation claim rests on the **exact polygon overlay
+   plus a 2e-8 mm erosion probe**, with the grid as corroboration only. Wherever the
+   conservation claim is stated, the noise floor and the real instrument must be stated with
+   it.
+
+### Gate at the re-pinned tip
+
+`cargo test --workspace --offline --no-fail-fast`: **1040 passed / 0 failed / 0 ignored**.
+The arithmetic closes exactly against develop `0f24b79`'s 1011: `1011 + 7` (phase-A
+orientation) `+ 23` (phase-B `plinth-layers`) `− 2` (deleted with the Tier-1 stitcher) `+ 1`
+(named successor) `= 1040`. Gate 2 (`--all-features`) is 1041, the same set plus one
+feature-gated test the default run does not build. Gates 3–5 green, tree clean before and
+after.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -3814,6 +3922,8 @@ Everything else here is non-blocking.
 | FU-26 | `nonmanifold_edges` under-counts, and duplicate faces are counted nowhere | **Opened 2026-08-07 by the FU-25 Phase-1 diagnosis** (`decimation-design-2026-08-06.md` §8.6), deliberately **not** fixed there because Phase 1 must not move behaviour. Two parts. **(1)** `build_face_topology` reads `cut_flags` for its duplicate-face exclusion *inside the same loop that writes it* (`crates/plinth-mesh/src/topology.rs:339-341` reads, `:371-373` writes), so a face that shares an edge with a genuine duplicate face acquires `TOPOLOGY_CUT_DUPLICATE` part-way through and any **later** edge key touching that face is dropped from the count. Deterministic (`BTreeMap` key order) but order-dependent, and it under-counts: on decimated treant candidates 24 against a frozen-snapshot 25 at r = 0.911, and 170 against 208 at r = 0.50. **(2)** Larger: duplicate faces are excluded from `nonmanifold_edges` by design and counted **nowhere else**, so `topology_not_increased` (`crates/plinth-decimate/src/lib.rs:1843`) cannot see them at all — 664 duplicate-face groups at r = 0.50 pass that gate unremarked. Together these make the gate's number a **floor** on the damage, and the gap widens with reduction. This is a *counting* defect, not a licence to relax the gate: `stitch_layer` genuinely requires degree-2 adjacency. Fixing (1) will move the reported count on any decimated mesh, so it needs the usual re-pin discipline — no corpus digest depends on it today, because no corpus model decimates. Note: the number `FU-26` was assigned on `feature/decimation-followup` while `FU-24` was in flight elsewhere; renumber at merge if it collides — the finding, not the number, is the record. **[Headline evidence RE-DERIVED 2026-08-07 from a committed instrument; everything above stands except one face count.** The corpus gate's report schema is bumped to `plinth/m3-decimation-corpus-budget-report/v4` and now serializes `max_mm` on every probe, so this finding no longer rests on scratch instrumentation that was reverted. Re-run at the `feature/decimation-followup` tip, the r ≈ 0.911 treant candidate is **390,898 faces, not 390,896** — the search's bisection asks meshoptimizer for 390,901 faces (`429,120 × 0.91093749999999996`) where the reverted scratch asked for 390,898, and the two undershoot by 3 and 2 faces respectively. §0(b)'s original live report already said 390,898; the scratch was the odd one out. **The topology conclusion is unchanged:** `build_face_topology` reports **24** non-manifold edges and 0 boundary edges at that candidate, exactly as recorded, and the disposition is still `TopologyIncreased` before the witness is consulted. Attribution, for whoever lands the fix: the **24** and the **170** are engine output and are re-derivable from the v4 report by anyone with a clean checkout; the **25**, the **208** and every duplicate-face-group count (109 at r = 0.911, 664 at r = 0.50) are scratch measurements of 2026-08-07 and are *not* re-derivable, because no committed instrument counts them — which is this finding. Land the counter first, then the comparison becomes reproducible rather than remembered. Correction and re-derivation: [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §8.9.]** |
 | FU-27 | An **unidentified intermittent failure** in `plinth-support`'s lib tests under machine load | **Opened 2026-08-07 by FU-8f phase G4.** Two separate `cargo test --workspace --offline --no-fail-fast` passes exited non-zero with `error: 1 target failed:` `-p plinth-support --lib`, both while the machine was still hot from G4's two 600 s treant runs. **Neither run's `failures:` block was retained, so the failing test is UNKNOWN**, and G4 deliberately does not guess. Four consecutive full-workspace runs afterwards are clean at **989 / 0**, the `--all-features` gate has never failed, and `specialized::tests::full_specialized_evidence_is_identical_at_one_four_and_sixteen_threads` — the 1/4/16-thread determinism test the FU-8f G2 section already recorded flaking under load, and the only known load-sensitive test in that binary — passes in isolation. **It is the obvious suspect and is NOT identified as the cause.** Two sightings in one session is past the point where "flake, re-ran, green" is an adequate record: a determinism test that only fails under load is either a real ordering dependence or a real resource sensitivity, and both matter. **First action is procedural, not diagnostic** — every gate run should tee to a file so the `failures:` block survives the next sighting; only then is there evidence to name the test. Until then **no claim is made that the two G4 sightings and the G2 sighting are the same defect.** See *FU-8f phase G4 measured 2026-08-07* §G4.8. **[Datum 2026-08-07 (FU-8f G3–G5 close-out verification):** five-gate workspace test runs came back clean **twice on a quiet machine AND twice while a concurrent `cargo test --workspace` ran in another worktree** — a non-reproduction under load, recorded as a datum, **not** as evidence the flake is gone.**]** |
 | FU-28 | The **drilled hollow is producible but not supportable**: `run_support` refuses `plinth_hollow::run`'s own output | **Opened 2026-08-07 by export phase E2** (`export-path-design-2026-08-07.md`, *E2 LANDED* section), which was the first code anywhere to run the real hollow stage and the sealed support run back to back on a corpus model. The export design's OQ-1 asked whether `plinth_hollow::run` *completes* on corpus models and planned a typed solid-decision fallback for a refusal. It completes: the corpus Sphere hollows, plans drains and drills, returning `AwaitingInternalSupport`. **The refusal lands one stage later** — `run_support` rejects that 14,526-face drilled shell during `Preparation` (against `max_grid_bytes=67108864`, `knn_max_work=100000000`, so this is not obviously a resource-cap stop; the phase is `Preparation`, and the underlying refusal code was not extracted because doing so needs the `census` feature and E2 must not move engine behaviour). The oriented solid is 4,760 faces and seals fine — digest `17667468971446251870`, unmoved. **Consequence today:** every artifact the export path can emit for the Sphere is the *solid*, so hollowing buys the corpus nothing downstream, and the whole 7-of-8 sealed-run evidence base remains what F14 already said it was — `solid_decision` handoffs. **Consequence for E4:** `prepare()` cannot simply chain `hollow_stage` into `run_support` and expect the hollow to survive; it needs this diagnosed first or an explicit, recorded policy for which geometry ships. **First action is diagnostic, not a fix:** re-run the drilled shell under `--features census` and read `stage_errors` to name the actual `Preparation` refusal, then decide whether it is a mesh-property refusal (the drilled shell has an interior surface the oriented solid does not) or a resource stop. Pinned by `crates/plinth-pipeline/tests/first_artifact.rs`, which asserts the `DrilledShellRefusedBySupport` variant by equality, so the day this changes the gate fails and says so. Note also that **A5 internal-support planning does not exist anywhere in this workspace**, so even a supportable drilled shell would ship today with no internal supports. |
+| FU-29 | The **OQ-3 adequacy stitch site has zero corpus coverage**, and its `max_loop_vertices` cap is an unexercised refusal path | **Opened 2026-08-08 as ruling condition (2) of the FU-10 phase-C re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). §8.5 measurement (3) said the adequacy-probe path "moves zero rows on all seven models"; instrumentation at both stitch sites shows it **ran** zero rows: 2,956 print-layer rows against **0** adequacy rows, because `find_local_minima` always reaches `normalized_slice_layers(SliceStitchSpace::AdequacyProbe, …)` with an empty `probe_heights` — every local minimum matched a birth, so `suspects` is empty and the batch carries zero planes. "Moves zero rows" and "ran zero rows" are different claims and the record did not distinguish them. Consequence: the adequacy site's normalization has **no corpus-level evidence at all** — unit tests only — and the `max_loop_vertices` cap that phase-C deviation 2 adds there (a site that previously had no loop-vertex cap) is a **new refusal path that has never executed on real data**. This is a coverage gap, not a known defect. **First action:** construct a model, or a synthetic layer set, whose local minima do *not* all match births, so `probe_heights` is non-empty and the site executes on real geometry; then decide whether the cap belongs there at the value it has. |
+| FU-30 | Corpus coverage of `coalesce_exact_regular_seats` **halved** at the FU-10 phase-C cutover | **Opened 2026-08-08 by the re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). The specialized golden asserted `coalesced_seat_count == 1` for both corpus models; measured at the re-pinned tip it is `toed slab` **0** and `raking blade` **1**. With the corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the terminal coalescing pass is a measured no-op there and the count is now pinned per model. The pass is still exercised — by `make_raking_blade` and by `specialized`'s unit tests — but by one corpus model instead of two, and the `DuplicatePhysicalSeat` failure mode it was built to prevent now has a single corpus witness. The disappearance is *consistent with* the four phantom island births removed from `make_toed_slab` (print layers 49, 52, 226, 228) but that causal link was **not** independently proven; only the measurement is on the record. **First action:** decide whether one corpus witness plus unit tests is adequate, or whether a fixture should pin the duplicate-seat path deliberately rather than incidentally. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
