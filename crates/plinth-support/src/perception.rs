@@ -1781,8 +1781,7 @@ pub(crate) mod orientation {
                 .count();
         }
 
-        let consistent =
-            unvoted_edges == 0 && conflicting_edges == 0 && unbalanced_vertices == 0;
+        let consistent = unvoted_edges == 0 && conflicting_edges == 0 && unbalanced_vertices == 0;
         let raw = if consistent {
             walk_directed(&next, &points)
         } else {
@@ -4596,7 +4595,9 @@ mod tests {
     use super::*;
     use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
-    use plinth_mesh::{make_box, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab};
+    use plinth_mesh::{
+        make_box, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
+    };
 
     const SWEEP_CHILD: &str = "PLINTH_PERCEPTION_SWEEP_CHILD";
     const SWEEP_LINE: &str = "PLINTH_PERCEPTION_SWEEP=";
@@ -5228,7 +5229,12 @@ mod tests {
             wall(0, PlaneIntersectionKind::Basic, [2.0, 0.0], [0.0, 0.0]),
             wall(1, PlaneIntersectionKind::Vertex, [2.0, 2.0], [2.0, 0.0]),
             wall(2, PlaneIntersectionKind::Basic, [0.0, 2.0], [2.0, 2.0]),
-            wall(3, PlaneIntersectionKind::PositiveEdge, [0.0, 0.0], [0.0, 2.0]),
+            wall(
+                3,
+                PlaneIntersectionKind::PositiveEdge,
+                [0.0, 0.0],
+                [0.0, 2.0],
+            ),
         ];
         let layer =
             orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &normals).unwrap();
