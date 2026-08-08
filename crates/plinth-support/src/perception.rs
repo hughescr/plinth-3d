@@ -1614,7 +1614,7 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
               normalizer and the phase-C stitch cutover. Until then the \
               oriented stitch is exercised by its unit tests only."
 )]
-pub(crate) mod orientation {
+mod orientation {
     use std::collections::{BTreeMap, BTreeSet};
 
     use geom_kernel::{PlaneIntersection, PlaneSliceBatch};
@@ -1627,15 +1627,15 @@ pub(crate) mod orientation {
 
     /// One stitched slice loop carrying its derived winding.
     #[derive(Clone, Debug, PartialEq)]
-    pub(crate) struct OrientedLoop {
+    pub(super) struct OrientedLoop {
         /// Loop vertices in walk order, rotated so the minimum [`point_key`]
         /// vertex comes first. Never reversed: on a non-degraded layer the
         /// walk order IS the derived direction.
-        pub(crate) points_xy_mm: Vec<[f64; 2]>,
+        pub(super) points_xy_mm: Vec<[f64; 2]>,
         /// Shoelace area over `points_xy_mm`. On a non-degraded layer the
         /// sign is the loop's nonzero-rule verdict: positive bounds solid on
         /// its left (an outer boundary), negative bounds a hole.
-        pub(crate) signed_area_mm2: f64,
+        pub(super) signed_area_mm2: f64,
     }
 
     /// Typed per-layer diagnostic for the spec sec 3.3 degraded path: why the
@@ -1643,30 +1643,30 @@ pub(crate) mod orientation {
     /// to the raw undirected walk (even-odd fallback territory for the
     /// phase-B union). "Not a silent fallback, not an abort."
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct WindingDegradation {
+    pub(super) struct WindingDegradation {
         /// Segments whose alignment vote abstained: the segment lies closer
         /// to perpendicular to `z_hat x n` than parallel, as happens on a
         /// near-horizontal face or a degenerate normal.
-        pub(crate) ambiguous_segments: usize,
+        pub(super) ambiguous_segments: usize,
         /// Undirected edges left with no usable vote at all.
-        pub(crate) unvoted_edges: usize,
+        pub(super) unvoted_edges: usize,
         /// Undirected edges whose duplicate owners voted both ways (shared
         /// positive-edge owners across a tangent crease genuinely disagree).
-        pub(crate) conflicting_edges: usize,
+        pub(super) conflicting_edges: usize,
         /// Vertices whose directed degree is not exactly one-in one-out.
-        pub(crate) unbalanced_vertices: usize,
+        pub(super) unbalanced_vertices: usize,
     }
 
     /// All stitched loops of one slice plane plus the winding verdict.
     #[derive(Clone, Debug, PartialEq)]
-    pub(crate) struct OrientedLayer {
+    pub(super) struct OrientedLayer {
         /// Deterministic order: ascending [`point_key`] of each loop's first
         /// (minimum-key) vertex. Vertices belong to exactly one loop each,
         /// so the order is total.
-        pub(crate) loops: Vec<OrientedLoop>,
+        pub(super) loops: Vec<OrientedLoop>,
         /// `None` when every loop carries a consistent derived winding;
         /// `Some` says exactly why orientation degraded for this layer.
-        pub(crate) degraded: Option<WindingDegradation>,
+        pub(super) degraded: Option<WindingDegradation>,
     }
 
     /// Per-edge direction tally. "Forward" means minimum key -> maximum key.
@@ -1700,7 +1700,7 @@ pub(crate) mod orientation {
     /// path there is NO area filter here: the phase-B union must see every
     /// loop, including large self-cancelling ones (spec sec 3.2), so
     /// degenerate-output filtering happens after the union, never before it.
-    pub(crate) fn orient_layer(
+    pub(super) fn orient_layer(
         site: SliceStitchSite,
         intersections: &[PlaneIntersection],
         normals: &[[f64; 3]],
@@ -1884,7 +1884,7 @@ pub(crate) mod orientation {
     /// assembly by layer index, index-parallel map-collect only. The pool
     /// width follows the same `PLINTH_THREADS` authority as the kernel's own
     /// batch calls.
-    pub(crate) fn orient_layers_batch(
+    pub(super) fn orient_layers_batch(
         batch: &PlaneSliceBatch,
         normals: &[[f64; 3]],
     ) -> Result<Vec<OrientedLayer>, GenericPerceptionError> {
