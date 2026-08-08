@@ -1447,6 +1447,16 @@ disposition G1 took for `load_resource_plan_from_counts` and the FU-8e Q5
 precedent took before it. Repricing is G5's, and is not to be done as a side
 effect of anything else.
 
+**Appended 2026-08-07 (post-verification record):** the paragraph above covers
+the up-front `exact_operations` refusal; lazy acceptance also shrinks a
+**metered mid-loop refusal** — `load_delta_limit` is checked inside the variant
+loop against the running `executed_load_work + executed_coverage_work`, which
+under `StopAtFirstNotWorse` accumulates over the executed prefix only, so a
+batch that would previously have refused `GateOperationLimit` at a variant after
+the accepted index now succeeds; the direction is safe (the prefix's spend is a
+subset of the full evaluation's spend, and the limit bounds *executed* spend),
+and OD-8 measured zero.
+
 ### 13.2 `GateRoutePlanMismatch`, re-founded a second time
 
 Landed verbatim on the error variant's doc comment and appended to F3's own

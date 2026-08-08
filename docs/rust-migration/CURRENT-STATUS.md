@@ -2395,6 +2395,14 @@ for a vector that is no longer materialised (**open question 4, answered NOT IN 
 charged byte term alongside a control-flow change mixes two record sweeps, and over-charging
 refuses nothing that was not already refused.
 
+**Appended 2026-08-07 (post-verification record):** lazy acceptance also shrinks a **metered
+mid-loop refusal**, not only the executed work — `load_delta_limit` is checked inside the
+variant loop against the running `executed_load_work + executed_coverage_work`, and under
+`StopAtFirstNotWorse` that sum accumulates over the executed prefix only, so a batch that would
+previously have refused `GateOperationLimit` at a variant *after* the accepted index now
+succeeds; the direction is safe — the prefix's spend is a subset of the full evaluation's spend,
+and the limit bounds *executed* spend — and OD-8 measured zero.
+
 **The executed spend is metered, and reported.** `GateBatchOutcome::executed_variant_count`
 joins `executed_touched_rows` and `executed_load_work` — the same "state a bound from the plan,
 meter the real spend as it runs" shape `load_delta_limit` uses. It is asserted
@@ -2404,7 +2412,9 @@ design record, recorded rather than quietly fixed:** the record states the equal
 "exactly when no safe proposal exists". That is right except at one boundary — when the accepted
 proposal is the **last** one, stopping at it and evaluating everything are the same prefix, so
 equality holds *with* an acceptance. The shipped assertion states the exact length and covers
-both.
+both. **Appended 2026-08-07 (post-verification record):** the `executed_variant_count` invariant
+is a `debug_assert` (dev/test builds); in release the enforcement is the `GateRoutePlanMismatch`
+prefix comparison itself.
 
 **`GateRoutePlanMismatch` is re-founded a second time.** The full text is landed verbatim on the
 error variant's doc comment, appended to *FU-8d phase F3 landed 2026-08-06* (whose attestation

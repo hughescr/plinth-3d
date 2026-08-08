@@ -4498,6 +4498,12 @@ fn evaluate_gate_batch(
             // accepted proposal is the **last** one, stopping at it and
             // evaluating everything are the same prefix, so equality holds with
             // an acceptance.  The exact statement below covers both.
+            //
+            // Appended 2026-08-07 (post-verification record): both statements
+            // below are `debug_assert`s, compiled out of release builds.  In
+            // release the enforcement of this invariant is the
+            // `GateRoutePlanMismatch` prefix comparison itself -- a real
+            // `Result::Err`, not an assert.
             debug_assert!(
                 outcome.executed_variant_count <= plan.variants,
                 "the gate executed {} variants against a plan of {}",
@@ -8376,6 +8382,13 @@ mod tests {
     /// [`fu8f_prefix_acceptance_matches_the_full_evaluation`] instead, at
     /// `left: Some(9) right: Some(0)`.  The two tests are therefore not
     /// redundant: each catches a mutation the other does not.
+    ///
+    /// **Correction 2026-08-07 (verification re-run):** mutation (a) also fails
+    /// [`fu8f_prefix_acceptance_matches_the_full_evaluation`], at `left: 12
+    /// right: 2` via its `executed_variant_count == index + 2` pin, so "every
+    /// other `fu8f_*` test still passes" over-claimed and the suite is
+    /// STRONGER than the transcript stated: mutation (a) is caught by both
+    /// tests, mutation (b) only by the second.
     #[test]
     fn fu8f_forced_late_safe_proposal_stops_at_the_same_index() {
         let (contacts, samples, demands, proposals, layers) = fu8f_first_safe_fixture();
