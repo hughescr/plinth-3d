@@ -46,3 +46,7 @@ scripts/treant_v2_results.json
 # in-repo, but the models themselves are inputs we fetch, not source -- the
 # treant alone is 21 MB. Keep the directory and its manifest, never the STLs.
 corpus/models/*.stl
+
+# Export-track run outputs (E-phase .chitubox artifacts). Run outputs never
+# belong in git; the owner picks artifacts up from here for GUI acceptance.
+/exports/

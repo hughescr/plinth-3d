@@ -1,0 +1,149 @@
+//! Produce `.chitubox` artifacts from native sealed support runs, for the
+//! owner's ChituBox GUI acceptance gate (design phase E3 / corpus sweep).
+//!
+//! `cargo run --release --offline --example first_artifact -p plinth-pipeline -- Sphere`
+//! `cargo run --release --offline --example first_artifact -p plinth-pipeline -- --all`
+//!
+//! With a model name, writes that one model's artifact (defaulting to
+//! `Sphere` when no argument is given). With `--all`, writes one artifact for
+//! every frozen-digest corpus model except the Weeping Treant, whose
+//! tournament cannot yet complete.
+//!
+//! Writes `exports/<model-slug>-first-artifact.chitubox` at the workspace
+//! root. `exports/` is gitignored: this is a run output, not source. The
+//! composition itself lives in `examples/shared/first_artifact_chain.rs` and
+//! is shared verbatim with `tests/first_artifact.rs`, so every artifact
+//! handed to the GUI is produced by exactly the code the test gates.
+//!
+//! `--all` keeps going past a per-model failure: an unreachable model is a
+//! finding to report, not a reason to withhold the artifacts that did seal.
+//! The final exit code reflects whether every attempted model succeeded.
+
+#[path = "shared/first_artifact_chain.rs"]
+mod chain;
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+/// The seven frozen-digest corpus models this sweep covers. The Weeping
+/// Treant is deliberately excluded: its support tournament cannot yet
+/// complete, so attempting it here would not produce a reviewable artifact.
+const CORPUS_MODELS: [&str; 7] = [
+    "Sphere",
+    "Cylinder",
+    "make_box",
+    "make_overhang_table",
+    "make_toed_slab",
+    "make_raking_blade",
+    "make_thin_fin",
+];
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let exports = chain::workspace_root().join("exports");
+    if let Err(error) = std::fs::create_dir_all(&exports) {
+        eprintln!("cannot create {}: {error}", exports.display());
+        return ExitCode::FAILURE;
+    }
+
+    if args.first().map(String::as_str) == Some("--all") {
+        let mut failures = Vec::new();
+        for model in CORPUS_MODELS {
+            if let Err(reason) = run_one(model, &exports) {
+                eprintln!("FINDING\t{model}\t{reason}");
+                failures.push((model, reason));
+            }
+        }
+        if failures.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            eprintln!(
+                "SUMMARY\t{} of {} models failed: {}",
+                failures.len(),
+                CORPUS_MODELS.len(),
+                failures
+                    .iter()
+                    .map(|(model, _)| *model)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            ExitCode::FAILURE
+        }
+    } else {
+        let model = args.first().cloned().unwrap_or_else(|| "Sphere".to_owned());
+        match run_one(&model, &exports) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(reason) => {
+                eprintln!("FINDING\t{model}\t{reason}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+/// Run the whole chain for one model, write its artifact, audit the bytes on
+/// disk, and print the same diagnostics the original single-model runner
+/// printed. Returns `Err` with the reason on any failure, without touching
+/// the filesystem outside the one target path.
+fn run_one(model: &str, exports: &Path) -> Result<(), String> {
+    let target: PathBuf = exports.join(format!(
+        "{}-first-artifact.chitubox",
+        model.to_lowercase().replace(' ', "-")
+    ));
+
+    let outcome = chain::run_corpus_model(model, &target)
+        .map_err(|reason| format!("CHAIN\tUNREACHABLE\t{reason}"))?;
+    let audit = chain::audit_disk_artifact(&target, model)
+        .map_err(|reason| format!("AUDIT\tFAILED\t{reason}"))?;
+
+    println!("ARTIFACT\t{}", target.display());
+    println!(
+        "CHAIN\t{}\tsource_faces={}\tprepared_faces={}\thollow={:?}",
+        outcome.model, outcome.source_faces, outcome.prepared_faces, outcome.hollow_disposition,
+    );
+    println!("GEOMETRY\t{:?}", outcome.supported_geometry);
+    println!(
+        "SEAL\trouted_contacts={}\tfinal_live_members={}\tsnapshot_digest={}\tprimitives={}\tlift_mm={}\tplate_z_mm={}",
+        outcome.routed_contacts,
+        outcome.final_live_members,
+        outcome.snapshot_digest,
+        outcome.primitive_count,
+        outcome.lift_mm,
+        outcome.plate_z_mm,
+    );
+    println!(
+        "EMIT\trecords={}\tbytes={}",
+        outcome.emit.support_record_count, outcome.emit.artifact_bytes,
+    );
+    println!(
+        "DISK\tmodel={}\tmodel_triangles={}\trecords={}\tby_type={:?}",
+        audit.model_name,
+        audit.model_triangle_count,
+        audit.support_record_count,
+        audit.records_by_segment_type,
+    );
+    println!(
+        "WINDING\toutward={}/{}\tmin_record_volume_mm3={}\tmodel_volume_mm3={}",
+        audit.outward_wound_records,
+        audit.support_record_count,
+        audit.min_record_signed_volume_mm3,
+        audit.model_signed_volume_mm3,
+    );
+    println!(
+        "PREVIEW\tbytes={}\tnative_fallback={}",
+        audit.preview_bytes, audit.preview_is_native_fallback,
+    );
+    println!(
+        "GATE\tformat_gate_passed={}\tfile_bytes={}",
+        audit.format_gate_passed, audit.file_bytes,
+    );
+
+    if audit.format_gate_passed && audit.outward_wound_records == audit.support_record_count {
+        Ok(())
+    } else {
+        Err(format!(
+            "GATE\tformat_gate_passed={}\toutward={}/{}",
+            audit.format_gate_passed, audit.outward_wound_records, audit.support_record_count
+        ))
+    }
+}

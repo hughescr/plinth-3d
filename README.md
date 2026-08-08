@@ -308,6 +308,41 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > run has completed the gate. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8f phases
   > G1–G5, 2026-08-07*) and `support-resource-caps-2026-08-05.md` §13–§15.
 
+  > **Amended 2026-08-07/08 — FU-8f G6a–G6c landed; none of the figures above moved.** The
+  > merge gate's load transpose is now RETAINED across a tournament's rounds instead of
+  > rebuilt every one: a committed merge's own bucket-union delta (D-G6-1/D-G6-2, four
+  > mutation-proven guards) replaces the per-round rebuild on every round every guard
+  > accepts, mutation-proven equivalent to a fresh build field by field, `make_raking_blade`'s
+  > 21 committed merges the live witness — all rode the retained path, digest
+  > `13278215294653054002` byte-identical throughout G6a–G6c. **Every round is still
+  > CHARGED the full build's figure** — the admissible worst case, since no plan can know at
+  > plan time whether a guard will miss (the G3 charged/executed severance shape, carried
+  > over) — and G6c adds the METER beside it: `GateLoadState::executed_operations`, asserted
+  > `<=` the charge every round, plus one new byte term (the retained arena's own held bytes,
+  > charged at its 2×-compaction ceiling) joining the gate-peak charge. **No cap, floor or
+  > coefficient was raised, lowered or touched by any of G6a, G6b or G6c**, and none of the
+  > figures quoted in the G1–G5 paragraph above moved — this is a removal of *work*, metered
+  > honestly, not a repricing. What still stops the treant is wall-clock, not a cap; ruling
+  > R-f remains unsatisfied. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8f phases
+  > G6a–G6c, 2026-08-07/08*) and `support-resource-caps-2026-08-05.md` §16.
+
+  > **Amended 2026-08-08 — FU-8f G6d measured; the closing sentence above is superseded at the
+  > same tip and is left standing rather than rewritten.** G6d changed no engine code; it
+  > measured. **The treant's gate stage COMPLETES** — the merge tournament runs to its own end at
+  > **823 rounds**, the whole model run finishing in **339 s against the 600 s box** (a 1.77×
+  > margin), twice, identically on every counter. So "what still stops the treant is wall-clock"
+  > is no longer true: **the new stopping point is the FU-8g initial-contact preflight**, a typed
+  > refusal in previously-unexercised code —
+  > `Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })`
+  > — where `work = contact_count × (4 + nfaces)` = 542 × 429,124 is bounded against a **flat,
+  > unscaled** 4,000,000 cap. That is a preflight *bound* rather than a measured demand, and it is
+  > **not a cap to raise**; the remedy is the FU-8b/FU-8c/G5 one, make the bound honest. And
+  > **ruling R-f's precondition is now MET** — a run has completed the gate, twice, with counters
+  > — so the re-derivation is **unblocked but deliberately not yet acted on** (D-G6-6). No cap,
+  > floor or coefficient moved, and all seven frozen digests are byte-identical. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8f phase G6d measured 2026-08-08*) and
+  > `support-resource-caps-2026-08-05.md` §17.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.
