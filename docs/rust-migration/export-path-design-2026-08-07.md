@@ -565,3 +565,54 @@ E3 remains the only semantic oracle. A structural pass is not a claim that
 ChituBox will load the file (`chitubox_io/src/lib.rs:14-16`), and this artifact
 is the first from-scratch project the native engine has ever produced from its
 own sealed plan. On refusal, follow OQ-4.
+
+## Addendum 2026-08-07 — corpus sweep landed
+
+`examples/first_artifact.rs` was extended with a `--all` mode that runs the
+same `first_artifact_chain` composition over every frozen-digest corpus model
+except the Weeping Treant (its support tournament cannot yet complete). Five
+of the seven reached a written, re-parsed, format-gate-passed `.chitubox`;
+each was run twice and the bytes were byte-identical both times. Two refuse
+at the hollow stage, before support planning is ever reached — reported below
+rather than worked around.
+
+**Per-model stats** (model triangles / support records = the reopened file's
+own counts, not producer state; sha256 over the full artifact bytes):
+
+| model | triangles | support records | size (bytes) | sha256 |
+|---|---:|---:|---:|---|
+| Sphere | 4,760 | 47 | 416,256 | `a8bfa4d051c4ac811e5a5a16bcd1d9e7c0b704431a2b9e2e8f115c5b3d62691a` |
+| make_overhang_table | 60 | 544 | 2,826,024 | `9aea36488f308f3f6c3b4b0eff60d726148dd71be6902da409d226d303c4b504` |
+| make_toed_slab | 140 | 407 | 2,161,824 | `0eebfab356c9dfcac0563eca4ea369f262065eb77d1e3636bbb8b408ec8e7076` |
+| make_raking_blade | 24 | 202 | 1,091,544 | `1d27dccb435fe6d7bc691599e78e8a18bfa71748aeee0e6ee34ef886c2c3a6c4` |
+| make_thin_fin | 24 | 109 | 560,688 | `b73377981c3ecebb421f75702912cf4741bffba224a37cfea969f81675f94c1a` |
+| Cylinder | — | — | — | refused before emit (below) |
+| make_box | — | — | — | refused before emit (below) |
+
+Sphere's bytes are identical to the E2 artifact already checked in at
+`exports/sphere-first-artifact.chitubox` — the sweep did not change it, only
+reproduced it.
+
+**Refusal finding.** `Cylinder` and `make_box` both refuse at
+`plinth_hollow`'s cavity check, before the composition ever reaches
+`run_support`:
+
+```
+hollow: native shell did not contain one negative cavity enclosed by
+positive outer material
+```
+
+This is the real `hollow_stage` decision path (`HollowRequest` /
+`HollowStageOutput`), not the OD-8 census's shortcut — the census forces
+every model through `HollowedModel::solid_decision(BelowThreshold)` directly
+and never calls the cavity check at all, which is why both models still
+produce a frozen OD-8 digest despite refusing here. No fix was attempted:
+`plinth-hollow`'s cavity decision is out of this task's scope, and the
+instruction was to report a refusal, not work around it. Filed as a finding
+for follow-up, not a blocker for the five artifacts that did emit.
+
+**OD-8 census cross-check.** `PLINTH_CENSUS=1` census runs (which bypass the
+hollow-stage cavity check) reproduced all seven frozen digests unchanged,
+Cylinder and make_box included — confirming the two hollow-stage refusals are
+new information from this sweep's deeper chain, not a regression in anything
+the census already gated.
