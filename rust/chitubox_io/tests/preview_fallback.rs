@@ -99,6 +99,24 @@ fn existing_nonempty_preview_is_preserved_when_placement_changes() {
 }
 
 #[test]
+fn saved_first_model_project_embeds_native_preview_on_disk() {
+    let mut project = Project::new_empty();
+    project.add_model(source("solo")).unwrap();
+
+    let path = std::env::temp_dir().join(format!(
+        "preview_fallback_first_add_{}.chitubox",
+        std::process::id()
+    ));
+    project.save(&path).expect("save first-model project");
+    let disk_bytes = std::fs::read(&path).expect("read saved project");
+    std::fs::remove_file(&path).ok();
+
+    assert_layout(&disk_bytes, 1);
+    let reparsed = Project::from_bytes(disk_bytes).expect("reparse saved project");
+    assert_eq!(reparsed.model_count(), 1);
+}
+
+#[test]
 fn later_model_additions_do_not_duplicate_preview_and_are_deterministic() {
     let mut incremental = Project::new_empty();
     incremental.add_model(source("first")).unwrap();
