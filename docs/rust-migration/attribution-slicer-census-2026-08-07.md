@@ -20,9 +20,17 @@
 > corrections are recorded at the ruling site: the Finding 2 grid reading of
 > `make_toed_slab` material gained, `88.043086 mm²` (a 600×600 grid, noise floor
 > ≈1e-3 mm²/cell), is superseded by the exact-polygon figure `87.9727 mm²`
-> (exactly the sum of the seven false-hole areas); and nothing else in the body
-> below is amended. Everything from the horizontal rule immediately below this
-> banner to the end of the file is the analyst's original, unedited text.
+> (exactly the sum of the seven false-hole areas); and the Finding 1 shared-edge
+> claim in the "Merge along a shared edge" row (body line 225) — *"every one has a
+> ≥1.0 mm shared edge"* — is superseded by the measured shared-edge floor
+> `0.7249 mm`, on `make_toed_slab` layer 244. That row's *conclusion* stands (no
+> merge in this corpus rests on a point contact; 0.7249 mm is still ~14 layer
+> heights and ~38 X pixels), but **the ≥1.0 mm floor as stated is wrong and must
+> not be quoted**. Both corrections are recorded at
+> [`§8.6`](slicer-union-design-2026-08-07.md) of the design and at the ruling site
+> [`CURRENT-STATUS.md`](CURRENT-STATUS.md#fu10-repin-2026-08-08). Nothing else in
+> the body below is amended. Everything from the horizontal rule immediately below
+> this banner to the end of the file is the analyst's original, unedited text.
 
 ---
 
