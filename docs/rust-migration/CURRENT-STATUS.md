@@ -2922,6 +2922,123 @@ release `--features census` build: `Sphere` 17667468971446251870, `Cylinder`
 this phase: **repricing changes charges, never geometry.** Full derivation:
 `support-resource-caps-2026-08-05.md` §15.
 
+### FU-8f phase G6a landed 2026-08-07 — the retention carrier and its four guards, rebuild-always; no charged number moves {#fu8f-g6a-2026-08-07}
+
+**Scope, stated as a limit first.** G6a lands the *plumbing* for cross-round retention of the
+merge gate's load transpose and nothing else. Every round still executes the **full build**
+(rebuild-always), so the phase is **byte-identical in behavior by construction** — there is no
+fast path to be wrong. What it lands is the carrier, its lifecycle, and the four guards that
+will police the fast path when G6b flips it in, each **mutation-proven** before it is trusted.
+Design record: [`fu8f-g6-design-2026-08-07.md`](fu8f-g6-design-2026-08-07.md), landed verbatim
+on this branch with a provenance banner. **No cap, floor or coefficient is raised, lowered or
+touched. No charged number moves.**
+
+**What exists now.** `RetainedLoadTranspose` in `perception.rs`: an append-only arena of
+bucket payloads plus per-contact `(offset, len)` refs, the merge-invariant row invariants
+(`face_id`, `area_mm2`, `centroid_mm`), a `(owner, point_mm)` contact witness, and the mesh
+digest the build ran under. `consolidate` owns exactly one `Option<RetainedLoadTranspose>` on
+its stack, threads it as `&mut` through `evaluate_gate_batch` into `build_gate_load_state`, and
+drops it on return — **retention never escapes the tournament**, and every non-gate load
+finalize is untouched. `record_commit` synchronizes it after each committed merge by an
+**identity walk** over positions on bits, never by comparator re-derivation; anything other
+than "survivors in preserved relative order plus exactly one insertion" **poisons** the carrier
+rather than guessing, and the next round pays one counted rebuild.
+
+**The four guards, and the measurement that says they work.** Census gains
+`retained_load_rounds` / `retained_load_rebuilds` / `retained_load_rebuild_<cause>` on the gate
+row. A guard miss is never silent. Measured on the corpus at this tip
+(`PLINTH_CENSUS=1`, release, `--features census`):
+
+| model | gate batches | retained rounds | counted rebuilds | cause |
+|---|---:|---:|---:|---|
+| `Sphere` | 2 | 2 | 0 | — |
+| `Cylinder` | 2 | 2 | 0 | — |
+| `make_box` | 2 | 2 | 0 | — |
+| `make_overhang_table` | 2 | 2 | 0 | — |
+| `make_toed_slab` | 2 | 2 | **1** | `contact_witness` |
+| `make_raking_blade` | 23 | 23 | **1** | `contact_witness` |
+| `make_thin_fin` | 2 | 2 | 0 | — |
+
+**`make_raking_blade` is the live witness, and it is a stronger one than G6a needed.** Because
+this phase rebuilds unconditionally, the *only* consumer of `record_commit`'s remap is the
+**next** round's guard chain — so a wrong remap could not corrupt geometry, it could only show
+up as a counted rebuild. It did not. Across 23 gate batches (one initial proposal-free
+evaluate, **21 committed merges**, one terminal audit) the remapped witness matched
+`append_variant_load_inputs`'s own freshly-derived `(owner, point_mm)` list on bits **every
+time**, and every specialized bucket length matched the gate's own `contact_rows` every time.
+That is 21 consecutive committed merges of positional contact/owner renumbering reproduced
+exactly, on a real model, as a *counter* rather than an argument.
+
+**The one rebuild on each of two models is the predicted one, not a defect.** Its cause is
+`contact_witness`, and it falls on the **terminal audit** — `coalesce_exact_regular_seats`
+mutates contacts after the tournament loop and behind the retention slot, exactly the hazard
+design finding F-G6-4 named and exactly the reason guard 2 is written as *equality against the
+fresh list* rather than as a round counter that trusts callers. The design predicted this site
+in advance and declined to teach `record_commit` about coalescing (open question 4); the
+measurement confirms the prediction and the cost is one rebuild per tournament.
+
+**A design error was found and corrected at implementation — recorded, not silently fixed.**
+Design finding F-G6-5 states that `build_gate_load_state`'s `contact_rows[c]` is "each
+contact's eligible-row count", making guard 4 a total comparison. **It is not.**
+`contact_rows[c]` is derived from contact `c`'s own `(owner, face)` run, and
+`append_variant_load_inputs` emits such pairs *only* on the branch that resolves a contact
+specialized — a generic seat contributes an empty run, while its transpose bucket is not empty
+at all, because eligibility is a predicate on the `LoadOwner` and a generic island owner is
+eligible for the generic authority's rows. Taken literally, guard 4 would have reported a miss
+on **every round of every batch carrying a generic seat** — which is every real gate batch,
+since the finalizer refuses with `MissingPhysicalContact` unless the generic authority's rows
+have holders — and the rebuild counter would have fired always, destroying the very
+measurement above. Guard 4 is therefore **restricted to the specialized contacts**, which
+keeps every part of F-G6-5 that is true (still `O(contacts)`, still reading a `contact_rows`
+the round computes for `proposal_load_bound` regardless, so still **zero added derivation**)
+and still covers the contacts the update acts on. Restoring totality would require deriving
+each generic island's eligible-row count fresh — an `O(rows × owners)` walk over the row-major
+eligibility, precisely the walk G6 exists to delete — so it is **declined on the design's own
+terms**. The deviation, its justification and both halves of it are recorded in full on
+`RetainedLoadTranspose::cardinality_rebuild_cause` and pinned by
+`fu8f_retained_transpose_rebuilds_when_a_bucket_length_drifts`, whose positive control is an
+**independent** derivation of `contact_rows` — which is what caught this. The design file
+itself is left standing verbatim, per the append-only rule.
+
+**Non-vacuity: the guards are measured, not argued.** Six deliberate mutations were applied at
+this tip, each run, each required to be caught, transcripts recorded in the named test's doc
+comment: **M1** delete guard 1's fingerprint compare; **M2** delete guard 2's witness compare;
+**M2b** replace guard 2's bit comparison with `==` (fails the `-0.0` arm alone, which is that
+arm's whole job); **M3** delete guard 3's merged-resolves-specialized refusal; **M4** delete
+guard 4's cardinality compare; **M6** insert the merged bucket at `p + 1` — the G6a-reachable
+member of the design's mutation triad, member (a). **All six failed the named test.** Also
+proven: **M5**, zeroing the rebuild counter's increment, fails
+`fu8f_retained_transpose_counts_every_guard_miss_as_a_rebuild`, so "a guard miss is a *counted*
+rebuild" is itself pinned. Stated honestly against overclaim: the terminal `survivor.is_some()`
+check in the identity walk is **defense in depth and is not separately reachable** — with the
+list length already pinned to "old minus one", a list leaving a survivor unmatched must also
+diverge twice, which the second-divergence arm refuses first — and it is recorded as unproven
+rather than claimed as proven. Triad members (b) and (c) act on the retained fast path, which
+does not exist until G6b, and land with it.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **998** tests
+default (base `b0324fd` 990) and **999** `--all-features` (base 991), 0 failed — the **+8** in
+both is exactly the eight new tests this phase adds, attributed one for one. Clippy clean with
+`-D warnings`, `cargo fmt --all -- --check` clean, `git diff --check` clean. **All seven frozen
+OD-8 census digests byte-identical**: `Sphere` 17667468971446251870, `Cylinder`
+13310185350867878190, `make_box` 9657051231007502658, `make_overhang_table`
+6686599816688114065, `make_toed_slab` 11199296506741562956, `make_raking_blade`
+13278215294653054002, `make_thin_fin` 7016743535301716631 — together with `routed_contacts`
+and `final_live_members` unmoved on all seven. That is the check that matters for a phase whose
+whole claim is that it changed nothing.
+
+**Two debts carried forward deliberately, so neither is discovered later.** (1) **Held bytes
+are not yet charged.** Retention extends the transpose's lifetime across rounds (~66 MB arena
+ceiling on the treant, plus the row invariants), and `gate_load_state_bytes` does not yet
+carry it — D-G6-4 sequences that into **G6c**, with G6a's rebuild-always meaning the stated
+demand is otherwise unchanged. No cap is approached and none is touched, but the stated peak
+currently understates the held peak by the retained term, and that is a known gap, not an
+oversight. (2) **No wall-clock number is recorded here at all.** Concurrent workflows were
+running on this machine throughout, so per the standing rule only counters and bit-identity are
+landed. G6a is expected to be *slower* than base, not faster — it does the full build **and**
+repopulates the carrier — and the treant's behavior at this tip is **not** measured or claimed.
+**G6d is the measuring phase**; nothing in this section may be read as a performance result.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
