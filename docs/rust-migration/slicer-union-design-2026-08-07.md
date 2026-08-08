@@ -410,3 +410,89 @@ normalized layers, but the exterior-ness screen today is 3D (`surface.inside`,
 exist and perception consumes them"; open the nomination-consumption change as its own
 successor item with its own census gate — it changes contact placement, a different risk
 class than layer geometry.
+
+---
+
+## 7. Phase-B addendum — OQ-1 resolution and recorded deviations (appended 2026-08-07)
+
+*Append-only implementation record; sections 1–6 above are the verbatim design and are
+unchanged. This section is the in-repo record required by the phase-B charter ("OQ-1
+resolved and recorded", phase table row B) and by the standing rule that deviations are
+recorded in-repo, never silent.*
+
+### 7.1 OQ-1 resolved: `i_overlay` is suitable — pinned `=8.0.0`, i64 integer API
+
+Verified 2026-08-07 against crates.io (unsandboxed `cargo` fetch; all gates thereafter ran
+`--offline` against the updated lockfile) and against the vendored crate sources as primary
+evidence:
+
+- **Version:** `8.0.0` is the newest release in the freshly fetched crates.io sparse index
+  (release train observed in the index: 4.5.x → 5.0.x → 6.0.x → 7.0.0–7.0.3 → 8.0.0).
+  Pinned exactly per workspace convention: `i_overlay = "=8.0.0"` (checksum
+  `391901c4...c3607ca` in `Cargo.lock`; transitive tree `i_float 4.0.0`, `i_shape 4.0.0`,
+  `i_tree 0.19.0`, `i_key_sort 0.11.0` — pure Rust throughout, `libm` the only leaf).
+- **License:** `MIT OR Apache-2.0` (crate manifest) — broader than the MIT the design
+  assumed; no conflict.
+- **Maintenance:** active. The 8.0.0 package targets edition 2024 with
+  `rust-version = 1.88` and carries a current upstream VCS sha; the steady 2025–2026
+  release cadence above is the maintenance signal. (The crate's bundled CHANGELOG.md stops
+  at 1.10.0/2025-02-02 — stale relative to the release train; version evidence is the
+  index, not the changelog.) The workspace toolchain (rustc 1.97.1) satisfies the 1.88
+  floor. The `geo` fallback (OQ-1's contingency) was not needed.
+- **Integer width:** the integer API is generic — `IntPoint<T: IntNumber>` with
+  `IntNumber` implemented for i16/i32/**i64** (`i_float 4.0.0`,
+  `src/int/number/int.rs`); for i64 the engine's wide arithmetic is
+  `type Wide = i128` / `type WideUInt = u128` (`int.rs:225-227`). **The i64/1e-8 branch of
+  OQ-1's recommendation is therefore taken:** `SLICE_UNION_QUANTUM_MM = 1e-8 mm`,
+  coinciding with the perception stitch key `LOOP_MERGE_MM = 1e-8`, making quantization
+  lossless with respect to stitched vertices and the sec 3.5 pass-through comparison an
+  exact integer equality.
+
+### 7.2 New registered constants (sec 3.2 contract, updated for the i64 branch)
+
+- `SLICE_UNION_QUANTUM_MM = 1e-8 mm` — supersedes the spec text's i32-sized default of
+  1e-6 mm (sec 3.2 was explicitly provisional on OQ-1).
+- `SLICE_UNION_MAX_ABS_MM = 1e4 mm` — new with the i64 branch: the coordinate-domain
+  half-width bounding quantized magnitudes to ≤1e12 (~2^40), keeping per-term i128 wide
+  products (~2^80) far from overflow. A refusal boundary (typed error, no clamping), not
+  printable reach; ~40× headroom over the ~250 mm build domain. The spec's i32 headroom
+  arithmetic ("≤2.5e8, ~12% of i32 range") is superseded alongside the quantum.
+
+Both are M0-registered placeholders (`runtime_determinism` ledger classification, honest
+Rust-era provenance, no legacy Python source) with ledger rows naming this section as
+normative; recorded values are pinned by `plinth-core`'s constants goldens and
+cross-checked against the crate's own constants by `plinth-layers/tests/registry_pin.rs`.
+
+### 7.3 Recorded phase-B deviations from the sec 3.4 sketch
+
+1. **API shape.** `plinth_layers::normalize_layers_batch(&[LayerLoops], min_area_mm2,
+   &LayerUnionLimits)` takes STITCHED loops per layer plus that layer's fill rule
+   (`LayerFillRule::NonZero` for oriented layers, `EvenOdd` for the sec 3.3 degraded
+   path), not the spec sketch's `(&PlaneSliceBatch, &normals, &limits)`. Rationale:
+   segment stitching and the ẑ×n orientation derivation landed in
+   `perception::orientation` (phase A) where the seam-error spaces and frozen stitcher
+   semantics live; passing raw segments would duplicate that walk here. The phase-C
+   wrapper composes stitch → orient → normalize exactly as sec 3.4 prescribes, with
+   `degraded: Some(_)` mapping to `EvenOdd`. `plinth-layers` stays free of
+   `plinth-support`, so the future emit-side slicer (F4) can consume it directly.
+2. **`min_area_mm2` is a parameter,** not a crate constant: `BIRTH_MIN_AREA_MM2 = 1e-3`
+   stays owned by its perception call sites; the crate applies whatever threshold the
+   caller passes, after the union, per sec 3.2.
+3. **Property tests use the workspace's pinned seeded RNG** (`rand_chacha =0.10.0`,
+   48 seeded cases per property) instead of adding a `proptest` dependency; the V2
+   properties (idempotence bit-for-bit, area bounds/monotonicity, fill-rule agreement,
+   containment invariants) are otherwise as specified. The V2 orientation cross-check
+   (ẑ×n vs shoelace sign, `robust` referee) landed with phase A's analytic-fixture tests
+   and is not duplicated here.
+4. **`max_union_operations` model:** per layer `(n + k)·ceil(log2 n)` with `k` charged at
+   its explicit `n²` worst case, summed over the batch — sec 3.4's bound made concrete;
+   `max_output_vertices` is necessarily enforced on union output (output size is not
+   knowable in advance), all other caps preflight before any engine allocation.
+5. **Engine options:** the union runs with `keep_all_points` so the engine does not
+   simplify collinear vertices; pass-through equality (sec 3.5) is then a pure
+   representation check, and a layer already in canonical form emits its ORIGINAL f64
+   loops verbatim, reversed/rotated only (no arithmetic on the values).
+
+Phase-B scope note: this phase lands the crate and its constants only. No perception call
+site is rewired (phase C), no census digest can move (nothing upstream of
+`GenericContactPlan::digest()` changed), and the FU-16 treant measurement remains phase D.

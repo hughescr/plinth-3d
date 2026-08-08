@@ -1,0 +1,17 @@
+[package]
+name = "plinth-layers"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+geom_kernel = { path = "../../rust/geom_kernel" }
+i_overlay = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+plinth-core = { path = "../plinth-core" }
+rand_chacha = { workspace = true }
+rand_core = { workspace = true }
