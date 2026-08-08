@@ -3021,6 +3021,15 @@ pub(crate) struct RetainedLoadTranspose {
     /// Counted guard misses, carried across repopulations — the test-visible
     /// twin of the `retained_load_rebuilds` census counter.
     rebuild_count: usize,
+    /// FU-8f phase G6c — the O(|l| + |r| + contacts) remap cost the most
+    /// recent [`Self::record_commit`] actually performed against this
+    /// carrier's own contact count at the time, `0` when this carrier is
+    /// freshly absorbed from a full build (no commit has touched it since).
+    /// Read by [`Self::executed_operations`], the retained-round meter
+    /// (D-G6-4); never charged on its own, and never fed back into the
+    /// round's stated charge, which stays the admissible full-build worst
+    /// case regardless (see [`Self::executed_operations`]'s doc comment).
+    last_update_operations: usize,
 }
 
 /// Why one gate round could not (or, in G6a, additionally did not need to)
@@ -3177,6 +3186,7 @@ impl RetainedLoadTranspose {
         self.row_area_mm2 = Vec::new();
         self.row_centroid_mm = Vec::new();
         self.contact_witness = Vec::new();
+        self.last_update_operations = 0;
     }
 
     /// Synchronize the carrier with one committed merge (D-G6-2), called by
@@ -3378,6 +3388,17 @@ impl RetainedLoadTranspose {
             ));
         }
         self.cells = self.cells + merged_len - left_len as usize - right_len as usize;
+        // FU-8f phase G6c (D-G6-4): the O(|l| + |r| + contacts) remap this
+        // call just performed, against the POST-merge contact count —
+        // `next_witness.len()`, one shorter than `old_len` — because that is
+        // the bookkeeping pass size the loop above actually ran (one entry
+        // written per surviving contact plus the merged seat).  Read by
+        // [`Self::executed_operations`] on the round that follows this
+        // commit; overwritten by the next commit or zeroed by the next full
+        // absorption, never accumulated.
+        self.last_update_operations = (left_len as usize)
+            .saturating_add(right_len as usize)
+            .saturating_add(next_witness.len());
         self.buckets = next_buckets;
         self.contact_witness = next_witness;
         // FU-8f phase G6b (design D-G6-2 step 4): compact the arena at 2x
@@ -3419,6 +3440,90 @@ impl RetainedLoadTranspose {
     /// `fu8f_retained_row_invariants_are_the_builds_own_and_survive_a_commit`).
     pub(crate) fn row_face_ids(&self) -> &[u32] {
         &self.row_face_id
+    }
+
+    /// FU-8f phase G6c — the executed retained-path operation meter
+    /// (D-G6-4), read by [`crate::specialized::build_gate_load_state`]
+    /// beside — never instead of — the round's stated charge.
+    ///
+    /// **Charging stays untouched.** Every round is still charged the full
+    /// build's own figure, `SpecializedLoadBaseline::build`'s
+    /// `specialized_load_resource_plan` operations count, because no plan
+    /// can know at plan time whether a guard will miss (D-G6-4, the G3/FU-8d
+    /// severance shape carried over). This is the OTHER number: what a
+    /// retained round actually spent, so the two can be compared.
+    ///
+    /// Priced from the same per-cell allowance G5 gave the full build's own
+    /// fill/scan pass — `LOAD_WITNESS_SLOTS + 5` per cell, see
+    /// [`LoadTransposeCounts::operations`] — applied to the retained `cells`
+    /// [`Self::finalize_retained_round`] actually scans (never the two
+    /// `LoadTransposeCounts::count`/`::finish` eligibility traversals the
+    /// full build pays twice, F-G6-2: a retained round never runs them, so
+    /// they are not in this figure at all), plus the O(rows) row fill and
+    /// the O(contacts) contact-hash pass [`Self::finalize_retained_round`]
+    /// also runs, plus [`Self::last_update_operations`] — the most recent
+    /// [`Self::record_commit`]'s own O(|l| + |r| + contacts) remap, `0` on a
+    /// round that reused a build with no intervening commit (the design's
+    /// "even the no-merge case saves one full build" lifecycle case).
+    pub(crate) fn executed_operations(
+        &self,
+        contact_count: usize,
+    ) -> Result<usize, GenericPerceptionError> {
+        self.cells
+            .checked_mul(LOAD_WITNESS_SLOTS + 5)
+            .and_then(|scan| scan.checked_add(self.row_face_id.len()))
+            .and_then(|work| work.checked_add(contact_count))
+            .and_then(|work| work.checked_add(self.last_update_operations))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    /// FU-8f phase G6c — what the carrier holds across rounds, charged as
+    /// part of `gate_load_state_bytes` (D-G6-4).
+    ///
+    /// Retention EXTENDS the lifetime of state phase G1 already charged per
+    /// round (the 32,848,040 B `LoadEligibilityTranspose` scratch term,
+    /// charged inside [`load_resource_plan`] every time
+    /// `SpecializedLoadBaseline::build` runs): on a retained round that
+    /// build never runs at all, so this term REPLACES G1's rather than
+    /// joining it, exactly once, here.
+    ///
+    /// The arena term is charged at [`Self::record_commit`]'s own
+    /// 2×-compaction CEILING (`2 × cells × 4 B`), not the arena's live
+    /// length, because compaction runs only once waste crosses that bound —
+    /// charging the live size would under-state the peak the arena is
+    /// actually allowed to reach between compactions. `buckets` and
+    /// `contact_witness` are one entry per contact and are charged at their
+    /// real (checked) sizes, not the design record's `(contacts + 1)`
+    /// CSR-splice approximation (D-G6-2's recorded fallback shape, which
+    /// this carrier is not — it is the arena, so its own real layout is
+    /// charged instead of an estimate for a structure it does not use).
+    pub(crate) fn retained_bytes(&self) -> Result<usize, GenericPerceptionError> {
+        let contacts = self.buckets.len();
+        let arena_ceiling_bytes = self
+            .cells
+            .checked_mul(2)
+            .and_then(|doubled| doubled.checked_mul(std::mem::size_of::<u32>()))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        let bucket_bytes = contacts
+            .checked_mul(std::mem::size_of::<(u32, u32)>())
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        let row_bytes = self
+            .row_face_id
+            .len()
+            .checked_mul(
+                std::mem::size_of::<u32>()
+                    + std::mem::size_of::<f64>()
+                    + std::mem::size_of::<[f64; 3]>(),
+            )
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        let witness_bytes = contacts
+            .checked_mul(std::mem::size_of::<(LoadOwner, [f64; 3])>())
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        arena_ceiling_bytes
+            .checked_add(bucket_bytes)
+            .and_then(|total| total.checked_add(row_bytes))
+            .and_then(|total| total.checked_add(witness_bytes))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
     }
 
     /// FU-8f phase G6b — the retained fast path: produce the round's finalized
@@ -3608,6 +3713,11 @@ impl RetainedLoadTranspose {
             mesh_fingerprint: verified_mesh.fingerprint().to_owned(),
             poisoned: false,
             rebuild_count,
+            // FU-8f phase G6c: a freshly absorbed carrier has had no commit
+            // applied to IT yet — the build that produced it already paid
+            // (and was charged) its own full cost, and that is not an
+            // "update" in [`Self::record_commit`]'s sense.
+            last_update_operations: 0,
         });
     }
 
@@ -3655,6 +3765,7 @@ impl RetainedLoadTranspose {
             mesh_fingerprint: String::new(),
             poisoned: false,
             rebuild_count: 0,
+            last_update_operations: 0,
         }
     }
 
@@ -9096,6 +9207,139 @@ mod tests {
             0,
             "no round of this harness may pay a rebuild",
         );
+    }
+
+    /// FU-8f phase G6c (D-G6-4) — the charge-vs-meter invariant, pinned as a
+    /// test rather than left to the production `debug_assert!`s alone
+    /// (`build_gate_load_state` and `evaluate_gate_batch` in `specialized.rs`
+    /// both check it too, on the real gate state, but a `debug_assert!`
+    /// compiles out of release — the same disposition the G3 executed/charged
+    /// invariant took, see the "Appended 2026-08-07" note on that assert).
+    ///
+    /// One committed merge (round 0 of the equivalence harness's own
+    /// schedule, a real dedup union: seats 2 and 4 share no face, so this
+    /// also exercises the concatenation arm rather than only the dedup one
+    /// the sibling test names): [`RetainedLoadTranspose::executed_operations`]
+    /// on the retained round is compared against
+    /// [`specialized_load_resource_plan`] — the SAME function
+    /// `build_gate_load_state` calls for the round's CHARGE — on the round's
+    /// own shape. The executed figure must never exceed it, because a
+    /// retained round is a strict subset of what a full build of the same
+    /// shape would do (F-G6-2/F-G6-3: the two eligibility traversals never
+    /// run on this path at all).
+    #[test]
+    fn fu8f_g6c_retained_round_executes_no_more_than_it_is_charged() {
+        let fixture = retention_fixture();
+        let proof = fixture.proof();
+        let mesh_faces = fixture.mesh.tris().len();
+        let served: [&[u32]; 6] = [
+            &[0, 1, 2],
+            &[0, 1, 3],
+            &[2, 3, 4],
+            &[4, 5],
+            &[5, 6],
+            &[6, 7],
+        ];
+        let seats = fixture.contacts[..fixture.specialized_seats]
+            .iter()
+            .zip(served)
+            .map(|(contact, served)| (contact.point_mm, served.to_vec()))
+            .collect::<Vec<_>>();
+        let (contacts, pairs) = harness_inputs(&fixture, &seats);
+        let mut slot = None;
+        {
+            let (partition, baseline, transpose) = SpecializedLoadBaseline::build(
+                &fixture.plan,
+                &proof,
+                &fixture.surface,
+                &contacts,
+                &pairs,
+                retention_limits(),
+            )
+            .expect("the harness fixture must build");
+            RetainedLoadTranspose::absorb_full_build(
+                &mut slot, None, &proof, transpose, &partition, &baseline, &contacts,
+            );
+        }
+        let mut carrier = slot.expect("absorb_full_build always populates the slot");
+
+        // Round 0 of the sibling equivalence test's own schedule: merge
+        // seats 2 and 4, inserted at position 1 — proven well-formed there,
+        // reused here rather than re-derived.
+        let (left, right, insert_at) = (2usize, 4usize, 1usize);
+        let merged_point = [50.0, 51.5, 52.25];
+        let mut merged_served = seats[left].1.clone();
+        merged_served.extend_from_slice(&seats[right].1);
+        merged_served.sort_unstable();
+        merged_served.dedup();
+        let mut next = seats
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != left && *index != right)
+            .map(|(_, seat)| seat.clone())
+            .collect::<Vec<_>>();
+        next.insert(insert_at, (merged_point, merged_served));
+        let (new_contacts, new_pairs) = harness_inputs(&fixture, &next);
+
+        carrier.record_commit(
+            left,
+            right,
+            new_contacts.iter().map(|contact| contact.point_mm),
+            merged_point,
+            true,
+        );
+        assert!(
+            !carrier.is_poisoned_for_test(),
+            "a well-formed commit must not poison retention",
+        );
+        assert_eq!(
+            carrier.entry_rebuild_cause(&proof, &new_contacts),
+            None,
+            "an entry guard fired on a well-formed commit",
+        );
+        let contact_rows = contact_rows_from_row_faces(
+            carrier.row_face_ids(),
+            mesh_faces,
+            &new_pairs,
+            new_contacts.len(),
+        );
+        assert_eq!(
+            carrier.cardinality_rebuild_cause(&new_contacts, &contact_rows),
+            None,
+            "guard 4 fired on a well-formed commit",
+        );
+
+        // The round is retained: `build_gate_load_state` would take this
+        // exact branch. Meter it, and price the SAME round's full-build
+        // charge from the SAME function `build_gate_load_state` calls.
+        let executed = carrier
+            .executed_operations(new_contacts.len())
+            .expect("the meter must not overflow on a fixture-sized round");
+        let charged = specialized_load_resource_plan(
+            &fixture.plan,
+            new_contacts.len(),
+            SpecializedLoadCounts::bounded(new_pairs.len(), mesh_faces),
+        )
+        .expect("the charge must not overflow on a fixture-sized round")
+        .operations;
+        assert!(
+            executed > 0,
+            "a non-empty retained round must meter SOME work",
+        );
+        assert!(
+            executed <= charged,
+            "a retained round executed {executed} operations against a charge of {charged}",
+        );
+
+        // The retained carrier's own held-bytes ceiling must be computable
+        // and, on this tiny fixture, dwarfed by the physical-contact list
+        // alone would be on a real gate batch — a sanity bound, not a pinned
+        // figure (the design's own ~66 MB estimate is treant-scale, this
+        // fixture is not).
+        let retained_bytes = carrier
+            .retained_bytes()
+            .expect("the byte ceiling must not overflow on a fixture-sized round");
+        assert!(retained_bytes > 0, "a populated carrier holds SOME bytes");
     }
 
     /// FU-8f phase G6b — the identity walk's position-key hazard, CLOSED

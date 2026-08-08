@@ -4184,6 +4184,20 @@ fn evaluate_gate_batch(
         limits,
         retained_load,
     )?;
+    // FU-8f phase G6c (D-G6-4): re-check the charge-vs-meter invariant at the
+    // call site too, on the state `build_gate_load_state` actually returned
+    // rather than the locals it computed the value from — the assertion
+    // inside that function and this one are deliberately redundant, the
+    // same "check it where it is produced and check it where it is
+    // consumed" belt-and-braces `evaluate_gate_batch` already applies to the
+    // G3 executed/charged invariant a few lines below.
+    debug_assert!(
+        load_state.executed_operations <= load_state.baseline_operations,
+        "GateLoadState reports {:?} at {} operations against a charge of {}",
+        load_state.executed_load_build,
+        load_state.executed_operations,
+        load_state.baseline_operations,
+    );
     let plan = gate_resource_plan(
         contacts.len(),
         proposals.len(),
@@ -4269,7 +4283,8 @@ fn evaluate_gate_batch(
     // payloads, then retains only its arithmetic summary. It therefore does
     // not retain data for the full gate payload.
     let mut load_scratch = SpecializedLoadDeltaScratch::for_rows(load_state.baseline.row_count());
-    let load_baseline_bytes = gate_load_state_bytes(&load_state, &load_scratch)?;
+    let load_baseline_bytes =
+        gate_load_state_bytes(&load_state, &load_scratch, retained_load.as_ref())?;
     whole_gate_route_preflight_then_execute(
         proposal_storage_bytes,
         topology,
@@ -4344,7 +4359,11 @@ fn evaluate_gate_batch(
                 GatePeakUsage {
                     proposal_bytes: proposal_storage_bytes,
                     result_bytes: plan.vector_bytes,
-                    load_baseline_bytes: gate_load_state_bytes(&load_state, &load_scratch)?,
+                    load_baseline_bytes: gate_load_state_bytes(
+                        &load_state,
+                        &load_scratch,
+                        retained_load.as_ref(),
+                    )?,
                     face_scratch_bytes: island_face_scratch_bytes(islands)?,
                     batch_index_bytes: batch_index.retained_bytes,
                     nearest_bytes: gate_nearest_array_bytes(coverage_samples.len())?,
@@ -4716,6 +4735,30 @@ fn build_gate_load_state(
                     // charges — identical on both paths, because
                     // `append_variant_load_inputs` ran identically above.
                     charge_load_descriptor_work(work, owner_faces.len(), limit)?;
+                    // FU-8f phase G6c (D-G6-4): meter the retained round's
+                    // actual spend BESIDE the charge, never instead of it —
+                    // `baseline_operations` below stays the full build's own
+                    // figure, the admissible worst case, because no plan can
+                    // know at plan time whether a guard will miss.  The
+                    // executed figure is a strict subset of what a full
+                    // build performs (F-G6-2/F-G6-3: the count/finish
+                    // eligibility traversals never run on this path), so the
+                    // assertion is provable, not merely hoped: it is checked
+                    // here every round in debug, and pinned by
+                    // `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`
+                    // in release (a `debug_assert` is compiled out there, the
+                    // same disposition G3's charged/executed invariant took).
+                    let executed_operations = state.executed_operations(physical.len())?;
+                    crate::census_record!(crate::census::record_load_build_meter(
+                        baseline_resource.operations,
+                        executed_operations,
+                    ));
+                    debug_assert!(
+                        executed_operations <= baseline_resource.operations,
+                        "a retained round executed {executed_operations} load operations \
+                         against a charge of {}",
+                        baseline_resource.operations,
+                    );
                     return Ok(GateLoadState {
                         physical,
                         owner_faces,
@@ -4726,6 +4769,8 @@ fn build_gate_load_state(
                         baseline,
                         baseline_operations: baseline_resource.operations,
                         baseline_scratch_bytes: baseline_resource.scratch_bytes,
+                        executed_load_build: ExecutedLoadBuild::Retained,
+                        executed_operations,
                     });
                 }
             }
@@ -4764,6 +4809,15 @@ fn build_gate_load_state(
     // One unit per pair inspected while indexing them, the same unit every
     // other descriptor scan in this stage charges.
     charge_load_descriptor_work(work, owner_faces.len(), limit)?;
+    // FU-8f phase G6c: a rebuilt round's executed spend IS the charge —
+    // `SpecializedLoadBaseline::build` is what `specialized_load_resource_plan`
+    // prices, so charged and executed are the same number here, restated
+    // rather than duplicated, and the meter still records it so a run's
+    // rebuild rounds appear in the same total as its retained ones.
+    crate::census_record!(crate::census::record_load_build_meter(
+        baseline_resource.operations,
+        baseline_resource.operations,
+    ));
     Ok(GateLoadState {
         physical,
         owner_faces,
@@ -4774,6 +4828,8 @@ fn build_gate_load_state(
         baseline,
         baseline_operations: baseline_resource.operations,
         baseline_scratch_bytes: baseline_resource.scratch_bytes,
+        executed_load_build: ExecutedLoadBuild::Rebuilt,
+        executed_operations: baseline_resource.operations,
     })
 }
 
@@ -4837,10 +4893,27 @@ fn gate_contact_rows(
 /// It replaces `matrix_bytes`, and it is smaller by construction: one physical
 /// list and one pair list for the batch where there were up to
 /// `max_gate_window_variants` of each.
+///
+/// **FU-8f phase G6c addition:** `retained_load`, when `Some`, adds
+/// [`RetainedLoadTranspose::retained_bytes`] — the carrier held ACROSS
+/// rounds by the tournament, not by this one batch's `GateLoadState`. It is
+/// charged here, at the gate-peak term, for the same reason G1 charged the
+/// per-round `LoadEligibilityTranspose` scratch here (32,848,040 B on the
+/// Weeping Treant): retention EXTENDS that term's lifetime across rounds
+/// rather than rebuilding it every round, so on a retained round this
+/// REPLACES G1's per-round figure — that build never runs, so its own
+/// internal `load_resource_plan` scratch check never runs either — instead
+/// of joining it. No cap moves: this only changes what a given round's own
+/// peak states, never any limit it is checked against.
 fn gate_load_state_bytes(
     state: &GateLoadState,
     scratch: &SpecializedLoadDeltaScratch,
+    retained_load: Option<&RetainedLoadTranspose>,
 ) -> Result<usize, SpecializedError> {
+    let retained_bytes = match retained_load {
+        Some(retained) => retained.retained_bytes()?,
+        None => 0,
+    };
     [
         checked_route_bytes::<PhysicalContact>(state.physical.len())?,
         checked_route_bytes::<(u32, u32)>(state.owner_faces.len())?,
@@ -4850,6 +4923,7 @@ fn gate_load_state_bytes(
         checked_route_bytes::<usize>(state.contact_rows.len())?,
         state.baseline.retained_bytes(),
         scratch.retained_bytes()?,
+        retained_bytes,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| {
@@ -7120,6 +7194,34 @@ struct GateLoadState {
     baseline: SpecializedLoadBaseline,
     baseline_operations: usize,
     baseline_scratch_bytes: usize,
+    /// FU-8f phase G6c (D-G6-4) — which path this round's load build
+    /// actually took.  `baseline_operations` above is unaffected by this:
+    /// every round is still charged the full build's own figure, the
+    /// admissible worst case, because no plan can know at plan time whether
+    /// a retention guard will miss.  This and `executed_operations` are the
+    /// OTHER, separately stated number — what the round actually spent —
+    /// read by the charge-vs-meter assertion in [`build_gate_load_state`]
+    /// and by the census.
+    executed_load_build: ExecutedLoadBuild,
+    /// The executed retained-path spend
+    /// ([`RetainedLoadTranspose::executed_operations`]) on a
+    /// [`ExecutedLoadBuild::Retained`] round, or `baseline_operations`
+    /// restated on a [`ExecutedLoadBuild::Rebuilt`] round — the full build IS
+    /// what `baseline_operations` charges, so charged and executed are the
+    /// same figure there by construction, not by coincidence.
+    executed_operations: usize,
+}
+
+/// FU-8f phase G6c (D-G6-4) — which path a gate round's load build actually
+/// took, metered beside the charge every round states regardless.  See
+/// [`GateLoadState::executed_load_build`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutedLoadBuild {
+    /// [`SpecializedLoadBaseline::build`] ran: the tournament's first round,
+    /// or a counted guard-miss rebuild.
+    Rebuilt,
+    /// [`RetainedLoadTranspose::finalize_retained_round`] ran instead.
+    Retained,
 }
 
 impl GateLoadState {
