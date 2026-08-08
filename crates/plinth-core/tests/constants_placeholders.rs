@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 237] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 239] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -178,6 +178,8 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 237] = [
     "REWIRE_TWIG_MERGE_LEN_MM",
     "REWIRE_WORK_BUDGET",
     "SCAR_COST_WEIGHT",
+    "SLICE_UNION_MAX_ABS_MM",
+    "SLICE_UNION_QUANTUM_MM",
     "SPACING_FLOOR_MM",
     "STANDOFF_MM",
     "STRUT_FALLBACK_MAX_ANGLE_DEG",
@@ -261,7 +263,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 237] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 239] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -431,6 +433,8 @@ const EXPECTED_ROWS: [ExpectedRow; 237] = rows! {
     "REWIRE_TWIG_MERGE_LEN_MM", "0.5", "mm", "scalar";
     "REWIRE_WORK_BUDGET", "{state:\"disabled\"}", "count", "trial_setting<nonzero_u64>";
     "SCAR_COST_WEIGHT", "1.0", "1", "scalar";
+    "SLICE_UNION_MAX_ABS_MM", "10000.0", "mm", "scalar";
+    "SLICE_UNION_QUANTUM_MM", "0.00000001", "mm", "scalar";
     "SPACING_FLOOR_MM", "2.5", "mm", "scalar";
     "STANDOFF_MM", "0.6", "mm", "scalar";
     "STRUT_FALLBACK_MAX_ANGLE_DEG", "60.0", "°", "scalar";
@@ -502,7 +506,7 @@ const EXPECTED_ROWS: [ExpectedRow; 237] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 237 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 239 placeholder declarations must construct")
 }
 
 #[test]
@@ -513,7 +517,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 237);
+    assert_eq!(descriptors.len(), 239);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -604,7 +608,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_268_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_270_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -612,14 +616,14 @@ fn evidence_and_placeholder_fixture_builds_one_268_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 268);
+    assert_eq!(registry.len(), 270);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        268
+        270
     );
 }
 

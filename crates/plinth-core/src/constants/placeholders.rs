@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 237], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 239], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1335,6 +1335,10 @@ placeholder_declarations! {
     "REWIRE_WORK_BUDGET", "count", "trial_setting<nonzero_u64>", "B5 exact-search baseline is Disabled with no wall-clock fallback and no selected enabled budget.";
     scar_cost_weight: NonNegativeFinite = NonNegativeFinite::new(1.0)?;
     "SCAR_COST_WEIGHT", "1", "scalar", "Strut-selection scar cost weight.";
+    slice_union_max_abs_mm: PositiveFinite = PositiveFinite::new(1.0e4)?;
+    "SLICE_UNION_MAX_ABS_MM", "mm", "scalar", "FU-10 layer-normalizer coordinate domain half-width; keeps quantized magnitudes at or below 1e12 so i128 wide arithmetic in the pinned integer overlay engine cannot overflow. A refusal boundary, not printable reach.";
+    slice_union_quantum_mm: PositiveFinite = PositiveFinite::new(1.0e-8)?;
+    "SLICE_UNION_QUANTUM_MM", "mm", "scalar", "FU-10 layer-normalizer quantization step; a determinism contract, not a tunable. Equals the perception stitch key LOOP_MERGE_MM so stitched vertices quantize losslessly (design OQ-1 i64 branch).";
     spacing_floor_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "SPACING_FLOOR_MM", "mm", "scalar", "Removal-ergonomics spacing floor selected without measurement.";
     standoff_mm: PositiveFinite = PositiveFinite::new(0.6)?;

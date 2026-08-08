@@ -97,6 +97,34 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// included, so nothing else in the package moved these models. The member
 /// counts move by more than the four stubs because CCO re-solves its tournament
 /// over the smaller contact set.
+///
+/// **The tuples were re-pinned a second time on 2026-08-08, by owner ruling,
+/// for FU-10 phase C** (the per-layer polygon-union cutover). The paragraphs
+/// above stand unamended as the record of the 2026-08-05 movement; this one
+/// records an independent, later one. Post-cutover: `make_toed_slab`
+/// 64/179 -> 64/170 and `make_raking_blade` 32/89 -> 27/72. Every unit of that
+/// delta is the removal of **24 phantom island births**, each traced to a named
+/// print layer by the census attribution
+/// (`docs/rust-migration/slicer-union-design-2026-08-07.md` sec 8.5 and its
+/// 2026-08-08 addendum):
+///
+/// - `make_raking_blade`: 20 births at layers 90..=109 — one per layer, the
+///   same rake tooth re-born on every layer once it is fused into the blade
+///   body (a real in-plane overlap of 2.5718e-3 mm^2, 0.029886 mm deep, NOT an
+///   abutment). Its 8 genuine births at layers 82..=89, while the tooth really
+///   was a free-standing solid, survive bit-identically. Cost: 5 routed
+///   contacts, 17 live members.
+/// - `make_toed_slab`: 4 births at layers 49, 52, 226, 228 — the layer
+///   immediately after each of the four runs where a boundary-degenerate parity
+///   probe had labelled the solid toe a void. Routed contacts are unchanged at
+///   64; cost 9 live members.
+///
+/// No material is lost anywhere in the corpus, and 87.9727 mm^2 of real toe
+/// material — exactly the sum of the seven false hole areas — is restored on
+/// `make_toed_slab`. The owner accepted the `make_raking_blade` tooth-body
+/// merge on the ground that a 0.029886 mm-deep fusion prints as fused at 0.05 mm
+/// layers, so the merged solid is the one that matches physical reality
+/// (PR-1(a) precedent: sub-layer features are not resolvable).
 #[test]
 fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
     let mut failures = Vec::new();
@@ -105,15 +133,15 @@ fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
             "make_toed_slab",
             make_toed_slab().expect("procedural toed slab"),
             64_usize,
-            179_usize,
-            4_826_202_191_472_851_835_u64,
+            170_usize,
+            13_346_779_153_602_682_749_u64,
         ),
         (
             "make_raking_blade",
             make_raking_blade().expect("procedural raking blade"),
-            32,
-            89,
-            1_709_218_010_932_846_012,
+            27,
+            72,
+            8_660_653_339_934_460_766,
         ),
     ] {
         let hollowed = hollowed_corpus_model(mesh, name);

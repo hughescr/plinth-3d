@@ -1943,6 +1943,28 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "SLICE_UNION_MAX_ABS_MM",
+      "classification": "runtime_determinism",
+      "normative": "docs/rust-migration/slicer-union-design-2026-08-07.md §3.2 quantization contract; §7 phase-B addendum = 1e4 mm",
+      "source_locators": [
+        "crates/plinth-layers/src/lib.rs:SLICE_UNION_MAX_ABS_MM",
+        "crates/plinth-core/src/constants/placeholders.rs:slice_union_max_abs_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Rust-era FU-10 phase-B determinism contract with no legacy Python source. Coordinate-domain half-width for the layer-union quantization: 1e4 mm keeps |quantized| <= 1e12 (~2^40), so per-term i128 wide products (~2^80) summed over any feasible contour stay far below the i128 range in the pinned i_overlay 8.0.0 i64 engine. Selected as a refusal boundary with ~40x headroom over the ~250 mm build domain; NOT a measured printer bound."
+    },
+    {
+      "id": "SLICE_UNION_QUANTUM_MM",
+      "classification": "runtime_determinism",
+      "normative": "docs/rust-migration/slicer-union-design-2026-08-07.md §3.2 (spec default 1e-6 mm; OQ-1 i64 branch taken); §7 phase-B addendum = 1e-8 mm",
+      "source_locators": [
+        "crates/plinth-layers/src/lib.rs:SLICE_UNION_QUANTUM_MM",
+        "crates/plinth-core/src/constants/placeholders.rs:slice_union_quantum_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Rust-era FU-10 phase-B determinism contract with no legacy Python source. One explicit quantization at the normalizer boundary, exact integer arithmetic inside, one dequantization out. Value 1e-8 mm taken from design OQ-1's i64 recommendation (i_overlay 8.0.0 exposes an i64 integer API with i128 wide arithmetic), coinciding with the perception stitch key LOOP_MERGE_MM = 1e-8 mm so stitched vertices quantize losslessly and the pass-through-if-already-normal comparison is exact integer equality. A determinism contract, not a tunable: changing it moves every downstream slice digest."
+    },
+    {
       "id": "SPACING_FLOOR_MM",
       "classification": "runtime_placement",
       "normative": "03-physics-and-constants.md §3.4 = 2.5 mm; Placeholder ergonomics policy",

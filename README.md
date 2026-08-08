@@ -489,12 +489,33 @@ instrumentation is verified result-inert against pre-instrumentation digests.
   3D mesh boolean, and that work is not done. Until it lands the 3D mesh retains buried
   surface, and the exterior-ness screen described above is the affirmative defence rather
   than a structural guarantee. Survivable today; not finished.
+
+  > **Resolved 2026-08-08 — dated note; the bullet above is left standing as written.** The
+  > per-layer polygon union under a fill rule (FU-10) landed on `feature/slicer-union`
+  > (phases A-C), replacing the legacy stitcher's silent unowned-hole drop and bbox
+  > hole-owner fallback entirely — deleted, not bypassed. The corpus census gate moved on
+  > four of seven frozen digests at the cutover and the owner ruled to re-pin all four,
+  > accepting the `make_raking_blade` tooth-body merge as physically correct at 0.05 mm
+  > layers. See `docs/rust-migration/CURRENT-STATUS.md` (*`#fu10-repin-2026-08-08`*) and
+  > `docs/rust-migration/attribution-slicer-census-2026-08-07.md`. This does not close the
+  > buried-surface caveat itself: normalized per-layer output keeps buried contours out of
+  > candidate nomination (OD-9's structural defence layer), but the 3D mesh still retains
+  > buried surface, and the affirmative exterior-ness screen described above is still the
+  > guard against attaching to it.
 - **Some geometry is pinned provisionally.** One corpus model's required-table freeze is
   explicitly provisional pending a probe-parity investigation, and the CCO model-anchor
   support family is arithmetically dead on the current corpus — 0 surviving anchors from
   3429 attempts. Reviving it is a print-consequence decision reserved to the maintainer,
   and until then a commit-time tripwire makes it impossible for that family to land
   silently.
+
+  > **Resolved 2026-08-08 — dated note; the bullet above is left standing as written.** The
+  > probe-parity investigation (FU-7) is closed: the FU-10 phase-C cutover retires the old
+  > vertex-parity probe (measured deciding SOLID vs. HOLE by f64 round-off ~1e-15 mm from a
+  > boundary) rather than hardening it, and lands on the same member-count move FU-7 had
+  > parked, `72 -> 42`, digit for digit. `make_toed_slab`'s required-table freeze is no
+  > longer provisional on that ground. The CCO model-anchor clause is untouched by this
+  > work and remains exactly as stated.
 - **Python is not gone yet.** The frozen Python engine under `scripts/` remains as the
   oracle that the Rust ports are checked against, and its skills and tooling are still in
   the tree. Standing policy is elimination, not coexistence: each Python surface is deleted

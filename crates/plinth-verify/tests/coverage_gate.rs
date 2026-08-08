@@ -20,6 +20,21 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // verified byte-identical. Any future widening must first flip the pinned
 // input-list test `verification_snapshot_digest_input_list_is_pinned` in
 // plinth-support's runner tests, forcing a deliberate refresh here.
+//
+// Refreshed a second time on 2026-08-08, by owner ruling, for the FU-10 phase-C
+// per-layer polygon-union cutover: `snapshot_digest` 5304257786453935365 ->
+// 5470664714994646368, moving in lockstep with `make_overhang_table`'s OD-8
+// census digest (6686599816688114065 -> 1875674282253663076). The two JSON
+// documents were diffed field by field before and after the refresh and
+// EXACTLY ONE field differs: `snapshot_digest`. Every `request` and `resources`
+// counter, all 9 islands, all 9 patches (`uncovered_area_mm2`, `cut_ambiguous`,
+// `assessment_failed`, `worst_gap`) and all 9 defects are byte-identical, so no
+// evidence was lost. `make_overhang_table` produces byte-identical support
+// (73 routed contacts, 261 live members, 5 island births, 4 local minima); its
+// digest moved only because the plan digest hashes slice-layer loop vertices
+// directly, and 80 of its 686 print layers were requantized by 5 picometres.
+// See `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 8.5 and its
+// 2026-08-08 addendum.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {

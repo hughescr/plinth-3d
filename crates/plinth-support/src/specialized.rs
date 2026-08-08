@@ -13187,25 +13187,57 @@ mod tests {
     /// Both models nominate one dyadic cell vertex from two islands under
     /// their own ratified corpus orientation, which used to fail closed with
     /// `DuplicatePhysicalSeat` before consolidation could finish.
+    ///
+    /// **Re-pinned 2026-08-08 by owner ruling for the FU-10 phase-C
+    /// polygon-union cutover** (`docs/rust-migration/slicer-union-design-2026-08-07.md`
+    /// sec 8.5 and its 2026-08-08 addendum). `toed slab` moves
+    /// `(72, 50_688, 9)` -> `(42, 34_304, 8)` — the FU-7 parked `72 -> 42`
+    /// contact count, reproduced digit for digit from the other direction — and
+    /// `raking blade` moves `(40, 35_008, 11)` -> `(33, 34_176, 8)`.
+    ///
+    /// The coalesced-seat count is now pinned PER MODEL rather than asserted to
+    /// be 1 for both, because it moved and the move is the point: with the
+    /// corrected slice geometry `toed slab` no longer produces a co-located
+    /// regular pair at all, so the terminal pass is a measured no-op there
+    /// (0 coalesced), while `raking blade` still exercises it (1 coalesced).
+    /// That is consistent with the four phantom island births removed from
+    /// `toed slab` (print layers 49, 52, 226, 228) but is NOT independently
+    /// proven to be caused by them; the honest claim is the measurement.
+    /// Corpus coverage of `coalesce_exact_regular_seats` therefore now rests on
+    /// `raking blade` plus this module's unit tests, not on two models.
+    ///
+    /// The gate's own health predicates are unchanged and still hold on both
+    /// models: `baseline == accepted` (non-worsening) and every contact on a
+    /// distinct physical position.
     #[test]
     fn oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing() {
         let mut failures = Vec::new();
-        for (name, baseline, mesh, expected_digest, expected_counts, expected_shared_seats) in [
+        for (
+            name,
+            baseline,
+            mesh,
+            expected_digest,
+            expected_counts,
+            expected_shared_seats,
+            expected_coalesced,
+        ) in [
             (
                 "toed slab",
                 "make_toed_slab",
                 make_toed_slab().unwrap(),
-                18_042_644_323_102_122_916_u64,
-                (72, 50_688, 9),
-                4_usize,
+                5_397_140_793_948_005_744_u64,
+                (42, 34_304, 8),
+                3_usize,
+                0_usize,
             ),
             (
                 "raking blade",
                 "make_raking_blade",
                 make_raking_blade().unwrap(),
-                208_221_774_708_787_011_u64,
-                (40, 35_008, 11),
+                9_036_091_150_423_983_742_u64,
+                (33, 34_176, 8),
                 3,
+                1,
             ),
         ] {
             let plan = full_fixture(oriented_corpus_mesh(mesh, baseline), name)
@@ -13228,13 +13260,13 @@ mod tests {
                 .count();
             if plan.digest() != expected_digest
                 || actual_counts != expected_counts
-                || gate.coalesced_seat_count != 1
+                || gate.coalesced_seat_count != expected_coalesced
                 || gate.baseline != gate.accepted
                 || positions.len() != plan.contacts().len()
                 || shared_seats != expected_shared_seats
             {
                 failures.push(format!(
-                    "{name}: digest actual={} expected={expected_digest}; counts actual={actual_counts:?} expected={expected_counts:?}; coalesced={} accepted_pairs={} non_worsening={}; distinct_positions={} of {}; shared_seats actual={shared_seats} expected={expected_shared_seats}",
+                    "{name}: digest actual={} expected={expected_digest}; counts actual={actual_counts:?} expected={expected_counts:?}; coalesced actual={} expected={expected_coalesced}; accepted_pairs={} non_worsening={}; distinct_positions={} of {}; shared_seats actual={shared_seats} expected={expected_shared_seats}",
                     plan.digest(),
                     gate.coalesced_seat_count,
                     gate.accepted_pair_count,
