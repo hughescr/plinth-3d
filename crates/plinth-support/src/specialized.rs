@@ -20,8 +20,8 @@ use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError
 use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
-    GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedLoadBaseline, SpecializedLoadCounts, SpecializedLoadDeltaScratch,
+    GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, RetainedLoadTranspose,
+    SliceSolid, SpecializedLoadBaseline, SpecializedLoadCounts, SpecializedLoadDeltaScratch,
     SpecializedLoadDeltaWork, SpecializedOwnerReservation, VerifiedMeshFingerprint,
 };
 use crate::{
@@ -2925,6 +2925,16 @@ fn consolidate(
         attach_exact_mixed_contacts(contacts, layers, attach_reach, limits, &mut telemetry)?;
     let coverage_radius =
         selection_config.coverage_radius_factor.get() * selection_config.target_spacing_mm.get();
+    // FU-8f phase G6a: the tournament's ONE cross-round retention slot for the
+    // load transpose (design D-G6-1).  Created empty, populated by the initial
+    // proposal-free evaluate's full build, kept synchronized by
+    // `record_commit` after every committed merge, guarded at every
+    // `build_gate_load_state` entry, and dropped when this function returns —
+    // retention never escapes the tournament.  `attach_exact_mixed_contacts`
+    // above ran before the slot existed, harmlessly (F-G6-4);
+    // `coalesce_exact_regular_seats` below mutates contacts *behind* the slot,
+    // which guard 2 catches at the terminal audit by design.
+    let mut retained_load: Option<RetainedLoadTranspose> = None;
     let initial_baseline = evaluate_gate_batch(
         contacts,
         &[],
@@ -2942,6 +2952,7 @@ fn consolidate(
         coverage_radius,
         selection_config.voxel_pitch_mm.get().powi(2),
         limits,
+        &mut retained_load,
         // A proposal-free batch has one variant and no acceptance question to
         // answer; `EvaluateAll` says so rather than relying on the loop's
         // bound to hide the difference.
@@ -3003,6 +3014,7 @@ fn consolidate(
             coverage_radius,
             selection_config.voxel_pitch_mm.get().powi(2),
             limits,
+            &mut retained_load,
             // FU-8f phase G3: the merge round asks one question — "is there a
             // proposal that is not worse?" — and the first hit answers it.
             GateBatchAcceptance::StopAtFirstNotWorse,
@@ -3023,12 +3035,40 @@ fn consolidate(
             });
         }
         let proposal = &proposals[proposal_index];
-        let mut merged = Some(commit_merge(
+        let merged_contact = commit_merge(
             proposal,
             contacts,
             limits.max_merge_commit_bytes,
             &mut telemetry,
-        )?);
+        )?;
+        // FU-8f phase G6a, design open question 7's rider: retention never
+        // trusts the proposal's position copy — `record_commit` and guard 2
+        // read the committed list itself — but the agreement between the two
+        // is asserted here so silent drift is caught in debug builds rather
+        // than absorbed by a guard.
+        debug_assert_eq!(
+            merged_contact.position_mm, proposal.position_mm,
+            "the committed seat moved away from the proposal that offered it"
+        );
+        // FU-8f phase G6a, guard 3 (design D-G6-3): re-run the
+        // merged-resolves-specialized predicate on the COMMITTED contact —
+        // whose routes and demands are the parents' dedup union, so the parts
+        // question is the same one `merged_seat_is_specialized` answered for
+        // the proposal — and let `record_commit` poison retention when it
+        // fails.  Uncharged, like the predicate's variant-loop twin: the walk
+        // is O(routes²) over one contact, once per committed merge.
+        let merged_resolves_specialized = {
+            let mut predicate_work = 0usize;
+            generic_owner_for_parts(
+                ContactParts::new(&merged_contact, None),
+                generic.islands(),
+                &mut predicate_work,
+                usize::MAX,
+            )?
+            .is_none()
+        };
+        let committed_position_mm = merged_contact.position_mm;
+        let mut merged = Some(merged_contact);
         let mut next = Vec::with_capacity(contacts.len().saturating_sub(1));
         for (index, contact) in contacts.drain(..).enumerate() {
             if index == proposal.left {
@@ -3039,6 +3079,19 @@ fn consolidate(
         }
         next.sort_by(compare_contacts);
         *contacts = next;
+        // FU-8f phase G6a: synchronize retention with the committed list,
+        // immediately after `*contacts = next` and before the next round's
+        // gather (design D-G6-2).  A walk that cannot name the remap poisons
+        // the slot and the next round pays one counted full rebuild.
+        if let Some(state) = retained_load.as_mut() {
+            state.record_commit(
+                proposal.left,
+                proposal.right,
+                contacts.iter().map(|contact| contact.position_mm),
+                committed_position_mm,
+                merged_resolves_specialized,
+            );
+        }
         iterations = required_iterations;
     }
     // Terminal canonicalization. Placement is load-bearing: running the union
@@ -3065,6 +3118,11 @@ fn consolidate(
         coverage_radius,
         selection_config.voxel_pitch_mm.get().powi(2),
         limits,
+        // The terminal audit consults the same retention slot — and when the
+        // coalesce above changed anything, guard 2 refuses reuse and the audit
+        // takes a counted full rebuild (F-G6-4).  In G6a it rebuilds either
+        // way; the guard verdict is what is being landed.
+        &mut retained_load,
         // The terminal audit wants the coalesced plan's own vector, not an
         // acceptance decision.
         GateBatchAcceptance::EvaluateAll,
@@ -4040,6 +4098,10 @@ fn evaluate_gate_batch(
     coverage_radius: f64,
     coverage_area_floor_mm2: f64,
     limits: SpecializedLimits,
+    // FU-8f phase G6a: the tournament's cross-round retention slot, owned by
+    // `consolidate` and threaded through to `build_gate_load_state` beside the
+    // G3 acceptance parameter.
+    retained_load: &mut Option<RetainedLoadTranspose>,
     acceptance: GateBatchAcceptance,
 ) -> Result<GateBatchOutcome, SpecializedError> {
     let mut preflight_telemetry = GatePreflightTelemetry::default();
@@ -4120,6 +4182,7 @@ fn evaluate_gate_batch(
         &mut descriptor_operations,
         gate_operation_limit,
         limits,
+        retained_load,
     )?;
     let plan = gate_resource_plan(
         contacts.len(),
@@ -4547,6 +4610,13 @@ fn evaluate_gate_batch(
 
 /// Build the merge gate's one set of load inputs and its one baseline
 /// partition (FU-8d phase F3, part P2).  See [`GateLoadState`].
+///
+/// FU-8f phase G6a: `retained` is the tournament's cross-round retention slot
+/// ([`RetainedLoadTranspose`]).  This phase is **rebuild-always** — the guard
+/// chain runs and its verdict is recorded and counted, but every round still
+/// executes the full build below and repopulates the slot from that build's
+/// own transpose, so behavior is byte-identical by construction.  G6b flips
+/// the retained fast path in against these guards.
 #[allow(clippy::too_many_arguments)]
 fn build_gate_load_state(
     contacts: &[WorkingContact],
@@ -4560,6 +4630,7 @@ fn build_gate_load_state(
     work: &mut usize,
     limit: usize,
     limits: SpecializedLimits,
+    retained: &mut Option<RetainedLoadTranspose>,
 ) -> Result<GateLoadState, SpecializedError> {
     let mut physical = Vec::with_capacity(contacts.len());
     let mut owner_faces = Vec::new();
@@ -4577,6 +4648,14 @@ fn build_gate_load_state(
         work,
         limit,
     )?;
+    // FU-8f phase G6a, guard chain entry (design D-G6-3): guards 1 and 2 (and
+    // the guard-3 poison latch) against the fresh physical list.  Guard 4 runs
+    // below once `contact_rows` exists.  Any miss is a counted full rebuild —
+    // which, in this rebuild-always phase, is the same full build every round
+    // takes anyway; the verdict and the counter are what G6a lands.
+    let mut retained_rebuild_cause = retained
+        .as_ref()
+        .and_then(|state| state.entry_rebuild_cause(mesh, &physical));
     let load_limits = LoadFinalizeLimits {
         max_scratch_bytes: limits.max_load_scratch_bytes,
         max_operations_floor: limits.max_load_operations_floor,
@@ -4592,7 +4671,7 @@ fn build_gate_load_state(
         physical.len(),
         SpecializedLoadCounts::bounded(owner_faces.len(), island_face_count),
     )?;
-    let (partition, baseline) = SpecializedLoadBaseline::build(
+    let (partition, baseline, transpose) = SpecializedLoadBaseline::build(
         generic,
         mesh,
         surface,
@@ -4626,6 +4705,31 @@ fn build_gate_load_state(
             }
         }
     }
+    // FU-8f phase G6a, guard 4 (design D-G6-3, F-G6-5): the freshly-derived
+    // per-contact eligible-row counts against every retained bucket's length,
+    // at zero added derivation cost — `contact_rows` is computed above for
+    // `proposal_load_bound` regardless.  Restricted to the SPECIALIZED
+    // contacts, because `contact_rows` counts a contact's own
+    // `(owner, face)` run and a generic seat emits none while its transpose
+    // bucket is not empty; the deviation from F-G6-5's "each contact's
+    // eligible-row count" and its justification are recorded in full on
+    // [`RetainedLoadTranspose::cardinality_rebuild_cause`].
+    if retained_rebuild_cause.is_none() {
+        retained_rebuild_cause = retained
+            .as_ref()
+            .and_then(|state| state.cardinality_rebuild_cause(&physical, &contact_rows));
+    }
+    // Count any guard miss, then (re)populate the retention slot from this
+    // build's own transpose and partition — never from a restatement of them.
+    RetainedLoadTranspose::absorb_full_build(
+        retained,
+        retained_rebuild_cause,
+        mesh,
+        transpose,
+        &partition,
+        &baseline,
+        &physical,
+    );
     // One unit per pair inspected while indexing them, the same unit every
     // other descriptor scan in this stage charges.
     charge_load_descriptor_work(work, owner_faces.len(), limit)?;

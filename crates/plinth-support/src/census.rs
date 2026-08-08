@@ -141,6 +141,28 @@ pub struct CensusData {
     pub stage_errors: Vec<String>,
     pub scaled_caps: Vec<ScaledCapRow>,
     pub gate_proposals: GateProposalCensus,
+    pub retained_load: RetainedLoadCensus,
+}
+
+/// FU-8f phase G6a — the merge gate's retained-load-transpose accounting.
+///
+/// `rounds` counts every gate-batch load build the retention slot observed
+/// (one per `evaluate_gate_batch` call, including the first build of a
+/// tournament, whose slot is still empty).  `rebuilds` counts **guard
+/// misses** — rounds where a retention guard (mesh fingerprint, contact
+/// witness, merged-resolves-specialized poison, bucket cardinality) refused
+/// reuse and the round fell back to a counted full rebuild.  A guard miss is
+/// never silent: the design record (`fu8f-g6-design-2026-08-07.md`, D-G6-3)
+/// requires every miss to land here.  In phase G6a every round executes the
+/// full build regardless (rebuild-always), so `rebuilds` is purely the guard
+/// verdict; from G6b on it is also the count of rounds that paid the rebuild.
+/// `by_cause` carries one label per miss kind so a nonzero total is
+/// attributable without a rerun.
+#[derive(Clone, Debug, Default)]
+pub struct RetainedLoadCensus {
+    pub rounds: usize,
+    pub rebuilds: usize,
+    pub by_cause: std::collections::BTreeMap<&'static str, usize>,
 }
 
 /// FU-8c observation O1 — how much merge-proposal work each model actually
@@ -208,6 +230,21 @@ pub fn reset() {
         census.stage_errors.clear();
         census.scaled_caps.clear();
         census.gate_proposals = GateProposalCensus::default();
+        census.retained_load = RetainedLoadCensus::default();
+    });
+}
+
+/// FU-8f phase G6a — one gate-batch load build observed by the retention
+/// slot.  `rebuilt_cause` is `Some(label)` exactly when a retention guard
+/// missed and the round fell back to a counted full rebuild.
+pub(crate) fn record_retained_load_build(rebuilt_cause: Option<&'static str>) {
+    with(|census| {
+        census.retained_load.rounds = census.retained_load.rounds.saturating_add(1);
+        if let Some(cause) = rebuilt_cause {
+            census.retained_load.rebuilds = census.retained_load.rebuilds.saturating_add(1);
+            let counted = census.retained_load.by_cause.entry(cause).or_insert(0);
+            *counted = counted.saturating_add(1);
+        }
     });
 }
 
@@ -336,6 +373,21 @@ fn report_scaled_caps(model: &str, census: &CensusData) {
                 "merge_proposals={}",
                 census.gate_proposals.proposals
             ));
+            // FU-8f phase G6a, additive like the two cells above: the gate row
+            // alone carries the retained-load-transpose accounting, because
+            // these are the same batches.  Totals over every gate batch; see
+            // [`RetainedLoadCensus`] for what a "rebuild" means per phase.
+            cells.push(format!(
+                "retained_load_rounds={}",
+                census.retained_load.rounds
+            ));
+            cells.push(format!(
+                "retained_load_rebuilds={}",
+                census.retained_load.rebuilds
+            ));
+            for (cause, count) in &census.retained_load.by_cause {
+                cells.push(format!("retained_load_rebuild_{cause}={count}"));
+            }
         }
         row(model, "T0_scaled_cap", &cells);
     }
