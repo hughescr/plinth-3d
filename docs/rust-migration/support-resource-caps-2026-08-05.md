@@ -1837,3 +1837,103 @@ not a cap question in either direction.
 11199296506741562956, `make_raking_blade` 13278215294653054002, `make_thin_fin`
 7016743535301716631 — which is the check that matters here: **repricing changes
 charges, never geometry.**
+
+## 16. FU-8f phase G6c (2026-08-08) — the meter beside the charge; the arena's held bytes join the gate peak; no cap moves
+
+**Scope, stated first.** §15 (G5) repriced what the load finalizer's CHARGE
+prices. This section changes neither that charge nor any cap: it adds a
+SECOND, separately-stated number — what a round actually EXECUTES — beside
+the charge every round still states, and adds one new byte term for state
+G6a/G6b's retention now holds across rounds. Pointers: §10–§13 priced the
+gate's operation model this section meters against; §14 counted rounds; §15
+is the repricing this section's charge figure inherits untouched.
+
+### 16.1 The charge stays the admissible worst case; the meter is new
+
+Every gate round — retained or rebuilt — is still charged
+`specialized_load_resource_plan`'s figure over the round's fresh pair counts,
+exactly as G6b landed it (§ above, "charging is deliberately untouched").
+That does not change here. What G6c adds is `GateLoadState::executed_operations`
+and `executed_load_build` (`Rebuilt` | `Retained`):
+
+- **`Rebuilt`:** `executed_operations == baseline_operations`. The full build
+  IS what the charge prices, so the two coincide by construction, not
+  measurement.
+- **`Retained`:** `RetainedLoadTranspose::executed_operations` prices only
+  what `finalize_retained_round` actually runs — the G5-repriced per-cell
+  scan allowance (`LOAD_WITNESS_SLOTS + 5` per retained cell) over `cells`,
+  the O(rows) fill, the O(contacts) hash, and the last `record_commit`'s
+  O(|l| + |r| + contacts) remap. The two eligibility traversals a full build
+  pays twice (`LoadTransposeCounts::count`/`::finish`) are not in this figure
+  — a retained round never runs them (F-G6-2/F-G6-3, §12/§13's own findings
+  on what G1 deliberately left standing).
+
+`executed_operations <= baseline_operations` is checked in both
+`build_gate_load_state` and `evaluate_gate_batch` (`debug_assert!`, the same
+disposition as the G3 executed/charged invariant — compiled out of release,
+enforced by the census meter and a pinned test in debug/test builds), and
+pinned by `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`.
+
+### 16.2 The census meters the run total
+
+`RetainedLoadCensus` gains `charged_operations`/`executed_operations` — `u128`
+running sums over every load-build round of a run, retained or rebuilt —
+printed on the gate's `T0_scaled_cap` row as
+`retained_load_charged_operations=`/`retained_load_executed_operations=`.
+This is the run-level twin of the per-round assertion: a full corpus run's
+totals are now readable from one census invocation rather than re-derived.
+
+### 16.3 The arena's held bytes join the gate peak — a NEW term, a DIFFERENT cap than the design record's own comparison
+
+`RetainedLoadTranspose::retained_bytes` — the carrier's own arena (charged at
+its 2×-compaction CEILING, `2 x cells x 4 B`, never the live length, because
+compaction runs only once waste crosses that bound), `buckets`,
+`contact_witness` and the row invariants, at their REAL sizes — now joins
+`gate_load_state_bytes` (a new `Option<&RetainedLoadTranspose>` parameter)
+whenever retention is live. This term feeds `check_gate_peak`'s
+`load_baseline_bytes` addend, checked against `max_gate_peak_bytes`
+(`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES`, 1 GiB, **UNCHANGED**).
+
+**Stated because it is easy to misread:** the design record's own ~66 MB
+estimate for this term compares itself against `max_load_scratch_bytes`
+(`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`, 512 MiB) for SCALE only. That
+is a DIFFERENT cap, checked only inside `SpecializedLoadBaseline::build`'s
+own internal `finalize_load_rows` check (§1's `load_resource_plan`), which a
+retained round never reaches at all — it calls `finalize_retained_round`
+instead. The arena's bytes are charged against `max_gate_peak_bytes`, not
+`max_load_scratch_bytes`; both are UNCHANGED by this phase.
+
+### 16.4 G1's per-round transpose-scratch term retires on retained rounds — already true since G6b, stated here
+
+The 32,848,040 B term §1's own addendum on
+`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES` describes is charged inside
+`load_resource_plan`, reached only from `SpecializedLoadBaseline::build`. A
+retained round never calls that function, so that check — and the term it
+charges — simply does not run on a retained round. This was already true the
+moment G6b landed the retained fast path; G6c is where it is stated as a
+record fact rather than left to be inferred from the control flow. §16.3's
+new arena term is a SEPARATE charge at a SEPARATE cap and does not
+substitute for it.
+
+### 16.5 What this licenses, and what it does not
+
+- **Licensed:** reading a run's retained-vs-rebuilt split and its
+  charged-vs-executed totals from one census invocation
+  (`retained_load_rounds`/`retained_load_rebuilds`/
+  `retained_load_charged_operations`/`retained_load_executed_operations`).
+- **Licensed:** treating the arena's held-bytes term as bounded and charged,
+  not merely designed-for — `RetainedLoadTranspose::retained_bytes` returns a
+  checked `Result`, same as every other byte term in this file.
+- **NOT licensed:** reading `executed_operations` as a new CHARGE. It is
+  metered, asserted `<=` the charge, and never subtracted from any cap check
+  — the exact "charge the worst case, meter the spend" shape §14's own
+  citation of the G3/FU-8d precedent already named.
+- **NOT licensed:** any cap, floor or coefficient change. None moved.
+- **NOT licensed:** a wall-clock claim. **G6d remains the measuring phase.**
+
+**Gates.** Five gates green, verbatim, tree clean before and after: **1003**
+tests default / **1004** `--all-features`, 0 failed, the **+1** over the G6b
+tip attributed to `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`.
+`make_raking_blade`'s 21 retained rounds ran under the new `debug_assert!`s
+during this same test pass and did not trip either — the invariant held on
+real corpus geometry, not only the fixture.

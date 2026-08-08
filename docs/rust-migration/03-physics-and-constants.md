@@ -1268,6 +1268,17 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > counted. R4's n = 1 marking is again unaffected. Full derivation:
 > `support-resource-caps-2026-08-05.md` §15, and `CURRENT-STATUS.md` under
 > *FU-8f phase G5 landed 2026-08-07*.
+>
+> **Addendum 2026-08-08 — FU-8f phase G6c landed; every sentence above stands, and
+> NO number in this section moved.** G6c added a metered "executed" figure beside
+> the charge every gate round states (`GateLoadState::executed_operations`), and
+> one new byte term (the retained transpose arena's held bytes) at
+> `SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` — a cap this section does not derive.
+> Neither batch-product coefficient here is touched, re-derived, raised or
+> lowered, and none of the figures in the table above moved: the CHARGE stays
+> exactly what G5 repriced it to. Full account:
+> `support-resource-caps-2026-08-05.md` §16, and `CURRENT-STATUS.md` under
+> *FU-8f phase G6c landed 2026-08-08*.
 
 ### 3.11 NOT constants — resource guards
 

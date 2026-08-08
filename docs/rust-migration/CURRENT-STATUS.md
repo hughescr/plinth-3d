@@ -2478,6 +2478,16 @@ comparison — fails **five** tests with `GateRoutePlanMismatch`, among them
 `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`. The prefix attestation
 is exercised by real corpus geometry on every run, not only by fixtures.
 
+**Correction 2026-08-08 (owed from the FU-8f closer, landed by G6c):** the paragraph above
+over-claims. Mutation (a) — replacing the fold's stop signal with `false` — also fails
+`fu8f_prefix_acceptance_matches_the_full_evaluation`, at `left: 12 right: 2` via its
+`executed_variant_count == index + 2` pin, so "fails the forced test ... and nothing else" is
+wrong: mutation (a) is caught by BOTH tests, mutation (b) only by the second. The suite is
+STRONGER than this paragraph stated, not weaker; nothing here was re-verified vacuous. The same
+correction already stands on `fu8f_forced_late_safe_proposal_stops_at_the_same_index`'s own doc
+comment (`specialized.rs`), dated 2026-08-07 at the verification re-run; this is that correction's
+landing in the record it was owed to, not a second finding.
+
 **OD-8 at this tip — MEASURED ZERO.** All seven frozen census digests byte-identical, each from
 its own `PLINTH_CENSUS_ONLY` invocation of a fresh release `--features census` build: `Sphere`
 17667468971446251870, `Cylinder` 13310185350867878190, `make_box` 9657051231007502658,
@@ -3174,6 +3184,95 @@ number is recorded anywhere in this section: concurrent workflows were running o
 machine throughout, so counters and bit-identity are the only landed measurements.
 **G6d remains the measuring phase**; the ~741 ms/round removal predicted by D-G6-5 is a
 prediction until G6d measures it.
+
+### FU-8f phase G6c landed 2026-08-08 — charging honesty under retention; the meter beside the charge, never instead of it {#fu8f-g6c-2026-08-08}
+
+**What lands.** Charging itself is UNCHANGED from G6b: every gate round is still charged the
+full build's own figure (`baseline_resource.operations` from `specialized_load_resource_plan`),
+the admissible worst case, because no plan can know at plan time whether a retention guard
+will miss (D-G6-4, the G3/FU-8d charged/executed severance shape carried over). What G6c adds
+is the OTHER number, stated beside the charge and never fed back into it:
+
+- **`GateLoadState` gains `executed_load_build: ExecutedLoadBuild` (`Rebuilt` | `Retained`) and
+  `executed_operations: usize`.** On a `Rebuilt` round the two are the same figure by
+  construction — the full build IS what `specialized_load_resource_plan` prices, so charged and
+  executed coincide there, not by coincidence. On a `Retained` round
+  `RetainedLoadTranspose::executed_operations` prices only the work the retained path actually
+  performs: the G5-repriced per-cell scan allowance (`LOAD_WITNESS_SLOTS + 5` per retained
+  cell, `LoadTransposeCounts::operations`'s own constant) over `cells`, plus the O(rows) fill
+  and O(contacts) hash `finalize_retained_round` runs, plus the most recent `record_commit`'s
+  own O(|l| + |r| + contacts) remap (`last_update_operations`, `0` on a round that reused a
+  build with no intervening commit). The two eligibility traversals a full build pays twice
+  (`LoadTransposeCounts::count`/`::finish`, F-G6-2) are not in this figure at all — a retained
+  round never runs them.
+- **The invariant `executed_operations <= baseline_operations` is checked twice per round** —
+  once inside `build_gate_load_state` on the locals it just computed, once again in
+  `evaluate_gate_batch` on the `GateLoadState` it was handed back — both `debug_assert!`s,
+  compiled out of release the same way the G3 executed/charged assert is (its own "Appended
+  2026-08-07" note explains the disposition). Pinned as a real test too:
+  `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged` (`perception.rs`) drives one
+  committed merge through the retained path and compares `RetainedLoadTranspose::executed_operations`
+  against `specialized_load_resource_plan` — the SAME function `build_gate_load_state` charges
+  from — on the round's own shape.
+- **The census meters the run total, not just one round.** `RetainedLoadCensus` gains
+  `charged_operations`/`executed_operations` (`u128` running sums, printed on the gate's
+  `T0_scaled_cap` row as `retained_load_charged_operations=`/`retained_load_executed_operations=`),
+  accumulated on both `Rebuilt` and `Retained` rounds via `record_load_build_meter` so a run's
+  rebuild rounds and retained rounds land in the same total.
+- **The retained arena's held bytes join `gate_load_state_bytes`**
+  (`RetainedLoadTranspose::retained_bytes`, a new `Option<&RetainedLoadTranspose>` parameter),
+  charged at the 2×-compaction CEILING (`2 x cells x 4 B`, never the arena's live length —
+  `record_commit` only compacts once waste crosses that bound, so a live-size charge would
+  under-state the peak the arena is actually allowed to reach between compactions) plus the real
+  `buckets`/`contact_witness`/row-invariant sizes (not the design record's `(contacts + 1)`
+  CSR-splice approximation — this carrier is the arena, D-G6-1's recommended shape, not the
+  memcpy-splice fallback, so its own real layout is charged). This term feeds
+  `check_gate_peak`'s `load_baseline_bytes` addend, checked against `max_gate_peak_bytes`
+  (`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES`, 1 GiB, unchanged) — **not**
+  `max_load_scratch_bytes` (`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`, 512 MiB), which the
+  design record's own ~66 MB estimate compares itself against for scale but which is a
+  DIFFERENT cap, checked only inside `SpecializedLoadBaseline::build`'s own internal
+  `finalize_load_rows` check — a check a retained round never reaches, which is the next point.
+- **G1's per-round 32,848,040 B transpose-scratch term is retired on retained rounds — already
+  true by construction since G6b, stated here rather than left implicit.** That term is charged
+  inside `load_resource_plan`, called only from `SpecializedLoadBaseline::build`
+  (`finalize_load_rows`'s own internal check against `max_load_scratch_bytes`). The retained
+  path calls `finalize_retained_round` instead and never reaches `SpecializedLoadBaseline::build`
+  at all, so that internal check — and the term it charges — simply does not run on a retained
+  round. G6c's own addition (the arena's `retained_bytes`, above) is a DIFFERENT term, at a
+  DIFFERENT cap (`max_gate_peak_bytes`), charged only while the carrier is live across rounds;
+  the two are not in competition and neither substitutes for the other's cap.
+- **The FU-8f closer's owed correction is landed**, on the G3 section above (`{#fu8f-g3-2026-08-07}`):
+  the "Non-vacuity is measured by mutation" paragraph's claim that mutation (a) "fails the
+  forced test ... and nothing else" over-claimed — verification proved
+  `fu8f_prefix_acceptance_matches_the_full_evaluation` also fails it. The same correction has
+  stood on `fu8f_forced_late_safe_proposal_stops_at_the_same_index`'s doc comment
+  (`specialized.rs`) since 2026-08-07; this is that correction landing in the record it was
+  owed to.
+
+**No cap, floor or coefficient is raised, lowered or touched — the standing owner ruling holds.**
+Nothing charged moves either: `baseline_operations` is untouched, and every existing pinned
+figure (G5's repriced 795,766,031 / 1,844,748,658 / 4,525,792,233 / 5,709,845,912, and the
+32,848,040 B transpose-bytes term wherever it is quoted for a FULL build) stands exactly as G5
+left it — this section adds a meter and a new byte term beside those figures, it does not
+re-sweep them. `docs/rust-migration/support-resource-caps-2026-08-05.md` §16 carries the same
+account; `crates/plinth-core/src/constants/placeholders.rs`'s
+`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` and `SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES`
+registry notes each carry a dated addendum; `constants.md` is regenerated by its producer
+(`cargo run --example render_constants_golden -p plinth-core --offline`) and only note text
+moves, no value column.
+
+**Verification.** Five gates green at this tip, tree clean before and after: **1003** tests
+default (G6b tip 1002) and **1004** `--all-features` (G6b tip 1003), 0 failed — the **+1** in
+both is exactly this phase's one new test, attributed one for one. `make_raking_blade`'s 21
+retained rounds and its terminal `contact_witness` rebuild all still ran under the new
+`debug_assert!`s during this run (`support_runner_integration.rs`'s
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`, debug profile, asserts
+live) without tripping either — the charge-vs-meter invariant held on real corpus geometry, not
+only on the fixture. Clippy clean with `-D warnings`, `cargo fmt --all -- --check` clean,
+`git diff --check` clean. No wall-clock number is recorded anywhere in this section: concurrent
+workflows were running on this machine throughout, so counters and bit-identity are the only
+landed measurements. **G6d remains the measuring phase.**
 
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
