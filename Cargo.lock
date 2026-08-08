@@ -1233,6 +1233,7 @@ dependencies = [
  "plinth-core",
  "plinth-decimate",
  "plinth-hollow",
+ "plinth-layers",
  "plinth-mesh",
  "plinth-orient",
  "rayon",

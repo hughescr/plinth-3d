@@ -885,6 +885,8 @@ pub enum GenericPerceptionError {
     OrientationFaceOutOfRange { face_id: u32, faces: usize },
     #[error("slice orientation could not start its thread pool: {0}")]
     OrientationPool(String),
+    #[error("slice layers could not be normalized: {0}")]
+    LayerUnion(String),
     #[error("slice loop vertex count {required} exceeds cap {limit}")]
     LoopVertexLimit { required: usize, limit: usize },
     #[error("welded minimum vertex count {required} exceeds cap {limit}")]
@@ -998,36 +1000,17 @@ pub fn prepare_generic_contacts(
             },
         )
         .map_err(|error| GenericPerceptionError::Slice(error.to_string()))?;
-    let mut loop_vertices = 0usize;
-    let mut slice_layers = Vec::with_capacity(planes.len());
-    for layer in 0..planes.len() {
-        let loops = stitch_layer(SliceStitchSite::PrintLayer(layer), sliced.plane(layer))?;
-        loop_vertices = loop_vertices
-            .checked_add(
-                loops
-                    .iter()
-                    .map(|solid| {
-                        solid.outer.points_xy_mm.len()
-                            + solid
-                                .holes
-                                .iter()
-                                .map(|hole| hole.points_xy_mm.len())
-                                .sum::<usize>()
-                    })
-                    .sum::<usize>(),
-            )
-            .ok_or(GenericPerceptionError::LoopVertexLimit {
-                required: usize::MAX,
-                limit: limits.max_loop_vertices,
-            })?;
-        if loop_vertices > limits.max_loop_vertices {
-            return Err(GenericPerceptionError::LoopVertexLimit {
-                required: loop_vertices,
-                limit: limits.max_loop_vertices,
-            });
-        }
-        slice_layers.push(loops);
-    }
+    // One batched stitch -> orient -> normalize for the whole slice batch.
+    // The hand-summed `max_loop_vertices` accounting that used to sit in this
+    // loop now rides inside the normalizer as its output-vertex cap (design
+    // sec 3.4), so the count is charged against normalized output rather than
+    // the pre-union walk.
+    let slice_layers = normalized_slice_layers(
+        SliceStitchSpace::PrintLayer,
+        &sliced,
+        geometry.normals(),
+        limits,
+    )?;
     let island_births = find_births(&layer_indices, &planes, &slice_layers, limits)?;
     let local_z_minima = find_local_minima(mesh, &surface, layers, &island_births, limits)?;
     let load_eligibility = build_load_eligibility(mesh, &surface, &islands, specialized)?;
@@ -1226,9 +1209,9 @@ fn point_key(point: [f64; 2]) -> PointKey {
     )
 }
 
-/// Which caller a `stitch_layer` invocation belongs to.
+/// Which caller a slice-stitch invocation belongs to.
 ///
-/// The two call sites hand `stitch_layer` indices from different spaces: a
+/// The two call sites hand the stitcher indices from different spaces: a
 /// print-layer index and an adequacy-probe row. Carrying the space with the
 /// index keeps a raised seam error from claiming a probe row is a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1248,302 +1231,161 @@ impl SliceStitchSite {
     }
 }
 
-fn stitch_layer(
-    site: SliceStitchSite,
-    intersections: &[geom_kernel::PlaneIntersection],
-) -> Result<Vec<SliceSolid>, GenericPerceptionError> {
-    let mut points = BTreeMap::<PointKey, [f64; 2]>::new();
-    let mut edges = BTreeSet::<(PointKey, PointKey)>::new();
-    for event in intersections {
-        let a = [event.segment[0][0], event.segment[0][1]];
-        let b = [event.segment[1][0], event.segment[1][1]];
-        let ka = point_key(a);
-        let kb = point_key(b);
-        if ka == kb {
-            continue;
+/// The index space a whole stitch batch belongs to.
+///
+/// [`SliceStitchSite`] names one layer; this names the space a batch's indices
+/// live in, so a batched call can mint the right site per index without either
+/// call site walking layers itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SliceStitchSpace {
+    PrintLayer,
+    AdequacyProbe,
+}
+
+impl SliceStitchSpace {
+    const fn site(self, index: usize) -> SliceStitchSite {
+        match self {
+            Self::PrintLayer => SliceStitchSite::PrintLayer(index),
+            Self::AdequacyProbe => SliceStitchSite::AdequacyProbe(index),
         }
-        points.entry(ka).or_insert(a);
-        points.entry(kb).or_insert(b);
-        edges.insert(if ka < kb { (ka, kb) } else { (kb, ka) });
     }
-    let mut adjacency = BTreeMap::<PointKey, Vec<PointKey>>::new();
-    for &(a, b) in &edges {
-        adjacency.entry(a).or_default().push(b);
-        adjacency.entry(b).or_default().push(a);
-    }
-    if adjacency.values().any(|neighbors| neighbors.len() != 2) {
-        return Err(site.open_seam());
-    }
-    for neighbors in adjacency.values_mut() {
-        neighbors.sort_unstable();
-    }
-    let mut unused = edges;
-    let mut raw = Vec::<Vec<[f64; 2]>>::new();
-    while let Some(&(start, next)) = unused.first() {
-        let mut keys = vec![start];
-        let mut previous = start;
-        let mut current = next;
-        unused.remove(&(start, next));
-        while current != start {
-            keys.push(current);
-            let neighbors = &adjacency[&current];
-            let following = if neighbors[0] == previous {
-                neighbors[1]
-            } else {
-                neighbors[0]
-            };
-            let edge = if current < following {
-                (current, following)
-            } else {
-                (following, current)
-            };
-            if !unused.remove(&edge) {
-                return Err(site.open_seam());
-            }
-            previous = current;
-            current = following;
-        }
-        raw.push(keys.into_iter().map(|key| points[&key]).collect());
-    }
-    // Sub-threshold loops are dropped BEFORE the parity count, not after it.
-    // Filtering afterwards let a loop contribute to every other loop's nesting
-    // depth and then vanish from the set hole ownership searches, so depth and
-    // ownership were decided against two different loop sets - a second way to
-    // manufacture a hole no solid can claim.
-    let kept = raw
+}
+
+/// Stitch, orient and normalize every layer of one kernel slice batch.
+///
+/// FU-10 phase C: the cutover both stitch sites now go through. Design:
+/// `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 3.4 ("both
+/// stitch sites consume normalized output") and phase table row C. The
+/// pipeline is exactly the three stages sec 3.4 prescribes -- stitch (the
+/// legacy undirected walk, semantics unchanged, inside
+/// [`orientation::orient_layer`]) -> orient (the phase-A `z_hat x n`
+/// derivation) -> normalize (the phase-B per-layer union) -- and it is
+/// batch-first at every stage: one `slice_z_batch` upstream, one
+/// `orient_layers_batch`, one `normalize_layers_batch`. No per-layer entry
+/// point survives in either hot path.
+///
+/// # 2026-08-07: the deferred parity work is done
+///
+/// The stitcher this replaces classified hole-versus-solid by the even-odd
+/// nesting parity of each loop's FIRST VERTEX -- a point that lies exactly ON
+/// its own loop and, in a tangle, within `LOOP_MERGE_MM` of a neighbour's,
+/// where ray parity has no defined answer. Two comments in that code admitted
+/// the debt and deferred it by name: "Normalizing parity itself waits on the
+/// fill-rule work", and, of the better interior probe, "gated behind the
+/// fill-rule normalization work". **This is that work, and this note is its
+/// dated resolution.** Parity is not normalized here -- it is retired. Hole
+/// ownership is the union engine's own shape structure, decided in exact
+/// integer arithmetic on explicitly quantized coordinates, so:
+///
+/// * no containment question is asked at a boundary-degenerate point at all,
+///   and the `interior_probe` that existed to dodge that degeneracy is
+///   deleted along with the parity count that made it necessary;
+/// * the Tier-1 unowned-hole fallback chain -- vertex probe, then interior
+///   probe, then any-vertex, then **bounding-box containment**, and finally a
+///   **silent drop** of any hole nothing claimed -- is deleted entire. On
+///   normalized output a hole's owner is unique by construction: there is no
+///   query to widen and nothing to drop. FU-16, whose closure measurement was
+///   "bbox claiming can under-report a solid's area; the Tier 2 union
+///   supersedes it", loses its subject here.
+///
+/// Already-normal layers are unaffected BY CONSTRUCTION, not by luck: the
+/// phase-B normalizer compares its union output against its input under
+/// canonical integer form and, on equality, emits the ORIGINAL f64 loops
+/// verbatim (design sec 3.5). Measured at the phase-C tip, that holds on 100%
+/// of already-normal layers.
+///
+/// It does NOT hold for the whole corpus, and the design record says why
+/// rather than hiding it: sec 8.5 records the census run at this tip, where
+/// three of seven digests are byte-identical and four moved. The moving layers
+/// carry two or more counter-clockwise loops that ABUT -- contours touching
+/// where the vertex-only legacy stitcher could not see it -- and the nonzero
+/// union merges them, which is design case D1 arriving on the clean corpus
+/// rather than only on the treant. Nothing was re-pinned to absorb it.
+fn normalized_slice_layers(
+    space: SliceStitchSpace,
+    batch: &geom_kernel::PlaneSliceBatch,
+    normals: &[[f64; 3]],
+    limits: GenericPerceptionLimits,
+) -> Result<Vec<Vec<SliceSolid>>, GenericPerceptionError> {
+    let oriented = orientation::orient_layers_batch(space, batch, normals)?;
+    let layers = oriented
         .into_iter()
-        .filter(|points_xy| signed_area(points_xy).abs() >= BIRTH_MIN_AREA_MM2)
-        .collect::<Vec<_>>();
-    let mut loops = Vec::with_capacity(kept.len());
-    for (index, points_xy) in kept.iter().enumerate() {
-        // Still the loop's first vertex, and deliberately so: a strictly
-        // interior probe is the better containment query (see
-        // `interior_probe`), but swapping it in here re-classifies loops on
-        // clean models too and moves frozen digests. Widening the query is
-        // therefore confined to hole ownership, where it can only rescue a
-        // hole the old code refused outright. Normalizing parity itself waits
-        // on the fill-rule work.
-        let probe = points_xy[0];
-        let depth = kept
-            .iter()
-            .enumerate()
-            .filter(|(other, polygon)| *other != index && point_in_polygon(probe, polygon))
-            .count();
-        let hole = depth % 2 == 1;
-        let mut canonical = canonicalize_loop(points_xy.clone(), hole);
-        let area = signed_area(&canonical);
-        let desired_positive = !hole;
-        if (area > 0.0) != desired_positive {
-            canonical.reverse();
-            canonical = canonicalize_loop(canonical, hole);
-        }
-        loops.push(SliceLoop {
-            signed_area_mm2: signed_area(&canonical),
-            points_xy_mm: canonical,
-            hole,
-        });
-    }
-    loops.sort_by(|a, b| {
-        a.hole
-            .cmp(&b.hole)
-            .then_with(|| b.signed_area_mm2.abs().total_cmp(&a.signed_area_mm2.abs()))
-            .then_with(|| point_key(a.points_xy_mm[0]).cmp(&point_key(b.points_xy_mm[0])))
-    });
-    let mut solids = loops
-        .iter()
-        .filter(|loop_| !loop_.hole)
-        .cloned()
-        .map(|outer| SliceSolid {
-            outer,
-            holes: Vec::new(),
+        .map(|layer| plinth_layers::LayerLoops {
+            // Design sec 3.3's degraded path: a layer whose derived winding
+            // was locally inconsistent carries no meaningful direction, so
+            // parity is the only defensible fill for it. Typed, per-layer,
+            // and never an abort.
+            fill_rule: if layer.degraded.is_some() {
+                plinth_layers::LayerFillRule::EvenOdd
+            } else {
+                plinth_layers::LayerFillRule::NonZero
+            },
+            loops: layer
+                .loops
+                .into_iter()
+                .map(|oriented_loop| oriented_loop.points_xy_mm)
+                .collect(),
         })
         .collect::<Vec<_>>();
-    for hole in loops.into_iter().filter(|loop_| loop_.hole) {
-        let Some(owner) = hole_owner(&solids, &hole) else {
-            // A hole nothing can claim sits inside another void: every loop
-            // containing it was itself classified a hole. Dropping it leaves
-            // the region void, which is exactly what even-odd parity already
-            // says it is, so the only cost is a bounded, local over-report of
-            // solid area. That is not worth aborting a whole support run for.
-            continue;
-        };
-        solids[owner].holes.push(hole);
-    }
-    for solid in &mut solids {
-        solid.holes.sort_by(|left, right| {
-            right
-                .signed_area_mm2
-                .abs()
-                .total_cmp(&left.signed_area_mm2.abs())
-                .then_with(|| {
-                    point_key(left.points_xy_mm[0]).cmp(&point_key(right.points_xy_mm[0]))
+    // The union's caps are derived, not invented. Perception already caps the
+    // kernel slice stream, and a stitched layer holds at most two endpoints
+    // per admitted intersection, so `max_slice_intersections * 2` is the exact
+    // input-vertex bound this stage inherits; the operation and scratch caps
+    // follow from it (`LayerUnionLimits::from_input_bound`). `max_loop_vertices`
+    // is the authority-carried output cap that the print-layer call site used
+    // to sum by hand; design sec 3.4 moves it onto normalized output, which is
+    // where it now binds -- including for the adequacy probes, which never had
+    // it. Adding new cap fields to `GenericPerceptionLimits` was the
+    // alternative and is refused: they would be unregistered constants, and
+    // any that entered `authority_fingerprint` would move every frozen digest
+    // for a guard that cannot change a successful plan.
+    let union_limits = plinth_layers::LayerUnionLimits::from_input_bound(
+        limits.max_slice_intersections.saturating_mul(2),
+        limits.max_loop_vertices,
+    );
+    let normalized =
+        plinth_layers::normalize_layers_batch(&layers, BIRTH_MIN_AREA_MM2, &union_limits).map_err(
+            |error| match error {
+                plinth_layers::LayerUnionError::OutputVertexCap { requested, cap } => {
+                    GenericPerceptionError::LoopVertexLimit {
+                        required: requested,
+                        limit: cap,
+                    }
+                }
+                other => GenericPerceptionError::LayerUnion(other.to_string()),
+            },
+        )?;
+    Ok(normalized
+        .layers
+        .into_iter()
+        .map(|layer| {
+            layer
+                .solids
+                .into_iter()
+                .map(|solid| SliceSolid {
+                    outer: normalized_slice_loop(solid.outer, false),
+                    holes: solid
+                        .holes
+                        .into_iter()
+                        .map(|hole| normalized_slice_loop(hole, true))
+                        .collect(),
                 })
-        });
-    }
-    Ok(solids)
-}
-
-/// Assign `hole` to the smallest solid that can claim it.
-///
-/// A sculpt whose sub-objects interpenetrate slices into contours that cross
-/// themselves, and "inside" is undefined for a self-crossing polygon. Even-odd
-/// containment stops being transitive there: a loop can be inside a hole that
-/// is inside a solid, yet test outside that solid. So widen the question
-/// instead of aborting, and let the caller drop what still has no owner.
-///
-/// The first step is the query this function has always run, so a hole the old
-/// code could place is placed identically. Every later step only ever runs
-/// where the old code raised `OpenSliceSeam` and gave up, which is what makes
-/// the whole chain inert on any model that already sliced.
-fn hole_owner(solids: &[SliceSolid], hole: &SliceLoop) -> Option<usize> {
-    let &vertex = hole.points_xy_mm.first()?;
-    if let Some(index) = smallest_solid(solids, |solid| {
-        point_in_polygon(vertex, solid.outer.points_xy_mm())
-    }) {
-        return Some(index);
-    }
-    let probe = interior_probe(&hole.points_xy_mm);
-    if let Some(index) = smallest_solid(solids, |solid| {
-        point_in_polygon(probe, solid.outer.points_xy_mm())
-    }) {
-        return Some(index);
-    }
-    if let Some(index) = smallest_solid(solids, |solid| {
-        hole.points_xy_mm
-            .iter()
-            .any(|point| point_in_polygon(*point, solid.outer.points_xy_mm()))
-    }) {
-        return Some(index);
-    }
-    let bounds = bounding_box(&hole.points_xy_mm)?;
-    smallest_solid(solids, |solid| {
-        bounding_box(solid.outer.points_xy_mm()).is_some_and(|outer| box_contains(outer, bounds))
-    })
-}
-
-/// The smallest-area solid satisfying `claims`, ties broken by slice order.
-fn smallest_solid(
-    solids: &[SliceSolid],
-    mut claims: impl FnMut(&SliceSolid) -> bool,
-) -> Option<usize> {
-    solids
-        .iter()
-        .enumerate()
-        .filter(|(_, solid)| claims(solid))
-        .min_by(|(_, left), (_, right)| {
-            left.outer
-                .signed_area_mm2
-                .abs()
-                .total_cmp(&right.outer.signed_area_mm2.abs())
+                .collect()
         })
-        .map(|(index, _)| index)
+        .collect())
 }
 
-/// `[min_x, min_y, max_x, max_y]` over `points`.
-fn bounding_box(points: &[[f64; 2]]) -> Option<[f64; 4]> {
-    let first = points.first()?;
-    Some(
-        points
-            .iter()
-            .fold([first[0], first[1], first[0], first[1]], |bounds, point| {
-                [
-                    bounds[0].min(point[0]),
-                    bounds[1].min(point[1]),
-                    bounds[2].max(point[0]),
-                    bounds[3].max(point[1]),
-                ]
-            }),
-    )
-}
-
-const fn box_contains(outer: [f64; 4], inner: [f64; 4]) -> bool {
-    outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
-}
-
-/// How many of a loop's longest edges may seed an interior probe.
-const INTERIOR_PROBE_EDGES: usize = 8;
-/// Inward offsets, as a fraction of the seeding edge's length, tried in order.
-const INTERIOR_PROBE_OFFSETS: [f64; 5] = [0.5, 0.125, 0.031_25, 1.0e-3, 1.0e-5];
-
-/// A point strictly inside `polygon` under the even-odd rule.
+/// Carry one normalized loop into the perception loop type.
 ///
-/// Anchoring a containment query on a contour vertex is boundary-degenerate:
-/// the vertex lies exactly ON its own loop, and in a tangle it can sit under a
-/// micron from a neighbouring loop's boundary, where `point_in_polygon` has no
-/// defined answer. Prefer the area centroid, fall back to inward offsets from
-/// the longest edges, and only then to the vertex the query used to use.
-///
-/// Only `hole_owner` calls this, and only after the legacy vertex query has
-/// already failed. Nesting parity still runs on the vertex: promoting this
-/// probe there re-decides hole-versus-solid on clean models as well and is
-/// gated behind the fill-rule normalization work.
-fn interior_probe(polygon: &[[f64; 2]]) -> [f64; 2] {
-    let fallback = polygon.first().copied().unwrap_or([0.0, 0.0]);
-    if polygon.len() < 3 {
-        return fallback;
+/// A pure re-wrapping: the points and their shoelace area come from the
+/// normalizer unmodified, and `hole` is the engine's structural verdict
+/// (outer contour versus interior contour), not a re-derived parity answer.
+fn normalized_slice_loop(source: plinth_layers::NormalizedLoop, hole: bool) -> SliceLoop {
+    SliceLoop {
+        points_xy_mm: source.points_xy_mm,
+        signed_area_mm2: source.signed_area_mm2,
+        hole,
     }
-    let area = signed_area(polygon);
-    if let Some(centroid) = area_centroid(polygon, area) {
-        if point_in_polygon(centroid, polygon) {
-            return centroid;
-        }
-    }
-    // Interior lies to the left of `a -> b` exactly when the loop winds
-    // counter-clockwise, i.e. when its signed area is positive.
-    let inward = if area < 0.0 { -1.0 } else { 1.0 };
-    let mut edges = (0..polygon.len())
-        .map(|index| {
-            let a = polygon[index];
-            let b = polygon[(index + 1) % polygon.len()];
-            (index, (b[0] - a[0]).hypot(b[1] - a[1]))
-        })
-        .collect::<Vec<_>>();
-    edges.sort_by(|(left_index, left_length), (right_index, right_length)| {
-        right_length
-            .total_cmp(left_length)
-            .then(left_index.cmp(right_index))
-    });
-    for &(index, length) in edges.iter().take(INTERIOR_PROBE_EDGES) {
-        if !(length.is_finite() && length > 0.0) {
-            break;
-        }
-        let a = polygon[index];
-        let b = polygon[(index + 1) % polygon.len()];
-        let midpoint = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
-        let normal = [
-            -inward * (b[1] - a[1]) / length,
-            inward * (b[0] - a[0]) / length,
-        ];
-        for offset in INTERIOR_PROBE_OFFSETS {
-            let step = offset * length;
-            let candidate = [
-                midpoint[0] + normal[0] * step,
-                midpoint[1] + normal[1] * step,
-            ];
-            if point_in_polygon(candidate, polygon) {
-                return candidate;
-            }
-        }
-    }
-    fallback
-}
-
-/// The area centroid of `polygon`, or `None` when it is degenerate.
-fn area_centroid(polygon: &[[f64; 2]], area: f64) -> Option<[f64; 2]> {
-    if area == 0.0 || !area.is_finite() {
-        return None;
-    }
-    let mut moment = [0.0f64; 2];
-    for index in 0..polygon.len() {
-        let a = polygon[index];
-        let b = polygon[(index + 1) % polygon.len()];
-        let cross = a[0] * b[1] - b[0] * a[1];
-        moment[0] += (a[0] + b[0]) * cross;
-        moment[1] += (a[1] + b[1]) * cross;
-    }
-    let scale = 1.0 / (6.0 * area);
-    let centroid = [moment[0] * scale, moment[1] * scale];
-    (centroid[0].is_finite() && centroid[1].is_finite()).then_some(centroid)
 }
 
 fn canonicalize_loop(mut points: Vec<[f64; 2]>, _hole: bool) -> Vec<[f64; 2]> {
@@ -1605,15 +1447,10 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 /// phase-B union normalizer consumes.
 ///
 /// Everything here is consumer-side: `geom_kernel::slicing` and its frozen
-/// Trimesh vectors are untouched, and the legacy [`stitch_layer`] path --
-/// which every frozen OD-8 digest still flows through -- is not rewired until
-/// the phase-C cutover.
-#[allow(
-    dead_code,
-    reason = "FU-10 phase A lands ahead of its consumers: the phase-B layer \
-              normalizer and the phase-C stitch cutover. Until then the \
-              oriented stitch is exercised by its unit tests only."
-)]
+/// Trimesh vectors are untouched. Since the phase-C cutover
+/// ([`normalized_slice_layers`]) this is the ONLY stitch in perception -- the
+/// legacy undirected walk survives inside it as the degraded path, not as a
+/// second copy.
 mod orientation {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1622,7 +1459,7 @@ mod orientation {
 
     use super::{
         canonicalize_loop, point_key, signed_area, GenericPerceptionError, PointKey,
-        SliceStitchSite,
+        SliceStitchSite, SliceStitchSpace,
     };
 
     /// One stitched slice loop carrying its derived winding.
@@ -1885,6 +1722,7 @@ mod orientation {
     /// width follows the same `PLINTH_THREADS` authority as the kernel's own
     /// batch calls.
     pub(super) fn orient_layers_batch(
+        space: SliceStitchSpace,
         batch: &PlaneSliceBatch,
         normals: &[[f64; 3]],
     ) -> Result<Vec<OrientedLayer>, GenericPerceptionError> {
@@ -1896,15 +1734,12 @@ mod orientation {
         let layers: Vec<Result<OrientedLayer, GenericPerceptionError>> = pool.install(|| {
             (0..layer_count)
                 .into_par_iter()
-                .map(|layer| {
-                    orient_layer(
-                        SliceStitchSite::PrintLayer(layer),
-                        batch.plane(layer),
-                        normals,
-                    )
-                })
+                .map(|layer| orient_layer(space.site(layer), batch.plane(layer), normals))
                 .collect()
         });
+        // Collected in index order, so a raised seam error is the LOWEST
+        // failing layer's -- the same one the per-layer stitch loops this
+        // replaced would have surfaced first.
         layers.into_iter().collect()
     }
 }
@@ -2360,14 +2195,20 @@ fn find_local_minima(
             .diagnostic()
             .get()
             .powi(2);
+    // OQ-3, answered yes in the design: the adequacy probes go through the
+    // same normalized path as the print layers -- one code path, and adequacy
+    // areas are exactly where the deleted bbox/drop distortions bit (sec 2 D5).
+    // Batched with the print-layer site, not per probe row.
+    let probe_layers = normalized_slice_layers(
+        SliceStitchSpace::AdequacyProbe,
+        &adequacy_slices,
+        surface.geometry().normals(),
+        limits,
+    )?;
     let mut adequate = vec![false; minima.len()];
     for (probe_row, (minimum_index, minimum)) in suspects.into_iter().enumerate() {
-        let solids = stitch_layer(
-            SliceStitchSite::AdequacyProbe(probe_row),
-            adequacy_slices.plane(probe_row),
-        )?;
         let point = [minimum.position_mm[0], minimum.position_mm[1]];
-        let carried = carried_outer_area(&solids, point);
+        let carried = carried_outer_area(&probe_layers[probe_row], point);
         adequate[minimum_index] = carried >= threshold;
     }
     Ok(minima
@@ -5178,6 +5019,45 @@ mod tests {
         );
     }
 
+    /// Run the FU-10 phase-C stitch -> orient -> normalize path over one
+    /// hand-built plane of kernel intersections.
+    ///
+    /// The batched entry point is the only one there is (that is the point of
+    /// the cutover), so a single-layer test wraps its events in a one-plane
+    /// batch rather than reaching for a per-layer back door.
+    fn normalized_test_layer(
+        space: SliceStitchSpace,
+        events: Vec<geom_kernel::PlaneIntersection>,
+        normals: &[[f64; 3]],
+    ) -> Result<Vec<SliceSolid>, GenericPerceptionError> {
+        let batch = geom_kernel::PlaneSliceBatch {
+            plane_offsets: vec![0, events.len()],
+            intersections: events,
+            effective_threads: 1,
+            participating_threads: 1,
+            candidate_work: 0,
+        };
+        normalized_slice_layers(
+            space,
+            &batch,
+            normals,
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .map(|mut layers| layers.remove(0))
+    }
+
+    /// V3 disposition (FU-10 phase C): this test used to call the legacy
+    /// `stitch_layer`; it now asserts the same frozen result through the
+    /// normalized path, unchanged in every value.
+    ///
+    /// The duplicate positive-edge owner is the design's D4 case, and what
+    /// happens to it is worth naming. Faces 0 and 4 own the same on-plane edge
+    /// and the kernel hands their segments in OPPOSITE endpoint order, yet
+    /// both `z_hat x n` votes are cast in that edge's canonical
+    /// minimum-key-to-maximum-key frame, so they agree instead of conflicting.
+    /// The layer is therefore NOT degraded: it unions under nonzero with the
+    /// derived winding, and the duplicate is deduplicated by the undirected
+    /// edge set exactly as before.
     #[test]
     fn frozen_segment_vector_deduplicates_shared_owner_and_stitches_one_loop() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
@@ -5186,6 +5066,13 @@ mod tests {
             kind: PlaneIntersectionKind::Basic,
             segment: [[a[0], a[1], 0.5], [b[0], b[1], 0.5]],
         };
+        let normals = [
+            [0.0, -1.0, 0.0], // y = 0 wall, outward -y
+            [1.0, 0.0, 0.0],  // x = 2 wall, outward +x
+            [0.0, 1.0, 0.0],  // y = 2 wall, outward +y
+            [-1.0, 0.0, 0.0], // x = 0 wall, outward -x
+            [0.0, -1.0, 0.0], // the second positive-side owner of the y = 0 wall
+        ];
         let events = vec![
             edge(0, [0.0, 0.0], [2.0, 0.0]),
             edge(1, [2.0, 0.0], [2.0, 2.0]),
@@ -5195,7 +5082,8 @@ mod tests {
             // edge owners. Loop assembly owns this deterministic dedup.
             edge(4, [2.0, 0.0], [0.0, 0.0]),
         ];
-        let loops = stitch_layer(SliceStitchSite::PrintLayer(7), &events).unwrap();
+        let loops =
+            normalized_test_layer(SliceStitchSpace::PrintLayer, events.clone(), &normals).unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(
             loops[0].outer().points_xy_mm(),
@@ -5203,6 +5091,12 @@ mod tests {
         );
         assert_eq!(loops[0].area_mm2(), 4.0);
         assert!(loops[0].holes().is_empty());
+
+        // State the mechanism rather than leave it implied: a duplicate owner
+        // handed back-to-front does not cost this layer its derived winding.
+        let oriented =
+            orientation::orient_layer(SliceStitchSite::PrintLayer(7), &events, &normals).unwrap();
+        assert_eq!(oriented.degraded, None);
     }
 
     /// FU-10 phase A: the `z_hat x n` rule must impose counter-clockwise
@@ -5448,8 +5342,12 @@ mod tests {
                 },
             )
             .unwrap();
-        let layers =
-            orientation::orient_layers_batch(&batch, surface.geometry().normals()).unwrap();
+        let layers = orientation::orient_layers_batch(
+            SliceStitchSpace::PrintLayer,
+            &batch,
+            surface.geometry().normals(),
+        )
+        .unwrap();
         assert_eq!(layers.len(), planes.len());
         for layer in &layers {
             assert_eq!(layer.degraded, None);
@@ -5462,15 +5360,11 @@ mod tests {
         }
     }
 
-    /// A self-crossing outer contour makes even-odd containment intransitive:
-    /// the island is inside the middle loop, the middle loop is inside the
-    /// outer loop, and yet the island tests OUTSIDE the outer loop because it
-    /// lands in the outer loop's doubly-covered lobe. Parity therefore calls
-    /// the island a hole that no solid contains. That used to abort the entire
-    /// support run with `OpenSliceSeam`; the stitcher must now hand back
-    /// solids.
-    #[test]
-    fn self_crossing_outer_contour_still_yields_solids_not_a_seam_error() {
+    /// The three-ring self-crossing fixture of the D2/D1 cases: an outer
+    /// stroke that folds back over itself, a middle ring straddling the fold,
+    /// and an island inside the middle ring but inside the outer's
+    /// doubly-covered lobe.
+    fn self_crossing_fixture() -> Vec<geom_kernel::PlaneIntersection> {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let mut face_id = 0u32;
         let mut ring = |points: &[[f64; 2]]| {
@@ -5501,75 +5395,113 @@ mod tests {
             [8.0, 6.0],
             [0.0, 6.0],
         ]);
-        // Middle: straddles the fold. Its interior probe lands below y = 2, so
-        // parity puts it inside the outer loop - depth 1, a hole.
+        // Middle: straddles the fold. Under the legacy vertex-parity probe it
+        // landed below y = 2 and so was called a hole of the outer loop.
         events.extend(ring(&[[3.0, 0.2], [5.0, 0.2], [5.0, 2.4], [3.0, 2.4]]));
         // Island: wholly inside the middle loop, but inside the doubly-covered
-        // block, so it tests outside the outer loop - depth 1, also a hole,
-        // and no solid contains any of its points.
+        // block, so under parity it tested OUTSIDE the outer loop - a hole no
+        // solid contained, which the deleted Tier-1 chain claimed by bounding
+        // box.
         events.extend(ring(&[[3.4, 2.05], [4.6, 2.05], [4.6, 2.35], [3.4, 2.35]]));
+        events
+    }
 
-        let solids = stitch_layer(SliceStitchSite::PrintLayer(419), &events)
+    /// A mesh defect has no defensible outward normal at the crossing, so
+    /// every `z_hat x n` vote abstains and sec 3.3's degraded even-odd path is
+    /// what a self-crossing layer actually gets. Modelled here by a straight-up
+    /// normal, for which the derived in-plane direction is the zero vector.
+    fn degenerate_normals(count: usize) -> Vec<[f64; 3]> {
+        vec![[0.0, 0.0, 1.0]; count]
+    }
+
+    /// V3 disposition (FU-10 phase C): kept, and re-aimed at normalized
+    /// output. The old expectation -- outer `52.0` with holes `[-4.4, -0.36]`
+    /// -- was the parity stitcher's, and most of it was fallback machinery:
+    /// `52.0` is the raw shoelace of a self-crossing stroke (an area no fill
+    /// rule agrees with), the middle ring was called a hole by a first-vertex
+    /// probe, and the island was claimed only by the deleted bounding-box
+    /// tier. The union answers what the fallbacks were guessing at, and the
+    /// answer is checkable by hand.
+    ///
+    /// Under even-odd the outer stroke's crossing number partitions the plane
+    /// into 3x3 blocks about x = 0, 2, 6, 8 and y = 0, 2, 4, 6. Filled
+    /// (odd) are every block except `x in [6,8], y in [0,2]` (0 crossings)
+    /// and `x in [2,6], y in [2,4]` (the doubly covered fold, 2 crossings):
+    /// `12 + 8 + 16 = 36 mm^2`. The middle ring adds one crossing over
+    /// `x in [3,5]`: its `y in [0.2,2]` part goes even and voids
+    /// `2 * 1.8 = 3.6`, its `y in [2,2.4]` part goes odd and fills
+    /// `2 * 0.4 = 0.8`. The island adds one more crossing inside that
+    /// 0.8 patch, voiding `1.2 * 0.3 = 0.36` back out as a hole. So:
+    /// `36 - 3.6 = 32.4` for the main solid -- the 3.6 void is not a hole
+    /// because it reaches the exterior through the pinch points at (3,2),
+    /// (5,2) and (6,2) -- plus a separate `0.8` solid holding the `-0.36`
+    /// island. Total filled area `32.84 mm^2`.
+    #[test]
+    fn self_crossing_outer_contour_still_yields_solids_not_a_seam_error() {
+        let events = self_crossing_fixture();
+        let normals = degenerate_normals(events.len());
+        let solids = normalized_test_layer(SliceStitchSpace::PrintLayer, events, &normals)
             .expect("a self-crossing contour is survivable, not a seam violation");
-        assert_eq!(solids.len(), 1);
-        assert_eq!(solids[0].outer().signed_area_mm2(), 52.0);
-        // Both holes are claimed: the middle one by direct containment, the
-        // island by the bounding-box fallback.
-        assert_eq!(solids[0].holes().len(), 2);
-        let areas = solids[0]
-            .holes()
+        let shape = solids
             .iter()
-            .map(|hole| (hole.signed_area_mm2() * 1.0e6).round() / 1.0e6)
+            .map(|solid| {
+                (
+                    round6(solid.outer().signed_area_mm2()),
+                    solid
+                        .holes()
+                        .iter()
+                        .map(|hole| round6(hole.signed_area_mm2()))
+                        .collect::<Vec<_>>(),
+                )
+            })
             .collect::<Vec<_>>();
-        assert_eq!(areas, vec![-4.4, -0.36]);
+        assert_eq!(shape, vec![(32.4, vec![]), (0.8, vec![-0.36])]);
+        let filled = solids.iter().map(SliceSolid::area_mm2).sum::<f64>();
+        assert_eq!(round6(filled), 32.84);
     }
 
-    #[test]
-    fn a_hole_no_solid_can_reach_is_discarded_rather_than_raised() {
-        let square = |x: f64, y: f64, size: f64| {
-            vec![[x, y], [x + size, y], [x + size, y + size], [x, y + size]]
-        };
-        let solid = SliceSolid {
-            outer: SliceLoop {
-                points_xy_mm: square(0.0, 0.0, 1.0),
-                signed_area_mm2: 1.0,
-                hole: false,
-            },
-            holes: Vec::new(),
-        };
-        let reachable = SliceLoop {
-            points_xy_mm: square(0.2, 0.2, 0.4),
-            signed_area_mm2: -0.16,
-            hole: true,
-        };
-        let unreachable = SliceLoop {
-            points_xy_mm: square(10.0, 10.0, 0.4),
-            signed_area_mm2: -0.16,
-            hole: true,
-        };
-        let solids = std::slice::from_ref(&solid);
-        assert_eq!(hole_owner(solids, &reachable), Some(0));
-        assert_eq!(hole_owner(solids, &unreachable), None);
+    fn round6(value: f64) -> f64 {
+        (value * 1.0e6).round() / 1.0e6
     }
 
+    /// V3 disposition (FU-10 phase C): the named successor to
+    /// `a_hole_no_solid_can_reach_is_discarded_rather_than_raised`, which
+    /// tested the deleted `hole_owner` fallback chain directly. What that test
+    /// pinned -- that a hole no solid can claim is silently dropped -- has no
+    /// referent on normalized output, because ownership is structural rather
+    /// than probed. This asserts the property that replaces it, on the very
+    /// fixture that used to manufacture the unclaimable hole: every emitted
+    /// hole lies strictly inside the outer that owns it, and the filled area
+    /// accounts for every square millimetre the fill rule says is solid, so
+    /// nothing was claimed by bounding box and nothing was dropped.
     #[test]
-    fn interior_probe_leaves_the_boundary_even_when_the_centroid_does_not_land_inside() {
-        // A C-shape: the area centroid falls in the notch, outside the loop.
-        let c_shape = [
-            [0.0, 0.0],
-            [3.0, 0.0],
-            [3.0, 1.0],
-            [1.0, 1.0],
-            [1.0, 2.0],
-            [3.0, 2.0],
-            [3.0, 3.0],
-            [0.0, 3.0],
-        ];
-        let centroid = area_centroid(&c_shape, signed_area(&c_shape)).expect("non-degenerate");
-        assert!(!point_in_polygon(centroid, &c_shape));
-        let probe = interior_probe(&c_shape);
-        assert!(point_in_polygon(probe, &c_shape));
-        assert!(c_shape.iter().all(|vertex| *vertex != probe));
+    fn every_normalized_hole_is_owned_by_construction_so_none_is_ever_dropped() {
+        let events = self_crossing_fixture();
+        let normals = degenerate_normals(events.len());
+        let solids = normalized_test_layer(SliceStitchSpace::PrintLayer, events, &normals).unwrap();
+        assert!(!solids.is_empty(), "the fixture must yield solids");
+        for solid in &solids {
+            assert!(
+                solid.outer().signed_area_mm2() > 0.0,
+                "outers wind counter-clockwise"
+            );
+            for hole in solid.holes() {
+                assert!(hole.signed_area_mm2() < 0.0, "holes wind clockwise");
+                assert!(
+                    hole.points_xy_mm()
+                        .iter()
+                        .all(|point| point_in_polygon(*point, solid.outer().points_xy_mm())),
+                    "a normalized hole is strictly inside the outer that owns it"
+                );
+            }
+        }
+        // The area the deleted chain could distort in either direction: a
+        // dropped hole over-reports, a bbox-claimed one under-reports. Neither
+        // is possible against the hand-derived even-odd fill.
+        assert_eq!(
+            round6(solids.iter().map(SliceSolid::area_mm2).sum::<f64>()),
+            32.84
+        );
     }
 
     #[test]

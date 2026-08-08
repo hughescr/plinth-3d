@@ -496,3 +496,178 @@ cross-checked against the crate's own constants by `plinth-layers/tests/registry
 Phase-B scope note: this phase lands the crate and its constants only. No perception call
 site is rewired (phase C), no census digest can move (nothing upstream of
 `GenericContactPlan::digest()` changed), and the FU-16 treant measurement remains phase D.
+
+---
+
+## 8. Phase-C addendum — the perception cutover, recorded (appended 2026-08-07)
+
+*Append-only implementation record; sections 1–6 are the verbatim design and are unchanged,
+and section 7 is phase B's record. This section is the in-repo record required by the
+standing rule that deviations are recorded, never silent, and it carries phase row C's
+"V3 disposition table in the commit message" as the durable copy.*
+
+### 8.1 What landed
+
+Both stitch sites named in F3 now consume normalized layers, through one function:
+`perception::normalized_slice_layers(space, batch, normals, limits)`. It is the sec 3.4
+composition exactly — stitch → orient → normalize — and it is batch-first end to end: one
+`slice_z_batch` upstream, one `orient_layers_batch`, one `normalize_layers_batch`, and no
+per-layer entry point left in either hot path. The print-layer site's hand-rolled
+per-layer loop and the adequacy site's per-probe-row loop are both gone.
+
+**OQ-3 is answered as the design recommended: yes.** The adequacy probes take the same
+normalized path as the print layers. One code path, and the site enum still keeps the two
+seam-error spaces apart (`OpenSliceSeam` versus `OpenAdequacyProbeSeam`), now via a new
+`SliceStitchSpace` that names the index space of a whole batch so the batched call can mint
+the right per-index site.
+
+**The Tier-1 fallback the design condemns is deleted, not bypassed.** Gone from the tree:
+`stitch_layer` (the even-odd, first-vertex-parity stitcher), `hole_owner` (the widening
+chain: vertex probe → interior probe → any-vertex → **bounding-box containment**), the
+**silent drop** of any hole nothing claimed, and their supporting `smallest_solid`,
+`bounding_box`, `box_contains`, `interior_probe`, `area_centroid`, `INTERIOR_PROBE_EDGES`,
+`INTERIOR_PROBE_OFFSETS`. On normalized output a hole's owner is unique by construction, so
+there is no query to widen and nothing to drop. FU-16's closure measurement ("bbox claiming
+can under-report a solid's area; the Tier 2 union supersedes it") loses its subject.
+
+**The deferred-parity comments get their dated resolution.** The two in-code admissions —
+"Normalizing parity itself waits on the fill-rule work" at the parity count, and "gated
+behind the fill-rule normalization work" at `interior_probe` — were attached to code this
+phase deletes. Their resolution note is therefore carried on the successor,
+`normalized_slice_layers`, under the heading *"2026-08-07: the deferred parity work is
+done"*, which quotes both deferrals and states what replaced them.
+
+### 8.2 Recorded phase-C deviations
+
+1. **`LayerUnionLimits` is derived from the existing authority caps, not added to
+   `GenericPerceptionLimits`.** Sec 3.4 specifies the limits struct but not where its
+   numbers come from. Adding four cap fields to `GenericPerceptionLimits` was the obvious
+   reading and is refused for two reasons: the values would be new unregistered constants,
+   and any field entering `authority_fingerprint` moves every frozen OD-8 digest — for a
+   guard that by construction cannot change a successful plan. Instead
+   `plinth_layers::LayerUnionLimits::from_input_bound(max_input_vertices,
+   max_output_vertices)` (new in this phase, additive to the phase-B crate) computes the
+   operation and scratch caps as the exact worst case those two bounds already admit, with
+   saturating arithmetic so an unrepresentable bound reports `usize::MAX` rather than
+   wrapping. Perception passes `max_slice_intersections * 2` (a stitched layer holds at most
+   two endpoints per admitted intersection, and the kernel already refused past that cap)
+   and `max_loop_vertices`. **Honest consequence:** three of the four caps are inert for
+   this caller by construction; the binding one is the output cap, which is the point of the
+   sec 3.4 move. The real protection against oversized layer work remains the kernel slice
+   caps upstream, which is where it already was.
+2. **`max_loop_vertices` now binds the adequacy probes too.** Sec 3.4 says the check "moves
+   naturally onto the normalized output", and one shared path means one shared cap. The
+   adequacy site previously had no loop-vertex cap at all, so this is a new refusal
+   path — bounded by the same kernel caps, and reachable only on input the print-layer site
+   would already have refused.
+3. **`orient_layers_batch` gained a `space` parameter** (phase A hard-coded
+   `SliceStitchSite::PrintLayer`). Errors are still collected in layer-index order, so a
+   raised seam error names the lowest failing layer — the same one the per-layer loops
+   surfaced first.
+4. **Phase A's module-wide `#[allow(dead_code)]` is removed**, its stated condition ("lands
+   ahead of its consumers") having been met. Nothing in `orientation` is dead now.
+
+### 8.3 V3 disposition table (sec 4, "no test is deleted without a named successor")
+
+| Pinned-legacy test | Disposition | Note |
+|---|---|---|
+| `frozen_segment_vector_deduplicates_shared_owner_and_stitches_one_loop` | **Kept, re-aimed at the normalized path. Every asserted value unchanged.** | The D4 duplicate positive-edge owner does *not* degrade the layer: both `z_hat x n` votes are cast in the edge's canonical min-key→max-key frame, so opposite kernel endpoint order still agrees. Now also asserts `degraded == None`, naming that mechanism. |
+| `self_crossing_outer_contour_still_yields_solids_not_a_seam_error` | **Kept, re-aimed at the normalized path. Expectation changed and re-derived.** | Was outer `52.0` with holes `[-4.4, -0.36]`; is now `[(32.4, []), (0.8, [-0.36])]`, total filled `32.84 mm²`. The old `52.0` was the raw shoelace of a self-crossing stroke — an area no fill rule agrees with — the middle ring was a first-vertex-probe verdict, and the island was claimed only by the deleted bbox tier. The new numbers are derived by hand in the test's doc comment from the even-odd crossing-number partition, block by block. |
+| `a_hole_no_solid_can_reach_is_discarded_rather_than_raised` | **Deleted; successor named and landed.** | It called `hole_owner` directly, and the claim it pinned (an unclaimable hole is silently dropped) has no referent once ownership is structural. Successor: `every_normalized_hole_is_owned_by_construction_so_none_is_ever_dropped`, on the *same* fixture that used to manufacture the unownable hole; it asserts holes wind clockwise strictly inside their owner and that total filled area equals the hand-derived `32.84 mm²`, which a dropped hole would over-report and a bbox-claimed one under-report. |
+| `interior_probe_leaves_the_boundary_even_when_the_centroid_does_not_land_inside` | **Deleted; successor named.** | It tested `interior_probe`, deleted with the chain that was its only caller. Successor: the same containment guarantee is now asserted structurally by the test above, and as a seeded property by `plinth-layers`' V2 containment-invariant property test. |
+| `an_adequacy_probe_seam_no_longer_masquerades_as_a_print_layer` | **Unchanged.** | `SliceStitchSite::open_seam` survives the cutover verbatim. |
+| `frozen_birth_overlap_ignores_retained_negative_winding_holes_like_python` | **Unchanged, and re-derived as required.** | It builds `SliceSolid`s by hand and never reaches the stitcher, so the cutover cannot move it. No expectation changed. |
+| `hollow_adequacy_uses_positive_outer_area_even_when_point_is_in_hole` | **Unchanged, and re-derived as required.** | Same: hand-built `SliceSolid` straight into `carried_outer_area`. No expectation changed. |
+| Phase-A orientation tests (7) and `plinth-layers` phase-B tests (23) | **Unchanged.** | Except `kernel_sliced_box_layers_orient_counter_clockwise`, which passes the new `space` argument. |
+
+### 8.4 Phase-C scope note
+
+This phase rewires the call sites and deletes the superseded machinery. The FU-16 treant
+measurement remains phase D's. The V4 census gate was run here rather than deferred, because
+sec 3.5's whole claim is that it cannot move — see 8.5 for what it actually did.
+
+### 8.5 The census gate was run at the phase-C tip, and it MOVED — stop-and-report
+
+Phase C's charter required running the 7-model census after cutover with the expectation,
+from sec 3.5, that every digest is byte-identical. **It is not: three of seven are unmoved,
+four moved.** Under OD-8 this is a stop-and-report, and nothing here is re-pinned. What
+follows is the attribution that ruling needs. Run: `cargo run --release --offline --features
+census --example embed_incidence_census` at the phase-C tip.
+
+| Model | frozen `snapshot_digest` | phase-C tip | verdict | print layers differing |
+|---|---|---|---|---|
+| `Sphere` | `17667468971446251870` | `17667468971446251870` | **unmoved** | 0 |
+| `Cylinder` | `13310185350867878190` | `13310185350867878190` | **unmoved** | 0 |
+| `make_box` | `9657051231007502658` | `9657051231007502658` | **unmoved** | 0 |
+| `make_overhang_table` | `6686599816688114065` | `1875674282253663076` | MOVED | 80 of 686 |
+| `make_toed_slab` | `11199296506741562956` | `2823659516373762066` | MOVED | 90 of 369 |
+| `make_raking_blade` | `13278215294653054002` | `9567737006650358297` | MOVED | 20 of 269 |
+| `make_thin_fin` | `7016743535301716631` | `8797083662933568276` | MOVED | 6 of 432 |
+
+`make_toed_slab` and `make_raking_blade` also fail their `support_runner_integration`
+goldens: `(64, 179, 4826202191472851835)` → `(64, 170, 13346779153602682749)` and
+`(32, 89, 1709218010932846012)` → `(27, 72, 8660653339934460766)`. `plinth-verify`'s
+`coverage_gate` overhang-table report moves with `make_overhang_table`'s digest
+(`5304257786453935365` → `5470664714994646368`; every evidence field -- islands, patch
+areas, worst gaps, defects -- is unchanged, only the snapshot digest moved), and
+`specialized::tests::oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`
+is the lib-side view of the same two models the runner-integration golden covers.
+**Exactly three tests fail in the whole workspace**
+(`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`,
+`specialized::tests::oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`,
+`public_coverage_report_is_frozen_without_evidence_loss`), and all three are golden-pinning.
+Gate 1 at this tip: **1016 passed / 3 failed / 0 ignored**, against a develop baseline of 990
+passed / 0 failed; the arithmetic closes as 990 + 7 (phase A) + 23 (phase B) − 2 deleted here
++ 1 successor here = 1019 total. Gate 2 (`--all-features`): **1017 passed / 3 failed / 0
+ignored** — the same three, plus one feature-gated test the default run does not build.
+Gates 3 (`clippy --workspace --all-targets --all-features -D warnings`), 4 (`fmt --check`)
+and 5 (`git diff --check`) are green, and the tree is clean before and after.
+
+#### The pass-through rule is NOT what broke — four independent measurements
+
+Measured with the legacy stitcher temporarily restored beside the new path and compared
+layer by layer (instrumentation removed before this commit):
+
+1. **Pass-through fires on 100% of already-normal layers.** On `make_toed_slab` (200 layers)
+   and `make_overhang_table` (480 layers) sliced from the procedural meshes,
+   `NormalizedLayer::passed_through` is true for **every** layer, `degraded` is `None` for
+   every layer, and `normalized_slice_layers` output is **byte-identical** (`==` on
+   `Vec<SliceSolid>`) to `legacy_stitch_layer` on every layer.
+2. **Three census models move zero layers** and their digests are byte-identical, through the
+   full orient + hollow + support pipeline.
+3. **The adequacy-probe path moves zero rows on all seven models.** OQ-3's new consumer
+   contributes nothing to the delta.
+4. **The layers that do move are genuinely not normal.** Their input is two or more
+   counter-clockwise loops that abut, and the nonzero union correctly merges them into one
+   solid — design case D1, verbatim. First differing layer per model:
+
+| Model | layer / z (mm) | legacy solids (area mm², vertices) | normalized |
+|---|---|---|---|
+| `make_overhang_table` | 346 / 17.325 | `104.23425810`(7), `18.47520861`(8), `18.47520861`(8), `18.43371399`(7), `18.43371399`(7) | `141.10168610`(18), `18.47520864`(8), `18.47520864`(8) |
+| `make_toed_slab` | 40 / 2.025 | `140.29611541`(7), `14.51977914`(34) | `154.81589453`(40) |
+| `make_raking_blade` | 90 / 4.525 | `160.00000000`(8), `0.30000396`(8) | `160.29743211`(16) |
+| `make_thin_fin` | 166 / 8.325 | `160.00000000`(8), `0.25168756`(7) | `160.25168760`(13) |
+
+In every case the merged outer's area equals the **arithmetic sum** of the legacy loops it
+absorbed, to within 2e-8 mm² — e.g. overhang table `104.23425810 + 18.43371399 + 18.43371399
+= 141.10168608` against a measured `141.10168610`. An intersection of measure zero at the
+1e-8 mm quantization contract is the signature of **abutting**, not overlapping, sub-solids:
+contours that touch where the legacy stitcher could not see it, because it decides incidence
+only at snapped vertices and never at an edge. The union sees edge/vertex incidence and
+merges, which is the physically correct fill for a union of solids and is exactly what sec
+3.3 says nonzero winding buys.
+
+#### Consequence for the owner ruling
+
+The premise "the corpus is clean, so pass-through guarantees zero movement" is false as
+stated: after orientation and hollowing, four of the seven models contain layers with
+abutting sub-solid contours. The delta is not a defect in the normalizer, it is the defect
+class the normalizer was chartered to fix, arriving on the clean corpus rather than only on
+the treant. **No golden is re-pinned in this commit, and no test expectation was relaxed to
+make a gate pass.** The four failures stand as the measurement.
+
+One refinement the ruling may want to weigh: sec 3.5's pass-through is decided **per layer**,
+so a single non-normal loop requantizes every loop in its layer — visible above as the
+untouched `18.47520861` → `18.47520864` on the overhang table. A per-solid pass-through would
+shrink the delta to only the merged solids, at the cost of a more complex equality check. It
+would not change which layers merge, and so would not by itself restore any digest.

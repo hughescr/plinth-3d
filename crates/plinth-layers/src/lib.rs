@@ -140,6 +140,47 @@ pub struct LayerUnionLimits {
     pub max_scratch_bytes: usize,
 }
 
+impl LayerUnionLimits {
+    /// The caps a caller that already bounds its own input vertex count is
+    /// entitled to, given that bound.
+    ///
+    /// A caller whose upstream stage caps how many vertices can ever reach
+    /// this one (`plinth-support`'s perception caps the kernel slice stream,
+    /// so at most two stitched endpoints per admitted intersection) does not
+    /// get to invent a second, unrelated number for the derived caps. This
+    /// constructor computes the two derived caps as the exact worst case that
+    /// `max_input_vertices` and `max_output_vertices` already admit:
+    ///
+    /// * operations: `(N + N^2) * ceil(log2 N)` with `N = max_input_vertices`.
+    ///   The per-layer charge is `(n_i + n_i^2) * ceil(log2 n_i)`; since
+    ///   `sum n_i <= N` and therefore `sum n_i^2 <= N^2`, the whole-batch
+    ///   worst case is the single-layer expression at `N`.
+    /// * scratch: the modeled input bytes at `N` plus the modeled output
+    ///   allowance at `max_output_vertices` -- the exact expression
+    ///   [`normalize_layers_batch`]'s preflight evaluates, at its inputs'
+    ///   maxima.
+    ///
+    /// Arithmetic saturates rather than wrapping: a bound too large to
+    /// represent is a bound that cannot bind, and `usize::MAX` says so
+    /// honestly. Both derived caps are therefore inert by construction for
+    /// such a caller -- the binding caps remain the two passed in.
+    #[must_use]
+    pub const fn from_input_bound(max_input_vertices: usize, max_output_vertices: usize) -> Self {
+        let n = max_input_vertices;
+        let log2 = (usize::BITS - if n == 0 { 1 } else { n }.leading_zeros()) as usize;
+        let max_union_operations = n.saturating_mul(n).saturating_add(n).saturating_mul(log2);
+        let max_scratch_bytes = n
+            .saturating_mul(QUANTIZED_POINT_BYTES + ENGINE_EDGE_BYTES_MODEL)
+            .saturating_add(max_output_vertices.saturating_mul(QUANTIZED_POINT_BYTES));
+        Self {
+            max_input_vertices,
+            max_output_vertices,
+            max_union_operations,
+            max_scratch_bytes,
+        }
+    }
+}
+
 /// One emitted loop: canonical rotation (minimum quantized key first), with
 /// its shoelace area over exactly the emitted points.
 #[derive(Clone, Debug, PartialEq)]
