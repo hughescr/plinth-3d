@@ -539,9 +539,12 @@ instrumentation is verified result-inert against pre-instrumentation digests.
   > `python` feature, the optional `pyo3`/`numpy` dependencies, the maturin `pyproject.toml`
   > and `python/` package, and the `build.rs` that fed the extension-staleness gate), the
   > `scripts/tests` pytest harness, the `scripts/tools` legacy pipeline, the
-  > `scripts/support_placement` engine, and the venv that served them — 101 `.py` files, the
-  > root `pyproject.toml`/`uv.lock`, and 13 crates out of `Cargo.lock`. **No build or test
-  > step in this repository requires a Python interpreter**: the Rust toolchain named in
+  > `scripts/support_placement` engine, and the tracked config that declared the venv serving
+  > them — 101 `.py` files, the root `pyproject.toml`/`uv.lock`, `scripts/build_kernel.sh`,
+  > and 13 crates out of `Cargo.lock`. (The `.venv/` directory itself is gitignored and was
+  > never tracked, so no commit deleted it; the copy in the definitive checkout was removed
+  > by hand the same day.) **No build or test step in this repository requires a Python
+  > interpreter**: the Rust toolchain named in
   > `rust-toolchain.toml` is now the whole toolchain, and the five-command gate under
   > *Development* is the complete build surface.
   >

@@ -3801,7 +3801,18 @@ had before.
 | `scripts/tools/` | the legacy pipeline entry points — `prep_one.py`, `run_v5.py`, census tooling, the Blender-driven sweeps — plus `host.blend`, the Blender host document for `geometry_sweep.py` |
 | `scripts/support_placement/` | the 35-module frozen engine those entry points drove |
 | `scripts/build_kernel.sh` | a maturin driver that built the extension into `.venv` |
-| `pyproject.toml`, `uv.lock`, `.venv/` | the interpreter and environment that served all of it |
+| `pyproject.toml`, `uv.lock` | the tracked config that declared the interpreter and environment serving all of it |
+
+> **Correction, 2026-08-08 (same day, before merge).** The row above originally listed
+> `.venv/` alongside `pyproject.toml` and `uv.lock`. That overstated what the branch did.
+> `.venv/` is gitignored and was never tracked, so no commit could delete it: what E8
+> deleted is the *tracked* Python config — `pyproject.toml`, `uv.lock`, and
+> `scripts/build_kernel.sh`. The
+> physical `.venv/` directory (243 MB) existed only in the definitive checkout, and was
+> removed there by hand, separately, on 2026-08-08. Both things happened; crediting the
+> branch with the second would claim a deletion git is not capable of making. The
+> distinction is exactly why the guard below refuses to skip ignored paths — a re-`uv sync`
+> would put a `.venv` back in a checkout without touching a single tracked file.
 
 101 `.py` files. `Cargo.lock`, regenerated offline, loses **13 crates**: `pyo3` and its four
 support crates, `numpy`, `ndarray`, `heck`, `indoc`, `memoffset`, `rustc-hash`,

@@ -18,8 +18,12 @@
 //! `pyo3`/`numpy` dependencies, the maturin `pyproject.toml`, the mixed-layout
 //! `python/` package, and the `build.rs` whose only consumer was that
 //! binding), the `scripts/tests` pytest harness, the `scripts/tools` legacy
-//! pipeline, the `scripts/support_placement` engine, and the venv that served
-//! them. The parity knowledge those suites carried had already been ported:
+//! pipeline, the `scripts/support_placement` engine, and the tracked config
+//! that declared the venv serving them (`pyproject.toml`, `uv.lock`,
+//! `scripts/build_kernel.sh`). The `.venv/` directory itself is gitignored and
+//! was never tracked, so no commit deleted it — a checkout's copy has to be
+//! removed by hand, which is the whole reason this guard walks ignored paths.
+//! The parity knowledge those suites carried had already been ported:
 //! `frozen_baseline`, `roundtrip`, `synth_compare` and the support-parity
 //! tests are Rust-native and run against committed corpus and baseline
 //! artifacts, which is why the deletion cost no coverage.
