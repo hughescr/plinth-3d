@@ -441,3 +441,127 @@ retirement (13) gated on M1 parity. Export work is downstream of all frozen
 digests and file-disjoint from the active plinth-support gate work — proven
 live by the FU-8f merge that landed mid-survey touching zero export-path
 files.
+
+---
+
+## E2 LANDED 2026-08-07 — the first end-to-end composition
+
+*Everything above this line is the original survey and is left standing
+verbatim. This section records what happened when E2 was executed, including
+the two places where measurement contradicted the survey's expectations.*
+
+```
+Branch:   feature/export-first-artifact (E1 landed at 18aef8e)
+Base:     develop @ b0324fd
+Artifact: exports/sphere-first-artifact.chitubox (gitignored run output)
+```
+
+### What landed
+
+Three files, all test/example scope; **no library code changed anywhere**:
+
+| Path | What |
+|---|---|
+| `crates/plinth-pipeline/examples/shared/first_artifact_chain.rs` | the composition, shared verbatim by the test and the example |
+| `crates/plinth-pipeline/tests/first_artifact.rs` | the integration gate (2 tests) |
+| `crates/plinth-pipeline/examples/first_artifact.rs` | writes the owner's E3 artifact into `exports/` |
+
+`chitubox_io` and `plinth-verify` became **dev-dependencies** of
+`plinth-pipeline`; its library boundary still imports only `plinth-emit`'s
+report types, exactly as F13 describes.
+
+The shared module lives under `examples/shared/` because cargo's example
+auto-discovery only claims `examples/*.rs` and `examples/*/main.rs`, so a file
+one directory down is not a build target. Both consumers reach it by `#[path]`.
+The point is that the artifact handed to the owner and the artifact the test
+gates are produced by the same code, not by two copies that drift.
+
+### F12 is closed
+
+`run_support` → `FinalSupportAuthority::into_supported_model` →
+`plinth_emit::write` now runs on real models. The corpus Sphere produces a
+416,256-byte `.chitubox` with 47 support records, and the emitted file survives
+an independent re-read.
+
+The `SupportedModel` handed to `plinth-emit` came from a sealed run whose
+snapshot digest is **17667468971446251870** — bit-for-bit the frozen OD-8
+Sphere digest. That is F18's downstream claim demonstrated rather than argued:
+the export path consumed the identical sealed plan the census measures. It is
+deliberately **not** asserted in the test (OQ-3: digest authority stays with
+`plinth-support`'s own goldens); it is recorded here as evidence.
+
+### What the artifact contains, re-derived from the bytes on disk
+
+| Quantity | Value |
+|---|---|
+| model triangles | 4,760 |
+| support records | 47 |
+| by wire type | TAPER 7, JOINER 8, FLARE 6, PAD_OR_BRIDGE 11, TIP 7, SHAFT 8 |
+| frustum / sphere / raft families | 21 / 15 / 11 — all three exercised |
+| outward-wound record meshes | 47 of 47 |
+| smallest record signed volume | 0.7064 mm³ |
+| model mesh signed volume | 4,174.75 mm³ |
+| embedded preview | 26,996 B, byte-equal to E1's native fallback asset |
+| `plinth-verify` format gate | passed |
+| file size | 416,256 B |
+
+Winding is re-derived from the binary32 vertices *on disk*, not trusted from
+the producer: for a closed surface the signed volume is translation invariant,
+so a strictly positive value is exactly the outward-winding property
+`wind_outward` enforces, independently recomputed after a round trip through
+the container.
+
+### OQ-1 is answered, and the survey's guess was wrong in an interesting way
+
+OQ-1 asked whether `plinth_hollow::run` completes on corpus models, and
+recommended falling back to the typed solid decision *if a model refuses*.
+
+**It does not refuse.** The corpus Sphere hollows, plans drains, and drills
+successfully, returning `AwaitingInternalSupport` — a proved drilled shell
+paired with the untouched oriented solid.
+
+**The refusal is one stage later.** The sealed support run rejects that
+14,526-face drilled shell during `Preparation`
+(`max_grid_bytes=67108864`, `knn_max_work=100000000`). So the drilled hollow is
+*producible but not supportable* by today's engine. Recorded as **FU-28**.
+
+The seam therefore tries the real thing and reports which geometry won, as a
+typed `SupportedGeometry` value rather than a comment:
+
+1. `HollowStageDecidedSolid` — support planning consumed the hollow stage's own
+   output; no fallback involved. This is `make_overhang_table`.
+2. `DrilledShellSealed` — the drilled shell sealed. Nothing reaches this today.
+3. `DrilledShellRefusedBySupport { drilled_faces, refusal }` — the Sphere.
+   The oriented-solid reserve carried the model instead.
+
+Three honesty notes on that third path, since it is the one that ships:
+
+- The fallback uses the **same** `solid_decision(BelowThreshold)` handoff that
+  every existing sealed-run gate and the entire OD-8 census already use. That
+  is F14's caveat, inherited deliberately, so the Sphere artifact sits on
+  exactly the same evidentiary footing as the seven frozen digests — not on a
+  new and weaker one.
+- It is reported, not hidden: the enum variant carries the drilled face count
+  and the runner's own refusal string with the caps it was measured against.
+- The two alternatives were rejected as fabrications. `into_solid_fallback`
+  stamps a named **A5** refusal code into the permanent record and A5 never
+  ran; `approve_hollow` asserts A5 approved. A5 internal-support planning does
+  not exist anywhere in this workspace.
+
+The test pins the third variant by equality, so the day the drilled shell
+becomes supportable — or the hollow stage changes its verdict — the gate fails
+and says so, rather than silently changing what the owner is handed.
+
+### What is deliberately not asserted
+
+No new frozen digest, per OQ-3. Concurrent `plinth-support` gate work
+legitimately moves member counts; every assertion here is a completion,
+structural or self-consistency property that a changed member count cannot
+break. `support_runner_integration.rs` keeps digest authority.
+
+### Still open
+
+E3 remains the only semantic oracle. A structural pass is not a claim that
+ChituBox will load the file (`chitubox_io/src/lib.rs:14-16`), and this artifact
+is the first from-scratch project the native engine has ever produced from its
+own sealed plan. On refusal, follow OQ-4.
