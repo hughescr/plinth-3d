@@ -915,6 +915,27 @@ sequenced as its own later phase (G5), after a treant run completes the gate.
 See `support-resource-caps-2026-08-05.md` for the counter table, the
 preflight-versus-exact-plan asymmetry, and the bit-identity evidence.
 
+**Addendum 2026-08-07 (FU-8f phase G5) — the repricing above has landed, and its
+precondition is corrected rather than quietly dropped.** All four caps remain at
+their inherited values and the 32,848,040 B byte term is unchanged to the byte.
+The sentence "no charged operation count moved" is now history: G5 retired
+`rows × contacts × (owner_log + 4)` and replaced it with
+`Σ |eligible_owners| × (log + 2) × 2` from the counts plus
+`cells × (LOAD_WITNESS_SLOTS + 5)` from the exact cell count, so on the treant's
+gate batch that term goes 4,342,523,562 → 207,690,028 + 65,685,144 and the
+finalizer's whole exact plan goes 4,714,113,843 → 644,970,917. **The
+precondition stated above — "after a treant run completes the gate" — was NOT
+met, and G5 ran anyway.** That is deliberate and is stated so it is not read as
+an oversight: the precondition belongs to **ruling R-f**, which governs
+*re-deriving the batch-product coefficients from a completed run*, and G5
+re-derives neither coefficient. What G5 does is correct a charge that was
+over-stating executed work by a factor of ~21 on the term concerned; that is a
+falling demand, it can create no refusal, and it needs no completed run to be
+true. R-f is still unsatisfied and both coefficients are still not re-derived.
+The preflight/exact-plan asymmetry the paragraph above describes for **bytes**
+now holds for **operations** too, for the same reason and with the same
+consequence: a later refusal, never unafforded execution.
+
 ### 3.10.9 Support execution-authority caps — the unmeasured inventory
 
 Owner ruling **R5, 2026-08-05**. §3.10.8 registered six constants and left the
@@ -1206,6 +1227,47 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > cap to raise either. Full derivation:
 > `support-resource-caps-2026-08-05.md` §12, and `CURRENT-STATUS.md` under
 > *FU-8e phases E1–E4 landed 2026-08-07* and *FU-8f opened 2026-08-07*.
+>
+> **Addendum 2026-08-07 — FU-8f phase G5 landed; everything above stands, and for
+> the first time since F3 the demand these coefficients price MOVES — downward.**
+> G5 repriced `load_resource_plan_from_counts`'s scan term from
+> `rows × contacts × (owner_log + 4)` — a model of the dense `contacts × rows`
+> scan that phase G1 had *already* replaced with a CSR transpose, and which G1
+> deliberately left standing and over-stating — to what the transpose really
+> spends: `Σ |eligible_owners| × (log + 2) × 2` for its two eligibility
+> traversals plus `cells × (LOAD_WITNESS_SLOTS + 5)` for the fill and the scan.
+> Measured on the treant's round-1 merge-gate batch, 2026-08-07, on a **quiet**
+> machine, one instrumented release run whose instrumentation was reverted by
+> editing before the gates:
+>
+> | term | before G5 | after G5 |
+> |---|---:|---:|
+> | `baseline_rows` | 554,926,572 | 554,926,572 |
+> | load (`specialized_load_resource_plan`) | 5,543,831,115 | **795,766,031** |
+> | load proposal bound | 1,048,982,627 | 1,048,982,627 |
+> | **gate `load` term** | **6,592,813,742** | **1,844,748,658** |
+> | `demand_rows` | 42,949,185 | 42,949,185 |
+> | proposal work | 2,083,167,818 | 2,083,167,818 |
+> | **stated demand** | **9,273,857,317** (26.2 %) | **4,525,792,233** (12.8 %) |
+> | `exact_operations` | **10,457,910,996** (29.5 %) | **5,709,845,912** (16.1 %) |
+>
+> The fall is **4,748,065,084 at both**, to the unit, and it is *entirely* the
+> load term. **BOTH coefficients are UNCHANGED and neither is re-derived**, and
+> for the gate that is arithmetic (the demand fell, the cap did not move) while
+> for the load coefficient it is a deliberate refusal: the repriced load demand
+> divides to 4.46 units per batch element where the derivation input was 31, and
+> applying the rule would take `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` from 64 to
+> **8** — a cap *reduction*, which is the direction that creates refusals. FU-23
+> and R4 trigger re-derivation on a **second specimen**, not on the same specimen
+> getting cheaper. The derivation input of record stays the 2026-08-06 figure.
+> **The finding that follows:** at 795,359,775 the treant's load demand is now
+> *below* the 2,000,000,000 flat floor, so no corpus model leaves that floor any
+> more; the scaling is kept regardless, because removing it would be a cap
+> change. **Ruling R-f is STILL not satisfied** — G5 ran no completion attempt,
+> and G4's two attempts are EXCEEDS-TIMEBOX at 602 s with 436 and 430 rounds
+> counted. R4's n = 1 marking is again unaffected. Full derivation:
+> `support-resource-caps-2026-08-05.md` §15, and `CURRENT-STATUS.md` under
+> *FU-8f phase G5 landed 2026-08-07*.
 
 ### 3.11 NOT constants — resource guards
 

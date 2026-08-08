@@ -371,8 +371,54 @@ const TREANT_GATE_OPERATIONS_REQUIRED: usize = 12_714_828_544;
 /// the same `rows=130548` with `materialized=11421470912`. No 134,368-row load
 /// batch is planned anywhere in the corpus; had one been, it would have
 /// materialized 11,755,675,072 and taken the census's widest-per-kind slot.
+///
+/// **Dated addendum 2026-08-07 — FU-8f phase G5. Every sentence above is left
+/// standing and the demand below has since moved, downward, by 4,607,175,844.**
+/// G5 repriced `load_resource_plan_from_counts`'s scan term from
+/// `rows x contacts x (owner_log + 4)` — the model of a dense `contacts x rows`
+/// scan that phase G1 had already replaced with a CSR transpose — to the
+/// transpose's own `Σ |eligible_owners|`-shaped search term plus a
+/// `cells`-shaped fill-and-scan term. On this same 130,548-row batch,
+/// re-measured on a **quiet** machine at the G4 tip plus G5, 2026-08-07:
+/// **5,402,535,619 → 795,359,775**, a 6.79x fall.
+///
+/// **`TREANT_LOAD_OPERATIONS_REQUIRED` is deliberately NOT re-pinned to the new
+/// figure**, and the reason is a cap, not an oversight. This constant is the
+/// *derivation input* of the load batch-product coefficient:
+/// `the_batch_product_coefficients_are_the_rule_applied_to_their_own_observations`
+/// asserts `next_power_of_two(2 * ceil(demand / units)) == 64`, and the
+/// repriced demand divides to 5 rather than 31, which would re-derive that
+/// coefficient to **8** — that is, **lower a cap by 8x**. G5's mandate is that
+/// no cap is raised, lowered or touched, so the observation of record for that
+/// derivation stays the 2026-08-06 one, dated and attributed here. Re-deriving
+/// it is a separate decision under FU-23/R4, wants a second specimen rather
+/// than the same specimen getting cheaper, and would be a cap *reduction* — the
+/// direction that can create refusals.
+///
+/// **Correction 2026-08-07 (verification fix): the hypothetical coefficient
+/// above is mis-derived from this comment's own figures.** The rule it quotes,
+/// `next_power_of_two(2 * ceil(demand / units))`, takes the ceiling FIRST and
+/// `next_power_of_two` rounds UP: the repriced demand does divide to 5
+/// (`795_359_775_u64.div_ceil(178_460_483)`), 2 x 5 = 10, and
+/// `10_u64.next_power_of_two()` = **16**, not 8 — the earlier text rounded
+/// 2 x 4.46 down and skipped the `div_ceil`. 64 -> 16 would **lower the cap
+/// 4x**, not 8x. The refusal to re-derive and its FU-23/R4 reasoning stand
+/// exactly as written; only the arithmetic of the hypothetical is corrected.
 const TREANT_LOAD_ROWS: usize = 130_548;
 const TREANT_LOAD_OPERATIONS_REQUIRED: usize = 5_402_535_619;
+/// The same batch's demand under FU-8f phase G5's repriced model, measured
+/// 2026-08-07 on a quiet machine, one instrumented release run, the
+/// instrumentation reverted by editing before the gates.
+///
+/// Pinned **beside** its predecessor rather than replacing it, because the two
+/// answer different questions: the one above is what the coefficient was
+/// derived from, this one is what the treant now asks for. What it is here to
+/// assert is a **finding**, and
+/// `the_treant_batch_scaled_caps_admit_its_measured_demands_with_headroom`
+/// states it: the repriced demand no longer exceeds the flat floor, so the
+/// treant no longer needs the batch-product scaling at the load stage at all.
+/// The scaling is kept regardless, because removing it would be a cap change.
+const TREANT_LOAD_OPERATIONS_REPRICED: usize = 795_359_775;
 /// Its 39,223-proposal merge gate, on the *same* batch shape: the gate
 /// re-evaluates every contact once per proposal variant, so the plan is
 /// quadratic in the batch. FU-8c; this cap must keep refusing it.
@@ -482,6 +528,29 @@ fn the_treant_batch_scaled_caps_admit_its_measured_demands_with_headroom() {
     assert!(
         TREANT_LOAD_OPERATIONS_REQUIRED > load_floor,
         "and it must be a demand the flat floor really did refuse"
+    );
+
+    // FU-8f phase G5 (2026-08-07). The demand above is the 2026-08-06
+    // observation the coefficient was derived from; the repriced model states
+    // 795,359,775 for the same batch. Two things are asserted about it, and the
+    // second is the finding.
+    const {
+        assert!(
+            TREANT_LOAD_OPERATIONS_REPRICED < TREANT_LOAD_OPERATIONS_REQUIRED,
+            "the repricing must move the demand DOWNWARD; a rise would be a cap \
+             question and G5 raises, lowers and touches no cap"
+        );
+    }
+    assert!(
+        TREANT_LOAD_OPERATIONS_REPRICED <= load_cap,
+        "the repriced demand must still be admitted"
+    );
+    assert!(
+        TREANT_LOAD_OPERATIONS_REPRICED < load_floor,
+        "FINDING: after G5 the treant's load demand no longer exceeds the FLAT \
+         floor, so the batch-product scaling this cap adds is no longer load- \
+         bearing for the only model that ever needed it. Kept anyway — removing \
+         it would be a cap change, which this phase does not make."
     );
 }
 

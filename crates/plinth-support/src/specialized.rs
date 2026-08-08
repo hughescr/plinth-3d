@@ -265,6 +265,38 @@ impl SpecializedLimits {
     /// unsatisfied**. See `support-resource-caps-2026-08-05.md` §12 and
     /// `CURRENT-STATUS.md` (*FU-8e phases E1–E4 landed 2026-08-07*).
     ///
+    /// **Dated addendum 2026-08-07 — FU-8f phase G5. Every block above is left
+    /// standing exactly as written, and for the first time since F3 the demand
+    /// this limit is handed MOVES — downward, by 4,748,065,084.** G5 repriced
+    /// `load_resource_plan_from_counts`'s scan term from
+    /// `rows × contacts × (owner_log + 4)` — a model of the dense
+    /// `contacts × rows` scan that phase G1 had *already* replaced with a CSR
+    /// transpose, and which G1 deliberately left standing and over-stating — to
+    /// what the transpose really spends: `Σ |eligible_owners| × (log + 2) × 2`
+    /// for its two eligibility traversals, plus `cells × (LOAD_WITNESS_SLOTS +
+    /// 5)` for the fill and the scan, the latter charged from the exact cell
+    /// count that no preflight can state. The demand becomes
+    ///
+    /// ```text
+    /// baseline_rows 554,926,572 + load 1,844,748,658
+    ///   + demand_rows 42,949,185 + proposal work 2,083,167,818
+    ///   = 4,525,792,233   against 35,445,500,736  -> FITS (12.8 % of cap)
+    /// ```
+    ///
+    /// with `exact_operations` **5,709,845,912** (16.1 %). The `load` line is
+    /// `specialized_load_resource_plan`'s own 5,543,831,115 → **795,766,031**
+    /// plus the **unchanged** 1,048,982,627 proposal bound; the other three
+    /// lines are byte-identical to F3's. Measured on the treant's round-1
+    /// merge-gate batch, 2026-08-07, on a **quiet** machine, one instrumented
+    /// release run whose instrumentation was reverted by editing before the
+    /// gates. **The cap still did not move and no cap code was touched — a
+    /// falling demand can create no refusal.** What stops the treant is still
+    /// wall-clock: G4's two attempts are EXCEEDS-TIMEBOX at 602 s with 436 and
+    /// 430 merge rounds counted, so **ruling R-f remains unsatisfied** and
+    /// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is still not re-derived. See
+    /// `support-resource-caps-2026-08-05.md` §15 and `CURRENT-STATUS.md`
+    /// (*FU-8f phase G5 landed 2026-08-07*).
+    ///
     /// **Ruling note 2026-08-06 on the 12,714,828,544 quoted at the top of this
     /// comment.** It is a dated FU-8b-era charge for the treant's proposal-free
     /// gate batch, quoted here only for the face-count spread it demonstrates
@@ -1180,7 +1212,7 @@ impl SpecializedContactPlan {
             hash.usize(vector.load_violation_count);
             hash.usize(vector.unsupported_specialized_count);
         }
-        hash.usize(self.gate_evidence.evaluated_pair_count);
+        hash.usize(self.gate_evidence.gathered_pair_count);
         hash.usize(self.gate_evidence.accepted_pair_count);
         hash.usize(self.gate_evidence.deep_clone_count);
         hash.usize(self.gate_evidence.max_commit_bytes);
@@ -1490,7 +1522,48 @@ impl FrozenSpecializedGateVector {
 pub struct SpecializedGateEvidence {
     pub baseline: FrozenSpecializedGateVector,
     pub accepted: FrozenSpecializedGateVector,
-    pub evaluated_pair_count: usize,
+    /// Merge proposals the tournament **gathered**, summed over its rounds.
+    ///
+    /// Renamed from `evaluated_pair_count` by FU-8f phase G3, 2026-08-07, and
+    /// the rename corrects a mis-statement that predates the phase.  The field
+    /// has always been assigned `total_proposals`, the running sum of
+    /// `gather_pair_proposals`' output, incremented immediately after the
+    /// gather and checked against `max_merge_total_proposals` — so it counted
+    /// proposals *offered to* the gate, never proposals the gate evaluated.
+    /// The two happened to be close while the gate evaluated every variant it
+    /// was handed; under G3's prefix acceptance the gap on the Weeping Treant
+    /// v1.2 is 39,223 gathered against 1 evaluated, and a field named
+    /// "evaluated" counting "gathered" would be a quiet falsehood at three
+    /// orders of magnitude.
+    ///
+    /// **Nothing frozen moves with the name.**  The sealed digest hashes this
+    /// field's *value* (`hash.usize`), not its identifier, so all seven OD-8
+    /// census digests are byte-identical across the rename; the cost is prose,
+    /// which is what the every-record-site rule exists to pay.
+    ///
+    /// What the gate really evaluated is [`Self::evaluated_variant_count`].
+    pub gathered_pair_count: usize,
+    /// Gate variants the stage actually **evaluated**, summed over every
+    /// `evaluate_gate_batch` call the specialized plan made — the two
+    /// proposal-free batches (the initial baseline and the terminal audit, one
+    /// variant each) plus each merge round's executed prefix.
+    ///
+    /// FU-8f phase G3, 2026-08-07.  This is the *executed* counterpart to the
+    /// *charged* `plan.variants`, in the same "state a bound from the plan,
+    /// meter the real spend as it runs" shape `executed_load_work` uses against
+    /// `load_delta_limit`.  The batch is admitted on what it **may** spend;
+    /// this reports what it **did** spend.  Under
+    /// `GateBatchAcceptance::StopAtFirstNotWorse` it is at most `plan.variants`
+    /// per round.
+    ///
+    /// **Deliberately NOT part of the sealed digest**, said here rather than
+    /// left to be discovered.  The digest seals the plan the stage *produced*;
+    /// this counts how the stage *reached* it.  Hashing it would make every
+    /// frozen corpus digest a function of an acceptance optimisation, so a
+    /// later phase that evaluated fewer variants for a bit-identical answer
+    /// would break OD-8 while changing nothing observable about the plan.  The
+    /// precedent is [`Self::coalesced_seat_count`], reported and unhashed.
+    pub evaluated_variant_count: usize,
     pub accepted_pair_count: usize,
     /// Seats removed by the terminal exactly-coincident regular coalescing
     /// pass.  That pass is canonicalization, not the gated merge tournament,
@@ -1573,7 +1646,42 @@ pub enum SpecializedError {
     InvalidGateWindow,
     #[error("specialized gate resource arithmetic overflowed")]
     GateResourceOverflow,
-    #[error("specialized gate route preflight did not match execution planning")]
+    /// The batch did not execute the prefix of the work it planned.
+    ///
+    /// # `GateRoutePlanMismatch` — re-founded a second time (FU-8f phase G3, 2026-08-07)
+    ///
+    /// `GateRoutePlanMismatch` is re-founded for the second time, and it is
+    /// weaker again — said plainly rather than left to be discovered.  At F1–F2
+    /// it compared a plan against a **second plan**.  FU-8d phase F3 re-founded
+    /// it as plan-vs-execution, attesting *"the batch executed the work it
+    /// planned, once per proposal and **in order**"*, counting `touched_rows`
+    /// from `touched.len()` as each delta filled and comparing measured peak
+    /// bytes.  FU-8f severs charged-batch from executed-batch, so *"every
+    /// planned proposal was executed"* is no longer true and **must not be
+    /// claimed**.
+    ///
+    /// What it attests now: **"the batch executed a prefix of the work it
+    /// planned — the first `executed_variant_count` variants, in plan order,
+    /// each exactly once, at the peak the plan stated"**, together with
+    /// `executed_variant_count <= plan.variants` and the equality case.  The
+    /// three fingerprints are therefore compared **prefix-wise**: the executed
+    /// nearest plan must equal the plan's own first `executed_variant_count`
+    /// records, not its total.
+    ///
+    /// What is lost is the attestation that the tail was executed at all — and
+    /// the tail is precisely what the owner's ruling authorises not executing:
+    ///
+    /// > *"2.1 hours down to 28 minutes seems worth it; anywhere else that we
+    /// > can also still shave more time off?"* — Craig, 2026-08-07
+    ///
+    /// The trade is deliberate and is the ruling's, not the implementation's.
+    /// What is **not** weakened: the batch is still admitted on the whole
+    /// batch's charge, so nothing is executed that was not first afforded; and
+    /// the no-safe-proposal path still evaluates every variant, so the refusal
+    /// path's attestation is exactly F3's.
+    ///
+    /// The mechanism is [`GateWholeRoutePlan::executed_prefix`].
+    #[error("specialized gate execution did not match the prefix of its route plan")]
     GateRoutePlanMismatch,
     #[error("specialized route-keyed coverage nearest query failed: {0}")]
     CoverageNearest(String),
@@ -2834,8 +2942,16 @@ fn consolidate(
         coverage_radius,
         selection_config.voxel_pitch_mm.get().powi(2),
         limits,
-    )?[0];
-    let mut total_proposals = 0usize;
+        // A proposal-free batch has one variant and no acceptance question to
+        // answer; `EvaluateAll` says so rather than relying on the loop's
+        // bound to hide the difference.
+        GateBatchAcceptance::EvaluateAll,
+    )?;
+    // FU-8f phase G3: variants the stage really evaluated, summed over every
+    // batch — the two proposal-free calls and each round's executed prefix.
+    let mut evaluated_variants = initial_baseline.executed_variant_count;
+    let initial_baseline = initial_baseline.baseline;
+    let mut gathered_proposals = 0usize;
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
@@ -2855,19 +2971,19 @@ fn consolidate(
                 )?;
             }
         }
-        total_proposals = total_proposals
+        gathered_proposals = gathered_proposals
             .checked_add(proposals.len())
             .ok_or(SpecializedError::GateResourceOverflow)?;
-        if total_proposals > limits.max_merge_total_proposals {
+        if gathered_proposals > limits.max_merge_total_proposals {
             return Err(SpecializedError::MergeTotalProposalLimit {
-                required: total_proposals,
+                required: gathered_proposals,
                 limit: limits.max_merge_total_proposals,
             });
         }
         if proposals.is_empty() {
             break;
         }
-        let vectors = evaluate_gate_batch(
+        let outcome = evaluate_gate_batch(
             contacts,
             &proposals,
             proposals
@@ -2887,9 +3003,14 @@ fn consolidate(
             coverage_radius,
             selection_config.voxel_pitch_mm.get().powi(2),
             limits,
+            // FU-8f phase G3: the merge round asks one question — "is there a
+            // proposal that is not worse?" — and the first hit answers it.
+            GateBatchAcceptance::StopAtFirstNotWorse,
         )?;
-        let baseline = vectors[0];
-        let Some(proposal_index) = first_safe_proposal(&vectors, baseline) else {
+        evaluated_variants = evaluated_variants
+            .checked_add(outcome.executed_variant_count)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        let Some((proposal_index, _)) = outcome.accepted else {
             break;
         };
         let required_iterations = iterations
@@ -2927,7 +3048,7 @@ fn consolidate(
     // terminal `gate_not_worse` audit below observe the coalesced result.
     let coalesced_seat_count =
         coalesce_exact_regular_seats(contacts, limits, &mut telemetry, iterations)?;
-    let accepted_vector = evaluate_gate_batch(
+    let accepted_outcome = evaluate_gate_batch(
         contacts,
         &[],
         0,
@@ -2944,14 +3065,22 @@ fn consolidate(
         coverage_radius,
         selection_config.voxel_pitch_mm.get().powi(2),
         limits,
-    )?[0];
+        // The terminal audit wants the coalesced plan's own vector, not an
+        // acceptance decision.
+        GateBatchAcceptance::EvaluateAll,
+    )?;
+    evaluated_variants = evaluated_variants
+        .checked_add(accepted_outcome.executed_variant_count)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let accepted_vector = accepted_outcome.baseline;
     if !gate_not_worse(accepted_vector, initial_baseline) {
         return Err(SpecializedError::MergeGateRegression);
     }
     Ok(SpecializedGateEvidence {
         baseline: initial_baseline,
         accepted: accepted_vector,
-        evaluated_pair_count: total_proposals,
+        gathered_pair_count: gathered_proposals,
+        evaluated_variant_count: evaluated_variants,
         accepted_pair_count: iterations,
         coalesced_seat_count,
         deep_clone_count: telemetry.deep_clone_count,
@@ -3036,6 +3165,24 @@ fn gate_not_worse(
         && candidate.unsupported_specialized_count <= baseline.unsupported_specialized_count
 }
 
+/// The reference oracle for [`GateBatchAcceptanceFold`], retained test-only
+/// (FU-8f phase G3, 2026-08-07).
+///
+/// This **was** the production acceptance rule: `evaluate_gate_batch` returned
+/// a materialised `Vec<FrozenSpecializedGateVector>` with one entry per variant
+/// and the tournament called this on it.  It is a `position`, not a search for
+/// a best — so the answer never depended on anything past the index it
+/// returns, and everything after that index was built and discarded.  On the
+/// Weeping Treant v1.2 that was 39,223 variants built to answer a question
+/// settled by the first.
+///
+/// It is retained rather than deleted for the same reason FU-8c retained the
+/// full nearest sweep and G1 retained the `contacts × rows` scan: the prefix
+/// path is proved *against* it, on the same inputs, rather than argued.
+/// `fu8f_prefix_acceptance_matches_the_full_evaluation` is that proof, and
+/// `fu8f_forced_late_safe_proposal_stops_at_the_same_index` is the case the
+/// corpus cannot supply.
+#[cfg(test)]
 fn first_safe_proposal(
     vectors: &[FrozenSpecializedGateVector],
     baseline: FrozenSpecializedGateVector,
@@ -3044,6 +3191,126 @@ fn first_safe_proposal(
         .iter()
         .skip(1)
         .position(|vector| gate_not_worse(*vector, baseline))
+}
+
+/// How many of a gate batch's variants the evaluation is required to run
+/// (FU-8f phase G3, 2026-08-07).
+///
+/// This is a statement about *execution*, never about *charging*.  Both modes
+/// are handed a batch that was priced, preflighted and admitted on all
+/// `plan.variants`; they differ only in whether the loop is permitted to stop
+/// once the answer is settled.  See [`GateBatchOutcome::executed_variant_count`]
+/// for what the executed side then reports, and
+/// [`SpecializedError::GateRoutePlanMismatch`] for what the prefix can still be
+/// held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateBatchAcceptance {
+    /// Evaluate every variant the plan prices, whatever the answer.
+    ///
+    /// The proposal-free calls (`proposals == &[]`, one variant), the terminal
+    /// audit and the tests use this, and for them it is the *only* correct
+    /// mode: they want the baseline vector itself, not an acceptance decision.
+    /// Behaviour under this mode is exactly what it was before G3.
+    EvaluateAll,
+    /// Stop after the first proposal variant that is [`gate_not_worse`] than
+    /// the batch's baseline.
+    ///
+    /// The tournament's merge rounds, and the whole of G3's saving.  The index
+    /// this returns is the index the retained `first_safe_proposal` oracle
+    /// returns, **by the definition of `position`**: evaluating in gather order
+    /// and stopping at the first hit visits exactly the entries `position`
+    /// would have inspected before returning, in the same order, and reads the
+    /// same predicate on each.  Nothing downstream ever read a later entry —
+    /// the tournament consumed the vector through `vectors[0]` and this call
+    /// alone.
+    StopAtFirstNotWorse,
+}
+
+/// What a gate batch decided, and what it spent deciding it (FU-8f phase G3).
+///
+/// It replaces the `Vec<FrozenSpecializedGateVector>` the batch used to return.
+/// Under [`GateBatchAcceptance::StopAtFirstNotWorse`] that vector is no longer
+/// materialised at all — 39,224 entries on the treant — and the worst case does
+/// *strictly less* work than before, one inlined [`gate_not_worse`] per variant
+/// instead of a `position` pass over a vector that had to be built first.
+struct GateBatchOutcome {
+    /// Variant 0: the batch's own baseline, unchanged in meaning and value.
+    baseline: FrozenSpecializedGateVector,
+    /// The accepted proposal's index in gather order and its frozen vector, or
+    /// `None` when no variant was [`gate_not_worse`] than the baseline.
+    accepted: Option<(usize, FrozenSpecializedGateVector)>,
+    /// Variants actually evaluated — the prefix, **not** the plan.
+    ///
+    /// Metered beside `executed_touched_rows` and `executed_load_work`, in the
+    /// same "state a bound from the plan, meter the real spend as it runs"
+    /// shape as `load_delta_limit`.  The invariant, asserted at the call site:
+    /// `executed_variant_count <= plan.variants`, with equality under
+    /// `StopAtFirstNotWorse` **exactly** when `accepted` is `None`, because the
+    /// only way to reach the end of the loop without stopping is to have found
+    /// no safe proposal.  Under `EvaluateAll` it is `plan.variants` always.
+    executed_variant_count: usize,
+}
+
+/// The acceptance rule, folded over variants as they are evaluated
+/// (FU-8f phase G3).
+///
+/// Extracted rather than written inline so the rule can be driven directly by
+/// the equivalence tests against the retained [`first_safe_proposal`] oracle:
+/// what is under test is *which index the rule picks and when it stops*, and
+/// that is exactly this type.  The per-variant vectors it is fed are built by
+/// code G3 does not touch.
+struct GateBatchAcceptanceFold {
+    acceptance: GateBatchAcceptance,
+    baseline: Option<FrozenSpecializedGateVector>,
+    accepted: Option<(usize, FrozenSpecializedGateVector)>,
+    executed_variant_count: usize,
+}
+
+impl GateBatchAcceptanceFold {
+    const fn new(acceptance: GateBatchAcceptance) -> Self {
+        Self {
+            acceptance,
+            baseline: None,
+            accepted: None,
+            executed_variant_count: 0,
+        }
+    }
+
+    /// Feed variant `variant`'s frozen vector.  Returns `true` when the batch
+    /// may stop — i.e. when nothing later can change the outcome and the mode
+    /// permits not computing it.
+    ///
+    /// The `self.accepted.is_none()` guard is what makes this a `position`
+    /// rather than a `rposition` under `EvaluateAll`: the first hit wins there
+    /// too, so the two modes never disagree about *which* proposal is accepted,
+    /// only about how many variants are built after the decision.
+    fn evaluate(&mut self, variant: usize, vector: FrozenSpecializedGateVector) -> bool {
+        debug_assert_eq!(
+            variant, self.executed_variant_count,
+            "gate variants must be fed in plan order, exactly once each"
+        );
+        self.executed_variant_count += 1;
+        let Some(baseline) = self.baseline else {
+            // Variant 0 *is* the baseline; there is nothing yet to compare it
+            // against, and the batch can never stop on it.
+            self.baseline = Some(vector);
+            return false;
+        };
+        if self.accepted.is_none() && gate_not_worse(vector, baseline) {
+            self.accepted = Some((variant - 1, vector));
+        }
+        self.accepted.is_some() && self.acceptance == GateBatchAcceptance::StopAtFirstNotWorse
+    }
+
+    fn finish(self) -> GateBatchOutcome {
+        GateBatchOutcome {
+            baseline: self
+                .baseline
+                .expect("every gate batch evaluates at least its baseline variant"),
+            accepted: self.accepted,
+            executed_variant_count: self.executed_variant_count,
+        }
+    }
 }
 
 /// Worst-case bytes a shared distinct-face buffer may hold.
@@ -3773,7 +4040,8 @@ fn evaluate_gate_batch(
     coverage_radius: f64,
     coverage_area_floor_mm2: f64,
     limits: SpecializedLimits,
-) -> Result<Vec<FrozenSpecializedGateVector>, SpecializedError> {
+    acceptance: GateBatchAcceptance,
+) -> Result<GateBatchOutcome, SpecializedError> {
     let mut preflight_telemetry = GatePreflightTelemetry::default();
     gate_header_preflight(
         contacts.len(),
@@ -3951,7 +4219,17 @@ fn evaluate_gate_batch(
         limits,
         &plan,
         |whole_gate_route_plan| {
-            let mut vectors = Vec::with_capacity(plan.variants);
+            // FU-8f phase G3: the `Vec<FrozenSpecializedGateVector>` that used
+            // to be built here — 39,224 entries on the treant, of which the
+            // tournament read two — is gone.  The acceptance rule folds over
+            // the variants as they are produced instead, and under
+            // `StopAtFirstNotWorse` the loop stops as soon as the answer is
+            // settled.  `plan.vector_bytes` is deliberately still charged for
+            // the vector that is no longer materialised: open question 4,
+            // answered NOT IN G3 — moving a charged byte term alongside a
+            // control-flow change mixes two record sweeps, and charging more
+            // than is spent refuses nothing that was not already refused.
+            let mut acceptance_fold = GateBatchAcceptanceFold::new(acceptance);
             let mut executed_nearest = GateNearestBatchPlan::seeded();
             // The batch's one baseline nearest sweep.  Every proposal variant
             // below reads its answers and rewrites only the rows its own merged
@@ -4185,30 +4463,84 @@ fn evaluate_gate_batch(
                         layers,
                         attach_reach,
                     );
-                    vectors.push(FrozenSpecializedGateVector::from_live(
-                        coverage_objective,
-                        load_violations,
-                        unsupported_specialized_count,
-                    ));
+                    let settled = acceptance_fold.evaluate(
+                        variant,
+                        FrozenSpecializedGateVector::from_live(
+                            coverage_objective,
+                            load_violations,
+                            unsupported_specialized_count,
+                        ),
+                    );
                     // Restore the baseline rows this variant borrowed, so the
-                    // next proposal starts from the batch's own answers.
+                    // next proposal starts from the batch's own answers.  Run
+                    // before the break, not after it: the restore is what makes
+                    // `baseline_nearest` the batch's answers again, and a
+                    // stopped batch must leave them as clean as a finished one.
                     for &row in &touched_rows {
                         working_nearest[row] = baseline_nearest[row];
                     }
+                    if settled {
+                        break;
+                    }
                 }
             }
+            let outcome = acceptance_fold.finish();
+            // FU-8f phase G3, the executed/charged invariant, asserted where
+            // both numbers are in hand.  `executed_variant_count <=
+            // plan.variants` holds structurally — the loop is bounded by
+            // `plan.variants` and each pass evaluates exactly one variant — and
+            // the exact length is stated here rather than only bounded, because
+            // a prefix one variant short would satisfy the bound and be wrong.
+            //
+            // The design record states the equality case as "exactly when no
+            // safe proposal exists".  That is right except at one boundary,
+            // recorded here rather than left to be tripped over: when the
+            // accepted proposal is the **last** one, stopping at it and
+            // evaluating everything are the same prefix, so equality holds with
+            // an acceptance.  The exact statement below covers both.
+            //
+            // Appended 2026-08-07 (post-verification record): both statements
+            // below are `debug_assert`s, compiled out of release builds.  In
+            // release the enforcement of this invariant is the
+            // `GateRoutePlanMismatch` prefix comparison itself -- a real
+            // `Result::Err`, not an assert.
+            debug_assert!(
+                outcome.executed_variant_count <= plan.variants,
+                "the gate executed {} variants against a plan of {}",
+                outcome.executed_variant_count,
+                plan.variants
+            );
+            debug_assert_eq!(
+                outcome.executed_variant_count,
+                match (acceptance, outcome.accepted) {
+                    // Baseline plus proposals `0..=index`, and nothing after.
+                    (GateBatchAcceptance::StopAtFirstNotWorse, Some((index, _))) => index + 2,
+                    // No acceptance, or a mode that never stops: the whole plan.
+                    _ => plan.variants,
+                },
+                "the executed prefix is not the length the acceptance rule implies"
+            );
+            // The prefix, in proposals: variant 0 is the baseline and carries
+            // no proposal of its own.
+            let executed_proposals = outcome.executed_variant_count - 1;
             executed_nearest.record_demand_rows(
-                proposals
-                    .len()
+                executed_proposals
                     .checked_mul(authoritative_demands.len())
                     .ok_or(SpecializedError::GateResourceOverflow)?,
             )?;
             executed_whole_gate_route_plan.nearest = executed_nearest;
             executed_whole_gate_route_plan.touched_rows = executed_touched_rows;
-            if whole_gate_route_plan != executed_whole_gate_route_plan {
+            // FU-8f phase G3: prefix-wise, per the re-founding text on
+            // `SpecializedError::GateRoutePlanMismatch`.
+            let planned_prefix = whole_gate_route_plan.executed_prefix(
+                &planned_nearest,
+                executed_proposals,
+                authoritative_demands.len(),
+            )?;
+            if planned_prefix != executed_whole_gate_route_plan {
                 return Err(SpecializedError::GateRoutePlanMismatch);
             }
-            Ok(vectors)
+            Ok(outcome)
         },
     )
 }
@@ -4673,6 +5005,15 @@ thread_local! {
 /// existed at a time.
 struct GatePlannedNearest {
     batch: GateNearestBatchPlan,
+    /// `batch` as it stood after the baseline sweep was recorded and before the
+    /// first proposal was — the fold's starting point (FU-8f phase G3).
+    ///
+    /// [`GateWholeRoutePlan::executed_prefix`] replays the plan's own retained
+    /// deltas onto this to state what the plan said about the first *k*
+    /// proposals.  A `Copy` summary struct beside the one already here, so it
+    /// holds no heap allocation and adds nothing to `retained_plan_bytes`,
+    /// which charges the delta **vector**.
+    baseline_only: GateNearestBatchPlan,
     proposals: Vec<ProposalNearestPlan>,
     retained_plan_bytes: usize,
 }
@@ -4752,6 +5093,9 @@ fn plan_gate_nearest_batch(
         NearestWitnessRetention::RetainWitnesses,
     )?;
     plan.record_baseline(&baseline);
+    // FU-8f phase G3: the fold's starting point, snapshotted before any
+    // proposal is recorded, so a prefix of the plan can be restated exactly.
+    let baseline_only = plan;
     let mut retained_plan_bytes = checked_route_bytes::<ProposalNearestPlan>(proposals.len())?;
     let mut retained = Vec::with_capacity(proposals.len());
     for proposal in proposals {
@@ -4774,6 +5118,7 @@ fn plan_gate_nearest_batch(
     debug_assert_eq!(plan.proposal_work.key_visits, planning_bound);
     Ok(GatePlannedNearest {
         batch: plan,
+        baseline_only,
         proposals: retained,
         retained_plan_bytes,
     })
@@ -4798,6 +5143,14 @@ struct GateWholeRoutePlan {
     /// predecessor's, and deliberately so — the predecessor bought its extra
     /// strength by paying for the whole planning pass twice, which is the
     /// defect FU-8d part (3) opened.
+    ///
+    /// **Amended by FU-8f phase G3 (2026-08-07): this is now a sum over the
+    /// executed prefix, not over every planned proposal.**  The paragraph above
+    /// is left standing and its claim is narrowed exactly once — "once per
+    /// proposal and in order" becomes "once per *executed* proposal and in
+    /// order" — and what it is compared against narrows with it.  See
+    /// [`Self::executed_prefix`] and the re-founding text on
+    /// [`SpecializedError::GateRoutePlanMismatch`].
     touched_rows: usize,
     max_peak_bytes: usize,
 }
@@ -4810,6 +5163,70 @@ impl GateWholeRoutePlan {
             .ok_or(SpecializedError::GateResourceOverflow)?;
         self.max_peak_bytes = self.max_peak_bytes.max(peak_bytes);
         Ok(())
+    }
+
+    /// This plan's own first `executed_proposals` records — what the execution
+    /// is held to when it stops early (FU-8f phase G3, 2026-08-07).
+    ///
+    /// `self` is the preflight's statement about the **whole** batch.  Under
+    /// [`GateBatchAcceptance::StopAtFirstNotWorse`] the execution runs a prefix
+    /// of it, so comparing the two directly would fail on every round that
+    /// accepts anything.  This rebuilds the plan's own summary truncated to
+    /// that prefix, by replaying the plan's retained per-proposal deltas —
+    /// **the plan's records, in the plan's order** — onto the plan's own
+    /// baseline-only snapshot.  Nothing here is re-derived from the contacts:
+    /// if the execution and the plan disagree about which proposals ran, in
+    /// which order, or about how many rows each touched, the fold diverges and
+    /// the batch is refused exactly as F3's comparison refused it.
+    ///
+    /// The byte terms are carried through untouched, so the peak comparison is
+    /// still preflight-against-execution across two independent
+    /// [`check_gate_peak`] computations; and so is the baseline sweep's
+    /// fingerprint, because the execution plans its own baseline routes and the
+    /// planner planned another and the two must still agree.  **Only the
+    /// proposal tail is relaxed.**
+    ///
+    /// When the whole batch executed — the no-safe-proposal case, and every
+    /// [`GateBatchAcceptance::EvaluateAll`] call — the prefix *is* the plan and
+    /// this returns `*self` unchanged, which is F3's comparison verbatim.  That
+    /// short-circuit is not merely an optimisation: it is why the refusal
+    /// path's attestation is unweakened.
+    ///
+    /// **The corpus is the live witness that this is load-bearing.**
+    /// `make_raking_blade` runs 21 committed merges through 23 gate batches,
+    /// every one of them under `StopAtFirstNotWorse`, so every one takes the
+    /// prefix branch.  Mutation transcript (2026-08-07): forcing the
+    /// short-circuit unconditionally — i.e. comparing the execution against the
+    /// **whole** plan, which is what F3 did — fails five tests with
+    /// `GateRoutePlanMismatch`
+    /// (`oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`,
+    /// `required_table_raking_and_thin_fin_fixtures_finalize_full_evidence`,
+    /// the two thread-determinism seals, and
+    /// `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`).
+    /// The attestation is not a formality that happens to hold.
+    fn executed_prefix(
+        &self,
+        planned: &GatePlannedNearest,
+        executed_proposals: usize,
+        demand_count: usize,
+    ) -> Result<Self, SpecializedError> {
+        if executed_proposals == planned.proposals.len() {
+            return Ok(*self);
+        }
+        let mut nearest = planned.baseline_only;
+        for delta in &planned.proposals[..executed_proposals] {
+            nearest.record_proposal(delta)?;
+        }
+        nearest.record_demand_rows(
+            executed_proposals
+                .checked_mul(demand_count)
+                .ok_or(SpecializedError::GateResourceOverflow)?,
+        )?;
+        Ok(Self {
+            nearest,
+            touched_rows: nearest.proposal_work.touched_rows,
+            ..*self
+        })
     }
 }
 
@@ -7751,6 +8168,373 @@ mod tests {
             merged(&contacts, 0, left),
         ]);
         (contacts, samples, demands, proposals, layers)
+    }
+
+    /// The attach reach every FU-8d/FU-8f fixture consumer below builds its
+    /// [`GateBatchIndex`] with, named once so the fixture's geometry and the
+    /// index that reads it cannot drift apart.
+    const FU8F_ATTACH_REACH: f64 = 1.0;
+
+    /// FU-8f phase G3: [`fu8d_delta_fixture`] **extended** with the one case
+    /// the corpus cannot supply — a batch whose first safe proposal is not
+    /// proposal 0.
+    ///
+    /// Every merge round ever observed on real geometry has `safe = Some(0)`:
+    /// 7 rounds on the Weeping Treant v1.2 and 21 on `make_raking_blade` in the
+    /// FU-8e design pass, 33 more at the FU-8e tip.  Where the answer is
+    /// `Some(0)` the executed prefix is `{baseline, proposal 0}` and prefix
+    /// evaluation is bit-identical to full evaluation *by construction* — which
+    /// is exactly why the corpus, `make_raking_blade`'s 21 real merges
+    /// included, cannot tell a correct prefix rule from one that always accepts
+    /// the first proposal.  This fixture can.
+    ///
+    /// It extends rather than duplicates: the contacts, samples, demands and
+    /// layer plan are `fu8d_delta_fixture`'s, with three **lonely-demand
+    /// pairs** appended.  Each pair is a server sitting exactly on a demand of
+    /// its own island — so the baseline index records it as that demand's only
+    /// witness — and a partner 40 mm away on the same island.  Merging the two
+    /// puts the seat 20 mm from the demand, far outside
+    /// [`FU8F_ATTACH_REACH`], so [`variant_unsupported_count`] loses the
+    /// witness and gains nothing back: the variant is **strictly worse** by
+    /// `unsupported_specialized_count`, which is [`gate_not_worse`]'s cheapest
+    /// monotone component to move deliberately.
+    ///
+    /// The returned proposals are ordered as gather order, and the order is the
+    /// whole point:
+    ///
+    /// | gather index | proposal | verdict |
+    /// |---|---|---|
+    /// | 0, 1, 2 | the three lonely-demand merges | worse |
+    /// | 3 | `fu8d_delta_fixture`'s `merge(0, 1)` | **safe** |
+    /// | 4 | a fourth lonely-demand merge | worse, and never evaluated |
+    ///
+    /// Index 4 exists so the prefix is **strictly shorter** than the plan.
+    /// Without it the safe proposal would be last, the prefix would be the
+    /// whole batch, and the test would pass against an implementation that
+    /// never stops.
+    fn fu8f_first_safe_fixture() -> (
+        Vec<WorkingContact>,
+        Vec<CoverageSample>,
+        Vec<SpecializedDemand>,
+        Vec<MergeProposal>,
+        LayerPlan,
+    ) {
+        let (mut contacts, samples, mut demands, _proposals, layers) = fu8d_delta_fixture();
+        let up = [0.0, 0.0, 1.0];
+        let route = |candidate: u64, island: u32, component: u32, face: u32| RegularContactRoute {
+            candidate_id: candidate,
+            owner_island_id: island,
+            coverage_face_id: face,
+            component_id: component,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        // Four lonely-demand pairs on four islands of their own, each far
+        // enough from the fixture's own geometry (which lives inside |x| < 11)
+        // and from each other that no contact can witness another's demand.
+        let mut lonely = Vec::new();
+        for (step, x) in [100.0_f64, 200.0, 300.0, 400.0].into_iter().enumerate() {
+            let island = 30 + u32::try_from(step).expect("four steps fit a u32");
+            let candidate = 100 + step as u64;
+            let server = contacts.len();
+            contacts.push(test_regular_contact(
+                [x, 0.0, 0.0],
+                up,
+                route(candidate, island, 10, island),
+                Vec::new(),
+            ));
+            contacts.push(test_regular_contact(
+                [x + 40.0, 0.0, 0.0],
+                up,
+                route(candidate + 50, island, 10, island + 1),
+                Vec::new(),
+            ));
+            demands.push(minimum_demand(island, island, 10, [x, 0.0, 0.0]));
+            lonely.push((server, server + 1));
+        }
+
+        let merged = |contacts: &[WorkingContact], left: usize, right: usize| MergeProposal {
+            left,
+            right,
+            representative_component_id: 10,
+            representative_position_mm: contacts[left].position_mm,
+            representative_face_id: 0,
+            representative_normal: up,
+            primary_regular: contacts[left].primary_regular,
+            seat_provenance: contacts[left].seat_provenance,
+            position_mm: [
+                (contacts[left].position_mm[0] + contacts[right].position_mm[0]) / 2.0,
+                (contacts[left].position_mm[1] + contacts[right].position_mm[1]) / 2.0,
+                (contacts[left].position_mm[2] + contacts[right].position_mm[2]) / 2.0,
+            ],
+            normal: up,
+        };
+        let proposals = vec![
+            merged(&contacts, lonely[0].0, lonely[0].1),
+            merged(&contacts, lonely[1].0, lonely[1].1),
+            merged(&contacts, lonely[2].0, lonely[2].1),
+            // The safe one: contacts 0 and 1 sit on one route key, and the
+            // merged seat lands exactly `FU8F_ATTACH_REACH` from the only
+            // demand either of them witnesses, so nothing is lost.
+            merged(&contacts, 0, 1),
+            merged(&contacts, lonely[3].0, lonely[3].1),
+        ];
+        (contacts, samples, demands, proposals, layers)
+    }
+
+    /// The frozen vectors a batch over this fixture would produce, with
+    /// coverage and load held at the baseline's so the acceptance question is
+    /// decided by `unsupported_specialized_count` alone.
+    ///
+    /// Two of [`gate_not_worse`]'s three monotone components are pinned
+    /// constant deliberately: what is under test is the *acceptance rule and
+    /// where it stops*, and isolating one component is how that is made
+    /// observable.  The third component is **not** faked — it is
+    /// [`variant_unsupported_count`]'s own answer for each proposal, computed
+    /// from the same [`GateBatchIndex`] the production loop uses.
+    fn fu8f_variant_vectors(
+        contacts: &[WorkingContact],
+        samples: &[CoverageSample],
+        demands: &[SpecializedDemand],
+        proposals: &[MergeProposal],
+        layers: &LayerPlan,
+    ) -> Vec<FrozenSpecializedGateVector> {
+        let index = GateBatchIndex::build(contacts, samples, demands, layers, FU8F_ATTACH_REACH)
+            .expect("batch index");
+        let frozen = |proposal: Option<&MergeProposal>| {
+            FrozenSpecializedGateVector::from_live(
+                CoverageObjective {
+                    failing_uncovered_area_mm2: 1.5,
+                    max_patch_area_mm2: 0.25,
+                    failing_patch_count: 2,
+                    worst_gap_mm: 0.75,
+                },
+                4,
+                variant_unsupported_count(
+                    contacts,
+                    proposal,
+                    demands,
+                    &index,
+                    layers,
+                    FU8F_ATTACH_REACH,
+                ),
+            )
+        };
+        std::iter::once(frozen(None))
+            .chain(proposals.iter().map(|proposal| frozen(Some(proposal))))
+            .collect()
+    }
+
+    /// Drive the production acceptance rule over a ready-made variant
+    /// sequence, exactly as `evaluate_gate_batch`'s loop does, and report what
+    /// it decided and how far it got.
+    fn fu8f_fold(
+        acceptance: GateBatchAcceptance,
+        vectors: &[FrozenSpecializedGateVector],
+    ) -> GateBatchOutcome {
+        let mut fold = GateBatchAcceptanceFold::new(acceptance);
+        for (variant, vector) in vectors.iter().enumerate() {
+            if fold.evaluate(variant, *vector) {
+                break;
+            }
+        }
+        fold.finish()
+    }
+
+    fn fu8f_same_bits(
+        left: FrozenSpecializedGateVector,
+        right: FrozenSpecializedGateVector,
+    ) -> bool {
+        left.failing_uncovered_area_mm2.to_bits() == right.failing_uncovered_area_mm2.to_bits()
+            && left.max_patch_area_mm2.to_bits() == right.max_patch_area_mm2.to_bits()
+            && left.failing_patch_count == right.failing_patch_count
+            && left.worst_gap_mm.to_bits() == right.worst_gap_mm.to_bits()
+            && left.load_violation_count == right.load_violation_count
+            && left.unsupported_specialized_count == right.unsupported_specialized_count
+    }
+
+    /// FU-8f phase G3 — **the prefix accepts the proposal the full evaluation
+    /// accepted, at the same index, with the same bits, and stops short.**
+    ///
+    /// The reference side is the retained `#[cfg(test)]` [`first_safe_proposal`]
+    /// — literally the rule the tournament ran before G3, over a fully
+    /// materialised variant vector — and the candidate side is
+    /// [`GateBatchAcceptanceFold`] under
+    /// [`GateBatchAcceptance::StopAtFirstNotWorse`], fed the same variants in
+    /// the same order and permitted to stop.  Same swap-test shape FU-8c and
+    /// FU-8d used, applied to the acceptance rule.
+    ///
+    /// **Non-vacuity is measured, not assumed.**  The fixture is asserted to
+    /// force `safe = Some(3)`: three strictly-worse proposals really are worse,
+    /// the safe one really is safe, and the prefix really is shorter than the
+    /// plan.  An implementation that dropped the `break` would fail on
+    /// `executed_variant_count`; one whose fixture collapsed to `Some(0)` would
+    /// fail on the index; one that accepted the *last* safe proposal rather
+    /// than the first would fail on both.
+    ///
+    /// **Mutation transcript (2026-08-07), so non-vacuity is measured rather
+    /// than argued.**  Replacing `GateBatchAcceptanceFold::evaluate`'s stop
+    /// signal with `false` — the "someone reverted the `break`" mutation —
+    /// fails this test at `executed_variant_count`, `left: 6 right: 5`, while
+    /// every other `fu8f_*` test still passes.  Dropping the
+    /// `self.accepted.is_none()` guard — "accept the last safe proposal, not
+    /// the first" — leaves this test green (the fixture has exactly one safe
+    /// proposal) and fails
+    /// [`fu8f_prefix_acceptance_matches_the_full_evaluation`] instead, at
+    /// `left: Some(9) right: Some(0)`.  The two tests are therefore not
+    /// redundant: each catches a mutation the other does not.
+    ///
+    /// **Correction 2026-08-07 (verification re-run):** mutation (a) also fails
+    /// [`fu8f_prefix_acceptance_matches_the_full_evaluation`], at `left: 12
+    /// right: 2` via its `executed_variant_count == index + 2` pin, so "every
+    /// other `fu8f_*` test still passes" over-claimed and the suite is
+    /// STRONGER than the transcript stated: mutation (a) is caught by both
+    /// tests, mutation (b) only by the second.
+    #[test]
+    fn fu8f_forced_late_safe_proposal_stops_at_the_same_index() {
+        let (contacts, samples, demands, proposals, layers) = fu8f_first_safe_fixture();
+        let vectors = fu8f_variant_vectors(&contacts, &samples, &demands, &proposals, &layers);
+        // `gate_resource_plan`'s own definition of the charged batch, rather
+        // than a restatement of it: variants = proposals + 1.
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
+        let plan = gate_resource_plan(
+            contacts.len(),
+            proposals.len(),
+            samples.len(),
+            demands.len(),
+            GateProposalRoutedWork::default(),
+            GateLoadWork {
+                baseline_operations: 0,
+                proposal_bound: 0,
+            },
+            limits,
+        )
+        .expect("gate resource plan");
+        assert_eq!(plan.variants, 6);
+        assert_eq!(vectors.len(), plan.variants);
+
+        // The fixture forces what the corpus cannot: k = 3 worse proposals
+        // ahead of the first safe one.
+        let baseline = vectors[0];
+        for (index, vector) in vectors.iter().enumerate().skip(1) {
+            let expected_safe = index == 4;
+            assert_eq!(
+                gate_not_worse(*vector, baseline),
+                expected_safe,
+                "variant {index} has unsupported {} against baseline {}",
+                vector.unsupported_specialized_count,
+                baseline.unsupported_specialized_count
+            );
+        }
+        assert!(
+            vectors[1].unsupported_specialized_count > baseline.unsupported_specialized_count,
+            "the lonely-demand merges are not actually worse, so k collapsed to 0"
+        );
+
+        // Reference: the retained full-evaluation oracle.
+        let reference = first_safe_proposal(&vectors, baseline);
+        assert_eq!(reference, Some(3));
+
+        // Candidate: the production prefix rule.
+        let prefix = fu8f_fold(GateBatchAcceptance::StopAtFirstNotWorse, &vectors);
+        let (prefix_index, prefix_vector) = prefix.accepted.expect("a safe proposal exists");
+        assert_eq!(Some(prefix_index), reference);
+        assert!(fu8f_same_bits(prefix_vector, vectors[prefix_index + 1]));
+        assert!(fu8f_same_bits(prefix.baseline, baseline));
+
+        // The prefix is strictly shorter than the plan — the whole claim — and
+        // strictly longer than the run of worse proposals, so it did not stop
+        // early for the wrong reason.
+        //
+        // The design record pins this as `executed_variant_count == 4` against
+        // `plan.variants == 5`.  That pairing does not close with its own
+        // `k = 3` at gather positions 0..2: a safe proposal at gather index 3
+        // forces baseline + four proposals = **5** evaluated variants.  The pin
+        // is therefore 5 against 6 here, which is the same claim with the
+        // arithmetic corrected — the prefix stops strictly short of the batch.
+        assert_eq!(prefix.executed_variant_count, 5);
+        assert!(prefix.executed_variant_count < plan.variants);
+        assert!(prefix.executed_variant_count > 4);
+
+        // And `EvaluateAll` reaches the same decision the long way, so the two
+        // modes differ in cost and never in answer.
+        let full = fu8f_fold(GateBatchAcceptance::EvaluateAll, &vectors);
+        assert_eq!(full.accepted.map(|(index, _)| index), reference);
+        assert_eq!(full.executed_variant_count, plan.variants);
+        assert!(fu8f_same_bits(
+            full.accepted.expect("a safe proposal exists").1,
+            prefix_vector
+        ));
+    }
+
+    /// FU-8f phase G3, the negative twin — **when nothing is safe the prefix
+    /// IS the whole batch, and the round breaks.**
+    ///
+    /// This is the case the re-founded `GateRoutePlanMismatch` keeps at full
+    /// strength: `executed_variant_count == plan.variants`, so
+    /// `GateWholeRoutePlan::executed_prefix` short-circuits to `*self` and the
+    /// comparison is FU-8d phase F3's, verbatim.  It is also the case that
+    /// makes the charged/executed severance safe to state — the batch may still
+    /// spend everything it was charged for, so charging the prefix would bound
+    /// nothing.
+    #[test]
+    fn fu8f_a_batch_with_no_safe_proposal_evaluates_every_variant() {
+        let (contacts, samples, demands, proposals, layers) = fu8f_first_safe_fixture();
+        // Drop the one safe proposal; every survivor is a lonely-demand merge.
+        let proposals: Vec<MergeProposal> = proposals
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 3)
+            .map(|(_, proposal)| proposal)
+            .collect();
+        let vectors = fu8f_variant_vectors(&contacts, &samples, &demands, &proposals, &layers);
+        let baseline = vectors[0];
+        assert_eq!(first_safe_proposal(&vectors, baseline), None);
+
+        let outcome = fu8f_fold(GateBatchAcceptance::StopAtFirstNotWorse, &vectors);
+        assert!(outcome.accepted.is_none(), "the round must break");
+        assert_eq!(outcome.executed_variant_count, proposals.len() + 1);
+        assert_eq!(outcome.executed_variant_count, vectors.len());
+        assert!(fu8f_same_bits(outcome.baseline, baseline));
+
+        // Non-vacuity: the survivors really are all worse, so "no safe
+        // proposal" is a verdict rather than an empty batch.
+        assert_eq!(proposals.len(), 4);
+        for vector in vectors.iter().skip(1) {
+            assert!(vector.unsupported_specialized_count > baseline.unsupported_specialized_count);
+        }
+    }
+
+    /// FU-8f phase G3 — **the two acceptance modes never disagree about which
+    /// proposal is accepted, on the FU-8d fixture's own proposals.**
+    ///
+    /// The forced fixture above proves the interesting index; this proves the
+    /// rule over the batch the rest of FU-8d's tests use, where the safe
+    /// proposal is early — the shape the corpus actually produces.  Both modes
+    /// are checked against the retained oracle, and every prefix length is
+    /// checked against the index the oracle returned, so a mode that stopped
+    /// one variant early or one variant late fails here.
+    #[test]
+    fn fu8f_prefix_acceptance_matches_the_full_evaluation() {
+        let (contacts, samples, demands, proposals, layers) = fu8d_delta_fixture();
+        let vectors = fu8f_variant_vectors(&contacts, &samples, &demands, &proposals, &layers);
+        let baseline = vectors[0];
+        let reference = first_safe_proposal(&vectors, baseline);
+
+        let prefix = fu8f_fold(GateBatchAcceptance::StopAtFirstNotWorse, &vectors);
+        let full = fu8f_fold(GateBatchAcceptance::EvaluateAll, &vectors);
+        assert_eq!(prefix.accepted.map(|(index, _)| index), reference);
+        assert_eq!(full.accepted.map(|(index, _)| index), reference);
+        assert_eq!(full.executed_variant_count, vectors.len());
+        assert_eq!(
+            prefix.executed_variant_count,
+            reference.map_or(vectors.len(), |index| index + 2)
+        );
+        match (prefix.accepted, full.accepted) {
+            (Some((_, left)), Some((_, right))) => assert!(fu8f_same_bits(left, right)),
+            (None, None) => {}
+            _ => panic!("the two acceptance modes disagreed about whether a proposal is safe"),
+        }
     }
 
     /// What one equivalence sweep actually exercised, so a fixture can be
@@ -12078,7 +12862,7 @@ mod tests {
             let gate = plan.gate_evidence();
             let actual_gate = (
                 gate.accepted.load_violation_count,
-                gate.evaluated_pair_count,
+                gate.gathered_pair_count,
                 gate.accepted_pair_count,
                 gate.coalesced_seat_count,
             );
