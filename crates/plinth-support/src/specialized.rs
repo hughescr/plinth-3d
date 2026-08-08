@@ -3120,8 +3120,8 @@ fn consolidate(
         limits,
         // The terminal audit consults the same retention slot — and when the
         // coalesce above changed anything, guard 2 refuses reuse and the audit
-        // takes a counted full rebuild (F-G6-4).  In G6a it rebuilds either
-        // way; the guard verdict is what is being landed.
+        // takes a counted full rebuild (F-G6-4).  Since G6b a coalesce-free
+        // audit rides retention like any other guard-accepted round.
         &mut retained_load,
         // The terminal audit wants the coalesced plan's own vector, not an
         // acceptance decision.
@@ -4611,12 +4611,18 @@ fn evaluate_gate_batch(
 /// Build the merge gate's one set of load inputs and its one baseline
 /// partition (FU-8d phase F3, part P2).  See [`GateLoadState`].
 ///
-/// FU-8f phase G6a: `retained` is the tournament's cross-round retention slot
-/// ([`RetainedLoadTranspose`]).  This phase is **rebuild-always** — the guard
-/// chain runs and its verdict is recorded and counted, but every round still
-/// executes the full build below and repopulates the slot from that build's
-/// own transpose, so behavior is byte-identical by construction.  G6b flips
-/// the retained fast path in against these guards.
+/// FU-8f phase G6a landed `retained` — the tournament's cross-round retention
+/// slot ([`RetainedLoadTranspose`]) — with its guard chain mutation-proven
+/// while every round still rebuilt (byte-identical by construction).  Phase
+/// G6b flips the fast path in against those proven guards: a round every
+/// guard accepts runs [`RetainedLoadTranspose::finalize_retained_round`] —
+/// the same scan loop body and finalize tail over the retained buckets — and
+/// skips `GroupedOwnerFaces`/`extend_load_eligibility`/`LoadTransposeCounts`
+/// entirely; any guard miss is the counted full rebuild, exactly as before.
+/// Charging is deliberately untouched in G6b (D-G6-4: the round is charged
+/// the full build, the admissible worst case, because no plan can know at
+/// plan time whether a guard will miss); phase G6c lands the retained-round
+/// metering beside that charge.
 #[allow(clippy::too_many_arguments)]
 fn build_gate_load_state(
     contacts: &[WorkingContact],
@@ -4650,9 +4656,7 @@ fn build_gate_load_state(
     )?;
     // FU-8f phase G6a, guard chain entry (design D-G6-3): guards 1 and 2 (and
     // the guard-3 poison latch) against the fresh physical list.  Guard 4 runs
-    // below once `contact_rows` exists.  Any miss is a counted full rebuild —
-    // which, in this rebuild-always phase, is the same full build every round
-    // takes anyway; the verdict and the counter are what G6a lands.
+    // below once `contact_rows` exists.  Any miss is a counted full rebuild.
     let mut retained_rebuild_cause = retained
         .as_ref()
         .and_then(|state| state.entry_rebuild_cause(mesh, &physical));
@@ -4665,12 +4669,68 @@ fn build_gate_load_state(
     // phase costs and holds.  The gate no longer states a hand-built model of
     // it beside it — the `variants × faces × contacts` term FU-8d part (2)
     // named as under-charged is gone, and this figure, for one baseline, is
-    // what `gate_resource_plan` charges in its place.
+    // what `gate_resource_plan` charges in its place.  Retained rounds charge
+    // it too (G6b): the charge states the admissible worst case — a guard can
+    // miss at any entry and cost the full build — and phase G6c meters the
+    // retained-path spend beside it.  No cap moves.
     let baseline_resource = specialized_load_resource_plan(
         generic,
         physical.len(),
         SpecializedLoadCounts::bounded(owner_faces.len(), island_face_count),
     )?;
+    // FU-8f phase G6b — the retained fast path.  Entry guards passed, so
+    // derive `face_row`/`row_face` from the retained row invariants (identical
+    // to a fresh partition's by row-set invariance, F-G6-1), run guard 4
+    // against the `contact_rows` that derivation yields, and if it too passes,
+    // the round's partition and baseline come from
+    // `finalize_retained_round` — no grouping, no extension, no transpose
+    // count/fill.  Any guard-4 miss falls through to the counted full rebuild
+    // below, which re-derives everything from its own fresh partition.
+    if retained_rebuild_cause.is_none() {
+        if let Some(state) = retained.as_ref() {
+            let (face_row, row_face) = gate_face_rows(
+                mesh.mesh().tris().len(),
+                state.row_face_ids().iter().copied(),
+            )?;
+            let contact_rows = gate_contact_rows(
+                contacts.len(),
+                &owner_faces,
+                &pair_starts,
+                &face_row,
+                &row_face,
+            );
+            match state.cardinality_rebuild_cause(&physical, &contact_rows) {
+                Some(cause) => retained_rebuild_cause = Some(cause),
+                None => {
+                    let (partition, baseline) =
+                        state.finalize_retained_round(generic, mesh, &physical)?;
+                    // The partition was needed only to assemble the baseline;
+                    // the gate keeps exactly what the fresh path keeps.
+                    drop(partition);
+                    // A retained round is a round observed and no guard miss:
+                    // `rounds` increments, `rebuilds` does not — the same
+                    // meaning the counter has carried since G6a.
+                    crate::census_record!(crate::census::record_retained_load_build(None));
+                    // One unit per pair inspected while indexing them, the
+                    // same unit every other descriptor scan in this stage
+                    // charges — identical on both paths, because
+                    // `append_variant_load_inputs` ran identically above.
+                    charge_load_descriptor_work(work, owner_faces.len(), limit)?;
+                    return Ok(GateLoadState {
+                        physical,
+                        owner_faces,
+                        pair_starts,
+                        face_row,
+                        row_face,
+                        contact_rows,
+                        baseline,
+                        baseline_operations: baseline_resource.operations,
+                        baseline_scratch_bytes: baseline_resource.scratch_bytes,
+                    });
+                }
+            }
+        }
+    }
     let (partition, baseline, transpose) = SpecializedLoadBaseline::build(
         generic,
         mesh,
@@ -4679,46 +4739,17 @@ fn build_gate_load_state(
         &owner_faces,
         load_limits,
     )?;
-    // `face_row` is one `u32` per mesh face, independent of the batch's
-    // contact count.
-    let mut face_row = vec![u32::MAX; mesh.mesh().tris().len()];
-    let mut row_face = Vec::with_capacity(partition.rows().len());
-    for (row, load) in partition.rows().iter().enumerate() {
-        row_face.push(load.face_id);
-        // Rows are ascending by face id, so the first row carrying a face is
-        // the one recorded and the rest of its run follows contiguously.
-        if face_row[load.face_id as usize] == u32::MAX {
-            face_row[load.face_id as usize] =
-                u32::try_from(row).map_err(|_| SpecializedError::GateResourceOverflow)?;
-        }
-    }
-    let mut contact_rows = vec![0usize; contacts.len()];
-    for (contact, count) in contact_rows.iter_mut().enumerate() {
-        for &(_, face_id) in &owner_faces[pair_starts[contact]..pair_starts[contact + 1]] {
-            let mut row = face_row[face_id as usize];
-            if row == u32::MAX {
-                continue;
-            }
-            while (row as usize) < row_face.len() && row_face[row as usize] == face_id {
-                *count += 1;
-                row += 1;
-            }
-        }
-    }
-    // FU-8f phase G6a, guard 4 (design D-G6-3, F-G6-5): the freshly-derived
-    // per-contact eligible-row counts against every retained bucket's length,
-    // at zero added derivation cost — `contact_rows` is computed above for
-    // `proposal_load_bound` regardless.  Restricted to the SPECIALIZED
-    // contacts, because `contact_rows` counts a contact's own
-    // `(owner, face)` run and a generic seat emits none while its transpose
-    // bucket is not empty; the deviation from F-G6-5's "each contact's
-    // eligible-row count" and its justification are recorded in full on
-    // [`RetainedLoadTranspose::cardinality_rebuild_cause`].
-    if retained_rebuild_cause.is_none() {
-        retained_rebuild_cause = retained
-            .as_ref()
-            .and_then(|state| state.cardinality_rebuild_cause(&physical, &contact_rows));
-    }
+    let (face_row, row_face) = gate_face_rows(
+        mesh.mesh().tris().len(),
+        partition.rows().iter().map(|load| load.face_id),
+    )?;
+    let contact_rows = gate_contact_rows(
+        contacts.len(),
+        &owner_faces,
+        &pair_starts,
+        &face_row,
+        &row_face,
+    );
     // Count any guard miss, then (re)populate the retention slot from this
     // build's own transpose and partition — never from a restatement of them.
     RetainedLoadTranspose::absorb_full_build(
@@ -4744,6 +4775,60 @@ fn build_gate_load_state(
         baseline_operations: baseline_resource.operations,
         baseline_scratch_bytes: baseline_resource.scratch_bytes,
     })
+}
+
+/// `face_row`/`row_face` from the partition rows' face ids, in row order.
+///
+/// FU-8f phase G6b: factored out of [`build_gate_load_state`] so the retained
+/// path (which reads the face ids from
+/// [`RetainedLoadTranspose::row_face_ids`]) and the full-build path (which
+/// reads them from its own fresh partition) run one derivation, not two
+/// copies.  `face_row` is one `u32` per mesh face, independent of the batch's
+/// contact count.
+fn gate_face_rows(
+    mesh_face_count: usize,
+    row_faces: impl ExactSizeIterator<Item = u32>,
+) -> Result<(Vec<u32>, Vec<u32>), SpecializedError> {
+    let mut face_row = vec![u32::MAX; mesh_face_count];
+    let mut row_face = Vec::with_capacity(row_faces.len());
+    for (row, face_id) in row_faces.enumerate() {
+        row_face.push(face_id);
+        // Rows are ascending by face id, so the first row carrying a face is
+        // the one recorded and the rest of its run follows contiguously.
+        if face_row[face_id as usize] == u32::MAX {
+            face_row[face_id as usize] =
+                u32::try_from(row).map_err(|_| SpecializedError::GateResourceOverflow)?;
+        }
+    }
+    Ok((face_row, row_face))
+}
+
+/// Each contact's eligible-row count from its own `(owner, face)` run — the
+/// figure `proposal_load_bound` reads and guard 4 cross-checks (F-G6-5, with
+/// the generic-seat deviation recorded on
+/// [`RetainedLoadTranspose::cardinality_rebuild_cause`]).  Factored out of
+/// [`build_gate_load_state`] with `gate_face_rows`, for the same reason.
+fn gate_contact_rows(
+    contact_count: usize,
+    owner_faces: &[(u32, u32)],
+    pair_starts: &[usize],
+    face_row: &[u32],
+    row_face: &[u32],
+) -> Vec<usize> {
+    let mut contact_rows = vec![0usize; contact_count];
+    for (contact, count) in contact_rows.iter_mut().enumerate() {
+        for &(_, face_id) in &owner_faces[pair_starts[contact]..pair_starts[contact + 1]] {
+            let mut row = face_row[face_id as usize];
+            if row == u32::MAX {
+                continue;
+            }
+            while (row as usize) < row_face.len() && row_face[row as usize] == face_id {
+                *count += 1;
+                row += 1;
+            }
+        }
+    }
+    contact_rows
 }
 
 /// What the batch's retained load state holds, charged as one term of the gate
@@ -8569,6 +8654,190 @@ mod tests {
             full.accepted.expect("a safe proposal exists").1,
             prefix_vector
         ));
+    }
+
+    /// FU-8f phase G6b — the post-sort renumbering arm (design D-G6-3, the
+    /// parent design's riskiest-claim warning): a COMMITTED merge lands the
+    /// merged seat at its **sorted position**, strictly interior here, and
+    /// `record_commit`'s identity-walk-derived `p` and remapped witness must
+    /// equal the actual [`append_variant_load_inputs`] output over the
+    /// committed list — production's own renumbering, not a hand restatement
+    /// of it.
+    ///
+    /// This is a different claim from FU-8d's, and both stay pinned: the
+    /// FU-8d fixtures (`fu8d_load_delta_matches_the_per_variant_finalize`)
+    /// pin the *variant* renumbering, where the merged seat is appended
+    /// **last**; this arm pins the *committed* renumbering, where
+    /// `next.sort_by(compare_contacts)` places it at its sorted position and
+    /// every contact id and specialized owner id past that point shifts by
+    /// one (F-G6-1).
+    ///
+    /// The whole production shape is exercised: demand-carrying seats through
+    /// [`commit_merge`], `consolidate`'s own splice-and-sort, the guard-3
+    /// predicate re-run on the committed contact, then
+    /// `append_variant_load_inputs` over the committed list as the authority
+    /// the witness is compared against, `(owner, point_mm)` on bits at every
+    /// position.
+    #[test]
+    fn fu8f_committed_renumbering_matches_append_variant_load_inputs() {
+        // Five demand-carrying seats (they resolve specialized by
+        // construction: `generic_owner_for_parts` returns `None` for any
+        // parts with demands), one island each, positions ascending in x so
+        // the committed midpoint sorts interior.
+        let islands = (1..=5u32)
+            .map(|id| SupportIsland {
+                id,
+                face_ids: vec![id * 2 - 2, id * 2 - 1],
+            })
+            .collect::<Vec<_>>();
+        let mut contacts = (0..5u32)
+            .map(|index| {
+                WorkingContact::specialized(minimum_demand(
+                    index + 1,
+                    index * 2,
+                    10,
+                    [f64::from(index), 0.0, 0.0],
+                ))
+            })
+            .collect::<Vec<_>>();
+        contacts.sort_by(compare_contacts);
+
+        let physical_of = |contacts: &[WorkingContact]| -> Vec<PhysicalContact> {
+            let mut physical = Vec::new();
+            let mut owner_faces = Vec::new();
+            let mut scratch = Vec::new();
+            let mut work = 0usize;
+            append_variant_load_inputs(
+                contacts,
+                None,
+                &[],
+                &islands,
+                &[],
+                &mut physical,
+                &mut owner_faces,
+                None,
+                &mut scratch,
+                &mut work,
+                usize::MAX,
+            )
+            .expect("the fixture's load inputs must append");
+            physical
+        };
+        let physical_before = physical_of(&contacts);
+        assert!(
+            physical_before
+                .iter()
+                .all(|contact| matches!(contact.owner, LoadOwner::Specialized(_))),
+            "every seat must resolve specialized, or the renumbering arm is vacuous",
+        );
+
+        // A carrier synchronized to the pre-commit list.  Buckets are trivial
+        // on purpose: the claims here are `p` and the witness remap; bucket
+        // content is the perception harness's job.
+        let buckets = (0..physical_before.len())
+            .map(|contact| vec![contact as u32])
+            .collect::<Vec<_>>();
+        let mut carrier = RetainedLoadTranspose::from_witness_for_test(&physical_before, buckets);
+
+        // Merge the seats at x = 1 and x = 2; the committed midpoint x = 1.5
+        // sorts strictly between x = 0 and x = 3.
+        let position_of = |contacts: &[WorkingContact], x: f64| {
+            contacts
+                .iter()
+                .position(|contact| contact.position_mm == [x, 0.0, 0.0])
+                .expect("the fixture seats its contacts at integer x")
+        };
+        let (left, right) = (position_of(&contacts, 1.0), position_of(&contacts, 2.0));
+        let up = [0.0, 0.0, 1.0];
+        let proposal = MergeProposal {
+            left,
+            right,
+            representative_component_id: 10,
+            representative_position_mm: contacts[left].position_mm,
+            representative_face_id: 0,
+            representative_normal: up,
+            primary_regular: contacts[left].primary_regular,
+            seat_provenance: contacts[left].seat_provenance,
+            position_mm: [1.5, 0.0, 0.0],
+            normal: up,
+        };
+        let mut telemetry = MergeAllocationTelemetry::default();
+        let merged_contact =
+            commit_merge(&proposal, &contacts, usize::MAX, &mut telemetry).expect("commit");
+        let committed_position_mm = merged_contact.position_mm;
+        // `consolidate`'s own splice and sort, verbatim.
+        let mut merged = Some(merged_contact);
+        let mut next = Vec::with_capacity(contacts.len().saturating_sub(1));
+        for (index, contact) in contacts.drain(..).enumerate() {
+            if index == proposal.left {
+                next.push(merged.take().expect("left index is visited once"));
+            } else if index != proposal.right {
+                next.push(contact);
+            }
+        }
+        next.sort_by(compare_contacts);
+        let merged_index = next
+            .iter()
+            .position(|contact| contact.position_mm == committed_position_mm)
+            .expect("the committed seat is in the committed list");
+        assert!(
+            merged_index > 0 && merged_index + 1 < next.len(),
+            "the committed seat must land strictly interior (landed at \
+             {merged_index} of {}), or this arm pins nothing beyond FU-8d's \
+             merged-last",
+            next.len(),
+        );
+
+        // Guard 3's predicate, exactly as `consolidate` re-runs it on the
+        // committed contact.
+        let merged_resolves_specialized = {
+            let mut predicate_work = 0usize;
+            generic_owner_for_parts(
+                ContactParts::new(&next[merged_index], None),
+                &[],
+                &mut predicate_work,
+                usize::MAX,
+            )
+            .expect("the predicate must answer")
+            .is_none()
+        };
+        assert!(merged_resolves_specialized);
+
+        carrier.record_commit(
+            left,
+            right,
+            next.iter().map(|contact| contact.position_mm),
+            committed_position_mm,
+            merged_resolves_specialized,
+        );
+        assert!(
+            !carrier.is_poisoned_for_test(),
+            "a well-formed committed merge must not poison retention",
+        );
+
+        // THE claim: the remapped witness equals production's own renumbering
+        // of the committed list, `(owner, point_mm)` on bits at every
+        // position — so `p` (where the committed seat's witness entry sits)
+        // is the sorted position `append_variant_load_inputs` gives it.
+        let physical_after = physical_of(&next);
+        let witness = carrier.witness_for_test();
+        assert_eq!(witness.len(), physical_after.len());
+        for (index, contact) in physical_after.iter().enumerate() {
+            assert_eq!(
+                witness[index].0, contact.owner,
+                "witness owner at {index} is not append_variant_load_inputs's",
+            );
+            assert_eq!(
+                witness[index].1.map(f64::to_bits),
+                contact.point_mm.map(f64::to_bits),
+                "witness position at {index} is not append_variant_load_inputs's",
+            );
+        }
+        assert_eq!(
+            witness[merged_index].1.map(f64::to_bits),
+            committed_position_mm.map(f64::to_bits),
+            "the identity walk's p is not the committed seat's sorted position",
+        );
     }
 
     /// FU-8f phase G3, the negative twin — **when nothing is safe the prefix
