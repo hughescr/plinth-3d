@@ -3039,6 +3039,33 @@ landed. G6a is expected to be *slower* than base, not faster — it does the ful
 repopulates the carrier — and the treant's behavior at this tip is **not** measured or claimed.
 **G6d is the measuring phase**; nothing in this section may be read as a performance result.
 
+**A third debt, found by adversarial re-verification of this phase after it was written, and a
+hard precondition for G6b: the identity walk keys on positions alone, and positions are not a
+key.** `record_commit` derives the insertion point `p` by walking the old witness against the
+new contact list comparing **only** `position_bits`. But `compare_contacts`
+(`specialized.rs:7683`) orders by position *and then* by four tie-breakers — primary-regular
+identity, regular routes, normal, demands — so two **distinct** contacts may legitimately carry
+bit-identical `position_mm`. If the committed seat's position coincides on bits with the
+survivor it sorts against at `p`, the greedy walk consumes that survivor at slot `p`, then
+accepts the survivor's own later slot as the insertion (its bits equal the committed position by
+assumption), and derives **`p + 1` instead of `p`** — silently, without poisoning. Neither
+guard necessarily catches it: guard 2 compares the *witness sequence*, which is identical under
+the swap precisely because the two positions agree on bits and owners are recomputed
+positionally; guard 4 catches it only when the two buckets' lengths happen to differ. This is
+the natural-path twin of mutation **M6**, which the test suite catches only because M6 is
+injected.
+
+**In G6a this is provably harmless and is not a defect in what landed** — rebuild-always means
+the *only* consumer of the remap is the next round's guard chain, so a mis-derived `p` can
+produce a counted rebuild and nothing else; geometry cannot move, which is why all seven digests
+are byte-identical above. It is recorded here because **G6b's fast path would consume the remap
+directly**, and there it would serve wrong buckets. It was **not observed** on the corpus: every
+one of `make_raking_blade`'s 21 committed merges remapped exactly, so this is a latent hazard
+argued from the comparator, not a measured failure. **G6b must close it before flipping the fast
+path in** — the cheap fix is to make the walk's survivor test the same total identity
+`compare_contacts` uses (or to carry a stable per-contact identity through the walk) rather than
+position bits alone, and to add a fixture with two tie-broken contacts sharing a position.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
