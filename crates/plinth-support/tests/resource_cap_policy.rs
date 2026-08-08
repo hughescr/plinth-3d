@@ -394,6 +394,16 @@ const TREANT_GATE_OPERATIONS_REQUIRED: usize = 12_714_828_544;
 /// it is a separate decision under FU-23/R4, wants a second specimen rather
 /// than the same specimen getting cheaper, and would be a cap *reduction* — the
 /// direction that can create refusals.
+///
+/// **Correction 2026-08-07 (verification fix): the hypothetical coefficient
+/// above is mis-derived from this comment's own figures.** The rule it quotes,
+/// `next_power_of_two(2 * ceil(demand / units))`, takes the ceiling FIRST and
+/// `next_power_of_two` rounds UP: the repriced demand does divide to 5
+/// (`795_359_775_u64.div_ceil(178_460_483)`), 2 x 5 = 10, and
+/// `10_u64.next_power_of_two()` = **16**, not 8 — the earlier text rounded
+/// 2 x 4.46 down and skipped the `div_ceil`. 64 -> 16 would **lower the cap
+/// 4x**, not 8x. The refusal to re-derive and its FU-23/R4 reasoning stand
+/// exactly as written; only the arithmetic of the hypothetical is corrected.
 const TREANT_LOAD_ROWS: usize = 130_548;
 const TREANT_LOAD_OPERATIONS_REQUIRED: usize = 5_402_535_619;
 /// The same batch's demand under FU-8f phase G5's repriced model, measured
