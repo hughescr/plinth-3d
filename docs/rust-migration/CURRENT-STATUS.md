@@ -3175,6 +3175,40 @@ and `make_toed_slab`'s coalesce-perturbed audit takes the predicted `contact_wit
 `make_raking_blade` 13278215294653054002, `make_thin_fin` 7016743535301716631, with
 `routed_contacts` and `final_live_members` unmoved on all seven.
 
+> **[Dated addendum 2026-08-08 — the retention table above is a `develop` `0f24b79`
+> measurement and four of its rows MOVE at the FU-10 phase-C cutover. The table is left
+> standing exactly as measured; this note records what re-measurement at the
+> `feature/slicer-union` tip (`b93b95f`) returns, and why.** Re-run model by model under
+> `PLINTH_CENSUS=1` + `PLINTH_CENSUS_ONLY`, `make_raking_blade` now reports
+> **`retained_load_rounds` 23 → 5**, with `retained_load_rebuilds` **1** and
+> `retained_load_rebuild_contact_witness` **1** — the `contact_witness` half reproduces
+> **exactly**, and so does `make_toed_slab`'s (2 rounds, 1 `contact_witness` rebuild). The
+> other six models' round counts are unmoved at 2.
+>
+> **This is not a retention regression; it is the cutover's arithmetic, and it reconciles.**
+> The table's 23 rounds decompose as 21 committed merges + 1 proposal-free batch + 1 terminal
+> audit. At the re-pinned tip the decomposition is **3 + 1 + 1 = 5**, and the 18 merges that
+> disappeared are the ones the union now performs upstream: `make_raking_blade`'s rake tooth
+> was a *separate* solid re-born on each of print layers 90–109 under the legacy stitcher, and
+> the merge gate spent a round per layer reuniting it with the body. Phase C fuses it in the
+> per-layer union — the 0.029886 mm-deep tooth-body fusion the owner ruling accepted on
+> 2026-08-08 under the PR-1(a) sub-layer precedent — so those rounds have no work left to do.
+> The contact movement recorded at [`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)
+> (`27 / 72`, was `32 / 89`) is the same fact counted at the contact level.
+>
+> **The G6 property the table was written to prove is preserved exactly.** Retained-path
+> rounds are `5 − 1 first build − 1 rebuild = 3`, which is precisely the 3 committed merge
+> rounds: **every committed merge round still rides the retained path**, as the 21 did. The
+> machinery is alive post-cutover — the retained path is exercised and F-G6-4's predicted
+> terminal-audit `contact_witness` rebuild still fires on both models that took it.
+>
+> **What is honestly weaker: the retention path's corpus exercise shrinks with the round
+> count** — 21 retained rounds → 3 on the only model that ever had more than one. That is the
+> same class of coverage reduction as [FU-30](#follow-ups), recorded here rather than opened
+> as its own row because no behaviour changed and the treant (823 rounds, 804 retained) is the
+> load-bearing witness for this machinery, not `make_raking_blade`. No cap, floor or
+> coefficient is touched, and no G6 code is changed by the cutover.]**
+
 **Verification.** Five gates green at this tip, tree clean before and after: **1002** tests
 default (G6a tip 998) and **1003** `--all-features` (G6a tip 999), 0 failed — the **+4** in
 both is exactly this phase's four new tests (the harness, the position-bit-tie refusal, the
