@@ -5966,6 +5966,197 @@ make_overhang_table `16396858890798947253`, make_toed_slab `133000971864625681`,
 make_raking_blade `18388631460456455184`, make_thin_fin `14656364680512457190`. The Weeping
 Treant is, as always, deliberately outside this set.
 
+## CHECKPOINT 2026-08-09 — THE WEEPING TREANT'S FIRST `.chitubox`, TWICE, BYTE-IDENTICAL {#checkpoint-treant-artifact-2026-08-09}
+
+> **This is the owner-defined milestone**: *"treant first successful .chitubox output generation"*,
+> full end to end. It is satisfied. The artifact below was produced by the real chain — corpus STL
+> in, `.chitubox` out — and then judged by re-reading its own bytes, twice.
+
+### C.0 What happened, in one sentence
+
+At `feature/checkpoint-treant-artifact` off `develop @ 063115f`, the Weeping Treant v1.2 ran the
+whole `first_artifact_chain` composition to a written, re-parsed, format-gate-passed `.chitubox`
+of **28,670,352 bytes**, **twice, in 339.68 s and 336.80 s**, exit code 0 both times, with the
+90 GB RSS watchdog armed and never fired — and the two files are **byte-identical**.
+
+### C.1 THE ARTIFACT
+
+| field | value |
+|---|---|
+| path (durable) | `exports/weeping-treant-v1.2-first-artifact.chitubox` (main checkout; gitignored) |
+| **sha256** | **`fb4594b623ad6ef0ea48541c9024dd8cc1dfd2b2bef44975e0ee3f73f2b9c7d1`** |
+| size | **28,670,352 bytes** (27.34 MiB) |
+| produced at | `feature/checkpoint-treant-artifact`, base `063115f` |
+| invocation | `target/release/examples/first_artifact "Weeping Treant v1.2"` |
+
+**Every number below is re-derived from the bytes on disk by `audit_disk_artifact`, not read back
+from producer state** — a fresh `Project::open`, a fresh winding computation over the binary32
+disk vertices, a raw-header read of the preview span, and the `plinth-verify` format gate, none of
+which consult the producer.
+
+| re-derived from disk | value |
+|---|---:|
+| model record name | `plinth-model` |
+| **model triangles** | **429,120** |
+| model signed volume | 24,568.377661863808 mm³ |
+| **support records** | **2,585** |
+| outward-wound records | **2,585 / 2,585** |
+| min record signed volume | 0.004450599450726456 mm³ |
+| preview span | **26,996 bytes, native fallback = true** |
+| **format gate** | **PASSED** (`plinth-verify`, structural status `Passed`) |
+| file bytes on disk | 28,670,352 |
+
+**Support records by wire segment type, and the three mesh families they make up:**
+
+| family | segment type | records |
+|---|---|---:|
+| frustum | `TAPER` (1) | 306 |
+| frustum | `JOINER` (3) | 1,077 |
+| frustum | `FLARE` (4) | 86 |
+| **frustum subtotal** | | **1,469** |
+| sphere | `TIP` (7) | 306 |
+| sphere | `SHAFT` (9) | 643 |
+| **sphere subtotal** | | **949** |
+| raft | `PAD_OR_BRIDGE` (6) | 167 |
+| **raft subtotal** | | **167** |
+| **total** | | **2,585** |
+
+**All three of the emitter's mesh families are exercised**, and 1,469 + 949 + 167 = 2,585 closes
+against the record count and against `primitive_count`, both independently.
+
+### C.2 THE SEAL-TUPLE CORRESPONDENCE — the artifact carries exactly the forest J6 measured
+
+This is the claim that makes the artifact worth the name, and it is an equality, not a
+resemblance. The checkpoint run's own `SEAL` line against *FU-32 phase J6 measured 2026-08-09*
+([`#fu32-j6-2026-08-09`](#fu32-j6-2026-08-09)):
+
+| field | J6's seal | this artifact | |
+|---|---:|---:|---|
+| `routed_contacts` | 306 | **306** | identical |
+| `final_live_members` | 1,383 | **1,383** | identical |
+| `snapshot_digest` | 423276951048565625 | **423276951048565625** | identical |
+| faces | 429,120 | **429,120** | identical |
+
+`primitive_count` = 2,585, `lift_mm` = 5, `plate_z_mm` = −5. **The 1,383 live members become 2,585
+emitted records** because a member lowers to several wire segments; that ratio is reported, not
+asserted, and is visible in the family table above.
+
+**Why the equality was not guaranteed in advance, and therefore means something.** J6's seal came
+from `embed_incidence_census`, which calls `verification_snapshot()`; this artifact comes from
+`into_supported_model()` and the emit path — a different consumer of the same authority, reached
+through a different composition, at a different thread count (see C.3). The digest reproducing to
+the unit across all of that is evidence the export path and the census see the same forest.
+
+### C.3 THE TWO RUNS
+
+Both unsandboxed (a sandboxed launch EPERM-blocks at 0 s), each with an unsandboxed RSS watchdog
+polling `ps` every 2 s, hard-armed at 90 GB, `SIGTERM` then `SIGKILL`, under a **1200 s** timebox.
+Machine quiet at both launches: no `cargo`, no `rustc`, nothing above ~38 % CPU.
+
+| | run 1 | run 2 |
+|---|---:|---:|
+| exit code | **0** | **0** |
+| wall clock | **339.68 s** | **336.80 s** |
+| peak RSS | 5,776,432 KB (5.51 GiB) | 5,717,312 KB (5.45 GiB) |
+| peak as share of the 90 GB arm | 6.12 % | 6.06 % |
+| RSS samples | 162 | 161 |
+| watchdog | armed 90 GB, **never fired** | armed 90 GB, **never fired** |
+| timebox | never approached | never approached |
+| sha256 | `fb4594b6…` | `fb4594b6…` |
+
+**BYTE-IDENTITY: verified two independent ways** — equal sha256, and `cmp` over the two files
+returning clean. **Every field of both runs' stdout is identical**, `SEAL`, `EMIT`, `DISK`,
+`WINDING`, `PREVIEW` and `GATE` alike. The determinism property that held for all five earlier
+corpus artifacts holds for the treant too, and the runs are 0.85 % apart in wall clock.
+
+**A conditions difference, stated rather than buried: this is NOT a speed claim against J6.** J6's
+470.83 s / 470.64 s were measured with `PLINTH_THREADS=4`; these runs used the machine default and
+carry the emit stage on top. **The two numbers are not comparable and no improvement is claimed
+from them.** What the thread-count difference does buy is a free determinism observation: the
+snapshot digest reproduced J6's to the unit at a different pool size.
+
+### C.4 HOW THE TREANT REACHED THE EMIT PATH — the hollow stage refused it
+
+**The treant does not hollow, and that is the only reason this checkpoint needed any code at all.**
+Run end to end at `063115f` before any change, twice, it exits 1 at 22.29 s / 22.42 s with the
+byte-identical `hollow: native shell did not contain one negative cavity enclosed by positive
+outer material` — `plinth_hollow::HollowError::InvalidShellTopology`. **The emit path was never
+implicated and was never reached.** That refusal is **FU-34**, opened by this checkpoint, and it
+is a property of the model, not of the export seam.
+
+`first_artifact_chain::run_from_oriented` treated a hollow-stage `Err` as fatal; its oriented-solid
+reserve existed only for a *support* refusal of a drilled shell. It now carries **OQ-1's own
+recommendation**, built at last: the oriented solid is pre-cloned before the hollow stage consumes
+it, and on `Err` it is handed to support planning through the same
+`HollowedModel::solid_decision(BelowThreshold)` route the support-refusal path,
+`embed_incidence_census` and every sealed-run gate already use, with the typed refusal recorded
+verbatim in `SupportedGeometry::HollowStageRefused`.
+
+**The provenance caveat, stated here as well as at the variant.** `SolidDecisionReason` has exactly
+two values, `NoCavity` and `BelowThreshold`, and **neither means "the hollow stage errored"**. So
+this artifact's `hollow_disposition` reads `Solid { reason: BelowThreshold }` — a verdict no stage
+in this run actually reached. That is the F14 imprecision, inherited knowingly rather than hidden:
+`SupportedGeometry::HollowStageRefused { refusal: "native shell did not contain one negative cavity
+enclosed by positive outer material" }` is where this artifact's true provenance lives, it is
+carried in the outcome, and a new test pins it. **Read the two fields together; the disposition
+alone will mislead.**
+
+### C.5 THE CHANGE IS INERT FOR EVERY MODEL THAT DOES NOT TAKE THE NEW PATH — proved, not argued
+
+Control experiment in one worktree at one tip, same target directory, the diff stashed and restored
+as the only variable. The five models that already emitted produce **byte-identical sha256 with and
+without the change**:
+
+| model | sha256 (control = with change) |
+|---|---|
+| Sphere | `d59044b82caeb169f77e6bc8778661491afe6f11ca2a8d4169a9118aad2cc9b8` |
+| make_overhang_table | `9aea36488f308f3f6c3b4b0eff60d726148dd71be6902da409d226d303c4b504` |
+| make_toed_slab | `12ebdcdee51ece68bfddad741998746d9dbc9eb89a08d055fb7e67f1be751a0d` |
+| make_raking_blade | `9acfa2703bbd74fd21a7b718ba55b41605b2c432e684fbdf57a66db382da84ab` |
+| make_thin_fin | `b73377981c3ecebb421f75702912cf4741bffba224a37cfea969f81675f94c1a` |
+
+**A side effect that is reported rather than left to be discovered.** The fallback lives in the
+shared composition, not behind a model-name special case, so `Cylinder` and `make_box` — the two
+models `export-path-design-2026-08-07.md` filed as an unfixed "Refusal finding" with this same
+message — now reach artifacts too. **`--all` is 7 of 7, exit code 0, where it was 5 of 7.** This
+was not the goal of the change. Whether those two artifacts are wanted in `exports/` is an owner's
+call; **neither was placed in the main checkout by this work.**
+
+### C.6 WHAT THIS CHECKPOINT DOES NOT CLAIM
+
+- **Nothing about ChituBox.** The format gate is structural — a fresh parse, reserialize and
+  byte-compare — and is **not** a claim that the ChituBox GUI will open or slice this file
+  (`chitubox_io/src/lib.rs:14-16`). The owner's GUI check is the semantic oracle and has not
+  happened. This section records an artifact, not an acceptance.
+- **Nothing about print quality, printability, or whether 1,383 members is a *good* forest.** The
+  seal says the pipeline's own invariants hold. It says nothing about resin.
+- **Nothing about hollowing the treant.** It is emitted **solid**. The resin saving hollowing exists
+  to deliver is exactly what FU-34 is about, and this artifact does not have it.
+- **No new pin.** `423276951048565625` is still not a frozen digest and the treant is still outside
+  the OD-8 set. Two byte-identical measurements are evidence, not a golden.
+- **No cap, floor, constant, coefficient or registry entry was raised, lowered or touched**, and no
+  engine crate was modified: the diff is `crates/plinth-pipeline/examples/`, that crate's
+  `tests/first_artifact.rs`, and docs.
+
+### C.7 Gates
+
+Five gates verbatim on the branch, tree clean after: (1) `cargo test --workspace --offline
+--no-fail-fast` — **1067 passed / 0 failed**; (2) the same `--all-features` — **1072 passed / 0
+failed**; (3) `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` —
+clean; (4) `cargo fmt --all -- --check` — clean; (5) `git diff --check` — clean.
+
+**Delta attributed: +1 / +1** against `063115f`'s 1066 / 1071, and it is exactly one test —
+`hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits`, which gates the new
+fallback on `make_box` and pins the refusal string, the `BelowThreshold` provenance stamp and the
+face-preserving reserve. A new branch in the shared composition with no gate on it is what drifts.
+
+**That test could not use `Cylinder`, and the reason is a second finding: FU-35.** `Cylinder` trips
+FU-8f phase G6c's `debug_assert` in `specialized.rs:4858` — a retained round executes **23,203**
+load operations against a charge of **4,146** — so any debug-profile test carrying it into
+`run_support` panics. **This is not the fallback's doing and it is not new:**
+`embed_incidence_census`, which shares none of this code, panics identically on `Cylinder` at this
+tip in a debug build. See FU-35.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -6001,6 +6192,19 @@ their generating commits are integrated.
   it sliced cleanly in ChituBox.
 - Related calibration commit: `634abdbebbca54cd622b571a609cca7bd9c64a61`
   (`fix(calibration): ground ordinary ChituBox models`), **accepted but branch-only**.
+
+### Weeping Treant first artifact {#gui-checkpoint-treant-first-artifact}
+
+- Project: `exports/weeping-treant-v1.2-first-artifact.chitubox` (main checkout; gitignored)
+- SHA-256: `fb4594b623ad6ef0ea48541c9024dd8cc1dfd2b2bef44975e0ee3f73f2b9c7d1`
+- Size: `28,670,352` bytes
+- Owner checkpoint: **the artifact exists and satisfies the milestone's generation half; the GUI
+  half is NOT yet done.** It has not been opened in ChituBox. The structural format gate passed and
+  the bytes re-parse, which is not the same claim — record it as observed only once the owner has
+  actually opened and sliced it.
+- Full record: *CHECKPOINT 2026-08-09*
+  ([`#checkpoint-treant-artifact-2026-08-09`](#checkpoint-treant-artifact-2026-08-09))
+- Produced by branch `feature/checkpoint-treant-artifact`, base `063115f`, **VERIFIED-NOT-MERGED**.
 
 ### Grounded loading fixture {#gui-checkpoint-loading-fixture}
 
@@ -6150,6 +6354,8 @@ Everything else here is non-blocking.
 | FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** **[FU-31 FIXED 2026-08-08 (**[`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)**).** Option (b) landed at `55b4d99`: `dispose_demands` aggregates same-position uncovered demands into one seat at push time, keyed on position bits normalized to `same_point`'s `==` equality; mutation-proven fixture reproduces the exact `DuplicatePhysicalSeat` with the aggregation disabled. Treant acceptance (attempt 1 of 2): specialized passes with **553** contacts (was 554 with the un-merged pair) and the run advances to `Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` — the FU-8g wall, now measured in-engine at 553 × (4 + 429,120). FU-8g's H0 treant leg captured in the same run: crossings mean **10.906** (p50 7, max 298), tests mean **191.982**, honest work Σcrossings **6,031** vs charged 237,303,360 (**39,347×**), honest scratch **142 MiB** vs charged 603 GiB. All seven frozen corpus digests byte-identical; one unit-fixture re-pin (raking blade, raw orientation, four real two-owner births now born aggregated), attributed in full in the section. FU-8g H1–H6 are unblocked.]** |
 | FU-32 | CCO routing re-digests the whole accumulated transcript once per terminal — the batch-first violation family a sixth time, and the first one no cap could have caught | **Opened 2026-08-09 by FU-8g phase H6** ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)), the run that first carried the Weeping Treant past `initial::build_initial_contacts`. With the initial-contact wall gone (H1/H2's honest charge: **108,378 vs the untouched 4,000,000**, 2.71 %), the treant's stopping point is no longer a refusal at all: both attempts ran **EXCEEDS-TIMEBOX at 600 s** with the main thread **100 % inside `PreparedSupportRun::route_initial_cco`** from t ≈ 267 s to the kill. **Measured, not argued:** across sample windows at t = 280 / 360 / 440 / 520 / 575 s the share of routing wall-clock in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % → 77.1 % while the constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % → 9.0 % → 9.0 % → 9.0 % — a growing term overtaking a constant one, reproduced across three windows 135 s apart. **Derived to the line from source, independently:** the routing loop (`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per terminal; that function's **first statement** (`cco.rs:1397`) is `let controller_digest_before = self.digest();`; and `CcoController::digest` (`cco.rs:1775–1862`) is not the cached `const fn` at `:863` but a full walk of the accumulated controller state — every terminal in `terminal_cadence` (`:1786`), every record in `terminals` (`:1790`), each `UnroutedNoWinner` record's **entire** anchor-refusal list via `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`; five words per refusal at `:2128–2149`) and `digest_anchor_refusals`, then the whole host kd-tree (`indexed_members` `:1851`, `samples` `:1856`). Cost `Θ(N²) + Θ(N·R) + Θ(N·H)` for `N` cadence terminals (553 specialized physical contacts plus the regular terminals appended at `runner.rs:1649`), `R` accumulated refusals, `H` host samples. The `Θ(N·R)` term dominates on this model, consistent with the standing record that **0 of 3429 attempted model anchors survive corpus-wide**, which makes `UnroutedNoWinner` common and refusal lists long. **A second, independent per-terminal re-digest sits in the same loop** and is the ~9 % constant term: `validate_replay` → `validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` → `SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`, plus `SurfaceAnchorPool::validate_against` → `surface_anchor_pool_digest` and `FinalizedContactLoads::validate_binding` → `finalized_load_rows_fingerprint` — **every one of those structures is immutable for the whole routing stage and every one is re-hashed from scratch per terminal.** Together ≈86 % of the stage. **This is NOT a cap and no cap would fix it**: nothing refuses, no resource is over-charged, no limit is consulted — which is why the measurement-first doctrine found it with a profiler rather than a preflight, and is the reason this row exists. **The remedy is not this row's to choose**, but the shape bounds it: both terms re-derive state whose deltas are already known at the call site, and the house precedent is incremental maintenance (FU-8f G3's prefix evaluation, G6's cross-round retention), not a bigger budget. **FIRST ACTION — and it is not the fix.** H6 also found that **an EXCEEDS-TIMEBOX run is structurally counter-free**: `plinth_support::census` flushes only from `census::finish` (model completed) or `census::report_failure` (typed refusal), there is **no signal handler anywhere** in `census.rs` or `examples/embed_incidence_census.rs`, and the watchdog kills with `SIGKILL` — so **both attempts emitted zero `CENSUS` rows**. The design's "EXCEEDS-**with counters**" outcome is therefore not achievable with the present harness on the very outcome it ranked most likely (~45 %), H4's rider (`rounds_committed`, `exit_reason`, the three-way `PoisonCause` split) **could not fire**, and the treant's **21 poison-driven rebuilds remain unattributed**. Give the census a periodic or signal-triggered flush *before* the next treant run; otherwise the next run buys another verdict with no evidence. **Memory is not the problem and should not be treated as one:** whole-process peak was **3,721 MiB**, 4.0 % of the 90 GB watchdog arm — H1's per-row reserve collapse confirmed at treant scale, against a design prediction of 14–32 GB under the old reserves. Routing's own growth (+1,591 MiB over 332 s, ≈4.8 MiB/s) is honestly rows-scaled transcript accumulation, and binds nothing. **The brace/joints/raft caps registered by H3 remain wholly unexercised** — the run never reached brace — so §18's statement of absence stands unchanged and this row licenses no brace number. **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. See *FU-8g phase H6 measured 2026-08-09* and `support-resource-caps-2026-08-05.md` §19. The treant has **no seal**. **[J0–J3 LANDED; THE MOVEMENT IS ATTRIBUTED AND THE RULING IS PENDING — 2026-08-09 (**[`#fu32-j3-2026-08-09`](#fu32-j3-2026-08-09)**).** J0 (`41246f6`) gave `plinth_support::census` a periodic **and** signal-triggered flush, so the counter-free killed run this row opened against is fixed at its root. J1 (`059b444`) hoisted the immutable routing authority (`VerifiedRoutingAuthority`, the G2 precedent applied verbatim) — **value-preserving; all seven OD-8 digests byte-identical**. J2 (`c14754e`) replaced `CcoController::digest`'s per-terminal whole-state walk with the design's state-pure incremental accumulators, kept **both F6 tamper tripwires genuinely recomputing** through `rebuild_accumulators()` (`runner.rs:2775`, `:2848`), and **MOVED ALL SEVEN frozen OD-8 snapshot digests**. **The sentence above stating the treant has no seal was written before J2 and stands as the record of its date: the Weeping Treant SEALED for the first time at J2** — complete pipeline (routing, rewire, brace, seal) in 463 s wall-clock, peak RSS ≈5.4 GiB (6 % of the 90 GB arm), `routed_contacts=306`, `final_live_members=1383`, `snapshot_digest=423276951048565625` — **a first measurement, not a pin**, and §A2's predicted next binder (`rewire::optimize`, ~55 %) did **not** bind. J3 adds **no engine code** and is the FU-10 attribution: the digest movement is **DECISION-NEUTRAL**, proved twice over — from source (all 30 `controller_digest_before` occurrences audited at this tip; **zero comparisons outside `#[cfg(test)]`**, and `finalize_transcript_row`'s admission check reads six other fields and deliberately not this one) and by parent-vs-tip routing-output dumps on all seven corpus models (**275 transcript rows and 687,288 content lines byte-identical**; of the transcript's 10 header digests only the 3 that fold the moved value move, and of `verification_snapshot_digest`'s 17 inputs exactly 1 does). **Three code pins and one golden will need re-pinning at J4**, enumerated by name in the J3 section — and **NOTHING is re-pinned, no golden refreshed, no doc table rewritten and no test expectation relaxed** pending the owner's ruling. **NO CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED.** Gates 1058 default / 1063 all-features with **exactly** the two expected digest-pin failures and no others; clippy, fmt and `git diff --check` clean. **Still open: J4 (owner ruling, re-pin, record sweep), J5 (the honest routing charge, §D3) and J6 (the treant measurement and the record).**]** **[J4 LANDED; THE OWNER RULED AND ALL SEVEN ARE RE-PINNED — 2026-08-09 (**[`#fu32-j4-2026-08-09`](#fu32-j4-2026-08-09)**).** Asked whether the value-changing digest fix may proceed given that all seven OD-8 fingerprints move, the owner ruled, verbatim: *"The fingerprints aren't sacred  if things change slightly that's to be expected (because the algorithm wasn't right when the fingerprints were generated!)"* — sought after J3's attribution and before any re-pin, which is FU-10 order. **The new OD-8 authority table is in the J4 section** and supersedes the 2026-08-08 one at [`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08): Sphere `2297157889062365577`, Cylinder `6853793710942395608`, make_box `8709076999423814412`, make_overhang_table `16396858890798947253`, make_toed_slab `133000971864625681`, make_raking_blade `18388631460456455184`, make_thin_fin `14656364680512457190` — **all seven digests move, NOT ONE count moves**, which is exactly what separates this movement from the 2026-08-08 one (that one moved two models' counts because real island births were removed). Three code pins re-pinned from J4's **own** re-measurement rather than hand-copied (`support_runner_integration.rs` toed_slab `13_346_779_153_602_682_749 -> 2_198_459_883_570_957_390` and raking_blade `8_660_653_339_934_460_766 -> 74_030_269_957_898_085`), and the workspace's one golden **regenerated through its own producer path, never hand-edited** (`coverage_gate_overhang_table.json` `snapshot_digest 5470664714994646368 -> 3706765241747593242`; diffed field by field afterwards — 185 leaves, exactly 1 moved, no evidence lost). `verification_snapshot_digest_input_list_is_pinned` was deliberately **not** touched and stayed **green**: the digest's input *shape* did not widen, only one input's value moved. Dated supersession lines were appended at every doc site quoting any of the seven superseded values (107 occurrences across 9 files); **no earlier citation was edited or deleted**. Census re-run at this tip reproduces the new septet byte for byte — the third concordant measurement — with `routed_contacts` and `final_live_members` unchanged on every model. Gates **1060 default / 1065 all-features, ALL GREEN**, zero failures; clippy, fmt and `git diff --check` clean; **J4 adds zero tests and moves zero counts. NO CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED. Still open: J5 (the honest routing charge, §D3 — an addition, not a move) and J6 (the treant measurement and the record).**]** **[J5 LANDED; ROUTING IS CHARGED — 2026-08-09 (**[`#fu32-j5-2026-08-09`](#fu32-j5-2026-08-09)**).** The sealed CCO routing cadence, which had **no `Limit`, no counter and no clock**, now carries a counted preflight charge against **two NEW registered caps** — `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS`, both 536,870,912 by one stated rule — with a meter beside the charge and a receipt (`executed ≤ charged` or `ChargeDrift`). Registry 284 → **286**; caps-doc §21, physics-doc §3.10.11, FU-24 ledger rows and a producer-regenerated `constants.md` in the same commit. **Result-inert: OD-8 seven byte-identical, `routed_contacts`/`final_live_members` unmoved.** Gates **1066 / 1071 ALL GREEN** (+6). **NO EXISTING CAP RAISED, LOWERED OR TOUCHED** — the two are additions to a stage that had none. `rewire::optimize`'s absent budget opened as **FU-33**, deferred not skipped.]** **[J6 MEASURED — FU-32 IS COMPLETE, J0–J6, AND THE TREANT SEALS TWICE UNDER THE STANDING MEMORY PROTOCOL — 2026-08-09 (**[`#fu32-j6-2026-08-09`](#fu32-j6-2026-08-09)**).** This row's headline sentence — *"The treant has **no seal**"* — was written at H6 and is **superseded**, first by J2's seal (the first in project history, 463 s, unprotocolled) and now by the measured record. **Two attempts, both COMPLETED: 470.83 s and 470.64 s of the 600 s box, exit code 0, peak RSS 5,585.6 / 5,610.9 MiB = 6.06 % / 6.09 % of the 90 GB arm, which never fired.** Seal tuple identical in both runs and to J2's: `routed_contacts=306`, `final_live_members=1383`, `snapshot_digest=423276951048565625`; four self-proving identities hold in the transcript (CCO winners 199+4+103 = 306; surviving model anchors 4 = committed 4; `T5` members sum to 1,383; stubs 306). **Determinism, the G6d standard: 13,441 terminal census rows per run, SHA-256 identical, ZERO differing rows**, wall-clock within 0.04 %. **THE WALL THIS ROW WAS OPENED AGAINST IS GONE:** the cadence loop that consumed ≥335 s without finishing at `bfa5b3b` — and whose hashing §M4 projected at ≈691 s — completes in **≤20.7 s**, bracketed by J5's own preflight-charge and receipt census rows. J5's charge/receipt reproduce **to the unit** (164,993,019 evaluations and 162,719,910 retained rows, 30.7 % / 30.3 % of the untouched cap). **Predictions scored:** §A2's ~55 % call (rewire binds next) **MISSED** — rewire cost 41.5–46.5 s, 8.8–9.9 % of the run, with its evaluated candidates bounded by the census at 619 clearance rows and 3,076 anchor attempts against a 364,223-row pool; the per-move shape the design named was right, the number of moves was never estimated, and **FU-33 is not closed, downgraded or answered**. The ~10 % call (a clean seal) **LANDED, on cause as well as outcome**. §A2's ~25 % call (a brace/raft refusal) **MISSED**: **the brace and raft stages RAN for the first time** — 748 rung rows, 450 Brace members in the sealed forest — **and none of the ten registered brace/raft caps refused; but none of them is metered, so there is still NO demand of record for any of the ten.** H3's "no run has ever reached them" is superseded; its "no measured demand" stands. **Design §M3's 30.3 B per retained refusal is corrected DOWNWARD to ≤8.8–9.3 B/row at completion — and the cap does NOT move, in either direction.** **NO cap, floor, constant, coefficient or registry entry raised, lowered or touched; NO engine code changed** (`git diff` over `crates/` and `rust/` empty); **the treant is still NOT in the frozen digest set and `423276951048565625` is still NOT a pin.** What stands between this seal and the `.chitubox` checkpoint is the **emit path** — `examples/first_artifact.rs --all` still excludes the treant for a reason that is no longer true — and that is export work, not FU-32's. Per §A4 step 5, a first seal is an **owner's** decision point.]** |
 | FU-33 | `rewire::optimize` is an **unbounded loop**: `REWIRE_WORK_BUDGET` is `TrialSetting::disabled()` and there is no wall-clock deadline anywhere in `plinth-support` for rewire | **Opened 2026-08-09 by FU-32 phase J5** ([`#fu32-j5-2026-08-09`](#fu32-j5-2026-08-09)), which charged routing and **deliberately did not charge this**. The shape is named from source in the design's §A2 #1 and ranked the **most likely next binder at ~55 %**: `rewire.rs`'s `'sweeps: loop` iterates `sweep_order` (one descriptor per live non-stub member, up to four kinds each) and **per move** does `RewireCcoBinding::bind` (a `forest.clone()` plus **two full `Forest::digest()` walks**), `derive_brace_attachments`, `total_volume_ml`, a whole-forest `validate()` per candidate, `changed_forest_volume_delta` per candidate, and `discover_rewire_anchor_seats` over **the entire 364,223-row anchor pool**. `REWIRE_WORK_BUDGET` is `Disabled` (`crates/plinth-core/src/constants/placeholders.rs`), so the loop has no budget at all and the only thing that has ever stopped it is an external `SIGKILL`. **Why J5 did not fix it, stated rather than assumed:** a work budget that stops a search early is **result-changing** — it changes which forest is returned and therefore every downstream digest — whereas J5's routing charge is result-inert by construction (proved: all seven OD-8 digests byte-identical at its tip). Landing both in one phase would put a value-moving ruling inside a resource-charging phase, which is the mixing FU-10 protocol exists to prevent. **What this row owes:** measure `rewire::optimize`'s real demand on the treant first (it has never been instrumented — the treant reached rewire for the first time at FU-32 J2), then decide between a charged preflight on a knowable worst case (J5's shape, result-inert) and an enabled `REWIRE_WORK_BUDGET` (result-changing, and therefore owner-ruled under FU-10 protocol before it is built). **Do NOT enable the budget without that measurement and that ruling.** No cap, floor or constant is touched by opening this row. |
+| FU-34 | `plinth_hollow::run` **refuses the Weeping Treant's shell outright** — `InvalidShellTopology`, so the project's flagship model cannot be hollowed and gets no resin saving at all | **Opened 2026-08-09 by the treant `.chitubox` checkpoint** ([`#checkpoint-treant-artifact-2026-08-09`](#checkpoint-treant-artifact-2026-08-09)). **Number note: this row was adjudicated as "FU-33", which was already taken** by the `rewire::optimize` row directly above (opened 2026-08-09 by FU-32 J5); it is filed at the next free number instead and **no existing row was renumbered, edited or displaced**. **The measurement.** `target/release/examples/first_artifact "Weeping Treant v1.2"` at `063115f`, twice, unsandboxed with the 90 GB RSS watchdog armed: both attempts exit 1 at **22.29 s / 22.42 s** (peak RSS 1.69 / 1.72 GiB, watchdog never fired, 1200 s timebox never approached) with the byte-identical line `hollow: native shell did not contain one negative cavity enclosed by positive outer material`. The typed value is `plinth_hollow::HollowError::InvalidShellTopology` (`crates/plinth-hollow/src/lib.rs:1866`, category `Shell`), raised from the post-Boolean shell check — `orient_boolean_cavity` (defined `:995`, called `:863`) and `validate_shell_topology` (`:949`, called `:864`) — both of which require the shell to triage as `TriageError::PreHollowed` with **exactly one** cavity component and to certify ≥2 closed components with **exactly one** of negative signed volume. Which of the two sites fires is **not** distinguishable from outside; both carry the same message and separating them needs instrumentation, which the checkpoint run was forbidden to add. **This is a hard error, not an ineligibility:** `plinth_hollow::run` (`:351–370`) converts only `IneligibleNoCavity`, `IneligibleBelowBulk` and `IneligibleSavings` into a typed `HollowStageOutput::Solid`; everything else propagates, and this propagates. **Why it was never seen before, stated precisely:** the OD-8 census and every sealed-run gate bypass the hollow stage entirely — `embed_incidence_census.rs:142` builds `HollowedModel::solid_decision(mesh, orientation, BelowThreshold)` straight from `oriented.into_parts()` — so **FU-32 J6's 470 s seal is on the oriented solid and the treant had never entered `plinth_hollow::run` in project history** until this checkpoint. **The treant is not alone, and that was already on the record:** `export-path-design-2026-08-07.md`'s corpus-sweep addendum filed `Cylinder` and `make_box` as a "Refusal finding" with **this same message**, unfixed. So the count is **three of eight corpus models refused by the cavity check**, and the largest, most branched model is one of them — consistent with (but **not proved by**) the reading that a branching form yields several disjoint interior voids where the check demands one. **What this row does NOT claim:** that the check is wrong. It may be correctly refusing a shell that is genuinely not printable; nobody has looked at the geometry. **First action:** dump the treant's post-Boolean shell and count its cavity components and its negative-volume closed components, which decides between "the model produces a multi-cavity shell and the check is right" and "the Boolean/marching path is producing a broken shell". Only then choose a remedy. **Product consequence, stated because it is the reason this row is not cosmetic:** hollowing is where the resin saving lives, and the flagship model currently gets none. **The checkpoint artifact is NOT blocked by this** — it emits from the oriented solid through the `HollowStageRefused` fallback, with the refusal recorded verbatim in the artifact's own `SupportedGeometry` — and no cap, floor, constant or registry entry is touched by opening this row. |
+| FU-35 | **FU-8f phase G6c's "a retained round executes no more than it is charged" invariant is FALSE on the `Cylinder`** — executed 23,203 against a charge of 4,146, a 5.6× overrun | **Opened 2026-08-09 by the treant `.chitubox` checkpoint** ([`#checkpoint-treant-artifact-2026-08-09`](#checkpoint-treant-artifact-2026-08-09)), found incidentally while gating the FU-34 fallback and **not caused by it**. `crates/plinth-support/src/specialized.rs:4858` carries `debug_assert!(executed_operations <= baseline_resource.operations)` under a comment stating the property is **"provable, not merely hoped"** and that it is "checked here every round in debug, and pinned by `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged` in release". On the `Cylinder` it is false: the assertion fires with `a retained round executed 23203 load operations against a charge of 4146`. **Independent of the checkpoint's change, and proved so rather than asserted:** `examples/embed_incidence_census` shares none of the export-seam code and takes the same `HollowedModel::solid_decision(BelowThreshold)` handoff, and a **debug** build of it at this tip panics identically — `PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Cylinder" ./target/debug/examples/embed_incidence_census`. The census's own last flushed row before the panic reads `retained_load_charged_operations=4146 retained_load_executed_operations=4146`, so the overrun belongs to a **later** round than the one the meter had flushed. **Why nobody had seen it:** every routine consumer of this path is a **release** build, where `debug_assert!` is compiled out, and the release pin named in the comment is a unit fixture rather than a corpus run — so no gate in the workspace has ever carried the `Cylinder` into `run_support` in a debug profile. `make_box` on the same path is clean (executed 532 ≤ charged 716), which is why the checkpoint's new test uses `make_box`; the checkpoint deliberately did **not** pick a model that hides this. **What this row does NOT claim:** that the charge is too low, or that the meter is wrong, or that any cap should move — the direction of the defect is exactly what has not been established. It could be an under-charge (a real accounting gap) or an over-count in `state.executed_operations` (a metering bug costing nothing real); those have opposite remedies and **the evidence does not yet separate them**. **First action:** run the `Cylinder` in debug, capture the round index and the per-round charge/executed pair for every round rather than the flushed subset, and determine which of the two figures is wrong before touching either. **Do NOT raise the charge to make the assertion pass** — that would enshrine the defect as a budget, which is FU-8b's whole lesson. **No cap, floor, constant or registry entry is touched by opening this row**, and the treant's own artifact is unaffected: the treant does not trip this assertion and the checkpoint's release runs are unaffected either way. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 

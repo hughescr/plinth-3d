@@ -25,7 +25,7 @@ mod chain;
 use std::path::PathBuf;
 
 use chitubox_io::SegmentType;
-use plinth_hollow::HollowDisposition;
+use plinth_hollow::{HollowDisposition, SolidDecisionReason};
 use plinth_mesh::make_overhang_table;
 
 /// A per-test scratch path that is removed on the way in and on the way out.
@@ -239,6 +239,76 @@ fn procedural_overhang_table_seals_lowers_and_emits_a_reparseable_chitubox() {
         .expect("make_overhang_table must reach a written file");
     let audit = chain::audit_disk_artifact(scratch.path(), "make_overhang_table")
         .expect("reopen and audit the artifact");
+
+    assert_artifact_is_sound(&outcome, &audit);
+    assert_eq!(outcome.lift_mm, chain::LIFT_MM);
+}
+
+/// The hollow-error fallback, gated on a model that actually takes it.
+///
+/// `make_box` errors out of `plinth_hollow::run` with `InvalidShellTopology`
+/// (FU-34) — it neither hollows nor decides solid — and before the fallback
+/// existed that error ended the chain, so `make_box` reached no artifact at
+/// all. This pins the path that carries it to one now, because a new branch in
+/// the shared composition with no gate on it is exactly what drifts.
+///
+/// **Why `make_box` and not `Cylinder`, which refuses identically.** `Cylinder`
+/// cannot be gated here at all today: on the sealed run it trips FU-8f phase
+/// G6c's `debug_assert` in `specialized.rs` — a retained round executes 23,203
+/// load operations against a charge of 4,146 — so any debug-profile test that
+/// carries it into `run_support` panics before reaching an artifact. **That is
+/// not this fallback's doing and it is not new:** `embed_incidence_census`,
+/// which shares none of this code and takes the same solid handoff, panics
+/// identically on `Cylinder` at this tip. It is filed as **FU-35**, and this
+/// test deliberately does not paper over it by pinning a model that hides it.
+///
+/// `make_box` and not the Weeping Treant, in turn, because the two take the
+/// identical path and this one costs milliseconds where the treant costs
+/// minutes, which is not a test's budget.
+#[test]
+fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
+    let _ = require_corpus_stl("make_box");
+    let scratch = Scratch::new("make-box-hollow-refusal");
+
+    let outcome = chain::run_corpus_model("make_box", scratch.path())
+        .expect("make_box must reach a written file through the hollow-error fallback");
+    let audit = chain::audit_disk_artifact(scratch.path(), "make_box")
+        .expect("reopen and audit the artifact");
+
+    // Pinned as an equality on the whole variant, refusal string included, so
+    // that the day `plinth-hollow` stops refusing this shell — or starts
+    // refusing it for a different reason — this fails and says so rather than
+    // quietly changing the artifact's provenance.
+    assert_eq!(
+        outcome.supported_geometry,
+        chain::SupportedGeometry::HollowStageRefused {
+            refusal: "native shell did not contain one negative cavity enclosed by \
+                      positive outer material"
+                .to_owned()
+        },
+        "make_box's hollow-stage verdict moved; re-derive what this artifact is made of"
+    );
+
+    // The provenance caveat this fallback knowingly inherits, asserted rather
+    // than described: the model carries a `BelowThreshold` solid stamp that no
+    // stage actually reached, because `SolidDecisionReason` cannot express
+    // "the hollow stage errored". The `SupportedGeometry` above is the only
+    // place the truth is recorded, which is why it is pinned first.
+    assert_eq!(
+        outcome.hollow_disposition,
+        HollowDisposition::Solid {
+            reason: SolidDecisionReason::BelowThreshold
+        },
+        "the fallback's solid handoff changed shape; the caveat documented on \
+         SupportedGeometry::HollowStageRefused needs re-deriving with it"
+    );
+
+    // The oriented solid reached support planning intact -- the pre-clone is a
+    // reserve, not a decimation step.
+    assert_eq!(
+        outcome.prepared_faces, outcome.source_faces,
+        "the hollow-error reserve is the oriented solid and must not lose faces"
+    );
 
     assert_artifact_is_sound(&outcome, &audit);
     assert_eq!(outcome.lift_mm, chain::LIFT_MM);

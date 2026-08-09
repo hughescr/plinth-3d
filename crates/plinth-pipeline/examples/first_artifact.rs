@@ -6,8 +6,11 @@
 //!
 //! With a model name, writes that one model's artifact (defaulting to
 //! `Sphere` when no argument is given). With `--all`, writes one artifact for
-//! every frozen-digest corpus model except the Weeping Treant, whose
-//! tournament cannot yet complete.
+//! every frozen-digest corpus model except the Weeping Treant, which stays out
+//! of the sweep for the reasons on `CORPUS_MODELS` — but is fully reachable by
+//! name, and that is how its checkpoint artifact was produced:
+//!
+//! `cargo run --release --offline --example first_artifact -p plinth-pipeline -- "Weeping Treant v1.2"`
 //!
 //! Writes `exports/<model-slug>-first-artifact.chitubox` at the workspace
 //! root. `exports/` is gitignored: this is a run output, not source. The
@@ -25,9 +28,26 @@ mod chain;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// The seven frozen-digest corpus models this sweep covers. The Weeping
-/// Treant is deliberately excluded: its support tournament cannot yet
-/// complete, so attempting it here would not produce a reviewable artifact.
+/// The seven frozen-digest corpus models this sweep covers. The Weeping Treant
+/// is deliberately excluded, and **the reason has changed** (2026-08-09).
+///
+/// The old reason — "its support tournament cannot yet complete" — is dead:
+/// FU-32 phase J6 sealed the treant twice, at 429,120 faces, in 470.8 s and
+/// 470.6 s with identical counters, so it completes. Two reasons stand in its
+/// place, and neither is "it does not work":
+///
+/// 1. **It is not a frozen-digest model.** This constant is the frozen-digest
+///    set and the treant has never been in it (§J3.9, §J4.1); a sweep over that
+///    set is the wrong place to add it.
+/// 2. **It costs minutes, not seconds.** The other seven finish this sweep in
+///    well under a minute combined; the treant alone is ~8 minutes of seal plus
+///    emit, which would turn a quick sweep into a long one for every caller.
+///
+/// It is reachable by name and that is how its checkpoint artifact is made:
+/// `-- "Weeping Treant v1.2"`. Note that it reaches the artifact through the
+/// hollow-stage fallback (`SupportedGeometry::HollowStageRefused`), because
+/// `plinth_hollow::run` refuses its shell — that refusal is FU-34 and is a
+/// property of the model, not of this sweep.
 const CORPUS_MODELS: [&str; 7] = [
     "Sphere",
     "Cylinder",

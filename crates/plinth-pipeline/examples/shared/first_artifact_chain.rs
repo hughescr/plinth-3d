@@ -87,6 +87,37 @@ pub enum SupportedGeometry {
         drilled_faces: usize,
         refusal: String,
     },
+    /// The hollow stage itself **errored** -- it neither hollowed nor decided
+    /// solid -- so the oriented solid carried the model instead.
+    ///
+    /// This is the case OQ-1 actually anticipated ("a corpus model might
+    /// *refuse* to hollow") and which the Sphere never exercised, so the
+    /// typed solid-decision fallback OQ-1 recommended for it was never built
+    /// until the Weeping Treant hit it. `plinth_hollow::run` converts only
+    /// `IneligibleNoCavity`, `IneligibleBelowBulk` and `IneligibleSavings`
+    /// into a typed `HollowStageOutput::Solid`; every other `HollowError`
+    /// propagates, and the treant's propagates as `InvalidShellTopology` --
+    /// its post-Boolean shell is not one negative cavity enclosed by positive
+    /// outer material. That refusal is FU-34.
+    ///
+    /// **The provenance caveat, stated rather than hidden (the F14 pattern).**
+    /// The reserve is taken through `HollowedModel::solid_decision`, whose
+    /// `SolidDecisionReason` has exactly two values, `NoCavity` and
+    /// `BelowThreshold`. **Neither one means "the hollow stage errored."** So
+    /// the model handed to support planning is stamped `BelowThreshold` by a
+    /// stage that never reached a threshold test, and that stamp is an
+    /// imprecision this seam knowingly inherits -- the same one the
+    /// support-refusal path above already carries, for the same reason: it is
+    /// the only handoff `plinth-hollow` exposes to a caller holding an
+    /// oriented solid, and it is the one every sealed-run gate and the whole
+    /// OD-8 census already travel. **This variant is where the truth lives.**
+    /// `refusal` is the typed `HollowError`'s own `Display`, verbatim and
+    /// unedited, so the artifact's real provenance is recoverable from the
+    /// outcome even though the `HollowedModel`'s own reason field cannot
+    /// express it. Anyone reading `hollow_disposition` alone will read a
+    /// retained-solid/below-threshold verdict and be misled; read this variant
+    /// beside it.
+    HollowStageRefused { refusal: String },
 }
 
 /// Everything the composition observed, reported rather than asserted so both
@@ -200,7 +231,8 @@ fn orient(mesh: Mesh, baseline: &str) -> Result<plinth_orient::OrientedModel, St
 /// real hollow stage and letting the sealed support run decide what it can
 /// carry.
 ///
-/// **OQ-1 is answered, and not the way the design record guessed.** It expected
+/// **OQ-1 is answered, and not the way the design record guessed — and then, on
+/// the ninth model, answered the design record's way after all.** OQ-1 expected
 /// a corpus model might *refuse* to hollow, and recommended the typed
 /// solid-decision fallback for that case. `plinth_hollow::run` does not refuse
 /// the corpus Sphere at all: it hollows, plans drains, drills, and hands back
@@ -208,9 +240,17 @@ fn orient(mesh: Mesh, baseline: &str) -> Result<plinth_orient::OrientedModel, St
 /// oriented solid. The refusal lands one stage later. The sealed support run
 /// rejects that 14,526-face drilled shell during Preparation, so the drilled
 /// hollow is not supportable by today's engine even though it is producible.
+/// **The Weeping Treant then did exactly what OQ-1 guessed** (2026-08-09): it
+/// errors out of `plinth_hollow::run` itself with `InvalidShellTopology`, and
+/// none of the three ineligibility codes that would have made that a typed
+/// `Solid`. So case 0 below is OQ-1's own recommendation, built at last.
 ///
 /// So this seam tries the real thing and records what happened:
 ///
+/// 0. `Err` — the hollow stage neither hollowed nor decided solid. Fall back to
+///    the pre-cloned oriented solid and report the typed refusal verbatim in
+///    `SupportedGeometry::HollowStageRefused`, which carries the provenance
+///    caveat this inherits. The refusal itself is FU-34, not this seam's to fix.
 /// 1. `Solid` — support planning consumes the hollow stage's own output.
 /// 2. `AwaitingInternalSupport` — `approve_hollow` yields the drilled shell
 ///    with its true `HollowedAndDrilled` disposition (the two alternatives,
@@ -222,6 +262,10 @@ fn orient(mesh: Mesh, baseline: &str) -> Result<plinth_orient::OrientedModel, St
 ///    every sealed-run gate and the whole OD-8 census already use — the
 ///    design record's F14 caveat, inherited deliberately and reported in
 ///    `SupportedGeometry`, not hidden.
+///
+/// **Cases 0 and 3 are fallbacks and say so.** Neither is the path the pipeline
+/// is meant to take; both exist so that a model the engine cannot yet hollow or
+/// support as a shell still reaches an artifact, with the reason attached.
 pub fn run_from_oriented(
     name: &str,
     source_faces: usize,
@@ -229,8 +273,41 @@ pub fn run_from_oriented(
     target: &Path,
 ) -> Result<ChainOutcome, String> {
     let printer = saturn4_ultra().clone();
-    let output = hollow_stage(oriented, &HollowRequest { printer })
-        .map_err(|error| format!("hollow: {error}"))?;
+
+    // Hold the oriented solid before the hollow stage consumes it. `OrientedModel`
+    // is move-only and exposes no from-parts constructor, so a pre-clone of its two
+    // `Clone` halves is the only way a caller can keep a reserve across a hollow
+    // *error* -- the `HollowedWithSolidReserve` reserve below exists only once the
+    // stage has already succeeded. Both clones are dropped unread on every path
+    // that does not error.
+    let hollow_error_reserve_mesh = oriented.mesh().clone();
+    let hollow_error_reserve_history = oriented.history().clone();
+
+    let output = match hollow_stage(oriented, &HollowRequest { printer }) {
+        Ok(output) => output,
+        // OQ-1's anticipated case, reached for the first time by the Weeping
+        // Treant (FU-34). Carry the oriented solid through the same
+        // `solid_decision(BelowThreshold)` handoff the support-refusal path
+        // below, `embed_incidence_census` and every sealed-run gate already
+        // use, and record the typed refusal verbatim in `SupportedGeometry`
+        // -- see `HollowStageRefused` for the provenance caveat this inherits.
+        Err(error) => {
+            let refusal = error.to_string();
+            let solid = HollowedModel::solid_decision(
+                hollow_error_reserve_mesh,
+                hollow_error_reserve_history,
+                SolidDecisionReason::BelowThreshold,
+            )
+            .map_err(|error| format!("{name}: hollow-error solid handoff: {error}"))?;
+            return seal_and_emit(
+                name,
+                source_faces,
+                solid,
+                SupportedGeometry::HollowStageRefused { refusal },
+                target,
+            );
+        }
+    };
 
     let candidate = match output {
         HollowStageOutput::Solid(model) => {
