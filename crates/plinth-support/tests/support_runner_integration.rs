@@ -125,6 +125,25 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// merge on the ground that a 0.029886 mm-deep fusion prints as fused at 0.05 mm
 /// layers, so the merged solid is the one that matches physical reality
 /// (PR-1(a) precedent: sub-layer features are not resolvable).
+///
+/// **The digests were re-pinned a third time on 2026-08-09, by owner ruling,
+/// for FU-32 phase J2** (the state-pure incremental `CcoController::digest`).
+/// Both paragraphs above stand unamended as the record of their own dates.
+/// `make_toed_slab` `13_346_779_153_602_682_749 -> 2_198_459_883_570_957_390`
+/// and `make_raking_blade` `8_660_653_339_934_460_766 -> 74_030_269_957_898_085`.
+/// **The counts did not move and must not**: `make_toed_slab` stays 64/170 and
+/// `make_raking_blade` stays 27/72, which is the discriminator separating this
+/// movement from a behavioural one. The movement is DECISION-NEUTRAL and was
+/// attributed before it was re-pinned, twice over: from source (all 30
+/// `controller_digest_before` occurrences audited — zero comparisons outside
+/// `#[cfg(test)]`) and by parent-vs-tip routing-output dumps on all seven corpus
+/// models (275 transcript rows and 687,288 content lines byte-identical; not one
+/// contact, membership, live member, coverage sample or island line differs).
+/// The owner ruled: "The fingerprints aren't sacred  if things change slightly
+/// that's to be expected (because the algorithm wasn't right when the
+/// fingerprints were generated!)". See `docs/rust-migration/CURRENT-STATUS.md`
+/// sections `#fu32-j3-2026-08-09` (the attribution) and `#fu32-j4-2026-08-09`
+/// (this re-pin).
 #[test]
 fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
     let mut failures = Vec::new();
@@ -134,14 +153,14 @@ fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
             make_toed_slab().expect("procedural toed slab"),
             64_usize,
             170_usize,
-            13_346_779_153_602_682_749_u64,
+            2_198_459_883_570_957_390_u64,
         ),
         (
             "make_raking_blade",
             make_raking_blade().expect("procedural raking blade"),
             27,
             72,
-            8_660_653_339_934_460_766,
+            74_030_269_957_898_085,
         ),
     ] {
         let hollowed = hollowed_corpus_model(mesh, name);

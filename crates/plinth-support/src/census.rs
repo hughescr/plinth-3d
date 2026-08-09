@@ -12,7 +12,9 @@
 //! an un-instrumented baseline can be produced from the same instrumented
 //! build.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::forest::{ContactEnd, MemberKind};
 use crate::runner::SupportVerificationSnapshot;
@@ -143,6 +145,13 @@ pub struct CensusData {
     pub gate_proposals: GateProposalCensus,
     pub retained_load: RetainedLoadCensus,
     pub merge_tournament: MergeTournamentCensus,
+    /// FU-32 J5 — the routing cadence's charge and meter; see
+    /// [`RouteCcoChargeCensus`].
+    pub route_cco_charge: RouteCcoChargeCensus,
+    /// FU-32 J0 — how many times [`flush_counters`] has drained this model's
+    /// counters early (periodic or signal-triggered), so a killed run's
+    /// stderr/stdout tail shows how stale its last flush was.
+    pub flush_count: usize,
 }
 
 /// FU-8f phase G6a — the merge gate's retained-load-transpose accounting.
@@ -261,6 +270,33 @@ pub struct GateProposalCensus {
     pub proposals: usize,
 }
 
+/// FU-32 J5 (design D3) — the sealed CCO routing cadence's charge and its
+/// meter, side by side, per model.
+///
+/// Routing was completely uncharged before FU-32 (design F8), so no run has
+/// ever reported what it spends. This row is how a run states it: `cadence`
+/// and `pool_rows` are the instance shape, `charged_*` are the worst case the
+/// preflight admitted against `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` /
+/// `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS`, and `executed_*` are what the
+/// discovery walks actually counted. `executed <= charged` is enforced in
+/// `runner::route_initial_cco` by a typed refusal, not by this row; printing
+/// both is what keeps a worst-case charge from ever being read as a
+/// measurement.
+///
+/// Last-write-wins per model (there is exactly one routing stage per run), the
+/// same idiom [`MergeTournamentCensus`] documents. `executed_*` stay zero on a
+/// run that refuses at the preflight or dies mid-cadence, which is itself the
+/// reportable fact — J0's flush prints this row from a killed run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RouteCcoChargeCensus {
+    pub cadence: usize,
+    pub pool_rows: usize,
+    pub charged_seat_evaluations: usize,
+    pub charged_seat_refusal_rows: usize,
+    pub executed_seat_evaluations: usize,
+    pub executed_seat_refusal_rows: usize,
+}
+
 /// One materialization of a batch-product-scaled execution cap.
 ///
 /// The no-silent-scaled-caps rule (owner ruling R1) requires every cap whose
@@ -285,6 +321,10 @@ fn with<R>(body: impl FnOnce(&mut CensusData) -> R) -> Option<R> {
     if !enabled() {
         return None;
     }
+    // FU-32 J0. Every recorder call already passes through here, so this is
+    // the one place that can arm the periodic flush without touching a
+    // single routing call site.
+    ensure_periodic_flush_thread();
     let mut guard = data().lock().ok()?;
     Some(body(&mut guard))
 }
@@ -305,7 +345,164 @@ pub fn reset() {
         census.gate_proposals = GateProposalCensus::default();
         census.retained_load = RetainedLoadCensus::default();
         census.merge_tournament = MergeTournamentCensus::default();
+        census.route_cco_charge = RouteCcoChargeCensus::default();
+        census.flush_count = 0;
     });
+}
+
+// ---------------------------------------------------------------------------
+// FU-32 J0 -- periodic + signal-triggered flush.
+//
+// `finish` and `report_failure` are the only two production drains, and
+// neither ever runs if the process is killed mid-model: H6 measured exactly
+// that failure (a 600 s EXCEEDS-TIMEBOX treant run that emitted zero CENSUS
+// rows, because the harness has no signal handler and the watchdog sends
+// SIGKILL). This section adds a THIRD drain, callable at any point during a
+// run, that prints only the counters that are cheap to read -- vector
+// lengths and the small scalar accumulators -- never `finish`'s per-row
+// detail (histograms, curvature probes, batched `surface.project` calls),
+// so triggering it far more often than `finish` ever runs costs O(counters),
+// not O(rows). No routing code changes: the trigger lives entirely inside
+// this module's own `with()` chokepoint, which every existing recorder call
+// site (`brace.rs`, `cco.rs`, `anchor.rs`, `runner.rs`) already passes
+// through, so the flush rides the run's ordinary recording traffic without
+// FU-32 J1/J2's routing loop being touched.
+// ---------------------------------------------------------------------------
+
+/// Default interval between periodic flushes, in whole seconds.
+/// `PLINTH_CENSUS_FLUSH_SECS=<n>` overrides it; `0` disables the periodic
+/// trigger (a SIGTERM/SIGINT can still force one).
+const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 5;
+
+/// How long the background flush thread sleeps between polls. Short enough
+/// that a SIGTERM/SIGINT is honoured promptly (§D4's "signal-triggered"
+/// half), long enough to be free.
+const FLUSH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Set by an OS signal handler ONLY (`examples/embed_incidence_census.rs`).
+/// Must stay async-signal-safe: a single relaxed store, no allocation, no
+/// lock, no I/O. Read back -- never acted on inside the handler itself -- by
+/// the background flush thread, so the actual flush always runs on an
+/// ordinary call stack with the census mutex safely acquirable.
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Called from an OS signal handler. Async-signal-safe by construction: see
+/// the field doc on [`TERMINATION_REQUESTED`].
+pub fn request_flush_on_next_entry() {
+    TERMINATION_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn termination_requested() -> bool {
+    TERMINATION_REQUESTED.load(Ordering::Relaxed)
+}
+
+fn flush_interval() -> Duration {
+    static INTERVAL: OnceLock<Duration> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let secs = std::env::var("PLINTH_CENSUS_FLUSH_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FLUSH_INTERVAL_SECS);
+        Duration::from_secs(secs)
+    })
+}
+
+/// The model label the harness is currently running, so the background
+/// thread and the signal-triggered flush can tag their rows without any
+/// routing code (crate-private, corpus-name-agnostic) carrying a model
+/// string through the whole preparation/routing stack. Set once per model,
+/// immediately after [`reset`], by the census harness.
+fn current_model_slot() -> &'static Mutex<&'static str> {
+    static SLOT: OnceLock<Mutex<&'static str>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new("unknown"))
+}
+
+pub fn set_current_model(name: &'static str) {
+    if let Ok(mut slot) = current_model_slot().lock() {
+        *slot = name;
+    }
+}
+
+fn current_model() -> &'static str {
+    current_model_slot().lock().map_or("unknown", |slot| *slot)
+}
+
+/// Pure: the periodic/signal-triggered flush decision, decoupled from the
+/// background thread's own timing and the process-global singleton so it is
+/// directly unit-testable -- the same discipline
+/// [`MergeTournamentCensus::record_commit`]'s doc comment establishes for
+/// this module.
+fn should_flush_now(elapsed: Duration, interval: Duration, termination_requested: bool) -> bool {
+    termination_requested || (interval > Duration::ZERO && elapsed >= interval)
+}
+
+/// Pure: the well-formed counter cells a flush prints (FU-32 J0). Vector
+/// lengths and small scalar accumulators only -- O(1) to build, never
+/// `finish`'s per-row detail.
+fn progress_cells(census: &CensusData) -> Vec<String> {
+    vec![
+        format!("flush_index={}", census.flush_count),
+        format!("rung_rows={}", census.rungs.len()),
+        format!("rung_outcome_rows={}", census.rung_outcomes.len()),
+        format!("embed_rows={}", census.embeds.len()),
+        format!("anchor_rows={}", census.anchors.len()),
+        format!("seg_rows={}", census.segs.len()),
+        format!("contact_rows={}", census.contacts.len()),
+        format!("attestation_rows={}", census.attestations.len()),
+        format!("seat_attestation_rows={}", census.seat_attestations.len()),
+        format!("stage_error_rows={}", census.stage_errors.len()),
+        format!("merge_tournaments={}", census.merge_tournament.tournaments),
+        format!(
+            "merge_rounds_committed={}",
+            census.merge_tournament.rounds_committed
+        ),
+        format!("gate_batches={}", census.gate_proposals.batches),
+        format!("merge_proposals={}", census.gate_proposals.proposals),
+    ]
+}
+
+/// The actual drain: every counter [`finish`]/[`report_failure`] would
+/// eventually report, printed now. Idempotent -- safe to call repeatedly for
+/// the same model, each call is simply the current cumulative state -- and
+/// cheap: O(number of distinct counters), never O(rows).
+fn flush_counters(model: &str) {
+    let Ok(mut census) = data().lock() else {
+        return;
+    };
+    census.flush_count = census.flush_count.saturating_add(1);
+    row(model, "T0_progress", &progress_cells(&census));
+    report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
+    for error in &census.stage_errors {
+        row(model, "T0_stage_error", std::slice::from_ref(error));
+    }
+}
+
+/// Start the background flush thread the first time recording is actually
+/// enabled. A no-op after the first call. Never runs unless `enabled()` is
+/// true, so an ordinary `cargo test --workspace --all-features` run (no
+/// `PLINTH_CENSUS=1` in the environment) never spawns it -- this thread does
+/// not exist in any gate.
+fn ensure_periodic_flush_thread() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("plinth-census-flush".to_owned())
+            .spawn(periodic_flush_loop);
+    });
+}
+
+fn periodic_flush_loop() {
+    let interval = flush_interval();
+    let mut elapsed = Duration::ZERO;
+    loop {
+        std::thread::sleep(FLUSH_POLL_INTERVAL);
+        elapsed += FLUSH_POLL_INTERVAL;
+        if should_flush_now(elapsed, interval, termination_requested()) {
+            flush_counters(current_model());
+            elapsed = Duration::ZERO;
+        }
+    }
 }
 
 /// FU-8f phase G6a — one gate-batch load build observed by the retention
@@ -336,6 +533,36 @@ pub(crate) fn record_load_build_meter(charged_operations: usize, executed_operat
             .retained_load
             .executed_operations
             .saturating_add(executed_operations as u128);
+    });
+}
+
+/// FU-32 J5 (design D3) — the routing cadence's charge, recorded at the
+/// preflight site, AFTER it was admitted and BEFORE the first terminal runs.
+/// A run killed inside the cadence therefore still reports what it was
+/// charged, which is the whole point of J0's flush.
+pub(crate) fn record_route_cco_charge(
+    cadence: usize,
+    pool_rows: usize,
+    charged_seat_evaluations: usize,
+    charged_seat_refusal_rows: usize,
+) {
+    with(|census| {
+        census.route_cco_charge.cadence = cadence;
+        census.route_cco_charge.pool_rows = pool_rows;
+        census.route_cco_charge.charged_seat_evaluations = charged_seat_evaluations;
+        census.route_cco_charge.charged_seat_refusal_rows = charged_seat_refusal_rows;
+    });
+}
+
+/// FU-32 J5 — the meter beside that charge, recorded once the cadence has
+/// ended and its receipt has been held against the charge.
+pub(crate) fn record_route_cco_execution(
+    executed_seat_evaluations: usize,
+    executed_seat_refusal_rows: usize,
+) {
+    with(|census| {
+        census.route_cco_charge.executed_seat_evaluations = executed_seat_evaluations;
+        census.route_cco_charge.executed_seat_refusal_rows = executed_seat_refusal_rows;
     });
 }
 
@@ -465,6 +692,41 @@ pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
             None => census.scaled_caps.push(entry),
         }
     });
+}
+
+/// FU-32 J5 — the routing cadence's charge beside its meter. Printed on the
+/// flush path and on both drains, so a model that never reached routing
+/// (`cadence == 0`) prints nothing and one that was killed inside the cadence
+/// still prints what it was charged.
+fn report_route_cco_charge(model: &str, census: &CensusData) {
+    let route = census.route_cco_charge;
+    if route.cadence == 0 {
+        return;
+    }
+    row(
+        model,
+        "T0_route_cco_charge",
+        &[
+            format!("cadence={}", route.cadence),
+            format!("pool_rows={}", route.pool_rows),
+            format!(
+                "charged_seat_evaluations={}",
+                route.charged_seat_evaluations
+            ),
+            format!(
+                "executed_seat_evaluations={}",
+                route.executed_seat_evaluations
+            ),
+            format!(
+                "charged_seat_refusal_rows={}",
+                route.charged_seat_refusal_rows
+            ),
+            format!(
+                "executed_seat_refusal_rows={}",
+                route.executed_seat_refusal_rows
+            ),
+        ],
+    );
 }
 
 fn report_scaled_caps(model: &str, census: &CensusData) {
@@ -673,8 +935,14 @@ fn histogram(values: impl Iterator<Item = f64>) -> [usize; 5] {
     counts
 }
 
+/// Pure: the exact tab-separated `CENSUS` line, factored out of [`row`] so
+/// its shape is directly unit-testable without capturing stdout.
+fn format_row(model: &str, table: &str, cells: &[String]) -> String {
+    format!("CENSUS\t{table}\t{model}\t{}", cells.join("\t"))
+}
+
 fn row(model: &str, table: &str, cells: &[String]) {
-    println!("CENSUS\t{table}\t{model}\t{}", cells.join("\t"));
+    println!("{}", format_row(model, table, cells));
 }
 
 fn stat(values: &mut [f64]) -> (f64, f64, f64, f64) {
@@ -1214,6 +1482,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
     }
 
     report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
@@ -1228,6 +1497,7 @@ pub fn report_failure(model: &str) {
         return;
     };
     report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
@@ -1235,7 +1505,124 @@ pub fn report_failure(model: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::MergeTournamentCensus;
+    use super::{format_row, progress_cells, should_flush_now, CensusData, MergeTournamentCensus};
+    use std::time::Duration;
+
+    /// FU-32 J0 — the periodic/signal-triggered flush decision, tested
+    /// against the pure [`should_flush_now`] directly rather than the
+    /// background thread or the `PLINTH_CENSUS` singleton, for exactly the
+    /// reason [`MergeTournamentCensus::record_commit`]'s doc comment gives:
+    /// this crate's tests run in parallel in one process, and the flush
+    /// thread and the `TERMINATION_REQUESTED`/`PLINTH_CENSUS` globals are
+    /// shared across all of them.
+    ///
+    /// # Mutation proof
+    ///
+    /// Replace `elapsed >= interval` with `elapsed > interval` and the
+    /// "fires exactly at the interval" case below fails. Drop the
+    /// `termination_requested ||` short-circuit and the "termination fires
+    /// before the interval elapses" case fails.
+    #[test]
+    fn should_flush_now_fires_on_the_interval_and_on_termination() {
+        let interval = Duration::from_secs(5);
+        assert!(
+            !should_flush_now(Duration::from_secs(4), interval, false),
+            "elapsed short of the interval, no termination request: must not flush"
+        );
+        assert!(
+            should_flush_now(Duration::from_secs(5), interval, false),
+            "elapsed exactly at the interval must flush"
+        );
+        assert!(
+            should_flush_now(Duration::from_secs(6), interval, false),
+            "elapsed past the interval must flush"
+        );
+        assert!(
+            should_flush_now(Duration::from_secs(0), interval, true),
+            "a termination request must flush regardless of elapsed time"
+        );
+        assert!(
+            !should_flush_now(Duration::from_secs(0), Duration::ZERO, false),
+            "a zero interval with no termination request must never fire on its own"
+        );
+    }
+
+    /// FU-32 J0 — a partial flush (no `finish`, no `report_failure`, the
+    /// model may still be mid-route) must emit a well-formed row: every cell
+    /// is `key=value`, and no cell embeds the row's own `\t` field separator
+    /// or a newline that would split it across lines. Built directly from a
+    /// fixture [`CensusData`], not the process-global singleton -- see the
+    /// module doc comment above for why.
+    ///
+    /// # Mutation proof
+    ///
+    /// Delete any one `format!("...={}", ...)` push from [`progress_cells`]
+    /// and the corresponding `cells.contains(...)` assertion below fails.
+    #[test]
+    fn progress_cells_are_well_formed_key_value_pairs() {
+        let mut census = CensusData {
+            flush_count: 3,
+            ..Default::default()
+        };
+        census.rungs.push(super::RungRow {
+            abs_cos_raw: 0.42,
+            cos_used: 0.5,
+            length_mm: 2.0,
+            radius_mm: 0.4,
+            inset1_mm: 0.1,
+        });
+        census.contacts.push(super::ContactRow {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            tip_radius_mm: 0.4,
+        });
+        census.merge_tournament.tournaments = 2;
+        census.merge_tournament.rounds_committed = 5;
+        census.gate_proposals.batches = 3;
+        census.gate_proposals.proposals = 9;
+
+        let cells = progress_cells(&census);
+
+        for cell in &cells {
+            let (key, value) = cell
+                .split_once('=')
+                .unwrap_or_else(|| panic!("progress cell `{cell}` is not key=value"));
+            assert!(!key.is_empty(), "progress cell `{cell}` has an empty key");
+            assert!(
+                !value.contains('\t') && !value.contains('\n'),
+                "progress cell `{cell}` embeds the row's own field separator"
+            );
+        }
+        assert!(cells.contains(&"flush_index=3".to_owned()));
+        assert!(cells.contains(&"rung_rows=1".to_owned()));
+        assert!(cells.contains(&"contact_rows=1".to_owned()));
+        assert!(cells.contains(&"merge_tournaments=2".to_owned()));
+        assert!(cells.contains(&"merge_rounds_committed=5".to_owned()));
+        assert!(cells.contains(&"gate_batches=3".to_owned()));
+        assert!(cells.contains(&"merge_proposals=9".to_owned()));
+    }
+
+    /// FU-32 J0 — the printed `CENSUS` line a partial flush produces is
+    /// well-formed TSV: `CENSUS`, table, model, then one `key=value` cell
+    /// per counter, all tab-separated. This is what H6 got zero of from a
+    /// killed run; J0's whole claim is that a row like this one survives.
+    #[test]
+    fn t0_progress_row_is_well_formed_census_tsv() {
+        let census = CensusData::default();
+        let line = format_row("Cylinder", "T0_progress", &progress_cells(&census));
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields[0], "CENSUS");
+        assert_eq!(fields[1], "T0_progress");
+        assert_eq!(fields[2], "Cylinder");
+        assert!(
+            fields.len() > 3,
+            "at least one counter cell must be present"
+        );
+        for cell in &fields[3..] {
+            assert!(cell.contains('='), "counter cell `{cell}` is not key=value");
+        }
+    }
 
     /// FU-8g H4 (D7) — a fixture tournament: a scripted sequence of
     /// `record_commit`/`record_exit` calls shaped exactly like a real

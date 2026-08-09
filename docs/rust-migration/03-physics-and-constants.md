@@ -1126,6 +1126,19 @@ measured rule on 2026-08-06 without their numbers changing; see §3.10.10.
 > ledger rows, provenance and the FU-24 gate: `m0-constants-source-ledger.json`;
 > caps-doc record: `support-resource-caps-2026-08-05.md` §18; dated
 > `CURRENT-STATUS.md` section: *FU-8g phase H3 landed 2026-08-09*.
+>
+> **[ADDENDUM 2026-08-09 (FU-32 phase J6) — "the brace and raft stages are
+> unexercised … on the treant at this tip" is SUPERSEDED; "no measured demand" is
+> NOT.** The paragraph above is left standing as the record of its date. The
+> Weeping Treant **sealed** twice under the standing memory protocol at FU-32 J5's
+> tip, so brace, joints/raft and lowering all executed and none of the ten caps
+> refused. **No demand figure of record exists for any of the ten even so**,
+> because none of them is metered anywhere in the census — a stage that does not
+> refuse tells you only that its demand was below the cap. The F7 ceiling remains
+> **derived**, never measured; every registry note and every provenance marker
+> above is unchanged; **no cap was raised, lowered or touched.** See
+> `support-resource-caps-2026-08-05.md` §22.3 and *FU-32 phase J6 measured
+> 2026-08-09* in `CURRENT-STATUS.md`.]**
 
 ### 3.10.10 Support execution-authority caps — the batch-product pair {#batch-product-caps}
 
@@ -1336,6 +1349,79 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > exactly what G5 repriced it to. Full account:
 > `support-resource-caps-2026-08-05.md` §16, and `CURRENT-STATUS.md` under
 > *FU-8f phase G6c landed 2026-08-08*.
+
+### 3.10.11 Support execution-authority caps — the routing cadence's first charge {#route-cco-caps}
+
+FU-32 phase J5, 2026-08-09. Everything above prices a stage that was already
+charged. This pair prices a stage that **was not charged at all**: the sealed
+initial-terminal CCO routing cadence (`route_initial_cco`, `runner.rs`) had no
+`Limit`, no `required`/`limit` pair, no counter and no clock anywhere in
+`cco.rs` or routing's half of `runner.rs` — the pre-FU-8b naked-hang shape,
+recorded as finding F8 of `fu32-design-2026-08-09.md`. A 600 s wall inside an
+uncharged loop is a **missing charge**, not a slow success.
+
+Both caps are `Placeholder`, classification `runtime_resource_cap`, and both are
+**additions**: no existing cap was raised, lowered or touched by this
+registration.
+
+| Stable ID | Value | Unit | Charge site |
+|---|---|---|---|
+| `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` | 536,870,912 | count | `RouteCcoWorkCharge::preflight`, `runner.rs` |
+| `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` | 536,870,912 | count | same preflight, second resource |
+
+**What is charged, and what is deliberately not.** Once J1 and J2 removed the
+redundant hashing, the cadence's remaining honest work is a Θ(N·P) seat search:
+every grown terminal's `discover_finalized_anchor_seats` classifies **every**
+exterior anchor-pool row exactly once, and retains at most one
+`AnchorSeatRefusal` row per row it refuses. Both worst cases are therefore
+`cadence × pool_rows`, and both are knowable before any work is done — which is
+what makes them chargeable. The controller and immutable-authority digests are
+**not** charged: after J1/J2 they are O(1) and O(delta), and pricing them would
+price an implementation detail (design D3, the same call G3 made when it
+declined to charge the merge gate's executed prefix). The sequencing was not
+negotiable either: charging before the fix would have written 843 GB of hashing
+into a budget.
+
+**Derivation, one rule for both:** `next_power_of_two(2 × the Weeping Treant
+v1.2's charged demand)` = `next_power_of_two(2 × 553 × 364,223)` =
+`next_power_of_two(402,830,638)` = **536,870,912**. Single specimen, n = 1, per
+R4/FU-23.
+
+**Measured at this tip, 2026-08-09** (`PLINTH_CENSUS=1`, `PLINTH_THREADS=4`,
+census table `T0_route_cco_charge`, which is new in this phase and prints the
+charge beside the meter so a worst case is never read as a measurement):
+
+| model | cadence | pool_rows | charged | executed evaluations | executed refusal rows |
+|---|---:|---:|---:|---:|---:|
+| Sphere | 7 | 4,760 | 33,320 | 33,320 | 33,320 |
+| Cylinder | 54 | 244 | 13,176 | 13,176 | 13,095 |
+| make_box | 11 | 12 | 132 | 132 | 125 |
+| make_overhang_table | 84 | 52 | 4,368 | 4,160 | 3,578 |
+| make_toed_slab | 68 | 76 | 5,168 | 5,016 | 5,016 |
+| make_raking_blade | 33 | 23 | 759 | 667 | 667 |
+| make_thin_fin | 18 | 22 | 396 | 396 | 396 |
+| **Weeping Treant v1.2** | **553** | **364,223** | **201,415,319** | **164,993,019** | **162,719,910** |
+
+The treant's charge is **37.5 %** of the cap and its executed spend **30.7 %**;
+the largest corpus charge (Sphere, 33,320) is 0.0062 %. `executed ≤ charged`
+holds on every model and on both resources, and is enforced — not merely
+reported — by `SupportRoutingError::ChargeDrift` at the end of the cadence. The
+gap between charged and executed is the quarantined cadence entries, which a
+preflight cannot know about in advance.
+
+**The disclosed hazard.** At the 30.3 B per retained refusal measured in the
+design's M3, `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` admits ≈16.3 GB of
+retained refusal evidence — far above the ≈4.9 GB the treant's 162.7 M rows
+imply, and below, but not comfortably below, the 90 GB watchdog arm and the
+~100 GB machine ceiling. It is **disclosed, not ratified**. The underlying
+question — is evidence proportional to the anchor pool, or to the decision? —
+is the design's open question 4 and is deliberately left untouched here,
+because summarising the refusal list would move every transcript digest.
+
+Full ledger rows, provenance and the FU-24 gate:
+`m0-constants-source-ledger.json`; caps-doc record:
+`support-resource-caps-2026-08-05.md` §21; dated `CURRENT-STATUS.md` section:
+*FU-32 phase J5 landed 2026-08-09*.
 
 ### 3.11 NOT constants — resource guards
 

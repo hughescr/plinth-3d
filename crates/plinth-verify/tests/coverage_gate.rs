@@ -35,6 +35,31 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // directly, and 80 of its 686 print layers were requantized by 5 picometres.
 // See `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 8.5 and its
 // 2026-08-08 addendum.
+//
+// Refreshed a third time on 2026-08-09, by owner ruling, for FU-32 phase J2 (the
+// state-pure incremental `CcoController::digest`): `snapshot_digest`
+// 5470664714994646368 -> 3706765241747593242, moving in lockstep with
+// `make_overhang_table`'s OD-8 census digest (1875674282253663076 ->
+// 16396858890798947253). Both records above stand unamended. The golden was
+// REGENERATED THROUGH THIS FILE'S OWN PRODUCER PATH — the `THREAD_CHILD` arm of
+// `public_coverage_report_is_frozen_without_evidence_loss`, whose stdout
+// `PLINTH_VERIFY_COVERAGE_JSON=` line was captured verbatim — never hand-edited.
+// The two JSON documents were then diffed field by field and EXACTLY ONE field
+// differs: `snapshot_digest`. 185 scalar leaves, 1 moved: every `request` bound,
+// all 11 `resources` counters, all 9 islands with their face ids, all 9 patches
+// and all 9 defects are byte-identical, so no evidence was lost.
+// `make_overhang_table` still produces byte-identical support (73 routed
+// contacts, unchanged live members); the digest moved because exactly 1 of
+// `verification_snapshot_digest`'s 17 inputs (`transcript_digest`) folds the
+// moved controller digest. The movement is DECISION-NEUTRAL and was attributed
+// before it was re-pinned; the owner ruled: "The fingerprints aren't sacred  if
+// things change slightly that's to be expected (because the algorithm wasn't
+// right when the fingerprints were generated!)". The pinned input-list test
+// `verification_snapshot_digest_input_list_is_pinned` stayed GREEN across this
+// movement, which is the independent confirmation that the digest's input SHAPE
+// did not widen — only one input's value moved. See
+// `docs/rust-migration/CURRENT-STATUS.md` sections `#fu32-j3-2026-08-09` and
+// `#fu32-j4-2026-08-09`.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {

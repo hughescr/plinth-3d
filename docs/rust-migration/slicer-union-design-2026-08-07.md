@@ -812,3 +812,39 @@ per model. Two consequences, stated rather than argued:
 The disappearance of the pair is *consistent with* the four phantom island births removed
 from `make_toed_slab` (print layers 49, 52, 226, 228), but that causal link was **not**
 independently proven. The claim on the record is the measurement.
+
+## Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above is rewritten, retracted or amended**, including §8.5's from→to table and the
+post-ruling re-pin table: both are correct **as dated records of 2026-08-08**, and the phase-C
+attribution they carry is untouched. What has changed is that the *right-hand* column of those
+tables — the values this document pinned — has since been superseded by a **second, entirely
+unrelated movement**.
+
+Under the owner's 2026-08-09 ruling, verbatim — *"The fingerprints aren't sacred  if things
+change slightly that's to be expected (because the algorithm wasn't right when the fingerprints
+were generated!)"* — **all seven OD-8 census digests were re-pinned again**, because FU-32 J2
+replaced `CcoController::digest`'s per-terminal whole-state walk with state-pure incremental
+accumulators, so the digest folds a different stream. The live values are Sphere
+`2297157889062365577`, Cylinder `6853793710942395608`, `make_box` `8709076999423814412`,
+`make_overhang_table` `16396858890798947253`, `make_toed_slab` `133000971864625681`,
+`make_raking_blade` `18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**The two movements have nothing in common and must not be conflated.** This document's
+movement was geometric — real print layers were requantized and 24 phantom island births
+removed, which is why it moved *counts* on two models. FU-32's movement touches no geometry at
+all: 687,288 dumped routing-output content lines and 275 transcript rows are byte-identical
+parent-to-tip across all seven models, every forest digest is unmoved, and `routed_contacts` /
+`final_live_members` are unchanged on **every** model. In particular the three models this
+document recorded as **unmoved** (Sphere, Cylinder, `make_box`) do move under FU-32, for a
+reason that has nothing to do with slicing.
+
+**The three in-workspace pins §8.5 re-pinned have moved again too**, and for the same reason.
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing` now pins toed_slab
+`(64, 170, 2198459883570957390)` (was `…, 13346779153602682749`) and raking_blade
+`(27, 72, 74030269957898085)` (was `…, 8660653339934460766`); `plinth-verify`'s frozen coverage
+report now carries `snapshot_digest` `3706765241747593242` (was `5470664714994646368`).
+**The counts in those tuples — 64 / 170 and 27 / 72 — did not move**, which is precisely the
+difference between this document's movement and FU-32's: §8.5 moved counts because it removed
+real island births; FU-32 moves none, on any model. The authority table and the full
+attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.

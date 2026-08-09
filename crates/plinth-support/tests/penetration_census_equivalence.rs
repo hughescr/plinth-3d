@@ -435,6 +435,16 @@ fn assert_interval_rows_bit_identical(left: &[Vec<Interval>], right: &[Vec<Inter
 /// fund row 1's two. Under (b) this test stays green: its subsegments are
 /// long enough for the step term to fund them, which is why the dense-stack
 /// test exists.
+///
+/// **Digest supersession, 2026-08-09 (FU-32 phase J4).** The OD-8 digest quoted
+/// in the first paragraph is the value of ITS date and appears here as a MODEL
+/// IDENTIFIER ONLY — this test pins nothing about it and asserts nothing on it.
+/// `make_raking_blade`'s OD-8 census digest moved to `18388631460456455184`
+/// under the owner ruling for FU-32 J2 (the state-pure incremental
+/// `CcoController::digest`). The fixture geometry, the rows, the mutation
+/// transcript and every assertion below are unaffected: the movement is
+/// decision-neutral and this model's routing output is byte-identical across
+/// it. See `docs/rust-migration/CURRENT-STATUS.md` `#fu32-j4-2026-08-09`.
 #[test]
 fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
     let surface = surface_of(&make_raking_blade().expect("raking blade fixture"));
@@ -478,6 +488,16 @@ fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
 /// triangle diagonal and reports a Möller pair — counted identically by
 /// both walks, deduplicated identically by both executions.) Under (b) this
 /// test stays green; see the dense-stack test.
+///
+/// **Digest supersession, 2026-08-09 (FU-32 phase J4).** The OD-8 digest quoted
+/// in the first paragraph is the value of ITS date and appears here as a MODEL
+/// IDENTIFIER ONLY — this test pins nothing about it and asserts nothing on it.
+/// `make_overhang_table`'s OD-8 census digest moved to `16396858890798947253`
+/// under the owner ruling for FU-32 J2 (the state-pure incremental
+/// `CcoController::digest`). The fixture geometry, the rows, the mutation
+/// transcript and every assertion below are unaffected: the movement is
+/// decision-neutral and this model's routing output is byte-identical across
+/// it. See `docs/rust-migration/CURRENT-STATUS.md` `#fu32-j4-2026-08-09`.
 #[test]
 fn fu8g_h5_overhang_table_hole_row_census_equals_execution_bit_for_bit() {
     let surface = surface_of(&make_overhang_table().expect("overhang table fixture"));

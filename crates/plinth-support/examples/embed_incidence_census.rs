@@ -22,6 +22,44 @@ use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{run_support, SupportPreparationLimits, SupportRequest};
 
+/// FU-32 J0 — the signal-triggered half of the flush (§D4). A `SIGTERM`
+/// (the watchdog's new first signal, ahead of `SIGKILL`) or `SIGINT` (a
+/// manual Ctrl-C) requests an immediate flush on the census module's own
+/// background thread; this handler does nothing else, on purpose.
+///
+/// Declared via a raw `extern "C"` prototype for POSIX `signal(3)` rather
+/// than a new crate dependency: `libc` is already linked into every Unix
+/// Rust binary through `std`, so this adds no new dependency and no new
+/// entry to `Cargo.toml`/`Cargo.lock`.
+#[cfg(unix)]
+mod termination_signal {
+    use std::os::raw::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIGTERM: c_int = 15;
+
+    extern "C" {
+        fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    }
+
+    /// Must stay async-signal-safe: [`plinth_support::census::request_flush_on_next_entry`]
+    /// is documented as exactly that (a single relaxed atomic store, no
+    /// allocation, no lock, no I/O) -- nothing else may be added here.
+    extern "C" fn handle(_signum: c_int) {
+        plinth_support::census::request_flush_on_next_entry();
+    }
+
+    /// Install the handler for both signals. Best-effort: if `signal(3)`
+    /// fails there is no async-signal-safe way to report it, and the
+    /// periodic (time-based) flush still runs regardless.
+    pub fn install() {
+        unsafe {
+            signal(SIGINT, handle);
+            signal(SIGTERM, handle);
+        }
+    }
+}
+
 const MODELS: [&str; 8] = [
     "Sphere",
     "Cylinder",
@@ -41,6 +79,12 @@ fn workspace_root() -> PathBuf {
 }
 
 fn main() -> ExitCode {
+    // FU-32 J0. Best-effort and harmless when `PLINTH_CENSUS` is unset: the
+    // handler only ever stores a flag that nothing polls unless recording is
+    // enabled.
+    #[cfg(unix)]
+    termination_signal::install();
+
     let root = workspace_root();
     let only = std::env::var("PLINTH_CENSUS_ONLY").ok();
     let mut failures = 0usize;
@@ -51,6 +95,11 @@ fn main() -> ExitCode {
             }
         }
         plinth_support::census::reset();
+        // FU-32 J0. Tags the periodic/signal-triggered flush's rows without
+        // any routing code carrying a model string through the whole
+        // preparation/routing stack -- see `census::current_model`'s doc
+        // comment.
+        plinth_support::census::set_current_model(name);
         match run_model(&root, name) {
             Ok(summary) => {
                 println!("MODEL\t{name}\tOK\t{summary}");

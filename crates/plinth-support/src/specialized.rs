@@ -13040,7 +13040,10 @@ mod tests {
     fn finalized_cco_rejects_equal_load_contact_swap_before_mutation() {
         use crate::{
             anchor::{AnchorGeometryAuthority, AnchorSearchConfig, SurfaceAnchorPool},
-            cco::{CcoController, CcoError, FinalizedAnchorTerminalRoute, TerminalCcoRequest},
+            cco::{
+                CcoController, CcoError, FinalizedAnchorTerminalRoute, TerminalCcoRequest,
+                VerifiedRoutingAuthority,
+            },
             forest::{
                 ContactEnd, Forest, Member, MemberKind, MemberSpec, Owner, RootwardEndRadius,
                 TerminalEndRadius,
@@ -13098,6 +13101,7 @@ mod tests {
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
         let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let authority = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
 
         let terminal_id = u32::try_from(bound_contact.contact_id()).unwrap();
         let p0_mm = bound_contact
@@ -13123,13 +13127,10 @@ mod tests {
             &mut forest,
             &request,
             FinalizedAnchorTerminalRoute {
-                plan: &plan,
+                authority: &authority,
                 contact: rebound_contact,
                 contact_id: rebound_contact.contact_id(),
-                loads: &loads,
-                pool: &pool,
                 config: AnchorSearchConfig::current().unwrap(),
-                geometry: &geometry,
                 process_resolution_mm: 0.05,
             },
         );

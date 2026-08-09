@@ -966,3 +966,28 @@ would grant. If the specimen is an already-reduced mesh, that behaviour is *expe
 than anomalous, and a future reader should not go looking for a defect in the decimator to
 explain it. If it is not, the diagnosis in §8.4 stands unchanged on its own measurements. **Both
 readings leave every number in this document exactly where it is.**
+
+## Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above is rewritten, retracted or amended.** Every OD-8 `snapshot_digest` quoted in
+this document — §1's note that Sphere's `17667468971446251870` "would move" if a witness were
+granted, and the three *unmoved* tables in §§8, 9 and the verifier record — is correct **as a
+dated record of its own measurement**. Under the owner's 2026-08-09 ruling, verbatim — *"The
+fingerprints aren't sacred  if things change slightly that's to be expected (because the
+algorithm wasn't right when the fingerprints were generated!)"* — **all seven OD-8 census
+digests were re-pinned**, because FU-32 J2 replaced `CcoController::digest`'s per-terminal
+whole-state walk with state-pure incremental accumulators. The live values are Sphere
+`2297157889062365577`, Cylinder `6853793710942395608`, `make_box` `8709076999423814412`,
+`make_overhang_table` `16396858890798947253`, `make_toed_slab` `133000971864625681`,
+`make_raking_blade` `18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**This does not weaken a single claim in this document, and one clause is worth stating
+explicitly.** §1's "frozen census digest `17667468971446251870` would move" was an argument
+about *decimation* moving Sphere's geometry, and it remains exactly as true — the threshold
+`DECIMATION_UTILITY_MIN_INPUT_FACES` still refuses Sphere before any geometry is examined, so
+decimation still moves it by zero faces. FU-32's movement is not that: it is a hash-stream
+change with no geometry behind it (687,288 dumped routing-output content lines and 275
+transcript rows byte-identical parent-to-tip on all seven models; `routed_contacts` and
+`final_live_members` unchanged on every one). A future reader checking §1's claim must compare
+against the **live** value above, not the superseded one. The authority table and the full
+attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.

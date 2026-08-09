@@ -1155,20 +1155,242 @@ impl Config {
     }
 }
 
+/// The four immutable routing authorities, hashed **once** for a whole CCO
+/// routing stage, with the subjects travelling inside the proof.
+///
+/// # FU-32 phase J1 — why this type exists
+///
+/// `plan`, `loads`, `pool` and `geometry` are behind shared references for the
+/// entire routing loop (`SupportRoutingRun::route_initial_cco`) and none of
+/// their types contains any interior mutability — a repo-wide grep for
+/// `Cell`/`RefCell`/`Mutex`/`RwLock`/`Atomic`/`thread_local` across
+/// `specialized.rs`, `perception.rs`, `anchor.rs` and this file finds exactly
+/// one hit, a `#[cfg(test)]` thread-local at `specialized.rs:5334`
+/// (re-verified 2026-08-09).  **The borrow checker already proves what the
+/// per-terminal re-hashes were re-checking.**
+///
+/// What that cost, measured on the Weeping Treant v1.2 (FU-32 design §M2):
+/// `SpecializedContactPlan::digest` 2,487,000 words × **4 calls per grown
+/// terminal**, `surface_anchor_pool_digest` 2,250,235 words × **~3.9**,
+/// `finalized_load_rows_fingerprint` 70,737 rows × **2** — ≈153 MB of hashing
+/// per terminal, ≈66 GB over a full cadence.  On `Cylinder`, a 244-triangle
+/// corpus model, it was ≈95 % of a 5,736 ms routing stage.
+///
+/// # What did NOT change, and must not
+///
+/// This is the `VerifiedMeshFingerprint` (FU-8f phase G2) precedent applied
+/// verbatim, with both of its properties:
+///
+/// 1. **The subjects travel inside the proof.**  A holder of this token can
+///    reach the plan, loads, pool and geometry *only* through it, so a digest
+///    computed from one object can never be presented alongside another — by
+///    construction rather than by discipline.  That is why
+///    [`FinalizedAnchorTerminalRoute`] carries the token instead of four
+///    independent references.
+/// 2. **The staleness comparison stays at every site.**  This type hoists the
+///    *hash*, not the *check*.  `bind`, `validate_replay`,
+///    `validate_finalized_anchor_route`,
+///    [`crate::anchor::SurfaceAnchorPool::validate_against_hoisted`],
+///    [`crate::anchor::discover_finalized_anchor_seats`],
+///    [`crate::anchor::validate_finalized_anchor_feet`] and
+///    `FinalizedContactLoads::validate_binding_hoisted` all still compare, and
+///    still refuse.  "Verify once, thread the proof — never stop verifying."
+///
+/// Each hoisted value is compared at its site against the subject's *own*
+/// O(1) sealed field — `plan.finalized_load_plan_digest()`, `loads.digest()`,
+/// `pool.digest()`, `geometry.fingerprint_ref()`, `loads.rows_fingerprint` —
+/// which is an independently computed witness, not a copy of the hoist.  A
+/// corrupted or foreign token therefore still fails a real comparison; that
+/// claim is pinned arm by arm by the `fu32_*` tests at the bottom of this
+/// module.
+///
+/// **Value-preserving.**  The digests recorded in every `TerminalRouteEvidence`
+/// are the same `u64`s computed by the same functions from the same
+/// structures — just once.
+pub(crate) struct VerifiedRoutingAuthority<'a, 'surface> {
+    plan: &'a SpecializedContactPlan,
+    loads: &'a FinalizedContactLoads,
+    pool: &'a SurfaceAnchorPool<'surface>,
+    geometry: &'a AnchorGeometryAuthority<'surface>,
+    plan_digest: u64,
+    loads_digest: u64,
+    pool_digest: u64,
+    load_rows_fingerprint: u64,
+    geometry_fingerprint: GeometryFingerprint,
+    /// The plan's canonical contact-id vector, built once instead of once per
+    /// `validate_finalized_anchor_route` call.
+    contact_ids: Vec<u64>,
+    /// Kills the two O(|contacts|) linear `find`s per terminal — one in the
+    /// runner's cadence loop, one in `validate_finalized_anchor_route`.
+    contact_by_id: BTreeMap<u64, usize>,
+}
+
+impl<'a, 'surface> VerifiedRoutingAuthority<'a, 'surface> {
+    /// Hash the four immutable authorities once and bind the digests to them.
+    ///
+    /// This performs **exactly** the validation the per-terminal path used to
+    /// perform — `pool.validate_against(geometry)` with its full content walk,
+    /// `loads.validate_binding(plan.load_partition(), contact_ids)` with its
+    /// full row walk, and the plan-seal agreement `plan.digest() ==
+    /// plan.finalized_load_plan_digest()` that `validate_initial_cco_preflight`
+    /// already requires — once, before the first terminal.
+    pub(crate) fn compute(
+        plan: &'a SpecializedContactPlan,
+        loads: &'a FinalizedContactLoads,
+        pool: &'a SurfaceAnchorPool<'surface>,
+        geometry: &'a AnchorGeometryAuthority<'surface>,
+    ) -> Result<Self, CcoError> {
+        pool.validate_against(geometry)?;
+        let contact_ids = plan
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let mut contact_by_id = BTreeMap::new();
+        for (index, &contact_id) in contact_ids.iter().enumerate() {
+            if contact_by_id.insert(contact_id, index).is_some() {
+                return Err(CcoError::FinalizedContactMismatch);
+            }
+        }
+        let load_rows_fingerprint =
+            FinalizedContactLoads::hoist_rows_fingerprint(plan.load_partition());
+        if loads
+            .validate_binding_hoisted(plan.load_partition(), &contact_ids, load_rows_fingerprint)
+            .is_err()
+        {
+            return Err(CcoError::FinalizedLoadBindingMismatch);
+        }
+        let plan_digest = plan.digest();
+        // The one place the plan's full walk still runs: the seal this token
+        // will be compared against at every site must be proved equal to the
+        // real hash exactly once, here, or the hoist would attest nothing.
+        if plan_digest != plan.finalized_load_plan_digest() {
+            return Err(CcoError::StaleFinalizedAnchorAuthority);
+        }
+        Ok(Self {
+            plan,
+            loads,
+            pool,
+            geometry,
+            plan_digest,
+            loads_digest: loads.digest(),
+            pool_digest: pool.digest(),
+            load_rows_fingerprint,
+            geometry_fingerprint: geometry.fingerprint(),
+            contact_ids,
+            contact_by_id,
+        })
+    }
+
+    pub(crate) const fn plan(&self) -> &'a SpecializedContactPlan {
+        self.plan
+    }
+
+    pub(crate) const fn loads(&self) -> &'a FinalizedContactLoads {
+        self.loads
+    }
+
+    pub(crate) const fn pool(&self) -> &'a SurfaceAnchorPool<'surface> {
+        self.pool
+    }
+
+    pub(crate) const fn geometry(&self) -> &'a AnchorGeometryAuthority<'surface> {
+        self.geometry
+    }
+
+    pub(crate) const fn plan_digest(&self) -> u64 {
+        self.plan_digest
+    }
+
+    pub(crate) const fn loads_digest(&self) -> u64 {
+        self.loads_digest
+    }
+
+    pub(crate) const fn pool_digest(&self) -> u64 {
+        self.pool_digest
+    }
+
+    pub(crate) const fn load_rows_fingerprint(&self) -> u64 {
+        self.load_rows_fingerprint
+    }
+
+    pub(crate) const fn geometry_fingerprint(&self) -> &GeometryFingerprint {
+        &self.geometry_fingerprint
+    }
+
+    pub(crate) fn contact_ids(&self) -> &[u64] {
+        &self.contact_ids
+    }
+
+    /// The plan contact for a stable physical-contact id, by index rather than
+    /// by an O(|contacts|) scan.
+    pub(crate) fn contact(&self, contact_id: u64) -> Option<&'a SpecializedPhysicalContact> {
+        self.contact_by_id
+            .get(&contact_id)
+            .and_then(|&index| self.plan.contacts().get(index))
+    }
+
+    /// FU-32 J1 mutation hook: corrupt one hoisted digest without touching the
+    /// subject it claims to attest.  Every site's comparison must catch it.
+    #[cfg(test)]
+    pub(crate) fn corrupt_for_test(&mut self, field: CorruptedAuthorityField) {
+        match field {
+            CorruptedAuthorityField::PlanDigest => self.plan_digest ^= 1,
+            CorruptedAuthorityField::LoadsDigest => self.loads_digest ^= 1,
+            CorruptedAuthorityField::PoolDigest => self.pool_digest ^= 1,
+            CorruptedAuthorityField::LoadRowsFingerprint => self.load_rows_fingerprint ^= 1,
+            CorruptedAuthorityField::GeometryFingerprint => {
+                self.geometry_fingerprint.corrupt_mesh_sha256_for_test();
+            }
+        }
+    }
+}
+
+/// Which hoisted value a `corrupt_for_test` call moves.  FU-32 J1.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CorruptedAuthorityField {
+    PlanDigest,
+    LoadsDigest,
+    PoolDigest,
+    LoadRowsFingerprint,
+    GeometryFingerprint,
+}
+
 /// The only production terminal-anchor route.  It starts from the finalized
 /// physical-contact authority and the canonical exterior pool; callers never
 /// hand CCO a selected-contact projection or an arbitrary seat collection.
+///
+/// FU-32 J1: the four immutable authorities now travel together inside
+/// [`VerifiedRoutingAuthority`] rather than as four independent references, so
+/// the hoisted digests cannot be paired with a different plan, pool, load
+/// artifact or geometry than the one they were computed from.
 pub(crate) struct FinalizedAnchorTerminalRoute<'a, 'surface> {
-    pub(crate) plan: &'a SpecializedContactPlan,
+    pub(crate) authority: &'a VerifiedRoutingAuthority<'a, 'surface>,
     pub(crate) contact: &'a SpecializedPhysicalContact,
     pub(crate) contact_id: u64,
-    pub(crate) loads: &'a FinalizedContactLoads,
-    pub(crate) pool: &'a SurfaceAnchorPool<'surface>,
     pub(crate) config: AnchorSearchConfig,
-    pub(crate) geometry: &'a AnchorGeometryAuthority<'surface>,
     /// F3 — the run's own process resolution, for the seat attestation's
     /// claimed extent and its OD-9 probe offset. See [`RewireAnchorRoute`].
     pub(crate) process_resolution_mm: f64,
+}
+
+impl<'a, 'surface> FinalizedAnchorTerminalRoute<'a, 'surface> {
+    pub(crate) const fn plan(&self) -> &'a SpecializedContactPlan {
+        self.authority.plan()
+    }
+
+    pub(crate) const fn loads(&self) -> &'a FinalizedContactLoads {
+        self.authority.loads()
+    }
+
+    pub(crate) const fn pool(&self) -> &'a SurfaceAnchorPool<'surface> {
+        self.authority.pool()
+    }
+
+    pub(crate) const fn geometry(&self) -> &'a AnchorGeometryAuthority<'surface> {
+        self.authority.geometry()
+    }
 }
 
 /// Immutable authority carried from discovery through the serial CCO replay.
@@ -1184,7 +1406,39 @@ struct FinalizedAnchorValidationContext<'a, 'surface> {
     geometry_fingerprint: GeometryFingerprint,
 }
 
-#[derive(Default)]
+/// FU-32 J5 — what the routing cadence ACTUALLY spent, counted by the walks
+/// that spent it (design D3, the G6c charge-beside-meter idiom).
+///
+/// The charge lives at the preflight (`runner::RouteCcoWorkCharge`, checked
+/// against `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and
+/// `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` before the first terminal); this
+/// is the meter beside it, and `runner::route_initial_cco` holds the receipt
+/// against the charge once the cadence ends. A meter is never a substitute for
+/// a charge: an over-spend refuses at `SupportRoutingError::ChargeDrift`
+/// rather than being reported after the fact.
+///
+/// Both fields are `saturating_add`, so an impossible overflow surfaces as a
+/// drift refusal instead of a panic or a wrap to a small number.
+///
+/// **Result-inert and deliberately NOT hashed.** `CcoController::digest`
+/// enumerates the fields it folds, and this is not one of them: it is
+/// execution accounting, it never alters an admitted plan, and folding it
+/// would put a resource meter inside a transcript identity. The same argument
+/// keeps every other cap out of every semantic digest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RouteCcoWorkMeter {
+    pub(crate) seat_evaluations: usize,
+    pub(crate) seat_refusal_rows: usize,
+}
+
+impl RouteCcoWorkMeter {
+    /// Fold one terminal's counted discovery into the run total.
+    fn record_terminal(&mut self, seat_evaluations: usize, seat_refusal_rows: usize) {
+        self.seat_evaluations = self.seat_evaluations.saturating_add(seat_evaluations);
+        self.seat_refusal_rows = self.seat_refusal_rows.saturating_add(seat_refusal_rows);
+    }
+}
+
 /// The only integration seam retained for the pending support runner.
 pub(crate) struct CcoController {
     hosts: HostCache,
@@ -1203,12 +1457,58 @@ pub(crate) struct CcoController {
     /// rows. Read once by the runner and folded into the run's contact
     /// attestation chain alongside the stub-stage head.
     contact_attestation_digest: u64,
+    /// FU-32 J2 (§D2.1) — commutative accumulator of per-record hashes:
+    /// `wrapping_add` of [`terminal_record_hash`] over every finished record,
+    /// maintained in O(1) per record at [`Self::finish_terminal`], the sole
+    /// record-insertion site.  [`Self::digest`] folds this value instead of
+    /// re-walking every record's refusal lists per call (the Θ(N·R) term that
+    /// was ~99.7 % of the treant's routing stage).
+    ///
+    /// See [`Self::digest`] for why this is an order-free accumulator and not
+    /// a chain, and [`Self::rebuild_accumulators`] for the from-scratch path
+    /// the F6 stage-boundary tripwires use.
+    records_acc: u64,
+    /// FU-32 J2 (§D2.1) — FNV-1a over the host kd-tree cache
+    /// ([`host_cache_digest`]), refreshed only in [`Self::finish_terminal`]'s
+    /// `KDTREE_REBUILD_EVERY` branch — the only place hosts change
+    /// ([`HostCache::rebuild`]'s only caller).
+    hosts_acc: u64,
+    /// FU-32 J5 — the routing cadence's execution meter. See
+    /// [`RouteCcoWorkMeter`] for why it is not hashed.
+    route_work: RouteCcoWorkMeter,
+}
+
+impl Default for CcoController {
+    fn default() -> Self {
+        let hosts = HostCache::default();
+        // The cached hosts accumulator must start equal to the from-scratch
+        // hash of the empty cache, not to zero, so `rebuild_accumulators`
+        // agrees with the cached pair from the very first `digest()` call.
+        let hosts_acc = host_cache_digest(&hosts);
+        Self {
+            hosts,
+            inserted: 0,
+            terminals: BTreeMap::new(),
+            terminal_cadence: Vec::new(),
+            sealed: false,
+            contact_attestation_digest: 0,
+            records_acc: 0,
+            hosts_acc,
+            route_work: RouteCcoWorkMeter::default(),
+        }
+    }
 }
 
 impl CcoController {
     /// The head of this controller's model-anchor seat-attestation chain.
     pub(crate) const fn contact_attestation_digest(&self) -> u64 {
         self.contact_attestation_digest
+    }
+
+    /// FU-32 J5 — what this controller's routing cadence actually spent, for
+    /// the receipt `runner::route_initial_cco` holds against its charge.
+    pub(crate) const fn route_work_meter(&self) -> RouteCcoWorkMeter {
+        self.route_work
     }
 }
 
@@ -1308,7 +1608,12 @@ impl CcoController {
         // Only after every final-state and authority check succeeds does the
         // controller become unable to route another terminal.
         self.sealed = true;
-        let final_controller_digest = self.digest();
+        // FU-32 J2 (§D2.2) -- the seal is one of the three genuine-recompute
+        // sites: both accumulators are rebuilt from scratch here, never read
+        // from the cached fields, so the sealed value is a pure function of
+        // the controller's actual state at seal time.
+        let (records_acc, hosts_acc) = self.rebuild_accumulators();
+        let final_controller_digest = self.digest_with_accumulators(records_acc, hosts_acc);
         let mut transcript = FinalizedCcoTranscript {
             plan_digest,
             finalized_load_digest: loads.digest(),
@@ -1400,12 +1705,22 @@ impl CcoController {
         let discovery = discover_finalized_anchor_seats(
             context.bound_contact,
             context.terminal,
-            context.route.pool,
+            context.route.pool(),
             context.route.config,
-            context.route.geometry,
+            context.route.geometry(),
+            context.route.authority.pool_digest(),
         )?;
         let anchor_ray_batches = discovery.query_counts().ray_batches;
         let anchor_seat_refusals = discovery.refusals().to_vec();
+        // FU-32 J5 (design D3) — meter the two quantities the routing preflight
+        // charged, at the one site that spends them, from the walk's own counts
+        // rather than from `pool.rows().len()` re-derived here. A quarantined
+        // terminal reaches `advance_skipped_terminal` instead and honestly
+        // contributes nothing.
+        self.route_work.record_terminal(
+            discovery.query_counts().seat_evaluations,
+            anchor_seat_refusals.len(),
+        );
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
             request.stub_end_mm().map(Finite::get),
@@ -1415,7 +1730,7 @@ impl CcoController {
         let mut outcome = grow_terminal_inner(
             forest,
             request,
-            context.route.geometry.surface(),
+            context.route.geometry().surface(),
             discovery.into_seats(),
             anchor_seat_refusals,
             Some(&context),
@@ -1759,6 +2074,14 @@ impl CcoController {
     }
 
     fn finish_terminal(&mut self, forest: &Forest, terminal: u32, record: TerminalCadenceRecord) {
+        // FU-32 J2 (§D2.1) -- fold this record's own hash into the
+        // commutative accumulator EXACTLY ONCE, at the sole record-insertion
+        // site, before the map takes ownership.  The record's refusal lists
+        // are hashed here, once, and never re-walked by `digest()`.
+        let cadence_index = self.terminal_cadence.len();
+        self.records_acc =
+            self.records_acc
+                .wrapping_add(terminal_record_hash(cadence_index, terminal, &record));
         let previous = self.terminals.insert(terminal, record);
         assert!(previous.is_none(), "terminal cadence was preflighted");
         self.terminal_cadence.push(terminal);
@@ -1767,12 +2090,145 @@ impl CcoController {
         assert_eq!(self.inserted, self.terminal_cadence.len());
         if self.inserted.is_multiple_of(KDTREE_REBUILD_EVERY) {
             self.hosts.rebuild(forest);
+            // J2 -- hosts change only on this branch (`HostCache::rebuild`
+            // has no other caller), so the hosts accumulator refreshes only
+            // on this branch.  Skipping this refresh is mutation (b) of the
+            // J2 triad and is pinned by
+            // `fu32_mutation_b_stale_hosts_accumulator_at_rebuild_boundary_fails_equivalence`.
+            self.hosts_acc = host_cache_digest(&self.hosts);
         }
     }
 
     /// Stable evidence for terminal dispositions and the exact host-cache
     /// scheduling state they produced.
+    ///
+    /// FU-32 J2 (§D2.1) — **state-pure incremental**.  The two expensive
+    /// segments of the pre-J2 whole-state walk (every record's refusal lists,
+    /// the whole host kd-tree) enter this stream through accumulators that
+    /// are maintained in O(delta) where state changes and are rebuildable in
+    /// O(state) by [`Self::rebuild_accumulators`]:
+    ///
+    /// - `records_acc` — a **commutative** (`wrapping_add`) combination of
+    ///   [`terminal_record_hash`] values, folded once per record at
+    ///   [`Self::finish_terminal`].  Commutativity is what makes the
+    ///   `BTreeMap` iteration order irrelevant — F5 proved a hash CHAIN is
+    ///   impossible twice over (FNV-1a has no composition law, and the
+    ///   `(k,k,k)` header plus mid-stream `BTreeMap` splices invalidate any
+    ///   retained fold at every step), while an order-free accumulator
+    ///   composes.  Order is still bound twice: by the `cadence_index` inside
+    ///   every record hash, and by the `terminal_cadence` vector, which stays
+    ///   hashed in full below.
+    /// - `hosts_acc` — [`host_cache_digest`] over the host kd-tree cache,
+    ///   refreshed only in the `KDTREE_REBUILD_EVERY` branch, the only place
+    ///   hosts change.
+    ///
+    /// The house precedent for O(1) maintenance at the arrival site under a
+    /// justifying doc comment is [`Self::extend_contact_attestation`] just
+    /// above: the F3 attestation head already folds per-terminal evidence in
+    /// O(1) instead of re-walking history.  The difference here — an
+    /// accumulator rather than a chain — is forced by F6: `digest()` must
+    /// stay a **pure function of controller state** so the stage-boundary
+    /// tripwires (`runner.rs` brace/rewire preflights) can genuinely
+    /// recompute it, and by F5's proof that no chain can splice into this
+    /// stream.
+    ///
+    /// **This restructure moves the digest's VALUE** — and with it, per F4,
+    /// all seven frozen OD-8 snapshot digests.  That movement is licensed
+    /// only under §D2.4's stop-and-report protocol: J2 lands with the digests
+    /// moved and NOTHING re-pinned; the owner rules on the from→to table in
+    /// J4.  The pre-J2 walk is retained verbatim as the `#[cfg(test)]` oracle
+    /// ([`Self::digest_full_walk_oracle`], the G3/G6 retention idiom).
     pub(crate) fn digest(&self) -> u64 {
+        self.digest_with_accumulators(self.records_acc, self.hosts_acc)
+    }
+
+    /// The §D2.1 word stream:
+    /// `FNV(inserted, |terminals|, |cadence|, cadence…, sealed, records_acc, hosts_acc)`
+    /// — Θ(k) cheap words per call (≈1.2 MB over a whole treant run, F5),
+    /// against the Θ(N·R) ≈ 777 GB the pre-J2 walk cost.
+    fn digest_with_accumulators(&self, records_acc: u64, hosts_acc: u64) -> u64 {
+        let mut fnv = FnvWords::new();
+        fnv.word(self.inserted as u64);
+        fnv.word(self.terminals.len() as u64);
+        fnv.word(self.terminal_cadence.len() as u64);
+        for terminal in &self.terminal_cadence {
+            fnv.word(u64::from(*terminal));
+        }
+        fnv.word(u64::from(self.sealed));
+        fnv.word(records_acc);
+        fnv.word(hosts_acc);
+        fnv.finish()
+    }
+
+    /// FU-32 J2 (§D2.2) — the genuine recompute-from-state path: both
+    /// accumulators rebuilt from scratch, never read from the cached fields.
+    ///
+    /// O(state) by design, and called from exactly the three sites that need
+    /// a real recompute — [`Self::finalize_transcript`]'s seal and the two
+    /// stage-boundary tripwires ([`Self::sealed_digest_matches_rebuilt`],
+    /// called by the brace and rewire preflights in `runner.rs`) — versus the
+    /// N per-cadence-entry calls that ride the cached pair.  This is the G3
+    /// severance between *charged* and *executed*: incremental where the
+    /// digest is consumed as evidence, exhaustive where it is consumed as a
+    /// check.
+    ///
+    /// A cadence entry with no matching record folds nothing; the resulting
+    /// accumulator then disagrees with any honestly sealed value (and the
+    /// `(inserted, |terminals|, |cadence|)` header words diverge besides), so
+    /// a tampered map still fails the comparison rather than panicking a
+    /// tripwire.
+    pub(crate) fn rebuild_accumulators(&self) -> (u64, u64) {
+        let mut records_acc = 0_u64;
+        for (cadence_index, &terminal) in self.terminal_cadence.iter().enumerate() {
+            if let Some(record) = self.terminals.get(&terminal) {
+                records_acc =
+                    records_acc.wrapping_add(terminal_record_hash(cadence_index, terminal, record));
+            }
+        }
+        (records_acc, host_cache_digest(&self.hosts))
+    }
+
+    /// F6/§D2.2 — the stage-boundary tripwire arm: recompute-and-compare
+    /// against the sealed controller digest.
+    ///
+    /// This never trusts the cached accumulators.  Both are genuinely rebuilt
+    /// from state by [`Self::rebuild_accumulators`], and the rebuilt pair is
+    /// *additionally* compared against the cached pair, so the tripwire
+    /// catches BOTH failure modes:
+    ///
+    /// 1. a controller whose **state** was mutated after seal — the rebuilt
+    ///    digest moves off the sealed value (the pre-J2 tripwire's teeth,
+    ///    kept whole);
+    /// 2. a controller whose **cached accumulators** drifted from its state —
+    ///    the incremental maintenance itself corrupted.  A pure rebuild
+    ///    cannot see this case (state still matches the seal), and the cached
+    ///    `digest()` alone cannot see case 1; comparing both arms is what
+    ///    keeps a cache-corruption bug from silently signing every
+    ///    per-terminal `controller_digest_before` with a wrong value while
+    ///    the sealed comparison passes.
+    ///
+    /// Pinned by
+    /// `fu32_a_corrupted_accumulator_is_caught_at_the_stage_boundary_tripwire`.
+    pub(crate) fn sealed_digest_matches_rebuilt(&self, sealed: u64) -> bool {
+        let (records_acc, hosts_acc) = self.rebuild_accumulators();
+        self.digest_with_accumulators(records_acc, hosts_acc) == sealed
+            && (records_acc, hosts_acc) == (self.records_acc, self.hosts_acc)
+    }
+
+    /// The pre-J2 whole-state walk, retained VERBATIM as the test oracle —
+    /// the FU-8c G3/G6 retention idiom (`first_safe_proposal`,
+    /// `reference_contacts_x_rows_scan`).  Deliberately self-contained (its
+    /// own inline FNV fold, its own record match) so a defect in the shared
+    /// helpers cannot fool it.
+    ///
+    /// Post-J2 its VALUE necessarily differs from [`Self::digest`] — F5
+    /// proved no value-preserving restructure of this stream exists — so
+    /// tests compare it for the *partition* it induces on states (two states
+    /// the old walk distinguished must stay distinguished by the new digest,
+    /// and trajectories the old walk called identical must stay identical),
+    /// not for equality with the new stream.
+    #[cfg(test)]
+    fn digest_full_walk_oracle(&self) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut word = |value: u64| {
             for byte in value.to_le_bytes() {
@@ -1862,6 +2318,142 @@ impl CcoController {
         }
         hash
     }
+}
+
+/// FNV-1a (`h ← (h ⊕ b) · p`) over little-endian `u64` words — the exact
+/// fold `CcoController::digest` has always used (F5), factored so the
+/// per-record hashes, the hosts accumulator and the digest stream itself are
+/// provably one algorithm.
+struct FnvWords(u64);
+
+impl FnvWords {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    const fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn word(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    const fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// FU-32 J2 (§D2.1) — the per-record hash folded into `records_acc`: a fresh
+/// FNV-1a over `cadence_index ‖ terminal_id ‖ record words`, computed ONCE,
+/// at `finish_terminal`, over that record's own refusal lists only.
+///
+/// `cadence_index` is bound INSIDE each record hash so the commutative fold
+/// cannot equate two trajectories that inserted the same records at swapped
+/// positions — mutation (c) of the J2 triad, pinned by
+/// `fu32_mutation_c_dropping_cadence_index_makes_swapped_records_collide`.
+/// The record words after the header are emitted by the same
+/// `digest_terminal_record` walk on both the incremental and the rebuild
+/// paths.
+fn terminal_record_hash(
+    cadence_index: usize,
+    terminal: u32,
+    record: &TerminalCadenceRecord,
+) -> u64 {
+    let mut fnv = FnvWords::new();
+    fnv.word(cadence_index as u64);
+    fnv.word(u64::from(terminal));
+    let mut word = |value: u64| fnv.word(value);
+    digest_terminal_record(&mut word, record);
+    fnv.finish()
+}
+
+/// One terminal record's disposition words — word-identical to the segment
+/// the pre-J2 whole-state walk emitted for the same record (retained verbatim
+/// as `digest_full_walk_oracle`).
+fn digest_terminal_record(word: &mut impl FnMut(u64), record: &TerminalCadenceRecord) {
+    match &record.disposition {
+        TerminalDisposition::Routed { route, winner } => {
+            word(0);
+            digest_route_evidence(word, route);
+            word(candidate_family_digest(winner.family));
+            word(winner.generation_index as u64);
+            word(winner.price_ml.to_bits());
+            word(winner.clearance_rows as u64);
+        }
+        TerminalDisposition::SkippedQuarantined {
+            terminal_id,
+            original_key,
+            forest_digest,
+            controller_digest_before,
+        } => {
+            word(1);
+            word(u64::from(*terminal_id));
+            word(u64::from(original_key.slot()));
+            word(u64::from(original_key.generation()));
+            word(*forest_digest);
+            word(*controller_digest_before);
+        }
+        TerminalDisposition::UnroutedNoWinner { route, reason } => {
+            word(2);
+            digest_route_evidence(word, route);
+            match reason {
+                NoWinnerEvidence::NoCandidatesGenerated {
+                    anchor_seat_refusals,
+                } => {
+                    word(0);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                }
+                NoWinnerEvidence::NoFeasibleCandidate {
+                    candidates_generated,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(1);
+                    word(*candidates_generated as u64);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
+                NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                    candidates_generated,
+                    candidates_feasible,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(2);
+                    word(*candidates_generated as u64);
+                    word(*candidates_feasible as u64);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
+            }
+        }
+    }
+}
+
+/// FU-32 J2 (§D2.1) — `hosts_acc`: a fresh FNV-1a over the host kd-tree
+/// cache, word-identical to the final segment of the pre-J2 walk.  Hosts
+/// change only in `finish_terminal`'s `KDTREE_REBUILD_EVERY` branch
+/// (`HostCache::rebuild` has no other caller), so that branch is the only
+/// place the cached value refreshes.
+fn host_cache_digest(hosts: &HostCache) -> u64 {
+    let mut fnv = FnvWords::new();
+    fnv.word(hosts.indexed_members.len() as u64);
+    for key in &hosts.indexed_members {
+        fnv.word(u64::from(key.slot()));
+        fnv.word(u64::from(key.generation()));
+    }
+    fnv.word(hosts.samples.len() as u64);
+    for (point, key) in &hosts.samples {
+        for coordinate in point {
+            fnv.word(coordinate.to_bits());
+        }
+        fnv.word(u64::from(key.slot()));
+        fnv.word(u64::from(key.generation()));
+    }
+    fnv.finish()
 }
 
 fn digest_route_evidence(word: &mut impl FnMut(u64), route: &TerminalRouteEvidence) {
@@ -2200,11 +2792,27 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
         let terminal =
             AnchorTerminalBinding::new(request.terminal_id, request.stub, request.stub_end_mm());
         let bound_contact = validate_finalized_anchor_route(request, &route, terminal)?;
+        // FU-32 J1.  These four comparisons are new *code* but not a new
+        // *check*: before the hoist, the four values recorded below were each
+        // recomputed here from the subject itself, so recording them was the
+        // check.  With the hash hoisted out of the loop, the recording has to
+        // state explicitly that the hoisted proof still matches the subject's
+        // own sealed witness — otherwise a corrupted token would be copied
+        // straight into the transcript on the winner arm, which never reaches
+        // `validate_replay`.  Every witness on the right-hand side is O(1):
+        // three stored fields and one borrowed fingerprint.
+        if route.authority.plan_digest() != route.plan().finalized_load_plan_digest()
+            || route.authority.loads_digest() != route.loads().digest()
+            || route.authority.pool_digest() != route.pool().digest()
+            || route.authority.geometry_fingerprint() != route.geometry().fingerprint_ref()
+        {
+            return Err(CcoError::StaleFinalizedAnchorAuthority);
+        }
         Ok(Self {
-            plan_digest: route.plan.digest(),
-            loads_digest: route.loads.digest(),
-            pool_digest: route.pool.digest(),
-            geometry_fingerprint: route.geometry.fingerprint(),
+            plan_digest: route.authority.plan_digest(),
+            loads_digest: route.authority.loads_digest(),
+            pool_digest: route.authority.pool_digest(),
+            geometry_fingerprint: route.authority.geometry_fingerprint().clone(),
             route,
             bound_contact,
             terminal,
@@ -2220,10 +2828,19 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
         request: &TerminalCcoRequest,
     ) -> Result<(), CcoError> {
         request.validate(forest)?;
-        if self.route.plan.digest() != self.plan_digest
-            || self.route.loads.digest() != self.loads_digest
-            || self.route.pool.digest() != self.pool_digest
-            || self.route.geometry.fingerprint() != self.geometry_fingerprint
+        // FU-32 J1.  The comparison stays exactly here and refuses exactly as
+        // it did; only the whole-structure re-hashes on the left-hand side
+        // were hoisted.  Each right-hand value was copied from the token at
+        // `bind`; each left-hand value is the subject's own O(1) sealed
+        // witness — `finalized_load_plan_digest` is the plan's own record of
+        // `digest()`, proved equal to it once by
+        // `VerifiedRoutingAuthority::compute` and again by
+        // `validate_initial_cco_preflight`.  A token corrupted after `compute`
+        // therefore still fails here.
+        if self.route.plan().finalized_load_plan_digest() != self.plan_digest
+            || self.route.loads().digest() != self.loads_digest
+            || self.route.pool().digest() != self.pool_digest
+            || *self.route.geometry().fingerprint_ref() != self.geometry_fingerprint
         {
             return Err(CcoError::StaleFinalizedAnchorAuthority);
         }
@@ -2246,7 +2863,7 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
             original_key: request.stub,
             plan_digest: self.plan_digest,
             loads_digest: self.loads_digest,
-            geometry_digest: self.route.geometry.digest(),
+            geometry_digest: self.route.geometry().digest(),
             forest_digest_before,
             controller_digest_before,
         }
@@ -2287,32 +2904,36 @@ fn validate_finalized_anchor_route(
     if route.config != AnchorSearchConfig::current()? {
         return Err(CcoError::StaleFinalizedAnchorConfig);
     }
-    route.pool.validate_against(route.geometry)?;
+    // FU-32 J1: same check, same refusal; the whole-pool re-hash behind its
+    // content arm was hoisted to `VerifiedRoutingAuthority::compute`.
+    route
+        .pool()
+        .validate_against_hoisted(route.geometry(), route.authority.pool_digest())?;
+    // FU-32 J1: the linear `find` over every plan contact became a map lookup
+    // in the token's contact index.  The comparison is unchanged — the plan's
+    // contact for this id must be equal to the one the route carries.
     if route.contact.contact_id() != route.contact_id
-        || route
-            .plan
-            .contacts()
-            .iter()
-            .find(|contact| contact.contact_id() == route.contact_id)
-            != Some(route.contact)
+        || route.authority.contact(route.contact_id) != Some(route.contact)
     {
         return Err(CcoError::FinalizedContactMismatch);
     }
-    let contact_ids = route
-        .plan
-        .contacts()
-        .iter()
-        .map(SpecializedPhysicalContact::contact_id)
-        .collect::<Vec<_>>();
+    // FU-32 J1: built once by the token instead of once per call.
+    let contact_ids = route.authority.contact_ids();
+    // FU-32 J1: same four-arm check, same refusal; the whole-partition row
+    // walk behind its third arm was hoisted.
     if route
-        .loads
-        .validate_binding(route.plan.load_partition(), &contact_ids)
+        .loads()
+        .validate_binding_hoisted(
+            route.plan().load_partition(),
+            contact_ids,
+            route.authority.load_rows_fingerprint(),
+        )
         .is_err()
     {
         return Err(CcoError::FinalizedLoadBindingMismatch);
     }
     let leaf = route
-        .loads
+        .loads()
         .leaf_for(route.contact_id)
         .ok_or(CcoError::FinalizedLoadBindingMismatch)?;
     if leaf.contact_id() != route.contact_id
@@ -2327,8 +2948,15 @@ fn validate_finalized_anchor_route(
     {
         return Err(CcoError::FinalizedStubLoadMismatch);
     }
-    Ok(BoundPhysicalAnchorContact::new(
-        route.plan,
+    // FU-32 J1: the plan digest inside this fingerprint is the token's, hashed
+    // once for the stage and proved equal to the plan's own seal at
+    // `VerifiedRoutingAuthority::compute`; the contact is the one this
+    // function just proved equal to the plan's contact for this id.  Same
+    // fingerprint, same bytes — without a second full plan walk and a second
+    // linear scan.
+    Ok(BoundPhysicalAnchorContact::from_hoisted(
+        route.authority.plan_digest(),
+        route.contact,
         route.contact_id,
     )?)
 }
@@ -2461,9 +3089,10 @@ fn grow_terminal_inner(
             foot_requests,
             context.bound_contact,
             context.terminal,
-            context.route.pool,
+            context.route.pool(),
             context.route.config,
-            context.route.geometry,
+            context.route.geometry(),
+            context.route.authority.pool_digest(),
         )?;
         anchor_foot_batches = validation.query_counts().sphere_breach_batches;
         let mut valid = BTreeSet::new();
@@ -4134,6 +4763,7 @@ mod tests {
         frame: BuildFrame,
     ) -> CompletedInitialRoutes {
         let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
+        let authority = VerifiedRoutingAuthority::compute(plan, loads, &pool, geometry).unwrap();
         let mut controller = CcoController::default();
         let mut expected = build.routing_order().specialized_terminals().to_vec();
         expected.extend_from_slice(build.routing_order().regular_terminals());
@@ -4161,13 +4791,10 @@ mod tests {
                     build.forest_mut(),
                     &request,
                     FinalizedAnchorTerminalRoute {
-                        plan,
+                        authority: &authority,
                         contact,
                         contact_id: u64::from(*terminal),
-                        loads,
-                        pool: &pool,
                         config: AnchorSearchConfig::current().unwrap(),
-                        geometry,
                         process_resolution_mm: 0.05,
                     },
                 )
@@ -4181,6 +4808,313 @@ mod tests {
             skipped_ledger,
             outcomes,
         )
+    }
+
+    /// FU-32 phase J1 — the hoisted routing authority is load-bearing, arm by
+    /// arm, and the routing path still refuses a stale proof.
+    ///
+    /// # Why this test has to exist
+    ///
+    /// J1 removed the per-terminal re-hashing of `plan`, `loads`, `pool` and
+    /// `geometry` and replaced it with digests hoisted once into
+    /// [`VerifiedRoutingAuthority`].  If the sites that read those hoisted
+    /// values had been left comparing the token against *itself*, the
+    /// comparisons would have degraded into `field == field` — a guarantee
+    /// regression dressed as a speed-up, exactly what the G2 record and FU-32
+    /// design §F6 warn about.  So every site compares the hoisted value
+    /// against the subject's own independently sealed witness, and this test
+    /// corrupts the hoist — leaving every subject untouched — to prove each of
+    /// those comparisons still bites.
+    ///
+    /// # The arms, and the site each one names
+    ///
+    /// | corrupted hoist | site that must refuse | error |
+    /// |---|---|---|
+    /// | `pool_digest` | `SurfaceAnchorPool::validate_against_hoisted`, reached from `validate_finalized_anchor_route` | `Anchor(StaleSurfaceAnchorPool)` |
+    /// | `load_rows_fingerprint` | `FinalizedContactLoads::validate_binding_hoisted`, third arm | `FinalizedLoadBindingMismatch` |
+    /// | `plan_digest` | `bind`, first arm, against `plan.finalized_load_plan_digest()` | `StaleFinalizedAnchorAuthority` |
+    /// | `loads_digest` | `bind`, second arm, against `loads.digest()` | `StaleFinalizedAnchorAuthority` |
+    /// | `geometry_fingerprint` | `bind`, fourth arm, against `geometry.fingerprint_ref()` | `StaleFinalizedAnchorAuthority` |
+    ///
+    /// Three distinct error types across the five arms, so no arm is satisfied
+    /// by a delegate's refusal in the way `36d1a63` had to correct for G2.
+    ///
+    /// # Mutation transcript (2026-08-09, run by hand at this tip)
+    ///
+    /// Nine comparisons were deleted one at a time and the `fu32_*` tests
+    /// re-run.  Every deletion failed a test, and every failure named the
+    /// deleted arm:
+    ///
+    /// | deleted comparison | failing assertion |
+    /// |---|---|
+    /// | `SurfaceAnchorPool::validate_against_hoisted` content arm | this test's `PoolDigest` arm **and** `anchor::tests::surface_anchor_pool_is_exterior_face_ordered_…` |
+    /// | `FinalizedContactLoads::validate_binding_hoisted` rows arm | this test's `LoadRowsFingerprint` arm **and** `perception::tests::finalized_contact_loads_fold_frozen_rows_…` |
+    /// | `bind` arm 1 (plan) | "bind accepted a corrupted PlanDigest hoist" |
+    /// | `bind` arm 2 (loads) | "bind accepted a corrupted LoadsDigest hoist" |
+    /// | `bind` arm 4 (geometry) | "bind accepted a corrupted GeometryFingerprint hoist" |
+    /// | `validate_replay` arms 0–3 | "validate_replay arm {0,1,2,3} stopped refusing a stale authority" |
+    ///
+    /// **The delegate observation, recorded rather than hidden.** Deleting any
+    /// of `bind`'s three arms leaves
+    /// [`fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation`]
+    /// **green**, because that fixture's terminal takes the no-winner arm and
+    /// `validate_replay` refuses on the same proof.  That is precisely the
+    /// `36d1a63` vacuity shape, and it is why this test calls `bind` directly:
+    /// so each of its arms can be satisfied only by the site that names it.
+    ///
+    /// # Why `bind` is exercised directly, and not only through the route
+    ///
+    /// The `36d1a63` vacuity lesson, met head-on.  On the **no-winner** arm
+    /// `grow_terminal_with_finalized_anchor` calls `validate_replay`, whose
+    /// quartet refuses on the same proof as `bind`'s — so deleting `bind`'s
+    /// plan/loads/geometry arm and running only the end-to-end test leaves it
+    /// **green**, satisfied by a delegate.  `bind`'s arms are the *only* gate
+    /// on the winner arm, where no replay happens.  So the arm-naming test
+    /// below calls `FinalizedAnchorValidationContext::bind` itself, and the
+    /// end-to-end test in
+    /// [`fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation`]
+    /// separately proves the production path refuses before any mutation.
+    ///
+    /// Every corrupted arm must also leave the forest untouched: these are
+    /// pre-mutation authority gates, so a refusal that had already grown a
+    /// member would be a different defect.
+    #[test]
+    fn fu32_bind_refuses_a_corrupted_hoisted_routing_authority_arm_by_arm() {
+        let (build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+
+        for (field, expected) in corrupted_authority_arms() {
+            let mut corrupted =
+                VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+            let contact = corrupted.contact(u64::from(terminal)).unwrap();
+            corrupted.corrupt_for_test(field);
+            let error = FinalizedAnchorValidationContext::bind(
+                build.forest(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &corrupted,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            )
+            .err()
+            .unwrap_or_else(|| panic!("bind accepted a corrupted {field:?} hoist"));
+            assert!(
+                expected(&error),
+                "bind refused a corrupted {field:?} at the wrong site: {error}"
+            );
+        }
+
+        let honest = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = honest.contact(u64::from(terminal)).unwrap();
+        FinalizedAnchorValidationContext::bind(
+            build.forest(),
+            &request,
+            FinalizedAnchorTerminalRoute {
+                authority: &honest,
+                contact,
+                contact_id: u64::from(terminal),
+                config: AnchorSearchConfig::current().unwrap(),
+                process_resolution_mm: 0.05,
+            },
+        )
+        .expect("an honest hoisted authority binds exactly as it did before J1");
+    }
+
+    /// One corruption arm: the hoisted field to move, and the predicate the
+    /// resulting refusal must satisfy.  FU-32 J1.
+    type CorruptedAuthorityArm = (CorruptedAuthorityField, fn(&CcoError) -> bool);
+
+    /// The five corruption arms and the error each must produce.  Shared by
+    /// the `bind` arm-naming test and the end-to-end path test so the two
+    /// cannot drift.  FU-32 J1.
+    fn corrupted_authority_arms() -> [CorruptedAuthorityArm; 5] {
+        [
+            (CorruptedAuthorityField::PoolDigest, |error| {
+                matches!(
+                    error,
+                    CcoError::Anchor(AnchorSearchError::StaleSurfaceAnchorPool)
+                )
+            }),
+            (CorruptedAuthorityField::LoadRowsFingerprint, |error| {
+                matches!(error, CcoError::FinalizedLoadBindingMismatch)
+            }),
+            (CorruptedAuthorityField::PlanDigest, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+            (CorruptedAuthorityField::LoadsDigest, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+            (CorruptedAuthorityField::GeometryFingerprint, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+        ]
+    }
+
+    /// FU-32 phase J1 — the production routing path refuses a corrupted hoist
+    /// before it touches the forest.  See
+    /// [`fu32_bind_refuses_a_corrupted_hoisted_routing_authority_arm_by_arm`]
+    /// for the arm-by-arm mutation transcript this complements.
+    #[test]
+    fn fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation() {
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+        let before = build.forest().digest();
+
+        for (field, expected) in corrupted_authority_arms() {
+            let mut corrupted =
+                VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+            let contact = corrupted
+                .contact(u64::from(terminal))
+                .expect("the plan owns this terminal's contact");
+            corrupted.corrupt_for_test(field);
+            let result = CcoController::default().grow_terminal_with_finalized_anchor(
+                build.forest_mut(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &corrupted,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            );
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("a corrupted {field:?} hoist routed a terminal"));
+            assert!(
+                expected(&error),
+                "corrupting {field:?} refused at the wrong site: {error}"
+            );
+            assert_eq!(
+                build.forest().digest(),
+                before,
+                "corrupting {field:?} mutated the forest before refusing"
+            );
+        }
+
+        // The same route, with an honest token, still routes: the arms above
+        // refuse the corruption rather than the path.
+        let honest = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = honest.contact(u64::from(terminal)).unwrap();
+        CcoController::default()
+            .grow_terminal_with_finalized_anchor(
+                build.forest_mut(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &honest,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            )
+            .expect("an honest hoisted authority routes exactly as it did before J1");
+    }
+
+    /// FU-32 phase J1 — `validate_replay`'s quartet still refuses a token that
+    /// went stale *between* `bind` and the serial winner replay.
+    ///
+    /// `bind` copies the four hoisted values out of the token; `validate_replay`
+    /// compares those copies against the subjects' own sealed witnesses.  This
+    /// test corrupts the token after a successful `bind`-shaped construction
+    /// and proves the replay comparison — not `bind`'s — is what refuses.
+    #[test]
+    fn fu32_validate_replay_still_refuses_a_token_corrupted_after_bind() {
+        let (build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+
+        let authority = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = authority.contact(u64::from(terminal)).unwrap();
+        let mut context = FinalizedAnchorValidationContext::bind(
+            build.forest(),
+            &request,
+            FinalizedAnchorTerminalRoute {
+                authority: &authority,
+                contact,
+                contact_id: u64::from(terminal),
+                config: AnchorSearchConfig::current().unwrap(),
+                process_resolution_mm: 0.05,
+            },
+        )
+        .expect("an honest token binds");
+        assert!(context.validate_replay(build.forest(), &request).is_ok());
+
+        // Move each recorded copy away from its subject in turn.  Every one of
+        // the four arms must refuse on its own.
+        let honest = (
+            context.plan_digest,
+            context.loads_digest,
+            context.pool_digest,
+            context.geometry_fingerprint.clone(),
+        );
+        for arm in 0..4 {
+            context.plan_digest = honest.0;
+            context.loads_digest = honest.1;
+            context.pool_digest = honest.2;
+            context.geometry_fingerprint = honest.3.clone();
+            match arm {
+                0 => context.plan_digest ^= 1,
+                1 => context.loads_digest ^= 1,
+                2 => context.pool_digest ^= 1,
+                _ => context.geometry_fingerprint.corrupt_mesh_sha256_for_test(),
+            }
+            assert!(
+                matches!(
+                    context.validate_replay(build.forest(), &request),
+                    Err(CcoError::StaleFinalizedAnchorAuthority)
+                ),
+                "validate_replay arm {arm} stopped refusing a stale authority"
+            );
+        }
     }
 
     fn no_winner_reason_signature(reason: &NoWinnerEvidence) -> String {
@@ -4287,18 +5221,17 @@ mod tests {
             .find(|contact| contact.contact_id() == replay.physical_contact_id)
             .unwrap();
         let replay_pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let replay_authority =
+            VerifiedRoutingAuthority::compute(&plan, &loads, &replay_pool, &geometry).unwrap();
         assert!(matches!(
             controller.grow_terminal_with_finalized_anchor(
                 build.forest_mut(),
                 &replay,
                 FinalizedAnchorTerminalRoute {
-                    plan: &plan,
+                    authority: &replay_authority,
                     contact: replay_contact,
                     contact_id: replay.physical_contact_id,
-                    loads: &loads,
-                    pool: &replay_pool,
                     config: AnchorSearchConfig::current().unwrap(),
-                    geometry: &geometry,
                     process_resolution_mm: 0.05,
                 },
             ),
@@ -5047,6 +5980,345 @@ mod tests {
         }
         assert!(!processed.hosts.samples.is_empty());
         assert_eq!(processed.hosts.samples.len(), 3);
+    }
+
+    /// FU-32 J2 — scripted disposition covering every record shape the
+    /// digest walks: all three disposition variants and all three
+    /// `NoWinnerEvidence` variants, with non-empty seat-refusal lists (the
+    /// Θ(N·R) term the accumulator exists to collapse).
+    fn scripted_disposition(index: usize, entry: &TerminalLedgerEntry) -> TerminalCadenceRecord {
+        let seed = index as u64 + 1;
+        let refusals = |count: usize| -> Vec<AnchorSeatRefusal> {
+            (0..count)
+                .map(|row| AnchorSeatRefusal {
+                    sample_index: index * 100 + row,
+                    source_sample_face_id: (row as u32) * 7 + entry.contact,
+                    reason: match row % 3 {
+                        0 => crate::anchor::AnchorSeatRefusalReason::TooShort,
+                        1 => crate::anchor::AnchorSeatRefusalReason::NoFirstHit,
+                        _ => crate::anchor::AnchorSeatRefusalReason::NearerNonExteriorObstruction,
+                    },
+                    first_hit_t: (row % 2 == 0).then(|| Finite::new(0.25 + row as f64).unwrap()),
+                })
+                .collect()
+        };
+        let route = TerminalRouteEvidence {
+            physical_contact_id: u64::from(entry.contact),
+            terminal_id: entry.contact,
+            original_key: entry.original_key,
+            plan_digest: seed.wrapping_mul(3),
+            loads_digest: seed.wrapping_mul(5),
+            geometry_digest: seed.wrapping_mul(7),
+            forest_digest_before: seed.wrapping_mul(11),
+            controller_digest_before: seed.wrapping_mul(13),
+        };
+        let disposition = match index % 5 {
+            0 => TerminalDisposition::Routed {
+                route,
+                winner: CcoCandidateEvidence {
+                    family: CandidateFamily::PlateDescent,
+                    generation_index: index,
+                    price_ml: 0.5 + index as f64,
+                    clearance_rows: index * 3,
+                },
+            },
+            1 => TerminalDisposition::SkippedQuarantined {
+                terminal_id: entry.contact,
+                original_key: entry.original_key,
+                forest_digest: seed.wrapping_mul(17),
+                controller_digest_before: seed.wrapping_mul(19),
+            },
+            2 => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::NoCandidatesGenerated {
+                    anchor_seat_refusals: refusals(3 + index % 4),
+                },
+            },
+            3 => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::NoFeasibleCandidate {
+                    candidates_generated: index + 1,
+                    anchor_seat_refusals: refusals(2 + index % 3),
+                    anchor_refusals: Vec::new(),
+                },
+            },
+            _ => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                    candidates_generated: index + 2,
+                    candidates_feasible: index + 1,
+                    anchor_seat_refusals: refusals(1 + index % 5),
+                    anchor_refusals: Vec::new(),
+                },
+            },
+        };
+        TerminalCadenceRecord { disposition }
+    }
+
+    /// The J2 equivalence check, asserted after EVERY insertion: the cached
+    /// accumulator pair equals the from-scratch rebuild bit-for-bit, and the
+    /// incremental digest equals the digest over the rebuilt pair.
+    fn assert_incremental_equals_rebuilt(controller: &CcoController) {
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        assert_eq!(
+            (records_acc, hosts_acc),
+            (controller.records_acc, controller.hosts_acc),
+            "cached accumulators drifted from the from-scratch rebuild"
+        );
+        assert_eq!(
+            controller.digest(),
+            controller.digest_with_accumulators(records_acc, hosts_acc),
+            "incremental digest diverged from the full recompute"
+        );
+    }
+
+    #[test]
+    fn fu32_incremental_digest_equals_the_full_walk_after_n_terminals() {
+        // Arm 1 -- GROWN on real geometry, committed winner.
+        let (mut forest, request, surface) = growth_fixture();
+        let mut grown = CcoController::default();
+        assert_incremental_equals_rebuilt(&grown);
+        grown
+            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .unwrap();
+        assert_incremental_equals_rebuilt(&grown);
+
+        // Arm 1b -- GROWN on real geometry, no winner: the refusal-carrying
+        // evidence arm that dominates the treant (0 of 3429 model anchors
+        // survive corpus-wide).
+        let (mut forest, request, surface) = no_winner_fixture();
+        let mut unrouted = CcoController::default();
+        unrouted
+            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .unwrap();
+        assert_incremental_equals_rebuilt(&unrouted);
+
+        // Arm 2 -- SKIPPED-QUARANTINED via the production path, across the
+        // KDTREE_REBUILD_EVERY boundary so the hosts-accumulator refresh is
+        // exercised where hosts actually change.
+        let (forest, skipped, _) = quarantined_cadence_fixture(26, 0);
+        let mut quarantined = CcoController::default();
+        for entry in skipped {
+            quarantined
+                .advance_skipped_terminal(&forest, entry)
+                .unwrap();
+            assert_incremental_equals_rebuilt(&quarantined);
+        }
+
+        // Scripted mix -- every disposition variant, every NoWinnerEvidence
+        // variant, refusal lists attached, 30 records crossing the rebuild
+        // boundary; checked after EVERY insertion, on two identical
+        // trajectories that must agree step by step (oracle and new digest
+        // alike).
+        let (forest, skipped, _) = quarantined_cadence_fixture(30, 100);
+        let mut first = CcoController::default();
+        let mut second = CcoController::default();
+        let mut oracle_values = vec![first.digest_full_walk_oracle()];
+        let mut new_values = vec![first.digest()];
+        for (index, entry) in skipped.iter().enumerate() {
+            let record = scripted_disposition(index, entry);
+            first.finish_terminal(&forest, entry.contact, record.clone());
+            second.finish_terminal(&forest, entry.contact, record);
+            assert_incremental_equals_rebuilt(&first);
+            assert_eq!(first.digest(), second.digest());
+            assert_eq!(
+                first.digest_full_walk_oracle(),
+                second.digest_full_walk_oracle()
+            );
+            oracle_values.push(first.digest_full_walk_oracle());
+            new_values.push(first.digest());
+        }
+        // The retained pre-J2 walk is the PARTITION oracle -- its values
+        // necessarily moved (F5 proved no value-preserving restructure
+        // exists), so what it certifies is discrimination: every state the
+        // old walk distinguished along this trajectory, the restructured
+        // digest must distinguish too.
+        for i in 0..oracle_values.len() {
+            for j in (i + 1)..oracle_values.len() {
+                assert_ne!(
+                    oracle_values[i], oracle_values[j],
+                    "oracle collision at ({i},{j})"
+                );
+                assert_ne!(
+                    new_values[i], new_values[j],
+                    "state distinguished by the retained walk collided under the incremental digest at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    /// FU-32 J2 (F6/§D2.2) — the stage-boundary tripwires
+    /// (`validate_brace_preflight` / `validate_rewire_preflight` in
+    /// `runner.rs`) compare the sealed controller digest through
+    /// [`CcoController::sealed_digest_matches_rebuilt`].  This pins both of
+    /// that method's teeth: a corrupted ACCUMULATOR is caught (the rebuilt
+    /// pair is cross-checked against the cached pair), and a mutated STATE is
+    /// caught by genuine recompute even when the cached digest still matches
+    /// the seal — the trust-the-cache failure mode F6 forbids.
+    #[test]
+    fn fu32_a_corrupted_accumulator_is_caught_at_the_stage_boundary_tripwire() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(30, 200);
+        let mut controller = CcoController::default();
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        // `finalize_transcript` seals with the digest over the REBUILT pair
+        // (§D2.2); with a coherent cache that value equals `digest()`.
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        let sealed = controller.digest_with_accumulators(records_acc, hosts_acc);
+        assert_eq!(sealed, controller.digest());
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A corrupted records accumulator is CAUGHT at the tripwire.
+        let pristine = controller.records_acc;
+        controller.records_acc ^= 0x5eed_0bad_c0ff_ee00;
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a corrupted records accumulator must fail the tripwire"
+        );
+        controller.records_acc = pristine;
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A corrupted hosts accumulator is CAUGHT at the tripwire.
+        let pristine = controller.hosts_acc;
+        controller.hosts_acc = controller.hosts_acc.wrapping_add(1);
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a corrupted hosts accumulator must fail the tripwire"
+        );
+        controller.hosts_acc = pristine;
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A state mutation the cached digest CANNOT see (the record changes
+        // behind the accumulator's back) is still caught, because the
+        // tripwire genuinely recomputes from state.
+        let tampered = skipped[0].contact;
+        match &mut controller
+            .terminals
+            .get_mut(&tampered)
+            .expect("scripted terminal present")
+            .disposition
+        {
+            TerminalDisposition::Routed { winner, .. } => winner.price_ml += 1.0,
+            _ => unreachable!("scripted index 0 is Routed"),
+        }
+        assert_eq!(
+            controller.digest(),
+            sealed,
+            "the cached digest is blind to this tamper -- exactly why the tripwire must rebuild"
+        );
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a state mutation after seal must fail the genuine recompute"
+        );
+    }
+
+    /// J2 mutation triad (a): a record folded twice must fail the
+    /// equivalence harness.
+    #[test]
+    fn fu32_mutation_a_double_folded_record_fails_equivalence() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(8, 300);
+        let mut controller = CcoController::default();
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        let honest = controller.digest();
+        assert_incremental_equals_rebuilt(&controller);
+
+        // Simulate the mutant: the first record's hash folded a second time.
+        let doubled = terminal_record_hash(
+            0,
+            skipped[0].contact,
+            controller
+                .terminals
+                .get(&skipped[0].contact)
+                .expect("first scripted record present"),
+        );
+        controller.records_acc = controller.records_acc.wrapping_add(doubled);
+        assert_ne!(controller.digest(), honest);
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        assert_ne!(
+            (records_acc, hosts_acc),
+            (controller.records_acc, controller.hosts_acc),
+            "the equivalence harness must catch a double fold"
+        );
+        assert_ne!(
+            controller.digest(),
+            controller.digest_with_accumulators(records_acc, hosts_acc)
+        );
+    }
+
+    /// J2 mutation triad (b): skipping the hosts-accumulator refresh at a
+    /// KDTREE_REBUILD_EVERY boundary must fail the equivalence harness.
+    #[test]
+    fn fu32_mutation_b_stale_hosts_accumulator_at_rebuild_boundary_fails_equivalence() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(25, 400);
+        let mut controller = CcoController::default();
+        // Hosts change only at insertion 25, so the pre-trajectory value IS
+        // the stale value the (b) mutant would have kept.
+        let stale_hosts_acc = controller.hosts_acc;
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        // The fixture forest has a live trunk, so the rebuild at 25 made the
+        // cache non-empty and the refresh moved the accumulator.
+        assert_ne!(controller.hosts_acc, stale_hosts_acc);
+        assert_eq!(controller.rebuild_accumulators().1, controller.hosts_acc);
+        assert_ne!(
+            controller.digest_with_accumulators(controller.records_acc, stale_hosts_acc),
+            controller.digest(),
+            "the equivalence harness must catch a skipped hosts refresh"
+        );
+    }
+
+    /// J2 mutation triad (c): with `cadence_index` dropped from the
+    /// per-record hash, two identical-content records inserted at swapped
+    /// positions collide under the commutative fold; with it bound, the two
+    /// orders stay distinct.
+    #[test]
+    fn fu32_mutation_c_dropping_cadence_index_makes_swapped_records_collide() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(2, 500);
+        let t1 = skipped[0].contact;
+        let t2 = skipped[1].contact;
+        // IDENTICAL record content for both terminals -- only the outer
+        // terminal id and the cadence position differ.
+        let record = TerminalCadenceRecord {
+            disposition: TerminalDisposition::SkippedQuarantined {
+                terminal_id: 9,
+                original_key: skipped[0].original_key,
+                forest_digest: 1234,
+                controller_digest_before: 5678,
+            },
+        };
+        let mut forward = CcoController::default();
+        forward.finish_terminal(&forest, t1, record.clone());
+        forward.finish_terminal(&forest, t2, record.clone());
+        let mut backward = CcoController::default();
+        backward.finish_terminal(&forest, t2, record.clone());
+        backward.finish_terminal(&forest, t1, record.clone());
+
+        // Computed exactly as the (c) mutant would -- no cadence_index in the
+        // per-record hash -- the two trajectories' accumulators are one and
+        // the same sum, i.e. the swap is invisible.
+        let no_index_hash = |terminal: u32| {
+            let mut fnv = FnvWords::new();
+            fnv.word(u64::from(terminal));
+            let mut word = |value: u64| fnv.word(value);
+            digest_terminal_record(&mut word, &record);
+            fnv.finish()
+        };
+        assert_eq!(
+            no_index_hash(t1).wrapping_add(no_index_hash(t2)),
+            no_index_hash(t2).wrapping_add(no_index_hash(t1)),
+            "the index-free mutant cannot tell the two orders apart"
+        );
+        // With cadence_index bound inside every record hash, the swap moves
+        // the accumulator (and the digest), so the harness catches the mutant.
+        assert_ne!(
+            forward.records_acc, backward.records_acc,
+            "cadence_index must bind insertion order into the accumulator"
+        );
+        assert_ne!(forward.digest(), backward.digest());
     }
 
     #[test]

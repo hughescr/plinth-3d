@@ -2944,6 +2944,30 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.9 = 100000",
       "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The raft stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- the pipeline has never reached it, no treant seal exists (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:RouteCcoWorkLimits::registered",
+        "crates/plinth-support/src/runner.rs:RouteCcoWorkCharge::preflight",
+        "crates/plinth-support/src/anchor.rs:discover_anchor_seats_bound"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.11 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority, NEW at FU-32 phase J5 (2026-08-09) rather than inherited: the sealed initial-terminal CCO routing cadence had NO charge of any kind before this tip -- no Limit, no counter, no clock (fu32-design-2026-08-09.md F8, the pre-FU-8b naked-hang shape). Bounds the cadence's real Theta(N x P) seat search, cadence_len x pool_rows, charged before the first terminal and metered beside the charge (executed <= charged, typed SupportRoutingError::ChargeDrift). Derivation rule, stated once and used for both routing caps: next_power_of_two(2 x the Weeping Treant v1.2's charged demand) = next_power_of_two(2 x 553 x 364,223) = next_power_of_two(402,830,638) = 536,870,912. Single specimen, n = 1, per R4/FU-23. MEASURED at this tip (census table T0_route_cco_charge, PLINTH_CENSUS=1, PLINTH_THREADS=4, 2026-08-09): treant charged 201,415,319 (37.5 % of cap), executed 164,993,019 (30.7 %); largest corpus model Sphere charged 33,320 (0.0062 %). The controller and immutable-authority digests are deliberately NOT charged -- after FU-32 J1/J2 they are O(1) and O(delta), and pricing them would price an implementation detail (design D3). No cap was raised, lowered or touched by this registration; the charge is an addition to a previously uncharged stage, added only AFTER J1 and J2 removed the redundant work so that it prices the loop that actually runs."
+    },
+    {
+      "id": "SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:RouteCcoWorkLimits::registered",
+        "crates/plinth-support/src/runner.rs:RouteCcoWorkCharge::preflight",
+        "crates/plinth-support/src/cco.rs:TerminalCcoOutcome::anchor_seat_refusals"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.11 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority, NEW at FU-32 phase J5 (2026-08-09) beside SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS and derived by the same stated rule. Bounds the AnchorSeatRefusal evidence rows the routing cadence retains run-wide: a sample can enter one terminal's refusal list at most once, so retained rows per terminal are bounded by pool_rows and the run-wide worst case is the same cadence_len x pool_rows product. Single specimen, n = 1, per R4/FU-23. MEASURED at this tip (census table T0_route_cco_charge, 2026-08-09): the treant completed its whole cadence for the first time and retained 162,719,910 rows -- 80.8 % of its charge and 30.3 % of this cap, and 2.3x the ~70.1 M the design's M2 growth law projected, recorded here as a correction to that projection and not to the cap, which was derived from the worst case. DISCLOSED, NOT RATIFIED: at the 30.3 B per retained refusal measured in M3 this cap admits approximately 16.3 GB of retained refusal evidence -- above the ~4.9 GB the treant's rows imply, and below but not comfortably below the 90 GB watchdog arm and the ~100 GB machine ceiling. Design open question 4 records the underlying question this registration does not answer and deliberately leaves the refusal list untouched, because summarising it would move every transcript digest. No cap was raised, lowered or touched."
     }
   ],
   "aliases": [
