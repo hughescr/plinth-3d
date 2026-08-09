@@ -900,6 +900,17 @@ pub enum NoAnchorSeatReason {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnchorSeatQueryCounts {
     pub ray_batches: usize,
+    /// FU-32 J5 — the seat evaluations this discovery actually executed:
+    /// one per pool row classified by [`discover_anchor_seats_bound`]'s
+    /// qualification walk, counted by the walk itself rather than re-derived
+    /// from `pool.rows().len()` at the caller.
+    ///
+    /// This is the metered half of the routing charge (design D3, the G6c
+    /// charge-beside-meter idiom); the charged half is
+    /// `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS`, checked in
+    /// `runner::route_initial_cco`'s preflight. Result-inert: no digest,
+    /// transcript or disposition reads it.
+    pub seat_evaluations: usize,
 }
 
 #[derive(Debug)]
@@ -1088,7 +1099,15 @@ fn discover_anchor_seats_bound(
             seats: Vec::new(),
             refusals,
             no_seat_reason: Some(NoAnchorSeatReason::NoQualifiedSamples),
-            query_counts: AnchorSeatQueryCounts::default(),
+            // FU-32 J5: `..default()` would report ZERO evaluations on the
+            // path that evaluates the WHOLE pool and qualifies none of it --
+            // the single most expensive terminal shape there is (the treant's
+            // 310 of 310 grown terminals produced no winner, design M2). The
+            // meter counts what the walk above executed, not what survived it.
+            query_counts: AnchorSeatQueryCounts {
+                ray_batches: 0,
+                seat_evaluations: samples.len(),
+            },
         });
     }
 
@@ -1182,7 +1201,10 @@ fn discover_anchor_seats_bound(
         seats,
         refusals,
         no_seat_reason,
-        query_counts: AnchorSeatQueryCounts { ray_batches: 1 },
+        query_counts: AnchorSeatQueryCounts {
+            ray_batches: 1,
+            seat_evaluations: samples.len(),
+        },
     })
 }
 
@@ -2281,7 +2303,13 @@ mod tests {
         );
         assert_eq!(
             result.query_counts(),
-            AnchorSeatQueryCounts { ray_batches: 1 }
+            AnchorSeatQueryCounts {
+                ray_batches: 1,
+                // FU-32 J5: every sample offered is classified, including the
+                // three that refuse and the candidates the cap truncates away
+                // -- the meter counts the walk, not its survivors.
+                seat_evaluations: samples.len(),
+            }
         );
     }
 
@@ -2337,7 +2365,10 @@ mod tests {
         assert!(result.seats().is_empty());
         assert_eq!(
             result.query_counts(),
-            AnchorSeatQueryCounts { ray_batches: 1 }
+            AnchorSeatQueryCounts {
+                ray_batches: 1,
+                seat_evaluations: 1,
+            }
         );
         assert_eq!(result.refusals().len(), 1);
         assert_eq!(

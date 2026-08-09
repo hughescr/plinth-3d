@@ -1406,6 +1406,39 @@ struct FinalizedAnchorValidationContext<'a, 'surface> {
     geometry_fingerprint: GeometryFingerprint,
 }
 
+/// FU-32 J5 — what the routing cadence ACTUALLY spent, counted by the walks
+/// that spent it (design D3, the G6c charge-beside-meter idiom).
+///
+/// The charge lives at the preflight (`runner::RouteCcoWorkCharge`, checked
+/// against `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and
+/// `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` before the first terminal); this
+/// is the meter beside it, and `runner::route_initial_cco` holds the receipt
+/// against the charge once the cadence ends. A meter is never a substitute for
+/// a charge: an over-spend refuses at `SupportRoutingError::ChargeDrift`
+/// rather than being reported after the fact.
+///
+/// Both fields are `saturating_add`, so an impossible overflow surfaces as a
+/// drift refusal instead of a panic or a wrap to a small number.
+///
+/// **Result-inert and deliberately NOT hashed.** `CcoController::digest`
+/// enumerates the fields it folds, and this is not one of them: it is
+/// execution accounting, it never alters an admitted plan, and folding it
+/// would put a resource meter inside a transcript identity. The same argument
+/// keeps every other cap out of every semantic digest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RouteCcoWorkMeter {
+    pub(crate) seat_evaluations: usize,
+    pub(crate) seat_refusal_rows: usize,
+}
+
+impl RouteCcoWorkMeter {
+    /// Fold one terminal's counted discovery into the run total.
+    fn record_terminal(&mut self, seat_evaluations: usize, seat_refusal_rows: usize) {
+        self.seat_evaluations = self.seat_evaluations.saturating_add(seat_evaluations);
+        self.seat_refusal_rows = self.seat_refusal_rows.saturating_add(seat_refusal_rows);
+    }
+}
+
 /// The only integration seam retained for the pending support runner.
 pub(crate) struct CcoController {
     hosts: HostCache,
@@ -1440,6 +1473,9 @@ pub(crate) struct CcoController {
     /// `KDTREE_REBUILD_EVERY` branch — the only place hosts change
     /// ([`HostCache::rebuild`]'s only caller).
     hosts_acc: u64,
+    /// FU-32 J5 — the routing cadence's execution meter. See
+    /// [`RouteCcoWorkMeter`] for why it is not hashed.
+    route_work: RouteCcoWorkMeter,
 }
 
 impl Default for CcoController {
@@ -1458,6 +1494,7 @@ impl Default for CcoController {
             contact_attestation_digest: 0,
             records_acc: 0,
             hosts_acc,
+            route_work: RouteCcoWorkMeter::default(),
         }
     }
 }
@@ -1466,6 +1503,12 @@ impl CcoController {
     /// The head of this controller's model-anchor seat-attestation chain.
     pub(crate) const fn contact_attestation_digest(&self) -> u64 {
         self.contact_attestation_digest
+    }
+
+    /// FU-32 J5 — what this controller's routing cadence actually spent, for
+    /// the receipt `runner::route_initial_cco` holds against its charge.
+    pub(crate) const fn route_work_meter(&self) -> RouteCcoWorkMeter {
+        self.route_work
     }
 }
 
@@ -1669,6 +1712,15 @@ impl CcoController {
         )?;
         let anchor_ray_batches = discovery.query_counts().ray_batches;
         let anchor_seat_refusals = discovery.refusals().to_vec();
+        // FU-32 J5 (design D3) — meter the two quantities the routing preflight
+        // charged, at the one site that spends them, from the walk's own counts
+        // rather than from `pool.rows().len()` re-derived here. A quarantined
+        // terminal reaches `advance_skipped_terminal` instead and honestly
+        // contributes nothing.
+        self.route_work.record_terminal(
+            discovery.query_counts().seat_evaluations,
+            anchor_seat_refusals.len(),
+        );
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
             request.stub_end_mm().map(Finite::get),

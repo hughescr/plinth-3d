@@ -145,6 +145,9 @@ pub struct CensusData {
     pub gate_proposals: GateProposalCensus,
     pub retained_load: RetainedLoadCensus,
     pub merge_tournament: MergeTournamentCensus,
+    /// FU-32 J5 — the routing cadence's charge and meter; see
+    /// [`RouteCcoChargeCensus`].
+    pub route_cco_charge: RouteCcoChargeCensus,
     /// FU-32 J0 — how many times [`flush_counters`] has drained this model's
     /// counters early (periodic or signal-triggered), so a killed run's
     /// stderr/stdout tail shows how stale its last flush was.
@@ -267,6 +270,33 @@ pub struct GateProposalCensus {
     pub proposals: usize,
 }
 
+/// FU-32 J5 (design D3) — the sealed CCO routing cadence's charge and its
+/// meter, side by side, per model.
+///
+/// Routing was completely uncharged before FU-32 (design F8), so no run has
+/// ever reported what it spends. This row is how a run states it: `cadence`
+/// and `pool_rows` are the instance shape, `charged_*` are the worst case the
+/// preflight admitted against `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` /
+/// `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS`, and `executed_*` are what the
+/// discovery walks actually counted. `executed <= charged` is enforced in
+/// `runner::route_initial_cco` by a typed refusal, not by this row; printing
+/// both is what keeps a worst-case charge from ever being read as a
+/// measurement.
+///
+/// Last-write-wins per model (there is exactly one routing stage per run), the
+/// same idiom [`MergeTournamentCensus`] documents. `executed_*` stay zero on a
+/// run that refuses at the preflight or dies mid-cadence, which is itself the
+/// reportable fact — J0's flush prints this row from a killed run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RouteCcoChargeCensus {
+    pub cadence: usize,
+    pub pool_rows: usize,
+    pub charged_seat_evaluations: usize,
+    pub charged_seat_refusal_rows: usize,
+    pub executed_seat_evaluations: usize,
+    pub executed_seat_refusal_rows: usize,
+}
+
 /// One materialization of a batch-product-scaled execution cap.
 ///
 /// The no-silent-scaled-caps rule (owner ruling R1) requires every cap whose
@@ -315,6 +345,7 @@ pub fn reset() {
         census.gate_proposals = GateProposalCensus::default();
         census.retained_load = RetainedLoadCensus::default();
         census.merge_tournament = MergeTournamentCensus::default();
+        census.route_cco_charge = RouteCcoChargeCensus::default();
         census.flush_count = 0;
     });
 }
@@ -441,6 +472,7 @@ fn flush_counters(model: &str) {
     census.flush_count = census.flush_count.saturating_add(1);
     row(model, "T0_progress", &progress_cells(&census));
     report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
@@ -501,6 +533,36 @@ pub(crate) fn record_load_build_meter(charged_operations: usize, executed_operat
             .retained_load
             .executed_operations
             .saturating_add(executed_operations as u128);
+    });
+}
+
+/// FU-32 J5 (design D3) — the routing cadence's charge, recorded at the
+/// preflight site, AFTER it was admitted and BEFORE the first terminal runs.
+/// A run killed inside the cadence therefore still reports what it was
+/// charged, which is the whole point of J0's flush.
+pub(crate) fn record_route_cco_charge(
+    cadence: usize,
+    pool_rows: usize,
+    charged_seat_evaluations: usize,
+    charged_seat_refusal_rows: usize,
+) {
+    with(|census| {
+        census.route_cco_charge.cadence = cadence;
+        census.route_cco_charge.pool_rows = pool_rows;
+        census.route_cco_charge.charged_seat_evaluations = charged_seat_evaluations;
+        census.route_cco_charge.charged_seat_refusal_rows = charged_seat_refusal_rows;
+    });
+}
+
+/// FU-32 J5 — the meter beside that charge, recorded once the cadence has
+/// ended and its receipt has been held against the charge.
+pub(crate) fn record_route_cco_execution(
+    executed_seat_evaluations: usize,
+    executed_seat_refusal_rows: usize,
+) {
+    with(|census| {
+        census.route_cco_charge.executed_seat_evaluations = executed_seat_evaluations;
+        census.route_cco_charge.executed_seat_refusal_rows = executed_seat_refusal_rows;
     });
 }
 
@@ -630,6 +692,41 @@ pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
             None => census.scaled_caps.push(entry),
         }
     });
+}
+
+/// FU-32 J5 — the routing cadence's charge beside its meter. Printed on the
+/// flush path and on both drains, so a model that never reached routing
+/// (`cadence == 0`) prints nothing and one that was killed inside the cadence
+/// still prints what it was charged.
+fn report_route_cco_charge(model: &str, census: &CensusData) {
+    let route = census.route_cco_charge;
+    if route.cadence == 0 {
+        return;
+    }
+    row(
+        model,
+        "T0_route_cco_charge",
+        &[
+            format!("cadence={}", route.cadence),
+            format!("pool_rows={}", route.pool_rows),
+            format!(
+                "charged_seat_evaluations={}",
+                route.charged_seat_evaluations
+            ),
+            format!(
+                "executed_seat_evaluations={}",
+                route.executed_seat_evaluations
+            ),
+            format!(
+                "charged_seat_refusal_rows={}",
+                route.charged_seat_refusal_rows
+            ),
+            format!(
+                "executed_seat_refusal_rows={}",
+                route.executed_seat_refusal_rows
+            ),
+        ],
+    );
 }
 
 fn report_scaled_caps(model: &str, census: &CensusData) {
@@ -1385,6 +1482,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
     }
 
     report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
@@ -1399,6 +1497,7 @@ pub fn report_failure(model: &str) {
         return;
     };
     report_scaled_caps(model, &census);
+    report_route_cco_charge(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }

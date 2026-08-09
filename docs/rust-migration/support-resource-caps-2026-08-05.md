@@ -2383,3 +2383,104 @@ all seven models; `routed_contacts` and `final_live_members` are unchanged on ev
 FU-32 phases J0–J4 raised, lowered or touched **no** cap, floor, constant or registry entry.
 The authority table and the full attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and
 `#fu32-j3-2026-08-09`.
+
+---
+
+## 21. FU-32 phase J5 (2026-08-09) — the routing cadence is charged for the first time; no existing cap moves
+
+**Two new caps. Zero cap raised, lowered or touched.** Every section above this one records a
+phase that either moved a demand under an existing cap or declined to move a cap. This one adds
+a charge where there was none, which is a different act and is recorded as such.
+
+### 21.1 What was uncharged
+
+`route_initial_cco` (`crates/plinth-support/src/runner.rs`) — the sealed initial-terminal CCO
+routing cadence — had **no `Limit`, no `required`/`limit` pair, no counter and no clock**
+anywhere in `cco.rs` or routing's half of `runner.rs`. Its only preflight,
+`validate_initial_cco_preflight`, is entirely digest and binding validation. Neither
+`SupportRoutingError` nor `CcoError` had a limit-shaped variant. This is finding **F8** of
+`docs/rust-migration/fu32-design-2026-08-09.md`, and it is the pre-FU-8b naked-hang shape
+exactly: §7's lesson, *"a cap cannot be too tight for work it never prices, and the remedy
+removes work rather than admitting more"*. A 600 s wall inside an uncharged loop is a **missing
+charge**, not a slow success.
+
+### 21.2 What is charged now, and the sequencing that is not negotiable
+
+| resource | worst case | registered cap | derivation |
+|---|---|---|---|
+| seat evaluations | `cadence × pool_rows` | `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` = 536,870,912 | `next_power_of_two(2 × 553 × 364,223)` |
+| retained refusal rows | `cadence × pool_rows` | `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` = 536,870,912 | same rule, same specimen |
+
+Both worst cases are exact and provable, not estimates: every grown terminal's
+`discover_finalized_anchor_seats` classifies **every** exterior anchor-pool row exactly once,
+and a sample can enter one terminal's refusal list at most once (it either refuses at
+qualification or it qualifies, and a qualified sample refuses at most once more at the ray
+stage). Both are knowable before any work is done, which is what makes them chargeable at a
+preflight rather than after the fact.
+
+**Not charged, deliberately:** the controller digest and the immutable-authority digests. After
+FU-32 J1 and J2 they are O(1) and O(delta); pricing them would price an implementation detail —
+the same call phase G3 made when it declined to charge the merge gate's executed prefix.
+
+**The order matters more than the numbers.** Design §D3 requires the charge to land *after* J1
+and J2 removed the redundant hashing. Charging first would have written ≈843 GB of per-terminal
+re-hashing into a budget and made the defect permanent. FU-8b's whole lesson is that the cap is
+not the remedy.
+
+### 21.3 The meter beside the charge (the G6c idiom), and the receipt
+
+`CcoController` carries a `RouteCcoWorkMeter` fed by the discovery walk's own counts — not
+re-derived from `pool.rows().len()` at the caller — and `route_initial_cco` holds the receipt
+against the charge before the transcript is sealed: `executed ≤ charged` on both resources, or
+`SupportRoutingError::ChargeDrift { resource, charged, executed }`. The drift refusal is
+unreachable today by construction, which is exactly why it exists: a future edit that lets the
+charging and executing sides disagree refuses loudly instead of quietly overspending an
+admitted charge. The meter is **not hashed** and is a member of no digest.
+
+### 21.4 The measured demand, every model, charge beside meter
+
+Census table `T0_route_cco_charge`, new in this phase (`PLINTH_CENSUS=1`, `PLINTH_THREADS=4`,
+2026-08-09, at this branch tip):
+
+| model | cadence | pool_rows | charged | executed evaluations | executed refusal rows | % of cap (charged) |
+|---|---:|---:|---:|---:|---:|---:|
+| Sphere | 7 | 4,760 | 33,320 | 33,320 | 33,320 | 0.0062 % |
+| Cylinder | 54 | 244 | 13,176 | 13,176 | 13,095 | 0.0025 % |
+| make_box | 11 | 12 | 132 | 132 | 125 | ~0 % |
+| make_overhang_table | 84 | 52 | 4,368 | 4,160 | 3,578 | 0.0008 % |
+| make_toed_slab | 68 | 76 | 5,168 | 5,016 | 5,016 | 0.0010 % |
+| make_raking_blade | 33 | 23 | 759 | 667 | 667 | ~0 % |
+| make_thin_fin | 18 | 22 | 396 | 396 | 396 | ~0 % |
+| **Weeping Treant v1.2** | **553** | **364,223** | **201,415,319** | **164,993,019** | **162,719,910** | **37.5 %** |
+
+`executed ≤ charged` holds on every model and both resources. The gap on the treant (81.9 %)
+is its quarantined cadence entries, which a preflight cannot know about in advance.
+
+**Two corrections this measurement forces, recorded rather than rewritten.** The design's M2
+projected ≈70.1 M retained refusal rows over the treant's full cadence from a 126,800-per-entry
+growth law measured over a partial run; the completed run retains **162,719,910**, 2.3× that
+projection. The projection is corrected here; the cap is not, because the cap was derived from
+the worst case (201,415,319), not from the projection, and the worst case reproduced exactly.
+
+### 21.5 The disclosed hazard, and what this phase does not answer
+
+At the 30.3 B per retained refusal measured in the design's M3,
+`SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` admits ≈**16.3 GB** of retained refusal evidence —
+above the ≈4.9 GB the treant's 162.7 M rows imply, and below but not comfortably below the
+90 GB watchdog arm and the ~100 GB machine ceiling (§17.4/A1; memory
+`machine-memory-ceiling`). **Disclosed, not ratified.** The underlying question — *is evidence
+proportional to the anchor pool, or to the decision?* — is design open question 4 and is
+deliberately untouched here, because summarising the refusal list would move every transcript
+digest and mix two digest movements into one ruling.
+
+### 21.6 What this phase does NOT bound: `rewire::optimize`
+
+`REWIRE_WORK_BUDGET` is `TrialSetting::disabled()`
+(`crates/plinth-core/src/constants/placeholders.rs`), so `rewire::optimize`
+(`crates/plinth-support/src/rewire.rs`) remains an **unbounded loop** with no work budget and
+no wall-clock deadline. The design names it as prediction **A2 #1**, the most likely next
+binder at ~55 % confidence, and scopes it to a follow-up rather than to J5: bounding it is a
+**result-changing** change (a budget that stops the search early changes which forest is
+returned, and therefore every downstream digest), where J5's charge is result-inert by
+construction. Mixing the two in one phase would put a value-moving ruling inside a
+resource-charging phase. **Opened as FU-33 in `CURRENT-STATUS.md`; deferred, not skipped.**

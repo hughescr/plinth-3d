@@ -71,7 +71,7 @@ use crate::{
     },
     cco::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
-        FinalizedDispositionKind, TerminalCcoRequest, VerifiedRoutingAuthority,
+        FinalizedDispositionKind, RouteCcoWorkMeter, TerminalCcoRequest, VerifiedRoutingAuthority,
     },
     coverage_measurement_assessment_resource_plan,
     dyadic::CandidatePayloadConfig,
@@ -1617,6 +1617,22 @@ impl<'a> PreparedSupportRun<'a> {
     /// all route-shaped authority is rechecked before the first native query
     /// or forest transition.
     pub(crate) fn route_initial_cco(self) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
+        let limits = RouteCcoWorkLimits::registered()?;
+        self.route_initial_cco_with_limits(limits)
+    }
+
+    /// The routing transaction, with its execution caps supplied rather than
+    /// read.
+    ///
+    /// FU-32 J5 split this out so the caps arrive as a parameter, exactly as
+    /// every other stage's limits do — which is also what lets a test drive the
+    /// REAL routing path into the new refusal on real geometry, instead of
+    /// proving the arithmetic in isolation and trusting the wiring by
+    /// inspection. Production has one caller and it passes the registered caps.
+    fn route_initial_cco_with_limits(
+        self,
+        limits: RouteCcoWorkLimits,
+    ) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
         let PreparedSupportRun {
             context,
             plan,
@@ -1654,6 +1670,25 @@ impl<'a> PreparedSupportRun<'a> {
         let mut controller = CcoController::default();
         let mut cadence = initial.routing_order().specialized_terminals().to_vec();
         cadence.extend_from_slice(initial.routing_order().regular_terminals());
+
+        // FU-32 phase J5 (design D3, F8's debt).  Routing used to be entirely
+        // uncharged -- no Limit, no counter, no clock -- so an instance too big
+        // to route could only be stopped by an external kill.  Charge the real
+        // Theta(N x P) work now, from the shape, BEFORE the first terminal:
+        // `cadence` entries each classify all `pool.rows()` exterior samples
+        // and retain at most one refusal row per sample.  The charge lands here
+        // rather than in J1/J2 on purpose -- pricing the loop before the
+        // redundant hashing was removed would have written the defect into a
+        // budget.
+        let charge = RouteCcoWorkCharge::compute(cadence.len(), pool.rows().len())?;
+        charge.preflight(limits)?;
+        crate::census_record!(crate::census::record_route_cco_charge(
+            charge.cadence(),
+            charge.pool_rows(),
+            charge.seat_evaluations(),
+            charge.seat_refusal_rows(),
+        ));
+
         for terminal in cadence {
             let ledger = initial
                 .forest()
@@ -1687,6 +1722,17 @@ impl<'a> PreparedSupportRun<'a> {
                 },
             )?;
         }
+        // FU-32 J5 — the receipt, held against the charge above before the
+        // transcript is sealed. `executed <= charged` on both resources, both
+        // recorded (the G6c idiom: a meter beside the charge, never instead of
+        // it).
+        let meter = controller.route_work_meter();
+        charge.covers_execution(meter)?;
+        crate::census_record!(crate::census::record_route_cco_execution(
+            meter.seat_evaluations,
+            meter.seat_refusal_rows,
+        ));
+
         let transcript = controller.finalize_transcript(&initial, &plan, loads, &geometry)?;
         transcript.validate_integrity()?;
         // PR-8/OD-9 (F3). The CCO model-anchor family's seat-attestation chain,
@@ -2918,6 +2964,205 @@ pub(crate) enum SupportRoutingError {
     MissingTerminalLedger { terminal: u32 },
     #[error("sealed CCO routing terminal {terminal} lacks its exact physical contact")]
     MissingPhysicalContact { terminal: u32 },
+    /// FU-32 J5 (design D3). The routing cadence's demand exceeds a registered
+    /// routing cap. The first typed resource refusal this stage has ever had:
+    /// before FU-32 it was entirely uncharged (design F8), so an over-large
+    /// instance could only be stopped by a wall-clock kill from outside.
+    #[error("sealed CCO routing {resource} requires {required}, limit is {limit}")]
+    Limit {
+        resource: &'static str,
+        required: usize,
+        limit: usize,
+    },
+    /// FU-32 J5 (design D3), the G6c idiom: the cadence executed more than the
+    /// preflight charged. The charge is a worst case the executing walks cannot
+    /// exceed by construction (every grown terminal classifies each pool row
+    /// exactly once, and a sample enters a terminal's refusal list at most
+    /// once), so this is unreachable today; it exists so a future edit that
+    /// lets the charging and executing sides disagree refuses loudly here
+    /// instead of quietly overspending an admitted charge.
+    #[error("sealed CCO routing executed {executed} {resource}; the preflight charged {charged}")]
+    ChargeDrift {
+        resource: &'static str,
+        charged: usize,
+        executed: usize,
+    },
+    /// FU-32 J5. The cadence-by-pool product does not fit a `usize`.
+    #[error("sealed CCO routing resource arithmetic overflow for {0}")]
+    ResourceOverflow(&'static str),
+    #[error("sealed CCO routing registered constants are unavailable: {0}")]
+    RegisteredConstantsUnavailable(String),
+}
+
+/// FU-32 J5 (design D3) — the routing cadence's registered execution caps.
+///
+/// Read from the one M0 publication, never redeclared here. `diagnostic()` is
+/// the sanctioned `Placeholder` read for a resource cap: a cap admits or
+/// refuses, it never contributes to an accepted result, so it is not on the
+/// accept path the wrapper guards (the same reasoning
+/// [`SupportPreparationLimits::production`] records).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RouteCcoWorkLimits {
+    max_seat_evaluations: usize,
+    max_seat_refusal_rows: usize,
+}
+
+impl RouteCcoWorkLimits {
+    fn registered() -> Result<Self, SupportRoutingError> {
+        let placeholders = plinth_core::m0_constants()
+            .map_err(|error| {
+                SupportRoutingError::RegisteredConstantsUnavailable(error.to_string())
+            })?
+            .placeholders();
+        Ok(Self {
+            max_seat_evaluations: cap_from_registry(
+                placeholders
+                    .support_route_cco_max_seat_evaluations()
+                    .diagnostic()
+                    .get(),
+                "seat evaluations",
+            )?,
+            max_seat_refusal_rows: cap_from_registry(
+                placeholders
+                    .support_route_cco_max_seat_refusal_rows()
+                    .diagnostic()
+                    .get(),
+                "seat refusal rows",
+            )?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        max_seat_evaluations: usize,
+        max_seat_refusal_rows: usize,
+    ) -> Self {
+        Self {
+            max_seat_evaluations,
+            max_seat_refusal_rows,
+        }
+    }
+}
+
+fn cap_from_registry(value: u64, resource: &'static str) -> Result<usize, SupportRoutingError> {
+    usize::try_from(value).map_err(|_| SupportRoutingError::ResourceOverflow(resource))
+}
+
+/// FU-32 J5 (design D3) — what the sealed routing cadence is charged, computed
+/// from the instance shape before the first terminal runs.
+///
+/// The cadence's remaining honest work, once J1 and J2 removed the redundant
+/// hashing, is a `Θ(N·P)` seat search: each grown terminal's
+/// `discover_finalized_anchor_seats` classifies EVERY exterior anchor-pool row
+/// exactly once, and retains one `AnchorSeatRefusal` row for at most each row
+/// it refuses. Both worst cases are therefore `cadence × pool_rows`, and both
+/// are knowable before any work is done — which is what makes them chargeable.
+/// A quarantined terminal spends neither, so the executed totals land at or
+/// under the charge and never above it.
+///
+/// Deliberately NOT charged: the controller digest and the immutable-authority
+/// digests. After J1 and J2 they are O(1) and O(delta) respectively, and
+/// pricing them would price an implementation detail rather than the work
+/// (design D3; the same call G3 made when it declined to charge the gate's
+/// executed prefix).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RouteCcoWorkCharge {
+    cadence: usize,
+    pool_rows: usize,
+    seat_evaluations: usize,
+    seat_refusal_rows: usize,
+}
+
+impl RouteCcoWorkCharge {
+    /// The instance's demand. `cadence` counts every entry of the frozen
+    /// routing order (quarantined entries included: whether a terminal is
+    /// quarantined is not knowable from the shape, so the charge assumes none
+    /// are).
+    pub(crate) fn compute(cadence: usize, pool_rows: usize) -> Result<Self, SupportRoutingError> {
+        let product = cadence
+            .checked_mul(pool_rows)
+            .ok_or(SupportRoutingError::ResourceOverflow("seat evaluations"))?;
+        Ok(Self {
+            cadence,
+            pool_rows,
+            seat_evaluations: product,
+            seat_refusal_rows: product,
+        })
+    }
+
+    pub(crate) const fn seat_evaluations(self) -> usize {
+        self.seat_evaluations
+    }
+
+    pub(crate) const fn seat_refusal_rows(self) -> usize {
+        self.seat_refusal_rows
+    }
+
+    pub(crate) const fn cadence(self) -> usize {
+        self.cadence
+    }
+
+    pub(crate) const fn pool_rows(self) -> usize {
+        self.pool_rows
+    }
+
+    /// Refuse before the cadence starts if the instance demands more than the
+    /// registered caps admit.
+    pub(crate) fn preflight(self, limits: RouteCcoWorkLimits) -> Result<(), SupportRoutingError> {
+        for (resource, required, limit) in [
+            (
+                "seat evaluations",
+                self.seat_evaluations,
+                limits.max_seat_evaluations,
+            ),
+            (
+                "seat refusal rows",
+                self.seat_refusal_rows,
+                limits.max_seat_refusal_rows,
+            ),
+        ] {
+            if required > limit {
+                return Err(SupportRoutingError::Limit {
+                    resource,
+                    required,
+                    limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The receipt: hold the counted execution against what was charged. The
+    /// `charge_covers_execution` shape (`initial.rs`), and the reason the
+    /// meter is beside the charge rather than instead of it — a run that
+    /// outruns its charge refuses here rather than silently spending more than
+    /// it was admitted for.
+    pub(crate) fn covers_execution(
+        self,
+        meter: RouteCcoWorkMeter,
+    ) -> Result<(), SupportRoutingError> {
+        for (resource, charged, executed) in [
+            (
+                "seat evaluations",
+                self.seat_evaluations,
+                meter.seat_evaluations,
+            ),
+            (
+                "seat refusal rows",
+                self.seat_refusal_rows,
+                meter.seat_refusal_rows,
+            ),
+        ] {
+            if executed > charged {
+                return Err(SupportRoutingError::ChargeDrift {
+                    resource,
+                    charged,
+                    executed,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -4391,6 +4636,155 @@ mod tests {
                 ));
             });
         }
+    }
+
+    /// FU-32 J5 (design D3, M1). The treant's stated demand, pinned: the
+    /// charge is the cadence-by-pool product on BOTH resources, and the two
+    /// registered caps admit it. This is the number the registry notes quote,
+    /// held against the registry's own values so a cap edit and a note can
+    /// never drift apart silently.
+    #[test]
+    fn fu32_j5_routing_charge_prices_the_measured_treant_shape_under_the_registered_caps() {
+        // fu32-design-2026-08-09.md M1, measured at bfa5b3b: cadence 553,
+        // pool_rows 364,223 (single specimen, n = 1, per R4/FU-23).
+        let charge = RouteCcoWorkCharge::compute(553, 364_223).expect("treant shape is finite");
+        assert_eq!(charge.seat_evaluations(), 201_415_319);
+        assert_eq!(charge.seat_refusal_rows(), 201_415_319);
+
+        let registered = RouteCcoWorkLimits::registered().expect("registered routing caps");
+        assert_eq!(
+            registered,
+            RouteCcoWorkLimits::for_test(536_870_912, 536_870_912),
+            "the registered routing caps are next_power_of_two(2 x 201,415,319) on both resources"
+        );
+        assert!(charge.preflight(registered).is_ok());
+    }
+
+    /// The seat-search arm alone. Deleting the evaluation check must fail
+    /// THIS test and not its sibling, so the two arms are proven independent
+    /// rather than one of them being carried by the other.
+    #[test]
+    fn fu32_j5_routing_refuses_an_over_demand_seat_search_on_the_required_corpus() {
+        with_prepared_table(|prepared| {
+            let refused =
+                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX));
+            match refused {
+                Err(SupportRoutingError::Limit {
+                    resource: "seat evaluations",
+                    required,
+                    limit: 1,
+                }) => assert!(
+                    required > 1,
+                    "the required corpus must demand a real seat search"
+                ),
+                Err(other) => panic!("expected a seat-evaluation limit refusal, got {other:?}"),
+                Ok(_) => panic!("an over-demand seat search must refuse"),
+            }
+        });
+    }
+
+    /// The retained-evidence arm alone, with the seat-search cap wide open.
+    #[test]
+    fn fu32_j5_routing_refuses_an_over_demand_refusal_evidence_budget_on_the_required_corpus() {
+        with_prepared_table(|prepared| {
+            let refused =
+                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(usize::MAX, 1));
+            match refused {
+                Err(SupportRoutingError::Limit {
+                    resource: "seat refusal rows",
+                    required,
+                    limit: 1,
+                }) => assert!(
+                    required > 1,
+                    "the required corpus must charge real refusal evidence"
+                ),
+                Err(other) => panic!("expected a refusal-row limit refusal, got {other:?}"),
+                Ok(_) => panic!("an over-demand refusal budget must refuse"),
+            }
+        });
+    }
+
+    /// FU-32 J5 — the meter is really fed by the walk, and the receipt really
+    /// holds on real geometry: the required corpus routes, spends a nonzero
+    /// number of seat evaluations, and lands at or under the charge on both
+    /// resources. A meter left unwired reads zero and fails here.
+    #[test]
+    fn fu32_j5_the_routing_meter_counts_the_real_pool_walk_and_stays_under_its_charge() {
+        // The charge this instance is priced at, recovered from the refusing
+        // arm above rather than recomputed from a formula this test owns.
+        let charged = with_prepared_table(|prepared| {
+            match prepared
+                .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX))
+            {
+                Err(SupportRoutingError::Limit { required, .. }) => required,
+                Err(other) => panic!("expected a limit refusal, got {other:?}"),
+                Ok(_) => panic!("an over-demand seat search must refuse"),
+            }
+        });
+
+        with_prepared_table(|prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            let meter = routed.state.controller.route_work_meter();
+            assert!(
+                meter.seat_evaluations > 0,
+                "the routing cadence must meter the seat search it executed"
+            );
+            assert!(meter.seat_evaluations <= charged);
+            assert!(meter.seat_refusal_rows <= charged);
+            assert!(
+                meter.seat_refusal_rows <= meter.seat_evaluations,
+                "a sample can refuse at most once per terminal"
+            );
+        });
+    }
+
+    /// FU-32 J5 — the receipt's own arms, both of them: an execution that
+    /// outruns its charge refuses with the resource that outran it. Unreachable
+    /// in production by construction, which is exactly why it is tested here.
+    #[test]
+    fn fu32_j5_the_routing_receipt_refuses_execution_that_outruns_its_charge() {
+        let charge = RouteCcoWorkCharge::compute(4, 10).expect("small shape is finite");
+        assert!(charge
+            .covers_execution(RouteCcoWorkMeter {
+                seat_evaluations: 40,
+                seat_refusal_rows: 40,
+            })
+            .is_ok());
+        assert!(matches!(
+            charge.covers_execution(RouteCcoWorkMeter {
+                seat_evaluations: 41,
+                seat_refusal_rows: 0,
+            }),
+            Err(SupportRoutingError::ChargeDrift {
+                resource: "seat evaluations",
+                charged: 40,
+                executed: 41,
+            })
+        ));
+        assert!(matches!(
+            charge.covers_execution(RouteCcoWorkMeter {
+                seat_evaluations: 0,
+                seat_refusal_rows: 41,
+            }),
+            Err(SupportRoutingError::ChargeDrift {
+                resource: "seat refusal rows",
+                charged: 40,
+                executed: 41,
+            })
+        ));
+    }
+
+    /// FU-32 J5 — an instance whose cadence-by-pool product is not
+    /// representable refuses as an overflow rather than wrapping to a small,
+    /// admissible charge.
+    #[test]
+    fn fu32_j5_an_unrepresentable_routing_product_refuses_instead_of_wrapping() {
+        assert!(matches!(
+            RouteCcoWorkCharge::compute(usize::MAX, 2),
+            Err(SupportRoutingError::ResourceOverflow("seat evaluations"))
+        ));
     }
 
     #[test]

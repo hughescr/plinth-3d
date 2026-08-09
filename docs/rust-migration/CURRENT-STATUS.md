@@ -5450,7 +5450,148 @@ instrumented sweep. `routed_contacts` and `final_live_members` are unchanged on 
 
 **NO cap, floor, constant or registry entry was raised, lowered or touched.** No count moved.
 No test was relaxed, deleted or ignored. **Still open: J5** (the honest routing charge, design
-§D3 — an *addition*, not a move) **and J6** (the treant measurement and the record).
+§D3 — an *addition*, not a move) **and J6** (the treant measurement and the record). **[J5 LANDED; ROUTING IS CHARGED FOR THE FIRST TIME — 2026-08-09 (**[`#fu32-j5-2026-08-09`](#fu32-j5-2026-08-09)**).** F8's debt is paid: the sealed CCO routing cadence, which had **no `Limit`, no counter and no clock** before this tip, now carries a counted preflight charge for the real Θ(N·P) work it does — `cadence × pool_rows` seat evaluations and the same bound on retained `AnchorSeatRefusal` evidence rows — against **two NEW registered caps**, `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS`, both `536,870,912` by one stated rule, `next_power_of_two(2 × 553 × 364,223)`, single specimen n = 1 per R4/FU-23. Both worst cases are **exact and provable**, not estimates. A meter fed by the discovery walk's own counts sits **beside** the charge (the G6c idiom) and the receipt is held before the transcript is sealed: `executed ≤ charged` or `SupportRoutingError::ChargeDrift`. **Measured, every model** (new census table `T0_route_cco_charge`): treant charged **201,415,319** and executed **164,993,019** evaluations / **162,719,910** retained rows — 37.5 % and 30.7 % of the cap — against a largest-corpus charge of 33,320 (Sphere, 0.0062 %). The design's M2 refusal-row **projection** (≈70.1 M) is corrected to the measured 162,719,910; the **cap does not move**, because it was derived from the worst case, which reproduced exactly. The digests J1/J2 made cheap are deliberately **not** charged (design D3), and the charge landed **after** the fix, never before it. Registry 284 → **286**; FU-24 ledger rows, caps-doc §21, physics-doc §3.10.11 and a producer-regenerated `constants.md` all in the same commit. **The ≈16.3 GB of retained refusal evidence the second cap admits is DISCLOSED, NOT RATIFIED** at every record site. Gates **1066 default / 1071 all-features, ALL GREEN** (+6, each attributed); OD-8 seven **byte-identical** with `routed_contacts`/`final_live_members` unmoved — a result-inert charge, which is what it must be. The treant seal **reproduces byte-identically** (`snapshot_digest=423276951048565625`) though **without the watchdog or timebox armed**, so it carries no wall-clock or peak-RSS number of record; **J6 still owes that measurement.** **NO EXISTING CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED** — the two caps are additions to a stage that had none. `rewire::optimize`'s absent budget is **deferred, not skipped**, and opened as **FU-33**. **Still open: J6** (the treant measurement and the record).]**
+
+## FU-32 phase J5 landed 2026-08-09 — routing is charged for the first time; two NEW caps, nothing existing touched {#fu32-j5-2026-08-09}
+
+**What this phase is, in one sentence.** J1 and J2 removed ≈843 GB of per-terminal re-hashing
+from the sealed CCO routing cadence; J5 pays F8's debt by putting an honest, counted charge on
+what is left, so the stage can no longer hang unpriced.
+
+### J5.1 The debt
+
+Design finding **F8** (`fu32-design-2026-08-09.md`): `route_initial_cco` had **no `Limit`, no
+`required`/`limit` pair, no counter and no clock** anywhere in `cco.rs` or routing's half of
+`runner.rs`; its only preflight was digest and binding validation; and neither
+`SupportRoutingError` nor `CcoError` had a limit-shaped variant. That is the pre-FU-8b
+naked-hang shape exactly. **A 600 s wall inside an uncharged loop is a missing charge, not a
+slow success** — which is precisely how H6's EXCEEDS-TIMEBOX presented, and why no cap could
+have caught it.
+
+### J5.2 The charge, the meter and the receipt
+
+Two resources, charged from the instance shape **before the first terminal runs**:
+
+| resource | worst case | new registered cap |
+|---|---|---|
+| seat evaluations | `cadence × pool_rows` | `SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` = 536,870,912 |
+| retained refusal rows | `cadence × pool_rows` | `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` = 536,870,912 |
+
+Both worst cases are **exact and provable**, not estimates: every grown terminal's
+`discover_finalized_anchor_seats` classifies every exterior anchor-pool row exactly once, and a
+sample can enter one terminal's refusal list at most once. Both are knowable before any work is
+done, which is what makes them chargeable at a preflight.
+
+**Meter beside the charge, never instead of it** (the G6c idiom): `CcoController` carries a
+`RouteCcoWorkMeter` fed by the discovery walk's **own counts** — `AnchorSeatQueryCounts` grew a
+`seat_evaluations` field so the count comes from the walk rather than being re-derived from
+`pool.rows().len()` at the caller — and `route_initial_cco` holds the receipt before the
+transcript is sealed: `executed ≤ charged` on both resources or
+`SupportRoutingError::ChargeDrift { resource, charged, executed }`. The meter is **not hashed**
+and is a member of no digest.
+
+**Deliberately NOT charged:** the controller digest and the immutable-authority digests. After
+J1/J2 they are O(1) and O(delta), and pricing them would price an implementation detail (design
+D3 — the same call G3 made in declining to charge the merge gate's executed prefix). **The
+sequencing was not negotiable:** charging first would have written the defect into a budget.
+
+### J5.3 Derivation, one rule for both
+
+`next_power_of_two(2 × the Weeping Treant v1.2's charged demand)` =
+`next_power_of_two(2 × 553 × 364,223)` = `next_power_of_two(402,830,638)` = **536,870,912**.
+Single specimen, n = 1, per R4/FU-23. Registered as `Placeholder`, classification
+`runtime_resource_cap`, with the FU-24 ledger rows and the caps-doc and physics-doc records
+written in the same commit (`m0-constants-source-ledger.json`,
+`support-resource-caps-2026-08-05.md` §21, `03-physics-and-constants.md` §3.10.11); the
+`constants.md` table was regenerated **through its own producer**, never hand-edited. Registry
+size 284 → **286**.
+
+### J5.4 Every model's stated demand, charge beside meter
+
+New census table `T0_route_cco_charge` (`PLINTH_CENSUS=1`, `PLINTH_THREADS=4`, this tip,
+2026-08-09). "Before" is not a smaller number: **before this phase there was no charge at all.**
+
+| model | cadence | pool_rows | charged | executed evaluations | executed refusal rows |
+|---|---:|---:|---:|---:|---:|
+| Sphere | 7 | 4,760 | 33,320 | 33,320 | 33,320 |
+| Cylinder | 54 | 244 | 13,176 | 13,176 | 13,095 |
+| make_box | 11 | 12 | 132 | 132 | 125 |
+| make_overhang_table | 84 | 52 | 4,368 | 4,160 | 3,578 |
+| make_toed_slab | 68 | 76 | 5,168 | 5,016 | 5,016 |
+| make_raking_blade | 33 | 23 | 759 | 667 | 667 |
+| make_thin_fin | 18 | 22 | 396 | 396 | 396 |
+| **Weeping Treant v1.2** | **553** | **364,223** | **201,415,319** | **164,993,019** | **162,719,910** |
+
+The treant's charge is **37.5 %** of the cap, its executed spend **30.7 %**; the largest corpus
+charge is **0.0062 %**. `executed ≤ charged` holds on every model and both resources. The
+treant's 81.9 % execution-to-charge ratio is its quarantined cadence entries, which a preflight
+cannot know about in advance.
+
+**One projection is corrected, and the cap is not.** The design's M2 projected ≈70.1 M retained
+refusal rows over the treant's full cadence from a growth law measured over a partial run; the
+completed run retains **162,719,910**, 2.3× that. The projection is corrected here as a dated
+record; the cap does not move, because it was derived from the worst case (201,415,319, which
+reproduced exactly), not from the projection.
+
+### J5.5 The disclosed hazard
+
+At the 30.3 B per retained refusal measured in the design's M3,
+`SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` admits ≈**16.3 GB** of retained refusal evidence —
+above the ≈4.9 GB the treant's rows imply, and below but **not comfortably below** the 90 GB
+watchdog arm and the ~100 GB machine ceiling. **Disclosed, not ratified**, in the registry note
+and in both doc records. Design open question 4 (*is evidence proportional to the anchor pool,
+or to the decision?*) is left untouched on purpose: summarising the refusal list would move
+every transcript digest and mix two digest movements into one ruling.
+
+### J5.6 Tests — six added, every one attributed, and the refusal is proven on real geometry
+
+`route_initial_cco` was split so its caps arrive as a **parameter** (`route_initial_cco_with_limits`),
+exactly as every other stage's limits do — which is what lets two of these tests drive the REAL
+routing path into the new refusal on the required corpus rather than proving arithmetic in
+isolation and trusting the wiring by inspection.
+
+| test | what fails if it is deleted |
+|---|---|
+| `fu32_j5_routing_charge_prices_the_measured_treant_shape_under_the_registered_caps` | the treant's stated demand and both registry values drift apart from the notes that quote them |
+| `fu32_j5_routing_refuses_an_over_demand_seat_search_on_the_required_corpus` | the seat-evaluation arm stops refusing |
+| `fu32_j5_routing_refuses_an_over_demand_refusal_evidence_budget_on_the_required_corpus` | the refusal-row arm stops refusing — proven **independently** of the arm above, so neither is carried by the other |
+| `fu32_j5_the_routing_meter_counts_the_real_pool_walk_and_stays_under_its_charge` | the meter is left unwired and reads zero on a real routing run |
+| `fu32_j5_the_routing_receipt_refuses_execution_that_outruns_its_charge` | either `ChargeDrift` arm stops firing |
+| `fu32_j5_an_unrepresentable_routing_product_refuses_instead_of_wrapping` | the product wraps to a small, admissible charge |
+
+### J5.7 Verification
+
+**Gates 1066 default / 1071 all-features, all green**, zero failures (1060/1065 at J4, plus
+J5's six); clippy `-D warnings`, `cargo fmt --check` and `git diff --check` clean; tree clean
+before and after. **OD-8: the seven frozen digests are byte-identical** at this tip —
+Sphere `2297157889062365577`, Cylinder `6853793710942395608`, make_box `8709076999423814412`,
+make_overhang_table `16396858890798947253`, make_toed_slab `133000971864625681`,
+make_raking_blade `18388631460456455184`, make_thin_fin `14656364680512457190` — with
+`routed_contacts` and `final_live_members` unchanged on every model, which is what a
+result-inert charge must look like.
+
+**The treant seal reproduces at this tip**, byte-identically to the J2 measurement the FU-32 row
+records: `routed_contacts=306`, `final_live_members=1383`,
+`snapshot_digest=423276951048565625`. It is recorded here as a **reproduction**, not a new
+birth, and with one protocol caveat stated plainly: this run was launched unsandboxed but
+**without the 90 GB RSS watchdog and without the 600 s timebox**, because it was a corpus census
+that happened to include the treant rather than a J6 measurement. **It therefore carries no
+wall-clock or peak-RSS number of record.** J6 still owes the measured run under the standing
+memory protocol.
+
+**NO existing cap, floor, constant or registry entry was raised, lowered or touched.** The two
+caps here are **additions** to a stage that had none.
+
+### J5.8 What J5 does not bound — `rewire::optimize`, opened as FU-33
+
+`REWIRE_WORK_BUDGET` is `TrialSetting::disabled()`, so `rewire::optimize` is an **unbounded
+loop** with no work budget and no wall-clock deadline. The design names it as prediction A2 #1,
+the most likely next binder (~55 %). It is **deferred, not skipped**, and the reason is a rule
+rather than a preference: bounding a search is **result-changing** — a budget that stops early
+changes which forest is returned and therefore every downstream digest — where J5's charge is
+result-inert by construction. Landing both in one phase would put a value-moving ruling inside
+a resource-charging phase, which is the exact mixing FU-10 protocol exists to prevent. See
+**FU-33**.
 
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
@@ -5635,6 +5776,7 @@ Everything else here is non-blocking.
 | FU-30 | Corpus coverage of `coalesce_exact_regular_seats` **halved** at the FU-10 phase-C cutover | **Opened 2026-08-08 by the re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). The specialized golden asserted `coalesced_seat_count == 1` for both corpus models; measured at the re-pinned tip it is `toed slab` **0** and `raking blade` **1**. With the corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the terminal coalescing pass is a measured no-op there and the count is now pinned per model. The pass is still exercised — by `make_raking_blade` and by `specialized`'s unit tests — but by one corpus model instead of two, and the `DuplicatePhysicalSeat` failure mode it was built to prevent now has a single corpus witness. The disappearance is *consistent with* the four phantom island births removed from `make_toed_slab` (print layers 49, 52, 226, 228) but that causal link was **not** independently proven; only the measurement is on the record. **First action:** decide whether one corpus witness plus unit tests is adequate, or whether a fixture should pin the duplicate-seat path deliberately rather than incidentally. |
 | FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** **[FU-31 FIXED 2026-08-08 (**[`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)**).** Option (b) landed at `55b4d99`: `dispose_demands` aggregates same-position uncovered demands into one seat at push time, keyed on position bits normalized to `same_point`'s `==` equality; mutation-proven fixture reproduces the exact `DuplicatePhysicalSeat` with the aggregation disabled. Treant acceptance (attempt 1 of 2): specialized passes with **553** contacts (was 554 with the un-merged pair) and the run advances to `Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` — the FU-8g wall, now measured in-engine at 553 × (4 + 429,120). FU-8g's H0 treant leg captured in the same run: crossings mean **10.906** (p50 7, max 298), tests mean **191.982**, honest work Σcrossings **6,031** vs charged 237,303,360 (**39,347×**), honest scratch **142 MiB** vs charged 603 GiB. All seven frozen corpus digests byte-identical; one unit-fixture re-pin (raking blade, raw orientation, four real two-owner births now born aggregated), attributed in full in the section. FU-8g H1–H6 are unblocked.]** |
 | FU-32 | CCO routing re-digests the whole accumulated transcript once per terminal — the batch-first violation family a sixth time, and the first one no cap could have caught | **Opened 2026-08-09 by FU-8g phase H6** ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)), the run that first carried the Weeping Treant past `initial::build_initial_contacts`. With the initial-contact wall gone (H1/H2's honest charge: **108,378 vs the untouched 4,000,000**, 2.71 %), the treant's stopping point is no longer a refusal at all: both attempts ran **EXCEEDS-TIMEBOX at 600 s** with the main thread **100 % inside `PreparedSupportRun::route_initial_cco`** from t ≈ 267 s to the kill. **Measured, not argued:** across sample windows at t = 280 / 360 / 440 / 520 / 575 s the share of routing wall-clock in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % → 77.1 % while the constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % → 9.0 % → 9.0 % → 9.0 % — a growing term overtaking a constant one, reproduced across three windows 135 s apart. **Derived to the line from source, independently:** the routing loop (`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per terminal; that function's **first statement** (`cco.rs:1397`) is `let controller_digest_before = self.digest();`; and `CcoController::digest` (`cco.rs:1775–1862`) is not the cached `const fn` at `:863` but a full walk of the accumulated controller state — every terminal in `terminal_cadence` (`:1786`), every record in `terminals` (`:1790`), each `UnroutedNoWinner` record's **entire** anchor-refusal list via `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`; five words per refusal at `:2128–2149`) and `digest_anchor_refusals`, then the whole host kd-tree (`indexed_members` `:1851`, `samples` `:1856`). Cost `Θ(N²) + Θ(N·R) + Θ(N·H)` for `N` cadence terminals (553 specialized physical contacts plus the regular terminals appended at `runner.rs:1649`), `R` accumulated refusals, `H` host samples. The `Θ(N·R)` term dominates on this model, consistent with the standing record that **0 of 3429 attempted model anchors survive corpus-wide**, which makes `UnroutedNoWinner` common and refusal lists long. **A second, independent per-terminal re-digest sits in the same loop** and is the ~9 % constant term: `validate_replay` → `validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` → `SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`, plus `SurfaceAnchorPool::validate_against` → `surface_anchor_pool_digest` and `FinalizedContactLoads::validate_binding` → `finalized_load_rows_fingerprint` — **every one of those structures is immutable for the whole routing stage and every one is re-hashed from scratch per terminal.** Together ≈86 % of the stage. **This is NOT a cap and no cap would fix it**: nothing refuses, no resource is over-charged, no limit is consulted — which is why the measurement-first doctrine found it with a profiler rather than a preflight, and is the reason this row exists. **The remedy is not this row's to choose**, but the shape bounds it: both terms re-derive state whose deltas are already known at the call site, and the house precedent is incremental maintenance (FU-8f G3's prefix evaluation, G6's cross-round retention), not a bigger budget. **FIRST ACTION — and it is not the fix.** H6 also found that **an EXCEEDS-TIMEBOX run is structurally counter-free**: `plinth_support::census` flushes only from `census::finish` (model completed) or `census::report_failure` (typed refusal), there is **no signal handler anywhere** in `census.rs` or `examples/embed_incidence_census.rs`, and the watchdog kills with `SIGKILL` — so **both attempts emitted zero `CENSUS` rows**. The design's "EXCEEDS-**with counters**" outcome is therefore not achievable with the present harness on the very outcome it ranked most likely (~45 %), H4's rider (`rounds_committed`, `exit_reason`, the three-way `PoisonCause` split) **could not fire**, and the treant's **21 poison-driven rebuilds remain unattributed**. Give the census a periodic or signal-triggered flush *before* the next treant run; otherwise the next run buys another verdict with no evidence. **Memory is not the problem and should not be treated as one:** whole-process peak was **3,721 MiB**, 4.0 % of the 90 GB watchdog arm — H1's per-row reserve collapse confirmed at treant scale, against a design prediction of 14–32 GB under the old reserves. Routing's own growth (+1,591 MiB over 332 s, ≈4.8 MiB/s) is honestly rows-scaled transcript accumulation, and binds nothing. **The brace/joints/raft caps registered by H3 remain wholly unexercised** — the run never reached brace — so §18's statement of absence stands unchanged and this row licenses no brace number. **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. See *FU-8g phase H6 measured 2026-08-09* and `support-resource-caps-2026-08-05.md` §19. The treant has **no seal**. **[J0–J3 LANDED; THE MOVEMENT IS ATTRIBUTED AND THE RULING IS PENDING — 2026-08-09 (**[`#fu32-j3-2026-08-09`](#fu32-j3-2026-08-09)**).** J0 (`41246f6`) gave `plinth_support::census` a periodic **and** signal-triggered flush, so the counter-free killed run this row opened against is fixed at its root. J1 (`059b444`) hoisted the immutable routing authority (`VerifiedRoutingAuthority`, the G2 precedent applied verbatim) — **value-preserving; all seven OD-8 digests byte-identical**. J2 (`c14754e`) replaced `CcoController::digest`'s per-terminal whole-state walk with the design's state-pure incremental accumulators, kept **both F6 tamper tripwires genuinely recomputing** through `rebuild_accumulators()` (`runner.rs:2775`, `:2848`), and **MOVED ALL SEVEN frozen OD-8 snapshot digests**. **The sentence above stating the treant has no seal was written before J2 and stands as the record of its date: the Weeping Treant SEALED for the first time at J2** — complete pipeline (routing, rewire, brace, seal) in 463 s wall-clock, peak RSS ≈5.4 GiB (6 % of the 90 GB arm), `routed_contacts=306`, `final_live_members=1383`, `snapshot_digest=423276951048565625` — **a first measurement, not a pin**, and §A2's predicted next binder (`rewire::optimize`, ~55 %) did **not** bind. J3 adds **no engine code** and is the FU-10 attribution: the digest movement is **DECISION-NEUTRAL**, proved twice over — from source (all 30 `controller_digest_before` occurrences audited at this tip; **zero comparisons outside `#[cfg(test)]`**, and `finalize_transcript_row`'s admission check reads six other fields and deliberately not this one) and by parent-vs-tip routing-output dumps on all seven corpus models (**275 transcript rows and 687,288 content lines byte-identical**; of the transcript's 10 header digests only the 3 that fold the moved value move, and of `verification_snapshot_digest`'s 17 inputs exactly 1 does). **Three code pins and one golden will need re-pinning at J4**, enumerated by name in the J3 section — and **NOTHING is re-pinned, no golden refreshed, no doc table rewritten and no test expectation relaxed** pending the owner's ruling. **NO CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED.** Gates 1058 default / 1063 all-features with **exactly** the two expected digest-pin failures and no others; clippy, fmt and `git diff --check` clean. **Still open: J4 (owner ruling, re-pin, record sweep), J5 (the honest routing charge, §D3) and J6 (the treant measurement and the record).**]** **[J4 LANDED; THE OWNER RULED AND ALL SEVEN ARE RE-PINNED — 2026-08-09 (**[`#fu32-j4-2026-08-09`](#fu32-j4-2026-08-09)**).** Asked whether the value-changing digest fix may proceed given that all seven OD-8 fingerprints move, the owner ruled, verbatim: *"The fingerprints aren't sacred  if things change slightly that's to be expected (because the algorithm wasn't right when the fingerprints were generated!)"* — sought after J3's attribution and before any re-pin, which is FU-10 order. **The new OD-8 authority table is in the J4 section** and supersedes the 2026-08-08 one at [`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08): Sphere `2297157889062365577`, Cylinder `6853793710942395608`, make_box `8709076999423814412`, make_overhang_table `16396858890798947253`, make_toed_slab `133000971864625681`, make_raking_blade `18388631460456455184`, make_thin_fin `14656364680512457190` — **all seven digests move, NOT ONE count moves**, which is exactly what separates this movement from the 2026-08-08 one (that one moved two models' counts because real island births were removed). Three code pins re-pinned from J4's **own** re-measurement rather than hand-copied (`support_runner_integration.rs` toed_slab `13_346_779_153_602_682_749 -> 2_198_459_883_570_957_390` and raking_blade `8_660_653_339_934_460_766 -> 74_030_269_957_898_085`), and the workspace's one golden **regenerated through its own producer path, never hand-edited** (`coverage_gate_overhang_table.json` `snapshot_digest 5470664714994646368 -> 3706765241747593242`; diffed field by field afterwards — 185 leaves, exactly 1 moved, no evidence lost). `verification_snapshot_digest_input_list_is_pinned` was deliberately **not** touched and stayed **green**: the digest's input *shape* did not widen, only one input's value moved. Dated supersession lines were appended at every doc site quoting any of the seven superseded values (107 occurrences across 9 files); **no earlier citation was edited or deleted**. Census re-run at this tip reproduces the new septet byte for byte — the third concordant measurement — with `routed_contacts` and `final_live_members` unchanged on every model. Gates **1060 default / 1065 all-features, ALL GREEN**, zero failures; clippy, fmt and `git diff --check` clean; **J4 adds zero tests and moves zero counts. NO CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED. Still open: J5 (the honest routing charge, §D3 — an addition, not a move) and J6 (the treant measurement and the record).**]** |
+| FU-33 | `rewire::optimize` is an **unbounded loop**: `REWIRE_WORK_BUDGET` is `TrialSetting::disabled()` and there is no wall-clock deadline anywhere in `plinth-support` for rewire | **Opened 2026-08-09 by FU-32 phase J5** ([`#fu32-j5-2026-08-09`](#fu32-j5-2026-08-09)), which charged routing and **deliberately did not charge this**. The shape is named from source in the design's §A2 #1 and ranked the **most likely next binder at ~55 %**: `rewire.rs`'s `'sweeps: loop` iterates `sweep_order` (one descriptor per live non-stub member, up to four kinds each) and **per move** does `RewireCcoBinding::bind` (a `forest.clone()` plus **two full `Forest::digest()` walks**), `derive_brace_attachments`, `total_volume_ml`, a whole-forest `validate()` per candidate, `changed_forest_volume_delta` per candidate, and `discover_rewire_anchor_seats` over **the entire 364,223-row anchor pool**. `REWIRE_WORK_BUDGET` is `Disabled` (`crates/plinth-core/src/constants/placeholders.rs`), so the loop has no budget at all and the only thing that has ever stopped it is an external `SIGKILL`. **Why J5 did not fix it, stated rather than assumed:** a work budget that stops a search early is **result-changing** — it changes which forest is returned and therefore every downstream digest — whereas J5's routing charge is result-inert by construction (proved: all seven OD-8 digests byte-identical at its tip). Landing both in one phase would put a value-moving ruling inside a resource-charging phase, which is the mixing FU-10 protocol exists to prevent. **What this row owes:** measure `rewire::optimize`'s real demand on the treant first (it has never been instrumented — the treant reached rewire for the first time at FU-32 J2), then decide between a charged preflight on a knowable worst case (J5's shape, result-inert) and an enabled `REWIRE_WORK_BUDGET` (result-changing, and therefore owner-ruled under FU-10 protocol before it is built). **Do NOT enable the budget without that measurement and that ruling.** No cap, floor or constant is touched by opening this row. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
