@@ -389,16 +389,12 @@ pub(crate) fn build_initial_contacts(
     let contact_count = contacts.len();
     let interval_cap = usize::try_from(policy.initial_axis_majority_cap().diagnostic().get())
         .map_err(|_| InitialContactError::ResourceOverflow("majority cap"))?;
-    let penetration_limits = geometry
-        .surface()
-        .penetration_intervals_batch_worst_case_limits(contact_count, 8, interval_cap, false)
-        .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
-    let scratch_bytes = preflight(
-        contact_count,
-        plan.load_partition().rows().len(),
-        penetration_limits,
-        limits,
-    )?;
+    // FU-8g H1 — count before charge before allocate. The logical contact and
+    // load-row caps are still checked HERE, before any contact-sized
+    // allocation; the work-items and scratch-bytes charges move below the
+    // stub-seed loop, because they are now charged from the census pass's
+    // counted totals and the census needs the stub geometry to count.
+    preflight_contact_caps(contact_count, plan.load_partition().rows().len(), limits)?;
     let mut contact_ids = Vec::new();
     contact_ids
         .try_reserve_exact(contact_count)
@@ -522,6 +518,50 @@ pub(crate) fn build_initial_contacts(
         });
     }
 
+    // FU-8g H1 — the census pass. The stub batch input is built ONCE and used
+    // twice: by the counting pass here and by the interval batch inside
+    // `classify_initial_overlaps`. The counted totals (work as traversal
+    // tests, hits as crossings, scratch and intervals as per-row sums — never
+    // `rows x faces`) are what the preflight below charges against the
+    // UNCHANGED production caps, and they are also the per-row allocation
+    // budgets the interval batch executes under.
+    let majority_step_mm = policy.initial_axis_majority_step_mm().diagnostic().get();
+    let axis_batch = axis_batch_input(&seeds)?;
+    let penetration_limits = if seeds.is_empty() {
+        // No stubs, no native query: the zero demand is stated as zero.
+        PenetrationBatchLimits {
+            max_rows: 0,
+            max_total_work: 0,
+            max_total_hits: 0,
+            max_total_samples: 0,
+            max_total_intervals: 0,
+            max_scratch_bytes: 0,
+        }
+    } else {
+        let census = geometry
+            .surface()
+            .penetration_census_batch(
+                &axis_batch.p0,
+                &axis_batch.p1,
+                &axis_batch.r0,
+                &axis_batch.r1,
+                8,
+                false,
+            )
+            .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
+        geometry
+            .surface()
+            .penetration_intervals_batch_census_limits(
+                &census,
+                8,
+                interval_cap,
+                majority_step_mm,
+                false,
+            )
+            .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?
+    };
+    let scratch_bytes = preflight_work(contact_count, penetration_limits, limits)?;
+
     crate::census_record!(if crate::census::enabled() {
         crate::census::record_contacts(contacts.iter().enumerate().map(|(slot, contact)| {
             let normal = contact.normal();
@@ -537,8 +577,9 @@ pub(crate) fn build_initial_contacts(
     let routing_order = routing_order(&seeds)?;
     let (overlaps, interval_batch_count) = classify_initial_overlaps(
         &seeds,
+        &axis_batch,
         geometry,
-        policy.initial_axis_majority_step_mm().diagnostic().get(),
+        majority_step_mm,
         interval_cap,
         policy.default_contact_depth_mm().diagnostic().get(),
         penetration_limits,
@@ -875,6 +916,7 @@ fn attestation_digest(
 
 fn classify_initial_overlaps(
     seeds: &[StubSeed],
+    axis_batch: &AxisBatchInput,
     geometry: &AnchorGeometryAuthority<'_>,
     majority_step_mm: f64,
     interval_cap: usize,
@@ -888,7 +930,6 @@ fn classify_initial_overlaps(
     if seeds.is_empty() {
         return Ok((overlaps, 0));
     }
-    let axis_batch = axis_batch_input(seeds)?;
     let intervals = geometry
         .surface()
         .penetration_intervals_batch_bounded(
@@ -915,12 +956,14 @@ fn classify_initial_overlaps(
     Ok((overlaps, 1))
 }
 
-fn preflight(
+/// The logical contact and load-row caps, checked before any contact-sized
+/// allocation exists. Split from [`preflight_work`] by FU-8g H1: these two
+/// caps need no counting, so they still refuse first.
+fn preflight_contact_caps(
     contact_count: usize,
     load_rows: usize,
-    penetration: PenetrationBatchLimits,
     limits: ContactConstructionLimits,
-) -> Result<usize, InitialContactError> {
+) -> Result<(), InitialContactError> {
     if contact_count > limits.max_contacts {
         return Err(InitialContactError::Limit {
             resource: "contacts",
@@ -935,6 +978,19 @@ fn preflight(
             limit: limits.max_load_rows,
         });
     }
+    Ok(())
+}
+
+/// The work-items and scratch-bytes charges, on the census pass's counted
+/// totals: `penetration` carries the batch's honest demand (sums over rows —
+/// work as executed traversal tests, scratch and intervals as counted per-row
+/// budgets), so the charge here is the demand the interval batch will
+/// actually execute and allocate, checked against the UNCHANGED caps.
+fn preflight_work(
+    contact_count: usize,
+    penetration: PenetrationBatchLimits,
+    limits: ContactConstructionLimits,
+) -> Result<usize, InitialContactError> {
     let work = contact_count
         .checked_mul(4)
         .and_then(|staging| staging.checked_add(penetration.max_total_work))
@@ -1596,9 +1652,50 @@ mod tests {
             ))
         ));
         let count = table.plan.contacts().len();
+        // FU-8g H1 re-pin: the preflight charges the census pass's counted
+        // demand, so the exact/minus-one probe must derive `required` from the
+        // same counted numbers. The stub batch below is the seed loop's own
+        // recipe (p0 = position - unit x depth, p1 = position + unit x span,
+        // r1 = max(r0, min_shoot)), reconstructed from the same policy reads.
+        let policy = m0_constants().unwrap().placeholders();
+        let depth = policy.default_contact_depth_mm().diagnostic().get();
+        let span = policy.stub_length_mm().diagnostic().get();
+        let min_shoot = policy.min_shoot_r_mm().diagnostic().get();
+        let majority_step = policy.initial_axis_majority_step_mm().diagnostic().get();
+        let interval_cap =
+            usize::try_from(policy.initial_axis_majority_cap().diagnostic().get()).unwrap();
+        let mut p0s = Vec::new();
+        let mut p1s = Vec::new();
+        let mut r0s = Vec::new();
+        let mut r1s = Vec::new();
+        for (slot, contact) in table.plan.contacts().iter().enumerate() {
+            let normal = contact.normal();
+            let length = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let unit = normal.map(|value| value / length);
+            let position = contact.position_mm();
+            p0s.push(std::array::from_fn(|axis| {
+                position[axis] - unit[axis] * depth
+            }));
+            p1s.push(std::array::from_fn(|axis| {
+                position[axis] + unit[axis] * span
+            }));
+            let r0 = table.loads.tip_radii_mm()[slot].get();
+            r0s.push(r0);
+            r1s.push(r0.max(min_shoot));
+        }
+        let census = table
+            .surface
+            .penetration_census_batch(&p0s, &p1s, &r0s, &r1s, 8, false)
+            .unwrap();
         let penetration = table
             .surface
-            .penetration_intervals_batch_worst_case_limits(count, 8, 80, false)
+            .penetration_intervals_batch_census_limits(
+                &census,
+                8,
+                interval_cap,
+                majority_step,
+                false,
+            )
             .unwrap();
         let required = required_scratch_bytes(count, penetration).unwrap();
         let required_work = count * 4 + penetration.max_total_work;
@@ -1740,6 +1837,7 @@ mod tests {
             .collect::<Vec<_>>();
         let (boundary_overlaps, batch_count) = classify_initial_overlaps(
             &boundary_seeds,
+            &axis_batch_input(&boundary_seeds).unwrap(),
             &geometry,
             m0_constants()
                 .unwrap()

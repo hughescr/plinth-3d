@@ -25,7 +25,7 @@ mod chain;
 use std::path::PathBuf;
 
 use chitubox_io::SegmentType;
-use plinth_hollow::{HollowDisposition, SolidDecisionReason};
+use plinth_hollow::HollowDisposition;
 use plinth_mesh::make_overhang_table;
 
 /// A per-test scratch path that is removed on the way in and on the way out.
@@ -170,43 +170,40 @@ fn corpus_sphere_seals_lowers_and_emits_a_reparseable_chitubox() {
 
     assert_artifact_is_sound(&outcome, &audit);
 
-    // OQ-1, measured rather than assumed. The design record asked whether the
-    // real hollow stage completes on corpus models and expected a refusal if it
-    // did not. It completes: the Sphere hollows, drains and drills. The refusal
-    // is one stage later — the sealed support run will not take the drilled
-    // shell — so the artifact is emitted from the oriented solid, exactly as
-    // every existing sealed-run gate and the whole OD-8 census do (F14).
+    // OQ-1, measured rather than assumed — RE-DERIVED 2026-08-08 (FU-8g H1),
+    // exactly as the previous pin demanded when it fired. The Sphere hollows,
+    // drains and drills, and the sealed support run now ACCEPTS the drilled
+    // shell: the `Preparation` refusal the previous pin recorded was the
+    // FU-8g wall itself — `initial::preflight` charging `contacts x faces`
+    // against the flat 4,000,000 work-items cap, which the drilled shell's
+    // face count blew. H1 replaced that fiction with the census pass's
+    // counted demand (no cap raised, lowered or touched), the counted demand
+    // fits, and the artifact is emitted from the drilled shell — the path the
+    // chain's own doc calls "the path the pipeline is ultimately meant to
+    // take". The OD-8 census and its seven frozen digests still run the
+    // solid handoff and are byte-identical; this seam is the only place the
+    // verdict moved.
     //
-    // Pinned as an equality, not a `matches!`, so that the day the drilled shell
-    // becomes supportable (or the hollow stage changes its verdict) this fails
-    // and says so, instead of quietly changing what the owner is handed.
-    match &outcome.supported_geometry {
-        chain::SupportedGeometry::DrilledShellRefusedBySupport {
-            drilled_faces,
-            refusal,
-        } => {
-            assert!(
-                *drilled_faces > outcome.prepared_faces,
-                "the drilled shell should have more faces than the oriented solid \
-                 that replaced it ({drilled_faces} vs {})",
-                outcome.prepared_faces
-            );
-            assert!(
-                refusal.contains("Preparation"),
-                "the drilled Sphere shell now fails somewhere other than Preparation: {refusal}"
-            );
-        }
-        other => panic!(
-            "Sphere's supported geometry is now {other:?}; re-derive what the export \
-             seam emits before trusting this artifact"
-        ),
-    }
+    // Pinned as an equality, not a `matches!`, so that the day the verdict
+    // moves again this fails and says so, instead of quietly changing what
+    // the owner is handed.
+    assert_eq!(
+        outcome.supported_geometry,
+        chain::SupportedGeometry::DrilledShellSealed,
+        "Sphere's supported geometry moved; re-derive what the export seam \
+         emits before trusting this artifact"
+    );
+    assert!(
+        outcome.prepared_faces > outcome.source_faces,
+        "the sealed drilled shell should have more faces than the source solid \
+         ({} vs {})",
+        outcome.prepared_faces,
+        outcome.source_faces
+    );
     assert_eq!(
         outcome.hollow_disposition,
-        HollowDisposition::Solid {
-            reason: SolidDecisionReason::BelowThreshold
-        },
-        "the emitted Sphere carries the frozen evidence base's solid handoff"
+        HollowDisposition::HollowedAndDrilled,
+        "the emitted Sphere carries the drilled shell's own disposition"
     );
 
     // All three of the emitter's mesh families are exercised by this one model:

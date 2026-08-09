@@ -3408,7 +3408,25 @@ mod tests {
         );
         let members = [normalize(&member)];
         let base = limits(&surface, 0, 1);
-        let required = base.nonstub_penetration;
+        // FU-8g H1 re-pin: the kernel batch now charges the census pass's
+        // counted demand, so the exact/minus-one boundary is the counted
+        // requirement for this member's own rays, not the worst-case shape.
+        let required = {
+            let row = &members[0];
+            let census = surface
+                .penetration_census_batch(
+                    &[row.p0],
+                    &[row.p1],
+                    &[row.r0],
+                    &[row.r1],
+                    OFFSET_RAYS,
+                    true,
+                )
+                .expect("nonstub census");
+            surface
+                .penetration_intervals_batch_census_limits(&census, OFFSET_RAYS, 8, 1.0, true)
+                .expect("nonstub counted requirements")
+        };
         for (name, lowered) in [
             (
                 "rows",
@@ -3496,7 +3514,17 @@ mod tests {
         );
         let members = [normalize(&member)];
         let base = limits(&surface, 1, 0);
-        let required = base.stub_penetration;
+        // FU-8g H1 re-pin: as in the nonstub twin above, the boundary is the
+        // census's counted requirement (axis ray only on the stub path).
+        let required = {
+            let row = &members[0];
+            let census = surface
+                .penetration_census_batch(&[row.p0], &[row.p1], &[row.r0], &[row.r1], 0, false)
+                .expect("stub census");
+            surface
+                .penetration_intervals_batch_census_limits(&census, 0, 8, 1.0, false)
+                .expect("stub counted requirements")
+        };
         for (name, lowered) in [
             (
                 "rows",

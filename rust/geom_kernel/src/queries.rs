@@ -207,11 +207,16 @@ impl std::error::Error for BatchInputError {}
 /// Caller-owned hard limits for [`NativeSurface::penetration_intervals_batch_bounded`].
 ///
 /// The limits describe the whole batch, not one Rayon worker. Before any
-/// parallel work begins the kernel derives a conservative exact-shape bound:
-/// every ray can test and hit every selected face, every resulting subsegment
-/// can consume `cap` samples, and every subsegment can become an interval.
-/// This makes the refusal independent of Rayon scheduling and leaves every
-/// row with pre-reserved, fallible scratch buffers.
+/// interval extraction begins the kernel COUNTS the batch's demand with an
+/// allocation-free census pass — one extra BVH descent per ray, `O(depth)`
+/// memory — and the counted totals (sums over rows, never `rows x max`) are
+/// what these limits refuse. Count-before-charge-before-allocate: every row's
+/// scratch buffers are pre-reserved, fallibly, at exactly its counted budget,
+/// and the execution pass refuses with
+/// [`PenetrationBatchError::CensusDrift`] rather than grow one. The
+/// conservative every-ray-hits-every-face shape survives only in
+/// [`NativeSurface::penetration_intervals_batch_worst_case_limits`], which is
+/// a sizing helper for callers that need a sufficient ceiling, not a charge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PenetrationBatchLimits {
     pub max_rows: usize,
@@ -457,6 +462,20 @@ pub enum PenetrationBatchError {
         buffer: &'static str,
         requested_bytes: usize,
     },
+    /// The execution pass exceeded the budget the census pass counted for it.
+    ///
+    /// The census walk and the fill walk are the same traversal over the same
+    /// immutable BVH with the same predicate, so this is impossible by
+    /// construction; the check is a proof obligation that preserves
+    /// count-before-charge-before-allocate. A future edit that lets the two
+    /// walks drift fails loudly here instead of silently regrowing a
+    /// `try_reserve_exact` buffer past its afforded capacity.
+    CensusDrift {
+        row: usize,
+        resource: &'static str,
+        counted: usize,
+        executed: usize,
+    },
 }
 
 impl From<BatchInputError> for PenetrationBatchError {
@@ -494,6 +513,15 @@ impl std::fmt::Display for PenetrationBatchError {
                     "penetration batch could not reserve {requested_bytes} bytes for {buffer}"
                 ),
             },
+            Self::CensusDrift {
+                row,
+                resource,
+                counted,
+                executed,
+            } => write!(
+                formatter,
+                "penetration batch row {row} executed {executed} {resource}; census counted {counted}"
+            ),
         }
     }
 }
@@ -511,6 +539,9 @@ struct PenetrationRowBudget {
     parity_crossings: usize,
 }
 
+/// Worst-case (`rows x max`) batch totals. Since the census pass landed these
+/// govern no execution: they exist solely for the sizing helper
+/// [`NativeSurface::penetration_intervals_batch_worst_case_limits`].
 #[derive(Clone, Copy)]
 struct PenetrationBatchRequirements {
     rows: usize,
@@ -519,7 +550,49 @@ struct PenetrationBatchRequirements {
     samples: usize,
     intervals: usize,
     scratch_bytes: usize,
-    row: PenetrationRowBudget,
+}
+
+/// One row's counted penetration demand: crossings and traversal tests summed
+/// over the row's rays (1, or `n_offset_rays + 1` when `rays_all`), plus the
+/// summed ray arc length. Produced by
+/// [`NativeSurface::penetration_census_batch`]; no per-hit storage exists
+/// anywhere in the counting pass.
+///
+/// The two `max_ray_*` fields exist because the fill pass re-creates its
+/// scratch buffers PER RAY: a sound per-ray reservation needs the worst
+/// single ray, while the batch totals need the row sums, and collapsing the
+/// two into one number would either under-reserve a ray or over-charge the
+/// row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenetrationRowCensus {
+    /// Möller crossings the fill walk will push for this row — exactly
+    /// `hits.len()` summed over the row's rays, before deduplication.
+    pub crossings: usize,
+    /// Executed traversal effort: BVH nodes popped plus Möller evaluations,
+    /// summed over the row's rays. This is the honest `work` quantity; it is
+    /// deliberately NOT the same number as `crossings` (storage).
+    pub tests: usize,
+    /// Summed length of the row's rays in millimetres, for the closed-form
+    /// sample bound.
+    pub seg_mm: f64,
+    /// The largest single-ray crossing count in the row — the per-ray scratch
+    /// reservation for the hit-shaped buffers.
+    pub max_ray_crossings: usize,
+    /// The longest single ray in millimetres — the per-ray form of the
+    /// closed-form sample bound.
+    pub max_ray_seg_mm: f64,
+}
+
+/// Counted (census-derived) batch requirements: totals are SUMS over per-row
+/// budgets, never `rows x max`.
+struct PenetrationCensusRequirements {
+    rows: usize,
+    work: usize,
+    hits: usize,
+    samples: usize,
+    intervals: usize,
+    scratch_bytes: usize,
+    row_budgets: Vec<PenetrationRowBudget>,
 }
 
 fn checked_penetration_mul(
@@ -545,6 +618,94 @@ fn checked_penetration_bytes<T>(
     resource: &'static str,
 ) -> Result<usize, PenetrationBatchError> {
     checked_penetration_mul(count, std::mem::size_of::<T>(), resource)
+}
+
+/// The fourteen per-row scratch buffers of `pen_intervals_one` which coexist
+/// for a ray, summed into one row's byte budget. Interval output is bounded
+/// separately by `max_total_intervals`; it is not scratch.
+///
+/// Shared by the worst-case and census requirement derivations so the two
+/// charges cannot drift in shape — only their inputs differ.
+fn penetration_row_scratch_bytes(
+    rays: usize,
+    hits_per_ray: usize,
+    subsegments_per_ray: usize,
+    samples_per_ray: usize,
+    traversal_stack: usize,
+    parity_crossings: usize,
+) -> Result<usize, PenetrationBatchError> {
+    let raylist_bytes = checked_penetration_bytes::<(i32, V3, V3, f64)>(rays, "ray list bytes")?;
+    let hits_bytes = checked_penetration_bytes::<(f64, u32)>(hits_per_ray, "hit bytes")?;
+    let tvals_bytes = checked_penetration_bytes::<f64>(hits_per_ray, "crossing parameter bytes")?;
+    let dedup_bytes = checked_penetration_bytes::<f64>(hits_per_ray, "dedup bytes")?;
+    let bounds_bytes = checked_penetration_bytes::<f64>(
+        checked_penetration_add(hits_per_ray, 2, "boundary capacity")?,
+        "boundary bytes",
+    )?;
+    let samples_bytes = checked_penetration_bytes::<V3>(samples_per_ray, "sample point bytes")?;
+    let slices_bytes =
+        checked_penetration_bytes::<(usize, usize)>(subsegments_per_ray, "slice bytes")?;
+    let sub_bounds_bytes = checked_penetration_bytes::<(f64, f64, bool, bool)>(
+        subsegments_per_ray,
+        "subsegment bound bytes",
+    )?;
+    let inside_bytes = checked_penetration_bytes::<bool>(samples_per_ray, "inside bytes")?;
+    let depths_bytes = checked_penetration_bytes::<f64>(samples_per_ray, "sample depth bytes")?;
+    let votes_bytes = checked_penetration_bytes::<bool>(subsegments_per_ray, "vote bytes")?;
+    let subdepth_bytes =
+        checked_penetration_bytes::<f64>(subsegments_per_ray, "subsegment depth bytes")?;
+    let traversal_bytes =
+        checked_penetration_bytes::<i32>(traversal_stack, "BVH traversal stack bytes")?;
+    let parity_bytes = checked_penetration_bytes::<f64>(parity_crossings, "parity crossing bytes")?;
+    [
+        raylist_bytes,
+        hits_bytes,
+        tvals_bytes,
+        dedup_bytes,
+        bounds_bytes,
+        samples_bytes,
+        slices_bytes,
+        sub_bounds_bytes,
+        inside_bytes,
+        depths_bytes,
+        votes_bytes,
+        subdepth_bytes,
+        traversal_bytes,
+        parity_bytes,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        checked_penetration_add(total, bytes, "row scratch bytes")
+    })
+}
+
+/// The closed-form honest sample bound (FU-8g design F10), per row.
+///
+/// `pen_intervals_one` samples each subsegment at
+/// `ns = cap.min(3.max(trunc(lsub / majority_step_mm)))`, and per ray the
+/// subsegment lengths sum to that ray's arc length, so a row's total sample
+/// count is bounded by
+/// `min(cap x subsegments, 3 x subsegments + seg / majority_step_mm)`.
+/// The real-valued `seg / step` term is integerized with `ceil` — the safe
+/// direction — so per-subsegment truncation can never exceed it. When the
+/// ratio is non-finite or beyond `usize`, the `cap` arm alone governs, which
+/// mirrors exactly what the sampling loop's saturating cast executes.
+fn census_row_sample_budget(
+    subsegments: usize,
+    seg_mm: f64,
+    majority_step_mm: f64,
+    cap: usize,
+) -> Result<usize, PenetrationBatchError> {
+    let cap_arm = checked_penetration_mul(subsegments, cap, "samples per row")?;
+    let step_samples = (seg_mm / majority_step_mm).ceil();
+    if !step_samples.is_finite() || step_samples < 0.0 || step_samples >= usize::MAX as f64 {
+        return Ok(cap_arm);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let step_samples = step_samples as usize;
+    let honest_arm = checked_penetration_mul(subsegments, 3, "samples per row")?;
+    let honest_arm = checked_penetration_add(honest_arm, step_samples, "samples per row")?;
+    Ok(cap_arm.min(honest_arm))
 }
 
 fn reserve_penetration_vec<T>(
@@ -1281,6 +1442,62 @@ impl NativeSurface {
         }
     }
 
+    /// Counting twin of [`Self::collect_hits_with_stack`]: the SAME traversal
+    /// over the same immutable BVH with the same predicates, but it counts
+    /// instead of pushing, so it needs the `O(depth)` stack and nothing else.
+    ///
+    /// Returns `(crossings, tests)` where `crossings` is exactly the number of
+    /// `(t, tid)` pairs the collecting walk would push, and `tests` is the
+    /// executed traversal effort: one per BVH node popped (its `ray_box`
+    /// evaluation) plus one per Möller evaluation in a reached leaf.
+    ///
+    /// Any edit to one walk must be mirrored in the other; the fill pass
+    /// refuses with [`PenetrationBatchError::CensusDrift`] if they disagree.
+    fn count_hits_with_stack(
+        &self,
+        o: V3,
+        d: V3,
+        t_max: f64,
+        stack: &mut Vec<i32>,
+    ) -> (usize, usize) {
+        let t0 = -EPS;
+        let t1 = t_max + EPS;
+        stack.clear();
+        stack.push(0);
+        let mut crossings = 0usize;
+        let mut tests = 0usize;
+        while let Some(ni) = stack.pop() {
+            tests += 1;
+            let node = &self.bvh.nodes[ni as usize];
+            if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
+                continue;
+            }
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let t = tid as usize;
+                    tests += 1;
+                    let (hit, _tv) = moller(
+                        o,
+                        d,
+                        self.mesh.v0(t),
+                        self.mesh.e1(t),
+                        self.mesh.e2(t),
+                        t_max,
+                    );
+                    if hit {
+                        crossings += 1;
+                    }
+                }
+            } else {
+                stack.push(node.a);
+                stack.push(node.b);
+            }
+        }
+        (crossings, tests)
+    }
+
     /// cast_rays for one ray: deduped by arc location; representative t = first
     /// in group, representative face = LOWEST index in group (Amendment A13).
     fn cast_one(&self, o: V3, d: V3, t_max: f64) -> (Vec<f64>, Vec<i64>) {
@@ -1563,6 +1780,14 @@ impl NativeSurface {
             // crossings along this ray
             let mut hits = reserve_penetration_vec(budget.hits_per_ray, Some(row), "hits")?;
             self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            if hits.len() > budget.hits_per_ray {
+                return Err(PenetrationBatchError::CensusDrift {
+                    row,
+                    resource: "hits",
+                    counted: budget.hits_per_ray,
+                    executed: hits.len(),
+                });
+            }
             let mut tvals =
                 reserve_penetration_vec(budget.hits_per_ray, Some(row), "crossing parameters")?;
             tvals.extend(hits.iter().map(|h| h.0));
@@ -1591,6 +1816,14 @@ impl NativeSurface {
                 "subsegment bounds",
             )?;
             let nb = b_bounds.len();
+            if nb - 1 > budget.subsegments_per_ray {
+                return Err(PenetrationBatchError::CensusDrift {
+                    row,
+                    resource: "subsegments",
+                    counted: budget.subsegments_per_ray,
+                    executed: nb - 1,
+                });
+            }
             for si in 0..nb - 1 {
                 let ta = b_bounds[si];
                 let tb = b_bounds[si + 1];
@@ -1605,6 +1838,14 @@ impl NativeSurface {
                 }
                 slices.push((run0, sample_pts.len()));
                 sub_bounds.push((ta, tb, si != 0, (si + 1) != (nb - 1)));
+            }
+            if sample_pts.len() > budget.samples_per_ray {
+                return Err(PenetrationBatchError::CensusDrift {
+                    row,
+                    resource: "samples",
+                    counted: budget.samples_per_ray,
+                    executed: sample_pts.len(),
+                });
             }
 
             // inside classification + depth (nearest dist) for inside samples
@@ -1694,6 +1935,14 @@ impl NativeSurface {
                     i += 1;
                 }
             }
+            if out.len() > budget.intervals {
+                return Err(PenetrationBatchError::CensusDrift {
+                    row,
+                    resource: "intervals",
+                    counted: budget.intervals,
+                    executed: out.len(),
+                });
+            }
         }
         Ok(out)
     }
@@ -1713,15 +1962,6 @@ impl NativeSurface {
                 samples: 0,
                 intervals: 0,
                 scratch_bytes: 0,
-                row: PenetrationRowBudget {
-                    rays: 0,
-                    hits_per_ray: 0,
-                    samples_per_ray: 0,
-                    subsegments_per_ray: 0,
-                    intervals: 0,
-                    traversal_stack: 0,
-                    parity_crossings: 0,
-                },
             });
         }
         if rays_all && n_offset_rays > i32::MAX as usize {
@@ -1739,7 +1979,16 @@ impl NativeSurface {
         let samples_per_ray = checked_penetration_mul(subsegments_per_ray, cap, "samples per ray")?;
         let intervals_per_row =
             checked_penetration_mul(rays, subsegments_per_ray, "intervals per row")?;
-        let work_per_row = checked_penetration_mul(rays, hits_per_ray, "work per row")?;
+        // `work` is charged as executed traversal tests (nodes popped plus
+        // Möller evaluations) since FU-8g H1, and a walk can pop every BVH
+        // node and test every face, so the sufficient ceiling is their sum —
+        // `nfaces` alone UNDER-states tiny meshes, where node-visit overhead
+        // is not amortized away (H0 finding 1: `make_box` 0.82x). `hits`
+        // stays `nfaces`: the two quantities are severed here exactly as in
+        // the census derivation.
+        let tests_per_ray =
+            checked_penetration_add(hits_per_ray, self.bvh.nodes.len(), "tests per ray")?;
+        let work_per_row = checked_penetration_mul(rays, tests_per_ray, "work per row")?;
         let samples_per_row = checked_penetration_mul(rays, samples_per_ray, "samples per row")?;
         let traversal_stack = checked_penetration_add(self.bvh.depth, 1, "BVH traversal stack")?;
         let parity_crossings = self
@@ -1750,75 +1999,230 @@ impl NativeSurface {
             .max()
             .unwrap_or(0);
 
-        // All vectors which coexist for a ray are included. Interval output is
-        // bounded separately by `max_total_intervals`; it is not scratch.
-        let raylist_bytes =
-            checked_penetration_bytes::<(i32, V3, V3, f64)>(rays, "ray list bytes")?;
-        let hits_bytes = checked_penetration_bytes::<(f64, u32)>(hits_per_ray, "hit bytes")?;
-        let tvals_bytes =
-            checked_penetration_bytes::<f64>(hits_per_ray, "crossing parameter bytes")?;
-        let dedup_bytes = checked_penetration_bytes::<f64>(hits_per_ray, "dedup bytes")?;
-        let bounds_bytes = checked_penetration_bytes::<f64>(
-            checked_penetration_add(hits_per_ray, 2, "boundary capacity")?,
-            "boundary bytes",
-        )?;
-        let samples_bytes = checked_penetration_bytes::<V3>(samples_per_ray, "sample point bytes")?;
-        let slices_bytes =
-            checked_penetration_bytes::<(usize, usize)>(subsegments_per_ray, "slice bytes")?;
-        let sub_bounds_bytes = checked_penetration_bytes::<(f64, f64, bool, bool)>(
+        let row_scratch = penetration_row_scratch_bytes(
+            rays,
+            hits_per_ray,
             subsegments_per_ray,
-            "subsegment bound bytes",
+            samples_per_ray,
+            traversal_stack,
+            parity_crossings,
         )?;
-        let inside_bytes = checked_penetration_bytes::<bool>(samples_per_ray, "inside bytes")?;
-        let depths_bytes = checked_penetration_bytes::<f64>(samples_per_ray, "sample depth bytes")?;
-        let votes_bytes = checked_penetration_bytes::<bool>(subsegments_per_ray, "vote bytes")?;
-        let subdepth_bytes =
-            checked_penetration_bytes::<f64>(subsegments_per_ray, "subsegment depth bytes")?;
-        let traversal_bytes =
-            checked_penetration_bytes::<i32>(traversal_stack, "BVH traversal stack bytes")?;
-        let parity_bytes =
-            checked_penetration_bytes::<f64>(parity_crossings, "parity crossing bytes")?;
-        let row_scratch = [
-            raylist_bytes,
-            hits_bytes,
-            tvals_bytes,
-            dedup_bytes,
-            bounds_bytes,
-            samples_bytes,
-            slices_bytes,
-            sub_bounds_bytes,
-            inside_bytes,
-            depths_bytes,
-            votes_bytes,
-            subdepth_bytes,
-            traversal_bytes,
-            parity_bytes,
-        ]
-        .into_iter()
-        .try_fold(0usize, |total, bytes| {
-            checked_penetration_add(total, bytes, "row scratch bytes")
-        })?;
+        let hits_per_row = checked_penetration_mul(rays, hits_per_ray, "hits per row")?;
         Ok(PenetrationBatchRequirements {
             rows,
             work: checked_penetration_mul(rows, work_per_row, "total work")?,
-            hits: checked_penetration_mul(rows, work_per_row, "total hits")?,
+            hits: checked_penetration_mul(rows, hits_per_row, "total hits")?,
             samples: checked_penetration_mul(rows, samples_per_row, "total samples")?,
             intervals: checked_penetration_mul(rows, intervals_per_row, "total intervals")?,
             scratch_bytes: checked_penetration_mul(rows, row_scratch, "total scratch bytes")?,
-            row: PenetrationRowBudget {
-                rays,
-                hits_per_ray,
-                samples_per_ray,
+        })
+    }
+
+    /// The counted demand of one row: every ray a fill walk would execute is
+    /// walked once, counting instead of pushing. Degenerate rows and rays are
+    /// skipped exactly as `pen_intervals_one` skips them.
+    fn census_one(
+        &self,
+        p0: V3,
+        p1: V3,
+        r0: f64,
+        r1: f64,
+        n_offset_rays: usize,
+        rays_all: bool,
+    ) -> PenetrationRowCensus {
+        let l = norm(sub(p1, p0));
+        let mut census = PenetrationRowCensus {
+            crossings: 0,
+            tests: 0,
+            seg_mm: 0.0,
+            max_ray_crossings: 0,
+            max_ray_seg_mm: 0.0,
+        };
+        if l < 1e-9 {
+            return census;
+        }
+        for ray in capsule_rays(p0, p1, r0, r1, n_offset_rays, rays_all) {
+            let seg = ray.length_mm();
+            if seg < 1e-9 {
+                continue;
+            }
+            let (crossings, tests) = STACK.with(|s| {
+                self.count_hits_with_stack(ray.origin(), ray.direction(), 1.0, &mut s.borrow_mut())
+            });
+            census.crossings += crossings;
+            census.tests += tests;
+            census.seg_mm += seg;
+            census.max_ray_crossings = census.max_ray_crossings.max(crossings);
+            if seg > census.max_ray_seg_mm {
+                census.max_ray_seg_mm = seg;
+            }
+        }
+        census
+    }
+
+    /// Batched crossing/traversal census: one allocation-free counting pass
+    /// per ray, index-parallel over rows, with NO per-hit storage — the BVH
+    /// walk is identical to the fill walk's but counts instead of pushing, so
+    /// it needs `O(bvh.depth)` memory per worker and nothing else.
+    ///
+    /// This is the COUNT of count-before-charge-before-allocate: feed the
+    /// result to [`Self::penetration_intervals_batch_census_limits`] to state
+    /// the batch's honest demand before any interval-sized allocation exists.
+    pub fn penetration_census_batch(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        n_offset_rays: usize,
+        rays_all: bool,
+    ) -> Result<Vec<PenetrationRowCensus>, PenetrationBatchError> {
+        let n = p0s.len();
+        Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
+        if rays_all && n_offset_rays > i32::MAX as usize {
+            return Err(PenetrationBatchError::ArithmeticOverflow {
+                resource: "offset ray labels",
+            });
+        }
+        let mut per = reserve_penetration_vec(n, None, "census rows")?;
+        par::run(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|i| self.census_one(p0s[i], p1s[i], r0s[i], r1s[i], n_offset_rays, rays_all))
+                .collect_into_vec(&mut per);
+        });
+        Ok(per)
+    }
+
+    /// Measured sibling of [`Self::penetration_requirements`]: per-row budgets
+    /// from counted crossings, the closed-form sample bound, `work` charged as
+    /// traversal tests and `hits` as crossings (severed — they measure
+    /// different things), and totals that are SUMS, never `rows x max`.
+    ///
+    /// A row budget's per-ray fields hold the row's worst SINGLE ray (the
+    /// buffers are re-created per ray, so that is the sound reservation),
+    /// while the interval budget and the batch totals hold the row sums.
+    /// Every census figure is bounded above by the corresponding worst-case
+    /// figure, so a worst-case-derived limit always admits the counted
+    /// demand.
+    fn penetration_requirements_from_census(
+        &self,
+        census: &[PenetrationRowCensus],
+        n_offset_rays: usize,
+        cap: usize,
+        majority_step_mm: f64,
+        rays_all: bool,
+    ) -> Result<PenetrationCensusRequirements, PenetrationBatchError> {
+        if rays_all && n_offset_rays > i32::MAX as usize {
+            return Err(PenetrationBatchError::ArithmeticOverflow {
+                resource: "offset ray labels",
+            });
+        }
+        let rays = if rays_all {
+            checked_penetration_add(n_offset_rays, 1, "rays per row")?
+        } else {
+            1
+        };
+        let traversal_stack = checked_penetration_add(self.bvh.depth, 1, "BVH traversal stack")?;
+        let parity_crossings = self
+            .pv
+            .grids
+            .iter()
+            .map(|grid| grid.max_occ)
+            .max()
+            .unwrap_or(0);
+        let mut row_budgets = reserve_penetration_vec(census.len(), None, "row budgets")?;
+        let mut work = 0usize;
+        let mut hits = 0usize;
+        let mut samples = 0usize;
+        let mut intervals = 0usize;
+        let mut scratch_bytes = 0usize;
+        for row in census {
+            // Per-ray reservations come from the row's worst single ray (the
+            // buffers are re-created per ray); the batch totals come from the
+            // row's sums. Per ray, deduplicated crossings + 1 bound that
+            // ray's subsegments.
+            let subsegments_per_ray =
+                checked_penetration_add(row.max_ray_crossings, 1, "subsegments per ray")?;
+            let samples_per_ray = census_row_sample_budget(
                 subsegments_per_ray,
-                intervals: intervals_per_row,
+                row.max_ray_seg_mm,
+                majority_step_mm,
+                cap,
+            )?;
+            // Summed over the row's rays: subsegments <= crossings + rays,
+            // and the sample sum obeys the same closed-form bound on the
+            // summed arc length.
+            let row_subsegments = checked_penetration_add(row.crossings, rays, "row subsegments")?;
+            let row_samples =
+                census_row_sample_budget(row_subsegments, row.seg_mm, majority_step_mm, cap)?;
+            let row_scratch = penetration_row_scratch_bytes(
+                rays,
+                row.max_ray_crossings,
+                subsegments_per_ray,
+                samples_per_ray,
                 traversal_stack,
                 parity_crossings,
-            },
+            )?;
+            work = checked_penetration_add(work, row.tests, "total work")?;
+            hits = checked_penetration_add(hits, row.crossings, "total hits")?;
+            samples = checked_penetration_add(samples, row_samples, "total samples")?;
+            intervals = checked_penetration_add(intervals, row_subsegments, "total intervals")?;
+            scratch_bytes =
+                checked_penetration_add(scratch_bytes, row_scratch, "total scratch bytes")?;
+            row_budgets.push(PenetrationRowBudget {
+                rays,
+                hits_per_ray: row.max_ray_crossings,
+                samples_per_ray,
+                subsegments_per_ray,
+                intervals: row_subsegments,
+                traversal_stack,
+                parity_crossings,
+            });
+        }
+        Ok(PenetrationCensusRequirements {
+            rows: census.len(),
+            work,
+            hits,
+            samples,
+            intervals,
+            scratch_bytes,
+            row_budgets,
+        })
+    }
+
+    /// Honest, counted limits for this batch shape — the census-derived
+    /// sibling of [`Self::penetration_intervals_batch_worst_case_limits`].
+    /// `max_total_work` is summed traversal tests (what the ray loop
+    /// executes); `max_total_hits` is summed crossings (what the hit buffers
+    /// store); every total is a sum over the counted rows.
+    pub fn penetration_intervals_batch_census_limits(
+        &self,
+        census: &[PenetrationRowCensus],
+        n_offset_rays: usize,
+        cap: usize,
+        majority_step_mm: f64,
+        rays_all: bool,
+    ) -> Result<PenetrationBatchLimits, PenetrationBatchError> {
+        let requirements = self.penetration_requirements_from_census(
+            census,
+            n_offset_rays,
+            cap,
+            majority_step_mm,
+            rays_all,
+        )?;
+        Ok(PenetrationBatchLimits {
+            max_rows: requirements.rows,
+            max_total_work: requirements.work,
+            max_total_hits: requirements.hits,
+            max_total_samples: requirements.samples,
+            max_total_intervals: requirements.intervals,
+            max_scratch_bytes: requirements.scratch_bytes,
         })
     }
 
     fn check_penetration_limits(
-        requirements: PenetrationBatchRequirements,
+        requirements: &PenetrationCensusRequirements,
         limits: PenetrationBatchLimits,
     ) -> Result<(), PenetrationBatchError> {
         for (resource, required, limit) in [
@@ -1882,9 +2286,14 @@ impl NativeSurface {
         })
     }
 
-    /// Bounded, one-shot batch extraction of penetration intervals. Input
-    /// gathering, one index-parallel map, and ordered scatter are retained;
-    /// limits are fully preflighted before Rayon starts.
+    /// Bounded, one-shot batch extraction of penetration intervals: count,
+    /// charge, allocate. An allocation-free census pass counts the batch's
+    /// demand first, the counted totals are checked against `limits` before
+    /// any interval-sized allocation exists, and each row then executes under
+    /// its own counted budget (pre-reserved, fallible scratch buffers, with
+    /// [`PenetrationBatchError::CensusDrift`] as the typed refusal should
+    /// execution ever exceed its count). Input gathering, one index-parallel
+    /// map per pass, and ordered scatter are retained.
     #[allow(clippy::too_many_arguments)]
     pub fn penetration_intervals_batch_bounded(
         &self,
@@ -1901,9 +2310,17 @@ impl NativeSurface {
     ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
         let n = p0s.len();
         Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
-        let requirements = self.penetration_requirements(n, n_offset_rays, cap, rays_all)?;
-        Self::check_penetration_limits(requirements, limits)?;
+        let census = self.penetration_census_batch(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)?;
+        let requirements = self.penetration_requirements_from_census(
+            &census,
+            n_offset_rays,
+            cap,
+            majority_step_mm,
+            rays_all,
+        )?;
+        Self::check_penetration_limits(&requirements, limits)?;
         let mut per = reserve_penetration_vec(n, None, "ordered row results")?;
+        let row_budgets = &requirements.row_budgets;
         par::run(|| {
             (0..n)
                 .into_par_iter()
@@ -1918,7 +2335,7 @@ impl NativeSurface {
                         cap,
                         min_illegal_len_mm,
                         rays_all,
-                        requirements.row,
+                        row_budgets[i],
                         i,
                     )
                 })
