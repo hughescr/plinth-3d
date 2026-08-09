@@ -730,7 +730,7 @@ fn named_authority_paths_exist_without_runtime_ledger_parsing() {
         ),
         (
             "performance trial domain definitions",
-            "docs/specs/SPEC-V5-PERF.md",
+            "docs/engineering-journal/specs/SPEC-V5-PERF.md",
         ),
     ] {
         let path = repository.join(relative);

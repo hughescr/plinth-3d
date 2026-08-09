@@ -1,7 +1,7 @@
 # Reference — durable written findings, indexed
 
 Everything we worked out, wrote down, and still believe. **Not normative:**
-`docs/specs/` holds the rules we ratified and that code cites as law; this
+`docs/engineering-journal/specs/` holds the rules we ratified and that code cites as law; this
 directory holds the measurements and the reasoning several of those specs were
 built on.
 
@@ -10,9 +10,9 @@ number, a measurement, or the reason a constant has the value it has, it is
 listed below — read the one line, then the file. Keep this index complete: a
 new file here without an entry is a file nobody will find.
 
-**What goes where.** `docs/specs/` = law. `docs/datasheets/` = vendor and
+**What goes where.** `docs/engineering-journal/specs/` = law. `docs/datasheets/` = vendor and
 hardware data somebody else published (see
-[`../datasheets/README.md`](../datasheets/README.md)). **Here** = our own
+[`../../datasheets/README.md`](../../datasheets/README.md)). **Here** = our own
 findings. Run outputs — result JSONs, censuses, CPU profiles, determinism/parity
 comparisons, screenshots — are **not in git** at all; they are archived outside
 the repo.
@@ -56,7 +56,7 @@ vendor document.
 Formula-by-formula audits of the v4 Python engine, all against
 `resin-print-prep` master `f02b7af`. The **reasoning** in these is still good;
 several **constant values** in them are pre-plate-5 and stale —
-[`../engineering-journal/03-physics-and-constants.md`](../engineering-journal/03-physics-and-constants.md)
+[`../03-physics-and-constants.md`](../03-physics-and-constants.md)
 §5 lists exactly which.
 
 | file | what it is | read it when |

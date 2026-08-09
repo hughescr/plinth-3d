@@ -67,13 +67,13 @@ impl M0EvidenceConstants {
         let plate_6_date = exact_date("2026-07-31")?;
         let plate_6_source = EvidenceSource::calibration_plate(
             PlateId::from("COUPON-PLATE-6-support-arm-capacity"),
-            "docs/reference/plate-06-results.md",
+            "docs/engineering-journal/reference/plate-06-results.md",
             "§5 Finding 1",
             plate_6_date.clone(),
         )?;
         let release_front_source = EvidenceSource::project_record(
             EvidenceId::new("saturn4-ultra-release-front-plate6")?,
-            "docs/reference/plate-06-results.md",
+            "docs/engineering-journal/reference/plate-06-results.md",
             "§1 Printer",
             plate_6_date,
         )?;
@@ -86,7 +86,7 @@ impl M0EvidenceConstants {
         )?;
         let minima_source = EvidenceSource::project_record(
             EvidenceId::new("minima-contact-fix-2026-07-24")?,
-            "docs/reference/acceptance-run-2026-07-24-contactfix.md",
+            "docs/engineering-journal/reference/acceptance-run-2026-07-24-contactfix.md",
             "Provenance and What moved",
             exact_date("2026-07-24")?,
         )?;
@@ -96,7 +96,7 @@ impl M0EvidenceConstants {
             load_sharing_value,
             plate_6_source,
             None,
-            "Plate 6 validated one cap area (30 mm²), one arm diameter (0.798 mm), and one arm length (4.00 mm). No strip failed, so there is no measured upper bracket; N > 6 is extrapolation. The fin root contributes about 19.75% section bonus, so the result is at least N× and never evidence for super-additive sharing. X_tot is algebraically degenerate with total arm area, and the ratio rests on plate 5. The tight N=2 flip, X_tot 30.077 alive versus 30.481 dead, is a 1.33% window and does not prove exact additivity. Plate 6 §5 Finding 3 records survival on both axes at X_arm=60.15, excluding zipper collapse at that load while leaving zero-variance and near-boundary axis effects untested; the four X-axis cells were not zipper tests. docs/reference/plate-06-results.md §6 records the B6 override: re-scoping a preregistered void after seeing data is exactly what preregistration blocks, making these points post-hoc and leaving that counterargument unanswered.",
+            "Plate 6 validated one cap area (30 mm²), one arm diameter (0.798 mm), and one arm length (4.00 mm). No strip failed, so there is no measured upper bracket; N > 6 is extrapolation. The fin root contributes about 19.75% section bonus, so the result is at least N× and never evidence for super-additive sharing. X_tot is algebraically degenerate with total arm area, and the ratio rests on plate 5. The tight N=2 flip, X_tot 30.077 alive versus 30.481 dead, is a 1.33% window and does not prove exact additivity. Plate 6 §5 Finding 3 records survival on both axes at X_arm=60.15, excluding zipper collapse at that load while leaving zero-variance and near-boundary axis effects untested; the four X-axis cells were not zipper tests. docs/engineering-journal/reference/plate-06-results.md §6 records the B6 override: re-scoping a preregistered void after seeing data is exactly what preregistration blocks, making these points post-hoc and leaving that counterargument unanswered.",
         )?;
         let n_eff_cap_value = load_sharing_value
             .n_eff_cap()
@@ -119,7 +119,7 @@ impl M0EvidenceConstants {
             FiniteInterval::new(25.00, 25.34, BoundKind::Inclusive, BoundKind::Inclusive)?,
             EvidenceSource::calibration_plate(
                 PlateId::from("COUPON-PLATE-5-compliant-vs-stiff"),
-                "docs/reference/plate-05-results.md",
+                "docs/engineering-journal/reference/plate-05-results.md",
                 "§1 and §5",
                 on_or_before_date("2026-07-30")?,
             )?,
@@ -159,7 +159,7 @@ impl M0EvidenceConstants {
             0.08,
             EvidenceSource::owner_decision(
                 EvidenceId::new("print-floor-owner-decision-2026-07-24")?,
-                "docs/specs/SPEC-EMBED-POLICY.md",
+                "docs/engineering-journal/specs/SPEC-EMBED-POLICY.md",
                 "PRINT-FLOOR amendment and Normative constants",
                 exact_date("2026-07-24")?,
             )?,
@@ -177,7 +177,7 @@ impl M0EvidenceConstants {
             cco_x_pair_load_discount: Derived::new(
                 0.840_896_415_253_714_5,
                 std::iter::empty::<&str>(),
-                "Proof-only fourth-root relation: (F/2)^0.25/F^0.25 = 0.5^0.25. The proof is in docs/reference/physics_transient_peel.md and the relation is implemented in both cco.py and bracing.py.",
+                "Proof-only fourth-root relation: (F/2)^0.25/F^0.25 = 0.5^0.25. The proof is in docs/engineering-journal/reference/physics_transient_peel.md and the relation is implemented in both cco.py and bracing.py.",
             ),
             decimation_max_absolute_deviation_mm: Derived::new(
                 decimation_max_absolute_deviation_value,
@@ -198,7 +198,7 @@ impl M0EvidenceConstants {
                 0.050,
                 EvidenceSource::project_record(
                     EvidenceId::new("saturn4-ultra-layer-profile-plate6")?,
-                    "docs/reference/plate-06-results.md",
+                    "docs/engineering-journal/reference/plate-06-results.md",
                     "§1 Layer height",
                     exact_date("2026-07-30")?,
                 )?,
@@ -227,7 +227,7 @@ impl M0EvidenceConstants {
                 MicronGranularity::ONE_MICRON,
                 EvidenceSource::corpus_study(
                     EvidenceId::new("phase8-micron-chord-canonicalization-2026-07-24")?,
-                    "docs/specs/SPEC-P8-RELOCATE.md",
+                    "docs/engineering-journal/specs/SPEC-P8-RELOCATE.md",
                     "§5.3 Layer 3/amendment G",
                     exact_date("2026-07-24")?,
                 )?,
@@ -238,7 +238,7 @@ impl M0EvidenceConstants {
                 6.0,
                 EvidenceSource::owner_decision(
                     EvidenceId::new("p8-pocket-voxel-owner-decision")?,
-                    "docs/specs/SPEC-P8-RELOCATE.md",
+                    "docs/engineering-journal/specs/SPEC-P8-RELOCATE.md",
                     "§4.1",
                     exact_date("2026-07-25")?,
                 )?,
@@ -342,7 +342,7 @@ impl M0EvidenceConstants {
                 FiniteInterval::new(19.91, 30.48, BoundKind::Exclusive, BoundKind::Exclusive)?,
                 EvidenceSource::calibration_plate(
                     PlateId::from("COUPON-PLATE-6-support-arm-capacity"),
-                    "docs/reference/plate-06-results.md",
+                    "docs/engineering-journal/reference/plate-06-results.md",
                     "§5 Finding 2",
                     exact_date("2026-07-31")?,
                 )?,

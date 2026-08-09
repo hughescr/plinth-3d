@@ -18,7 +18,7 @@ docs/artifacts/
 /artifacts/
 scripts/treant_v2_results.json
 
-# Compiled Typst PDFs (e.g. docs/reference/*.typ) land here. The .typ/.md
+# Compiled Typst PDFs (e.g. docs/engineering-journal/reference/*.typ) land here. The .typ/.md
 # source stays tracked; the rendered PDF is a build product like any other.
 /output/
 

@@ -53,7 +53,7 @@ pub struct M0Constants {
 /// declaration set. The policy literals remain owned by their canonical
 /// registry entries: seven are `Placeholder` policy values and
 /// `PRINT_FLOOR_CHORD_MM` is an owner-decision `Measured` value. See
-/// `docs/specs/SPEC-EMBED-POLICY.md` "Normative constants" and
+/// `docs/engineering-journal/specs/SPEC-EMBED-POLICY.md` "Normative constants" and
 /// "PRINT-FLOOR amendment", and
 /// `docs/engineering-journal/03-physics-and-constants.md` §3.6.
 ///

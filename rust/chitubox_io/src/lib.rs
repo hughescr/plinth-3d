@@ -9,7 +9,7 @@
 //! byte-identical; (b) every write re-parses and structurally verifies before
 //! done; (c) unknown/opaque regions are preserved verbatim, never zeroed.
 //!
-//! See `docs/specs/SPEC-CHITUBOX-RS.md` and `docs/specs/CHITUBOX-FORMAT.md`.
+//! See `docs/engineering-journal/specs/SPEC-CHITUBOX-RS.md` and `docs/engineering-journal/specs/CHITUBOX-FORMAT.md`.
 //!
 //! Honesty clause: a passing `verify` means the output is structurally
 //! self-consistent (magics, offsets, coverage) — NOT that ChituBox will load
