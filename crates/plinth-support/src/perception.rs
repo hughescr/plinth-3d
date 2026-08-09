@@ -3176,11 +3176,13 @@ pub(crate) struct RetainedLoadTranspose {
     /// design record sketched a `u64`; the landed G2 proof digest is a string
     /// and is stored as one rather than re-hashed into a weaker form.
     mesh_fingerprint: String,
-    /// Set when [`Self::record_commit`] refuses to trust its own remap
+    /// `Some` when [`Self::record_commit`] refuses to trust its own remap
     /// (guard 3, or an identity walk that did not see "survivors in preserved
-    /// order plus exactly one insertion").  A poisoned carrier answers every
-    /// guard query with a rebuild cause until the next repopulation.
-    poisoned: bool,
+    /// order plus exactly one insertion") — carrying WHICH of the three
+    /// [`PoisonCause`] groups fired (FU-8g H4, D6, the rider's split of the
+    /// collapsed `Poisoned` label).  A poisoned carrier answers every guard
+    /// query with a rebuild cause until the next repopulation.
+    poison_cause: Option<PoisonCause>,
     /// Counted guard misses, carried across repopulations — the test-visible
     /// twin of the `retained_load_rebuilds` census counter.
     rebuild_count: usize,
@@ -3195,14 +3197,70 @@ pub(crate) struct RetainedLoadTranspose {
     last_update_operations: usize,
 }
 
+/// FU-8g H4 (D6, F11) — which of the three genuinely distinct bugs poisoned
+/// the carrier.  `RetainedLoadRebuildCause::Poisoned` used to collapse all
+/// nine `record_commit` refusal sites into one census label; the treant's 21
+/// poison rebuilds (`CURRENT-STATUS.md` §G6d.8) were counted but never
+/// attributed.  This is the split, one variant per group:
+///
+/// - [`Self::Guard3Generic`] — the merged seat resolved GENERIC, so the
+///   bucket-union identity (F-G6-1) does not hold.  A silent-wrongness guard;
+///   the design predicted this would never fire on real geometry (F11), so a
+///   nonzero count here is a NEW finding, not a confirmation.
+/// - [`Self::CommitShape`] — the caller handed `record_commit` something that
+///   is not a tournament merge, or an internal bookkeeping invariant the
+///   merge itself depends on did not hold: out-of-range/equal `left`/`right`,
+///   a committed list of the wrong length, a parent that is not
+///   `LoadOwner::Specialized`, the `first_specialized_owner` recovery
+///   underflowing, or (H4 addition, see the doc comment on the `poison`
+///   call site) the merged arena offset not fitting `u32`.
+/// - [`Self::IdentityWalk`] — the identity walk could not name the remap:
+///   a position-bit tie at the insertion point (G6b), the inserted seat not
+///   matching the committed position, a second divergence, an unmatched
+///   survivor, or no insertion ever recorded.
+///
+/// # Deviation from F11's inventory, recorded rather than absorbed
+///
+/// F11 (`fu8g-design-2026-08-08.md`) counted **nine** `poison()` call sites
+/// in `record_commit` and bounded its own search to `:3378–3480`. Source
+/// review at H4 found a **tenth**, one line past that bound: the
+/// `u32::try_from(merged_offset).is_err()` guard, which protects the arena
+/// offset arithmetic from overflowing `u32` once the identity walk has
+/// already succeeded. F11 did not classify it. It is unreachable on any
+/// mesh this engine has ever run (the arena would need to exceed
+/// `u32::MAX` live+dead `u32` cells) and is defensive rather than
+/// caller-shape or position-matching in character — the same character as
+/// the `first_specialized_owner` underflow check F11 itself placed in
+/// **commit shape**. Classified there by that precedent, not left
+/// unclassified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PoisonCause {
+    Guard3Generic,
+    CommitShape,
+    IdentityWalk,
+}
+
+impl PoisonCause {
+    /// The census label for this cause (FU-8g H4, D6).
+    #[cfg(feature = "census")]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Guard3Generic => "poisoned_guard3",
+            Self::CommitShape => "poisoned_commit_shape",
+            Self::IdentityWalk => "poisoned_identity_walk",
+        }
+    }
+}
+
 /// Why one gate round could not (or, in G6a, additionally did not need to)
 /// reuse the retained transpose.  Every variant maps to one counted rebuild.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetainedLoadRebuildCause {
     /// [`RetainedLoadTranspose::record_commit`] invalidated the carrier:
     /// guard 3 fired, or the identity walk diverged from the one-insertion
-    /// shape it requires.
-    Poisoned,
+    /// shape it requires.  FU-8g H4: carries WHICH of the three
+    /// [`PoisonCause`] groups fired, instead of collapsing them.
+    Poisoned(PoisonCause),
     /// Guard 1: the retained transpose met a different mesh.
     MeshFingerprint,
     /// Guard 2: the fresh physical list is not the witnessed one.
@@ -3217,7 +3275,7 @@ impl RetainedLoadRebuildCause {
     #[cfg(feature = "census")]
     const fn label(self) -> &'static str {
         match self {
-            Self::Poisoned => "poisoned",
+            Self::Poisoned(cause) => cause.label(),
             Self::MeshFingerprint => "mesh_fingerprint",
             Self::ContactWitness => "contact_witness",
             Self::BucketCardinality => "bucket_cardinality",
@@ -3248,8 +3306,8 @@ impl RetainedLoadTranspose {
         verified_mesh: &VerifiedMeshFingerprint<'_>,
         contacts: &[PhysicalContact],
     ) -> Option<RetainedLoadRebuildCause> {
-        if self.poisoned {
-            return Some(RetainedLoadRebuildCause::Poisoned);
+        if let Some(cause) = self.poison_cause {
+            return Some(RetainedLoadRebuildCause::Poisoned(cause));
         }
         if self.mesh_fingerprint != verified_mesh.fingerprint() {
             return Some(RetainedLoadRebuildCause::MeshFingerprint);
@@ -3321,8 +3379,8 @@ impl RetainedLoadTranspose {
         contacts: &[PhysicalContact],
         contact_rows: &[usize],
     ) -> Option<RetainedLoadRebuildCause> {
-        if self.poisoned {
-            return Some(RetainedLoadRebuildCause::Poisoned);
+        if let Some(cause) = self.poison_cause {
+            return Some(RetainedLoadRebuildCause::Poisoned(cause));
         }
         if self.buckets.len() != contact_rows.len() || contacts.len() != contact_rows.len() {
             return Some(RetainedLoadRebuildCause::BucketCardinality);
@@ -3339,9 +3397,10 @@ impl RetainedLoadTranspose {
     }
 
     /// Invalidate the carrier and release its payload.  The next gate round
-    /// takes a counted full rebuild ([`RetainedLoadRebuildCause::Poisoned`]).
-    fn poison(&mut self) {
-        self.poisoned = true;
+    /// takes a counted full rebuild ([`RetainedLoadRebuildCause::Poisoned`]),
+    /// attributed to `cause` (FU-8g H4, D6).
+    fn poison(&mut self, cause: PoisonCause) {
+        self.poison_cause = Some(cause);
         self.arena = Vec::new();
         self.buckets = Vec::new();
         self.cells = 0;
@@ -3383,22 +3442,22 @@ impl RetainedLoadTranspose {
         committed_position_mm: [f64; 3],
         merged_resolves_specialized: bool,
     ) {
-        if self.poisoned {
+        if self.poison_cause.is_some() {
             return;
         }
         // Guard 3.  A generic-resolving merged seat's bucket is NOT the union
         // of its parents' buckets, so the remap below would be silently wrong.
         if !merged_resolves_specialized {
-            self.poison();
+            self.poison(PoisonCause::Guard3Generic);
             return;
         }
         let old_len = self.contact_witness.len();
         if left >= old_len || right >= old_len || left == right {
-            self.poison();
+            self.poison(PoisonCause::CommitShape);
             return;
         }
         if positions_after.len() + 1 != old_len {
-            self.poison();
+            self.poison(PoisonCause::CommitShape);
             return;
         }
         // The bucket-union identity additionally needs both parents
@@ -3407,13 +3466,13 @@ impl RetainedLoadTranspose {
         let (LoadOwner::Specialized(left_owner), LoadOwner::Specialized(_)) =
             (self.contact_witness[left].0, self.contact_witness[right].0)
         else {
-            self.poison();
+            self.poison(PoisonCause::CommitShape);
             return;
         };
         // `owner = first_specialized_owner + index` by construction, so the
         // base recovers from any specialized survivor — the left parent here.
         let Some(first_specialized_owner) = left_owner.checked_sub(left as u32) else {
-            self.poison();
+            self.poison(PoisonCause::CommitShape);
             return;
         };
         // Identity walk: match survivors in order; the single divergence is
@@ -3445,14 +3504,14 @@ impl RetainedLoadTranspose {
                     // guess, in a case no corpus commit has ever produced
                     // (all 21 `make_raking_blade` remaps were exact).
                     if insertion.is_none() && bits == position_bits(committed_position_mm) {
-                        self.poison();
+                        self.poison(PoisonCause::IdentityWalk);
                         return;
                     }
                     survivor = survivor_indices.next();
                 }
                 _ if insertion.is_none() => {
                     if bits != position_bits(committed_position_mm) {
-                        self.poison();
+                        self.poison(PoisonCause::IdentityWalk);
                         return;
                     }
                     insertion = Some(new_index);
@@ -3460,7 +3519,7 @@ impl RetainedLoadTranspose {
                 _ => {
                     // A second divergence: the new list is not "survivors in
                     // order plus one insertion".
-                    self.poison();
+                    self.poison(PoisonCause::IdentityWalk);
                     return;
                 }
             }
@@ -3468,11 +3527,11 @@ impl RetainedLoadTranspose {
         if survivor.is_some() {
             // A survivor was never matched, so the walk cannot name the
             // remap it would need.
-            self.poison();
+            self.poison(PoisonCause::IdentityWalk);
             return;
         }
         let Some(insert_at) = insertion else {
-            self.poison();
+            self.poison(PoisonCause::IdentityWalk);
             return;
         };
         // Merged bucket: linear ascending dedup merge of the parents' buckets,
@@ -3481,8 +3540,12 @@ impl RetainedLoadTranspose {
         let (left_offset, left_len) = self.buckets[left];
         let (right_offset, right_len) = self.buckets[right];
         let merged_offset = self.arena.len();
+        // FU-8g H4 deviation from F11's inventory (see the doc comment on
+        // `PoisonCause::CommitShape`): a tenth `poison()` site F11 did not
+        // enumerate, classified `CommitShape` by the same precedent as the
+        // `first_specialized_owner` underflow check above.
         if u32::try_from(merged_offset).is_err() {
-            self.poison();
+            self.poison(PoisonCause::CommitShape);
             return;
         }
         let (mut cursor_l, end_l) = (left_offset as usize, (left_offset + left_len) as usize);
@@ -3739,7 +3802,10 @@ impl RetainedLoadTranspose {
         verified_mesh: &VerifiedMeshFingerprint<'_>,
         contacts: &[PhysicalContact],
     ) -> Result<(FinalizedLoadPartition, SpecializedLoadBaseline), GenericPerceptionError> {
-        debug_assert!(!self.poisoned, "the guard chain admits no poisoned carrier");
+        debug_assert!(
+            self.poison_cause.is_none(),
+            "the guard chain admits no poisoned carrier"
+        );
         debug_assert_eq!(
             self.buckets.len(),
             contacts.len(),
@@ -3874,7 +3940,7 @@ impl RetainedLoadTranspose {
                 .map(|contact| (contact.owner, contact.point_mm))
                 .collect(),
             mesh_fingerprint: verified_mesh.fingerprint().to_owned(),
-            poisoned: false,
+            poison_cause: None,
             rebuild_count,
             // FU-8f phase G6c: a freshly absorbed carrier has had no commit
             // applied to IT yet — the build that produced it already paid
@@ -3926,7 +3992,7 @@ impl RetainedLoadTranspose {
                 .map(|contact| (contact.owner, contact.point_mm))
                 .collect(),
             mesh_fingerprint: String::new(),
-            poisoned: false,
+            poison_cause: None,
             rebuild_count: 0,
             last_update_operations: 0,
         }
@@ -3956,7 +4022,16 @@ impl RetainedLoadTranspose {
 
     #[cfg(test)]
     pub(crate) const fn is_poisoned_for_test(&self) -> bool {
-        self.poisoned
+        self.poison_cause.is_some()
+    }
+
+    /// FU-8g H4 — which [`PoisonCause`] group fired, if any.  The
+    /// mutation-proven twin of [`Self::is_poisoned_for_test`]: that method
+    /// only proves poisoning happened, this one proves the split attributes
+    /// it correctly.
+    #[cfg(test)]
+    pub(crate) const fn poison_cause_for_test(&self) -> Option<PoisonCause> {
+        self.poison_cause
     }
 
     /// The row invariants a retained round will read instead of rebuilding
@@ -8737,13 +8812,23 @@ mod tests {
         );
         assert_eq!(
             poisoned.entry_rebuild_cause(&proof, &fixture.contacts),
-            Some(RetainedLoadRebuildCause::Poisoned),
+            Some(RetainedLoadRebuildCause::Poisoned(
+                PoisonCause::Guard3Generic
+            )),
             "a poisoned carrier must answer every entry guard with a rebuild",
         );
         assert_eq!(
             poisoned.cardinality_rebuild_cause(&fixture.contacts, &fixture.contact_rows()),
-            Some(RetainedLoadRebuildCause::Poisoned),
+            Some(RetainedLoadRebuildCause::Poisoned(
+                PoisonCause::Guard3Generic
+            )),
             "a poisoned carrier must answer the cardinality guard too",
+        );
+        assert_eq!(
+            poisoned.poison_cause_for_test(),
+            Some(PoisonCause::Guard3Generic),
+            "FU-8g H4: a generic-resolving merge must attribute to Guard3Generic, \
+             not collapse into the old single Poisoned label",
         );
 
         // Positive arm: the same commit, resolving specialized, is accepted.
@@ -8916,7 +9001,7 @@ mod tests {
             RetainedLoadRebuildCause::MeshFingerprint,
             RetainedLoadRebuildCause::ContactWitness,
             RetainedLoadRebuildCause::BucketCardinality,
-            RetainedLoadRebuildCause::Poisoned,
+            RetainedLoadRebuildCause::Poisoned(PoisonCause::IdentityWalk),
         ]
         .into_iter()
         .enumerate()
@@ -9239,6 +9324,16 @@ mod tests {
             carrier.is_poisoned_for_test(),
             "a commit whose contact list is the wrong length did not poison retention",
         );
+        // FU-8g H4 mutation proof: this arm is `PoisonCause::CommitShape`.
+        // Delete `PoisonCause::CommitShape` from the `positions_after.len() +
+        // 1 != old_len` arm of `record_commit` (or otherwise stop it from
+        // being reached, e.g. by folding the length check into the identity
+        // walk) and this assertion fails.
+        assert_eq!(
+            carrier.poison_cause_for_test(),
+            Some(PoisonCause::CommitShape),
+            "a wrong-length commit must attribute to CommitShape",
+        );
 
         // (a2) the parents are not two distinct contacts of the witnessed
         // list: the bounds/distinctness check.
@@ -9272,6 +9367,16 @@ mod tests {
             "a commit whose inserted seat is not the committed contact did \
              not poison retention",
         );
+        // FU-8g H4 mutation proof: this arm is `PoisonCause::IdentityWalk`.
+        // Delete the `bits != position_bits(committed_position_mm)` refusal
+        // in the `_ if insertion.is_none()` arm of `record_commit` (or the
+        // `PoisonCause::IdentityWalk` argument to its `self.poison(...)`
+        // call) and this assertion fails.
+        assert_eq!(
+            carrier.poison_cause_for_test(),
+            Some(PoisonCause::IdentityWalk),
+            "a foreign inserted seat must attribute to IdentityWalk",
+        );
 
         // (d) the parents are not both specialized: the union identity's other
         // precondition (F-G6-1).
@@ -9297,11 +9402,20 @@ mod tests {
             carrier.is_poisoned_for_test(),
             "a merge with a generic parent did not poison retention",
         );
+        // FU-8g H4 mutation proof: this arm is `PoisonCause::CommitShape`.
+        // Delete the `LoadOwner::Specialized` match guard's `else` arm's
+        // `PoisonCause::CommitShape` argument in `record_commit` and this
+        // assertion fails.
+        assert_eq!(
+            carrier.poison_cause_for_test(),
+            Some(PoisonCause::CommitShape),
+            "a generic parent must attribute to CommitShape",
+        );
 
         // (e) a poisoned carrier stays poisoned and answers every guard.
         assert_eq!(
             carrier.entry_rebuild_cause(&fixture.proof(), &fixture.contacts),
-            Some(RetainedLoadRebuildCause::Poisoned),
+            Some(RetainedLoadRebuildCause::Poisoned(PoisonCause::CommitShape)),
         );
         carrier.record_commit(left, right, survivors().into_iter(), merged_position, true);
         assert!(
@@ -9907,8 +10021,19 @@ mod tests {
             );
             assert_eq!(
                 carrier.entry_rebuild_cause(&fixture.proof(), &fixture.contacts),
-                Some(RetainedLoadRebuildCause::Poisoned),
+                Some(RetainedLoadRebuildCause::Poisoned(
+                    PoisonCause::IdentityWalk
+                )),
                 "the tie must surface as a counted rebuild",
+            );
+            // FU-8g H4 mutation proof: this is `PoisonCause::IdentityWalk`.
+            // Delete the `PoisonCause::IdentityWalk` argument from the
+            // position-bit-tie `self.poison(...)` call in `record_commit`
+            // and this assertion fails.
+            assert_eq!(
+                carrier.poison_cause_for_test(),
+                Some(PoisonCause::IdentityWalk),
+                "the position-bit tie must attribute to IdentityWalk",
             );
         }
 

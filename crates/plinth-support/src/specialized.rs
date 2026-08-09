@@ -3031,6 +3031,11 @@ fn consolidate(
     let mut evaluated_variants = initial_baseline.executed_variant_count;
     let initial_baseline = initial_baseline.baseline;
     let mut gathered_proposals = 0usize;
+    // FU-8g H4 (D7, F12): the contact count the merge-round loop entered
+    // with, recorded beside its exit so a transcript can state "1,366 -> 543"
+    // without a rerun.
+    #[cfg(feature = "census")]
+    let contacts_first = contacts.len();
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
@@ -3060,6 +3065,13 @@ fn consolidate(
             });
         }
         if proposals.is_empty() {
+            // FU-8g H4 (D7): the tournament ran out of pair proposals to
+            // gather, rather than gathering some and refusing all of them.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "no_proposals",
+            ));
             break;
         }
         let outcome = evaluate_gate_batch(
@@ -3091,12 +3103,29 @@ fn consolidate(
             .checked_add(outcome.executed_variant_count)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         let Some((proposal_index, _)) = outcome.accepted else {
+            // FU-8g H4 (D7): §17.1's "the tournament ends because no
+            // proposal in the final batch is safe, not because proposals ran
+            // out and not on a cap" — recorded at the site it happens,
+            // instead of read back out of a scratch log.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "no_safe_proposal",
+            ));
             break;
         };
         let required_iterations = iterations
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         if required_iterations > limits.max_merge_iterations {
+            // FU-8g H4 (D7): the third named exit -- a typed refusal, but
+            // still one of the tournament's own three stopping modes, so it
+            // is recorded here rather than left to the error variant alone.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "iteration_cap",
+            ));
             return Err(SpecializedError::MergeIterationLimit {
                 required: required_iterations,
                 limit: limits.max_merge_iterations,
@@ -3147,6 +3176,11 @@ fn consolidate(
         }
         next.sort_by(compare_contacts);
         *contacts = next;
+        // FU-8g H4 (D7): one committed round, counted unconditionally --
+        // beside the retained-load synchronization below, but not gated on
+        // it, because retention observing the commit and the tournament
+        // committing the merge are two different facts.
+        crate::census_record!(crate::census::record_merge_tournament_commit());
         // FU-8f phase G6a: synchronize retention with the committed list,
         // immediately after `*contacts = next` and before the next round's
         // gather (design D-G6-2).  A walk that cannot name the remap poisons

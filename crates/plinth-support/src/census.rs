@@ -142,6 +142,7 @@ pub struct CensusData {
     pub scaled_caps: Vec<ScaledCapRow>,
     pub gate_proposals: GateProposalCensus,
     pub retained_load: RetainedLoadCensus,
+    pub merge_tournament: MergeTournamentCensus,
 }
 
 /// FU-8f phase G6a — the merge gate's retained-load-transpose accounting.
@@ -175,6 +176,66 @@ pub struct RetainedLoadCensus {
     /// `build_gate_load_state`) and therefore in the sum.
     pub charged_operations: u128,
     pub executed_operations: u128,
+}
+
+/// FU-8g H4 (D7, F12) — the merge tournament's own committed-round counter
+/// and stopping mode, so a future treant transcript proves `rounds_committed`
+/// and *why it stopped* without scratch instrumentation (the G6d precedent:
+/// `PLINTH_G6D_ROUNDS` counted 823 committed rounds against 826 load
+/// builds, then was deleted before the gates — see `CURRENT-STATUS.md`
+/// §17.1/§G6d.8).
+///
+/// `tournaments` counts `consolidate()` invocations (each one "opened a
+/// gate"); `rounds_committed` counts merges that were actually committed
+/// (`contacts` mutated in place), which is **not** the same number as
+/// `GateProposalCensus::batches` or [`RetainedLoadCensus::rounds`] — those
+/// count load builds, one of which happens on every batch whether or not it
+/// accepts a proposal. `contacts_first`/`contacts_last`/`exit_reason` are the
+/// **most recent** tournament's own values (there is one `consolidate()` call
+/// per model on every corpus/treant run today, so "most recent" and "only"
+/// coincide in practice; the field is a last-write-wins accumulator, the same
+/// idiom [`ScaledCapRow`] documents for its own single-materialization
+/// fields, in case that ever changes).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MergeTournamentCensus {
+    pub tournaments: usize,
+    pub rounds_committed: usize,
+    pub contacts_first: usize,
+    pub contacts_last: usize,
+    pub exit_reason: &'static str,
+}
+
+impl MergeTournamentCensus {
+    /// The pure accumulation this row's own tests pin directly, decoupled
+    /// from the process-global singleton `with()` gates on: this codebase's
+    /// census pipeline is only ever exercised out-of-process (the
+    /// `embed_incidence_census` example, `PLINTH_CENSUS=1`), never inside
+    /// `cargo test`, because `cargo test` runs this crate's tests in
+    /// parallel in one process and dozens of them call `consolidate()` --
+    /// driving the real `record_merge_tournament_commit`/`_exit` through the
+    /// shared `Mutex<CensusData>` from a unit test would let concurrently
+    /// running tests' own tournaments pollute the count under test. Testing
+    /// the accumulation here, and trusting the one-line call sites in
+    /// `specialized.rs` by inspection (each fires exactly where D7 names),
+    /// avoids inventing a cross-test lock this follow-up has no mandate to
+    /// add.
+    fn record_commit(&mut self) {
+        self.rounds_committed = self.rounds_committed.saturating_add(1);
+    }
+
+    /// See [`Self::record_commit`]'s doc comment for why this is tested in
+    /// isolation from the global singleton.
+    fn record_exit(
+        &mut self,
+        contacts_first: usize,
+        contacts_last: usize,
+        exit_reason: &'static str,
+    ) {
+        self.tournaments = self.tournaments.saturating_add(1);
+        self.contacts_first = contacts_first;
+        self.contacts_last = contacts_last;
+        self.exit_reason = exit_reason;
+    }
 }
 
 /// FU-8c observation O1 — how much merge-proposal work each model actually
@@ -243,6 +304,7 @@ pub fn reset() {
         census.scaled_caps.clear();
         census.gate_proposals = GateProposalCensus::default();
         census.retained_load = RetainedLoadCensus::default();
+        census.merge_tournament = MergeTournamentCensus::default();
     });
 }
 
@@ -285,6 +347,34 @@ pub(crate) fn record_gate_proposals(proposals: usize) {
     with(|census| {
         census.gate_proposals.batches = census.gate_proposals.batches.saturating_add(1);
         census.gate_proposals.proposals = census.gate_proposals.proposals.saturating_add(proposals);
+    });
+}
+
+/// FU-8g H4 (D7) — one committed merge.  Called from `consolidate`
+/// immediately beside `RetainedLoadTranspose::record_commit`, but
+/// unconditionally — this counts every round the tournament actually
+/// committed, not only the rounds retention was able to observe.
+pub(crate) fn record_merge_tournament_commit() {
+    with(|census| census.merge_tournament.record_commit());
+}
+
+/// FU-8g H4 (D7) — one tournament's exit: `contacts_first` is the contact
+/// count `consolidate` entered the merge-round loop with, `contacts_last` is
+/// the count at the exit named by `exit_reason` (before the terminal
+/// coalesce, per D7), and `exit_reason` is one of `"no_safe_proposal"`,
+/// `"no_proposals"` or `"iteration_cap"` — the loop's three self-contained
+/// exits (`MergeTotalProposalLimit` and `GateResourceOverflow` are typed
+/// refusals with their own error variant and are not tournament "stopping
+/// modes" in F12's sense, so they are deliberately not a fourth reason here).
+pub(crate) fn record_merge_tournament_exit(
+    contacts_first: usize,
+    contacts_last: usize,
+    exit_reason: &'static str,
+) {
+    with(|census| {
+        census
+            .merge_tournament
+            .record_exit(contacts_first, contacts_last, exit_reason);
     });
 }
 
@@ -428,6 +518,29 @@ fn report_scaled_caps(model: &str, census: &CensusData) {
             cells.push(format!(
                 "retained_load_executed_operations={}",
                 census.retained_load.executed_operations
+            ));
+            // FU-8g H4 (D7), additive like the cells above: the tournament's
+            // own committed-round counter and stopping mode, on the same row
+            // because it is the same batches -- see [`MergeTournamentCensus`].
+            cells.push(format!(
+                "merge_tournaments={}",
+                census.merge_tournament.tournaments
+            ));
+            cells.push(format!(
+                "merge_rounds_committed={}",
+                census.merge_tournament.rounds_committed
+            ));
+            cells.push(format!(
+                "merge_contacts_first={}",
+                census.merge_tournament.contacts_first
+            ));
+            cells.push(format!(
+                "merge_contacts_last={}",
+                census.merge_tournament.contacts_last
+            ));
+            cells.push(format!(
+                "merge_exit_reason={}",
+                census.merge_tournament.exit_reason
             ));
         }
         row(model, "T0_scaled_cap", &cells);
@@ -1117,5 +1230,104 @@ pub fn report_failure(model: &str) {
     report_scaled_caps(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MergeTournamentCensus;
+
+    /// FU-8g H4 (D7) — a fixture tournament: a scripted sequence of
+    /// `record_commit`/`record_exit` calls shaped exactly like a real
+    /// `consolidate()` run (`specialized.rs`, D7's three named call sites),
+    /// asserting `rounds_committed` equals the committed merges and
+    /// `exit_reason` is the loop's actual exit. Tested against the pure
+    /// [`MergeTournamentCensus`] methods directly, decoupled from the
+    /// process-global `Mutex<CensusData>` singleton and the `PLINTH_CENSUS`
+    /// runtime gate — see [`MergeTournamentCensus::record_commit`]'s doc
+    /// comment for why: `cargo test` runs this crate's tests in parallel in
+    /// one process, and dozens of them call `consolidate()`, so driving the
+    /// real recorders through the shared singleton from here would let
+    /// concurrently running tests' own tournaments pollute the count under
+    /// test.
+    ///
+    /// The three committed rounds and the exit are the shape F12 itself
+    /// names: contacts fall by exactly one per committed round (each merge
+    /// removes two parents and inserts one merged seat), so
+    /// `contacts_first - contacts_last == rounds_committed` is not an
+    /// incidental fact of this fixture, it is the invariant `consolidate`'s
+    /// own loop guarantees on every real run — asserted here as a second,
+    /// independent check on the same numbers.
+    ///
+    /// # Mutation proof
+    ///
+    /// Delete the `saturating_add(1)` in [`MergeTournamentCensus::record_commit`]
+    /// (or replace it with a no-op) and `rounds_committed_matches_the_scripted_commits`
+    /// fails. Delete the `exit_reason = exit_reason` assignment (or any of the
+    /// three) in [`MergeTournamentCensus::record_exit`] and
+    /// `exit_reason_and_contact_counts_are_the_most_recent_exits_own` fails.
+    #[test]
+    fn rounds_committed_matches_the_scripted_commits() {
+        let mut census = MergeTournamentCensus::default();
+        // A tournament that opens with 1_366 contacts (F12's own number) and
+        // commits three merges before the gate refuses every remaining
+        // proposal -- `consolidate`'s "no_safe_proposal" exit.
+        let contacts_first = 1_366;
+        for _ in 0..3 {
+            census.record_commit();
+        }
+        let contacts_last = contacts_first - 3;
+        census.record_exit(contacts_first, contacts_last, "no_safe_proposal");
+
+        assert_eq!(
+            census.rounds_committed, 3,
+            "three record_commit calls must count as three committed rounds",
+        );
+        assert_eq!(
+            census.tournaments, 1,
+            "one record_exit call must count as one tournament",
+        );
+        assert_eq!(
+            census.contacts_first - census.contacts_last,
+            census.rounds_committed,
+            "each committed round removes exactly one contact (two parents \
+             replaced by one merged seat), so this must hold on every real \
+             tournament, not just this fixture",
+        );
+        assert_eq!(census.exit_reason, "no_safe_proposal");
+    }
+
+    /// FU-8g H4 (D7) — the three named exit reasons `consolidate` actually
+    /// passes (`specialized.rs`'s three `record_merge_tournament_exit` call
+    /// sites, verbatim), and that a later tournament's exit overwrites an
+    /// earlier one's fields rather than accumulating them (documented as
+    /// last-write-wins on [`MergeTournamentCensus`] itself) while
+    /// `tournaments` keeps counting every exit.
+    #[test]
+    fn exit_reason_and_contact_counts_are_the_most_recent_exits_own() {
+        let mut census = MergeTournamentCensus::default();
+        for (round, (contacts_first, contacts_last, exit_reason)) in [
+            (100, 100, "no_proposals"),
+            (200, 199, "iteration_cap"),
+            (60, 12, "no_safe_proposal"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            census.record_exit(contacts_first, contacts_last, exit_reason);
+            assert_eq!(
+                census.tournaments,
+                round + 1,
+                "every record_exit call must count as one more tournament",
+            );
+            assert_eq!(census.contacts_first, contacts_first);
+            assert_eq!(census.contacts_last, contacts_last);
+            assert_eq!(census.exit_reason, exit_reason);
+        }
+        // The last exit recorded above is the one still visible: last write
+        // wins, not first, and not an accumulation.
+        assert_eq!(census.contacts_first, 60);
+        assert_eq!(census.contacts_last, 12);
+        assert_eq!(census.exit_reason, "no_safe_proposal");
     }
 }
