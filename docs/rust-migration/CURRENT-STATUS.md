@@ -5059,6 +5059,271 @@ opened to fix is **gone**, the charge that replaced it is **sufficient and 2.71 
 cap**, and the reserves that were predicted at tens of gigabytes are **megabytes**. **The treant
 still has no seal**, and what stops it now is named, derived to the line, and opened as FU-32.
 
+## FU-32 phase J3 attributed 2026-08-09 — the controller-digest movement is DECISION-NEUTRAL, proved from source AND parent-vs-tip on 687,288 dumped routing-output lines; NOTHING is re-pinned {#fu32-j3-2026-08-09}
+
+**No engine code.** This phase adds one document section and one ledger addendum. `git diff` over
+`crates/` and `rust/` is empty at this tip, and the two digest-pinned tests J2 left failing are
+still failing, still by design, still with their old expectations untouched. **This is FU-10
+protocol step 2 and nothing else**: *"a golden is not re-pinned until every missing member is
+attributed"* (`CURRENT-STATUS.md:620`), attribution lands as evidence **before** the ruling is
+sought, and the ruling is sought **before** anything is re-pinned
+([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)).
+
+### J3.1 — The claim, stated so it can be falsified
+
+> J2 (`c14754e`) moves exactly three named u64 quantities and everything downstream of them:
+> `TerminalRouteEvidence::controller_digest_before`,
+> `TerminalDisposition::SkippedQuarantined::controller_digest_before` (and its sealed copy
+> `FinalizedSkippedEvidence::controller_digest_before`), and
+> `FinalizedCcoTranscript::final_controller_digest`. **No other observable of a support run
+> changes on any corpus model** — not one routed contact, seat position, route membership, live
+> member, coverage sample, named island, load, refusal, disposition or `NoWinnerEvidence` payload.
+
+Falsifiable two ways, and both were run: (a) if any production site *compared* a moved value, the
+movement could steer a decision — §J3.2 audits all 30 occurrences; (b) if any output field other
+than the named ones differed parent-vs-tip, the claim is simply false — §J3.3 dumps and diffs every
+one of them on all seven models.
+
+### J3.2 — Proof (a), from source at THIS tip: the value is an input to no decision
+
+The design pre-argued this at `bfa5b3b` (§F3, 24 grep hits). **Re-verified at `c14754e`, not
+carried forward.** `grep -rn controller_digest_before crates/ rust/` now returns **30** hits, all
+in `crates/plinth-support/src/cco.rs`; the +6 are entirely J2's own test apparatus (the retained
+`digest_full_walk_oracle` and the mutation triad). Classified by enclosing item:
+
+| class | count | sites (`cco.rs`) | what it does |
+|---|---:|---|---|
+| field / variant declarations | 3 | `:635`, `:691`, `:718` | storage |
+| accessor `FinalizedSkippedEvidence::controller_digest_before()` | 2 | `:728`, `:729` | read-only; **its only caller in the workspace is a test** (`:5508`) |
+| write sites (production) | 4 | `:1659`, `:1699`, `:1712`, `:1751` | `self.digest()` captured once per cadence entry and stored, on both the grown and the quarantined arm |
+| constructor plumbing `route_evidence` | 2 | `:2806`, `:2816` | stores |
+| copy-forward into the sealed row | 2 | `:2497`, `:2518` | copies |
+| **reads — every one a hash fold, none a comparison** | 4 | `:2338`, `:2345` (`digest_terminal_record` → `records_acc`), `:2416` (`digest_route_evidence`), `:2578` (`transcript_rows_digest`) | `word(...)` into an FNV stream |
+| doc comment | 1 | `:2155` (on `sealed_digest_matches_rebuilt`, `:2160`) | prose |
+| `#[cfg(test)]` items inside the module body | 4 | `:1599`, `:1625` (`grow_terminal_for_test`), `:2209`, `:2216` (`digest_full_walk_oracle`) | test-only |
+| `mod tests` (`:4452`+) | 8 | `:5418`, `:5500`, `:5508`, `:5548`, `:5890`, `:5961`, `:5977`, `:6238` | test-only |
+
+**Zero equality tests, zero ordering, zero branching, zero arithmetic on the value outside
+`#[cfg(test)]`.** The decisive site is `finalize_transcript_row`'s `checked_route` closure
+(`cco.rs:2457–2466`), which is the transcript's own admission check: it validates
+`physical_contact_id`, `terminal_id`, `original_key`, `plan_digest`, `loads_digest` and
+`geometry_digest` — **six fields, and deliberately neither `controller_digest_before` nor
+`forest_digest_before`.** A row is admitted or refused without ever reading the moved value.
+
+**Extended, as the task required, to every consumer of the moved values** — the design's §F4 chain,
+re-walked at this tip. Every one is a fold, a same-run recompute-and-compare, or a printed record:
+
+| consumer | site | what it does with the moved value | can it move a decision? |
+|---|---|---|---|
+| `records_acc` / `digest()` | `cco.rs:2324`, `:2089`, `:2097` | folds it into the controller digest | no — output only |
+| `transcript_rows_digest` → `ordered_disposition_digest` | `cco.rs:2547`, `:1562` | folds | no |
+| `finalized_transcript_digest` → `transcript_digest` | `cco.rs:2617` | folds `final_controller_digest` + `ordered_disposition_digest` | no |
+| `FinalizedCcoTranscript::validate_integrity` | `cco.rs:868–869` | recomputes both from the same rows and compares | no — self-consistency at one tip |
+| **brace tripwire** | `runner.rs:2775` → `sealed_digest_matches_rebuilt` `cco.rs:2160` | `rebuild_accumulators()` (`cco.rs:2128`) from scratch, compared to the sealed value **and** to the cached pair | no — compares a value to itself recomputed in the same run |
+| **rewire tripwire** | `runner.rs:2848` → same | same | no |
+| `SupportVerificationSnapshot.transcript_digest` → `verification_snapshot_digest` → `snapshot_digest` | `runner.rs:2560`, `:3459` | folds (1 of 17 inputs) | no |
+| `SupportVerificationSnapshot::validate_integrity` | `runner.rs:1342` | recomputes and compares | no |
+| `plinth_verify::verify_coverage` | `plinth-verify/src/lib.rs:153` | `measurement.snapshot_digest() != snapshot.digest()` — binds a measurement to the snapshot it was taken from | no — same run, same tip |
+| transit-measurement bindings | `transit_measurement.rs:983`, `:988`, `:1711` | same-run binding checks | no |
+| `RewireCcoBinding` | `cco.rs:3400` | same-run binding check | no |
+| census / `first_artifact` reporting | `examples/embed_incidence_census.rs:206`, `plinth-pipeline/examples/first_artifact.rs:106` | prints | no |
+| test literals + one golden JSON | see §J3.6 | pins | **these are the re-pin sites, and they are the entire cost** |
+
+Two riders worth stating because a reader will ask:
+
+- **The PR-8/OD-9 seat-attestation chain is untouched and provably independent.**
+  `extend_contact_attestation` (`cco.rs:2015–2022`) folds only its own prior head, the terminal id
+  and the stage — never the controller digest — so `contact_attestation_digest` cannot move with
+  it. The live witness is that the rewire preflight's attestation comparison
+  (`runner.rs:2830`) passes on all seven models at the tip.
+- **The F6 tripwires still genuinely recompute.** `sealed_digest_matches_rebuilt` calls
+  `rebuild_accumulators()` and never reads the cached fields, and additionally cross-checks
+  cached-vs-rebuilt, so it now catches a *second* failure mode (a drifted accumulator) that the
+  pre-J2 walk could not express. The design cited these sites as `runner.rs:2763` / `:2832` at
+  `bfa5b3b`; at this tip they are `runner.rs:2775` / `:2848`. **The semantics are unchanged —
+  recompute-from-state and compare — which the standing invariant requires.**
+
+### J3.3 — Proof (b), measured: parent-vs-tip routing-output dumps, all seven corpus models
+
+**Method (the design's §M6 recipe, ephemeral by construction).** A throwaway
+`git clone --shared` was checked out at the **parent** (`059b444`, J1) and at the **tip**
+(`c14754e`, J2), instrumented at both with byte-identical dump code — a full field-by-field
+`{:?}` of every finalized transcript row and every transcript header digest at
+`finalize_transcript`, plus every one of `verification_snapshot_digest`'s inputs and a `{:?}` of
+every routed contact, route membership, final live member, coverage sample and named island at
+the seal — and run over the corpus with `PLINTH_CENSUS_ONLY` per model, release,
+`--features census`, `PLINTH_THREADS=4`. The scratch tree, its binaries and the dumps are **not
+in git** and never will be (the standing G4 rule); the recipe above is the durable artefact.
+The parent build reproduced the seven **frozen OD-8 digests byte-identical**, and the tip build
+reproduced J2's seven **new** digests byte-identical — so both sides of the diff are the values of
+record, independently re-measured, not values copied from a commit message.
+
+| model | rows | Routed | Skipped | NoWinner | retained seat refusals | content lines compared | **row diffs after redacting `controller_digest_before` only** | **content-line diffs** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Sphere | 7 | 7 | 0 | 0 | 0 | 9,214 | **0** | **0** |
+| Cylinder | 54 | 54 | 0 | 0 | 0 | 509,285 | **0** | **0** |
+| make_box | 11 | 11 | 0 | 0 | 0 | 12,337 | **0** | **0** |
+| make_overhang_table | 84 | 73 | 4 | 7 | **293** | 50,592 | **0** | **0** |
+| make_toed_slab | 68 | 64 | 2 | 2 | **152** | 50,995 | **0** | **0** |
+| make_raking_blade | 33 | 27 | 4 | 2 | **46** | 34,308 | **0** | **0** |
+| make_thin_fin | 18 | 17 | 0 | 1 | **22** | 20,557 | **0** | **0** |
+| **total** | **275** | **253** | **10** | **12** | **513** | **687,288** | **0** | **0** |
+
+Read that as three separate findings:
+
+1. **Only three line kinds differ at all.** Across all seven dumps the differing lines are
+   exclusively `ROW`, `TRANSCRIPT` and `SNAPSHOT`. **Not one** `CONTACT`, `MEMBERSHIP`, `LIVE`,
+   `COVSAMPLE` or `ISLAND` line differs — 687,288 lines of actual routing output, byte-identical.
+2. **Within the rows, the redaction is the whole delta.** Replacing `controller_digest_before: N`
+   with a placeholder — a mechanical substitution whose scope is exactly the two named fields —
+   makes all 275 transcript rows byte-identical parent-to-tip, with their winners, families,
+   prices, clearance rows, dispositions and complete `anchor_seat_refusals` lists intact. The
+   refusal path is genuinely exercised (513 retained refusals across four models, reproducing the
+   design's §M5 counts 293 / 152 / 46 / 22 exactly), so this is not a vacuous diff over models
+   that never build refusal evidence.
+3. **Within the headers, exactly the predicted fields move.** Of the transcript's 10 header
+   digests, **3** move on every model — `final_controller_digest`, `ordered_disposition_digest`
+   (which folds the rows, and the rows carry the moved field) and `transcript_digest` (which folds
+   both). `plan_digest`, `finalized_load_digest`, `load_partition_digest`, `geometry_digest`,
+   `initial_forest_digest`, `initial_post_quarantine_forest_digest` and `final_forest_digest` are
+   **unmoved on all seven models — the forest itself is bit-identical.** Of
+   `verification_snapshot_digest`'s **17** inputs, **exactly 1** moves (`transcript_digest`);
+   `mesh_digest`, `topology_digest`, `plan_digest`, `load_digest`, `geometry_digest`,
+   `forest_digest`, `regular_digest`, `coverage_digest`, `named_islands_digest`,
+   `lowered_primitives_digest`, `routed_projection_digest`, `final_live_members_digest` and all
+   four count fields are unmoved.
+
+### J3.4 — Proof (c), an in-workspace witness that needs no scratch tree
+
+The failing `public_coverage_report_is_frozen_without_evidence_loss` prints the frozen golden and
+the tip's report in full. Flattened to scalar leaves and diffed mechanically: **185 leaves, exactly
+1 differs — `snapshot_digest`.** Every `request` bound, every one of the 11 `resources` counters,
+all 9 islands with their face ids, all 9 patches (`uncovered_area_mm2`, `cut_ambiguous`,
+`assessment_failed`, `worst_gap`) and all 9 defects are byte-identical. This is an *independent*
+witness on a different path — the procedural `make_overhang_table` through coverage measurement and
+`plinth-verify` — and it reproduces §J3.3's conclusion inside the committed test suite, with no
+instrumentation at all.
+
+### J3.5 — Why no value-preserving alternative was sought again
+
+Not re-litigated, and not asserted on authority either: the design proved it twice over (§F5). FNV-1a
+mixes GF(2)⁶⁴ XOR with Z/2⁶⁴ multiplication and therefore admits no composition law, so no rolling
+combination of a retained tail with a new prefix exists **for this algorithm**; and the stream's
+first segment is `(inserted, |terminals|, |cadence|)`, which takes a new value at the **front** on
+every call, while `terminals` is a `BTreeMap` iterated in terminal-id order against cadence-order
+insertion, so records splice mid-stream. Either obstruction alone kills retention. The movement is
+not a choice about how to write the fix; it is a property of the digest that was there before.
+
+### J3.6 — The from→to table, and the per-model routing-output verdict
+
+Measured at `c14754e` from a release `--features census` build, one `PLINTH_CENSUS_ONLY`
+invocation per model; the tip figures below were reproduced twice (J2's own sweep and this
+phase's independent instrumented sweep) and agree byte for byte.
+
+| model | frozen OD-8 `snapshot_digest` (base) | measured at `c14754e` | routed contacts | final live members | **routing-output identity verdict** |
+|---|---|---|---:|---:|---|
+| Sphere | `17667468971446251870` | `2297157889062365577` | 7 → 7 | unchanged | **IDENTICAL** — 9,214 content lines, 7 rows, 0 diffs |
+| Cylinder | `13310185350867878190` | `6853793710942395608` | 54 → 54 | unchanged | **IDENTICAL** — 509,285 content lines, 54 rows, 0 diffs |
+| make_box | `9657051231007502658` | `8709076999423814412` | 11 → 11 | unchanged | **IDENTICAL** — 12,337 content lines, 11 rows, 0 diffs |
+| make_overhang_table | `1875674282253663076` | `16396858890798947253` | 73 → 73 | unchanged | **IDENTICAL** — 50,592 content lines, 84 rows incl. 7 no-winner and 293 refusals, 0 diffs |
+| make_toed_slab | `2823659516373762066` | `133000971864625681` | 64 → 64 | unchanged | **IDENTICAL** — 50,995 content lines, 68 rows incl. 152 refusals, 0 diffs |
+| make_raking_blade | `9567737006650358297` | `18388631460456455184` | 27 → 27 | unchanged | **IDENTICAL** — 34,308 content lines, 33 rows incl. 46 refusals, 0 diffs |
+| make_thin_fin | `8797083662933568276` | `14656364680512457190` | 17 → 17 | unchanged | **IDENTICAL** — 20,557 content lines, 18 rows incl. 22 refusals, 0 diffs |
+
+**All seven move. All seven models produce bit-identical support.** The `routed_contacts` and
+`final_live_members` counts in the snapshot dumps are unmoved on every model, which is the same
+claim the census line makes and is stated here from the dump rather than from the census.
+
+### J3.7 — Every site that will need re-pinning at J4, enumerated
+
+**Code — three pinned values in two files, plus one provenance comment.** The enumeration is not a
+guess: gates 1 and 2 ran the entire workspace with `--no-fail-fast` and **exactly two tests fail**,
+so the set of digest pins this movement disturbs is closed by measurement. Corroborated by sweeping
+every ≥18-digit literal in `plinth-support`, `plinth-verify` and `plinth-pipeline` — the remaining
+hits are `f64` `to_bits` geometry fixtures (`support_runner_integration.rs:331–411`),
+plan/source-authority digests in `specialized.rs` (upstream of routing, unmoved and green),
+`penetration_census_equivalence.rs:421`/`:467` which cite two census digests **in doc comments as
+model identifiers only**, and `plinth-pipeline`'s `first_artifact` test, which pins **no** digest by
+deliberate design (`crates/plinth-pipeline/tests/first_artifact.rs:12`):
+
+| # | site | pinned now | measured at `c14754e` | test that fails today |
+|---|---|---|---|---|
+| 1 | `crates/plinth-support/tests/support_runner_integration.rs:137` (`make_toed_slab`, procedural) | `13_346_779_153_602_682_749` | **`2198459883570957390`** | `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing` |
+| 2 | `crates/plinth-support/tests/support_runner_integration.rs:144` (`make_raking_blade`, procedural) | `8_660_653_339_934_460_766` | **`74030269957898085`** | same test |
+| 3 | `crates/plinth-verify/tests/coverage_gate_overhang_table.json` → `"snapshot_digest"` | `5470664714994646368` | **`3706765241747593242`** | `public_coverage_report_is_frozen_without_evidence_loss` |
+| 4 | `crates/plinth-verify/tests/coverage_gate.rs:16–37` — the golden's provenance comment block | (prose) | needs a **new dated paragraph**, appended below the existing two refresh records, which stand unamended | — |
+
+The counts those two tests assert alongside the digests are **unchanged and must stay unchanged**:
+`make_toed_slab` 64 / 170, `make_raking_blade` 27 / 72, and the coverage report's 185-leaf body.
+**A J4 re-pin that also moves a count is not this movement and must stop.**
+
+**One pinned digest that must NOT be re-pinned, and the reason matters.**
+`verification_snapshot_digest_input_list_is_pinned` (`runner.rs:4976–5014`) asserts
+`snapshot.digest() == 11_833_545_896_309_364_349` over a synthetic fixture whose
+`transcript_digest` is `0`. It is **green at this tip**, and that is a finding rather than an
+accident: it is the guard that fires when the snapshot digest's *input list* widens, and its
+staying green is independent confirmation that J2 changed the **value of one input**, not the shape
+of the digest. If a J4 re-pin ever needs to touch this test, the change being re-pinned is not this
+one.
+
+**Doc record sites — dated addenda only; the FU-10 rule is that no earlier citation is rewritten**
+(`CURRENT-STATUS.md:3697`: *"Everything written before this section stands unamended"*). The seven
+base values occur **107 times across 9 files** (the ninth being `coverage_gate.rs`'s provenance
+comment, item 4 above); every one of them is a *dated measurement of its own date* and stays
+exactly as written. The sites that a J4 sweep must visit — because a reader would otherwise take
+them for a current pin rather than a historical one — are:
+
+| file | occurrences | what J4 owes it |
+|---|---:|---|
+| `docs/rust-migration/CURRENT-STATUS.md` | 64 | the FU-32 ledger row (`:5244`) and a new dated re-pin section carrying the from→to table; **no existing line edited** |
+| `docs/rust-migration/support-resource-caps-2026-08-05.md` | 8 | a dated addendum at §4's canonical table (`:209–216`) and at the OD-8 restatement (`:2347`) |
+| `docs/rust-migration/slicer-union-design-2026-08-07.md` | 15 | a dated addendum noting the FU-10 phase-C from→to tables (`:599–605`, `:700–706`) have been superseded by a second, unrelated movement |
+| `docs/rust-migration/decimation-design-2026-08-06.md` | 10 | dated addendum (`:510`, `:798`, `:895` cite `Cylinder`) |
+| `docs/rust-migration/census-embed-incidence-2026-08-04.md` | 5 | dated addendum (`:406`, `:429`) |
+| `docs/rust-migration/export-path-design-2026-08-07.md` | 1 | `:525` calls Sphere's digest "bit-for-bit the frozen OD-8" — needs the dated note |
+| `docs/rust-migration/contact-physics-2026-08-04.md` | 1 | `:261` table row |
+| `crates/plinth-support/tests/penetration_census_equivalence.rs` | 2 | `:421`, `:467` cite two digests **in doc comments as model identifiers**; prose only, no assertion |
+| `docs/rust-migration/fu32-design-2026-08-09.md` | — | **NOT amended.** It is a design landed verbatim under a provenance banner and is a record of 2026-08-09 at `bfa5b3b`. |
+
+**Goldens: there is exactly one golden file in the workspace**
+(`crates/plinth-verify/tests/coverage_gate_overhang_table.json`) and it is item 3 above.
+
+### J3.8 — Gates at this tip
+
+Tree clean before and after. (1) `cargo test --workspace --offline --no-fail-fast` — **1058
+passed / 2 failed**; (2) the same `--all-features` — **1063 passed / 2 failed**; (3)
+`cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` — clean; (4)
+`cargo fmt --all -- --check` — clean; (5) `git diff --check` — clean. **The two failures are
+exactly the two J2 recorded, by name and no others** —
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing` and
+`public_coverage_report_is_frozen_without_evidence_loss` — which is the invariant this phase was
+required to hold: **a new failure would have been a blocker, and there is none.** The FU-27
+environmental flake did not fire, so no re-run was needed. **J3 adds zero tests and moves zero
+counts**, which is what a no-engine-code phase must do.
+
+### J3.9 — What this attribution does NOT claim
+
+Stated plainly, because an attribution that overreaches is worse than none:
+
+- **The Weeping Treant is not part of this proof.** J2's run sealed it for the first time
+  (`snapshot_digest=423276951048565625`), but that is a **first measurement, not a pin** — no
+  golden for that model has ever existed, and there is no before-value to diff against. J6
+  measures the treant; it does not prove J2.
+- **The corpus is the witness, deliberately** (design OQ-2). All seven models exercise
+  `route_initial_cco` non-trivially and four of them exercise the refusal path, which is what the
+  claim needs; a 600 s treant run is kept off the verification critical path on purpose.
+- **This is a J1→J2 diff.** J1 was separately proved byte-identical to the base septet, and the
+  parent side of this diff re-measured those seven frozen values byte-identical, so the chain back
+  to `bfa5b3b` is closed — but the field-by-field dump comparison itself is parent-to-tip.
+- **No behavioural claim is made about the digest's *purpose*.** It remains a hash-chain link that
+  binds prior history into each transcript row; it binds a *different* stream now, and whether that
+  is acceptable provenance is precisely the owner's question, not this document's.
+
+**NO CAP, floor, constant, registry entry or digest input was raised, lowered or touched. No
+golden re-pinned, no doc table rewritten, no test expectation relaxed.**
+
+**AWAITING OWNER RULING — nothing re-pinned.**
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -5241,7 +5506,7 @@ Everything else here is non-blocking.
 | FU-29 | The **OQ-3 adequacy stitch site has zero corpus coverage**, and its `max_loop_vertices` cap is an unexercised refusal path | **Opened 2026-08-08 as ruling condition (2) of the FU-10 phase-C re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). §8.5 measurement (3) said the adequacy-probe path "moves zero rows on all seven models"; instrumentation at both stitch sites shows it **ran** zero rows: 2,956 print-layer rows against **0** adequacy rows, because `find_local_minima` always reaches `normalized_slice_layers(SliceStitchSpace::AdequacyProbe, …)` with an empty `probe_heights` — every local minimum matched a birth, so `suspects` is empty and the batch carries zero planes. "Moves zero rows" and "ran zero rows" are different claims and the record did not distinguish them. Consequence: the adequacy site's normalization has **no corpus-level evidence at all** — unit tests only — and the `max_loop_vertices` cap that phase-C deviation 2 adds there (a site that previously had no loop-vertex cap) is a **new refusal path that has never executed on real data**. This is a coverage gap, not a known defect. **First action:** construct a model, or a synthetic layer set, whose local minima do *not* all match births, so `probe_heights` is non-empty and the site executes on real geometry; then decide whether the cap belongs there at the value it has. |
 | FU-30 | Corpus coverage of `coalesce_exact_regular_seats` **halved** at the FU-10 phase-C cutover | **Opened 2026-08-08 by the re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). The specialized golden asserted `coalesced_seat_count == 1` for both corpus models; measured at the re-pinned tip it is `toed slab` **0** and `raking blade` **1**. With the corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the terminal coalescing pass is a measured no-op there and the count is now pinned per model. The pass is still exercised — by `make_raking_blade` and by `specialized`'s unit tests — but by one corpus model instead of two, and the `DuplicatePhysicalSeat` failure mode it was built to prevent now has a single corpus witness. The disappearance is *consistent with* the four phantom island births removed from `make_toed_slab` (print layers 49, 52, 226, 228) but that causal link was **not** independently proven; only the measurement is on the record. **First action:** decide whether one corpus witness plus unit tests is adequate, or whether a fixture should pin the duplicate-seat path deliberately rather than incidentally. |
 | FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** **[FU-31 FIXED 2026-08-08 (**[`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)**).** Option (b) landed at `55b4d99`: `dispose_demands` aggregates same-position uncovered demands into one seat at push time, keyed on position bits normalized to `same_point`'s `==` equality; mutation-proven fixture reproduces the exact `DuplicatePhysicalSeat` with the aggregation disabled. Treant acceptance (attempt 1 of 2): specialized passes with **553** contacts (was 554 with the un-merged pair) and the run advances to `Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` — the FU-8g wall, now measured in-engine at 553 × (4 + 429,120). FU-8g's H0 treant leg captured in the same run: crossings mean **10.906** (p50 7, max 298), tests mean **191.982**, honest work Σcrossings **6,031** vs charged 237,303,360 (**39,347×**), honest scratch **142 MiB** vs charged 603 GiB. All seven frozen corpus digests byte-identical; one unit-fixture re-pin (raking blade, raw orientation, four real two-owner births now born aggregated), attributed in full in the section. FU-8g H1–H6 are unblocked.]** |
-| FU-32 | CCO routing re-digests the whole accumulated transcript once per terminal — the batch-first violation family a sixth time, and the first one no cap could have caught | **Opened 2026-08-09 by FU-8g phase H6** ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)), the run that first carried the Weeping Treant past `initial::build_initial_contacts`. With the initial-contact wall gone (H1/H2's honest charge: **108,378 vs the untouched 4,000,000**, 2.71 %), the treant's stopping point is no longer a refusal at all: both attempts ran **EXCEEDS-TIMEBOX at 600 s** with the main thread **100 % inside `PreparedSupportRun::route_initial_cco`** from t ≈ 267 s to the kill. **Measured, not argued:** across sample windows at t = 280 / 360 / 440 / 520 / 575 s the share of routing wall-clock in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % → 77.1 % while the constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % → 9.0 % → 9.0 % → 9.0 % — a growing term overtaking a constant one, reproduced across three windows 135 s apart. **Derived to the line from source, independently:** the routing loop (`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per terminal; that function's **first statement** (`cco.rs:1397`) is `let controller_digest_before = self.digest();`; and `CcoController::digest` (`cco.rs:1775–1862`) is not the cached `const fn` at `:863` but a full walk of the accumulated controller state — every terminal in `terminal_cadence` (`:1786`), every record in `terminals` (`:1790`), each `UnroutedNoWinner` record's **entire** anchor-refusal list via `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`; five words per refusal at `:2128–2149`) and `digest_anchor_refusals`, then the whole host kd-tree (`indexed_members` `:1851`, `samples` `:1856`). Cost `Θ(N²) + Θ(N·R) + Θ(N·H)` for `N` cadence terminals (553 specialized physical contacts plus the regular terminals appended at `runner.rs:1649`), `R` accumulated refusals, `H` host samples. The `Θ(N·R)` term dominates on this model, consistent with the standing record that **0 of 3429 attempted model anchors survive corpus-wide**, which makes `UnroutedNoWinner` common and refusal lists long. **A second, independent per-terminal re-digest sits in the same loop** and is the ~9 % constant term: `validate_replay` → `validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` → `SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`, plus `SurfaceAnchorPool::validate_against` → `surface_anchor_pool_digest` and `FinalizedContactLoads::validate_binding` → `finalized_load_rows_fingerprint` — **every one of those structures is immutable for the whole routing stage and every one is re-hashed from scratch per terminal.** Together ≈86 % of the stage. **This is NOT a cap and no cap would fix it**: nothing refuses, no resource is over-charged, no limit is consulted — which is why the measurement-first doctrine found it with a profiler rather than a preflight, and is the reason this row exists. **The remedy is not this row's to choose**, but the shape bounds it: both terms re-derive state whose deltas are already known at the call site, and the house precedent is incremental maintenance (FU-8f G3's prefix evaluation, G6's cross-round retention), not a bigger budget. **FIRST ACTION — and it is not the fix.** H6 also found that **an EXCEEDS-TIMEBOX run is structurally counter-free**: `plinth_support::census` flushes only from `census::finish` (model completed) or `census::report_failure` (typed refusal), there is **no signal handler anywhere** in `census.rs` or `examples/embed_incidence_census.rs`, and the watchdog kills with `SIGKILL` — so **both attempts emitted zero `CENSUS` rows**. The design's "EXCEEDS-**with counters**" outcome is therefore not achievable with the present harness on the very outcome it ranked most likely (~45 %), H4's rider (`rounds_committed`, `exit_reason`, the three-way `PoisonCause` split) **could not fire**, and the treant's **21 poison-driven rebuilds remain unattributed**. Give the census a periodic or signal-triggered flush *before* the next treant run; otherwise the next run buys another verdict with no evidence. **Memory is not the problem and should not be treated as one:** whole-process peak was **3,721 MiB**, 4.0 % of the 90 GB watchdog arm — H1's per-row reserve collapse confirmed at treant scale, against a design prediction of 14–32 GB under the old reserves. Routing's own growth (+1,591 MiB over 332 s, ≈4.8 MiB/s) is honestly rows-scaled transcript accumulation, and binds nothing. **The brace/joints/raft caps registered by H3 remain wholly unexercised** — the run never reached brace — so §18's statement of absence stands unchanged and this row licenses no brace number. **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. See *FU-8g phase H6 measured 2026-08-09* and `support-resource-caps-2026-08-05.md` §19. The treant has **no seal**. |
+| FU-32 | CCO routing re-digests the whole accumulated transcript once per terminal — the batch-first violation family a sixth time, and the first one no cap could have caught | **Opened 2026-08-09 by FU-8g phase H6** ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)), the run that first carried the Weeping Treant past `initial::build_initial_contacts`. With the initial-contact wall gone (H1/H2's honest charge: **108,378 vs the untouched 4,000,000**, 2.71 %), the treant's stopping point is no longer a refusal at all: both attempts ran **EXCEEDS-TIMEBOX at 600 s** with the main thread **100 % inside `PreparedSupportRun::route_initial_cco`** from t ≈ 267 s to the kill. **Measured, not argued:** across sample windows at t = 280 / 360 / 440 / 520 / 575 s the share of routing wall-clock in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % → 77.1 % while the constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % → 9.0 % → 9.0 % → 9.0 % — a growing term overtaking a constant one, reproduced across three windows 135 s apart. **Derived to the line from source, independently:** the routing loop (`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per terminal; that function's **first statement** (`cco.rs:1397`) is `let controller_digest_before = self.digest();`; and `CcoController::digest` (`cco.rs:1775–1862`) is not the cached `const fn` at `:863` but a full walk of the accumulated controller state — every terminal in `terminal_cadence` (`:1786`), every record in `terminals` (`:1790`), each `UnroutedNoWinner` record's **entire** anchor-refusal list via `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`; five words per refusal at `:2128–2149`) and `digest_anchor_refusals`, then the whole host kd-tree (`indexed_members` `:1851`, `samples` `:1856`). Cost `Θ(N²) + Θ(N·R) + Θ(N·H)` for `N` cadence terminals (553 specialized physical contacts plus the regular terminals appended at `runner.rs:1649`), `R` accumulated refusals, `H` host samples. The `Θ(N·R)` term dominates on this model, consistent with the standing record that **0 of 3429 attempted model anchors survive corpus-wide**, which makes `UnroutedNoWinner` common and refusal lists long. **A second, independent per-terminal re-digest sits in the same loop** and is the ~9 % constant term: `validate_replay` → `validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` → `SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`, plus `SurfaceAnchorPool::validate_against` → `surface_anchor_pool_digest` and `FinalizedContactLoads::validate_binding` → `finalized_load_rows_fingerprint` — **every one of those structures is immutable for the whole routing stage and every one is re-hashed from scratch per terminal.** Together ≈86 % of the stage. **This is NOT a cap and no cap would fix it**: nothing refuses, no resource is over-charged, no limit is consulted — which is why the measurement-first doctrine found it with a profiler rather than a preflight, and is the reason this row exists. **The remedy is not this row's to choose**, but the shape bounds it: both terms re-derive state whose deltas are already known at the call site, and the house precedent is incremental maintenance (FU-8f G3's prefix evaluation, G6's cross-round retention), not a bigger budget. **FIRST ACTION — and it is not the fix.** H6 also found that **an EXCEEDS-TIMEBOX run is structurally counter-free**: `plinth_support::census` flushes only from `census::finish` (model completed) or `census::report_failure` (typed refusal), there is **no signal handler anywhere** in `census.rs` or `examples/embed_incidence_census.rs`, and the watchdog kills with `SIGKILL` — so **both attempts emitted zero `CENSUS` rows**. The design's "EXCEEDS-**with counters**" outcome is therefore not achievable with the present harness on the very outcome it ranked most likely (~45 %), H4's rider (`rounds_committed`, `exit_reason`, the three-way `PoisonCause` split) **could not fire**, and the treant's **21 poison-driven rebuilds remain unattributed**. Give the census a periodic or signal-triggered flush *before* the next treant run; otherwise the next run buys another verdict with no evidence. **Memory is not the problem and should not be treated as one:** whole-process peak was **3,721 MiB**, 4.0 % of the 90 GB watchdog arm — H1's per-row reserve collapse confirmed at treant scale, against a design prediction of 14–32 GB under the old reserves. Routing's own growth (+1,591 MiB over 332 s, ≈4.8 MiB/s) is honestly rows-scaled transcript accumulation, and binds nothing. **The brace/joints/raft caps registered by H3 remain wholly unexercised** — the run never reached brace — so §18's statement of absence stands unchanged and this row licenses no brace number. **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. See *FU-8g phase H6 measured 2026-08-09* and `support-resource-caps-2026-08-05.md` §19. The treant has **no seal**. **[J0–J3 LANDED; THE MOVEMENT IS ATTRIBUTED AND THE RULING IS PENDING — 2026-08-09 (**[`#fu32-j3-2026-08-09`](#fu32-j3-2026-08-09)**).** J0 (`41246f6`) gave `plinth_support::census` a periodic **and** signal-triggered flush, so the counter-free killed run this row opened against is fixed at its root. J1 (`059b444`) hoisted the immutable routing authority (`VerifiedRoutingAuthority`, the G2 precedent applied verbatim) — **value-preserving; all seven OD-8 digests byte-identical**. J2 (`c14754e`) replaced `CcoController::digest`'s per-terminal whole-state walk with the design's state-pure incremental accumulators, kept **both F6 tamper tripwires genuinely recomputing** through `rebuild_accumulators()` (`runner.rs:2775`, `:2848`), and **MOVED ALL SEVEN frozen OD-8 snapshot digests**. **The sentence above stating the treant has no seal was written before J2 and stands as the record of its date: the Weeping Treant SEALED for the first time at J2** — complete pipeline (routing, rewire, brace, seal) in 463 s wall-clock, peak RSS ≈5.4 GiB (6 % of the 90 GB arm), `routed_contacts=306`, `final_live_members=1383`, `snapshot_digest=423276951048565625` — **a first measurement, not a pin**, and §A2's predicted next binder (`rewire::optimize`, ~55 %) did **not** bind. J3 adds **no engine code** and is the FU-10 attribution: the digest movement is **DECISION-NEUTRAL**, proved twice over — from source (all 30 `controller_digest_before` occurrences audited at this tip; **zero comparisons outside `#[cfg(test)]`**, and `finalize_transcript_row`'s admission check reads six other fields and deliberately not this one) and by parent-vs-tip routing-output dumps on all seven corpus models (**275 transcript rows and 687,288 content lines byte-identical**; of the transcript's 10 header digests only the 3 that fold the moved value move, and of `verification_snapshot_digest`'s 17 inputs exactly 1 does). **Three code pins and one golden will need re-pinning at J4**, enumerated by name in the J3 section — and **NOTHING is re-pinned, no golden refreshed, no doc table rewritten and no test expectation relaxed** pending the owner's ruling. **NO CAP, floor, constant or registry entry RAISED, LOWERED OR TOUCHED.** Gates 1058 default / 1063 all-features with **exactly** the two expected digest-pin failures and no others; clippy, fmt and `git diff --check` clean. **Still open: J4 (owner ruling, re-pin, record sweep), J5 (the honest routing charge, §D3) and J6 (the treant measurement and the record).**]** |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
