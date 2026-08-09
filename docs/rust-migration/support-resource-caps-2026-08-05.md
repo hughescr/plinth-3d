@@ -2138,6 +2138,21 @@ disclosing that none of them has a measurement of record — the brace and raft
 stages have never run. **No cap was raised, lowered or touched, and no run
 happened.** See §18.]**
 
+**[ADDENDUM 2026-08-09 (later) — THE REMAINDER IS NO LONGER UNEXERCISED, and this
+section's opening sentence is superseded.** Everything above is left standing
+exactly as written, as the record of its date. FU-32 phase J6 ran the Weeping
+Treant to a **seal**, twice, under the standing memory protocol
+([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09)):
+`prepare_support_run` returns **`Ok`**, so routing, rewire, penetration/brace,
+the CCO anchors, attestation and lowering all executed, and `routed_contacts`
+(306), `final_live_members` (1,383) and a snapshot digest
+(`423276951048565625`) exist. **What is NOT superseded is the second half of the
+sentence: nothing is measured or claimed about brace demand even now**, because
+no brace or raft cap is metered — see §22.3, which splits reach from demand
+deliberately. `max_scratch_bytes = 1e11` still sits above the 90 GB watchdog
+line and the hazard is **not realised, not cleared** (§22.4). **No cap was
+raised, lowered or touched.**]**
+
 ### 17.8 Gates
 
 Five gates green, verbatim, tests with `--no-fail-fast`, tree clean before and
@@ -2241,6 +2256,18 @@ run has not produced:
   line and the 100 GB machine ceiling (§17.4/A1), a standing hazard this
   registration surfaces and does not resolve.
 
+**[ADDENDUM 2026-08-09 (FU-32 phase J6) — the bullet above is HALF superseded,
+and the half that survives is the important one.** *"No run has ever reached
+them"* is **no longer true**: the treant sealed twice under the standing memory
+protocol and the brace, joints/raft and lowering stages all executed
+([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09); §22.3).
+*"Carry **no measured demand**"* **remains true and unchanged**: no brace or raft
+cap is metered anywhere in the census, so a run that did not refuse establishes
+only that the demand was **below** the cap, never what it was. The F7 ceiling
+stays **derived**, and the `1e11`-above-the-watchdog hazard stays **disclosed,
+not resolved** (§22.4). **No registry note, provenance marker or cap value is
+changed by this addendum.**]**
+
 ### 18.4 `CandidatePayloadConfig` remains out of scope
 
 R5's boundary stands: `CandidatePayloadConfig` mixes result-changing refinement
@@ -2327,6 +2354,19 @@ the watchdog), peak RSS **3,693 MiB** and **3,721 MiB**.
   the ~100 GB machine ceiling, so the machine binds before the cap does —
   **remains untested by measurement**, because brace was never reached. It is
   neither confirmed nor cleared by this run.
+
+**[ADDENDUM 2026-08-09 (FU-32 phase J6) — the two bullets above are the record of
+their date and both are now overtaken.** The treant **sealed** twice under the
+standing memory protocol at FU-32 J5's tip
+([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09)), so brace, joints,
+raft and lowering **were** entered — the "remain unexercised" bullet is
+superseded as to **reach** and stands as to **demand** (§22.3). The 90 GB arm was
+again never approached, at a whole-process peak of **5,585.6 / 5,610.9 MiB =
+6.06 % / 6.09 %** rather than 4.0 %, the difference being the three stages that
+now run after routing. The `1e11`-above-the-arm hazard moves from "untested,
+because brace was never reached" to **"reached, did not bite on this specimen,
+still unmetered and therefore still neither confirmed nor cleared"** (§22.4).
+**No cap was raised, lowered or touched.**]**
 
 ### 19.3 What binds instead — and why no cap can fix it
 
@@ -2473,6 +2513,16 @@ proportional to the anchor pool, or to the decision?* — is design open questio
 deliberately untouched here, because summarising the refusal list would move every transcript
 digest and mix two digest movements into one ruling.
 
+**[ADDENDUM 2026-08-09 (FU-32 phase J6) — the ≈16.3 GB above rests on a per-refusal byte cost
+measured over a PARTIAL run, and the completed run corrects it DOWNWARD.** The paragraph above is
+left standing as the record of its date. Measured across a *completed* routing stage, the
+whole-stage RSS growth is 1,359 MiB / 1,436 MiB over 162,719,910 retained rows — **≤8.8 and
+≤9.3 B per row, both upper bounds**, against §M3's 30.3 B. At that rate the cap admits ≈**4.4–4.7
+GB**, not ≈16.3 GB. **THE CAP DOES NOT MOVE, in either direction**, and design open question 4
+remains untouched: lowering a cap on a friendlier observation is the same error as raising one on
+an unfriendly observation. See §22.5 and
+[`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09).]**
+
 ### 21.6 What this phase does NOT bound: `rewire::optimize`
 
 `REWIRE_WORK_BUDGET` is `TrialSetting::disabled()`
@@ -2484,3 +2534,114 @@ binder at ~55 % confidence, and scopes it to a follow-up rather than to J5: boun
 returned, and therefore every downstream digest), where J5's charge is result-inert by
 construction. Mixing the two in one phase would put a value-moving ruling inside a
 resource-charging phase. **Opened as FU-33 in `CURRENT-STATUS.md`; deferred, not skipped.**
+
+## 22. FU-32 phase J6 (2026-08-09) — what every cap did on the first PROTOCOLLED, CHARGED treant seal; nothing moves
+
+**No cap, floor, byte term or coefficient was raised, lowered or touched by this phase.** J6
+changes no code at all: `git diff` over `crates/` and `rust/` is empty at its tip. This section
+records what the caps did when a run finally reached *all* of them and sealed, and it corrects two
+projections — both in the direction that makes a disclosed hazard smaller, which is exactly why
+neither is allowed to move a cap.
+
+### 22.1 The run
+
+Two attempts at `e173597` (FU-32 J5's tip), standing memory protocol without deviation — release,
+`--features census`, `PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`,
+`PLINTH_THREADS=4`, RSS watchdog **unsandboxed** polling every 2 s with `SIGTERM`-then-`SIGKILL`
+armed at 90 GB, 600 s timebox, **two attempts and no more**. Machine quiet at both launches (no
+`cargo`, `rustc` or sibling census process; nothing above ~30 % CPU). **Both attempts COMPLETED**:
+wall **470.83 s** and **470.64 s**, exit code **0**, peak RSS **5,585.6 MiB** and **5,610.9 MiB**.
+Full transcript and diagnosis: *FU-32 phase J6 measured 2026-08-09*
+([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09)).
+
+### 22.2 What the caps did — the first run that reached every one of them
+
+- **`SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS`
+  (§21, both 536,870,912)** — charged **201,415,319** on both resources; executed
+  **164,993,019** evaluations (**30.73 %** of cap) and **162,719,910** retained refusal rows
+  (**30.31 %** of cap). `executed ≤ charged` held; `ChargeDrift` did not fire. **Reproduces §21.4's
+  figures to the unit, twice**, and this is the first time they were measured with the watchdog and
+  timebox armed. The stage they price completed in **≤20.7 s**, bracketed by the charge row (emitted
+  at preflight, before the first terminal) and the receipt row (emitted after the last terminal) —
+  against ≥335 s **unfinished** at `bfa5b3b`.
+- **`specialized_gate_operations`** — floor 2,000,000,000, `per_batch_unit` 64, rows 342,668,
+  columns 891, materialized **19,562,287,872**, `at_floor=false`; 340 gate batches, 1,294,392
+  proposals, one tournament, 337 committed rounds, contacts 891 → 554, exit
+  **`no_safe_proposal`**. Retained-load charged **66,731,232,175** against executed
+  **6,634,686,434** — **9.94 %**, `executed ≤ charged` throughout. Retention **339 of 340 rounds
+  (99.7 %)**; the single rebuild is the terminal `contact_witness` miss F-G6-4 predicted by design,
+  and **G6d's 21 `Poisoned` rebuilds are zero here**. The instance is **not** G6d's — contacts start
+  at 891 here against G6d's 1,366, FU-31's slicer-union correction having landed in between — so the
+  337 rounds are **not comparable** to G6d's 823 and no claim is made about them.
+- **`specialized_load_operations`** — rows 83,146, columns 891, materialized **4,746,695,936**,
+  `at_floor=false`.
+- **`ContactConstructionLimits`** — 553 contacts against `max_contacts` 1,000,000; the stage
+  completed as it did at FU-8g H6, with no refusal.
+- **The ten brace/raft caps of §18 — see §22.3. They are no longer unreached. They are still
+  unmetered.**
+- **`joints`' four hard-coded, M0-unregistered literals** (`joints.rs:96–106`) executed without
+  refusing and are likewise unmetered. Recorded, not acted on.
+
+### 22.3 §17.7's and §18.3's "unexercised" — half superseded, half still exactly right
+
+This is the one claim in this document that this run moves, and it must be split in two or it will
+be read wrong.
+
+- **REACH — superseded.** §17.7 was written when `prepare_support_run` still returned `Err` and
+  says routing, rewire, penetration/brace, the CCO anchors, attestation and lowering are "all still
+  untouched". §18.3 says the ten brace/raft constants carry no measured demand "because the brace
+  and raft stages are unexercised … and on the treant at this tip", and §19.2's closing bullets
+  repeat it. **`run_support` returned `Ok` twice**, which it cannot do without
+  `BracedSupportRun::brace`, `structure` (joints + raft) and `lower` each returning `Ok`, and the
+  census shows brace working at scale: **748 rung rows, 650 rung outcomes, 603 embed rows, 56,183 +
+  5,521 brace clearance rows, 238 + 9 brace commits, 450 Brace members in the sealed forest.**
+  The words *"no run has ever reached them"* are **no longer true**, and every site that carries
+  them is amended by dated pointer to this section rather than rewritten.
+- **DEMAND — NOT superseded; still a plain statement of absence.** **No demand figure of record
+  exists for any of the ten**, because nothing meters them: `census::record_scaled_cap` is called
+  only from `perception.rs` and `specialized.rs`, never from `brace.rs`, `joints.rs` or `raft.rs`.
+  A stage running without refusing tells you the demand was **below** the cap; it does not tell you
+  what the demand was, and this document does not permit the difference to be blurred. §18.3's
+  provenance notes therefore **stand unchanged**, and the F7 brace ceiling of 85 clearance rods
+  remains **derived**, never measured.
+- **What would close it** is a metering phase — a charged-vs-executed receipt at the brace
+  penetration batch and at raft, on the G6c idiom §21.3 already establishes. **J6 does not do it,
+  does not open it, and does not licence anyone to invent a brace number from this run.**
+
+### 22.4 The 90 GB arm, and the cap that sits above it
+
+**Whole-process peak 5,585.6 / 5,610.9 MiB — 6.06 % / 6.09 % of the 90 GB arm; 5.5 % of the ~100 GB
+machine working ceiling. The watchdog never fired and was never close.** The
+`machine-memory-ceiling` finding is untouched.
+
+`SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES = 100,000,000,000` still sits **above** both the arm
+and the machine ceiling, so the structural hazard §14.6, §17.7 and §19.4 record — that this cap can
+arm the watchdog before it refuses — is **unchanged**. What is new is one data point against it:
+on the largest specimen this project owns, brace ran to completion inside a 5.48 GiB whole-process
+peak. **That is a hazard not realised, not a hazard cleared** — the demand behind that peak is
+unmetered (§22.3), so nothing here shows the cap could not bite on a larger mesh.
+
+### 22.5 Two projections corrected, and why NEITHER moves a cap
+
+- **§21.5's ≈16.3 GB of retained refusal evidence.** That figure rests on the design's §M3
+  measurement of **30.3 B per retained refusal**, taken over a *partial* run. Over the completed
+  routing stage the whole-stage RSS growth is **1,359 MiB** (run 1) and **1,436 MiB** (run 2) across
+  **162,719,910** retained rows — **≤8.8 and ≤9.3 bytes per row**, and those are *upper* bounds
+  because every other allocation in the stage shares the window. At the measured rate
+  `SUPPORT_ROUTE_CCO_MAX_SEAT_REFUSAL_ROWS` admits ≈**4.4–4.7 GB**, not ≈16.3 GB. **The cap does not
+  move.** It was derived from the worst case, which reproduced exactly (201,415,319); lowering a cap
+  on a friendlier observation is the same error as raising one on an unfriendly observation, in a
+  better suit. §21.5's disclosure stands with this correction appended to it, and design open
+  question 4 remains untouched.
+- **Design §M3's ≈4.3 GiB whole-process projection.** It holds for what it was about — a completed
+  *routing stage*, which exits at 3.73 / 3.79 GiB. The whole-process peak is 5.46–5.48 GiB because
+  rewire, brace and structure/lower run after it and §M3 had never seen them run. Not a miss; a
+  smaller question, now answerable.
+
+### 22.6 Gates
+
+Docs-only delta. Five gates green, verbatim, tree clean before and after: **1066** default /
+**1071** `--all-features`, **0 failed** — identical to §21's tip, as they must be, since J6 adds no
+test and changes no code; clippy `-D warnings`, `cargo fmt --all -- --check` and `git diff --check`
+all clean. **OD-8 was re-measured rather than assumed** and all seven frozen digests reproduce
+byte-identical from the same build that produced the seal.

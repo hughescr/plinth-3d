@@ -1126,6 +1126,19 @@ measured rule on 2026-08-06 without their numbers changing; see §3.10.10.
 > ledger rows, provenance and the FU-24 gate: `m0-constants-source-ledger.json`;
 > caps-doc record: `support-resource-caps-2026-08-05.md` §18; dated
 > `CURRENT-STATUS.md` section: *FU-8g phase H3 landed 2026-08-09*.
+>
+> **[ADDENDUM 2026-08-09 (FU-32 phase J6) — "the brace and raft stages are
+> unexercised … on the treant at this tip" is SUPERSEDED; "no measured demand" is
+> NOT.** The paragraph above is left standing as the record of its date. The
+> Weeping Treant **sealed** twice under the standing memory protocol at FU-32 J5's
+> tip, so brace, joints/raft and lowering all executed and none of the ten caps
+> refused. **No demand figure of record exists for any of the ten even so**,
+> because none of them is metered anywhere in the census — a stage that does not
+> refuse tells you only that its demand was below the cap. The F7 ceiling remains
+> **derived**, never measured; every registry note and every provenance marker
+> above is unchanged; **no cap was raised, lowered or touched.** See
+> `support-resource-caps-2026-08-05.md` §22.3 and *FU-32 phase J6 measured
+> 2026-08-09* in `CURRENT-STATUS.md`.]**
 
 ### 3.10.10 Support execution-authority caps — the batch-product pair {#batch-product-caps}
 

@@ -614,6 +614,24 @@ each was run twice and the bytes were byte-identical both times. Two refuse
 at the hollow stage, before support planning is ever reached — reported below
 rather than worked around.
 
+**[ADDENDUM 2026-08-09 (FU-32 phase J6) — THE TREANT EXCLUSION'S STATED REASON IS
+NO LONGER TRUE. Nothing in this document is changed by that, and no export work
+is done here.** The `--all` mode excludes the Weeping Treant because "its support
+tournament cannot yet complete". At FU-32 J5's tip `run_support` **completes and
+seals on the treant**, twice, under the standing memory protocol — 470.83 s and
+470.64 s of a 600 s box, exit code 0, `routed_contacts=306`,
+`final_live_members=1383`, `snapshot_digest=423276951048565625`, bit-identical
+counters across both runs. Record: *FU-32 phase J6 measured 2026-08-09*
+([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09)). **A seal is a
+`SupportVerificationSnapshot`, not a file**: the census harness calls
+`verification_snapshot()`, while the artifact chain calls `into_supported_model()`
+and then the emit path, so lifting the exclusion, running `first_artifact_chain`
+on the treant and producing a written, re-parsed, format-gate-passed `.chitubox`
+twice byte-identically is **still entirely undone, and it is export work**. The
+**E7** row's premise ("the export path should list it as a downstream
+beneficiary, not a dependency") is unaffected; the dependency it was waiting on
+is simply discharged. J6 does not start this and does not schedule it.]**
+
 **Per-model stats** (model triangles / support records = the reopened file's
 own counts, not producer state; sha256 over the full artifact bytes):
 
