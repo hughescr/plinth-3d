@@ -25,8 +25,6 @@ mod document;
 mod error;
 mod parse;
 mod project;
-#[cfg(feature = "python")]
-mod py;
 mod stl;
 mod support;
 mod transform;
@@ -34,10 +32,15 @@ mod types;
 mod verify;
 mod write;
 
-/// Version of the `chitubox_io._native` Python surface. Bumped whenever that
-/// surface changes shape; `scripts/tests/conftest.py` fails the `chitubox`-
-/// marked tests when the built extension disagrees with the Python side's
-/// expectation, so a stale extension can never certify itself green.
+/// Compatibility version of this crate's writer surface. Bumped whenever that
+/// surface changes shape, and matched against the `plinth-core` constants
+/// registry's `EXPECTED_CHITUBOX_API_VERSION` before emission.
+///
+/// Historically this versioned the `chitubox_io._native` PyO3 extension, and a
+/// staleness gate in the (now deleted) pytest harness failed the `chitubox`-
+/// marked tests when a built extension disagreed with the Python side. That
+/// harness and that extension were removed on 2026-08-08 (E8, Python
+/// elimination); the constant survives as the native writer's own contract.
 pub const CHITUBOX_API_VERSION: u32 = 1;
 
 pub use error::ChituboxError;

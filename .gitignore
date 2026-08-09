@@ -1,10 +1,14 @@
+.DS_Store
+
+# Python build products and virtualenvs. Nothing in this repository produces
+# them any more -- the last Python was deleted on 2026-08-08 (E8) and a guard
+# test now fails the suite if a `.py` file reappears -- but the patterns are
+# retained so a stray interpreter run, or a tool that scaffolds a venv, cannot
+# quietly leave droppings in a checkout.
 __pycache__/
 *.pyc
 .pytest_cache/
-.DS_Store
 .venv/
-uv.lock.bak
-scripts/tests/treant_pre_probe.pkl
 
 # Run outputs never belong in git. They record the result of running one
 # particular version of the code -- they are not a revision to the code or
@@ -18,8 +22,10 @@ scripts/treant_v2_results.json
 # source stays tracked; the rendered PDF is a build product like any other.
 /output/
 
-# maturin drops the compiled PyO3 extension into the crate source tree
-# (rust/*/python/*/_native.abi3.so). Never committable.
+# Compiled shared objects are build products, never source. This rule was
+# written for maturin, which used to drop the PyO3 extension into the crate
+# source tree as rust/*/python/*/_native.abi3.so; that binding is gone (E8,
+# 2026-08-08) and the rule is kept only as a general build-product guard.
 *.so
 
 # Root Cargo.lock is the workspace's sole tracked lockfile. Member-local
