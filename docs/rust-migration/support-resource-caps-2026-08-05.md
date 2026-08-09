@@ -220,6 +220,23 @@ models keep their digests:
 (`crates/plinth-support/tests/resource_cap_policy.rs`) asserts this from the
 registry rather than from the transcript.
 
+> **Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum; nothing above is
+> rewritten or retracted.** Every OD-8 `snapshot_digest` quoted above is correct **as a record
+> of its own date** (this §4 table was already superseded once, on 2026-08-08, for FU-10 phase
+> C). Under the owner's 2026-08-09 ruling — *"The fingerprints aren't sacred  if things change
+> slightly that's to be expected (because the algorithm wasn't right when the fingerprints were
+> generated!)"* — **all seven were re-pinned**, because FU-32 J2 replaced
+> `CcoController::digest`'s per-terminal whole-state walk with state-pure incremental
+> accumulators and the digest therefore folds a different stream. The live values are Sphere
+> `2297157889062365577`, Cylinder `6853793710942395608`, `make_box` `8709076999423814412`,
+> `make_overhang_table` `16396858890798947253`, `make_toed_slab` `133000971864625681`,
+> `make_raking_blade` `18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+> **The support itself did not change**: 687,288 dumped routing-output content lines and 275
+> transcript rows are byte-identical parent-to-tip across all seven models, and
+> `routed_contacts` / `final_live_members` are unchanged on every one. **No cap in this
+> document was raised, lowered or touched by that phase.** The authority table and the full
+> attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.
+
 ## 5. What was deliberately NOT raised
 
 Four further caps were measured over the treant with caps hand-raised, and none
@@ -2345,3 +2362,24 @@ Five gates green at this tip, verbatim, tree clean before and after:
 `--all-features` **1054 passed, 0 failed**, `cargo clippy --workspace --all-targets
 --all-features --offline -- -D warnings` clean, `cargo fmt --all -- --check`
 clean, `git diff --check` clean. OD-8: all seven frozen census digests reproduced **byte-identical** from the release `--features census` build at this tip, one `PLINTH_CENSUS_ONLY` invocation each — Sphere 17667468971446251870, Cylinder 13310185350867878190, make_box 9657051231007502658, make_overhang_table 1875674282253663076, make_toed_slab 2823659516373762066, make_raking_blade 9567737006650358297, make_thin_fin 8797083662933568276. The Weeping Treant is deliberately excluded from the digest set: it has never sealed and produces no snapshot digest.
+
+## 20. Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above in this document is rewritten, retracted or amended.** Every OD-8
+`snapshot_digest` quoted anywhere in it — including §19.4's gate record immediately above and
+§4's canonical table — is correct **as a record of its own date**. Under the owner's 2026-08-09
+ruling, verbatim — *"The fingerprints aren't sacred  if things change slightly that's to be
+expected (because the algorithm wasn't right when the fingerprints were generated!)"* — **all
+seven OD-8 census digests were re-pinned**, because FU-32 J2 replaced `CcoController::digest`'s
+per-terminal whole-state walk with state-pure incremental accumulators and the digest therefore
+folds a different stream. The live values are Sphere `2297157889062365577`, Cylinder
+`6853793710942395608`, `make_box` `8709076999423814412`, `make_overhang_table`
+`16396858890798947253`, `make_toed_slab` `133000971864625681`, `make_raking_blade`
+`18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**The support itself did not change, and no cap in this document moved.** 687,288 dumped
+routing-output content lines and 275 transcript rows are byte-identical parent-to-tip across
+all seven models; `routed_contacts` and `final_live_members` are unchanged on every one; and
+FU-32 phases J0–J4 raised, lowered or touched **no** cap, floor, constant or registry entry.
+The authority table and the full attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and
+`#fu32-j3-2026-08-09`.

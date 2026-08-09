@@ -698,3 +698,23 @@ against a digest from the other is not evidence of a regression. Contact-id
 numbering differs for the same reason: this harness's T7 rows name
 `make_toed_slab` terminals 22/23/27/59/60/68 where the procedural mesh numbers
 the same six refused seats 22/26/31/59/62/68.
+
+## Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above is rewritten, retracted or amended.** Every `snapshot_digest` quoted in this
+document is correct **as a dated record of its own census run**, and the compare-like-with-like
+warning immediately above is unaffected. Under the owner's 2026-08-09 ruling, verbatim — *"The
+fingerprints aren't sacred  if things change slightly that's to be expected (because the
+algorithm wasn't right when the fingerprints were generated!)"* — **all seven OD-8 census
+digests were re-pinned**, because FU-32 J2 replaced `CcoController::digest`'s per-terminal
+whole-state walk with state-pure incremental accumulators. The live values are Sphere
+`2297157889062365577`, Cylinder `6853793710942395608`, `make_box` `8709076999423814412`,
+`make_overhang_table` `16396858890798947253`, `make_toed_slab` `133000971864625681`,
+`make_raking_blade` `18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**The census bodies this document is about did not change.** No routed contact, live member,
+embed-incidence row or refusal moved: 687,288 dumped routing-output content lines and 275
+transcript rows are byte-identical parent-to-tip across all seven models, and this document's
+`routed / live` columns (Sphere 7/15, Cylinder 54/119, `make_box` 11/25) reproduce exactly at
+the new tip. Only the digest that summarizes the sealed snapshot moved. The authority table and
+the full attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.

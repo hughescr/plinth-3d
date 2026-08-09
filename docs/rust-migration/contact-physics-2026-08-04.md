@@ -961,3 +961,23 @@ the real limit on the largest-tip contacts, not a contact defect — now
 load-bearing in the attestation, see above); FU-CONTACT-2
 (`is_embedded_taper`'s `r0 != r1` clause is no longer a proxy for anything
 under PR-1).
+
+## Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above is rewritten, retracted or amended.** The Sphere row of the corpus delta table
+(`17667468971446251870`, moved: **no**) is correct **as a dated record of 2026-08-04**. Under
+the owner's 2026-08-09 ruling, verbatim — *"The fingerprints aren't sacred  if things change
+slightly that's to be expected (because the algorithm wasn't right when the fingerprints were
+generated!)"* — **all seven OD-8 census digests were re-pinned**, because FU-32 J2 replaced
+`CcoController::digest`'s per-terminal whole-state walk with state-pure incremental
+accumulators. The Sphere's live digest is **`2297157889062365577`**; the other six are Cylinder
+`6853793710942395608`, `make_box` `8709076999423814412`, `make_overhang_table`
+`16396858890798947253`, `make_toed_slab` `133000971864625681`, `make_raking_blade`
+`18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**The contact physics recorded in this document is untouched by that movement.** The table's
+`7 → 7` contacts and `15 → 15` members still reproduce exactly, no attestation verdict changed,
+and 687,288 dumped routing-output content lines are byte-identical parent-to-tip across all
+seven models. Only the digest that summarizes the sealed snapshot moved. The authority table
+and the full attribution are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and
+`#fu32-j3-2026-08-09`.

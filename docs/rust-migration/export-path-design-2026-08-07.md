@@ -654,3 +654,24 @@ hollow-stage cavity check) reproduced all seven frozen digests unchanged,
 Cylinder and make_box included — confirming the two hollow-stage refusals are
 new information from this sweep's deeper chain, not a regression in anything
 the census already gated.
+
+## Digest supersession, 2026-08-09 (FU-32 phase J4) — dated addendum
+
+**Nothing above is rewritten, retracted or amended.** In particular the E2 sentence recording
+that the Sphere's "snapshot digest is **17667468971446251870** — bit-for-bit the frozen OD-8"
+was true when it was written and is correct **as a dated record of 2026-08-07**. Under the
+owner's 2026-08-09 ruling, verbatim — *"The fingerprints aren't sacred  if things change
+slightly that's to be expected (because the algorithm wasn't right when the fingerprints were
+generated!)"* — **all seven OD-8 census digests were re-pinned**, because FU-32 J2 replaced
+`CcoController::digest`'s per-terminal whole-state walk with state-pure incremental
+accumulators. The Sphere's live digest is **`2297157889062365577`**; the other six are Cylinder
+`6853793710942395608`, `make_box` `8709076999423814412`, `make_overhang_table`
+`16396858890798947253`, `make_toed_slab` `133000971864625681`, `make_raking_blade`
+`18388631460456455184`, `make_thin_fin` `14656364680512457190`.
+
+**The claim that sentence was making survives intact**, and that is the point of recording this
+here: the export path's sealed run still agrees bit-for-bit with the census's, so an exported
+artifact is still provably the same support the census measured — it is *both* values that
+moved, together, and the equality still holds. The Sphere's `routed_contacts` / live members
+(7 / 15) and every other observable are unchanged. The authority table and the full attribution
+are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.
