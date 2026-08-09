@@ -17,7 +17,10 @@ use thiserror::Error;
 use crate::SelectedContact;
 use crate::{
     forest::MemberKey,
-    specialized::{PhysicalSeatProvenance, PrimaryRegularIdentity, SpecializedContactPlan},
+    specialized::{
+        PhysicalSeatProvenance, PrimaryRegularIdentity, SpecializedContactPlan,
+        SpecializedPhysicalContact,
+    },
 };
 
 const BELOW_LEVEL_EPS_MM: f64 = 1e-6;
@@ -168,6 +171,16 @@ pub(crate) struct GeometryFingerprint {
     native_grid_pitch_bits: u64,
 }
 
+impl GeometryFingerprint {
+    /// FU-32 J1 mutation hook: move a hoisted fingerprint away from the
+    /// geometry it claims to attest, so the staleness comparisons that read it
+    /// can be proved load-bearing.
+    #[cfg(test)]
+    pub(crate) fn corrupt_mesh_sha256_for_test(&mut self) {
+        self.mesh_sha256.push('0');
+    }
+}
+
 /// One checked geometry authority shared by both phases. It binds the native
 /// query engine to the exact indexed coordinates and topology sidecar.
 ///
@@ -215,6 +228,18 @@ impl<'a> AnchorGeometryAuthority<'a> {
     #[must_use]
     pub(crate) fn fingerprint(&self) -> GeometryFingerprint {
         self.fingerprint.clone()
+    }
+
+    /// The same fingerprint, borrowed.
+    ///
+    /// FU-32 phase J1.  [`Self::fingerprint`] clones three sha256 hex
+    /// `String`s on every call, and the routing loop called it twice per
+    /// terminal purely to *compare* it.  A comparison needs no copy, so the
+    /// staleness comparisons in [`crate::cco`] read this instead — the check
+    /// is unchanged, the allocation is gone.
+    #[must_use]
+    pub(crate) const fn fingerprint_ref(&self) -> &GeometryFingerprint {
+        &self.fingerprint
     }
 
     /// Revalidate the exact mesh/native pairing before a downstream stage
@@ -359,13 +384,42 @@ impl<'a> SurfaceAnchorPool<'a> {
         &self,
         geometry: &AnchorGeometryAuthority<'_>,
     ) -> Result<(), AnchorSearchError> {
+        self.validate_against_hoisted(
+            geometry,
+            surface_anchor_pool_digest(&self.geometry, &self.delicacy_by_face, &self.rows),
+        )
+    }
+
+    /// The same validation, against a content digest hashed **once** by a
+    /// caller that holds the pool immutably for a whole stage.
+    ///
+    /// # FU-32 phase J1 — the G2 rule, applied here
+    ///
+    /// `surface_anchor_pool_digest` walks `delicacy_by_face` (one `f64` per
+    /// exterior face) plus five words per pool row — 2,250,235 words / 18.0 MB
+    /// on the Weeping Treant v1.2 — and the CCO routing loop paid for it
+    /// **~3.9 times per grown terminal** over a pool held behind a shared
+    /// reference for the entire loop, in a type with no interior mutability.
+    /// The borrow checker already proves what that walk re-checked.
+    ///
+    /// **Every comparison stays.** The pointer-identity arm and the
+    /// geometry-fingerprint arm are untouched and still run at every call
+    /// site; the content-digest arm still runs, against the caller's hoisted
+    /// value.  That arm is not vacuous: `self.digest` is this pool's *own*
+    /// sealed field, computed at construction from its own contents, so a
+    /// hoisted digest belonging to a different pool — or a corrupted one —
+    /// disagrees with it and refuses.  "Verify once, thread the proof — never
+    /// stop verifying" (`crate::perception::VerifiedMeshFingerprint`).
+    pub(crate) fn validate_against_hoisted(
+        &self,
+        geometry: &AnchorGeometryAuthority<'_>,
+        hoisted_content_digest: u64,
+    ) -> Result<(), AnchorSearchError> {
         if !std::ptr::eq(self.surface, geometry.surface()) || self.geometry != geometry.fingerprint
         {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
-        if self.digest
-            != surface_anchor_pool_digest(&self.geometry, &self.delicacy_by_face, &self.rows)
-        {
+        if self.digest != hoisted_content_digest {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
         Ok(())
@@ -506,10 +560,29 @@ impl BoundPhysicalAnchorContact {
             .iter()
             .find(|contact| contact.contact_id() == contact_id)
             .ok_or(AnchorSearchError::FinalizedContactNotFound { contact_id })?;
+        Self::from_hoisted(plan.digest(), contact, contact_id)
+    }
+
+    /// The same binding, from a plan digest hashed **once** per stage and the
+    /// contact already resolved by the caller's own id index.
+    ///
+    /// FU-32 phase J1.  `plan.digest()` is a complete walk of the specialized
+    /// plan — 2,487,000 words / 19.9 MB on the Weeping Treant v1.2 — and this
+    /// constructor ran it twice per grown terminal, alongside an O(|contacts|)
+    /// linear `find`.  The fingerprint built here is bit-for-bit the same:
+    /// same digest value, same contact, same field order.
+    pub(crate) fn from_hoisted(
+        hoisted_plan_digest: u64,
+        contact: &SpecializedPhysicalContact,
+        contact_id: u64,
+    ) -> Result<Self, AnchorSearchError> {
+        if contact.contact_id() != contact_id {
+            return Err(AnchorSearchError::FinalizedContactNotFound { contact_id });
+        }
         let provenance = contact.seat_provenance();
         Ok(Self {
             fingerprint: FinalizedPhysicalContactFingerprint::from_physical(
-                plan.digest(),
+                hoisted_plan_digest,
                 contact_id,
                 provenance,
                 contact.position_mm(),
@@ -925,8 +998,12 @@ pub(crate) fn discover_finalized_anchor_seats(
     pool: &SurfaceAnchorPool<'_>,
     config: AnchorSearchConfig,
     geometry: &AnchorGeometryAuthority<'_>,
+    hoisted_pool_digest: u64,
 ) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
-    pool.validate_against(geometry)?;
+    // FU-32 J1: the pool check stays exactly here and refuses exactly as it
+    // did; only the whole-pool re-hash behind its content arm was hoisted to
+    // the once-per-stage authority token.
+    pool.validate_against_hoisted(geometry, hoisted_pool_digest)?;
     discover_anchor_seats_bound(
         terminal.stub_end_mm,
         Some(AnchorContactFingerprint::Finalized(contact.fingerprint)),
@@ -1367,8 +1444,11 @@ pub(crate) fn validate_finalized_anchor_feet(
     pool: &SurfaceAnchorPool<'_>,
     config: AnchorSearchConfig,
     geometry: &AnchorGeometryAuthority<'_>,
+    hoisted_pool_digest: u64,
 ) -> Result<AnchorFootValidation, AnchorSearchError> {
-    pool.validate_against(geometry)?;
+    // FU-32 J1: the pool check stays exactly here and refuses exactly as it
+    // did; only the whole-pool re-hash behind its content arm was hoisted.
+    pool.validate_against_hoisted(geometry, hoisted_pool_digest)?;
     validate_anchor_feet_bound(
         requests,
         Some(AnchorContactFingerprint::Finalized(contact.fingerprint)),
@@ -1959,6 +2039,29 @@ mod tests {
         assert_eq!(
             pool.validate_against(&identical_geometry),
             Err(AnchorSearchError::StaleSurfaceAnchorPool)
+        );
+
+        // FU-32 phase J1.  The hoisted form must be exactly as strict as the
+        // recomputing form on all three arms, and its content arm must bite:
+        // a hoisted digest that does not belong to this pool attests nothing.
+        assert_eq!(
+            pool.validate_against_hoisted(&geometry, pool.digest()),
+            Ok(())
+        );
+        assert_eq!(
+            pool.validate_against_hoisted(&geometry, pool.digest() ^ 1),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool),
+            "the hoisted content arm stopped comparing"
+        );
+        assert_eq!(
+            pool.validate_against_hoisted(&geometry, rebound_pool.digest()),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool),
+            "a foreign pool's hoisted digest was accepted"
+        );
+        assert_eq!(
+            pool.validate_against_hoisted(&identical_geometry, pool.digest()),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool),
+            "the hoist must not weaken the pointer-identity/geometry arms"
         );
 
         let (_, terminal, _) = bindings();

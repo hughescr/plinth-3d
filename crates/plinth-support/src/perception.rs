@@ -389,14 +389,60 @@ impl FinalizedContactLoads {
         partition: &FinalizedLoadPartition,
         canonical_contact_ids: &[u64],
     ) -> Result<(), GenericPerceptionError> {
+        self.validate_binding_hoisted(
+            partition,
+            canonical_contact_ids,
+            finalized_load_rows_fingerprint(&partition.rows),
+        )
+    }
+
+    /// The same binding validation, against a row fingerprint hashed **once**
+    /// by a caller that holds the partition immutably for a whole stage.
+    ///
+    /// # FU-32 phase J1 — the G2 rule, applied here
+    ///
+    /// `finalized_load_rows_fingerprint` walks every `FinalizedFaceLoad` row —
+    /// 70,737 rows on the Weeping Treant v1.2 — and the CCO routing loop paid
+    /// for it **twice per grown terminal**, over a partition owned by a plan
+    /// held behind a shared reference for the entire loop, in a type with no
+    /// interior mutability.
+    ///
+    /// **Every comparison stays.**  All four arms still run at this site; only
+    /// the row walk behind the third one moved to the caller's once-per-stage
+    /// hoist.  That arm is not vacuous: `self.rows_fingerprint` is this
+    /// artifact's *own* sealed field, so a hoisted fingerprint taken from a
+    /// different partition — or a corrupted one — disagrees with it and
+    /// refuses.  See [`VerifiedMeshFingerprint`] for the G2 precedent this
+    /// copies.
+    #[allow(
+        dead_code,
+        reason = "the sealed support runner consumes the hoisted-authority form"
+    )]
+    pub(crate) fn validate_binding_hoisted(
+        &self,
+        partition: &FinalizedLoadPartition,
+        canonical_contact_ids: &[u64],
+        hoisted_rows_fingerprint: u64,
+    ) -> Result<(), GenericPerceptionError> {
         if self.authority != partition.authority
             || self.contacts_fingerprint != partition.contacts_fingerprint
-            || self.rows_fingerprint != finalized_load_rows_fingerprint(&partition.rows)
+            || self.rows_fingerprint != hoisted_rows_fingerprint
             || self.contact_ids != canonical_contact_ids
         {
             return Err(GenericPerceptionError::StaleAuthority);
         }
         Ok(())
+    }
+
+    /// Hash a partition's rows once, for a caller that will then present the
+    /// value to [`Self::validate_binding_hoisted`] at every site that used to
+    /// recompute it.  FU-32 phase J1.
+    #[allow(
+        dead_code,
+        reason = "the sealed support runner hoists this once per routing stage"
+    )]
+    pub(crate) fn hoist_rows_fingerprint(partition: &FinalizedLoadPartition) -> u64 {
+        finalized_load_rows_fingerprint(&partition.rows)
     }
 
     #[allow(
@@ -5613,6 +5659,33 @@ mod tests {
         assert_eq!(
             loads.validate_binding(&partition, &reordered_ids),
             Err(GenericPerceptionError::StaleAuthority)
+        );
+
+        // FU-32 phase J1.  The hoisted form must be exactly as strict as the
+        // recomputing form, and its row arm must bite: a hoisted fingerprint
+        // that does not belong to this partition attests nothing.
+        let honest = FinalizedContactLoads::hoist_rows_fingerprint(&partition);
+        assert!(loads
+            .validate_binding_hoisted(&partition, &contact_ids, honest)
+            .is_ok());
+        assert_eq!(
+            loads.validate_binding_hoisted(&partition, &contact_ids, honest ^ 1),
+            Err(GenericPerceptionError::StaleAuthority),
+            "the hoisted row arm stopped comparing"
+        );
+        assert_eq!(
+            loads.validate_binding_hoisted(
+                &partition,
+                &contact_ids,
+                FinalizedContactLoads::hoist_rows_fingerprint(&stale),
+            ),
+            Err(GenericPerceptionError::StaleAuthority),
+            "a foreign partition's hoisted row fingerprint was accepted"
+        );
+        assert_eq!(
+            loads.validate_binding_hoisted(&partition, &reordered_ids, honest),
+            Err(GenericPerceptionError::StaleAuthority),
+            "the hoist must not weaken the contact-id arm"
         );
     }
 

@@ -1155,20 +1155,242 @@ impl Config {
     }
 }
 
+/// The four immutable routing authorities, hashed **once** for a whole CCO
+/// routing stage, with the subjects travelling inside the proof.
+///
+/// # FU-32 phase J1 — why this type exists
+///
+/// `plan`, `loads`, `pool` and `geometry` are behind shared references for the
+/// entire routing loop (`SupportRoutingRun::route_initial_cco`) and none of
+/// their types contains any interior mutability — a repo-wide grep for
+/// `Cell`/`RefCell`/`Mutex`/`RwLock`/`Atomic`/`thread_local` across
+/// `specialized.rs`, `perception.rs`, `anchor.rs` and this file finds exactly
+/// one hit, a `#[cfg(test)]` thread-local at `specialized.rs:5334`
+/// (re-verified 2026-08-09).  **The borrow checker already proves what the
+/// per-terminal re-hashes were re-checking.**
+///
+/// What that cost, measured on the Weeping Treant v1.2 (FU-32 design §M2):
+/// `SpecializedContactPlan::digest` 2,487,000 words × **4 calls per grown
+/// terminal**, `surface_anchor_pool_digest` 2,250,235 words × **~3.9**,
+/// `finalized_load_rows_fingerprint` 70,737 rows × **2** — ≈153 MB of hashing
+/// per terminal, ≈66 GB over a full cadence.  On `Cylinder`, a 244-triangle
+/// corpus model, it was ≈95 % of a 5,736 ms routing stage.
+///
+/// # What did NOT change, and must not
+///
+/// This is the `VerifiedMeshFingerprint` (FU-8f phase G2) precedent applied
+/// verbatim, with both of its properties:
+///
+/// 1. **The subjects travel inside the proof.**  A holder of this token can
+///    reach the plan, loads, pool and geometry *only* through it, so a digest
+///    computed from one object can never be presented alongside another — by
+///    construction rather than by discipline.  That is why
+///    [`FinalizedAnchorTerminalRoute`] carries the token instead of four
+///    independent references.
+/// 2. **The staleness comparison stays at every site.**  This type hoists the
+///    *hash*, not the *check*.  `bind`, `validate_replay`,
+///    `validate_finalized_anchor_route`,
+///    [`crate::anchor::SurfaceAnchorPool::validate_against_hoisted`],
+///    [`crate::anchor::discover_finalized_anchor_seats`],
+///    [`crate::anchor::validate_finalized_anchor_feet`] and
+///    `FinalizedContactLoads::validate_binding_hoisted` all still compare, and
+///    still refuse.  "Verify once, thread the proof — never stop verifying."
+///
+/// Each hoisted value is compared at its site against the subject's *own*
+/// O(1) sealed field — `plan.finalized_load_plan_digest()`, `loads.digest()`,
+/// `pool.digest()`, `geometry.fingerprint_ref()`, `loads.rows_fingerprint` —
+/// which is an independently computed witness, not a copy of the hoist.  A
+/// corrupted or foreign token therefore still fails a real comparison; that
+/// claim is pinned arm by arm by the `fu32_*` tests at the bottom of this
+/// module.
+///
+/// **Value-preserving.**  The digests recorded in every `TerminalRouteEvidence`
+/// are the same `u64`s computed by the same functions from the same
+/// structures — just once.
+pub(crate) struct VerifiedRoutingAuthority<'a, 'surface> {
+    plan: &'a SpecializedContactPlan,
+    loads: &'a FinalizedContactLoads,
+    pool: &'a SurfaceAnchorPool<'surface>,
+    geometry: &'a AnchorGeometryAuthority<'surface>,
+    plan_digest: u64,
+    loads_digest: u64,
+    pool_digest: u64,
+    load_rows_fingerprint: u64,
+    geometry_fingerprint: GeometryFingerprint,
+    /// The plan's canonical contact-id vector, built once instead of once per
+    /// `validate_finalized_anchor_route` call.
+    contact_ids: Vec<u64>,
+    /// Kills the two O(|contacts|) linear `find`s per terminal — one in the
+    /// runner's cadence loop, one in `validate_finalized_anchor_route`.
+    contact_by_id: BTreeMap<u64, usize>,
+}
+
+impl<'a, 'surface> VerifiedRoutingAuthority<'a, 'surface> {
+    /// Hash the four immutable authorities once and bind the digests to them.
+    ///
+    /// This performs **exactly** the validation the per-terminal path used to
+    /// perform — `pool.validate_against(geometry)` with its full content walk,
+    /// `loads.validate_binding(plan.load_partition(), contact_ids)` with its
+    /// full row walk, and the plan-seal agreement `plan.digest() ==
+    /// plan.finalized_load_plan_digest()` that `validate_initial_cco_preflight`
+    /// already requires — once, before the first terminal.
+    pub(crate) fn compute(
+        plan: &'a SpecializedContactPlan,
+        loads: &'a FinalizedContactLoads,
+        pool: &'a SurfaceAnchorPool<'surface>,
+        geometry: &'a AnchorGeometryAuthority<'surface>,
+    ) -> Result<Self, CcoError> {
+        pool.validate_against(geometry)?;
+        let contact_ids = plan
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let mut contact_by_id = BTreeMap::new();
+        for (index, &contact_id) in contact_ids.iter().enumerate() {
+            if contact_by_id.insert(contact_id, index).is_some() {
+                return Err(CcoError::FinalizedContactMismatch);
+            }
+        }
+        let load_rows_fingerprint =
+            FinalizedContactLoads::hoist_rows_fingerprint(plan.load_partition());
+        if loads
+            .validate_binding_hoisted(plan.load_partition(), &contact_ids, load_rows_fingerprint)
+            .is_err()
+        {
+            return Err(CcoError::FinalizedLoadBindingMismatch);
+        }
+        let plan_digest = plan.digest();
+        // The one place the plan's full walk still runs: the seal this token
+        // will be compared against at every site must be proved equal to the
+        // real hash exactly once, here, or the hoist would attest nothing.
+        if plan_digest != plan.finalized_load_plan_digest() {
+            return Err(CcoError::StaleFinalizedAnchorAuthority);
+        }
+        Ok(Self {
+            plan,
+            loads,
+            pool,
+            geometry,
+            plan_digest,
+            loads_digest: loads.digest(),
+            pool_digest: pool.digest(),
+            load_rows_fingerprint,
+            geometry_fingerprint: geometry.fingerprint(),
+            contact_ids,
+            contact_by_id,
+        })
+    }
+
+    pub(crate) const fn plan(&self) -> &'a SpecializedContactPlan {
+        self.plan
+    }
+
+    pub(crate) const fn loads(&self) -> &'a FinalizedContactLoads {
+        self.loads
+    }
+
+    pub(crate) const fn pool(&self) -> &'a SurfaceAnchorPool<'surface> {
+        self.pool
+    }
+
+    pub(crate) const fn geometry(&self) -> &'a AnchorGeometryAuthority<'surface> {
+        self.geometry
+    }
+
+    pub(crate) const fn plan_digest(&self) -> u64 {
+        self.plan_digest
+    }
+
+    pub(crate) const fn loads_digest(&self) -> u64 {
+        self.loads_digest
+    }
+
+    pub(crate) const fn pool_digest(&self) -> u64 {
+        self.pool_digest
+    }
+
+    pub(crate) const fn load_rows_fingerprint(&self) -> u64 {
+        self.load_rows_fingerprint
+    }
+
+    pub(crate) const fn geometry_fingerprint(&self) -> &GeometryFingerprint {
+        &self.geometry_fingerprint
+    }
+
+    pub(crate) fn contact_ids(&self) -> &[u64] {
+        &self.contact_ids
+    }
+
+    /// The plan contact for a stable physical-contact id, by index rather than
+    /// by an O(|contacts|) scan.
+    pub(crate) fn contact(&self, contact_id: u64) -> Option<&'a SpecializedPhysicalContact> {
+        self.contact_by_id
+            .get(&contact_id)
+            .and_then(|&index| self.plan.contacts().get(index))
+    }
+
+    /// FU-32 J1 mutation hook: corrupt one hoisted digest without touching the
+    /// subject it claims to attest.  Every site's comparison must catch it.
+    #[cfg(test)]
+    pub(crate) fn corrupt_for_test(&mut self, field: CorruptedAuthorityField) {
+        match field {
+            CorruptedAuthorityField::PlanDigest => self.plan_digest ^= 1,
+            CorruptedAuthorityField::LoadsDigest => self.loads_digest ^= 1,
+            CorruptedAuthorityField::PoolDigest => self.pool_digest ^= 1,
+            CorruptedAuthorityField::LoadRowsFingerprint => self.load_rows_fingerprint ^= 1,
+            CorruptedAuthorityField::GeometryFingerprint => {
+                self.geometry_fingerprint.corrupt_mesh_sha256_for_test();
+            }
+        }
+    }
+}
+
+/// Which hoisted value a `corrupt_for_test` call moves.  FU-32 J1.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CorruptedAuthorityField {
+    PlanDigest,
+    LoadsDigest,
+    PoolDigest,
+    LoadRowsFingerprint,
+    GeometryFingerprint,
+}
+
 /// The only production terminal-anchor route.  It starts from the finalized
 /// physical-contact authority and the canonical exterior pool; callers never
 /// hand CCO a selected-contact projection or an arbitrary seat collection.
+///
+/// FU-32 J1: the four immutable authorities now travel together inside
+/// [`VerifiedRoutingAuthority`] rather than as four independent references, so
+/// the hoisted digests cannot be paired with a different plan, pool, load
+/// artifact or geometry than the one they were computed from.
 pub(crate) struct FinalizedAnchorTerminalRoute<'a, 'surface> {
-    pub(crate) plan: &'a SpecializedContactPlan,
+    pub(crate) authority: &'a VerifiedRoutingAuthority<'a, 'surface>,
     pub(crate) contact: &'a SpecializedPhysicalContact,
     pub(crate) contact_id: u64,
-    pub(crate) loads: &'a FinalizedContactLoads,
-    pub(crate) pool: &'a SurfaceAnchorPool<'surface>,
     pub(crate) config: AnchorSearchConfig,
-    pub(crate) geometry: &'a AnchorGeometryAuthority<'surface>,
     /// F3 — the run's own process resolution, for the seat attestation's
     /// claimed extent and its OD-9 probe offset. See [`RewireAnchorRoute`].
     pub(crate) process_resolution_mm: f64,
+}
+
+impl<'a, 'surface> FinalizedAnchorTerminalRoute<'a, 'surface> {
+    pub(crate) const fn plan(&self) -> &'a SpecializedContactPlan {
+        self.authority.plan()
+    }
+
+    pub(crate) const fn loads(&self) -> &'a FinalizedContactLoads {
+        self.authority.loads()
+    }
+
+    pub(crate) const fn pool(&self) -> &'a SurfaceAnchorPool<'surface> {
+        self.authority.pool()
+    }
+
+    pub(crate) const fn geometry(&self) -> &'a AnchorGeometryAuthority<'surface> {
+        self.authority.geometry()
+    }
 }
 
 /// Immutable authority carried from discovery through the serial CCO replay.
@@ -1400,9 +1622,10 @@ impl CcoController {
         let discovery = discover_finalized_anchor_seats(
             context.bound_contact,
             context.terminal,
-            context.route.pool,
+            context.route.pool(),
             context.route.config,
-            context.route.geometry,
+            context.route.geometry(),
+            context.route.authority.pool_digest(),
         )?;
         let anchor_ray_batches = discovery.query_counts().ray_batches;
         let anchor_seat_refusals = discovery.refusals().to_vec();
@@ -1415,7 +1638,7 @@ impl CcoController {
         let mut outcome = grow_terminal_inner(
             forest,
             request,
-            context.route.geometry.surface(),
+            context.route.geometry().surface(),
             discovery.into_seats(),
             anchor_seat_refusals,
             Some(&context),
@@ -2200,11 +2423,27 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
         let terminal =
             AnchorTerminalBinding::new(request.terminal_id, request.stub, request.stub_end_mm());
         let bound_contact = validate_finalized_anchor_route(request, &route, terminal)?;
+        // FU-32 J1.  These four comparisons are new *code* but not a new
+        // *check*: before the hoist, the four values recorded below were each
+        // recomputed here from the subject itself, so recording them was the
+        // check.  With the hash hoisted out of the loop, the recording has to
+        // state explicitly that the hoisted proof still matches the subject's
+        // own sealed witness — otherwise a corrupted token would be copied
+        // straight into the transcript on the winner arm, which never reaches
+        // `validate_replay`.  Every witness on the right-hand side is O(1):
+        // three stored fields and one borrowed fingerprint.
+        if route.authority.plan_digest() != route.plan().finalized_load_plan_digest()
+            || route.authority.loads_digest() != route.loads().digest()
+            || route.authority.pool_digest() != route.pool().digest()
+            || route.authority.geometry_fingerprint() != route.geometry().fingerprint_ref()
+        {
+            return Err(CcoError::StaleFinalizedAnchorAuthority);
+        }
         Ok(Self {
-            plan_digest: route.plan.digest(),
-            loads_digest: route.loads.digest(),
-            pool_digest: route.pool.digest(),
-            geometry_fingerprint: route.geometry.fingerprint(),
+            plan_digest: route.authority.plan_digest(),
+            loads_digest: route.authority.loads_digest(),
+            pool_digest: route.authority.pool_digest(),
+            geometry_fingerprint: route.authority.geometry_fingerprint().clone(),
             route,
             bound_contact,
             terminal,
@@ -2220,10 +2459,19 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
         request: &TerminalCcoRequest,
     ) -> Result<(), CcoError> {
         request.validate(forest)?;
-        if self.route.plan.digest() != self.plan_digest
-            || self.route.loads.digest() != self.loads_digest
-            || self.route.pool.digest() != self.pool_digest
-            || self.route.geometry.fingerprint() != self.geometry_fingerprint
+        // FU-32 J1.  The comparison stays exactly here and refuses exactly as
+        // it did; only the whole-structure re-hashes on the left-hand side
+        // were hoisted.  Each right-hand value was copied from the token at
+        // `bind`; each left-hand value is the subject's own O(1) sealed
+        // witness — `finalized_load_plan_digest` is the plan's own record of
+        // `digest()`, proved equal to it once by
+        // `VerifiedRoutingAuthority::compute` and again by
+        // `validate_initial_cco_preflight`.  A token corrupted after `compute`
+        // therefore still fails here.
+        if self.route.plan().finalized_load_plan_digest() != self.plan_digest
+            || self.route.loads().digest() != self.loads_digest
+            || self.route.pool().digest() != self.pool_digest
+            || *self.route.geometry().fingerprint_ref() != self.geometry_fingerprint
         {
             return Err(CcoError::StaleFinalizedAnchorAuthority);
         }
@@ -2246,7 +2494,7 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
             original_key: request.stub,
             plan_digest: self.plan_digest,
             loads_digest: self.loads_digest,
-            geometry_digest: self.route.geometry.digest(),
+            geometry_digest: self.route.geometry().digest(),
             forest_digest_before,
             controller_digest_before,
         }
@@ -2287,32 +2535,36 @@ fn validate_finalized_anchor_route(
     if route.config != AnchorSearchConfig::current()? {
         return Err(CcoError::StaleFinalizedAnchorConfig);
     }
-    route.pool.validate_against(route.geometry)?;
+    // FU-32 J1: same check, same refusal; the whole-pool re-hash behind its
+    // content arm was hoisted to `VerifiedRoutingAuthority::compute`.
+    route
+        .pool()
+        .validate_against_hoisted(route.geometry(), route.authority.pool_digest())?;
+    // FU-32 J1: the linear `find` over every plan contact became a map lookup
+    // in the token's contact index.  The comparison is unchanged — the plan's
+    // contact for this id must be equal to the one the route carries.
     if route.contact.contact_id() != route.contact_id
-        || route
-            .plan
-            .contacts()
-            .iter()
-            .find(|contact| contact.contact_id() == route.contact_id)
-            != Some(route.contact)
+        || route.authority.contact(route.contact_id) != Some(route.contact)
     {
         return Err(CcoError::FinalizedContactMismatch);
     }
-    let contact_ids = route
-        .plan
-        .contacts()
-        .iter()
-        .map(SpecializedPhysicalContact::contact_id)
-        .collect::<Vec<_>>();
+    // FU-32 J1: built once by the token instead of once per call.
+    let contact_ids = route.authority.contact_ids();
+    // FU-32 J1: same four-arm check, same refusal; the whole-partition row
+    // walk behind its third arm was hoisted.
     if route
-        .loads
-        .validate_binding(route.plan.load_partition(), &contact_ids)
+        .loads()
+        .validate_binding_hoisted(
+            route.plan().load_partition(),
+            contact_ids,
+            route.authority.load_rows_fingerprint(),
+        )
         .is_err()
     {
         return Err(CcoError::FinalizedLoadBindingMismatch);
     }
     let leaf = route
-        .loads
+        .loads()
         .leaf_for(route.contact_id)
         .ok_or(CcoError::FinalizedLoadBindingMismatch)?;
     if leaf.contact_id() != route.contact_id
@@ -2327,8 +2579,15 @@ fn validate_finalized_anchor_route(
     {
         return Err(CcoError::FinalizedStubLoadMismatch);
     }
-    Ok(BoundPhysicalAnchorContact::new(
-        route.plan,
+    // FU-32 J1: the plan digest inside this fingerprint is the token's, hashed
+    // once for the stage and proved equal to the plan's own seal at
+    // `VerifiedRoutingAuthority::compute`; the contact is the one this
+    // function just proved equal to the plan's contact for this id.  Same
+    // fingerprint, same bytes — without a second full plan walk and a second
+    // linear scan.
+    Ok(BoundPhysicalAnchorContact::from_hoisted(
+        route.authority.plan_digest(),
+        route.contact,
         route.contact_id,
     )?)
 }
@@ -2461,9 +2720,10 @@ fn grow_terminal_inner(
             foot_requests,
             context.bound_contact,
             context.terminal,
-            context.route.pool,
+            context.route.pool(),
             context.route.config,
-            context.route.geometry,
+            context.route.geometry(),
+            context.route.authority.pool_digest(),
         )?;
         anchor_foot_batches = validation.query_counts().sphere_breach_batches;
         let mut valid = BTreeSet::new();
@@ -4134,6 +4394,7 @@ mod tests {
         frame: BuildFrame,
     ) -> CompletedInitialRoutes {
         let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
+        let authority = VerifiedRoutingAuthority::compute(plan, loads, &pool, geometry).unwrap();
         let mut controller = CcoController::default();
         let mut expected = build.routing_order().specialized_terminals().to_vec();
         expected.extend_from_slice(build.routing_order().regular_terminals());
@@ -4161,13 +4422,10 @@ mod tests {
                     build.forest_mut(),
                     &request,
                     FinalizedAnchorTerminalRoute {
-                        plan,
+                        authority: &authority,
                         contact,
                         contact_id: u64::from(*terminal),
-                        loads,
-                        pool: &pool,
                         config: AnchorSearchConfig::current().unwrap(),
-                        geometry,
                         process_resolution_mm: 0.05,
                     },
                 )
@@ -4181,6 +4439,313 @@ mod tests {
             skipped_ledger,
             outcomes,
         )
+    }
+
+    /// FU-32 phase J1 — the hoisted routing authority is load-bearing, arm by
+    /// arm, and the routing path still refuses a stale proof.
+    ///
+    /// # Why this test has to exist
+    ///
+    /// J1 removed the per-terminal re-hashing of `plan`, `loads`, `pool` and
+    /// `geometry` and replaced it with digests hoisted once into
+    /// [`VerifiedRoutingAuthority`].  If the sites that read those hoisted
+    /// values had been left comparing the token against *itself*, the
+    /// comparisons would have degraded into `field == field` — a guarantee
+    /// regression dressed as a speed-up, exactly what the G2 record and FU-32
+    /// design §F6 warn about.  So every site compares the hoisted value
+    /// against the subject's own independently sealed witness, and this test
+    /// corrupts the hoist — leaving every subject untouched — to prove each of
+    /// those comparisons still bites.
+    ///
+    /// # The arms, and the site each one names
+    ///
+    /// | corrupted hoist | site that must refuse | error |
+    /// |---|---|---|
+    /// | `pool_digest` | `SurfaceAnchorPool::validate_against_hoisted`, reached from `validate_finalized_anchor_route` | `Anchor(StaleSurfaceAnchorPool)` |
+    /// | `load_rows_fingerprint` | `FinalizedContactLoads::validate_binding_hoisted`, third arm | `FinalizedLoadBindingMismatch` |
+    /// | `plan_digest` | `bind`, first arm, against `plan.finalized_load_plan_digest()` | `StaleFinalizedAnchorAuthority` |
+    /// | `loads_digest` | `bind`, second arm, against `loads.digest()` | `StaleFinalizedAnchorAuthority` |
+    /// | `geometry_fingerprint` | `bind`, fourth arm, against `geometry.fingerprint_ref()` | `StaleFinalizedAnchorAuthority` |
+    ///
+    /// Three distinct error types across the five arms, so no arm is satisfied
+    /// by a delegate's refusal in the way `36d1a63` had to correct for G2.
+    ///
+    /// # Mutation transcript (2026-08-09, run by hand at this tip)
+    ///
+    /// Nine comparisons were deleted one at a time and the `fu32_*` tests
+    /// re-run.  Every deletion failed a test, and every failure named the
+    /// deleted arm:
+    ///
+    /// | deleted comparison | failing assertion |
+    /// |---|---|
+    /// | `SurfaceAnchorPool::validate_against_hoisted` content arm | this test's `PoolDigest` arm **and** `anchor::tests::surface_anchor_pool_is_exterior_face_ordered_…` |
+    /// | `FinalizedContactLoads::validate_binding_hoisted` rows arm | this test's `LoadRowsFingerprint` arm **and** `perception::tests::finalized_contact_loads_fold_frozen_rows_…` |
+    /// | `bind` arm 1 (plan) | "bind accepted a corrupted PlanDigest hoist" |
+    /// | `bind` arm 2 (loads) | "bind accepted a corrupted LoadsDigest hoist" |
+    /// | `bind` arm 4 (geometry) | "bind accepted a corrupted GeometryFingerprint hoist" |
+    /// | `validate_replay` arms 0–3 | "validate_replay arm {0,1,2,3} stopped refusing a stale authority" |
+    ///
+    /// **The delegate observation, recorded rather than hidden.** Deleting any
+    /// of `bind`'s three arms leaves
+    /// [`fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation`]
+    /// **green**, because that fixture's terminal takes the no-winner arm and
+    /// `validate_replay` refuses on the same proof.  That is precisely the
+    /// `36d1a63` vacuity shape, and it is why this test calls `bind` directly:
+    /// so each of its arms can be satisfied only by the site that names it.
+    ///
+    /// # Why `bind` is exercised directly, and not only through the route
+    ///
+    /// The `36d1a63` vacuity lesson, met head-on.  On the **no-winner** arm
+    /// `grow_terminal_with_finalized_anchor` calls `validate_replay`, whose
+    /// quartet refuses on the same proof as `bind`'s — so deleting `bind`'s
+    /// plan/loads/geometry arm and running only the end-to-end test leaves it
+    /// **green**, satisfied by a delegate.  `bind`'s arms are the *only* gate
+    /// on the winner arm, where no replay happens.  So the arm-naming test
+    /// below calls `FinalizedAnchorValidationContext::bind` itself, and the
+    /// end-to-end test in
+    /// [`fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation`]
+    /// separately proves the production path refuses before any mutation.
+    ///
+    /// Every corrupted arm must also leave the forest untouched: these are
+    /// pre-mutation authority gates, so a refusal that had already grown a
+    /// member would be a different defect.
+    #[test]
+    fn fu32_bind_refuses_a_corrupted_hoisted_routing_authority_arm_by_arm() {
+        let (build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+
+        for (field, expected) in corrupted_authority_arms() {
+            let mut corrupted =
+                VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+            let contact = corrupted.contact(u64::from(terminal)).unwrap();
+            corrupted.corrupt_for_test(field);
+            let error = FinalizedAnchorValidationContext::bind(
+                build.forest(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &corrupted,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            )
+            .err()
+            .unwrap_or_else(|| panic!("bind accepted a corrupted {field:?} hoist"));
+            assert!(
+                expected(&error),
+                "bind refused a corrupted {field:?} at the wrong site: {error}"
+            );
+        }
+
+        let honest = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = honest.contact(u64::from(terminal)).unwrap();
+        FinalizedAnchorValidationContext::bind(
+            build.forest(),
+            &request,
+            FinalizedAnchorTerminalRoute {
+                authority: &honest,
+                contact,
+                contact_id: u64::from(terminal),
+                config: AnchorSearchConfig::current().unwrap(),
+                process_resolution_mm: 0.05,
+            },
+        )
+        .expect("an honest hoisted authority binds exactly as it did before J1");
+    }
+
+    /// One corruption arm: the hoisted field to move, and the predicate the
+    /// resulting refusal must satisfy.  FU-32 J1.
+    type CorruptedAuthorityArm = (CorruptedAuthorityField, fn(&CcoError) -> bool);
+
+    /// The five corruption arms and the error each must produce.  Shared by
+    /// the `bind` arm-naming test and the end-to-end path test so the two
+    /// cannot drift.  FU-32 J1.
+    fn corrupted_authority_arms() -> [CorruptedAuthorityArm; 5] {
+        [
+            (CorruptedAuthorityField::PoolDigest, |error| {
+                matches!(
+                    error,
+                    CcoError::Anchor(AnchorSearchError::StaleSurfaceAnchorPool)
+                )
+            }),
+            (CorruptedAuthorityField::LoadRowsFingerprint, |error| {
+                matches!(error, CcoError::FinalizedLoadBindingMismatch)
+            }),
+            (CorruptedAuthorityField::PlanDigest, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+            (CorruptedAuthorityField::LoadsDigest, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+            (CorruptedAuthorityField::GeometryFingerprint, |error| {
+                matches!(error, CcoError::StaleFinalizedAnchorAuthority)
+            }),
+        ]
+    }
+
+    /// FU-32 phase J1 — the production routing path refuses a corrupted hoist
+    /// before it touches the forest.  See
+    /// [`fu32_bind_refuses_a_corrupted_hoisted_routing_authority_arm_by_arm`]
+    /// for the arm-by-arm mutation transcript this complements.
+    #[test]
+    fn fu32_a_corrupted_hoisted_authority_never_reaches_a_forest_mutation() {
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+        let before = build.forest().digest();
+
+        for (field, expected) in corrupted_authority_arms() {
+            let mut corrupted =
+                VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+            let contact = corrupted
+                .contact(u64::from(terminal))
+                .expect("the plan owns this terminal's contact");
+            corrupted.corrupt_for_test(field);
+            let result = CcoController::default().grow_terminal_with_finalized_anchor(
+                build.forest_mut(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &corrupted,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            );
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("a corrupted {field:?} hoist routed a terminal"));
+            assert!(
+                expected(&error),
+                "corrupting {field:?} refused at the wrong site: {error}"
+            );
+            assert_eq!(
+                build.forest().digest(),
+                before,
+                "corrupting {field:?} mutated the forest before refusing"
+            );
+        }
+
+        // The same route, with an honest token, still routes: the arms above
+        // refuse the corruption rather than the path.
+        let honest = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = honest.contact(u64::from(terminal)).unwrap();
+        CcoController::default()
+            .grow_terminal_with_finalized_anchor(
+                build.forest_mut(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    authority: &honest,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    config: AnchorSearchConfig::current().unwrap(),
+                    process_resolution_mm: 0.05,
+                },
+            )
+            .expect("an honest hoisted authority routes exactly as it did before J1");
+    }
+
+    /// FU-32 phase J1 — `validate_replay`'s quartet still refuses a token that
+    /// went stale *between* `bind` and the serial winner replay.
+    ///
+    /// `bind` copies the four hoisted values out of the token; `validate_replay`
+    /// compares those copies against the subjects' own sealed witnesses.  This
+    /// test corrupts the token after a successful `bind`-shaped construction
+    /// and proves the replay comparison — not `bind`'s — is what refuses.
+    #[test]
+    fn fu32_validate_replay_still_refuses_a_token_corrupted_after_bind() {
+        let (build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let frame = no_winner_frame();
+        let terminal = build
+            .routing_order()
+            .specialized_terminals()
+            .iter()
+            .chain(build.routing_order().regular_terminals())
+            .copied()
+            .find(|terminal| {
+                build.forest().terminal_ledger(*terminal).unwrap().state
+                    != TerminalLedgerState::Quarantined
+            })
+            .expect("the fixture routes at least one live terminal");
+        let request = TerminalCcoRequest::bind(build.forest(), terminal, frame).unwrap();
+
+        let authority = VerifiedRoutingAuthority::compute(&plan, &loads, &pool, &geometry).unwrap();
+        let contact = authority.contact(u64::from(terminal)).unwrap();
+        let mut context = FinalizedAnchorValidationContext::bind(
+            build.forest(),
+            &request,
+            FinalizedAnchorTerminalRoute {
+                authority: &authority,
+                contact,
+                contact_id: u64::from(terminal),
+                config: AnchorSearchConfig::current().unwrap(),
+                process_resolution_mm: 0.05,
+            },
+        )
+        .expect("an honest token binds");
+        assert!(context.validate_replay(build.forest(), &request).is_ok());
+
+        // Move each recorded copy away from its subject in turn.  Every one of
+        // the four arms must refuse on its own.
+        let honest = (
+            context.plan_digest,
+            context.loads_digest,
+            context.pool_digest,
+            context.geometry_fingerprint.clone(),
+        );
+        for arm in 0..4 {
+            context.plan_digest = honest.0;
+            context.loads_digest = honest.1;
+            context.pool_digest = honest.2;
+            context.geometry_fingerprint = honest.3.clone();
+            match arm {
+                0 => context.plan_digest ^= 1,
+                1 => context.loads_digest ^= 1,
+                2 => context.pool_digest ^= 1,
+                _ => context.geometry_fingerprint.corrupt_mesh_sha256_for_test(),
+            }
+            assert!(
+                matches!(
+                    context.validate_replay(build.forest(), &request),
+                    Err(CcoError::StaleFinalizedAnchorAuthority)
+                ),
+                "validate_replay arm {arm} stopped refusing a stale authority"
+            );
+        }
     }
 
     fn no_winner_reason_signature(reason: &NoWinnerEvidence) -> String {
@@ -4287,18 +4852,17 @@ mod tests {
             .find(|contact| contact.contact_id() == replay.physical_contact_id)
             .unwrap();
         let replay_pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let replay_authority =
+            VerifiedRoutingAuthority::compute(&plan, &loads, &replay_pool, &geometry).unwrap();
         assert!(matches!(
             controller.grow_terminal_with_finalized_anchor(
                 build.forest_mut(),
                 &replay,
                 FinalizedAnchorTerminalRoute {
-                    plan: &plan,
+                    authority: &replay_authority,
                     contact: replay_contact,
                     contact_id: replay.physical_contact_id,
-                    loads: &loads,
-                    pool: &replay_pool,
                     config: AnchorSearchConfig::current().unwrap(),
-                    geometry: &geometry,
                     process_resolution_mm: 0.05,
                 },
             ),

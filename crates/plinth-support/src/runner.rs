@@ -71,7 +71,7 @@ use crate::{
     },
     cco::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
-        FinalizedDispositionKind, TerminalCcoRequest,
+        FinalizedDispositionKind, TerminalCcoRequest, VerifiedRoutingAuthority,
     },
     coverage_measurement_assessment_resource_plan,
     dyadic::CandidatePayloadConfig,
@@ -1644,6 +1644,13 @@ impl<'a> PreparedSupportRun<'a> {
         CcoController::validate_initial_route_config()?;
         let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
 
+        // FU-32 phase J1.  `plan`, `loads`, `pool` and `geometry` are immutable
+        // for the whole cadence below, in types with no interior mutability, so
+        // their digests are hashed ONCE here and threaded — the G2
+        // `VerifiedMeshFingerprint` precedent.  Every staleness comparison
+        // stays at its own site; only the re-hashing behind them is gone.
+        let authority = VerifiedRoutingAuthority::compute(&plan, loads, &pool, &geometry)?;
+
         let mut controller = CcoController::default();
         let mut cadence = initial.routing_order().specialized_terminals().to_vec();
         cadence.extend_from_slice(initial.routing_order().regular_terminals());
@@ -1658,22 +1665,19 @@ impl<'a> PreparedSupportRun<'a> {
             }
 
             let request = TerminalCcoRequest::bind(initial.forest(), terminal, context.frame)?;
-            let contact = plan
-                .contacts()
-                .iter()
-                .find(|contact| contact.contact_id() == u64::from(terminal))
+            // FU-32 J1: the token's contact index replaces an O(|contacts|)
+            // linear scan run once per cadence entry.
+            let contact = authority
+                .contact(u64::from(terminal))
                 .ok_or(SupportRoutingError::MissingPhysicalContact { terminal })?;
             controller.grow_terminal_with_finalized_anchor(
                 initial.forest_mut(),
                 &request,
                 FinalizedAnchorTerminalRoute {
-                    plan: &plan,
+                    authority: &authority,
                     contact,
                     contact_id: u64::from(terminal),
-                    loads,
-                    pool: &pool,
                     config: anchor_config,
-                    geometry: &geometry,
                     // PR-8/OD-9 (F3). The seat attestation claims ONE PROCESS
                     // RESOLUTION, and a layer height is a property of this run
                     // rather than of the registry, so it travels on the route.
@@ -1683,7 +1687,6 @@ impl<'a> PreparedSupportRun<'a> {
                 },
             )?;
         }
-
         let transcript = controller.finalize_transcript(&initial, &plan, loads, &geometry)?;
         transcript.validate_integrity()?;
         // PR-8/OD-9 (F3). The CCO model-anchor family's seat-attestation chain,
