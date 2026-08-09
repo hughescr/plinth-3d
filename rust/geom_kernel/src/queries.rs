@@ -476,6 +476,18 @@ pub enum PenetrationBatchError {
         counted: usize,
         executed: usize,
     },
+    /// The batch's EXECUTED totals exceeded the totals that were CHARGED for
+    /// it (FU-8g H2). [`Self::CensusDrift`] proves the same relation one row
+    /// and one buffer at a time; this proves it for the aggregate the caller
+    /// actually spent against its cap, which is the number a resource policy
+    /// is written in. Like `CensusDrift` it is impossible by construction and
+    /// exists so that a future edit fails loudly instead of overspending a
+    /// charge nobody re-checks.
+    ChargeDrift {
+        resource: &'static str,
+        charged: usize,
+        executed: usize,
+    },
 }
 
 impl From<BatchInputError> for PenetrationBatchError {
@@ -521,6 +533,14 @@ impl std::fmt::Display for PenetrationBatchError {
             } => write!(
                 formatter,
                 "penetration batch row {row} executed {executed} {resource}; census counted {counted}"
+            ),
+            Self::ChargeDrift {
+                resource,
+                charged,
+                executed,
+            } => write!(
+                formatter,
+                "penetration batch executed {executed} {resource}; the charge was {charged}"
             ),
         }
     }
@@ -581,6 +601,42 @@ pub struct PenetrationRowCensus {
     /// The longest single ray in millimetres — the per-ray form of the
     /// closed-form sample bound.
     pub max_ray_seg_mm: f64,
+}
+
+/// What the fill pass ACTUALLY executed, summed over the batch's rows: the
+/// EXECUTED half of the charged-vs-executed pair (FU-8g H2, the G3/G6c
+/// idiom — both numbers stated, the relation asserted rather than assumed).
+///
+/// `work` and `hits` are metered in exactly the units
+/// [`PenetrationRowCensus::tests`] and [`PenetrationRowCensus::crossings`]
+/// count, so on an undrifted pair they are EQUAL to the charge, not merely
+/// under it; `samples` and `intervals` are bounded quantities and land at or
+/// under their counted budgets. Nothing here is a policy: it is the receipt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PenetrationBatchMeter {
+    /// Rows the fill pass executed — every row of the batch, degenerate rows
+    /// included (a degenerate row executes and meters zero of everything
+    /// else).
+    pub rows: usize,
+    /// Executed traversal effort: BVH nodes popped plus Möller evaluations,
+    /// summed over every ray of every row.
+    pub work: usize,
+    /// Möller crossings the fill walk actually pushed, before deduplication.
+    pub hits: usize,
+    /// Sample points the fill pass actually placed.
+    pub samples: usize,
+    /// Intervals the fill pass actually emitted.
+    pub intervals: usize,
+}
+
+/// One row's executed totals. Aggregated into [`PenetrationBatchMeter`] by
+/// the metered batch entry point.
+#[derive(Clone, Copy, Debug, Default)]
+struct PenetrationRowMeter {
+    work: usize,
+    hits: usize,
+    samples: usize,
+    intervals: usize,
 }
 
 /// Counted (census-derived) batch requirements: totals are SUMS over per-row
@@ -1400,6 +1456,13 @@ impl NativeSurface {
         });
     }
 
+    /// Returns the EXECUTED traversal effort of this walk — one per BVH node
+    /// popped plus one per Möller evaluation — in exactly the units
+    /// [`Self::count_hits_with_stack`] counts, so the census pass's `tests`
+    /// and this walk's return value are the same quantity measured by the
+    /// two walks. The metered penetration path
+    /// ([`Self::penetration_intervals_batch_bounded_metered`], FU-8g H2)
+    /// compares them; every other caller may ignore it.
     fn collect_hits_with_stack(
         &self,
         o: V3,
@@ -1407,13 +1470,15 @@ impl NativeSurface {
         t_max: f64,
         out: &mut Vec<(f64, u32)>,
         stack: &mut Vec<i32>,
-    ) {
+    ) -> usize {
         out.clear();
         let t0 = -EPS;
         let t1 = t_max + EPS;
         stack.clear();
         stack.push(0);
+        let mut tests = 0usize;
         while let Some(ni) = stack.pop() {
+            tests += 1;
             let node = &self.bvh.nodes[ni as usize];
             if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
                 continue;
@@ -1423,6 +1488,7 @@ impl NativeSurface {
                 let cnt = node.b as usize;
                 for &tid in &self.bvh.order[start..start + cnt] {
                     let t = tid as usize;
+                    tests += 1;
                     let (hit, tv) = moller(
                         o,
                         d,
@@ -1440,6 +1506,7 @@ impl NativeSurface {
                 stack.push(node.b);
             }
         }
+        tests
     }
 
     /// Counting twin of [`Self::collect_hits_with_stack`]: the SAME traversal
@@ -1754,11 +1821,12 @@ impl NativeSurface {
         rays_all: bool,
         budget: PenetrationRowBudget,
         row: usize,
-    ) -> Result<Vec<Interval>, PenetrationBatchError> {
+    ) -> Result<(Vec<Interval>, PenetrationRowMeter), PenetrationBatchError> {
         let l = norm(sub(p1, p0));
+        let mut meter = PenetrationRowMeter::default();
         let mut out = reserve_penetration_vec(budget.intervals, Some(row), "interval output")?;
         if l < 1e-9 {
-            return Ok(out);
+            return Ok((out, meter));
         }
         let mut traversal_stack =
             reserve_penetration_vec(budget.traversal_stack, Some(row), "BVH traversal stack")?;
@@ -1779,7 +1847,8 @@ impl NativeSurface {
             }
             // crossings along this ray
             let mut hits = reserve_penetration_vec(budget.hits_per_ray, Some(row), "hits")?;
-            self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            meter.work += self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            meter.hits += hits.len();
             if hits.len() > budget.hits_per_ray {
                 return Err(PenetrationBatchError::CensusDrift {
                     row,
@@ -1847,6 +1916,7 @@ impl NativeSurface {
                     executed: sample_pts.len(),
                 });
             }
+            meter.samples += sample_pts.len();
 
             // inside classification + depth (nearest dist) for inside samples
             let mut ins_all =
@@ -1944,7 +2014,8 @@ impl NativeSurface {
                 });
             }
         }
-        Ok(out)
+        meter.intervals = out.len();
+        Ok((out, meter))
     }
 
     fn penetration_requirements(
@@ -2294,6 +2365,11 @@ impl NativeSurface {
     /// [`PenetrationBatchError::CensusDrift`] as the typed refusal should
     /// execution ever exceed its count). Input gathering, one index-parallel
     /// map per pass, and ordered scatter are retained.
+    ///
+    /// This entry point discards the execution receipt. A caller that charges
+    /// a CAP from this batch's counted demand should call
+    /// [`Self::penetration_intervals_batch_bounded_metered`] instead and check
+    /// the receipt against what it charged (FU-8g H2).
     #[allow(clippy::too_many_arguments)]
     pub fn penetration_intervals_batch_bounded(
         &self,
@@ -2308,6 +2384,47 @@ impl NativeSurface {
         rays_all: bool,
         limits: PenetrationBatchLimits,
     ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+        self.penetration_intervals_batch_bounded_metered(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            n_offset_rays,
+            majority_step_mm,
+            cap,
+            min_illegal_len_mm,
+            rays_all,
+            limits,
+        )
+        .map(|(intervals, _meter)| intervals)
+    }
+
+    /// [`Self::penetration_intervals_batch_bounded`], plus the receipt: what
+    /// the fill pass ACTUALLY executed, so a caller that charged a cap from
+    /// the counted demand can assert `executed <= charged` instead of
+    /// assuming it (FU-8g H2, the G3/G6c charged-vs-executed idiom).
+    ///
+    /// The receipt is checked here too, against this batch's OWN counted
+    /// requirements, and a batch that outruns its count is refused with
+    /// [`PenetrationBatchError::ChargeDrift`] rather than returned. The
+    /// returned meter is therefore always within the census totals; a caller
+    /// re-checks it against ITS charge because the caller's charge was
+    /// derived from a separate counting pass, and only the caller knows which
+    /// number it spent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn penetration_intervals_batch_bounded_metered(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        n_offset_rays: usize,
+        majority_step_mm: f64,
+        cap: usize,
+        min_illegal_len_mm: f64,
+        rays_all: bool,
+        limits: PenetrationBatchLimits,
+    ) -> Result<(Vec<Vec<Interval>>, PenetrationBatchMeter), PenetrationBatchError> {
         let n = p0s.len();
         Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
         let census = self.penetration_census_batch(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)?;
@@ -2352,10 +2469,46 @@ impl NativeSurface {
             };
         }
         let mut ordered = reserve_penetration_vec(n, None, "ordered interval rows")?;
+        let mut meter = PenetrationBatchMeter {
+            rows: n,
+            ..PenetrationBatchMeter::default()
+        };
         for row in per {
-            ordered.push(row.expect("checked above"));
+            let (intervals, executed) = row.expect("checked above");
+            meter.work += executed.work;
+            meter.hits += executed.hits;
+            meter.samples += executed.samples;
+            meter.intervals += executed.intervals;
+            ordered.push(intervals);
         }
-        Ok(ordered)
+        Self::check_penetration_meter(&requirements, meter)?;
+        Ok((ordered, meter))
+    }
+
+    /// The executed receipt against the counted charge, resource by resource.
+    /// `work` and `hits` are the same quantities the census counted, measured
+    /// by the other walk, so on an undrifted pair they are EQUAL; `samples`
+    /// and `intervals` land at or under their counted budgets.
+    fn check_penetration_meter(
+        requirements: &PenetrationCensusRequirements,
+        meter: PenetrationBatchMeter,
+    ) -> Result<(), PenetrationBatchError> {
+        for (resource, charged, executed) in [
+            ("rows", requirements.rows, meter.rows),
+            ("work", requirements.work, meter.work),
+            ("hits", requirements.hits, meter.hits),
+            ("samples", requirements.samples, meter.samples),
+            ("intervals", requirements.intervals, meter.intervals),
+        ] {
+            if executed > charged {
+                return Err(PenetrationBatchError::ChargeDrift {
+                    resource,
+                    charged,
+                    executed,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Crate-internal compatibility entry point retained solely for the inline

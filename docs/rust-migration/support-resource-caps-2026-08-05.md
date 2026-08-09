@@ -2051,6 +2051,27 @@ query is BVH-bounded, the same over-statement §15 corrected on the load term.
 **No cap is raised here.** The standing owner ruling holds; the remedy, when it
 is designed, is §15's remedy — make the bound honest.
 
+**[ADDENDUM 2026-08-09 — the remedy this section named was applied, and no cap
+moved.** FU-8g phases H1/H2 made the bound honest exactly as §15 did on the load
+term: `initial::preflight` now charges the census pass's counted `Σ tests`
+(executed traversal effort — BVH nodes popped plus Möller evaluations) instead
+of `rows × nfaces`, with `work` and `hits` severed, per-row budgets, and a
+charged-vs-executed receipt checked at the charge site. **The formula quoted
+above is therefore no longer what the engine computes**, and the treant's charge
+at 553 contacts is **108,378** — **2.71 %** of the same, untouched 4,000,000 cap
+rather than 58.1× it. `ContactConstructionLimits::production()` is byte-identical
+to `develop @ e3168c5`: **no cap raised, lowered or touched**, and the D5.3
+contingency (scaling the cap by the FU-8b batch-product rule) is **not
+triggered and not added**. Two corpus models' honest charge is *higher* than the
+worst case it replaced (`make_box` 205 vs 176, `make_raking_blade` 975 vs 924 —
+node-visit overhead exceeds `nfaces` on a 12/24-face mesh), four orders of
+magnitude under the cap in both cases. A fixture proves an over-demand mesh is
+still refused at the unchanged caps. Full record, with the per-model
+before/after table and the deviations: *FU-8g phase H2 landed 2026-08-09* in
+[`CURRENT-STATUS.md`](CURRENT-STATUS.md#fu8g-h2-2026-08-09). M0 registration of
+these four `ContactConstructionLimits` numbers, this document's §18 and the
+`constants.md` regeneration remain owed by FU-8g H3.]**
+
 ### 17.6 Ruling R-f — the precondition is MET; the re-derivation is NOT done
 
 R-f requires a treant run that **completes** the gate. Two now have, with

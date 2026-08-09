@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use geom_kernel::{Interval, PenetrationBatchLimits};
+use geom_kernel::{Interval, PenetrationBatchLimits, PenetrationBatchMeter};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_mesh::Mesh;
 use thiserror::Error;
@@ -295,6 +295,18 @@ pub(crate) enum InitialContactError {
         required: usize,
         limit: usize,
     },
+    /// FU-8g H2. The interval batch executed more than the preflight charged
+    /// against the production caps. The census pass counts the demand and the
+    /// fill pass executes it over the same rays with the same predicates, so
+    /// this is impossible by construction; it exists so a future edit that
+    /// lets the counting and the executing walks disagree refuses loudly here
+    /// instead of quietly overspending an admitted charge.
+    #[error("initial-contact executed {executed} {resource}; the preflight charged {charged}")]
+    ChargeDrift {
+        resource: &'static str,
+        charged: usize,
+        executed: usize,
+    },
     #[error("initial-contact resource arithmetic overflow for {0}")]
     ResourceOverflow(&'static str),
     #[error("initial-contact staging allocation failed for {0}")]
@@ -575,7 +587,7 @@ pub(crate) fn build_initial_contacts(
     });
 
     let routing_order = routing_order(&seeds)?;
-    let (overlaps, interval_batch_count) = classify_initial_overlaps(
+    let (overlaps, interval_batch_count, meter) = classify_initial_overlaps(
         &seeds,
         &axis_batch,
         geometry,
@@ -584,6 +596,10 @@ pub(crate) fn build_initial_contacts(
         policy.default_contact_depth_mm().diagnostic().get(),
         penetration_limits,
     )?;
+    // FU-8g H2 — the receipt, checked against the charge, at the site that
+    // spent it. `penetration_limits` is exactly what `preflight_work` charged
+    // against `ContactConstructionLimits::production()` a few lines above.
+    charge_covers_execution(meter, penetration_limits)?;
     let mut terminals = Vec::new();
     terminals
         .try_reserve_exact(contact_count)
@@ -922,17 +938,21 @@ fn classify_initial_overlaps(
     interval_cap: usize,
     contact_depth_mm: f64,
     penetration_limits: PenetrationBatchLimits,
-) -> Result<(Vec<f64>, usize), InitialContactError> {
+) -> Result<(Vec<f64>, usize, PenetrationBatchMeter), InitialContactError> {
     let mut overlaps = Vec::new();
     overlaps
         .try_reserve_exact(seeds.len())
         .map_err(|_| InitialContactError::Allocation("quarantine classification"))?;
     if seeds.is_empty() {
-        return Ok((overlaps, 0));
+        return Ok((overlaps, 0, PenetrationBatchMeter::default()));
     }
-    let intervals = geometry
+    // FU-8g H2 — the metered entry point. The receipt comes back with the
+    // intervals so the charge this run spent against the production caps can
+    // be checked against what the fill pass actually executed, rather than
+    // assumed to cover it.
+    let (intervals, meter) = geometry
         .surface()
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_metered(
             &axis_batch.p0,
             &axis_batch.p1,
             &axis_batch.r0,
@@ -953,7 +973,42 @@ fn classify_initial_overlaps(
             contact_depth_mm,
         ));
     }
-    Ok((overlaps, 1))
+    Ok((overlaps, 1, meter))
+}
+
+/// The charged-vs-executed meter, beside the charge (FU-8g H2, the G3/G6c
+/// idiom). `charged` is the very number `preflight_work` spent against the
+/// unchanged production caps — counted by the census pass at the preflight
+/// site — and `meter` is what the fill pass then executed. `work` and `hits`
+/// are the same quantities counted by the two walks, so on an undrifted pair
+/// they are EQUAL, not merely under; `samples` and `intervals` are bounded
+/// and land at or under.
+///
+/// The kernel checks its receipt against its OWN counting pass. This check is
+/// the independent one: it holds the receipt against the number the caller
+/// charged, which is what a cap is written in and what a resource plan
+/// promised. A run that outruns its charge refuses here rather than silently
+/// spending more than it was admitted for.
+fn charge_covers_execution(
+    meter: PenetrationBatchMeter,
+    charged: PenetrationBatchLimits,
+) -> Result<(), InitialContactError> {
+    for (resource, charged, executed) in [
+        ("rows", charged.max_rows, meter.rows),
+        ("work", charged.max_total_work, meter.work),
+        ("hits", charged.max_total_hits, meter.hits),
+        ("samples", charged.max_total_samples, meter.samples),
+        ("intervals", charged.max_total_intervals, meter.intervals),
+    ] {
+        if executed > charged {
+            return Err(InitialContactError::ChargeDrift {
+                resource,
+                charged,
+                executed,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The logical contact and load-row caps, checked before any contact-sized
@@ -1718,6 +1773,171 @@ mod tests {
         ));
     }
 
+    /// A stack of `count` thin closed boxes sharing one footprint. A ray down
+    /// the column is tested against every triangle in the stack, so the
+    /// counted traversal demand grows with the stack and NOT with any
+    /// worst-case `rows x nfaces` fiction — which is exactly what makes it a
+    /// witness that the honest charge can still exceed the unchanged cap.
+    fn lamella_stack(count: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let mut vertices = Vec::with_capacity(count * 8);
+        let mut faces = Vec::with_capacity(count * 12);
+        for slab in 0..count {
+            let z0 = slab as f64 * 0.02;
+            let z1 = z0 + 0.01;
+            let base = u32::try_from(vertices.len()).unwrap();
+            for z in [z0, z1] {
+                for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                    vertices.push([x, y, z]);
+                }
+            }
+            for corners in [
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ] {
+                faces.push(corners.map(|corner| base + corner));
+            }
+        }
+        (vertices, faces)
+    }
+
+    /// FU-8g H2 — the refusal path survives the repricing. The whole point of
+    /// charging the counted demand instead of `rows x nfaces` is that the
+    /// charge falls; the obligation that comes with it is that a mesh whose
+    /// HONEST demand is genuinely too large is still refused, at caps nobody
+    /// touched. `ContactConstructionLimits::production()` is used verbatim
+    /// here — 4,000,000 work items, byte-identical to `develop` — and the
+    /// stack below overruns it on counted traversal tests alone.
+    ///
+    /// Measured at the tip that landed it (100 rows over an 8,000-slab,
+    /// 96,000-face stack): counted work 4,223,900 against the 4,000,000 cap,
+    /// counted hits 1,600,000, counted scratch 356,484,600 B against the
+    /// 536,870,912 B cap — so it is the WORK charge that refuses, on counted
+    /// traversal, with the byte charge still inside its own cap. The
+    /// worst-case shape for the same batch would have said 9,600,000: the
+    /// honest number is 2.3x smaller and still over.
+    #[test]
+    fn honest_over_demand_still_refuses_at_the_unchanged_production_caps() {
+        let production = ContactConstructionLimits::production();
+        // Pinned in the assertion, not read from a variable, so a future cap
+        // move has to come here and change this literal.
+        assert_eq!(production.max_work_items, 4_000_000);
+        assert_eq!(production.max_scratch_bytes, 512 * 1024 * 1024);
+
+        let (vertices, faces) = lamella_stack(8_000);
+        let surface = NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        // 42 stub-shaped rows, each running the whole column: the seed loop's
+        // own batch shape (`n_offset_rays = 8`, `rays_all = false`).
+        let rows = 100;
+        let top = 8_000.0 * 0.02 + 1.0;
+        let p0s: Vec<[f64; 3]> = (0..rows)
+            .map(|row| [0.05 + 0.008 * row as f64, 0.5, -1.0])
+            .collect();
+        let p1s: Vec<[f64; 3]> = p0s.iter().map(|p0| [p0[0], p0[1], top]).collect();
+        let r0s = vec![0.05; rows];
+        let r1s = vec![0.05; rows];
+        let policy = m0_constants().unwrap().placeholders();
+        let interval_cap =
+            usize::try_from(policy.initial_axis_majority_cap().diagnostic().get()).unwrap();
+        let majority_step = policy.initial_axis_majority_step_mm().diagnostic().get();
+        let census = surface
+            .penetration_census_batch(&p0s, &p1s, &r0s, &r1s, 8, false)
+            .unwrap();
+        let penetration = surface
+            .penetration_intervals_batch_census_limits(
+                &census,
+                8,
+                interval_cap,
+                majority_step,
+                false,
+            )
+            .unwrap();
+        // The demand that refuses is the COUNTED one, not a worst-case shape:
+        // it is under `rows x nfaces` and still over the cap.
+        assert!(penetration.max_total_work > production.max_work_items);
+        assert!(penetration.max_total_work < rows * faces.len());
+        let required = rows * 4 + penetration.max_total_work;
+        assert!(matches!(
+            preflight_work(rows, penetration, production),
+            Err(InitialContactError::Limit {
+                resource: "work items",
+                required: charged,
+                limit: 4_000_000,
+            }) if charged == required
+        ));
+    }
+
+    /// FU-8g H2 — the receipt is checked, resource by resource. Deleting any
+    /// row from `charge_covers_execution`'s table fails this test.
+    #[test]
+    fn the_meter_refuses_execution_that_outran_its_charge() {
+        let charged = PenetrationBatchLimits {
+            max_rows: 4,
+            max_total_work: 100,
+            max_total_hits: 10,
+            max_total_samples: 50,
+            max_total_intervals: 5,
+            max_scratch_bytes: 4_096,
+        };
+        let exact = PenetrationBatchMeter {
+            rows: 4,
+            work: 100,
+            hits: 10,
+            samples: 50,
+            intervals: 5,
+        };
+        // Executing exactly the charge is admitted: the charge is a boundary,
+        // not a margin.
+        assert_eq!(charge_covers_execution(exact, charged), Ok(()));
+        for (resource, over) in [
+            ("rows", PenetrationBatchMeter { rows: 5, ..exact }),
+            ("work", PenetrationBatchMeter { work: 101, ..exact }),
+            ("hits", PenetrationBatchMeter { hits: 11, ..exact }),
+            (
+                "samples",
+                PenetrationBatchMeter {
+                    samples: 51,
+                    ..exact
+                },
+            ),
+            (
+                "intervals",
+                PenetrationBatchMeter {
+                    intervals: 6,
+                    ..exact
+                },
+            ),
+        ] {
+            assert!(
+                matches!(
+                    charge_covers_execution(over, charged),
+                    Err(InitialContactError::ChargeDrift {
+                        resource: fired,
+                        ..
+                    }) if fired == resource
+                ),
+                "{resource} drift was not refused"
+            );
+        }
+    }
+
     #[test]
     fn table_and_toed_slab_real_plans_return_complete_fresh_forests() {
         let table = Fixture::new(make_overhang_table().unwrap())
@@ -1835,7 +2055,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let (boundary_overlaps, batch_count) = classify_initial_overlaps(
+        let (boundary_overlaps, batch_count, _meter) = classify_initial_overlaps(
             &boundary_seeds,
             &axis_batch_input(&boundary_seeds).unwrap(),
             &geometry,

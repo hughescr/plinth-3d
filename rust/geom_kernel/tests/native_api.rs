@@ -930,6 +930,59 @@ fn penetration_census_degenerate_row_counts_zero_and_executes_empty() {
     assert!(rows[0].is_empty());
 }
 
+/// FU-8g H2 — the charged-vs-executed receipt. `work` and `hits` are the same
+/// two quantities the census counted, measured by the OTHER walk, so an
+/// undrifted pair meters EQUAL to its charge rather than merely under it. The
+/// bounded quantities (samples, intervals) land at or under their counted
+/// budgets, and the metered entry point returns bit-identical geometry to the
+/// plain one.
+#[test]
+fn penetration_meter_receipt_matches_the_counted_charge() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let census = surface
+        .penetration_census_batch(
+            &HETEROGENEOUS_P0,
+            &HETEROGENEOUS_P1,
+            &HETEROGENEOUS_RADII,
+            &HETEROGENEOUS_RADII,
+            2,
+            true,
+        )
+        .unwrap();
+    let counted_tests: usize = census.iter().map(|row| row.tests).sum();
+    let counted_crossings: usize = census.iter().map(|row| row.crossings).sum();
+    let limits = surface
+        .penetration_intervals_batch_census_limits(&census, 2, 8, 0.12, true)
+        .unwrap();
+    let (rows, meter) = surface
+        .penetration_intervals_batch_bounded_metered(
+            &HETEROGENEOUS_P0,
+            &HETEROGENEOUS_P1,
+            &HETEROGENEOUS_RADII,
+            &HETEROGENEOUS_RADII,
+            2,
+            0.12,
+            8,
+            0.05,
+            true,
+            limits,
+        )
+        .unwrap();
+    assert_eq!(meter.rows, HETEROGENEOUS_P0.len());
+    assert_eq!(meter.work, counted_tests);
+    assert_eq!(meter.work, limits.max_total_work);
+    assert_eq!(meter.hits, counted_crossings);
+    assert_eq!(meter.hits, limits.max_total_hits);
+    // The D3 severance is visible in the receipt, not just in the charge.
+    assert!(meter.work > meter.hits);
+    // Non-vacuity: this batch really does sample and really does emit.
+    assert!(meter.samples > 0);
+    assert!(meter.intervals > 0);
+    assert!(meter.samples <= limits.max_total_samples);
+    assert!(meter.intervals <= limits.max_total_intervals);
+    assert_intervals_equal(&rows, &heterogeneous_penetration(&surface, limits).unwrap());
+}
+
 fn update_penetration_hash(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(1_099_511_628_211);
