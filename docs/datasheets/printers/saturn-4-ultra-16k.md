@@ -31,7 +31,7 @@ this record was committed. P is the source for the fields R does not publish.
 | XY pixel pitch (vendor order) | **14 × 19 μm** | Vendor-published ordered pair. The pitches are anisotropic, but the vendor sources do not assign either component to a named axis. | P, R |
 | Z-axis accuracy | 0.02 mm | Vendor-described Z-axis accuracy; it is not a layer-height default. | P, R |
 | Vendor layer-thickness capability | **0.01–0.20 mm** | Vendor range. | P |
-| Project default layer height | **0.050 mm** | Project printer-profile setting, **not** a claimed Elegoo default and not a substitute for resin/process calibration. See the existing [printer-profile record](../../rust-migration/03-physics-and-constants.md). | Local project record |
+| Project default layer height | **0.050 mm** | Project printer-profile setting, **not** a claimed Elegoo default and not a substitute for resin/process calibration. It is carried as a registered project constant with its own provenance, not as a vendor figure. | Local project record |
 | Vendor default layer height | **Not specified** | P gives a range, not a default. | P |
 | Printer dimensions | **327.4 × 329.2 × 548 mm** | The vendor lists this ordered triplet as “Printer Dimensions”; axis labels / orientation for the three enclosure dimensions are not specified. | P |
 | Release mechanism | **Tilt Release** | R states that the resin tank tilts to peel the model from the release film. | P, R |
