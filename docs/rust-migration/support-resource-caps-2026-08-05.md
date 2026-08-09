@@ -2259,3 +2259,89 @@ clean. The seven frozen OD-8 census digests are unaffected by construction —
 this phase touches no code the census exercises — and are not re-run for a
 docs-and-registry-only phase; the standing digests are named in the branch's
 own commit trailer discipline and remain the values of record.
+
+## 19. FU-8g phase H6 (2026-08-09) — the treant clears the initial-contact wall; no cap moves, and the successor wall is not a cap at all
+
+**No cap, floor, byte term or coefficient was raised, lowered or touched by this
+phase.** H6 changes no code at all: `git diff` over `crates/` and `rust/` is
+empty at its tip. This section records what the treant's caps did when a real
+run finally reached and passed them, and names what binds instead.
+
+### 19.1 The run
+
+Two attempts, the standing memory protocol without deviation — release,
+`--features census`, `PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`,
+`PLINTH_THREADS=4`, RSS watchdog unsandboxed polling every 2 s with a hard kill
+armed at 90 GB, 600 s timebox, two attempts and no more. Machine quiet at both
+launches (no other `cargo`/`rustc`/census process). Full transcript and
+diagnosis: *FU-8g phase H6 measured 2026-08-09*
+([`#fu8g-h6-2026-08-09`](CURRENT-STATUS.md#fu8g-h6-2026-08-09)).
+
+Both attempts ended **EXCEEDS-TIMEBOX at 600 s** (600 s / 601 s wall, SIGKILL by
+the watchdog), peak RSS **3,693 MiB** and **3,721 MiB**.
+
+### 19.2 What the caps did — the first time any of them was reached on the treant
+
+- **`ContactConstructionLimits::production().max_work_items = 4_000_000`** — the
+  cap this whole follow-up was opened against. **The treant PASSED it.**
+  `initial::build_initial_contacts` ran to completion (sampled at t = 200 s,
+  100 % of the main thread; complete by t = 267 s). H2's measured charge of
+  **108,378 — 2.71 % of the untouched 4,000,000** — is confirmed not merely
+  smaller but *sufficient*: the stage executed, `CensusDrift` never fired, and
+  no downstream consumer of the census refused. Under §17's pre-H1 arithmetic
+  the same run demanded 237,305,572, or **58.1×** this cap.
+- **D5.3's contingency is NOT triggered and is NOT added.** The design bound it
+  in advance: *if* H6 put the treant's `work` above the 4,000,000 floor, the
+  remedy was a measured `SUPPORT_INITIAL_CONTACT_WORK_PER_CONTACT_OBSERVED` and
+  a derived per-contact scaling under `next_power_of_two(2 × observed)`. The
+  floor was not crossed, so **the scaling is not added** — per the design's own
+  rule that adding unmeasured scaling is the same error as raising a cap, in a
+  nicer suit.
+- **The six `brace_penetration_limits` fields and the four `raft_limits`
+  registered in §18 remain unexercised.** The run never left routing, so brace
+  was never entered. §18's honest disclosure — "a plain statement of absence for
+  all ten brace/raft constants, which no run has ever exercised" — **still
+  stands, unchanged, at this tip.** §14.6's and §17.7's standing note that the
+  brace/transit stage is unexercised and its predictions unmeasured is likewise
+  unchanged. Nothing here licenses a brace number.
+- **The 90 GB watchdog arm was never approached.** Whole-process peak 3,721 MiB
+  = **4.0 %** of the arm. The standing hazard recorded in §17 and in the design's
+  §A1 — that brace's `max_scratch_bytes = 1e11` sits above both the watchdog and
+  the ~100 GB machine ceiling, so the machine binds before the cap does —
+  **remains untested by measurement**, because brace was never reached. It is
+  neither confirmed nor cleared by this run.
+
+### 19.3 What binds instead — and why no cap can fix it
+
+The treant's successor stopping point is **not a cap**. From t ≈ 267 s to the
+600 s kill the main thread is **100 % inside
+`PreparedSupportRun::route_initial_cco`**, and within it the share of wall-clock
+spent in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % →
+77.1 % across sample windows at t = 280 / 360 / 440 / 520 / 575 s, while the
+constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % →
+9.0 % → 9.0 % → 9.0 %. A growing term overtaking a constant one: the measured
+signature of a quadratic.
+
+Derived to the line, independently of the profile: the routing loop
+(`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per
+terminal; its first statement (`cco.rs:1397`) is `self.digest()`; and
+`CcoController::digest` (`cco.rs:1775–1862`) walks the entire accumulated
+controller state on every call — every terminal in the cadence, every terminal
+record, every `UnroutedNoWinner` record's **whole anchor-refusal list** via
+`digest_anchor_seat_refusals` (`cco.rs:2128–2149`), and the whole host kd-tree
+sample set. Cost `Θ(N²) + Θ(N·R) + Θ(N·H)`.
+
+**This is the batch-first violation family a sixth time** (after FU-8b, FU-8c,
+FU-8d, FU-8e and FU-8g's own `contacts × faces` bound), and it is the first
+member of that family that **no cap policy could have caught**: nothing refuses,
+no resource is over-charged, no limit is consulted. The measurement-first
+doctrine this document exists to enforce found it anyway — but it found it with a
+profiler, not with a preflight. Opened as **FU-32**.
+
+### 19.4 Gates
+
+Five gates green at this tip, verbatim, tree clean before and after:
+`cargo test --workspace --offline --no-fail-fast` **1052 passed, 0 failed**, the same
+`--all-features` **1054 passed, 0 failed**, `cargo clippy --workspace --all-targets
+--all-features --offline -- -D warnings` clean, `cargo fmt --all -- --check`
+clean, `git diff --check` clean. OD-8: all seven frozen census digests reproduced **byte-identical** from the release `--features census` build at this tip, one `PLINTH_CENSUS_ONLY` invocation each — Sphere 17667468971446251870, Cylinder 13310185350867878190, make_box 9657051231007502658, make_overhang_table 1875674282253663076, make_toed_slab 2823659516373762066, make_raking_blade 9567737006650358297, make_thin_fin 8797083662933568276. The Weeping Treant is deliberately excluded from the digest set: it has never sealed and produces no snapshot digest.
