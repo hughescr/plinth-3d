@@ -3529,6 +3529,14 @@ which reproduces the printed figure exactly, and independently confirms the surv
 count is 542. It is checked against `ContactConstructionLimits::production().max_work_items =
 4_000_000` (`runner.rs`) — a **flat** cap. The demand is **58.1×** the cap.
 
+**[SUPERSEDED AS THE ENGINE'S CHARGE, 2026-08-09 by FU-8g phase H1/H2
+(**[`#fu8g-h2-2026-08-09`](#fu8g-h2-2026-08-09)**). The formula above is no longer what
+`initial::preflight` computes.** `max_total_work` is now the census pass's counted `Σ tests`
+(executed traversal effort), not `rows × nfaces`, and the treant's charge at 553 contacts is
+**108,378** — **2.71 %** of the same, untouched 4,000,000 cap, not 58.1× it. The record above
+stands as measured: it is what the engine charged at `fe79124`, and the derivation from source
+was correct for that tip. **The cap itself was not raised, lowered or touched.**]**
+
 **The shape is the FU-8b / FU-8c family a fourth time: a `contacts × faces` product measured
 against an unscaled flat bound.** At this mesh's 429,120 faces the cap admits at most
 `4,000,000 / 429,124 = 9` physical contacts. The corpus passes this preflight only because every
@@ -3540,6 +3548,13 @@ BVH-bounded — the same over-statement G5 corrected on the load term, in the sa
 **It is NOT a cap to raise, and nothing here proposes raising it.** The standing owner ruling
 holds and no cap is touched by this phase. The remedy, when it is designed, is the one FU-8b,
 FU-8c and G5 all took: make the *bound* honest, not the cap bigger. Recorded as **FU-8g**.
+
+**[ADDENDUM 2026-08-09 — `ContactConstructionLimits::production().max_work_items`, the cap named
+in this section, now has an M0 registry entry.** FU-8g phase H3 registered it as
+`SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS` (`Placeholder`, unchanged at 4,000,000), alongside its
+three siblings and ten brace/raft caps. Registration did not touch the number this section names
+or the charge H1/H2 rebased it onto. See *FU-8g phase H3 landed 2026-08-09*
+([`#fu8g-h3-2026-08-09`](#fu8g-h3-2026-08-09)).]**
 
 #### G6d.9 Caps: none binds, and two projections can now be checked against truth
 
@@ -3929,6 +3944,1121 @@ test step needs an interpreter, and no coverage was lost in the removal. See the
 LANDED note on the E8 phase entry in
 [`export-path-design-2026-08-07.md`](export-path-design-2026-08-07.md).
 
+## FU-8g phase H0 measured 2026-08-08 — the corpus's honest demand, and a NEW blocker upstream of the wall H0 was sent to measure {#fu8g-h0-2026-08-08}
+
+**Scope, stated first, exactly as G4/G6d's precedent.** H0 changed no engine behaviour.
+Env-gated (`PLINTH_FU8G_CENSUS`) counters were added at two sites — `collect_hits_with_stack`'s
+own traversal (`rust/geom_kernel/src/queries.rs`, mirrored rather than modified, so the real
+production path is untouched) and `build_initial_contacts` just before its `preflight` call
+(`crates/plinth-support/src/initial.rs`) — then exercised against the seven corpus models and
+the Weeping Treant, and **reverted by editing before the gates**. `git diff` over `crates/` and
+`rust/` is empty at the tip this section describes. The design this phase measures against is
+[`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md), landed verbatim at H0 with its own
+provenance banner.
+
+### H0.1 The seven corpus models: honest crossings and traversal tests, at the real BVH, in-process
+
+`cargo run --release --offline --features census --example embed_incidence_census -p
+plinth-support`, once per model via `PLINTH_CENSUS_ONLY`, `PLINTH_FU8G_CENSUS=1` added. Every
+row below is `rows = contact_count` real physical contact stubs — not the design's seat-proxy
+sample — walked through `capsule_rays` and `collect_hits_with_stack` exactly as
+`pen_intervals_one` walks them, so this is the executed path, not an estimate of it.
+
+| model | faces | rows | crossings mean/p50/p95/p99.9/max | tests mean/p50/p95/p99.9/max |
+|---|---:|---:|---|---|
+| `make_box` | 12 | 11 | 1.273 / 1 / 2 / 2 / **2** | 14.636 / 15 / 17 / 17 / **17** |
+| `make_overhang_table` | 60 | 84 | 1.167 / 1 / 2 / 3 / **3** | 20.571 / 19 / 35 / 37 / **37** |
+| `make_toed_slab` | 140 | 68 | 2.147 / 1 / 2 / 32 / **32** | 21.794 / 19 / 49 / 69 / **69** |
+| `make_raking_blade` | 24 | 33 | 1.515 / 1 / 3 / 4 / **4** | 25.545 / 27 / 31 / 31 / **31** |
+| `make_thin_fin` | 24 | 18 | 1.333 / 1 / 2 / 2 / **2** | 18.333 / 19 / 21 / 21 / **21** |
+| `Sphere` | 4,760 | 7 | 6.000 / 6 / 6 / 6 / **6** | 51.000 / 49 / 62 / 62 / **62** |
+| `Cylinder` | 244 | 54 | 2.056 / 1 / 2 / 46 / **46** | 42.685 / 40 / 64 / 122 / **122** |
+
+**All seven OD-8 snapshot digests reproduced byte-identical** with the instrumentation live —
+Sphere `17667468971446251870`, Cylinder `13310185350867878190`, make_box
+`9657051231007502658`, make_overhang_table `1875674282253663076`, make_toed_slab
+`2823659516373762066`, make_raking_blade `9567737006650358297`, make_thin_fin
+`8797083662933568276` — confirming the census pass reads geometry without perturbing it.
+
+Charged-vs-honest, at the *unchanged* charge formula (`work = rows × nfaces`,
+`scratch_bytes` = today's `row_scratch` formula evaluated at the honest per-row crossing
+count instead of `nfaces`, D2/F4's arithmetic, not the F10 bound — H1's territory, not H0's):
+
+| model | charged work | honest work (Σ crossings) | honest work (Σ tests, D3) | charged scratch | honest scratch (Σ rows) |
+|---|---:|---:|---:|---:|---:|
+| `make_box` | 132 | 14 (**9.4×**) | 161 (**0.82×**) | 391,523 | 69,501 (**5.6×**) |
+| `make_overhang_table` | 5,040 | 98 (**51.4×**) | 1,728 (**2.9×**) | 14,007,588 | 520,870 (**26.9×**) |
+| `make_toed_slab` | 9,520 | 146 (**65.2×**) | 1,482 (**6.4×**) | 26,203,460 | 621,814 (**42.1×**) |
+| `make_raking_blade` | 792 | 50 (**15.8×**) | 843 (**0.94×**) | 2,258,421 | 233,503 (**9.7×**) |
+| `make_thin_fin` | 432 | 24 (**18.0×**) | 330 (**1.31×**) | 1,231,722 | 118,290 (**10.4×**) |
+| `Sphere` | 33,320 | 42 (**793×**) | 357 (**93.3×**) | 90,961,171 | 145,509 (**625×**) |
+| `Cylinder` | 13,176 | 111 (**118.7×**) | 2,305 (**5.7×**) | 36,139,662 | 485,277 (**74.5×**) |
+
+**Two findings the design's out-of-repo estimate could not see, both stated because they are
+measured, not guessed:**
+
+1. **`make_box` and `make_raking_blade` under-charge today's `work` if it were repriced to
+   traversal tests verbatim (D3), by 0.82× and 0.94×.** On these two tiny meshes the BVH's own
+   node-visit overhead exceeds `nfaces`: a 12- or 24-face tree still walks a handful of internal
+   nodes per ray, and at single-digit face counts that overhead is not amortized away. This does
+   not touch the design's thesis (the treant's ratio, whatever it turns out to be, is not going
+   to invert), and it changes nothing charged today (no cap moves in H0), but D3's own severance
+   (§F9) should carry this caveat forward: "traversal tests" is the honest quantity, and honest
+   is not always smaller.
+2. **The `Sphere`'s real crossing count is 6, uniformly, not the design's proxied 1.** The design's
+   §M caveat 1 said the seat proxy (downfacing faces, stride-sampled) is not the real contact set
+   and warned exactly this could happen. It did: the corpus `Sphere` fixture hollows before
+   support placement (`plinth-hollow`), so a real outward stub ray now crosses an outer shell and
+   an inner shell — several thin walls, not one convex surface — and every one of the 7 real
+   contacts sees exactly 6 crossings (p50 = p95 = p99.9 = max = 6, zero spread). The
+   `nfaces/mean_crossings` over-statement ratio this produces (793×) is materially different from
+   the design's own proxy figure (4,760× at `mean = 1`) — six times lower — precisely because the
+   proxy could not see the hollow shell. This is the caveat firing as designed, not a defect in
+   the design.
+
+### H0.2 THE BLOCKER — the Weeping Treant does not reach `initial::preflight` at `develop @ e3168c5`; it fails one stage earlier, on a pre-existing defect the design's premise did not anticipate
+
+**The design's entire F1–F12 / D1–D7 / M analysis is built on one fact taken from *FU-8f phase
+G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)): "the Weeping Treant
+now stops after its tournament with `Preparation: Initial(Limit { resource: "work items",
+required: 232585208, limit: 4000000 })`."** That fact was measured on branch
+`feature/fu8f-lazy-acceptance` at tip `fe79124` — the G6c tip, **before** FU-10's slicer-union
+work merged into `develop`. `fe79124` is an ancestor of `e3168c5` (`git merge-base
+--is-ancestor fe79124 e3168c5` confirms it), and the design's own provenance banner states it
+was designed against `develop @ e3168c5` itself, treating the G6d fact as still current there.
+
+**It is not current there.** Run three times at `e3168c5` (`cargo run --release --offline
+--features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping
+Treant v1.2"`, `PLINTH_THREADS=4`, RSS watchdog unsandboxed at 90 GB / 2 s sampling / 600 s
+timebox / max 2 attempts per the standing memory rule — all three finished well inside both
+limits: 206–210 s wall-clock, peak RSS 2.53–3.35 GiB, watchdog never armed) — twice with
+`PLINTH_FU8G_CENSUS=1` (H0's own instrumentation active) and once with it **unset** (a clean
+control, to rule out H0's own code as the cause, since H0's block sits inside
+`build_initial_contacts`, downstream of the actual failure site) — **all three attempts fail
+identically, before `build_initial_contacts` is ever called**:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2  Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })
+```
+
+`Specialized(...)` is a distinct error variant from `Initial(...)`; this is the specialized
+contact-plan construction stage, which runs and completes **before** `build_initial_contacts`
+is called at all (`runner.rs:3070`). H0's own instrumentation, gated inside
+`build_initial_contacts`, therefore never executes on the treant at this tip — not because of a
+bug in H0, but because the pipeline never reaches it. **No honest in-engine crossings/traversal-
+test measurement for the Weeping Treant is possible today, and none is claimed.**
+
+**Root cause, to the commit.** `git diff --stat fe79124 e3168c5 -- crates/ rust/` shows
+`crates/plinth-support/src/perception.rs` (+1,291/−… lines) and
+`crates/plinth-support/src/specialized.rs` (48 lines) changed between the G6d measurement and
+this tip, carrying **FU-10's phase-C polygon-union cutover** — merged via `0f24b79`/`8041828`.
+That cutover's own re-pinned test comment
+(`crates/plinth-support/src/specialized.rs`,
+`oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`) states it plainly
+for the two corpus models it touches: `make_toed_slab`'s coalesced-seat count moved **1 → 0**
+and its contact count moved **72 → 42**; `make_raking_blade`'s contact count moved **40 → 33**.
+**This is exactly [FU-30](#follow-ups-2026-08-04)'s own finding, restated in that row's own
+words:** "the `DuplicatePhysicalSeat` failure mode [`coalesce_exact_regular_seats`] was built to
+prevent now has a single corpus witness" (`make_raking_blade`), and FU-30's own "First action"
+asked whether one corpus witness is adequate. **It is not: the treant is the second witness, and
+on the treant the pass does not catch the collision.** Physical seats 163 and 164 on the
+429,120-face mesh's specialized contact plan now land at the same position under the corrected
+slice geometry, and nothing in the current `coalesce_exact_regular_seats` pass merges them, so
+`Specialized`'s hard-refusal fires before the tournament — before routing, before the gate, and
+three stages before the `initial::preflight` wall this entire follow-up was opened to fix.
+
+**Consequence for FU-8g.** The design's premise is falsified at its own stated base commit: the
+treant does not currently reach `initial::preflight`, so the 232,585,208-vs-4,000,000 wall F1–F5
+describe is **not the treant's current stopping point**. It may still be the *next* stopping
+point once the new upstream defect is fixed — nothing here says F1–F12's analysis of
+`penetration_requirements` is wrong, only that it cannot be exercised on the treant until
+something else is fixed first. **Comparison against the design's §M treant figures (62.03 mean
+crossings/ray, 6,918× over-statement) is therefore BLOCKED, not confirmed and not refuted** — no
+in-engine number exists to compare. The corpus comparison in §H0.1 stands on its own and is not
+affected by this blocker (corpus models never go near `DuplicatePhysicalSeat` on this
+geometry).
+
+**This is not FU-8g's defect to fix.** It sits in `Specialized` seat construction, three stages
+before anything FU-8g's design touches, and H0's mandate is measurement only — no engine
+change. It is opened as **FU-31** in the ledger below, cross-referenced to FU-30, and named as
+FU-8g's own critical-path blocker: H1–H6 all require exercising the treant past the point it
+currently fails, so FU-31 (or an equivalent fix inside `Specialized`) is now on FU-8g's own
+critical path, ahead of H1.
+
+**Verification.** Five gates green at this tip (default and `--all-features`), tree clean
+before and after; `cargo fmt --all -- --check` and `git diff --check` clean; all seven OD-8
+digests re-confirmed byte-identical (§H0.1). No cap, floor, constant or charged number is
+raised, lowered or touched. `git diff` over `crates/` and `rust/` is empty — the two
+instrumentation sites were reverted by editing, not left behind, and this section is the only
+change this phase makes.
+
+## FU-31 diagnosed 2026-08-08 — one island birth, two owning islands, two bit-identical seats, and the one merge the load gate refuses {#fu31-diagnosed-2026-08-08}
+
+**Scope, stated first.** Diagnosis only — no engine behaviour changed, no fix landed, no cap,
+floor, constant or charged number touched. Scratch `eprintln!` instrumentation (env-gated
+`PLINTH_FU31_DUMP` / `PLINTH_FU31_GATE_X`) was added at seven sites in
+`crates/plinth-support/src/specialized.rs`, exercised, and **reverted by editing**: `git diff`
+over `crates/` and `rust/` is empty at this tip and `grep FU31` over the sources returns
+nothing. Two instrumented reproductions at `develop @ e3168c5` (same harness and env as H0:
+`cargo run --release --offline --features census --example embed_incidence_census -p
+plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`, `PLINTH_THREADS=4`, 90 GB RSS
+watchdog, 600 s timebox) both failed identically with
+`Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })` and produced byte-identical seat
+dumps, consistent with H0's three uninstrumented reproductions. All seven corpus models were
+also run with the instrumentation live and reproduced their OD-8 snapshot digests
+byte-identical (§F31.4), so the census read geometry without perturbing it.
+
+### F31.1 The seat pair, exactly
+
+At the failing `canonicalize_and_validate` call the working vector holds **554** contacts and
+exactly **one** `same_point` pair — 163/164 is the whole problem, not the first of many:
+
+| | seat 163 | seat 164 |
+|---|---|---|
+| position_mm | (−11.691493872, 13.001936906, 79.675) | **identical, all 64 bits × 3** |
+| position bits | `c027620b7c1b3fb3, 402a00fddfc7d9d2, 4053eb333333328c` | same |
+| normal | (0.060714352, 0.986249148, 0.153708772) | identical bits |
+| class | pure specialized (`primary_regular=None`, 0 routes) | pure specialized (same) |
+| demands | 1: `IslandBirth` owner=**111**, face=137983, comp=0, birth_layer=**1593**, birth_z=79.67499999999762, footprint 5 pts | 2: `IslandBirth` owner=**113**, face=137983 — **the same birth event** — plus `Minimum` owner=113, face=78817, nominated (−11.662340164, 13.016237652, 79.626805368), 0.058 mm away |
+
+The positions are not a near-tie and not the G6b bit-tie phenomenon (independent computations
+landing on equal bits): they are **one value copied twice**. Both `IslandBirth` demands carry
+the same nominated position because they were minted from the *same* `IslandBirth` record by
+the per-owner fan-out in demand seeding, and `WorkingContact::specialized` copies the demand's
+nominated bits into the seat position verbatim. Same face (137983), same normal, same
+footprint; the only field distinguishing the two birth demands is `owner_island_id` (111 vs
+113 — face 137983 belongs to both islands' `face_ids`). Seat 164 is itself a tournament
+product: the commit log shows the owner-113 birth seat merging with the owner-113 `Minimum`
+seat (gate-accepted, seat kept at the birth position), which is why it carries two demands.
+
+### F31.2 Upstream provenance, and what FU-10 did and did not change
+
+The birth: print layer **1593** (census layer plan, 0.05 mm pitch from 0.0), z_mm
+79.67499999999762, footprint area **0.001078581 mm²** — a 5-point twig-tip island, projected
+to exterior face 137983, component 0. Treant totals at `e3168c5`: 216 island births + 351
+local minima → 567 seeds → **808** demands after per-owner fan-out, disposed as 36
+`exact_regular` + 55 covered + **717 pushed** as pure specialized seats, of which **198
+groups** share identical position bits (multi-owner fan-outs). The tournament committed **552**
+merges and resolved **197 of the 198** groups; 163/164 is the sole survivor.
+
+**The collision is pre-existing; FU-10 did not create it.** At `fe79124` (control, §F31.3) the
+*same* birth exists — layer 1593, z bits identical (`4053eb333333328c`), area identical to all
+printed digits, same projected face 137983 — with the centroid differing only in the last ~3
+ULPs (`c027620b7c1e0fe8` vs `c027620b7c1b3fb3`, ≈1e-10 mm): the union cutover moved the
+centroid *arithmetic*, not the event. The same two-owner fan-out happens there (owners 113/115
+in that tip's island numbering), both demands are pushed as bit-identical seats, and the
+control's tips hold **375** such identical-position groups (244 births / 408 minima / 1095
+demands / 987 pushed) — **all of which the tournament merged**, this pair included. What FU-10
+changed is the *load landscape* those merges are gated against, and for exactly one pair the
+merge became load-adverse.
+
+### F31.3 Why every dedup machine misses the pair — each for a stated, local reason
+
+1. **`canonicalize_and_validate`'s duplicate check** defines "physical duplicate" as
+   `same_point` = exact position-bits equality (`left == right` on `[f64; 3]`), unconditional
+   over all contacts. It fires. (Indices 163/164 are post-sort positions — FU-13's complaint;
+   this diagnosis needed a full dump run to learn what the payload could have said.)
+2. **`coalesce_exact_regular_seats`** admits a pair only when positions are `same_point` AND
+   **both sides are demand-free** (regular seats; the doc comment's dyadic-vertex case). 163/164
+   fail by **class** — both are demand-carrying specialized seats — not by tolerance and not by
+   pass ordering. No widening of its *position* criterion could ever catch them.
+3. **`attach_exact_mixed_contacts`** requires exactly one demand-free side (regular ×
+   specialized). Both sides carry demands → skipped every round.
+4. **The gated tournament** is the only machine whose admission covers this class, and it
+   *did* gather the pair — in **492** rounds, first as the pure birth-111 × birth-113 pair
+   (one proposal; the two demands share one representative key) and after the 113-merge as
+   163 × 164 with two variants (seat at the birth position, seat at the `Minimum` position).
+   The gate refused **every** variant, always for the same measured reason:
+   `load_violation_count` **3 vs baseline 2**, all four coverage components and
+   `unsupported_specialized_count` identical. `StopAtFirstNotWorse` accepted other pairs for
+   552 rounds; in the terminal round 3 proposals remained (this pair's two variants among
+   them) and none was accepted.
+
+**The load mechanism, named.** Two co-located seats split the nearest-won load rows between
+them, each staying under `tip_policy`'s safety factor; the merged seat wins the union of both
+row sets, and its summed carried area **violates the tip safety factor** (the ratified area
+law). The duplicated seat pair is, in load-model terms, a physically-single tip evading the
+per-seat load cap by splitting itself across two model contacts. The gate, applying not-worse
+honestly, refuses to expose that overload; `canonicalize_and_validate`, applying the
+one-seat-per-position invariant honestly, refuses the un-merged pair. Between the two correct
+local refusals the pipeline has no third path, and the model errors out.
+
+### F31.4 The `fe79124` control, and the corpus cross-check
+
+**Control.** A detached scratch worktree at `fe79124` (the G6d tip, pre-union), corpus models
+provisioned from the local copy, same instrumentation, same harness/env: the treant's
+specialized stage **passes** — the terminal duplicate scan reports **542 contacts, zero
+`same_point` pairs** — and a second control run with `PLINTH_CENSUS=1` prints the stopping
+point itself: `CENSUS T0_stage_error Weeping Treant v1.2 Preparation: Initial(Limit {
+resource: "work items", required: 232585208, limit: 4000000 })` — the wall G6d pinned, digit
+for digit, measured again at G6d's own commit. The introduction
+of the `DuplicatePhysicalSeat` failure is thereby bracketed to the FU-10 cutover merge
+(`fe79124` → `e3168c5`, the `perception.rs`/`specialized.rs` delta H0 already attributed), and
+the mechanism in §F31.2/§F31.3 says *how*: not by minting the colliding seats — `fe79124`
+mints 375 such groups and merges them all — but by shifting the load numbers under exactly one
+of them so its merge stopped clearing the gate.
+
+**Corpus.** All seven corpus models, run at `e3168c5` with the dump live: every model passes,
+all seven OD-8 digests byte-identical (Sphere `17667468971446251870`, Cylinder
+`13310185350867878190`, make_box `9657051231007502658`, make_overhang_table
+`1875674282253663076`, make_toed_slab `2823659516373762066`, make_raking_blade
+`9567737006650358297`, make_thin_fin `8797083662933568276`). Across the whole corpus there are
+**6** pushed specialized seats and **zero** identical-position groups — no corpus model ever
+creates the colliding configuration. Every corpus `same_point` pair the merge machinery sees
+is demand-free regular (coalesce's ratified territory). One more treant datum for
+[FU-30](#follow-ups-2026-08-04): the treant's working set contains a **27-seat co-located
+demand-free regular cluster** at (16.045028687, −27.403488016, 11.745975015) which
+`coalesce_exact_regular_seats` merges at the terminal pass (26 coalesces, before the error
+fires downstream of it) — once FU-31 is fixed, the treant is a far richer second corpus
+witness for that pass than `make_raking_blade`'s single pair.
+
+### F31.5 Fix options, weighed on this evidence
+
+**(a) Widen `coalesce_exact_regular_seats` to demand-carrying seats — NOT recommended.** The
+unconditional union would merge 163/164, but the terminal audit `gate_not_worse(accepted,
+initial_baseline)` then fails on the same 3-vs-2 load count and the model dies as
+`MergeGateRegression` — the same wall with a different name. Landing (a) therefore also means
+exempting canonicalization merges from the terminal audit, i.e. teaching the stage to absorb a
+real measured load regression silently, and it touches the pass whose evidence field
+(`coalesced_seat_count`) is owner-ratified and whose corpus coverage FU-30 is already
+litigating, with mutation-proven fixtures required. High blast radius, and it repairs the
+wrong invariant: the duplicate should never have existed.
+
+**(b) Stop double-emitting: aggregate uncovered demands sharing identical nominated position
+bits into ONE seat at push time — RECOMMENDED.** In the disposition loop, an uncovered demand
+whose nominated bits equal an already-pushed specialized seat's position joins that seat's
+`demands` vector instead of minting a sibling (sorted/deduped exactly as `commit_merge`
+already unions demand lists; key on position bits, not seed identity, so a `Minimum`
+coinciding with a birth centroid is also covered). The data model already says one tip may
+serve several islands — seat 164 itself carries two demands today. The invariant
+`canonicalize_and_validate` enforces then holds **by construction from birth**; the
+tournament's baseline and the terminal audit both price the same seat topology, so the 3-vs-2
+wedge cannot form — the initial baseline honestly reports the tip's summed load from the
+start instead of discovering it at merge time. **The corpus is provably untouched:** zero
+identical-position pushed groups exist on all seven models (§F31.4), so the aggregation is a
+no-op there and no frozen digest can move — structurally, not by re-measurement hope. The
+treant carries no frozen digest. Cost: a focused change in one loop plus a unit fixture
+(two same-position uncovered demands from two owners → one seat, two demands) — a new,
+mutation-provable test in `specialized`'s own suite, nothing touching coalesce's evidence
+field. Risk: on multi-owner-rich models (today: the treant alone) the tournament's merge
+history shifts (fewer initial contacts), and the reported `load_violation_count` rises where
+the split pair previously hid an overload — that is the fix being *honest*, and violations
+are recorded gate evidence the plan already tolerates (the treant's working baseline carries
+2 today), not refusals.
+
+**(c) "The refusal is correct; two distinct seats are real" — NOT supported.** The two seats
+are one physical tip: same bits, same face, same normal, one birth event. The ratified data
+model, the other 197 treant groups, and the same pair's own merge at `fe79124` all resolve
+this configuration to one seat. What (c) would actually assert is that a duplicated seat is a
+legitimate load-splitting device, which contradicts the load model's own physics (one arm
+cannot occupy two model rows' worth of tip). One genuine physics question *does* fall out of
+this diagnosis, for the owner rather than for FU-31: after (b), the twig tip at
+(−11.69, 13.00, 79.68) will be honestly flagged as violating the tip safety factor — whether
+a flagged tip should eventually hard-refuse, thicken, or spawn relief support is a question
+about violation semantics that exists today (the treant already carries 2 recorded
+violations) and is unchanged by this fix.
+
+**Recommendation: (b)**, with the unit fixture named above, a treant re-run as the acceptance
+check (expected: specialized passes, the run advances to the `initial::preflight` work-items
+wall, unblocking FU-8g H0's honest treant measurement), and the (c) physics note recorded for
+the owner's queue rather than folded into the fix.
+
+**Verification.** Five gates green at this tip; tree clean; the instrumentation reverted by
+editing (this section is the branch's only delta beyond H0's). The `fe79124` scratch worktree
+was removed and pruned after its control runs.
+
+## FU-31 FIXED 2026-08-08 — one seat per position by construction, and the treant walks to the wall {#fu31-fixed-2026-08-08}
+
+**What landed (commit `55b4d99`, option (b) as adjudicated).** The demand-disposition loop in
+`crates/plinth-support/src/specialized.rs` is extracted into `dispose_demands`, which seats
+uncovered demands in **one grouping pass** keyed on the nominated position's f64 bits
+(negative zero normalized to positive zero per coordinate, so key equality coincides exactly
+with the `same_point` `==` test `canonicalize_and_validate` applies at its
+`DuplicatePhysicalSeat` scan — both sites cite each other, making the by-construction claim
+checkable in source). A demand whose key matches an already-pushed specialized seat joins that
+seat's demand vector — which stays `compare_demands`-sorted and duplicate-free, matching
+`commit_merge`'s union postcondition — instead of minting a bit-identical sibling. Seat order
+is first-occurrence order, so any model with no same-position pushed group is behaviorally
+untouched; the seat representative is the group's `compare_demands`-minimal demand,
+`gather_pair_proposals`' own `selected_demand` convention. No per-demand scan of the physical
+vector exists (one map lookup per demand). `coalesce_exact_regular_seats`, its owner-ratified
+`coalesced_seat_count`, and every cap, floor and constant are untouched. Downstream was
+verified from source before landing: the tournament (`demands()` chained iterators), load-row
+construction, census hashing and evidence all consume multi-demand seats as first-class —
+seat 164 itself was one before this fix.
+
+**Mutation-proven fixture** (`one_birth_fanned_to_two_owners_seats_once_with_both_demands`):
+one birth fanned to owners 111/113 produces ONE seat carrying both demands and canonicalizes
+clean; with the aggregation disabled (the `Occupied` arm mutated to an unconditional push) it
+fails `called `Result::unwrap()` on an `Err` value: DuplicatePhysicalSeat { left: 0, right:
+1 }` — the treant's exact failure at unit scale. Applied, observed, reverted; transcript in
+the test and function doc comments.
+
+**One honest unit-fixture re-pin, attributed exactly.** The raking-blade fixture in
+`required_table_raking_and_thin_fin_fixtures_finalize_full_evidence` runs the model in its
+raw (non-census) orientation, and there the blade genuinely mints **four** island births each
+fanned to two owners — confirmed by scratch instrumentation before re-pinning. Born
+aggregated, those four pairs vanish from the tournament (gathered 10 → 0, accepted 8 → 4) and
+the pinned digest moves with those gate-evidence numbers (`12073756428966718576` →
+`13905373635452952930`). Contacts (40), coverage samples (40,192), load rows (13),
+`load_violation_count` (3) and `coalesced_seat_count` (0) are all unchanged. This is not a
+corpus, baseline, physics, or reference re-freeze.
+
+**ACCEPTANCE — the treant, attempt 1 of 2, wall reached.** Same harness and env as H0/F31
+(`cargo run --release --offline --features census --example embed_incidence_census -p
+plinth-support`, `PLINTH_CENSUS=1 PLINTH_FU8G_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant
+v1.2"`, `PLINTH_THREADS=4`, RSS watchdog unsandboxed at 90 GB / 2 s sampling / 600 s
+timebox): **202 s wall-clock, peak RSS 2,776,144 KB (2.65 GiB), watchdog never fired.**
+Specialized contact-plan construction **passes** — the working set that held 554 contacts
+with the un-merged pair now finalizes **553** — and the run advances through routing, the
+gate, and load finalization to exactly the wall FU-8g was opened to measure:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2  Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })
+```
+
+The required number is the charge formula at the new honest contact count: 553 × 4 + 553 ×
+429,120 = **237,305,572** — the same wall G6d pinned at `fe79124` (232,585,208 at 542
+contacts), now measured in-engine at this tip with 553. The two scaled-cap census lines the
+run also printed are recorded for FU-8f's file: `specialized_gate_operations` materialized
+19,562,287,872 (340 gate batches, 1,294,392 merge proposals, retained-load charged
+66,731,232,175 vs executed 6,634,686,434) and `specialized_load_operations` materialized
+4,746,695,936 — neither at floor.
+
+**FU-8g H0 treant leg — the honest in-engine numbers, captured in the same attempt.** The H0
+instrumentation (env-gated `PLINTH_FU8G_CENSUS`, the same two sites: a mirrored
+`collect_hits_with_stack` walk in `rust/geom_kernel/src/queries.rs` and a block in
+`build_initial_contacts` immediately before its `preflight` call) was reimplemented from the
+H0 record's recipe, **validated for metric fidelity on `make_box` — every H0.1 figure
+reproduced exactly** (rows 11, charged 132, honest crossings 14, honest tests 161, charged
+scratch 391,523, honest scratch 69,501, both distributions digit-for-digit) — exercised on
+the treant, and **reverted by editing before the gates** (`git diff` over `crates/` and
+`rust/` is empty at this tip; `grep -ri fu8g_census crates/ rust/` returns nothing). All
+seven corpus OD-8 digests were re-confirmed byte-identical after the fix, with and without
+the instrumentation live.
+
+| quantity | Weeping Treant v1.2, in-engine at this tip |
+|---|---|
+| rows (real physical contact stubs) | **553** (faces 429,120) |
+| crossings mean/p50/p95/p99.9/max | **10.906 / 7 / 26 / 298 / 298** |
+| traversal tests mean/p50/p95/p99.9/max | **191.982 / 81 / 654 / 3,236 / 3,236** |
+| charged work (rows × nfaces) | 237,303,360 |
+| honest work (Σ crossings) | **6,031** (**39,347×** over-charged) |
+| honest work (Σ tests, D3) | **106,166** (**2,235×** over-charged) |
+| charged scratch | 647,733,598,841 B (603 GiB) |
+| honest scratch (Σ row_scratch at honest crossings) | **149,188,000 B (142 MiB)** (**4,342×**) |
+
+Against the design's §M out-of-repo proxy (62.03 mean crossings/ray, 6,918× over-statement):
+the honest mean is **10.906**, so the real over-statement (nfaces / mean crossings) is
+**~39,347×** — the design's proxy *under*-stated the over-charge by 5.7× on the treant, the
+same direction §M's caveat 1 anticipated. Adjudicating what H1's bound does with these
+numbers is FU-8g's work, not this fix's; they are recorded so H1 starts from measurement.
+
+**The honest note, stated because the fix makes it visible.** The 0.001 mm² twig tip at
+(−11.69, 13.00, 79.68) — one physical tip, one seat now — carries the summed load of both
+owning islands' rows and reports its tip-safety-factor violation honestly in the specialized
+gate evidence, within plan tolerance (violations are recorded evidence the plan already
+tolerates — the treant's baseline carried 2 before this fix — not refusals; the stage
+completes and the pipeline advances). Whether a flagged tip should eventually hard-refuse,
+thicken, or spawn relief support remains the owner-queue physics question F31.5(c) recorded,
+unchanged by this fix.
+
+**Verification.** All seven frozen OD-8 census digests byte-identical after the fix: Sphere
+`17667468971446251870`, Cylinder `13310185350867878190`, make_box `9657051231007502658`,
+make_overhang_table `1875674282253663076`, make_toed_slab `2823659516373762066`,
+make_raking_blade `9567737006650358297`, make_thin_fin `8797083662933568276`. Five gates
+green at this tip (counts recorded in the commit); tree clean before and after; no cap,
+floor, constant or owner-ratified evidence field touched; `/private/tmp/plinth-chitubox-preview`
+untouched.
+
+## FU-8g phase H2 landed 2026-08-09 — the charge IS the counted demand, the receipt is checked against it, and the refusal path is proven at caps nobody touched {#fu8g-h2-2026-08-09}
+
+**Scope, stated first.** H2 is the charging phase of
+[`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md) (its H2 row: preflight rebase,
+charged-vs-executed meter, no cap raised, lowered or touched). Two of its four listed items were
+already landed by H1 at `08db663`, which said so in its own commit body; H2 verifies them,
+records their measured effect, adds the receipt the design asked for, and proves the refusal
+path still fires at the **unchanged** production caps. **No cap, floor, constant or
+owner-ratified evidence field is raised, lowered or touched by this phase.**
+`ContactConstructionLimits::production()` is byte-identical to `develop @ e3168c5`:
+`max_work_items = 4_000_000`, `max_scratch_bytes = 512 × 1024 × 1024 = 536,870,912`, and both
+literals are now pinned by an assertion in the refusal fixture below, so a future cap move has
+to come and change them there.
+
+### H2.1 What `initial::preflight` charges now, before and after, per model
+
+The preflight charge is `work items = contact_count × 4 + penetration.max_total_work`.
+`max_total_work` **before** H1 came from `penetration_intervals_batch_worst_case_limits`, i.e.
+`rows × nfaces`; **after** H1 it is the census pass's `Σ row.tests`, summed over rows, where
+`tests` is executed traversal effort (BVH nodes popped plus Möller evaluations). The two
+`work` columns below are therefore that formula evaluated on the **measured** numbers of record:
+the seven corpus rows come from *FU-8g phase H0 measured 2026-08-08*
+([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)) §H0.1, and the treant row from the FU-31
+acceptance run recorded in *FU-31 FIXED 2026-08-08*
+([`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)). **This is arithmetic on measurements
+already in this file, not a new run** — H1 changed no geometry (all seven OD-8 digests are
+byte-identical at this tip, re-confirmed below), and `Σ tests` is precisely what
+`penetration_intervals_batch_census_limits` sums into `max_total_work`.
+
+| model | rows | faces | charged BEFORE (worst case) | charged AFTER (counted) | change | after, as % of the 4,000,000 cap |
+|---|---:|---:|---:|---:|---:|---:|
+| `make_box` | 11 | 12 | 176 | **205** | **×0.86 — RISES** | 0.005 % |
+| `make_overhang_table` | 84 | 60 | 5,376 | **2,064** | ×2.60 fall | 0.05 % |
+| `make_toed_slab` | 68 | 140 | 9,792 | **1,754** | ×5.58 fall | 0.04 % |
+| `make_raking_blade` | 33 | 24 | 924 | **975** | **×0.95 — RISES** | 0.02 % |
+| `make_thin_fin` | 18 | 24 | 504 | **402** | ×1.25 fall | 0.01 % |
+| `Sphere` | 7 | 4,760 | 33,348 | **385** | ×86.6 fall | 0.010 % |
+| `Cylinder` | 54 | 244 | 13,392 | **2,521** | ×5.31 fall | 0.06 % |
+| **Weeping Treant v1.2** | 553 | 429,120 | **237,305,572** | **108,378** | **×2,189 fall** | **2.71 %** |
+
+**FINDING — the design's D4 claim is falsified as written, and its conclusion survives for a
+different reason.** D4 states: *"No new refusal is possible on any corpus model: every corpus
+demand falls (M1), and a falling demand can create no refusal."* **The demand does not fall on
+every corpus model.** On `make_box` the honest charge is **1.16× higher** than the worst-case
+one it replaced (205 vs 176) and on `make_raking_blade` **1.06× higher** (975 vs 924), exactly
+as H0's finding 1 warned when it measured 0.82× and 0.94× on the `work` term alone: on a 12- or
+24-face mesh the BVH's own node-visit overhead exceeds `nfaces`, and honest is not always
+smaller. The conclusion — no new refusal on any corpus model — nevertheless holds, but it must
+be argued from the margin rather than from monotonicity: the two risen charges are **205** and
+**975** against a **4,000,000** cap, four orders of magnitude of headroom. The gates prove the
+same thing operationally (1048/1048, both universes, no corpus model refusing anywhere).
+
+**The treant fits the unchanged cap with 37× of margin.** 108,378 work items against 4,000,000
+is **2.71 %** of the floor, so D5.3's contingency (the FU-8b batch-product rule with a measured
+coefficient) is **NOT triggered and is NOT added** — adding scaling no measurement requires is
+the same error as raising a cap. That contingency stays written down and unexercised.
+
+**What is deliberately NOT claimed here: the scratch-bytes charge, per model.** H0.1's honest
+scratch column was `row_scratch` evaluated at the honest crossing count; H1 charges something
+different in form — per-ray buffers sized at the row's **worst single ray**, samples bounded by
+the F10 closed form, totals summed per row — so H0's scratch arithmetic is not this tip's
+scratch charge and is not presented as it. The mechanism that made `work` fall (counted
+crossings instead of `nfaces`) drives the byte charge down by the same route, and the treant's
+pre-H1 honest-scratch figure (149,188,000 B ≈ 142 MiB, against a 536,870,912 B cap) is the best
+available indication that it fits, **but the definitive per-model byte charge is H6's to
+measure and no number for it is claimed at this tip.**
+
+### H2.2 The receipt — charged vs executed, asserted rather than assumed
+
+The design's H2 row asks for "a charged-vs-executed meter beside the charge (the G3/G6c idiom)
+so `executed ≤ charged` is asserted, not assumed". It exists now, in two independent places:
+
+- **In the kernel.** `collect_hits_with_stack` — the fill pass's own walk — now returns the
+  traversal effort it executed, counted in exactly the units `count_hits_with_stack` counts, and
+  `pen_intervals_one` accumulates it with the hits pushed, samples placed and intervals emitted.
+  `penetration_intervals_batch_bounded_metered` returns those totals as a public
+  `PenetrationBatchMeter` and refuses with the new typed
+  `PenetrationBatchError::ChargeDrift { resource, charged, executed }` if the batch outruns its
+  own counted requirements. `penetration_intervals_batch_bounded` is now a thin delegation to it
+  that drops the receipt, so no existing caller changed shape.
+- **At the one site that spends a cap.** `build_initial_contacts` takes the receipt back from
+  `classify_initial_overlaps` and checks it against `penetration_limits` — the very numbers
+  `preflight_work` charged against `ContactConstructionLimits::production()` a few lines above —
+  refusing with `InitialContactError::ChargeDrift` if execution outran the charge. The kernel's
+  own check compares the receipt to the kernel's own counting pass; this one compares it to the
+  number a cap was spent in, which is a different claim and the one a resource policy is written
+  in.
+
+**`work` and `hits` meter EQUAL to the charge, not merely under it** — they are the same two
+quantities measured by the two walks — and that equality is what the new kernel test asserts;
+`samples` and `intervals` are bounded quantities and land at or under their counted budgets.
+
+### H2.3 The refusal path, proven at the unchanged caps
+
+The obligation that comes with a charge that falls is that a mesh whose **honest** demand is
+genuinely too large is still refused. `honest_over_demand_still_refuses_at_the_unchanged_
+production_caps` (`crates/plinth-support/src/initial.rs`) builds a 8,000-slab, 96,000-face
+lamella stack, sends 100 stub-shaped rows down the column in the seed loop's own batch shape
+(`n_offset_rays = 8`, `rays_all = false`), and charges the counted demand against
+`ContactConstructionLimits::production()` **verbatim**:
+
+| quantity | value |
+|---|---:|
+| counted work (`Σ tests`) | **4,223,900** |
+| the cap it is checked against | 4,000,000 (unchanged) |
+| what the worst-case shape would have said | 9,600,000 |
+| counted hits (`Σ crossings`) | 1,600,000 |
+| counted penetration scratch | 356,484,600 B, against the unchanged 536,870,912 B cap |
+
+So the refusal is a **work** refusal on counted traversal, with the byte charge still inside its
+own cap, and the honest number that refuses is **2.3× smaller** than the fiction it replaced and
+still over the line. `Err(InitialContactError::Limit { resource: "work items", required:
+4,224,300, limit: 4_000_000 })` is matched with the cap as a literal.
+
+### H2.4 Deviations from the design's H2 row, recorded (never silent)
+
+1. **`initial::preflight` and `required_scratch_bytes` were already on census inputs before this
+   phase started.** H1 (`08db663`) landed the D4 split — `preflight_contact_caps` (logical caps,
+   still refused before any contact-sized allocation) and `preflight_work` (work items and
+   scratch bytes, charged from the census totals) — and said in its own body that it had done
+   so. H2 did not redo it; H2 measured its effect (§H2.1), added the receipt (§H2.2) and proved
+   the refusal path (§H2.3).
+2. **`designed_embed::for_batch` and the brace/transit limit derivations are NOT re-derived from
+   the census, deliberately.** Those three surfaces hand the kernel a caller-owned **ceiling**,
+   not a cap-backed charge: `for_batch` derives its ceiling from the surface itself, so it can
+   refuse nothing; brace's is the flat `brace_penetration_limits` production cap; and transit's
+   `TransitIntervalLimits` has **no production constructor at all** at this tip — every
+   construction of it is test code. Since H1 the shared bounded entry point counts before it
+   charges and allocates at every one of those call sites, so their allocations and their
+   admission arithmetic are already counted; re-deriving their ceilings from a second census pass
+   would add a full extra BVH descent per attestation batch for **zero** change in behaviour
+   (counted ≤ worst-case always, proven relationally by the re-pinned exact-cap test). What H2
+   does instead is state the ceiling-versus-charge distinction in the bounded entry point's own
+   doc comment and give the one surface that really does spend a cap — `initial::preflight` —
+   the receipt. If a later phase turns any of those three into a real charge, the metered entry
+   point is already there to check it.
+3. **The meter covers rows, work, hits, samples and intervals — not scratch bytes.** Bytes are
+   not executed, they are reserved, and every reservation on this path is a fallible
+   `try_reserve_exact` at exactly the counted budget, so the byte plan is enforced by an
+   allocator refusal at the moment of spending rather than by a counter afterwards. Recorded so
+   that the absence is visibly deliberate.
+
+### H2.5 The every-record-site sweep for the moved charged number
+
+The charge formula behind the treant's stopping point moved at H1, so every record that states
+the old number as *what the engine computes* gains a dated pointer here rather than a rewrite.
+Amended in this commit: **§G6d.8** of *FU-8f phase G6d measured 2026-08-08*, the **resumption
+checklist item** that repeats it, the **FU-8g follow-up row**, and **§17.5** of
+[`support-resource-caps-2026-08-05.md`](support-resource-caps-2026-08-05.md). The design doc
+[`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md) is **not** amended: it was landed
+verbatim under a provenance banner, its 232,585,208 and its §M projections are its premises as
+designed, and this section is where measurement supersedes them. **Still owed by H3**, and
+deliberately not done here: M0 registration of the four `ContactConstructionLimits` numbers, the
+six `brace_penetration_limits` fields and `raft_limits` with this work's measurement of record;
+caps-doc §18; `03-physics-and-constants.md`; `constants.md` regenerated by its producer; the
+`m0-constants-source-ledger.json` entry and the FU-24 ledger gate.
+
+### H2.6 Verification
+
+Five gates green at this tip, tree clean before and after: (1) `cargo test --workspace --offline
+--no-fail-fast` **1048 passed, 0 failed**; (2) the same `--all-features` **1048 passed, 0
+failed**; (3) `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`
+clean; (4) `cargo fmt --all -- --check` clean; (5) `git diff --check` clean. **Test delta
+attributed exactly: 1045 → 1048, +3, all new, no re-pins and no deletions** — one kernel test
+(the receipt matches the counted charge, `work`/`hits` by equality, geometry bit-identical to
+the unmetered entry point) and two support tests (the over-demand refusal at the unchanged
+production caps; the receipt tripwire, one case per checked resource so deleting any row from
+the check fails it).
+
+All seven frozen OD-8 census digests **byte-identical** with the meter live (`cargo run
+--release --offline --features census --example embed_incidence_census -p plinth-support`,
+`PLINTH_CENSUS=1 PLINTH_THREADS=4`, once per model): Sphere `17667468971446251870`, Cylinder
+`13310185350867878190`, make_box `9657051231007502658`, make_overhang_table
+`1875674282253663076`, make_toed_slab `2823659516373762066`, make_raking_blade
+`9567737006650358297`, make_thin_fin `8797083662933568276`. **No treant run this phase** — H6
+owns it, under the standing memory protocol. `/private/tmp/plinth-chitubox-preview` untouched.
+
+## FU-8g phase H3 landed 2026-08-09 — the four `ContactConstructionLimits`, six brace penetration limits and four raft limits are registered; nothing is raised, lowered or touched {#fu8g-h3-2026-08-09}
+
+**Scope, stated first.** H3 is the registration phase of
+[`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md) (its H3 row: M0 registration + record
+sweep). It changes **no engine code** — `git diff` over `crates/` and `rust/` at this tip is
+empty. Its whole diff is the M0 placeholder registry table (`crates/plinth-core/src/constants/
+placeholders.rs`), the three consuming test fixtures (`constants_placeholders.rs`,
+`constants_golden.rs`, both bumping their handwritten id/row lists and entry counts from 239/270
+to 253/284), `docs/rust-migration/m0-constants-source-ledger.json` (14 appended rows),
+`docs/rust-migration/constants.md` (regenerated by its producer, 14 additive rows), and this
+document plus `support-resource-caps-2026-08-05.md` §18 and
+`03-physics-and-constants.md` §3.10.9. **No cap, floor, coefficient or byte term is raised,
+lowered or touched.**
+
+### H3.1 What was unregistered
+
+F1/F2 of the design found that `ContactConstructionLimits::production()` (`initial.rs:63–70`)
+and `SupportPreparationLimits::production`'s `construction_limits` (`runner.rs`, the same four
+numbers hard-coded a second, independent time) had **no** M0 registry entry, and neither did
+`brace_penetration_limits` (`PenetrationBatchLimits`, six fields) or `raft_limits`
+(`RaftLimits`, four fields). Owner ruling R5 (2026-08-05) registered 42 sibling caps in the same
+family and named these four nested authorities **explicitly out of scope**
+(`03-physics-and-constants.md` §3.10.9), deferring them to "their own pass" — which is this one.
+Until now, H1's and H2's own "no cap was raised" claims rested on a number with no lookup entry:
+honest in fact, unverifiable from the registry.
+
+### H3.2 What is registered
+
+All 14 numbers, as `Placeholder`, classification `runtime_resource_cap`, on exactly R5's terms —
+**registration is disclosure, not ratification**:
+
+| Stable ID | Value | Unit |
+|---|---:|---|
+| `SUPPORT_CONSTRUCTION_MAX_CONTACTS` | 1,000,000 | count |
+| `SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS` | 10,000,000 | count |
+| `SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS` | 4,000,000 | count |
+| `SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES` | 536,870,912 | B |
+| `SUPPORT_BRACE_PENETRATION_MAX_ROWS` | 100,000 | count |
+| `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK` | 1,000,000,000 | count |
+| `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS` | 1,000,000,000 | count |
+| `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES` | 10,000,000,000 | count |
+| `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS` | 1,000,000,000 | count |
+| `SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES` | 100,000,000,000 | B |
+| `SUPPORT_RAFT_MAX_CANDIDATES` | 100,000 | count |
+| `SUPPORT_RAFT_MAX_ROOTS` | 100,000 | count |
+| `SUPPORT_RAFT_MAX_PRIMITIVES` | 200,000 | count |
+| `SUPPORT_RAFT_MAX_BYTES` | 134,217,728 | B |
+
+Every value is byte-identical to `develop @ e3168c5` and to `git blame`'s `73e7c132` on
+`runner.rs` — the same Codex-era commit R5's sibling caps already cite. Registering a number does
+not move it; H2's own fixture already pins `ContactConstructionLimits::production()`
+byte-identical, independent of this section.
+
+### H3.3 Provenance: measured where measured, disclosed as absent where not
+
+Per R4's precedent (single-specimen, n = 1, on measurements resting on the treant alone) and the
+standing rule against inventing a demand figure no run has produced: `SUPPORT_CONSTRUCTION_
+MAX_WORK_ITEMS` and `SUPPORT_CONSTRUCTION_MAX_CONTACTS` carry FU-8g H1/H2's measured treant demand
+(108,378 work items, 2.71 % of the unchanged cap; 553 contacts, 0.055 %); `SUPPORT_CONSTRUCTION_
+MAX_SCRATCH_BYTES` carries H0's pre-H1 estimate (149,188,000 B, ≈142 MiB, 27.8 %) with H2.1's own
+disclaimer restated — the post-H1 figure is H6's to measure, not claimed here. `SUPPORT_
+CONSTRUCTION_MAX_LOAD_ROWS` and all ten brace/raft constants carry **no** measured demand,
+disclosed as such: the brace and raft stages are unexercised on every corpus model and on the
+treant (§17.7) — no run has ever reached them. The design's F7 finding for the six brace fields
+is registered as a **derived** worst-case ceiling from the pre-fix sizing formula (production
+admits at most 85 clearance rods on the treant mesh once `max_scratch_bytes` is accounted for),
+never as a measured demand, and `SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES`'s note additionally
+discloses that this cap sits above the 90 GB watchdog line and the 100 GB machine ceiling — a
+standing hazard this registration surfaces, not resolves. `CandidatePayloadConfig` remains
+genuinely out of scope, exactly as R5 left it.
+
+### H3.4 Records swept
+
+`support-resource-caps-2026-08-05.md` gains **§18** (the full record) and dated addenda at §17.5
+(the debt this section pays), §14.6 and §17.7 (both still-unexercised-remainder sections, pointed
+at §18). `03-physics-and-constants.md` §3.10.9 gains a dated addendum correcting its own "not
+covered" sentence for three of the four named nested authorities, with the full 14-row table.
+`constants.md` was regenerated **by its producer** (`cargo run -p plinth-core --offline --example
+render_constants_golden`); the diff is 14 additive rows, nothing else moved.
+`m0-constants-source-ledger.json` gains 14 `registry_entries` rows, appended after the existing
+tail — the same shape R5's own 42 additions used, not a whole-file resort — and
+`constants_ledger_consistency`'s FU-24 gate is green. The **FU-8g follow-up row** below gains a
+dated bracket; the resumption checklist's item 5 gains a dated addendum.
+
+### H3.5 Verification
+
+Five gates green at this tip, tree clean before and after: (1) `cargo test --workspace --offline
+--no-fail-fast` **1048 passed, 0 failed**; (2) the same `--all-features` **1048 passed, 0
+failed**; (3) `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`
+clean; (4) `cargo fmt --all -- --check` clean; (5) `git diff --check` clean. **No engine test
+count moves**: H3 adds no test and changes no code, so the pass/fail counts are identical to the
+H2 tip's 1048/1048, to the unit, on both universes. The FU-27 flake did not fire in either run.
+The seven frozen OD-8 census digests are unaffected (this phase touches no code the census
+exercises) and are not re-run for a docs-and-registry-only phase; H2's digests above remain the
+values of record. `/private/tmp/plinth-chitubox-preview` untouched.
+
+## FU-8g phase H4 landed 2026-08-09 — the rider: the `Poisoned` label splits three ways, and a committed-round counter with its exit reason rides beside it {#fu8g-h4-2026-08-09}
+
+**Scope, stated first.** H4 is the owner-adjudicated rider
+[`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md) named independent of the kernel work (its
+H4 row): (1) split the census `Poisoned` label three ways so G6d's collapsed attribution of 21
+poison-driven rebuilds becomes measurable, and (2) add a committed-round counter and tournament
+exit-reason to the census output so a future treant transcript proves its own round count without
+scratch instrumentation. **No cap, floor, coefficient or digest is touched.** The whole diff is
+`crates/plinth-support/src/perception.rs` (D6), `crates/plinth-support/src/census.rs` (both), and
+`crates/plinth-support/src/specialized.rs` (the D7 call sites) — `rust/` and every M0/constants
+file are untouched.
+
+### H4.1 D6 — the `Poisoned` label, split three ways
+
+`RetainedLoadRebuildCause::Poisoned` (`perception.rs`) becomes `Poisoned(PoisonCause)`, where
+`PoisonCause` is `Guard3Generic | CommitShape | IdentityWalk` — the owner's mandated two groups
+(guard 3 vs. the identity walk) plus the design's recommended third (the four "commit shape"
+sites: out-of-range/equal `left`/`right`, wrong-length committed list, a parent that is not
+`LoadOwner::Specialized`, and the `first_specialized_owner` underflow check), per D6's own
+argument that folding those into the identity walk would recreate the exact ambiguity the rider
+exists to remove. `RetainedLoadTranspose::poison()` takes the cause as a parameter; every one of
+its call sites in `record_commit` now names its own group. The census label surface
+(`RetainedLoadRebuildCause::label()`, consumed by `census.rs`'s `by_cause: BTreeMap<&'static str,
+usize>`) needed no structural change, exactly as D6 predicted — the split is three new label
+strings, `"poisoned_guard3"`, `"poisoned_commit_shape"`, `"poisoned_identity_walk"`, in place of
+the one `"poisoned"` string.
+
+**A deviation from F11's inventory, found and recorded rather than absorbed.** F11 counted **nine**
+`poison()` call sites and bounded its own source read to `record_commit`'s `:3378–3480`. Source
+review at H4 found a **tenth**, one line past that bound: a `u32::try_from(merged_offset).is_err()`
+guard protecting the arena-offset arithmetic from overflowing `u32` after the identity walk has
+already succeeded — unreachable on any mesh this engine has ever run (the arena would need to
+exceed `u32::MAX` live+dead cells), and defensive rather than caller-shape or position-matching in
+character. Classified `CommitShape` by the same precedent F11 itself used for the
+`first_specialized_owner` underflow check, and documented in full at the `PoisonCause` enum's own
+doc comment in source, so the next reader does not have to re-derive the reasoning.
+
+### H4.2 D7 — the committed-round counter and exit reason
+
+`census::MergeTournamentCensus { tournaments, rounds_committed, contacts_first, contacts_last,
+exit_reason }` is new in `census.rs`, printed on the same `specialized_gate_operations`
+`T0_scaled_cap` row that already carries `gate_batches`/`retained_load_rounds` — the established
+"same batches, same row" idiom. `consolidate` (`specialized.rs`) records one commit
+unconditionally beside (not gated on) the existing `RetainedLoadTranspose::record_commit` call —
+counting every round the tournament actually committed, not only the rounds retention observed —
+and records one exit at each of the loop's three named stopping points: `proposals.is_empty()` →
+`"no_proposals"`, `outcome.accepted` is `None` → `"no_safe_proposal"`, and
+`required_iterations > limits.max_merge_iterations` → `"iteration_cap"` (a typed refusal, still
+recorded before the `Err` return, because it is one of the tournament's own three stopping modes
+in F12's sense). `MergeTotalProposalLimit` and `GateResourceOverflow` are deliberately **not** a
+fourth reason, matching D7 exactly.
+
+### H4.3 Census digest discipline — determined from source, proven by a corpus run
+
+The rider's own instruction was to check whether the new counters feed the digest hash before
+landing them, on the `gathered_pair_count` precedent (`specialized.rs`'s `SpecializedContactPlan::
+digest()` hashes `self.gate_evidence.gathered_pair_count`, `accepted_pair_count`,
+`deep_clone_count` and `max_commit_bytes` explicitly, by name, one `hash.usize()` call per field —
+nothing generic or derive-based). Neither `PoisonCause` nor `MergeTournamentCensus` is a field of
+any struct that digest function reads: both live entirely inside `census.rs`, itself
+`#[cfg(feature = "census")]`-gated and additionally runtime-gated on `PLINTH_CENSUS=1`, printed as
+additive `CENSUS` lines never consumed by production code. **Digests hold, by construction — and
+this was proven, not merely argued**: a release build (`--features census`) run over all seven
+reachable corpus models reproduced all seven frozen `snapshot_digest` values byte-identical to the
+ones this document's spawn brief states (`Sphere 17667468971446251870`, `Cylinder
+13310185350867878190`, `make_box 9657051231007502658`, `make_overhang_table 1875674282253663076`,
+`make_toed_slab 2823659516373762066`, `make_raking_blade 9567737006650358297`, `make_thin_fin
+8797083662933568276`), with `PLINTH_CENSUS=1` live and the new counters printing on every row.
+
+The same run is the fixture-tournament proof D7's own verification bar names, on real geometry
+rather than only the isolated unit fixture in H4.4: six of the seven models gather no merge
+proposals at all (`merge_rounds_committed=0`, `merge_contacts_first == merge_contacts_last`,
+`merge_exit_reason=no_proposals`), and `make_raking_blade` — the one model whose specialized gate
+does real merge work — printed `merge_contacts_first=37`, `merge_contacts_last=34`,
+`merge_rounds_committed=3`, `merge_exit_reason=no_proposals`: `37 − 34 = 3`, the committed-round
+invariant D7 states, holding on the corpus's own numbers, not just a hand-built fixture.
+
+### H4.4 Verification
+
+**Mutation-proven**, per the phase's own bar. Six assertions across three existing D6 fixtures now
+name the `PoisonCause` each poison site must produce
+(`fu8f_retained_transpose_invalidates_on_a_generic_resolving_merge` → `Guard3Generic`;
+`fu8f_retained_commit_poisons_when_it_cannot_name_the_remap` → `CommitShape` (wrong length) and
+`IdentityWalk` (foreign inserted seat) and `CommitShape` (generic parent);
+`fu8f_retained_commit_poisons_on_a_position_bit_tie_at_the_insertion_point` → `IdentityWalk`), each
+with a doc-comment naming the exact `poison(...)` call site to delete to fail it — verified by
+hand for the `Guard3Generic` case (deleting the argument's effect makes the new assertion fail
+while the pre-existing `is_poisoned_for_test()` assertion still passes, proving the new assertion
+is load-bearing, not redundant). Two new unit tests in `census.rs`
+(`rounds_committed_matches_the_scripted_commits`, `exit_reason_and_contact_counts_are_the_most_
+recent_exits_own`) pin `MergeTournamentCensus`'s pure accumulation directly — deliberately
+decoupled from the process-global `Mutex<CensusData>` singleton and the `PLINTH_CENSUS` runtime
+gate, because `cargo test` runs this crate's tests in parallel in one process and dozens of them
+call `consolidate()`, so driving the real recorders through the shared singleton from a unit test
+would let concurrently running tests' own tournaments pollute the count under test; both were
+confirmed to fail when their respective accumulation logic was neutered, then restored. The
+call-site wiring in `specialized.rs` is verified by the H4.3 corpus run instead, on real geometry.
+
+Five gates green at this tip, tree clean before and after: (1) `cargo test --workspace --offline
+--no-fail-fast` **1048 passed, 0 failed** (unchanged from the H3 tip — H4 adds no test under
+default features, only new assertions inside existing tests); (2) the same `--all-features`
+**1050 passed, 0 failed** (+2, exactly the two new `census.rs` unit tests, gated behind the
+`census` feature that `--all-features` turns on); (3) `cargo clippy --workspace --all-targets
+--all-features --offline -- -D warnings` clean; (4) `cargo fmt --all -- --check` clean; (5) `git
+diff --check` clean. The FU-27 flake did not fire in either test run. `/private/tmp/plinth-
+chitubox-preview` untouched.
+
+## FU-8g phase H5 landed 2026-08-09 — the equivalence proof and its non-vacuity: census equals execution bit for bit, and the mutation triad says the harness is not decoration {#fu8g-h5-2026-08-09}
+
+**Scope, stated first.** H5 is the design's separated proof phase
+([`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md), H5 row — "folding the proof into the
+phase that writes the code is how vacuous harnesses land"). **The whole diff is ONE new
+integration-test file**, `crates/plinth-support/tests/penetration_census_equivalence.rs` (placed
+in `plinth-support` because the harness needs both the `geom_kernel` batch API and the
+`plinth-mesh` corpus fixture generators), plus this record. No production code, cap, floor,
+constant, registry entry or digest input is touched; `rust/` is byte-identical to the H4 tip.
+
+### H5.1 The equivalence harness
+
+Four tests, one shared harness (`assert_census_matches_execution`), each run under both the
+production batch shape (`n_offset_rays = 8`, `rays_all = false`) and the multi-ray shape
+(`rays_all = true`):
+
+- **`fu8g_h5_raking_blade_census_equals_execution_bit_for_bit`** — real corpus fixture
+  (`make_raking_blade`). One row crosses the raked 0.03 mm blade AND the slab, so counted
+  crossings exceed emitted intervals on real geometry: the count-vs-interval severance is
+  exercised, not stipulated.
+- **`fu8g_h5_overhang_table_hole_row_census_equals_execution_bit_for_bit`** — the corpus model
+  with holes (`make_overhang_table`): two rows run horizontally at leg height through two legs
+  each, and the harness asserts the axis ray yields exactly two DISJOINT intervals — a genuine
+  hole, plus a leg/top coincident-face row exercising dedup identically on both sides.
+- **`fu8g_h5_dense_stack_exceeds_one_hundred_crossings_on_one_ray_and_matches`** — the synthetic
+  dense-crossing fixture: a 60-slab lamella stack whose full column carries **120 crossings on
+  one ray** (asserted `> 100` — §M2's treant-tail regime, present by measurement, not by
+  intent).
+- **`fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes`** — for each of
+  the six limit resources in turn, granting exactly the counted demand minus one refuses with
+  the TYPED `ResourceLimitExceeded` naming that resource and the exact counted `required` —
+  never an `AllocationFailure`, never a mid-execution `CensusDrift` — and granting exactly the
+  counted demand admits the batch (the charge is a boundary, not a margin). The caps-level
+  sibling at the UNCHANGED `ContactConstructionLimits::production()` values remains H2's
+  `honest_over_demand_still_refuses_at_the_unchanged_production_caps`, green at this tip.
+
+What the harness asserts, in order: (1) every census-derived limit is admitted by the
+worst-case-derived limit for the same batch (the counted charge never exceeds the ceiling);
+(2) execution under census limits is `to_bits`-identical to execution under worst-case limits,
+field by field — `s_a`, `s_b`, `entered`, `exited`, `max_depth`, `ray` — so a `-0.0`/`0.0` or
+NaN divergence cannot pass; (3) the batch receipt's `work` and `hits` EQUAL the census's summed
+`tests` and `crossings` (the two walks measure the same quantities); (4) per row,
+`census.crossings == executed hits` and `census.tests == executed work`, proven by single-row
+metered calls that must also reproduce the batch row's intervals bit for bit. Every batch is
+built with row 0 strictly the least-demanding row and the harness asserts that precondition —
+non-vacuity for triad (c) below is a measured property of the fixture, not a hope.
+
+### H5.2 The mutation triad — applied, observed, reverted (transcripts in the test file's doc comments)
+
+| mutation (`rust/geom_kernel/src/queries.rs`) | observed refusal | who catches it |
+|---|---|---|
+| (a) `census_one` under-counts a row's `max_ray_crossings` by 1 | `CensusDrift { row: 1, resource: "hits", executed == counted + 1 }` — blade 1→2, table 7→8, dense stack 119→120 | all 4 harness tests, plus 11 of `native_api`'s 32 |
+| (b) the F10 sample bound drops its `3 x` term | `CensusDrift { row: 1, resource: "samples", counted: 140, executed: 365 }` on the dense stack (121 subsegments x 3-sample floor vs a bound funding only `subsegments + ceil(seg/step)` = 140); `native_api`'s closed-form pin fails `left: 30, right: 40` | ONLY the dense-stack harness test + the one numeric pin — the blade and table tests stay green, which is exactly why the design demands the dense fixture |
+| (c) every row budget replaced by row 0's budget | `CensusDrift { row: 1, resource: "hits", counted: 0, executed: 2 / 8 / 120 }` | **the harness alone: `native_api` passes 32 of 32 under this mutation.** H5's file is the sole witness for per-row budget integrity — the vacuity the H5 row was scheduled to rule out was real |
+
+Each mutation was applied singly, observed failing with exactly the messages above, and reverted
+by editing; `git diff` over `rust/` is empty at this tip. The transcripts live permanently in the
+test file's module and per-test doc comments (house standard, same shape as FU-8f's and FU-31's).
+
+### H5.3 Gates and census
+
+Five gates green at this tip, tree clean before and after: (1) `cargo test --workspace --offline
+--no-fail-fast` **1052 passed, 0 failed** (+4 from the H4 tip's 1048 — exactly the four new
+harness tests); (2) the same `--all-features` **1054 passed, 0 failed** (+4 from 1050, same
+four; the default/all-features gap stays 2, H4's two feature-gated census tests); (3) `cargo
+clippy --workspace --all-targets --all-features --offline -- -D warnings` clean; (4) `cargo fmt
+--all -- --check` clean; (5) `git diff --check` clean. The FU-27 flake did not fire in either
+test run. OD-8: all seven frozen census digests reproduced **byte-identical** from a fresh
+release `--features census` build (Sphere 17667468971446251870, Cylinder 13310185350867878190,
+make_box 9657051231007502658, make_overhang_table 1875674282253663076, make_toed_slab
+2823659516373762066, make_raking_blade 9567737006650358297, make_thin_fin 8797083662933568276).
+No treant run this phase — H6 owns that, under the standing memory protocol.
+`/private/tmp/plinth-chitubox-preview` untouched. **Still open: H6 only.** The treant still has
+no seal.
+
+## FU-8g phase H6 measured 2026-08-09 — the initial-contact wall is broken and the treant reaches routing for the first time; the run then EXCEEDS-TIMEBOX inside a per-terminal whole-transcript re-digest {#fu8g-h6-2026-08-09}
+
+**Scope, stated first.** H6 is the design's measurement-and-record phase
+([`fu8g-design-2026-08-08.md`](fu8g-design-2026-08-08.md), H6 row — "**no engine code**"). **No
+file under `crates/` or `rust/` is touched by this phase**; `git diff` over both is empty at this
+tip, and no cap, floor, constant, registry entry or digest input is raised, lowered or touched.
+The whole diff is this record and its two sibling record sites. What follows is a run transcript
+and its diagnosis.
+
+### H6.1 The invocation and the protocol, verbatim
+
+Both attempts, at branch tip `2297dae` (`feature/fu8g-penetration-census`), from
+`/private/tmp/plinth-fu8g`:
+
+```sh
+PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2" PLINTH_THREADS=4 \
+  cargo run --release --offline --features census \
+    --example embed_incidence_census -p plinth-support
+```
+
+Standing memory protocol, applied without deviation: release build, `--features census`,
+`PLINTH_THREADS=4`, RSS watchdog running **unsandboxed** and polling every 2 s with a hard kill
+armed at 90 GB, a 600 s timebox, **two attempts and no more**. Machine-quiet evidence: `ps`
+showed **no other `cargo`, `rustc` or `embed_incidence_census` process** at either launch; load
+averages were 2.44 (attempt 1) and 3.26 (attempt 2) one-minute, driven by the terminal emulator
+alone. The binary was the fingerprint-verified release artifact at this tip (cargo reported
+`Finished` with nothing to rebuild). Machine: 16 cores, 128 GB.
+
+**One deliberate, recorded deviation, confined to attempt 2.** Attempt 1 ran the protocol
+untouched and produced a stopping mode but **no counters at all** (§H6.6). Because the design's
+own H6 row requires the record to "diagnose where the time went", attempt 2 — the last attempt
+permitted — ran the *identical* invocation under the *identical* watchdog and added **external
+stack sampling only**: nine 3-second `sample(1)` windows at t = 20, 60, 120, 200, 280, 360, 440,
+520 and 575 s. `sample` observes the process from outside; **no instrumentation entered the tree**
+and the `git diff` claim above is unaffected. The perturbation is ≤27 s of light sampling over
+600 s, and it can only make a timebox verdict *later*, never earlier — both attempts hit the same
+wall, so the verdict is not at risk. Attempt 1 is therefore the clean wall-clock of record and
+attempt 2 is the diagnosis.
+
+### H6.2 The outcome, named: EXCEEDS-TIMEBOX, twice, reproducibly
+
+| | attempt 1 | attempt 2 |
+|---|---|---|
+| stopping mode | **EXCEEDS-TIMEBOX (600 s)** | **EXCEEDS-TIMEBOX (600 s)** |
+| wall-clock at kill | 600 s | 601 s |
+| exit | SIGKILL (137), watchdog | SIGKILL (137), watchdog |
+| peak RSS | **3,693 MiB** at t = 594 s | **3,721 MiB** at t = 599 s |
+| watchdog 90 GB arm | **never approached** | **never approached** |
+| stdout census rows | **none** (§H6.6) | **none** (§H6.6) |
+| stage at kill | routing (inferred from RSS shape) | **routing, sampled directly** |
+
+This is outcome (3) of the four the phase was briefed for, and the one the design ranked **most
+likely at ~45 %**. It is a valid, recordable result. It is **not** a seal, **not** a typed refusal
+and **not** a watchdog kill.
+
+### H6.3 The historic part: `build_initial_contacts` COMPLETES, and the treant reaches routing
+
+**No treant run has ever done this before.** Every prior attempt died upstream:
+
+| tip | treant stopping point |
+|---|---|
+| `fe79124` (FU-8f G6c) | merge gate, then `Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })` — **58.1× the cap** |
+| `develop @ e3168c5` | `Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, three stages earlier (FU-31) |
+| `55b4d99` (FU-31 fixed) | `Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` at 553 contacts |
+| **`2297dae` (this run)** | **Preparation completes. Routing does not.** |
+
+At t = 200 s the main thread is **100 % inside `plinth_support::initial::build_initial_contacts`**
+(`run_support + 4240` → `build_initial_contacts + 132` → `SpecializedContactPlan::validate_binding`
+→ `GenericContactPlan::validate_binding` → `geom_kernel::queries::NativeSurface::exterior_face_mask`,
+1997 of 1997 main-thread samples). By t = 280 s it is 100 % inside
+`PreparedSupportRun::route_initial_cco`. Between those two windows, at **t = 267 s** (attempt 2)
+and **t = 272 s** (attempt 1), RSS releases ≈250 MiB in one 2 s poll (2,380 → 2,130 MiB and
+2,382 → 2,156 MiB) — the initial-contact scratch being freed. That is the
+**Preparation → Routing boundary**, reproduced in both attempts within 5 s.
+
+**So the FU-8g preflight passed on honest numbers, on the treant, at 429,120 faces.** H2 measured
+the charge at **108,378 against the untouched 4,000,000 floor (2.71 %)**; this run is the
+end-to-end confirmation that the number is not merely smaller but *sufficient* — the stage
+executed to completion, `CensusDrift` never fired, and nothing downstream of the census refused.
+Contact attestation, which the same stage carries, also completed. **D5.3's cap-scaling
+contingency is therefore NOT triggered and is NOT added** — exactly as the design demanded, and
+for the reason it demanded: no measurement requires it.
+
+### H6.4 Where the time went — a per-terminal re-digest of the whole accumulated transcript
+
+Main-thread sample attribution, sibling frames summed, attempt 2:
+
+| t (s) | total | dominant stage | `grow_terminal_with_finalized_anchor` | `CcoController::digest` | `validate_replay` |
+|---:|---:|---|---:|---:|---:|
+| 20 | 2283 | decimate / hollow / topology | — | — | — |
+| 60 | 1992 | `perception::prepare_generic_contacts` **100 %** | — | — | — |
+| 120 | 1948 | `specialized::prepare_specialized_contacts` **100 %** | — | — | — |
+| 200 | 1997 | `initial::build_initial_contacts` **100 %** | — | — | — |
+| 280 | 2254 | `route_initial_cco` **100 %** | 2200 (97.6 %) | 443 (**19.7 %**) | 699 (31.0 %) |
+| 360 | 2265 | `route_initial_cco` **100 %** | 2265 (100 %) | 1458 (**64.4 %**) | 312 (13.8 %) |
+| 440 | 2268 | `route_initial_cco` **100 %** | 2268 (100 %) | 1751 (**77.2 %**) | 203 (9.0 %) |
+| 520 | 2278 | `route_initial_cco` **100 %** | 2278 (100 %) | 1758 (**77.2 %**) | 204 (9.0 %) |
+| 575 | 2263 | `route_initial_cco` **100 %** | 2263 (100 %) | 1744 (**77.1 %**) | 204 (9.0 %) |
+
+**The quadratic is visible in the profile itself, not merely argued from source.**
+`CcoController::digest`'s share of the routing stage **rises** 19.7 → 64.4 → 77.2 → 77.2 → 77.1 %
+as the transcript accumulates, while `validate_replay`'s share **falls** 31.0 → 13.8 → 9.0 → 9.0
+→ 9.0 %. That is a growing term overtaking a constant one — the measured signature of
+`Θ(N²)` beside `Θ(N)` — and the plateau near 77 % is the asymptote, not a sampling artefact: it
+reproduces across three windows 135 s apart.
+
+**Derived to the line from source, independently of the profile:**
+
+- `runner.rs:1650–1666` — routing is a plain `for terminal in cadence` loop, one
+  `controller.grow_terminal_with_finalized_anchor(...)` per terminal.
+- `cco.rs:1397` — the **first statement** of that function is
+  `let controller_digest_before = self.digest();`, once per terminal.
+- `cco.rs:1775–1862` — `CcoController::digest` is **not** the cached `const fn` at `:863`; it
+  walks the entire accumulated controller state every call: `self.terminal_cadence` (every
+  terminal so far, `:1786`), `self.terminals` (every record so far, `:1790`), and for each
+  `UnroutedNoWinner` record it calls `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`)
+  and `digest_anchor_refusals` over **that terminal's entire refusal list**, then
+  `self.hosts.indexed_members` (`:1851`) and `self.hosts.samples` (`:1856`) — the whole kd-tree
+  host sample set.
+- `cco.rs:2128–2149` — `digest_anchor_seat_refusals` emits five words per refusal, linearly.
+
+So the routing stage costs
+
+```
+Σ_{k=1..N} [ k  +  Σ_{j<k} (seat_refusals_j + anchor_refusals_j)  +  |hosts.indexed_members|  +  |hosts.samples| ]
+  =  Θ(N²)  +  Θ(N · R)  +  Θ(N · H)
+```
+
+for `N` terminals in the cadence (553 specialized physical contacts survive the tournament per
+FU-31, plus the regular terminals appended at `runner.rs:1649`), `R` the total accumulated
+anchor-seat and anchor refusals, and `H` the host kd-tree sample count. The dominance of
+`digest_anchor_seat_refusals` in every routing window says the `Θ(N · R)` term is the large one on
+this model — consistent with the standing record that **0 of 3429 attempted model anchors survive
+corpus-wide**, which makes refusal lists long and `UnroutedNoWinner` common.
+
+**This is the batch-first violation family a sixth time** — after FU-8b, FU-8c, FU-8d, FU-8e and
+FU-8g's own `contacts × faces` bound. It is the same defect shape in a new dress: *a per-item call
+over a whole accumulated structure inside a hot loop*. It is **not** a cap, nothing refuses, and
+**no cap would fix it**.
+
+**A second, independent per-terminal re-digest sits in the same loop** and accounts for the ~9 %
+constant term: `FinalizedAnchorValidationContext::validate_replay` →
+`validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` →
+`SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`;
+and `SurfaceAnchorPool::validate_against` → `anchor::surface_anchor_pool_digest`; and
+`FinalizedContactLoads::validate_binding` → `perception::finalized_load_rows_fingerprint`. Every
+one of those structures is **immutable for the entire routing stage**, and every one is re-hashed
+from scratch once per terminal. Together the two re-digest families account for **≈86 %** of the
+routing stage's wall-clock at t = 280 s and **≈86 %** at t = 575 s.
+
+**Opened as [FU-32](#follow-ups-2026-08-04).** Naming the remedy is not this phase's business, but
+the shape of the defect bounds it: both terms are re-derivations of state whose deltas are already
+known at the call site, and the house precedent (G3's prefix evaluation, G6's cross-round
+retention) is incremental maintenance, not a bigger budget.
+
+### H6.5 Memory — H1's reserve collapse, confirmed at treant scale
+
+The design predicted `pen_intervals` alone at **14–32 GB under the old reserves** and **~MB under
+H1's**, and instructed that RSS climbing toward 90 GB would mean something in the new reserve
+logic was wrong. **Nothing climbed.** The *entire process* peaked at **3,721 MiB** — 4.0 % of the
+90 GB watchdog arm, 3.7 % of the ~100 GB working ceiling, 2.9 % of the 128 GB machine. The
+watchdog never fired and was never close to firing. H1's per-row census budgets are confirmed on
+the treant, end to end, at 429,120 faces.
+
+The one genuine memory growth is in routing and is honestly rows-scaled, not a reserve: RSS rises
+from 2,130 MiB at the Preparation→Routing boundary to 3,721 MiB at kill, **+1,591 MiB over 332 s
+≈ 4.8 MiB/s**, as per-terminal transcript rows and their refusal vectors accumulate. That is the
+same structure the `Θ(N · R)` term walks. It is the design's third-ranked risk ("memory in
+brace/transit") appearing in a stage A3 did not name, at roughly a sixtieth of the feared
+magnitude, and it binds nothing.
+
+### H6.6 FINDING — an EXCEEDS-TIMEBOX run is structurally counter-free, so H4's rider could not fire
+
+The design's H6 row and §A3 both treat "**EXCEEDS-with-counters**" as the valid degraded outcome,
+and H4 landed its rider (`rounds_committed`, `tournaments`, `contacts_first`, `contacts_last`,
+`exit_reason`, and the three-way `PoisonCause` split) precisely so that "the next transcript
+answers a question two records currently have to disclaim". **On this run it could not, and the
+reason is structural, not incidental:**
+
+- `plinth_support::census` prints **only** from `census::finish` (model completed) and
+  `census::report_failure` (model refused with a typed error), invoked at
+  `crates/plinth-support/examples/embed_incidence_census.rs:56–62` and `:154`.
+- There is **no signal handler** anywhere in `census.rs` or in the example — verified by grep for
+  `signal` / `SIGTERM` / `SIGINT` / `ctrlc`; the census accumulates in memory and is flushed once,
+  at the end.
+- The watchdog's kill is a `SIGKILL`. **Both attempts therefore emitted zero `CENSUS` rows** — the
+  entire stdout is `Finished ... / Running target/release/examples/embed_incidence_census`.
+
+Consequences, recorded plainly: the treant's **21 poison-driven rebuilds remain unattributed**;
+`rounds_committed` and `exit_reason` remain uncaptured on the treant; and the honest per-cap demand
+this phase was sent to report exists only for the caps H0/H1/H2 already measured offline. **"EXCEEDS
+with counters" is not currently achievable with this harness** — it is achievable only for outcomes
+that end in a typed refusal or a seal. This is a defect in the measurement apparatus, not in the
+engine, and it should be the *first* thing fixed before the next treant run, because the outcome it
+blinds is the one the design itself ranked most likely. Recorded on **FU-32** as its first action.
+
+### H6.7 The design's next-binder prediction, scored
+
+§A3 ranked four binders. Scored against this run:
+
+| # | A3's binder | confidence | outcome |
+|---|---|---:|---|
+| 1 | **Wall-clock — the 600 s timebox** | ~45 % | **LANDED.** Both attempts EXCEEDS at 600 s. |
+| 2 | A typed refusal in an unregistered brace/joints/raft cap | ~30 % | **NOT REACHED** — the run never left routing; brace was never entered. Untested, not falsified. |
+| 3 | Memory in brace/transit | ~15 % | **NOT REACHED**, and its premise is contradicted at every stage that *did* run (peak 3.7 GiB). |
+| 4 | A clean seal | ~10 % | **NO.** |
+
+**The verdict landed; the mechanism did not.** §A3 predicted the timebox would bind *because* "the
+brace/transit penetration batches are the expensive `rays_all = true` shape". The measured cause
+involves **no penetration at all** — it is a whole-transcript re-digest in CCO routing, a stage A3
+listed by name but never suspected. Scoring the prediction as a hit on the outcome alone would be
+the dishonest reading; it is a **hit on the call and a miss on the cause**, and the miss is the
+useful half. §A2's running scorecard becomes **2 landed of 5**.
+
+### H6.8 Gates, census and containment
+
+Five gates green at this tip, verbatim, tree clean before and after:
+(1) `cargo test --workspace --offline --no-fail-fast` — **1052 passed, 0 failed**;
+(2) the same `--all-features` — **1054 passed, 0 failed**;
+(3) `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` — clean;
+(4) `cargo fmt --all -- --check` — clean;
+(5) `git diff --check` — clean.
+**The FU-27 environmental flake (`full_specialized_evidence_is_identical_at_one_four_and_sixteen_threads`) did not fire in either test run**, so no re-run was needed. **Count attribution, exactly:** 1052/1054 is unchanged from the H5 tip, and 1052 = 1042 (the FU-31 tip named in this branch's standing protocol) + 6 (H4's `PoisonCause` and `MergeTournamentCensus` assertions) + 4 (H5's equivalence harness); all-features 1054 = 1042 + 8 + 4, the default/all-features gap of 2 still being H4's two feature-gated `census.rs` unit tests. **H6 adds zero tests and moves zero counts**, which is what a no-engine-code phase must do.
+OD-8: all seven frozen census digests reproduced **byte-identical** from the release `--features census` build at this tip, one `PLINTH_CENSUS_ONLY` invocation each — Sphere 17667468971446251870, Cylinder 13310185350867878190, make_box 9657051231007502658, make_overhang_table 1875674282253663076, make_toed_slab 2823659516373762066, make_raking_blade 9567737006650358297, make_thin_fin 8797083662933568276. The Weeping Treant is deliberately excluded from the digest set: it has never sealed and produces no snapshot digest.
+`git diff` over `crates/` and `rust/` is empty at this tip — H6 changed no engine code, by design.
+`/private/tmp/plinth-chitubox-preview` untouched. Nothing was pushed.
+
+**Where FU-8g stands.** H0–H5 are complete and H6 is measured. The follow-up's own thesis — honest
+work, honest charge, honest reserve — is confirmed end to end on the treant: the wall FU-8g was
+opened to fix is **gone**, the charge that replaced it is **sufficient and 2.71 % of an untouched
+cap**, and the reserves that were predicted at tens of gigabytes are **megabytes**. **The treant
+still has no seal**, and what stops it now is named, derived to the line, and opened as FU-32.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -4086,7 +5216,7 @@ Everything else here is non-blocking.
 | FU-8d | Per-proposal nearest is still `sources × samples` on the perturbed key, `unique_face_finalizer_work` is under-charged, and the per-proposal planning passes are uncharged and doubled | Opened 2026-08-06 by the FU-8c post-fix measurement; the successor stopping point for the Weeping Treant, and both parts are measured rather than predicted. **(1)** After FU-8c the per-proposal work is route-local but still a full `sources × samples` sweep of the perturbed key. On the treant that residual is **196,264,386,588** of the printed 201,480,535,329 — **97.4 %**, averaging 5,003,809 per proposal — because its coverage samples concentrate in a few very large route keys and its merge proposals sit on exactly those. It need not be `sources × samples`: retaining the **three** nearest sources per sample during the baseline sweep answers "nearest among the survivors" for any two-contact removal by inspection, leaving one distance test per touched sample against the merged seat, so the term becomes `samples` on the perturbed key. That is FU-8c's own top-`k` witness argument applied to the nearest instead of the demands. **(2)** The exact fold's `unique_face_finalizer_work` is `variants × faces × contacts` while `gate_resource_plan` charges it as `variants × faces`. On the treant the true term is ≥ 117,741 × 1,365 × 39,223 ≈ 6.3 × 10¹², which is also the arithmetic proving the refusal came from the plan and not from a completed fold. The under-charge is why this term has never been the refusing one; its superlinearity is why it will be as soon as (1) lands, so the two parts should be fixed together. **(3)** *[Third part added 2026-08-06; (1) and (2) are left standing as opened. Deliberately NOT coded yet — recorded so FU-8d is scoped honestly, and the cheapest of the three.]* **The per-proposal planning passes are themselves uncharged, and there are two of them.** `evaluate_gate_batch` runs `plan_proposal_nearest_delta` once per proposal inside `plan_gate_nearest_batch` (`specialized.rs:3553`, to build the plan) and **again** once per proposal inside the `exact_operations` fold (`specialized.rs:3571`, to charge it) — on the treant **2 × 39,223 ≈ 78,446 delta passes** — while the check that refuses the batch, `if exact_operations > gate_operation_limit`, is at `specialized.rs:3629`, **after both**. The entire cost of deciding the treant may not proceed is therefore paid *before* the refusal and **none of it is charged**: the plan charges the delta's *result* (`nearest_work`), never the cost of computing the delta. That is why the treant burns 124 s to state a demand it is then refused on, and it is a hole in what the cap means as much as a cost — a resource plan that cannot be afforded until after it has been executed bounds nothing. The second pass is a **free 2×** to reclaim: the fold recomputes a delta the planning pass already computed for the same proposal, so retaining the planning pass's per-proposal deltas turns two passes into one with no change of result. Sequence it **with (1), not before it** — (1) rewrites what a delta pass *is* (`sources × samples` on the perturbed key becomes `samples`), and halving the count of a pass about to change shape optimizes the wrong thing. Corollary, and the reason this is a part rather than a footnote: after (1) and (3) the planning work is small enough to charge, so **FU-8d should charge it**, rather than leaving the gate free to spend unbounded effort discovering it cannot afford to proceed. A fourth candidate — the per-variant `assess_coverage`, `O(samples)` per variant under its own `max_coverage_operations` cap — is recorded as **unmeasured**, not as a finding, because the treant has never reached it. As with FU-8c none of this is **a cap to raise**. Note for FU-23: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` should be re-derived after FU-8d lands, not after FU-8c. **[Phase F1 landed 2026-08-06 — the finding stays OPEN in all three parts; F1 changes no answer and buys no speed.** The baseline coverage sweep now retains `min(3, source_count)` nearest sources per sample — `(source_slot, squared_distance)` in the kernel's emission order — which is the witness table part (1)'s delta will read; nothing reads it yet. Pinned first by two tests: `fu8d_knn_row_zero_is_k_independent_bit_for_bit` (the kernel's row 0 is bit-identical at k = 1 and k = 3, over engineered exact ties and random clouds — the design's riskiest claim) and `fu8d_three_retained_witnesses_answer_any_two_removal` (three retained slots answer any two-contact removal exactly, against a kernel query over the survivors; it fails if the slot count is set to 2). Charges: **no operation charge moves** — `KnnBatchPlan`'s work is `source_count x query_count`, k-independent (ruling R-a, recorded in the `NEAREST_WITNESS_SLOTS` doc comment). Bytes do move and are charged: `+2 x query_count x 16 B` per route inside `KnnBatchPlan::logical_peak_bytes`, and `samples x 3 x 16 B` per batch as the new `GatePeakUsage::nearest_witness_bytes` (~19 MB on the treant, against the unchanged 1 GiB gate peak). `coverage_route_knn.max_neighbors` goes 1 -> 3 (ruling R-b), stated once in `SpecializedLimits::production`: a `KnnBatchLimits` **shape field, not a cap**, and the `SUPPORT_KNN_MAX_NEIGHBORS` registry note, ledger entry, `constants.md` and §3.10.9 table each carry the dated amendment. **No cap raised, no cap code touched.** Five gates green; all seven frozen OD-8 digests byte-identical; the treant's refusal line unchanged at `required: 201480535329, limit: 35445500736` — that immobility is the phase's proof. See *FU-8d phase F1 landed 2026-08-06*.]** **[Phase F2 landed 2026-08-06 — part (1) is CLOSED; parts (2) and (3) stay OPEN, and part (2) is now the treant's wall.** A merge proposal's nearest is now the minimum of two things: the first surviving retained witness, read as a *value*, and ONE `KnnBatchPlan(1 source, touched_rows queries, k = 1)` over the merged seat covering every perturbed key at once — combined by `f64::total_cmp` with the square root taken once *after* the minimum, so an exact survivor/merged tie is a tie between bit-identical `f64`. Pinned by `fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit` against the retained `#[cfg(test)]` full sweep, on a fixture that asserts it reached a narrow key, a total removal, a displaced holder, a steal, and an exact tie; truncating the witness scan to slot 0, or dropping the merged seat from the minimum, each make it fail. Repriced in `gate_resource_plan`: `nearest_work` becomes `Σ 1 × touched_rows`, `key_visits` is newly charged. Measured on the treant: the per-proposal nearest term **196,264,386,588 → 2,083,167,818 (94.2×)** — reconciling exactly as `195,222,841,902 + 1,041,544,686` — and the stated demand **201,480,535,329 → 7,299,316,559 (27.6×)**, **20.6 % of the unchanged 35,445,500,736**, so that check now PASSES. **No cap raised, no cap code touched.** The refusal moved one site: `variant_specialized_owner_face_count`'s descriptor budget crosses at **variant 275 of 39,224**, printing `required: 35445618202, limit: 35445500736` — a crossing, not a total. Over those 275 variants `unique_face_finalizer_work` is already 3,036,066,151,957, extrapolating to ~4.33 × 10¹⁴, against routed work of 3,912,181: **part (2) is the whole remaining wall.** Rulings recorded: **R-c** measured and NOT adopted (the radius bound removes 42 % of rows, a 1.7× constant, and the margin is 4.9× — over the 2× threshold); **R-d** precondition met (28 of 48 perturbed keys carry ≥ 10 proposals, one carries 26,543) but deliberately not built; **R-f** NOT satisfied — `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` waits for F3 *and* a treant run that COMPLETES the gate, which this is not. Five gates green; all seven frozen OD-8 digests byte-identical, `make_raking_blade`'s 1,402 real merge proposals through the rewritten code being the live witness; treant run 129 s at 2,641,504 KB (2.52 GiB) peak RSS. See *FU-8d phase F2 landed 2026-08-06*.]** **[Phase F3 landed 2026-08-06 — parts (2) and (3) are CLOSED, and with (1) closed at F2 this finding is RESOLVED on the defect it named. The treant's merge gate no longer refuses.** The load partition is finalized **once** per batch, retaining three nearest eligible contacts per row plus each contact's won rows, carried area and violation state; a proposal re-answers only `elig(left) ∪ elig(right)`, which the merged seat serves *exactly* because `parts_serves_owner` is true for an island precisely when `left` or `right` serves it. Rows outside the union keep a bit-identical candidate set in the same order, so their argmin is the baseline's. Carried areas are **re-summed** in the fold's own ascending row order rather than adjusted incrementally, because `f64` addition is not associative. Pinned by `fu8d_load_delta_matches_the_per_variant_finalize` against the whole production finalizer run on hand-renumbered variant inputs, row by row, on `load_violation_count`, and on carried area by `f64::to_bits`; it asserts it reached an exact survivor/survivor tie, an exact survivor/merged-seat tie, a row with no survivor, a displaced holder, a steal, and a row outside the union. The **per-variant window matrices are deleted, not repriced** — `gate_window_matrix_bytes` stated tens of gigabytes against the 512 MiB `max_gate_contact_matrix_bytes` and would have become the next refusal the moment the operations wall fell. Planning is 4 → 1 with a count-derived pre-check (`proposal_planning_precheck`) run *before* the loop, and the per-variant contact/demand rescans are derived (`GateVariantTotals`; a proposal variant's logical contact work is the baseline's minus one, exactly). Repriced to ONE authority: the `variants × faces` load model is replaced by `specialized_load_resource_plan`'s own figure — 4,618,272,984 → **6,592,813,742**, i.e. the honest number is 1.43× the under-charge part (2) named — while `descriptor_operations` falls from 35,445,417,382 at variant 275 (~5.06 × 10¹² extrapolated) to **136,791,451** charged once, and `unique_face_finalizer_work` (~4.33 × 10¹⁴ extrapolated) ceases to exist. Stated demand **9,273,857,317** and `exact_operations` **10,457,910,996** against the **unchanged** 35,445,500,736 — 26.2 % and 29.5 % — and the batch **executes**. `GateRoutePlanMismatch` is re-founded as plan-vs-execution and is explicitly **weaker**; the record says so. **No cap raised, lowered or touched.** The treant planned 8 gate batches (proposal-free + 7 merge rounds, 1,366 → 1,360 contacts, share flat at 26.2 %) inside the 600 s timebox and did **not** finish the tournament: recorded as EXCEEDS-TIMEBOX with counters, ~2.4–2.5 GB peak RSS, watchdog armed at 90 GB and never fired. The successor is the per-variant `assess_coverage` — 39,224 × 405,146 ≈ 1.59 × 10¹⁰ uncharged sample visits per batch — opened as **FU-8e** on this measured evidence. **R-f still NOT satisfied**: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` waits for a run that COMPLETES the gate. Five gates green; all seven frozen OD-8 digests byte-identical, with `make_raking_blade`'s 23 batches and 1,402 proposals through the rewritten *load* path the live corpus witness. See *FU-8d phase F3 landed 2026-08-06*.]** **[Phase F4 measured 2026-08-06 — FU-8d stays RESOLVED; F4 lands no engine code and closes the finding's record rather than its algorithm.** F4's deliverables are a clean treant run at the committed F3 tip and the record sweep F3 still owed. **Outcome (c) EXCEEDS-TIMEBOX, twice** — 607 s / 2.49 GiB and 602 s / 2.48 GiB, `PLINTH_THREADS=4`, watchdog armed at 90 GB and **never fired**, **no typed refusal at any cap in either attempt**, no batch counters (the tip carries no `PLINTH_FU8D_MEASURE` instrumentation, verified absent by grep, so §10's per-batch table stays the counter record). Attempt 2 sampled six windows across the timebox because attempt 1's single window at t = 600 could not separate "dominates the run" from "was running at the end". **The design predicted the wrong frame.** `assess_coverage` (part (4)/P4, the deferred candidate) is real but **second**, at 24–34 % of main-thread samples; the leader at **59–62 %** is **F2's own `fill_proposal_nearest_delta`**, and its cost is construction rather than arithmetic — it builds a fresh `PointCloudIndex` kd-tree over a **one-point** cloud once per proposal, 39,223 constructions and teardowns per gate batch, its call-graph children being `knn_batch_planned` over `_xzm_free`/`_free`/`_xzm_xzone_malloc` allocator traffic. Batched *within* a proposal, unbatched *across* proposals. Both go to **FU-8e**, in measured order. Also recorded, not acted on: `PLINTH_THREADS=4` buys the merge gate nothing (all four rayon workers in `__psynch_cvwait` for the whole gate stage while preparation is genuinely parallel — a note, **not** a reason to raise thread counts), and `merged_violation_count` is a steady third at ~4.6 %. **R-f STILL NOT satisfied** (neither attempt completes the gate, so `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is not re-derived); **R-c revived as a question** — the frame a radius bound would have shrunk is now the measured leader — recorded as FU-8e input and not adopted. **No cap raised, lowered or touched.** F4 also pays what F3's every-record-site sweep missed: `03-physics-and-constants.md` §3.10, the `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` and `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS` registry notes (hence a regenerated `constants.md`), and `specialized.rs`'s `gate_operation_limit` doc comment all still said the treant was refused at the merge gate; and the caps doc's phase-F3 section had landed as a duplicate `## 9`, now **§10**. See *FU-8d phase F4 measured 2026-08-06* and `support-resource-caps-2026-08-05.md` §11.]** |
 | FU-8e | The merge gate's per-proposal kd-tree construction, and the per-variant `assess_coverage`, are both uncharged and both unbatched across proposals | **Opened 2026-08-06 on FU-8d phase F4's measured evidence**, which is the footing the deferral ruling required — and opened on **two** parts in the order the sampler found them, not the one the design predicted. The treant's merge gate no longer refuses anything: since F3 it states 9,273,857,317 against an unchanged 35,445,500,736 and is admitted. What stops the treant is **wall-clock**: two 600 s attempts, both EXCEEDS-TIMEBOX, at 2.5 GiB peak RSS with the 90 GB watchdog never firing. **(1) `fill_proposal_nearest_delta` — 59–62 % of main-thread samples, the leader.** F2 correctly batched a proposal's nearest into one `KnnBatchPlan` covering all its touched rows; it did not batch *across* proposals. Each of the treant's 39,223 proposals constructs a `PointCloudIndex` kd-tree over a **one-point** cloud (`[proposal.position_mm]`), queries it, and drops it — 39,223 constructions and teardowns per gate batch, whose sampled children are `knn_batch_planned` over `_xzm_free` / `_free` / `_xzm_xzone_malloc` and `kiddo`'s `nearest_n_within_recurse` descending a single-node tree. A distance to one point needs no spatial index at all; the batch-first fix is to answer every proposal's touched rows without per-proposal index construction. **(2) `assess_coverage` — 24–34 %, second.** `O(samples)` per variant with ~7 `Vec::with_capacity(405,146)` allocations per call: `39,224 × 405,146 ≈ 1.59 × 10¹⁰` sample visits and of order a terabyte of allocation churn per gate batch, none charged against `gate_operation_limit`. This was the *only* part the design predicted, and F3's record asserted it was "what the 600 s is being spent on"; F4 measured it at about a quarter. Both parts are **uncharged**, so **neither is a cap to raise** — a cap cannot be too tight for work it never prices, and the remedy removes work rather than admitting more. Third and named so it is not a later surprise: `SpecializedLoadBaseline::merged_violation_count` at a steady ~4.6 %. Two riders from FU-8d: **ruling R-c is revived as a question** (§9.5 declined the radius-bounded steal path at a 4.9× margin against a 1.7× constant — F4 makes the frame it would have shrunk the measured leader, so re-measure before deciding), and **`PLINTH_THREADS=4` buys the merge gate nothing** (all four rayon workers sit in `__psynch_cvwait` for the whole gate stage while preparation is genuinely parallel), which is a note about the wall-clock being single-core and **not** a licence to raise thread counts. **Ruling R-f still gates FU-23**: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is re-derived only from a treant run that COMPLETES the gate, and no run yet has. See *FU-8d phase F4 measured 2026-08-06* and `support-resource-caps-2026-08-05.md` §11. **[Phases E1–E4 landed 2026-08-07 — RESOLVED on the defect this row names, and NOT on the treant reaching a seal; every sentence above is left standing, and the two it gets wrong are corrected rather than rewritten.** The gate no longer builds a `PointCloudIndex` per proposal (E1's `knn_single_source_planned_into`, whose bit-identity with the tree's answer is argued in five clauses and pinned by `fu8e_single_source_is_the_tree_answer_bit_for_bit`), and no longer re-runs `assess_coverage` for a variant that cannot have moved the objective (E3's retained baseline objective plus a two-counter probe folded into the delta's own row loop). **First correction: the 62 % was never index construction.** One one-point `PointCloudIndex` costs 83.3 ns and the 39,223 of them total **≈3.27 ms** per batch — the trees were free. **[Arithmetic corrected 2026-08-07 (records fix): this total was published as "16.7 microseconds", an arithmetic slip in the design pass — 39,223 × 83.3 ns = 3.267 ms, and 16.7 µs would have implied 0.426 ns per construction. The per-build 83.3 ns stands as measured; only the product is corrected, and the conclusion is unchanged — 3.27 ms is 0.009 % of the 37.33 s `fill_proposal_nearest_delta` frame, so construction remains negligible and the fix still targets the query loop. Primary note: `support-resource-caps-2026-08-05.md` §12.2.]** The cost was the query loop, ~1.04 × 10⁹ query iterations and ~2.08 × 10⁹ heap allocations per batch across two tree descents and a `sort_by` per query. **Second correction: the 28 % was never allocation churn.** "~7 `Vec::with_capacity(405,146)` per call … of order a terabyte" is six vectors in `RepairNoEvidence` mode over a traversal that visits only uncovered rows; what costs is the two unconditional full scans bracketing it, ≈254 GB of reads per batch ≈ 17 s at memory bandwidth. **The fix was to not scan, not to not allocate.** A third correction was a soundness fix: the design's status-**flip** trigger is unsound because `worst_gap_mm` is a `max` over the nearest *values* of a failing island's samples, so the shipped trigger is the wider "an uncovered row moved". **Measured 2026-08-07 under ruling R-g** (`PLINTH_THREADS=4`, RSS watchdog armed at 90 GB and never fired, one attempt of a permitted two): merge round **63.83 s → 14.68 s (4.35×)**, variant loop **60.23 → 10.73 s (5.6×)**, `fill_proposal_nearest_delta` **37.33 → 4.67 s**, coverage **17.05 → 0.001 s**, `merged_violation_count` **unmoved** at 4.98 s mean. `touched_rows` **1,041,544,686 to the row** in two independent runs; **zero** flipped rows, **zero** moved uncovered rows, **zero** coverage fallbacks across 33 rounds and ~1.29 M variants. **The stated demand did NOT move: 9,273,857,317 against the unchanged 35,445,500,736**, because `plan_proposal_nearest_delta` is untouched — no record site that quotes it moves, and that immobility is the phases' proof. Peak RSS 2.446 GiB. **The outcome is still EXCEEDS-TIMEBOX, at 601 s with 33 merge rounds**, and the arithmetic says it had to be: one merge commits per round, ≤1,365 rounds by the contact bound and ~460 at `make_raking_blade`'s completion ratio, so the gate stage is ≈1.8–5.5 h, 11–33× the box. **Ruling R-f is therefore STILL NOT satisfied and nothing was re-derived.** **R-c NOT adopted** (post-fix it saves at most 1.9 s of a 13.8 s round, and nothing at all if FU-8f lands); **R-d NOT adopted** (no per-key sweep left to amortise; the 6.30 ns row body is gather-dominated); the optional `merged_violation_count` buffer fold-in was **measured at 0.13 % and declined**. The post-fix leader is **`merged_violation_count` at 36 % of the round** — F4 sampled it at 4.6 % and the design predicted 29 %, both low — and the successor is opened as **FU-8f**, a recorded finding awaiting owner ruling. Five gates green; all seven frozen OD-8 digests byte-identical with `make_raking_blade`'s 1,402 real proposals the live witness. See *FU-8e phases E1–E4 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §12.]** |
 | FU-8f | Lazy first-safe gate acceptance, and non-incremental batch preparation | **RECORDED FINDING, 2026-08-07 — AWAITING OWNER RULING. Deliberately NOT implemented.** Opened on FU-8e phase E4's measurement as the treant's successor wall, in two parts, of which only the second is unambiguously an agent's to build. **(1) The gate evaluates 39,224 variants to answer a question that stopped at the first one.** `evaluate_gate_batch` returns a `vectors` array with one `FrozenSpecializedGateVector` per variant, and the tournament consumes it through exactly two lines — `let baseline = vectors[0]` and `first_safe_proposal(&vectors, baseline)`, which is `vectors.iter().skip(1).position(|v| gate_not_worse(*v, baseline))`. It is a `position`, not a search for a best, so everything after the accepted index is built and discarded. **`first_safe_proposal` returned `Some(0)` in every round measured** — 4/4 at the FU-8e tip, 28/28 across two models in the design pass. Lazy evaluation would take the round from 13.8 s to ~3.9 s (≈30 min for 460 rounds against ~1.8 h) and is observationally identical downstream: `SpecializedGateEvidence` retains only `baseline`, `accepted` and counts, and `evaluated_pair_count` is `total_proposals`, the number **gathered** rather than evaluated. **Why it is not built: it severs charged-batch from executed-batch.** FU-8d phase F3 re-founded `GateRoutePlanMismatch` as a plan-vs-execution attestation — every planned proposal executed, once and in order — and lazy evaluation breaks that invariant by construction, requiring the attestation to be re-founded a **second** time, on a weaker claim, two phases running. That is an owner's call, not an agent's, and it is what this row awaits. **(2) Batch preparation is rebuilt from scratch every round, and part (1) is not sufficient without it.** Preparation is **3.88 s of the 13.8 s round** — the 554,926,572-row baseline coverage sweep plus the `GateBatchIndex` — while a merge changes **2 contacts of 1,366**. At 460 rounds that is 1,785 s with the variant loop at zero, already **~3× the 600 s box**, so getting the treant under the timebox needs preparation to become incremental across rounds whatever is ruled on part (1). Part (2) touches no attestation and is the larger win. **Neither part is a cap to raise**: as with FU-8c, FU-8d and FU-8e, none of this work is charged against `gate_operation_limit`, and the remedy removes work rather than admitting more. See *FU-8f opened 2026-08-07* and `support-resource-caps-2026-08-05.md` §12.6. **[Status note 2026-08-07 — the row above was written while FU-8f was design-only and is left standing exactly as written: since it was recorded, phases G1 (the load-partition transpose) and G2 (the fingerprint hoist) have been implemented on the sibling branch `feature/fu8f-load-transpose` and are pending the merge queue, while G3 and later are pending this branch's own merge.]** **[Status note 2026-08-07 (later) — the row above and the note above it are both left standing exactly as written; two of their claims have stopped being true and are corrected here rather than rewritten. **This row is no longer AWAITING OWNER RULING and part (1) is no longer "deliberately NOT implemented".** The ruling came — *"2.1 hours down to 28 minutes seems worth it; anywhere else that we can also still shave more time off?"*, Craig, 2026-08-07 — and **phase G3 landed part (1)**: `GateBatchAcceptance` / `GateBatchOutcome`, the tournament breaking at the first `gate_not_worse` variant, `first_safe_proposal` retained `#[cfg(test)]` as the reference oracle it is proved against, `GateRoutePlanMismatch` re-founded a **second** time on a prefix-wise comparison with the ruling quoted verbatim at every record site, and the telemetry corrected (`evaluated_pair_count` → `gathered_pair_count`, plus a new unhashed `evaluated_variant_count`). **No charged number, cap, floor or coefficient moved**, and the plan still prices — and the refusal still runs against — every variant: charged and executed are severed, and both are stated. Seven frozen OD-8 digests byte-identical, `make_raking_blade`'s 21 real merges the live witness. Part (1)'s own sentence *"evaluated_pair_count is total_proposals, the number gathered rather than evaluated"* is the defect G3's rename fixes. **Part (2) stays OPEN**, and G1+G2 addressed only its cheapest components: a treant run at the G3 tip on a **quiet, uncontended machine** is still **EXCEEDS-TIMEBOX at 600 s**, so the round count remains unmeasured and **ruling R-f remains unsatisfied**. Counting the rounds is G4's. See *FU-8f phase G3 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §13.]** **[Status note 2026-08-07 (G4 measured) — everything above is left standing; G4 changed no engine code, so nothing above can have moved, and what follows is measurement rather than correction. **The rounds are counted at last, and the gate still does not fit.** Two attempts on a **quiet, uncontended machine** — the first frame-level measurements of this stage without a contention caveat — both **EXCEEDS-TIMEBOX at 602 s**, at **436** and **430** merge rounds, contacts 1,366 → 931/937, one merge committed per round without exception, peak RSS 2.554 / 2.528 GiB with the 90 GB watchdog never firing. Mean round **1,099–1,121 ms**, fitting `round_ms = 304.17 + 0.6924 x contacts`, which projects the **gate stage alone** to **8.4 min** at `make_raking_blade`'s 463-round completion ratio and **17.7 min** at the 1,365-round hard bound — **2.8x and 2.0x the design's D4 projection**, and neither inside the box. **Part (1) is confirmed delivered by measurement:** the variant loop is **0.52 ms of a 1,121 ms round**, from 60.23 s at `7aa6b73`, better than the ~1.6 ms D1 predicted; G2's fingerprint hoist is likewise invisible at 0 ms from 166.6. **Part (2) is now attributed to a single frame.** `build_gate_load_state` is **85.5 %** of the round, and inside it the miss against D4 is entirely **G1's transpose *build*, not its scan**: the transposed scan costs **47.4 ms** where the old `contacts x rows` scan cost ~3,090 ms (a **65x** fall, better than the 53x predicted), while sizing and filling the CSR cost **406.4 + 410.5 = 816.9 ms** against a design assumption of ~15 ms. The design's own "largest unattributed residual", `gather_pair_proposals`, is settled at **28.6 ms / 2.5 %** and is not a target. **One design claim is superseded by evidence:** D1 states `first_safe = Some(0)` in every observed round and that a `k > 0` case "is the one thing the corpus cannot supply" — the treant returns `Some(0)` for rounds 0–45 and **`Some(2)` for every round from 46 onward**, identically in both runs, so the treant is now a live 390-round corpus witness for the `k > 0` prefix and the forced fixture is no longer the only one. Nothing in G3 is invalidated: the oracle equivalence is proved for every index. **No cap came near binding and none was touched** — cumulative gather 15,544,641 over 436 rounds against `max_merge_total_proposals` = 100,000,000, projecting ~33.0 M at the hard bound. **No new typed refusal; the pipeline never left the gate stage**, so tournament commit, penetration/brace, CCO anchors, attestation and a first treant seal are all still unexercised and nothing is claimed about them. **Ruling R-f remains UNSATISFIED and `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` was not re-derived.** The next lever is named by measurement rather than by design: **make the CSR sizing pass stop being a second full traversal**, which the design's own D2a notes the gate already nearly holds in `contact_rows`. See *FU-8f phase G4 measured 2026-08-07* and `support-resource-caps-2026-08-05.md` §14.]** **[PHASE G5 LANDED 2026-08-07 — the honest load charge; everything above stands and four quoted numbers move DOWNWARD.** G5 retired `load_resource_plan_from_counts`'s `rows × contacts × (owner_log + 4)` scan term — the model of the dense scan G1 had already replaced, and which G1 deliberately left standing and over-stating — in favour of the transpose's own `Σ\|eligible_owners\| × (log + 2) × 2` search term plus a `cells × (LOAD_WITNESS_SLOTS + 5)` fill-and-scan term charged from the exact cell count. Measured on the treant's round-1 gate batch, quiet machine, one instrumented release run reverted by editing before the gates: load baseline **5,543,831,115 → 795,766,031**, gate load term **6,592,813,742 → 1,844,748,658**, stated demand **9,273,857,317 → 4,525,792,233** (26.2 % → 12.8 %), `exact_operations` **10,457,910,996 → 5,709,845,912** (29.5 % → 16.1 %). The fall is 4,748,065,084 at both, to the unit, and is entirely the load term. **No cap raised, lowered or touched; all seven frozen OD-8 digests byte-identical.** Two findings recorded rather than glossed: (1) the fall is not universal at every checkpoint — `make_box` and `make_thin_fin` each have three tiny load checkpoints that RISE by ≤56 units, though every model's *widest* demand falls and all are >4 million× under the 2,000,000,000 floor; (2) at 795,359,775 the treant's load demand is now **below** that flat floor, so no corpus model leaves it any more — the batch-product scaling is kept unchanged regardless, because re-deriving the coefficient from the cheaper observation would **lower** a cap. **G5 changes no executed work**, so the treant's stopping point is unchanged and still wall-clock; **R-f remains UNSATISFIED** and G5 ran no completion attempt. Open question 4 (`plan.vector_bytes`) is deliberately LEFT, with the follow-up named: metering `check_gate_peak`'s executed `result_bytes` beside the charged bound. See *FU-8f phase G5 landed 2026-08-07* and `support-resource-caps-2026-08-05.md` §15.]** **[PHASES G6a–G6c LANDED 2026-08-07/08 and PHASE G6d MEASURED 2026-08-08 — part (2) is CLOSED for the gate stage, and the treant's stopping point has moved out of the gate for the first time.** Everything above is left standing; G6a–G6c landed the cross-round retention of the load transpose (carrier + four mutation-proven guards, the incremental arena update with the bit-identity harness and its mutation triad, and the charge-vs-meter severance) and **G6d changed no engine code at all** — it is the measurement. **THE GATE COMPLETES.** Two attempts on a machine polled clean of sibling `cargo`/`rustc` thirteen times before launch, both finishing the whole model run in **339 s against the 600 s box (1.77× margin)** with the tournament committing **823 merge rounds** over **826 gate batches** — and the two runs are **bit-identical on every counter, with zero differing rounds across all 823 on contacts, proposals and rebuilds**, agreeing to 0.51 % on wall-clock. **804 of 826 load builds are retained (97.3 %)**; the 22 counted rebuilds are 21 `poisoned` and the single `contact_witness` miss at the terminal audit that F-G6-4 predicted by design. Executed work is **11.18 %** of charged run-wide and `executed ≤ charged` held every round. **The tournament ends because no proposal in the final batch is safe** — the acceptance fold's `None` arm, never before exercised — which falsifies **both** standing round predictions in opposite directions (463 too low, the 1,365 hard bound too high; the answer is 823). The retained round is **206.5 ms** against the pre-G6 round measured **in the same process** by the 21 rebuild rounds, which reproduce G4's own model to a mean of −0.97 % — a **4.4–5.2×** fall, and the first prediction in this chain to land (D-G6-5 said 0.19 s and 350–450 s; measured 0.206 s and 339 s). **G6e is NOT opened** (margin 1.77× > 1.5×, and the gate is no longer the binding stage). **Ruling R-f's precondition is now MET and re-deriving `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is UNBLOCKED — G6d deliberately does not do it**, per D-G6-6. **No cap, floor or coefficient is raised, lowered or touched by any G6 phase.** **What stops the treant now is a typed refusal in previously-unexercised code, opened as FU-8g**, and there is still **no seal**. See *FU-8f phase G6d measured 2026-08-08* and `support-resource-caps-2026-08-05.md` §17.]** |
-| FU-8g | The initial-contact preflight bounds work at `contacts x faces` against a **flat** 4,000,000 cap | **Opened 2026-08-08 by FU-8f phase G6d's completed-gate measurement — the treant's successor stopping point, and the first one that is not the merge gate.** With the gate stage no longer binding, the Weeping Treant now stops **after** its tournament with `Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })`, identically in both G6d attempts. **Derived to the unit from source.** `initial::preflight` (`crates/plinth-support/src/initial.rs`) checks `work = contact_count x 4 + penetration.max_total_work` against `ContactConstructionLimits::production().max_work_items = 4_000_000` (`runner.rs`). `penetration` comes from `penetration_intervals_batch_worst_case_limits(contact_count, 8, interval_cap, false)`, and inside `penetration_requirements` (`rust/geom_kernel/src/queries.rs`) with `rays_all = false` that is `rays = 1`, `hits_per_ray = mesh.nfaces()`, `work = rows x rays x hits_per_ray`. So `work = contact_count x (4 + nfaces)` = **542 x (4 + 429,120) = 542 x 429,124 = 232,585,208**, reproducing the printed figure exactly and independently confirming that 542 physical contacts survive the tournament and its terminal coalesce. The demand is **58.1x** the cap. **The shape is the FU-8b / FU-8c family a fourth time: a `contacts x faces` product measured against an unscaled flat bound.** At 429,120 faces this cap admits at most `4,000,000 / 429,124 = 9` physical contacts; the corpus passes only because every corpus mesh is two to four orders of magnitude smaller in face count, so nothing about the treant is special except its size. **And the quantity is a preflight *bound*, not a measured demand** — `hits_per_ray = nfaces` is the "every face could be hit" worst case while the executed query is BVH-bounded, the same over-statement G5 corrected on the load term and in the same direction. **This is NOT a cap to raise**, and nothing in G6d proposes raising it: as with FU-8b, FU-8c, FU-8d, FU-8e and G5, the remedy is to make the bound honest, not the cap bigger, and it is an owner's call whether and when to open it. **Rider, recorded here because G6d found it and it is one counter wide:** `RetainedLoadRebuildCause::Poisoned` collapses guard 3 and every `record_commit` identity-walk refusal — including the G6b position-bit tie — into a single census label, so G6d could count 21 poison-driven rebuilds on the treant but could **not** say which refusal fired. Splitting that label would make the next run's transcript self-explaining. See *FU-8f phase G6d measured 2026-08-08* §G6d.8 and `support-resource-caps-2026-08-05.md` §17. **[Post-verification adjudication 2026-08-08 — the records verifier asked whether a headline resting on uncommitted scratch transcripts is landable; the orchestrator ruled that it is, on the **G4 scratch-transcript precedent** (run outputs never enter git, and G4's own 436/430-round headline landed the same way), and **WIDENED the rider above**: the `Poisoned` split must **also emit a committed-round counter**, so that a future run's transcript proves its own round count rather than resting on scratch.]** |
+| FU-8g | The initial-contact preflight bounds work at `contacts x faces` against a **flat** 4,000,000 cap | **Opened 2026-08-08 by FU-8f phase G6d's completed-gate measurement — the treant's successor stopping point, and the first one that is not the merge gate.** With the gate stage no longer binding, the Weeping Treant now stops **after** its tournament with `Preparation: Initial(Limit { resource: "work items", required: 232585208, limit: 4000000 })`, identically in both G6d attempts. **Derived to the unit from source.** `initial::preflight` (`crates/plinth-support/src/initial.rs`) checks `work = contact_count x 4 + penetration.max_total_work` against `ContactConstructionLimits::production().max_work_items = 4_000_000` (`runner.rs`). `penetration` comes from `penetration_intervals_batch_worst_case_limits(contact_count, 8, interval_cap, false)`, and inside `penetration_requirements` (`rust/geom_kernel/src/queries.rs`) with `rays_all = false` that is `rays = 1`, `hits_per_ray = mesh.nfaces()`, `work = rows x rays x hits_per_ray`. So `work = contact_count x (4 + nfaces)` = **542 x (4 + 429,120) = 542 x 429,124 = 232,585,208**, reproducing the printed figure exactly and independently confirming that 542 physical contacts survive the tournament and its terminal coalesce. The demand is **58.1x** the cap. **The shape is the FU-8b / FU-8c family a fourth time: a `contacts x faces` product measured against an unscaled flat bound.** At 429,120 faces this cap admits at most `4,000,000 / 429,124 = 9` physical contacts; the corpus passes only because every corpus mesh is two to four orders of magnitude smaller in face count, so nothing about the treant is special except its size. **And the quantity is a preflight *bound*, not a measured demand** — `hits_per_ray = nfaces` is the "every face could be hit" worst case while the executed query is BVH-bounded, the same over-statement G5 corrected on the load term and in the same direction. **This is NOT a cap to raise**, and nothing in G6d proposes raising it: as with FU-8b, FU-8c, FU-8d, FU-8e and G5, the remedy is to make the bound honest, not the cap bigger, and it is an owner's call whether and when to open it. **Rider, recorded here because G6d found it and it is one counter wide:** `RetainedLoadRebuildCause::Poisoned` collapses guard 3 and every `record_commit` identity-walk refusal — including the G6b position-bit tie — into a single census label, so G6d could count 21 poison-driven rebuilds on the treant but could **not** say which refusal fired. Splitting that label would make the next run's transcript self-explaining. See *FU-8f phase G6d measured 2026-08-08* §G6d.8 and `support-resource-caps-2026-08-05.md` §17. **[Post-verification adjudication 2026-08-08 — the records verifier asked whether a headline resting on uncommitted scratch transcripts is landable; the orchestrator ruled that it is, on the **G4 scratch-transcript precedent** (run outputs never enter git, and G4's own 436/430-round headline landed the same way), and **WIDENED the rider above**: the `Poisoned` split must **also emit a committed-round counter**, so that a future run's transcript proves its own round count rather than resting on scratch.]** **[H0 MEASURED, H1 FIXED, H2 CHARGED — 2026-08-09 (**[`#fu8g-h2-2026-08-09`](#fu8g-h2-2026-08-09)**).** The `contacts × faces` bound is gone from the charge. H1 (`08db663`) landed the census pass — one allocation-free counting walk per ray, per-row budgets, `work` (traversal tests) severed from `hits` (crossings), the F10 closed-form sample bound, `CensusDrift` as the typed refusal, and all five production call sites moved through the one shared entry point, which also killed the ~67 GB attestation eager reserve. H2 added the charged-vs-executed receipt (`PenetrationBatchMeter`, checked in the kernel against its own count **and** at `initial::preflight` against the number it spent), proved with a fixture that an over-demand mesh (counted work 4,223,900) is **still refused at the unchanged 4,000,000 cap**, and recorded the per-model before/after charge. **The treant's charge is 108,378 — 2.71 % of the untouched cap** (was 237,305,572). **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. **Finding: the design's D4 claim that every corpus demand falls is FALSE** — `make_box` (205 vs 176) and `make_raking_blade` (975 vs 924) charge *more* honestly than they did by worst case, exactly as H0's finding 1 warned; no new refusal is possible anyway, four orders of magnitude under the cap. **Still open: H3** (M0 registration of the four `ContactConstructionLimits` numbers, the six `brace_penetration_limits` fields and `raft_limits`, caps §18, `constants.md` by its producer, the FU-24 ledger gate), **H4** (the rider above), **H5** (the equivalence harness and its mutation triad) and **H6** (the treant run under the memory protocol, which is where this row's stopping point is finally re-measured). The treant has **no seal**.]** **[H3 REGISTERED — 2026-08-09 (**[`#fu8g-h3-2026-08-09`](#fu8g-h3-2026-08-09)**).** All 14 numbers this row's own caps were unregistered under — the four `ContactConstructionLimits` fields, brace's six `PenetrationBatchLimits` fields, raft's four — are now `Placeholder` in the M0 registry, classification `runtime_resource_cap`, with honest provenance (single-specimen markers per R4/FU-23 where H0/H1/H2 measured a demand; a plain statement of absence for `SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS` and all ten brace/raft fields, which no run has ever exercised). **NO CAP RAISED, LOWERED OR TOUCHED** — registration only. `constants.md` regenerated by its producer; the FU-24 ledger gate (`constants_ledger_consistency`) is green. `CandidatePayloadConfig` remains genuinely out of scope, per R5. **Still open: H4, H5, H6** — the treant still has **no seal**.]** **[H4 LANDED — 2026-08-09 (**[`#fu8g-h4-2026-08-09`](#fu8g-h4-2026-08-09)**).** The owner-adjudicated rider: `RetainedLoadRebuildCause::Poisoned` now carries a `PoisonCause` (`Guard3Generic` | `CommitShape` | `IdentityWalk`), and `census::MergeTournamentCensus` adds `rounds_committed`/`tournaments`/`contacts_first`/`contacts_last`/`exit_reason` (`"no_proposals"` | `"no_safe_proposal"` | `"iteration_cap"`) beside the existing `specialized_gate_operations` census row. **Neither is hashed into any digest** — determined from source (both live only inside the feature-and-runtime-gated `census.rs`, printed as additive lines) and proven by a fresh corpus census run: all seven frozen digests reproduced byte-identical with the new counters live, and `make_raking_blade`'s own numbers (`contacts_first=37`, `contacts_last=34`, `rounds_committed=3`) satisfy D7's committed-round invariant on real geometry. **NO CAP RAISED, LOWERED OR TOUCHED.** Mutation-proven: six assertions across three existing D6 fixtures now name the exact `PoisonCause` each poison site must produce, and two new isolated `census.rs` unit tests pin `MergeTournamentCensus`'s accumulation. Gates 1048/1050 (unchanged default, +2 all-features — the two new census tests), 0 failed. **Still open: H5, H6** — the treant still has **no seal**.]** **[H5 PROVEN — 2026-08-09 (**[`#fu8g-h5-2026-08-09`](#fu8g-h5-2026-08-09)**): the separated equivalence proof, one new test file (`crates/plinth-support/tests/penetration_census_equivalence.rs`) and no engine code. Census-budgeted execution is `to_bits`-identical to worst-case-budgeted execution on `make_raking_blade`, `make_overhang_table` (a genuine two-interval hole row) and a synthetic 120-crossings-on-one-ray dense stack; every row's counted `crossings`/`tests` equal its executed `hits`/`work`, row by row; over-demand refuses as the typed preflight at the exact counted number, resource by resource, and exactly the counted demand is admitted. Mutation triad applied, observed, reverted — under-count-by-one, the F10 bound without its `3 x` term, and row-0 budget broadcast — with transcripts in the test file's doc comments; the broadcast mutation is caught by NOTHING else in the workspace (`native_api` 32/32 green under it), so the harness is load-bearing, not decorative. **NO CAP RAISED, LOWERED OR TOUCHED.** Gates 1052/1054, 0 failed; all seven OD-8 digests byte-identical. **Still open: H6 only** — the treant still has **no seal**.]** **[H6 MEASURED — 2026-08-09 (**[`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)**): the treant run under the standing memory protocol, no engine code, `git diff` over `crates/` and `rust/` empty. THIS ROW'S OWN WALL IS GONE.** `initial::build_initial_contacts` **ran to completion on the Weeping Treant at 429,120 faces** — the first time any treant run has passed it — sampled 100 % of the main thread at t = 200 s and complete by t = 267 s, with `CensusDrift` never firing and no downstream consumer of the census refusing. The `contacts × faces` bound this row was opened against is not merely smaller but **sufficient**. **D5.3's cap-scaling contingency is NOT triggered and NOT added**; **NO CAP RAISED, LOWERED OR TOUCHED.** Both attempts then ended **EXCEEDS-TIMEBOX at 600 s** (600 s / 601 s wall, SIGKILL by the watchdog), peak RSS **3,693 / 3,721 MiB — 4.0 % of the 90 GB arm**, which confirms H1's per-row reserve collapse at treant scale against a design prediction of 14–32 GB. **The successor stopping point is not a cap and no cap would fix it:** from t ≈ 267 s to the kill the main thread is 100 % inside `route_initial_cco`, where `CcoController::digest` re-walks the whole accumulated transcript once per terminal — its share of the stage **rises** 19.7 → 64.4 → 77.2 → 77.2 → 77.1 % while the constant term's **falls** 31.0 → 13.8 → 9.0 → 9.0 → 9.0 %. Opened as **FU-32**. **Second finding — about the apparatus, not the engine:** the census flushes only on completion or typed refusal and there is no signal handler, so a watchdog `SIGKILL` emits **zero `CENSUS` rows**; the design's "EXCEEDS-**with counters**" outcome is unachievable with this harness, **H4's rider could not fire**, and the **21 poison rounds remain unattributed**. Gates 1052/1054, 0 failed; all seven OD-8 digests byte-identical. **H0–H6 complete. The treant has NO SEAL**, and what stops it next is named, derived to the line, and owned by FU-32.]** |
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. **LANDED 2026-08-08** — phases A–C shipped, the census gate moved and stopped-and-reported per design, and the owner re-pinned all four moved digests ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). Closed. |
 | FU-11 | Opt-in SDF/remesh repair mode | Roadmap item. |
@@ -4110,6 +5240,8 @@ Everything else here is non-blocking.
 | FU-28 | The **drilled hollow is producible but not supportable**: `run_support` refuses `plinth_hollow::run`'s own output | **Opened 2026-08-07 by export phase E2** (`export-path-design-2026-08-07.md`, *E2 LANDED* section), which was the first code anywhere to run the real hollow stage and the sealed support run back to back on a corpus model. The export design's OQ-1 asked whether `plinth_hollow::run` *completes* on corpus models and planned a typed solid-decision fallback for a refusal. It completes: the corpus Sphere hollows, plans drains and drills, returning `AwaitingInternalSupport`. **The refusal lands one stage later** — `run_support` rejects that 14,526-face drilled shell during `Preparation` (against `max_grid_bytes=67108864`, `knn_max_work=100000000`, so this is not obviously a resource-cap stop; the phase is `Preparation`, and the underlying refusal code was not extracted because doing so needs the `census` feature and E2 must not move engine behaviour). The oriented solid is 4,760 faces and seals fine — digest `17667468971446251870`, unmoved. **Consequence today:** every artifact the export path can emit for the Sphere is the *solid*, so hollowing buys the corpus nothing downstream, and the whole 7-of-8 sealed-run evidence base remains what F14 already said it was — `solid_decision` handoffs. **Consequence for E4:** `prepare()` cannot simply chain `hollow_stage` into `run_support` and expect the hollow to survive; it needs this diagnosed first or an explicit, recorded policy for which geometry ships. **First action is diagnostic, not a fix:** re-run the drilled shell under `--features census` and read `stage_errors` to name the actual `Preparation` refusal, then decide whether it is a mesh-property refusal (the drilled shell has an interior surface the oriented solid does not) or a resource stop. Pinned by `crates/plinth-pipeline/tests/first_artifact.rs`, which asserts the `DrilledShellRefusedBySupport` variant by equality, so the day this changes the gate fails and says so. Note also that **A5 internal-support planning does not exist anywhere in this workspace**, so even a supportable drilled shell would ship today with no internal supports. |
 | FU-29 | The **OQ-3 adequacy stitch site has zero corpus coverage**, and its `max_loop_vertices` cap is an unexercised refusal path | **Opened 2026-08-08 as ruling condition (2) of the FU-10 phase-C re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). §8.5 measurement (3) said the adequacy-probe path "moves zero rows on all seven models"; instrumentation at both stitch sites shows it **ran** zero rows: 2,956 print-layer rows against **0** adequacy rows, because `find_local_minima` always reaches `normalized_slice_layers(SliceStitchSpace::AdequacyProbe, …)` with an empty `probe_heights` — every local minimum matched a birth, so `suspects` is empty and the batch carries zero planes. "Moves zero rows" and "ran zero rows" are different claims and the record did not distinguish them. Consequence: the adequacy site's normalization has **no corpus-level evidence at all** — unit tests only — and the `max_loop_vertices` cap that phase-C deviation 2 adds there (a site that previously had no loop-vertex cap) is a **new refusal path that has never executed on real data**. This is a coverage gap, not a known defect. **First action:** construct a model, or a synthetic layer set, whose local minima do *not* all match births, so `probe_heights` is non-empty and the site executes on real geometry; then decide whether the cap belongs there at the value it has. |
 | FU-30 | Corpus coverage of `coalesce_exact_regular_seats` **halved** at the FU-10 phase-C cutover | **Opened 2026-08-08 by the re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). The specialized golden asserted `coalesced_seat_count == 1` for both corpus models; measured at the re-pinned tip it is `toed slab` **0** and `raking blade` **1**. With the corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the terminal coalescing pass is a measured no-op there and the count is now pinned per model. The pass is still exercised — by `make_raking_blade` and by `specialized`'s unit tests — but by one corpus model instead of two, and the `DuplicatePhysicalSeat` failure mode it was built to prevent now has a single corpus witness. The disappearance is *consistent with* the four phantom island births removed from `make_toed_slab` (print layers 49, 52, 226, 228) but that causal link was **not** independently proven; only the measurement is on the record. **First action:** decide whether one corpus witness plus unit tests is adequate, or whether a fixture should pin the duplicate-seat path deliberately rather than incidentally. |
+| FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** **[FU-31 FIXED 2026-08-08 (**[`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)**).** Option (b) landed at `55b4d99`: `dispose_demands` aggregates same-position uncovered demands into one seat at push time, keyed on position bits normalized to `same_point`'s `==` equality; mutation-proven fixture reproduces the exact `DuplicatePhysicalSeat` with the aggregation disabled. Treant acceptance (attempt 1 of 2): specialized passes with **553** contacts (was 554 with the un-merged pair) and the run advances to `Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` — the FU-8g wall, now measured in-engine at 553 × (4 + 429,120). FU-8g's H0 treant leg captured in the same run: crossings mean **10.906** (p50 7, max 298), tests mean **191.982**, honest work Σcrossings **6,031** vs charged 237,303,360 (**39,347×**), honest scratch **142 MiB** vs charged 603 GiB. All seven frozen corpus digests byte-identical; one unit-fixture re-pin (raking blade, raw orientation, four real two-owner births now born aggregated), attributed in full in the section. FU-8g H1–H6 are unblocked.]** |
+| FU-32 | CCO routing re-digests the whole accumulated transcript once per terminal — the batch-first violation family a sixth time, and the first one no cap could have caught | **Opened 2026-08-09 by FU-8g phase H6** ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)), the run that first carried the Weeping Treant past `initial::build_initial_contacts`. With the initial-contact wall gone (H1/H2's honest charge: **108,378 vs the untouched 4,000,000**, 2.71 %), the treant's stopping point is no longer a refusal at all: both attempts ran **EXCEEDS-TIMEBOX at 600 s** with the main thread **100 % inside `PreparedSupportRun::route_initial_cco`** from t ≈ 267 s to the kill. **Measured, not argued:** across sample windows at t = 280 / 360 / 440 / 520 / 575 s the share of routing wall-clock in `CcoController::digest` **rises** 19.7 % → 64.4 % → 77.2 % → 77.2 % → 77.1 % while the constant-per-terminal `validate_replay` term's share **falls** 31.0 % → 13.8 % → 9.0 % → 9.0 % → 9.0 % — a growing term overtaking a constant one, reproduced across three windows 135 s apart. **Derived to the line from source, independently:** the routing loop (`runner.rs:1650–1666`) calls `grow_terminal_with_finalized_anchor` once per terminal; that function's **first statement** (`cco.rs:1397`) is `let controller_digest_before = self.digest();`; and `CcoController::digest` (`cco.rs:1775–1862`) is not the cached `const fn` at `:863` but a full walk of the accumulated controller state — every terminal in `terminal_cadence` (`:1786`), every record in `terminals` (`:1790`), each `UnroutedNoWinner` record's **entire** anchor-refusal list via `digest_anchor_seat_refusals` (`:1818`, `:1824`, `:1834`; five words per refusal at `:2128–2149`) and `digest_anchor_refusals`, then the whole host kd-tree (`indexed_members` `:1851`, `samples` `:1856`). Cost `Θ(N²) + Θ(N·R) + Θ(N·H)` for `N` cadence terminals (553 specialized physical contacts plus the regular terminals appended at `runner.rs:1649`), `R` accumulated refusals, `H` host samples. The `Θ(N·R)` term dominates on this model, consistent with the standing record that **0 of 3429 attempted model anchors survive corpus-wide**, which makes `UnroutedNoWinner` common and refusal lists long. **A second, independent per-terminal re-digest sits in the same loop** and is the ~9 % constant term: `validate_replay` → `validate_finalized_anchor_route` → `BoundPhysicalAnchorContact::new` → `SpecializedContactPlan::digest` → `GenericContactPlan::digest` → `ContactCandidatePool::digest`, plus `SurfaceAnchorPool::validate_against` → `surface_anchor_pool_digest` and `FinalizedContactLoads::validate_binding` → `finalized_load_rows_fingerprint` — **every one of those structures is immutable for the whole routing stage and every one is re-hashed from scratch per terminal.** Together ≈86 % of the stage. **This is NOT a cap and no cap would fix it**: nothing refuses, no resource is over-charged, no limit is consulted — which is why the measurement-first doctrine found it with a profiler rather than a preflight, and is the reason this row exists. **The remedy is not this row's to choose**, but the shape bounds it: both terms re-derive state whose deltas are already known at the call site, and the house precedent is incremental maintenance (FU-8f G3's prefix evaluation, G6's cross-round retention), not a bigger budget. **FIRST ACTION — and it is not the fix.** H6 also found that **an EXCEEDS-TIMEBOX run is structurally counter-free**: `plinth_support::census` flushes only from `census::finish` (model completed) or `census::report_failure` (typed refusal), there is **no signal handler anywhere** in `census.rs` or `examples/embed_incidence_census.rs`, and the watchdog kills with `SIGKILL` — so **both attempts emitted zero `CENSUS` rows**. The design's "EXCEEDS-**with counters**" outcome is therefore not achievable with the present harness on the very outcome it ranked most likely (~45 %), H4's rider (`rounds_committed`, `exit_reason`, the three-way `PoisonCause` split) **could not fire**, and the treant's **21 poison-driven rebuilds remain unattributed**. Give the census a periodic or signal-triggered flush *before* the next treant run; otherwise the next run buys another verdict with no evidence. **Memory is not the problem and should not be treated as one:** whole-process peak was **3,721 MiB**, 4.0 % of the 90 GB watchdog arm — H1's per-row reserve collapse confirmed at treant scale, against a design prediction of 14–32 GB under the old reserves. Routing's own growth (+1,591 MiB over 332 s, ≈4.8 MiB/s) is honestly rows-scaled transcript accumulation, and binds nothing. **The brace/joints/raft caps registered by H3 remain wholly unexercised** — the run never reached brace — so §18's statement of absence stands unchanged and this row licenses no brace number. **NO CAP RAISED, LOWERED OR TOUCHED**, and D5.3's cap-scaling contingency is not triggered and not added. See *FU-8g phase H6 measured 2026-08-09* and `support-resource-caps-2026-08-05.md` §19. The treant has **no seal**. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
@@ -4371,6 +5503,83 @@ future verifiers should stop re-deriving this from scratch.
    > phase**, and all seven frozen OD-8 digests are byte-identical. This item stays on the
    > critical path and the treant still has **no seal**. Full record: *FU-8f phase G6d measured
    > 2026-08-08*.
+
+   > **ADDENDUM 2026-08-09 (FU-8g H1/H2 landed) — the block above is left standing exactly as
+   > written; one number in it has stopped describing the engine and is corrected here.** The
+   > remedy the block names — "make the bound honest rather than the cap bigger" — was applied.
+   > `initial::preflight` now charges the census pass's counted `Σ tests` (executed traversal
+   > effort) rather than `contact_count × (4 + nfaces)`, `work` and `hits` are severed, every
+   > eager reserve is right-sized to a counted per-row budget, and a charged-vs-executed receipt
+   > is checked at the charge site. **The treant's charge is 108,378 at 553 contacts — 2.71 % of
+   > the same, untouched 4,000,000 cap**, not 58.1× it. **No cap, floor or constant was raised,
+   > lowered or touched**, the D5.3 cap-scaling contingency is **not triggered and not added**,
+   > and a fixture proves an over-demand mesh still refuses at the unchanged caps. Two corpus
+   > models' honest charge is *higher* than the worst case it replaced, four orders of magnitude
+   > under the cap. All seven frozen OD-8 digests byte-identical. **The treant still has no
+   > seal**, and what stops it next is unmeasured — H6 owns that run. Full record: *FU-8g phase
+   > H2 landed 2026-08-09* ([`#fu8g-h2-2026-08-09`](#fu8g-h2-2026-08-09)).
+
+   > **ADDENDUM 2026-08-09 (FU-8g H3 landed) — the block above is left standing exactly as
+   > written; the "still owed by H3" pointer in H2's own record is now satisfied.** The four
+   > `ContactConstructionLimits` numbers, brace's six `PenetrationBatchLimits` fields and raft's
+   > four are registered in the M0 registry as `Placeholder`, classification
+   > `runtime_resource_cap`, with honest provenance — measured-demand single-specimen markers
+   > (per R4/FU-23) where H0/H1/H2 measured one, a plain disclosure of absence where no run has
+   > ever reached the cap (all of `SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS` and the ten brace/raft
+   > constants). `constants.md` regenerated by its producer; the FU-24 ledger gate is green.
+   > **No cap, floor or byte term was raised, lowered or touched.** This item stays on the
+   > critical path: H3 changes no code, so nothing about the treant's next stopping point moved.
+   > Full record: *FU-8g phase H3 landed 2026-08-09* ([`#fu8g-h3-2026-08-09`](#fu8g-h3-2026-08-09)).
+
+   > **ADDENDUM 2026-08-09 (FU-8g H4 landed) — the block above is left standing exactly as
+   > written; H4 is the independent rider, off the critical path, and touches nothing this item
+   > describes.** `RetainedLoadRebuildCause::Poisoned` now carries a `PoisonCause`
+   > (`Guard3Generic` | `CommitShape` | `IdentityWalk`) so the treant's 21 poison-driven rebuilds
+   > (§G6d.8) can be attributed by a future run instead of only counted, and
+   > `census::MergeTournamentCensus` adds a committed-round counter and a named exit reason
+   > (`"no_proposals"` | `"no_safe_proposal"` | `"iteration_cap"`) beside the existing gate census
+   > row, so a transcript proves its own round count without scratch instrumentation. **Neither is
+   > hashed into any digest** — determined from source and proven by a corpus census run: all
+   > seven frozen digests reproduced byte-identical with both counters live. **No cap, floor or
+   > constant was raised, lowered or touched.** This item stays on the critical path: H4 changes
+   > no code this item's own stopping-point analysis depends on. Full record: *FU-8g phase H4
+   > landed 2026-08-09* ([`#fu8g-h4-2026-08-09`](#fu8g-h4-2026-08-09)).
+
+   > **ADDENDUM 2026-08-09 (FU-8g H5 landed) — the block above is left standing exactly as
+   > written; H5 adds no engine code, only the separated proof.** The census-vs-execution
+   > equivalence harness (`crates/plinth-support/tests/penetration_census_equivalence.rs`) proves
+   > on real corpus fixtures (`make_raking_blade`, `make_overhang_table` with its genuine hole
+   > row) and a synthetic 120-crossings-on-one-ray dense stack that execution under counted
+   > budgets is `to_bits`-identical to execution under worst-case budgets, that every row's
+   > counted `crossings`/`tests` equal its executed `hits`/`work`, and that over-demand refuses
+   > as the typed preflight at the exact counted number. The mutation triad was applied, observed
+   > and reverted — notably, the budget-broadcast mutation (c) is caught by NOTHING else in the
+   > workspace (`native_api` passes 32/32 under it), so the harness is load-bearing, not
+   > decorative. **No cap, floor, constant or digest input was touched**; all seven OD-8 digests
+   > reproduced byte-identical. H1–H5 are now complete; **only H6 (the treant run under the
+   > memory protocol) remains.** Full record: *FU-8g phase H5 landed 2026-08-09*
+   > ([`#fu8g-h5-2026-08-09`](#fu8g-h5-2026-08-09)).
+
+   > **ADDENDUM 2026-08-09 (FU-8g H6 measured — the phase is complete) — the block above is left
+   > standing exactly as written; the wall it describes no longer stops the treant, and what does
+   > is a different defect entirely.** H6 added no engine code (`git diff` over `crates/` and
+   > `rust/` empty) and ran the treant twice under the standing memory protocol. **The
+   > initial-contact wall is broken:** `build_initial_contacts` ran to completion on the Weeping
+   > Treant for the first time — no run in this project's history had ever passed it — confirming
+   > H2's 108,378 charge against the **untouched** 4,000,000 floor is sufficient and not merely
+   > smaller. **D5.3's cap-scaling contingency is not triggered and not added; no cap, floor or
+   > constant was raised, lowered or touched.** Both attempts then ended **EXCEEDS-TIMEBOX at
+   > 600 s**, peak RSS **3,693 / 3,721 MiB** — 4.0 % of the 90 GB watchdog arm, confirming H1's
+   > reserve collapse at treant scale against a predicted 14–32 GB. The treant's successor
+   > stopping point is **not a cap**: a per-terminal re-digest of the whole accumulated CCO
+   > transcript, measured rising 19.7 → 77.1 % of the routing stage and derived to the line from
+   > `runner.rs:1650–1666` / `cco.rs:1397` / `cco.rs:1775–1862`. Opened as **FU-32**, together
+   > with the finding that a watchdog-killed run emits **no census rows at all**, so H4's rider
+   > could not fire and the 21 poison rounds are still unattributed. All seven OD-8 digests
+   > byte-identical; gates 1052/1054, 0 failed. **FU-8g H0–H6 are complete. The treant still has
+   > no seal.** Full record: *FU-8g phase H6 measured 2026-08-09*
+   > ([`#fu8g-h6-2026-08-09`](#fu8g-h6-2026-08-09)).
+
 
 6. **Model-anchor bundle — PR-7 seating + tournament-bias investigation + tripwire
    retirement.** Treat these three as one unit; landing any alone is incoherent. **Organic

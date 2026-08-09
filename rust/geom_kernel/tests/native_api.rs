@@ -505,6 +505,35 @@ fn generous_penetration_limits() -> PenetrationBatchLimits {
     }
 }
 
+/// The batch's counted (census-derived) limits — since FU-8g H1 these are the
+/// numbers the bounded batch charges, so exact/minus-one refusal probes must
+/// derive from them rather than from the worst-case sizing helper.
+#[allow(clippy::too_many_arguments)]
+fn census_penetration_limits(
+    surface: &NativeSurface,
+    p0s: &[[f64; 3]],
+    p1s: &[[f64; 3]],
+    r0s: &[f64],
+    r1s: &[f64],
+    n_offset_rays: usize,
+    cap: usize,
+    majority_step_mm: f64,
+    rays_all: bool,
+) -> PenetrationBatchLimits {
+    let census = surface
+        .penetration_census_batch(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)
+        .unwrap();
+    surface
+        .penetration_intervals_batch_census_limits(
+            &census,
+            n_offset_rays,
+            cap,
+            majority_step_mm,
+            rays_all,
+        )
+        .unwrap()
+}
+
 const HETEROGENEOUS_P0: [[f64; 3]; 3] = [[-1.0, 0.5, 0.5], [0.25, 0.25, -1.0], [1.25, 2.0, 0.5]];
 const HETEROGENEOUS_P1: [[f64; 3]; 3] = [[4.0, 0.5, 0.5], [0.25, 0.25, 2.0], [3.75, 2.0, 0.5]];
 const HETEROGENEOUS_RADII: [f64; 3] = [0.1, 0.05, 0.2];
@@ -635,9 +664,25 @@ fn bounded_penetration_preflights_every_resource_at_exact_cap() {
     let surface = cube_surface();
     let p0s = [[-1.0, 0.5, 0.5]];
     let p1s = [[2.0, 0.5, 0.5]];
-    let limits = surface
+    // FU-8g H1 re-pin: the bounded batch now charges the census pass's
+    // counted totals, so the exact cap is the counted demand, not the
+    // worst-case shape. The worst-case sizing helper must still be a
+    // sufficient ceiling, and both admissions must produce bit-identical
+    // intervals — the shared-path identity claim.
+    let radii = vec![0.0; p0s.len()];
+    let limits = census_penetration_limits(&surface, &p0s, &p1s, &radii, &radii, 0, 8, 0.12, false);
+    let worst_case = surface
         .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
         .unwrap();
+    assert!(limits.max_total_work <= worst_case.max_total_work);
+    assert!(limits.max_total_hits <= worst_case.max_total_hits);
+    assert!(limits.max_total_samples <= worst_case.max_total_samples);
+    assert!(limits.max_total_intervals <= worst_case.max_total_intervals);
+    assert!(limits.max_scratch_bytes <= worst_case.max_scratch_bytes);
+    assert_intervals_equal(
+        &bounded_penetration(&surface, &p0s, &p1s, limits).unwrap(),
+        &bounded_penetration(&surface, &p0s, &p1s, worst_case).unwrap(),
+    );
     let bounded = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
     assert_eq!(bounded.len(), 1);
     assert_eq!(bounded[0].len(), 1);
@@ -734,9 +779,9 @@ fn bounded_penetration_high_crossing_mesh_has_one_ordered_refusal() {
     ]);
     let p0s = [[-1.0, 0.5, 0.5], [-1.0, 0.5, 0.5]];
     let p1s = [[8.0, 0.5, 0.5], [8.0, 0.5, 0.5]];
-    let limits = surface
-        .penetration_intervals_batch_worst_case_limits(2, 0, 8, false)
-        .unwrap();
+    // FU-8g H1 re-pin: the exact hits cap is the census's counted crossings.
+    let radii = vec![0.0; p0s.len()];
+    let limits = census_penetration_limits(&surface, &p0s, &p1s, &radii, &radii, 0, 8, 0.12, false);
     let intervals = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
     assert_eq!(intervals.len(), 2);
     assert!(intervals[0].len() >= 4, "all four cubes are crossed");
@@ -764,9 +809,10 @@ fn bounded_penetration_deep_bvh_and_parity_scratch_obey_exact_cap() {
     assert!(surface.pv.grids.iter().any(|grid| grid.max_occ > 0));
     let p0s = [[-1.0, 0.5, 0.5]];
     let p1s = [[256.0, 0.5, 0.5]];
-    let limits = surface
-        .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
-        .unwrap();
+    // FU-8g H1 re-pin: the exact scratch cap is the census-derived per-row
+    // sum, which still carries the deep-BVH traversal stack and parity terms.
+    let radii = vec![0.0; p0s.len()];
+    let limits = census_penetration_limits(&surface, &p0s, &p1s, &radii, &radii, 0, 8, 0.12, false);
     assert!(bounded_penetration(&surface, &p0s, &p1s, limits).is_ok());
     let below = PenetrationBatchLimits {
         max_scratch_bytes: limits.max_scratch_bytes - 1,
@@ -780,6 +826,161 @@ fn bounded_penetration_deep_bvh_and_parity_scratch_obey_exact_cap() {
             limit,
         }) if required == limits.max_scratch_bytes && limit == limits.max_scratch_bytes - 1
     ));
+}
+
+#[test]
+fn penetration_census_severs_work_from_hits_and_prices_the_counted_row() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[4.0, 0.5, 0.5]];
+    let radii = [0.0];
+    let census = surface
+        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .unwrap();
+    assert_eq!(census.len(), 1);
+    let row = census[0];
+    // The ray crosses two unit cubes: at least four crossings, and the
+    // traversal visits nodes as well as triangles, so tests strictly exceeds
+    // crossings — the two quantities measure different things.
+    assert!(row.crossings >= 4);
+    assert!(row.tests > row.crossings);
+    assert_eq!(row.seg_mm.to_bits(), 5.0f64.to_bits());
+    let limits = surface
+        .penetration_intervals_batch_census_limits(&census, 0, 8, 0.12, false)
+        .unwrap();
+    // work is charged as traversal tests, hits as crossings: severed.
+    assert_eq!(limits.max_total_work, row.tests);
+    assert_eq!(limits.max_total_hits, row.crossings);
+    assert_ne!(limits.max_total_work, limits.max_total_hits);
+    // The counted numbers are the exact admission boundary.
+    assert!(bounded_penetration(&surface, &p0s, &p1s, limits).is_ok());
+    assert!(matches!(
+        bounded_penetration(
+            &surface,
+            &p0s,
+            &p1s,
+            PenetrationBatchLimits {
+                max_total_work: limits.max_total_work - 1,
+                ..limits
+            }
+        ),
+        Err(PenetrationBatchError::ResourceLimitExceeded {
+            resource: "work",
+            required,
+            ..
+        }) if required == row.tests
+    ));
+}
+
+#[test]
+fn penetration_census_sample_budget_is_the_closed_form_bound() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0]]);
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[2.0, 0.5, 0.5]];
+    let radii = [0.0];
+    let census = surface
+        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .unwrap();
+    let row = census[0];
+    // At cap = 80 the F10 arm governs: 3 x subsegments + ceil(seg / step)
+    // beats cap x subsegments, so the sample charge is the closed-form honest
+    // bound rather than the cap-saturated product.
+    let subsegments = row.crossings + 1;
+    let expected = (3 * subsegments + (row.seg_mm / 0.12).ceil() as usize).min(80 * subsegments);
+    assert!(expected < 80 * subsegments);
+    let limits = surface
+        .penetration_intervals_batch_census_limits(&census, 0, 80, 0.12, false)
+        .unwrap();
+    assert_eq!(limits.max_total_samples, expected);
+    // The bound admits the execution it prices: the batch runs at exactly it.
+    let rows = surface
+        .penetration_intervals_batch_bounded(
+            &p0s, &p1s, &radii, &radii, 0, 0.12, 80, 0.05, false, limits,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn penetration_census_degenerate_row_counts_zero_and_executes_empty() {
+    let surface = cube_surface();
+    let p0s = [[5.0, 5.0, 5.0]];
+    let p1s = [[5.0, 5.0, 5.0]];
+    let radii = [0.0];
+    let census = surface
+        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .unwrap();
+    assert_eq!(
+        census[0],
+        geom_kernel::PenetrationRowCensus {
+            crossings: 0,
+            tests: 0,
+            seg_mm: 0.0,
+            max_ray_crossings: 0,
+            max_ray_seg_mm: 0.0
+        }
+    );
+    let limits = surface
+        .penetration_intervals_batch_census_limits(&census, 0, 8, 0.12, false)
+        .unwrap();
+    assert_eq!(limits.max_total_work, 0);
+    assert_eq!(limits.max_total_hits, 0);
+    let rows = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].is_empty());
+}
+
+/// FU-8g H2 — the charged-vs-executed receipt. `work` and `hits` are the same
+/// two quantities the census counted, measured by the OTHER walk, so an
+/// undrifted pair meters EQUAL to its charge rather than merely under it. The
+/// bounded quantities (samples, intervals) land at or under their counted
+/// budgets, and the metered entry point returns bit-identical geometry to the
+/// plain one.
+#[test]
+fn penetration_meter_receipt_matches_the_counted_charge() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let census = surface
+        .penetration_census_batch(
+            &HETEROGENEOUS_P0,
+            &HETEROGENEOUS_P1,
+            &HETEROGENEOUS_RADII,
+            &HETEROGENEOUS_RADII,
+            2,
+            true,
+        )
+        .unwrap();
+    let counted_tests: usize = census.iter().map(|row| row.tests).sum();
+    let counted_crossings: usize = census.iter().map(|row| row.crossings).sum();
+    let limits = surface
+        .penetration_intervals_batch_census_limits(&census, 2, 8, 0.12, true)
+        .unwrap();
+    let (rows, meter) = surface
+        .penetration_intervals_batch_bounded_metered(
+            &HETEROGENEOUS_P0,
+            &HETEROGENEOUS_P1,
+            &HETEROGENEOUS_RADII,
+            &HETEROGENEOUS_RADII,
+            2,
+            0.12,
+            8,
+            0.05,
+            true,
+            limits,
+        )
+        .unwrap();
+    assert_eq!(meter.rows, HETEROGENEOUS_P0.len());
+    assert_eq!(meter.work, counted_tests);
+    assert_eq!(meter.work, limits.max_total_work);
+    assert_eq!(meter.hits, counted_crossings);
+    assert_eq!(meter.hits, limits.max_total_hits);
+    // The D3 severance is visible in the receipt, not just in the charge.
+    assert!(meter.work > meter.hits);
+    // Non-vacuity: this batch really does sample and really does emit.
+    assert!(meter.samples > 0);
+    assert!(meter.intervals > 0);
+    assert!(meter.samples <= limits.max_total_samples);
+    assert!(meter.intervals <= limits.max_total_intervals);
+    assert_intervals_equal(&rows, &heterogeneous_penetration(&surface, limits).unwrap());
 }
 
 fn update_penetration_hash(hash: &mut u64, value: u64) {

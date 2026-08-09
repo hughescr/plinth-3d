@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 270] = [
+const EXPECTED_CONSTANT_IDS: [&str; 284] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -203,6 +203,16 @@ const EXPECTED_CONSTANT_IDS: [&str; 270] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_BRACE_PENETRATION_MAX_ROWS",
+    "SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK",
+    "SUPPORT_CONSTRUCTION_MAX_CONTACTS",
+    "SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS",
+    "SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES",
+    "SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS",
     "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT",
     "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED",
     "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
@@ -233,6 +243,10 @@ const EXPECTED_CONSTANT_IDS: [&str; 270] = [
     "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES",
     "SUPPORT_PREPARATION_MAX_PRIMITIVES",
     "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES",
+    "SUPPORT_RAFT_MAX_BYTES",
+    "SUPPORT_RAFT_MAX_CANDIDATES",
+    "SUPPORT_RAFT_MAX_PRIMITIVES",
+    "SUPPORT_RAFT_MAX_ROOTS",
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS",
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES",
     "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES",
@@ -284,7 +298,7 @@ fn golden_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn global_registry_is_one_complete_atomic_270_constant_publication() {
+fn global_registry_is_one_complete_atomic_284_constant_publication() {
     let first = m0_constants().expect("M0 constants registry must construct");
     let second = m0_constants().expect("M0 constants registry must construct");
     assert!(
@@ -317,7 +331,7 @@ fn global_registry_is_one_complete_atomic_270_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [20, 11, 239, 0]);
+    assert_eq!(classes, [20, 11, 253, 0]);
 }
 
 #[test]

@@ -1950,19 +1950,7 @@ pub fn prepare_specialized_contacts(
     demands.dedup_by(|left, right| compare_demands(left, right) == Ordering::Equal);
     let authoritative_demands = demands.clone();
     let dispositions = regular_dispositions(&physical, &demands, layers, attach_reach, limits)?;
-    for (demand_index, demand) in demands.into_iter().enumerate() {
-        if let Some(index) = dispositions[demand_index].exact_regular {
-            physical[index].demands.push(demand);
-            continue;
-        }
-        if dispositions[demand_index].covered {
-            continue;
-        }
-        if !satisfies(demand.nominated_position_mm, &demand, layers, attach_reach) {
-            return Err(SpecializedError::UnsatisfiedDemand { demand_index });
-        }
-        physical.push(WorkingContact::specialized(demand));
-    }
+    dispose_demands(&mut physical, demands, &dispositions, layers, attach_reach)?;
     // FU-8f phase G2.  ONE `mesh_fingerprint` for the whole specialized-plan
     // build: every merge-gate round inside `consolidate` and the accepted
     // plan's own load finalize below now read this proof instead of re-hashing
@@ -2676,6 +2664,86 @@ fn regular_dispositions(
     Ok(out)
 }
 
+/// Dispose every seeded demand: attach exact-regular matches, drop covered
+/// demands, and seat the uncovered remainder -- aggregating uncovered demands
+/// that nominate the *same* physical position into ONE seat carrying the
+/// union of their demands (FU-31, diagnosed 2026-08-08).
+///
+/// One island birth fanned out to several owning islands by the per-owner
+/// seeding loop, or a `Minimum` coinciding with a birth centroid, nominates
+/// bit-identical positions.  Pushed as siblings, two bit-identical pure
+/// specialized seats are a physically-single tip splitting its nearest-won
+/// load rows, each half ducking the tip safety factor; the merge gate then
+/// correctly refuses to expose the honest summed load
+/// (`load_violation_count` regresses), and `canonicalize_and_validate`'s
+/// `same_point` duplicate scan (the `DuplicatePhysicalSeat` site) correctly
+/// refuses the un-merged pair.  Aggregating at push time makes the
+/// one-seat-per-position invariant hold by construction, and the tournament
+/// baseline prices the tip's summed load from the start.
+///
+/// The grouping key is the nominated position's f64 bits with negative zero
+/// normalized to positive zero per coordinate, so key equality coincides
+/// exactly with the `same_point` `==` test that `canonicalize_and_validate`
+/// applies at its `DuplicatePhysicalSeat` scan (for non-NaN coordinates,
+/// IEEE-754 `==` is bit equality except `-0.0 == +0.0`; a NaN nominated
+/// coordinate cannot reach the push -- `satisfies` never accepts one, since
+/// every comparison against a NaN distance or z-delta is false).  One
+/// grouping pass, no per-demand scan of `physical`: the map holds the seat
+/// index for each position key, so each demand costs one map lookup.  Seat
+/// order is first-occurrence order, so on any model with no same-position
+/// pushed group (the whole seven-model corpus: zero such groups, F31.4) this
+/// loop is behaviorally identical to the plain push it replaces.  The seat
+/// representative (provenance, position, normal) is the group's
+/// `compare_demands`-minimal demand -- the same convention
+/// `gather_pair_proposals` uses for its `selected_demand` -- which is the
+/// first one encountered, because the caller sorts `demands` by
+/// `compare_demands`; each seat's demand vector stays sorted and
+/// duplicate-free for the same reason, matching `commit_merge`'s union
+/// postcondition.
+///
+/// Mutation-proven 2026-08-08 by
+/// `one_birth_fanned_to_two_owners_seats_once_with_both_demands`: with the
+/// aggregation disabled (the `Occupied` arm replaced by an unconditional
+/// `physical.push(WorkingContact::specialized(demand))`), the fixture fails
+/// with `called `Result::unwrap()` on an `Err` value: DuplicatePhysicalSeat {
+/// left: 0, right: 1 }` from its `canonicalize_and_validate` call -- the
+/// exact treant failure -- and the seat-count assertion can never be reached;
+/// with the aggregation restored the fixture passes.  Transcript in the test.
+fn dispose_demands(
+    physical: &mut Vec<WorkingContact>,
+    demands: Vec<SpecializedDemand>,
+    dispositions: &[RegularDisposition],
+    layers: &LayerPlan,
+    attach_reach: f64,
+) -> Result<(), SpecializedError> {
+    let mut pushed_seat_by_position: BTreeMap<[u64; 3], usize> = BTreeMap::new();
+    for (demand_index, demand) in demands.into_iter().enumerate() {
+        if let Some(index) = dispositions[demand_index].exact_regular {
+            physical[index].demands.push(demand);
+            continue;
+        }
+        if dispositions[demand_index].covered {
+            continue;
+        }
+        if !satisfies(demand.nominated_position_mm, &demand, layers, attach_reach) {
+            return Err(SpecializedError::UnsatisfiedDemand { demand_index });
+        }
+        let key = demand
+            .nominated_position_mm
+            .map(|coordinate| (coordinate + 0.0).to_bits());
+        match pushed_seat_by_position.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                physical[*entry.get()].demands.push(demand);
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(physical.len());
+                physical.push(WorkingContact::specialized(demand));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn attach_exact_mixed_contacts(
     contacts: &mut Vec<WorkingContact>,
     layers: &LayerPlan,
@@ -2963,6 +3031,11 @@ fn consolidate(
     let mut evaluated_variants = initial_baseline.executed_variant_count;
     let initial_baseline = initial_baseline.baseline;
     let mut gathered_proposals = 0usize;
+    // FU-8g H4 (D7, F12): the contact count the merge-round loop entered
+    // with, recorded beside its exit so a transcript can state "1,366 -> 543"
+    // without a rerun.
+    #[cfg(feature = "census")]
+    let contacts_first = contacts.len();
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
@@ -2992,6 +3065,13 @@ fn consolidate(
             });
         }
         if proposals.is_empty() {
+            // FU-8g H4 (D7): the tournament ran out of pair proposals to
+            // gather, rather than gathering some and refusing all of them.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "no_proposals",
+            ));
             break;
         }
         let outcome = evaluate_gate_batch(
@@ -3023,12 +3103,29 @@ fn consolidate(
             .checked_add(outcome.executed_variant_count)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         let Some((proposal_index, _)) = outcome.accepted else {
+            // FU-8g H4 (D7): §17.1's "the tournament ends because no
+            // proposal in the final batch is safe, not because proposals ran
+            // out and not on a cap" — recorded at the site it happens,
+            // instead of read back out of a scratch log.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "no_safe_proposal",
+            ));
             break;
         };
         let required_iterations = iterations
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         if required_iterations > limits.max_merge_iterations {
+            // FU-8g H4 (D7): the third named exit -- a typed refusal, but
+            // still one of the tournament's own three stopping modes, so it
+            // is recorded here rather than left to the error variant alone.
+            crate::census_record!(crate::census::record_merge_tournament_exit(
+                contacts_first,
+                contacts.len(),
+                "iteration_cap",
+            ));
             return Err(SpecializedError::MergeIterationLimit {
                 required: required_iterations,
                 limit: limits.max_merge_iterations,
@@ -3079,6 +3176,11 @@ fn consolidate(
         }
         next.sort_by(compare_contacts);
         *contacts = next;
+        // FU-8g H4 (D7): one committed round, counted unconditionally --
+        // beside the retained-load synchronization below, but not gated on
+        // it, because retention observing the commit and the tournament
+        // committing the merge are two different facts.
+        crate::census_record!(crate::census::record_merge_tournament_commit());
         // FU-8f phase G6a: synchronize retention with the committed list,
         // immediately after `*contacts = next` and before the next round's
         // gather (design D-G6-2).  A walk that cannot name the remap poisons
@@ -12216,6 +12318,91 @@ mod tests {
         assert!(!dispositions[2].covered);
     }
 
+    /// FU-31 fixture (2026-08-08): ONE island birth, fanned out to two owning
+    /// islands by the per-owner demand seeding, nominates bit-identical
+    /// positions; `dispose_demands` must seat it ONCE, carrying both demands,
+    /// and `canonicalize_and_validate` must accept the result.  This is the
+    /// treant's seat-163/164 configuration (print layer 1593, face 137983,
+    /// owners 111/113) reduced to a unit fixture.
+    ///
+    /// Mutation transcript (house standard), applied and reverted 2026-08-08:
+    /// with the aggregation disabled -- `dispose_demands`'s `Occupied` arm
+    /// replaced by an unconditional
+    /// `physical.push(WorkingContact::specialized(demand))` -- this test
+    /// fails at the `canonicalize_and_validate(...).unwrap()` below with
+    ///
+    /// ```text
+    /// called `Result::unwrap()` on an `Err` value: DuplicatePhysicalSeat { left: 0, right: 1 }
+    /// ```
+    ///
+    /// which is exactly the treant's in-engine failure
+    /// (`Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`) at
+    /// unit scale.  With the aggregation restored, the test passes.
+    #[test]
+    fn one_birth_fanned_to_two_owners_seats_once_with_both_demands() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [0.1, 0.2, 0.1];
+        let birth = |owner: u32| SpecializedDemand {
+            kind: SpecializedDemandKind::IslandBirth,
+            owner_island_id: owner,
+            coverage_face_id: 5,
+            coverage_component_id: 0,
+            nominated_position_mm: position,
+            nominated_normal: [0.0, 0.0, -1.0],
+            region_points_mm: Vec::new(),
+            birth_z_mm: Some(0.1),
+            birth_layer_index: Some(2),
+            birth_footprint: Some(crate::perception::test_slice_solid(vec![
+                [-1.0, -1.0],
+                [1.0, -1.0],
+                [1.0, 1.0],
+                [-1.0, 1.0],
+            ])),
+        };
+        // Same seeding pipeline as the build path: per-owner fan-out, then
+        // sort/dedup by `compare_demands`.  The owners differ, so dedup keeps
+        // both demands -- one value copied twice, the F31.1 configuration.
+        let mut demands = vec![birth(111), birth(113)];
+        demands.sort_by(compare_demands);
+        demands.dedup_by(|left, right| compare_demands(left, right) == Ordering::Equal);
+        assert_eq!(demands.len(), 2);
+        // Both demands uncovered, no exact-regular match: pure push path.
+        let dispositions = vec![RegularDisposition::default(); demands.len()];
+        let mut physical = Vec::new();
+        dispose_demands(&mut physical, demands, &dispositions, &layers, 0.2).unwrap();
+        canonicalize_and_validate(
+            &mut physical,
+            &[
+                SupportIsland {
+                    id: 111,
+                    face_ids: vec![5],
+                },
+                SupportIsland {
+                    id: 113,
+                    face_ids: vec![5],
+                },
+            ],
+            &layers,
+            0.2,
+        )
+        .unwrap();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0].demands.len(), 2);
+        assert_eq!(physical[0].demands[0].owner_island_id, 111);
+        assert_eq!(physical[0].demands[1].owner_island_id, 113);
+        assert_eq!(physical[0].position_mm, position);
+        assert!(physical[0].primary_regular.is_none());
+        assert!(physical[0].regular_routes.is_empty());
+        match physical[0].seat_provenance {
+            PhysicalSeatProvenance::Specialized(representative) => {
+                // The group's `compare_demands`-minimal demand (owner 111)
+                // is the seat representative.
+                assert_eq!(representative.owner_island_id, 111);
+            }
+            PhysicalSeatProvenance::Regular(_) => panic!("pure specialized seat"),
+        }
+    }
+
     #[test]
     fn different_owner_exact_prepass_makes_duplicate_invariant_unreachable() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
@@ -13309,14 +13496,21 @@ mod tests {
             (
                 "raking blade",
                 make_raking_blade().unwrap(),
-                // Updated for exact two-stage Python parity: the owner-independent
-                // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds finalized physical-seat provenance and
-                // append-only child-allocation history explicitly.
+                // Re-pinned 2026-08-08 for FU-31 push-site demand aggregation:
+                // in THIS raw (non-census) orientation the raking blade mints
+                // four island births each fanned out to two owning islands
+                // with bit-identical nominated positions.  `dispose_demands`
+                // now seats each birth ONCE carrying both demands, so the
+                // tournament has no same-position pure specialized pairs left
+                // to gather (gathered 10 -> 0) and only the four mixed-class
+                // attach-prepass commits remain (accepted 8 -> 4); the digest
+                // moves with those gate-evidence numbers.  Contacts, coverage
+                // samples, load rows, load_violation_count, and
+                // coalesced_seat_count are all unchanged.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                12_073_756_428_966_718_576_u64,
+                13_905_373_635_452_952_930_u64,
                 (40, 40_192, 13),
-                (3, 10, 8, 0),
+                (3, 0, 4, 0),
             ),
             (
                 "thin fin",

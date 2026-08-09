@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 239] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 253] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -189,6 +189,16 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 239] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_BRACE_PENETRATION_MAX_ROWS",
+    "SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES",
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK",
+    "SUPPORT_CONSTRUCTION_MAX_CONTACTS",
+    "SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS",
+    "SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES",
+    "SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS",
     "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
     "SUPPORT_KNN_MAX_NEIGHBORS",
     "SUPPORT_KNN_MAX_QUERY_POINTS",
@@ -211,6 +221,10 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 239] = [
     "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES",
     "SUPPORT_PREPARATION_MAX_PRIMITIVES",
     "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES",
+    "SUPPORT_RAFT_MAX_BYTES",
+    "SUPPORT_RAFT_MAX_CANDIDATES",
+    "SUPPORT_RAFT_MAX_PRIMITIVES",
+    "SUPPORT_RAFT_MAX_ROOTS",
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS",
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES",
     "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES",
@@ -263,7 +277,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 239] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 253] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -444,6 +458,16 @@ const EXPECTED_ROWS: [ExpectedRow; 239] = rows! {
     "STRUT_MODEL_ANCHOR_MAX_DELICACY", "0.5", "1", "scalar";
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "5.0", "mm", "scalar";
     "STUB_LENGTH_MM", "2.5", "mm", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_ROWS", "100000", "count", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES", "100000000000", "B", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS", "1000000000", "count", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS", "1000000000", "count", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES", "10000000000", "count", "scalar";
+    "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK", "1000000000", "count", "scalar";
+    "SUPPORT_CONSTRUCTION_MAX_CONTACTS", "1000000", "count", "scalar";
+    "SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS", "10000000", "count", "scalar";
+    "SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS", "4000000", "count", "scalar";
     "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES", "2147483648", "B", "scalar";
     "SUPPORT_KNN_MAX_NEIGHBORS", "1", "count", "scalar";
     "SUPPORT_KNN_MAX_QUERY_POINTS", "20000000", "count", "scalar";
@@ -466,6 +490,10 @@ const EXPECTED_ROWS: [ExpectedRow; 239] = rows! {
     "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES", "65536", "count", "scalar";
     "SUPPORT_PREPARATION_MAX_PRIMITIVES", "200000", "count", "scalar";
     "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES", "134217728", "B", "scalar";
+    "SUPPORT_RAFT_MAX_BYTES", "134217728", "B", "scalar";
+    "SUPPORT_RAFT_MAX_CANDIDATES", "100000", "count", "scalar";
+    "SUPPORT_RAFT_MAX_PRIMITIVES", "200000", "count", "scalar";
+    "SUPPORT_RAFT_MAX_ROOTS", "100000", "count", "scalar";
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS", "2000000000", "count", "scalar";
     "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES", "536870912", "B", "scalar";
     "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES", "536870912", "B", "scalar";
@@ -506,7 +534,7 @@ const EXPECTED_ROWS: [ExpectedRow; 239] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 239 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 253 placeholder declarations must construct")
 }
 
 #[test]
@@ -517,7 +545,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 239);
+    assert_eq!(descriptors.len(), 253);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -608,7 +636,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_270_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_284_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -616,14 +644,14 @@ fn evidence_and_placeholder_fixture_builds_one_270_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 270);
+    assert_eq!(registry.len(), 284);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        270
+        284
     );
 }
 

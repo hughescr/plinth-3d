@@ -2790,6 +2790,160 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
       "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on synthetic-neighbor pairs."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_ROWS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. The design's F7 finding (fu8g-design-2026-08-08.md, single specimen, n = 1, per R4/FU-23) is a DERIVED ceiling from the worst-case sizing formula, not a measured demand: at rays_all=false, cap=80, T=429,120 faces (the Weeping Treant v1.2), the per-row worst-case charge is scratch_bytes 1,171,071,249 B, so this cap alone admits at most 85 rows before any other brace cap binds. This cap is simultaneously ABOVE the 90 GB watchdog line and the 100 GB machine ceiling (memory machine-memory-ceiling; support-resource-caps-2026-08-05.md section 17.4/A1), a standing hazard this registration discloses and does not resolve. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. Design finding F9 (fu8g-design-2026-08-08.md) shows hits and work are the same expression at the worst-case sizing this cap is checked against, so the F7 derivation for max_total_work (per-row charge 429,120, admitting at most 2,330 rows before this cap alone) applies here too. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. The design's F7 finding (fu8g-design-2026-08-08.md, single specimen, n = 1, per R4/FU-23) is a DERIVED ceiling from the worst-case sizing formula, not a measured demand: at rays_all=false, cap=80, T=429,120 faces (the Weeping Treant v1.2), the per-row worst-case charge is intervals 429,121, so this cap alone admits at most 2330 rows before any other brace cap binds. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 10000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. The design's F7 finding (fu8g-design-2026-08-08.md, single specimen, n = 1, per R4/FU-23) is a DERIVED ceiling from the worst-case sizing formula, not a measured demand: at rays_all=false, cap=80, T=429,120 faces (the Weeping Treant v1.2), the per-row worst-case charge is samples 34,329,680, so this cap alone admits at most 291 rows before any other brace cap binds. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production brace_penetration_limits",
+        "rust/geom_kernel/src/queries.rs:PenetrationBatchLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The brace stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- no run has ever reached it (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. The design's F7 finding (fu8g-design-2026-08-08.md, single specimen, n = 1, per R4/FU-23) is a DERIVED ceiling from the worst-case sizing formula, not a measured demand: at rays_all=false, cap=80, T=429,120 faces (the Weeping Treant v1.2), the per-row worst-case charge is work 429,120, so this cap alone admits at most 2330 rows before any other brace cap binds. Production admits at most 85 clearance rods on this mesh once max_scratch_bytes is accounted for. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_CONSTRUCTION_MAX_CONTACTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/initial.rs:ContactConstructionLimits::new / ::production",
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production construction_limits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source. Introduced Codex-era 73e7c13; the same four numbers are hard-coded independently at BOTH ContactConstructionLimits::production (initial.rs) and SupportPreparationLimits::production's construction_limits (runner.rs), a duplication the design (fu8g-design-2026-08-08.md F1/F2) flags but this registration does not resolve -- neither site reads the registry. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on physical contacts admitted before initial-contact construction allocates. Single-specimen observation (n = 1, per R4/FU-23): the Weeping Treant v1.2's FU-31-fixed acceptance run charges 553 contacts, 0.055% of this cap; every corpus model's contact count is smaller still."
+    },
+    {
+      "id": "SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/initial.rs:ContactConstructionLimits::new / ::production",
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production construction_limits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 10000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source. Introduced Codex-era 73e7c13; the same four numbers are hard-coded independently at BOTH ContactConstructionLimits::production (initial.rs) and SupportPreparationLimits::production's construction_limits (runner.rs), a duplication the design (fu8g-design-2026-08-08.md F1/F2) flags but this registration does not resolve -- neither site reads the registry. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on load-partition rows checked before initial-contact construction allocates. No measurement of record exists for this quantity on any corpus model or the Weeping Treant v1.2 at this tip: FU-8g's H0/H2 measurements priced the work-items charge and the contact count, not load rows."
+    },
+    {
+      "id": "SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/initial.rs:ContactConstructionLimits::new / ::production",
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production construction_limits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source. Introduced Codex-era 73e7c13; the same four numbers are hard-coded independently at BOTH ContactConstructionLimits::production (initial.rs) and SupportPreparationLimits::production's construction_limits (runner.rs), a duplication the design (fu8g-design-2026-08-08.md F1/F2) flags but this registration does not resolve -- neither site reads the registry. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on initial-contact construction's penetration scratch bytes. FU-8g's H0 pre-fix estimate for the Weeping Treant v1.2 (553 contacts, honest crossing-count scratch) was 149,188,000 B (approximately 142 MiB, 27.8% of this cap); H2 (2026-08-09) explicitly declined to claim a post-H1 per-model byte figure as the measurement of record, leaving that to H6's in-process run."
+    },
+    {
+      "id": "SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/initial.rs:ContactConstructionLimits::new / ::production",
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production construction_limits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 4000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source. Introduced Codex-era 73e7c13; the same four numbers are hard-coded independently at BOTH ContactConstructionLimits::production (initial.rs) and SupportPreparationLimits::production's construction_limits (runner.rs), a duplication the design (fu8g-design-2026-08-08.md F1/F2) flags but this registration does not resolve -- neither site reads the registry. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on the initial-contact preflight's work-items charge. This is the cap FU-8g exists to make honestly chargeable, not to raise: at develop@e3168c5 the flat contact_count x (4 + nfaces) bound charged the Weeping Treant v1.2 232,585,208 (58.1x over, FU-8f phase G6d, 2026-08-08); FU-8g phases H1/H2 (2026-08-09) replaced that with the census pass's counted work-items total, and the SAME treant run (553 contacts) now charges 108,378 -- 2.71% of this UNCHANGED cap (single specimen, n = 1, per R4/FU-23). No cap was raised, lowered or touched by H1, H2 or this registration; see support-resource-caps-2026-08-05.md sections 17.5/18 and CURRENT-STATUS.md FU-8g phase H2 landed 2026-08-09."
+    },
+    {
+      "id": "SUPPORT_RAFT_MAX_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production raft_limits",
+        "crates/plinth-support/src/raft.rs:RaftLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 134217728",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The raft stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- the pipeline has never reached it, no treant seal exists (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_RAFT_MAX_CANDIDATES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production raft_limits",
+        "crates/plinth-support/src/raft.rs:RaftLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The raft stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- the pipeline has never reached it, no treant seal exists (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_RAFT_MAX_PRIMITIVES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production raft_limits",
+        "crates/plinth-support/src/raft.rs:RaftLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 200000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The raft stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- the pipeline has never reached it, no treant seal exists (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "SUPPORT_RAFT_MAX_ROOTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production raft_limits",
+        "crates/plinth-support/src/raft.rs:RaftLimits"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73e7c13. Registered by FU-8g phase H3 (2026-08-09); registration records the inherited number and does NOT ratify it. The raft stage is unexercised on every corpus model and on the Weeping Treant v1.2 at this tip -- the pipeline has never reached it, no treant seal exists (support-resource-caps-2026-08-05.md section 17.7), so no measurement of record exists for its demand. No cap was raised, lowered or touched."
     }
   ],
   "aliases": [
