@@ -33,7 +33,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // (73 routed contacts, 261 live members, 5 island births, 4 local minima); its
 // digest moved only because the plan digest hashes slice-layer loop vertices
 // directly, and 80 of its 686 print layers were requantized by 5 picometres.
-// See `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 8.5 and its
+// See `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 8.5 and its
 // 2026-08-08 addendum.
 //
 // Refreshed a third time on 2026-08-09, by owner ruling, for FU-32 phase J2 (the
@@ -58,7 +58,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // `verification_snapshot_digest_input_list_is_pinned` stayed GREEN across this
 // movement, which is the independent confirmation that the digest's input SHAPE
 // did not widen — only one input's value moved. See
-// `docs/rust-migration/CURRENT-STATUS.md` sections `#fu32-j3-2026-08-09` and
+// `docs/engineering-journal/CURRENT-STATUS.md` sections `#fu32-j3-2026-08-09` and
 // `#fu32-j4-2026-08-09`.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
 

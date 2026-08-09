@@ -189,8 +189,8 @@ impl SpecializedLimits {
     /// 196,264,386,588 (97.4 % of the demand) is a *different* defect, opened as
     /// **FU-8d**. Read 5,173,199,556 as the floor of the repriced plan, never as
     /// the treant's price. See
-    /// `docs/rust-migration/support-resource-caps-2026-08-05.md` §7 and
-    /// `docs/rust-migration/CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*).
+    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §7 and
+    /// `docs/engineering-journal/CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*).
     ///
     /// **Dated addendum 2026-08-06 — FU-8d phase F2. The block above is left
     /// standing exactly as written; every number in it was true when measured
@@ -6796,7 +6796,7 @@ impl GateCoverageQuestion<'_> {
 /// rests on is unchanged: 3.27 ms is 0.009 % of the 37.33 s
 /// `fill_proposal_nearest_delta` frame, so construction is negligible and the
 /// fix targets the query loop.  Primary note:
-/// `docs/rust-migration/support-resource-caps-2026-08-05.md` §12.2.)
+/// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §12.2.)
 /// The cost was the *query* loop: per query, a `nearest_n` descent that
 /// allocates a `SortedVec`, a second `nearest_n_within_exclusive` descent that
 /// allocates a `Vec`, and a `sort_by`, for about 1.04e9 query iterations and
@@ -13377,7 +13377,7 @@ mod tests {
     /// `DuplicatePhysicalSeat` before consolidation could finish.
     ///
     /// **Re-pinned 2026-08-08 by owner ruling for the FU-10 phase-C
-    /// polygon-union cutover** (`docs/rust-migration/slicer-union-design-2026-08-07.md`
+    /// polygon-union cutover** (`docs/engineering-journal/slicer-union-design-2026-08-07.md`
     /// sec 8.5 and its 2026-08-08 addendum). `toed slab` moves
     /// `(72, 50_688, 9)` -> `(42, 34_304, 8)` — the FU-7 parked `72 -> 42`
     /// contact count, reproduced digit for digit from the other direction — and

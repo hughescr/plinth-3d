@@ -55,7 +55,7 @@ pub struct M0Constants {
 /// `PRINT_FLOOR_CHORD_MM` is an owner-decision `Measured` value. See
 /// `docs/specs/SPEC-EMBED-POLICY.md` "Normative constants" and
 /// "PRINT-FLOOR amendment", and
-/// `docs/rust-migration/03-physics-and-constants.md` §3.6.
+/// `docs/engineering-journal/03-physics-and-constants.md` §3.6.
 ///
 /// The later measurement/gate implementation must preserve the specification's
 /// strict boundaries: a scar limit is legal at equality (`<=`), while an
@@ -165,7 +165,7 @@ impl<'a> ScarAreaCapPolicy<'a> {
 /// for that spread. FU-8d phase F3's repricing plausibly supersedes it as an
 /// input and no re-measurement exists at this tip; the ruling note on
 /// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (`constants/evidence.rs`, and
-/// `docs/rust-migration/support-resource-caps-2026-08-05.md` §7.1) is the
+/// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §7.1) is the
 /// primary record. The spread this paragraph draws from it is unaffected.
 ///
 /// These are execution-authority bounds only. They admit or refuse; they never

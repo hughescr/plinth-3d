@@ -10,7 +10,7 @@
 //! the scalar kernel-free core they scatter over.
 //!
 //! The rules implemented here are PR-1 through PR-4 of the Phase B-2 contact
-//! physics design (`docs/rust-migration/contact-physics-2026-08-04.md`):
+//! physics design (`docs/engineering-journal/contact-physics-2026-08-04.md`):
 //!
 //! * **PR-1 `CONTACT_SEAT_DEPTH`** — every model contact is seated, none
 //!   kisses.  [`seat_depth_mm`], [`seat_endpoint`].

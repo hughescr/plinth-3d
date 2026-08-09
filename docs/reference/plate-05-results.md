@@ -272,7 +272,7 @@ not promote it into the table without recovering the read.
    were ever recorded.
 
 The engine-facing constants derived from these findings live in
-[`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
+[`../engineering-journal/03-physics-and-constants.md`](../engineering-journal/03-physics-and-constants.md)
 §3 and §4 (`X_STAR_CONE`, `X_ALLOWED`, `tensile_green_mpa`).
 
 ---
@@ -387,5 +387,5 @@ affects the TIP reading in §5.
 
 - [`plate-06-results.md`](plate-06-results.md) — the successor plate; cylindrical
   arms, load sharing, and the record of record for support-arm capacity.
-- [`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
+- [`../engineering-journal/03-physics-and-constants.md`](../engineering-journal/03-physics-and-constants.md)
   — engine-facing constants derived from both plates.

@@ -1,6 +1,6 @@
 //! FU-10 phase B -- per-layer polygon union with fill-rule normalization.
 //!
-//! Design: `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 3
+//! Design: `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3
 //! (phase table row B; the OQ-1 resolution and phase-B deviations are the
 //! sec 7 addendum). The stitched slice loops of one layer -- wound contours
 //! when the phase-A orientation derivation succeeded, unoriented loops when it

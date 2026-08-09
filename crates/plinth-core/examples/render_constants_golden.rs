@@ -1,4 +1,4 @@
-//! Writes `docs/rust-migration/constants.md` from the one M0 registry.
+//! Writes `docs/engineering-journal/constants.md` from the one M0 registry.
 //!
 //! The golden test asserts the checked-in file equals
 //! `registry().render_markdown()` byte for byte, and its failure message says
@@ -13,7 +13,7 @@ use std::path::Path;
 fn main() -> Result<(), String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/rust-migration/constants.md");
+        .join("docs/engineering-journal/constants.md");
     let rendered = plinth_core::m0_constants()
         .map_err(|error| format!("M0 constants registry must construct: {error}"))?
         .registry()

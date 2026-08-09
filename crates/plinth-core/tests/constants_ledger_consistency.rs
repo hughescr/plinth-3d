@@ -1,6 +1,6 @@
 //! FU-24: the ledger and the registry must name the same constants.
 //!
-//! `docs/rust-migration/m0-constants-source-ledger.json` is hand-maintained
+//! `docs/engineering-journal/m0-constants-source-ledger.json` is hand-maintained
 //! prose provenance for every constant the live registry
 //! (`M0PlaceholderConstants` + `M0EvidenceConstants`, assembled by
 //! [`m0_constants`]) actually publishes. Nothing mechanically keeps the two
@@ -38,7 +38,7 @@ struct Ledger {
 fn ledger_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/rust-migration/m0-constants-source-ledger.json")
+        .join("docs/engineering-journal/m0-constants-source-ledger.json")
 }
 
 #[test]

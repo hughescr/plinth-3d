@@ -56,7 +56,7 @@ vendor document.
 Formula-by-formula audits of the v4 Python engine, all against
 `resin-print-prep` master `f02b7af`. The **reasoning** in these is still good;
 several **constant values** in them are pre-plate-5 and stale —
-[`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
+[`../engineering-journal/03-physics-and-constants.md`](../engineering-journal/03-physics-and-constants.md)
 §5 lists exactly which.
 
 | file | what it is | read it when |
