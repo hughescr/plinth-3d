@@ -1070,6 +1070,63 @@ raised — see the *Not raised, deliberately* paragraph in §3.10.8 and FU-8b.
 Two of those four, the gate and load **operation** caps, became the floors of a
 measured rule on 2026-08-06 without their numbers changing; see §3.10.10.
 
+> **Dated addendum 2026-08-09 (FU-8g phase H3) — the "not covered" sentence above is
+> corrected, not rewritten, and three of the four nested authorities it named are
+> now registered.** The paragraph naming the scope of this ruling said the four
+> further nested authorities reachable from `SupportPreparationLimits::production`
+> — `CandidatePayloadConfig`, `ContactConstructionLimits`, `PenetrationBatchLimits`
+> and `RaftLimits`, ~19 more values — were **not** covered. FU-8g's own design
+> (`fu8g-design-2026-08-08.md` F1/F2) found the same gap independently: the four
+> `ContactConstructionLimits` numbers are bare literals at **two** independent
+> sites (`ContactConstructionLimits::production`, `initial.rs`, and
+> `SupportPreparationLimits::production`'s `construction_limits`, `runner.rs` —
+> both hard-code the same four numbers, and this registration does not merge
+> them), and brace's six `PenetrationBatchLimits` fields (`brace_penetration_limits`)
+> plus `RaftLimits`'s four fields are equally unregistered. **All 14 are now
+> registered** as classification `runtime_resource_cap`, wrapper `Placeholder`,
+> exactly on §3.10.9's terms: **registration is disclosure, not ratification**,
+> and no cap is raised, lowered or touched by it.
+>
+> | Stable ID | Value | Unit | Construction site |
+> |---|---|---|---|
+> | `SUPPORT_CONSTRUCTION_MAX_CONTACTS` | 1,000,000 | count | `ContactConstructionLimits`.max_contacts |
+> | `SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS` | 10,000,000 | count | `ContactConstructionLimits`.max_load_rows |
+> | `SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS` | 4,000,000 | count | `ContactConstructionLimits`.max_work_items |
+> | `SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES` | 536,870,912 | B | `ContactConstructionLimits`.max_scratch_bytes |
+> | `SUPPORT_BRACE_PENETRATION_MAX_ROWS` | 100,000 | count | `PenetrationBatchLimits`.max_rows (brace_penetration_limits) |
+> | `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_WORK` | 1,000,000,000 | count | `PenetrationBatchLimits`.max_total_work |
+> | `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_HITS` | 1,000,000,000 | count | `PenetrationBatchLimits`.max_total_hits |
+> | `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_SAMPLES` | 10,000,000,000 | count | `PenetrationBatchLimits`.max_total_samples |
+> | `SUPPORT_BRACE_PENETRATION_MAX_TOTAL_INTERVALS` | 1,000,000,000 | count | `PenetrationBatchLimits`.max_total_intervals |
+> | `SUPPORT_BRACE_PENETRATION_MAX_SCRATCH_BYTES` | 100,000,000,000 | B | `PenetrationBatchLimits`.max_scratch_bytes |
+> | `SUPPORT_RAFT_MAX_CANDIDATES` | 100,000 | count | `RaftLimits`.max_candidates |
+> | `SUPPORT_RAFT_MAX_ROOTS` | 100,000 | count | `RaftLimits`.max_roots |
+> | `SUPPORT_RAFT_MAX_PRIMITIVES` | 200,000 | count | `RaftLimits`.max_primitives |
+> | `SUPPORT_RAFT_MAX_BYTES` | 134,217,728 | B | `RaftLimits`.max_bytes |
+>
+> **What this registration adds beyond disclosure, per constant, is honest about
+> what is and is not measured** (single-specimen markers per R4/FU-23 where a
+> measurement exists, and a plain statement of absence where it does not):
+> `SUPPORT_CONSTRUCTION_MAX_WORK_ITEMS` and `SUPPORT_CONSTRUCTION_MAX_CONTACTS`
+> carry the Weeping Treant v1.2's FU-8g H1/H2 measured demand (108,378 work
+> items, 2.71 % of cap; 553 contacts, 0.055 %, both single specimen n = 1);
+> `SUPPORT_CONSTRUCTION_MAX_SCRATCH_BYTES` carries H0's pre-H1 estimate
+> (149,188,000 B, ≈142 MiB, 27.8 %) with H2's own disclaimer that the post-H1
+> figure is H6's to measure, not claimed here; `SUPPORT_CONSTRUCTION_MAX_LOAD_ROWS`
+> and all ten brace/raft constants carry **no** measured demand, honestly, because
+> the brace and raft stages are unexercised on every corpus model and on the
+> treant at this tip (§17.7) — the design's F7 finding for the six brace fields is
+> a **derived** worst-case ceiling (production admits at most 85 clearance rods on
+> the treant mesh once `max_scratch_bytes` is accounted for), not a measured
+> demand, and is labelled as such in the registry note.
+>
+> **`CandidatePayloadConfig` remains genuinely out of scope**, exactly as R5 left
+> it: it mixes result-changing refinement policy with execution caps and needs
+> its own classification pass, which is not this registration's job. Full
+> ledger rows, provenance and the FU-24 gate: `m0-constants-source-ledger.json`;
+> caps-doc record: `support-resource-caps-2026-08-05.md` §18; dated
+> `CURRENT-STATUS.md` section: *FU-8g phase H3 landed 2026-08-09*.
+
 ### 3.10.10 Support execution-authority caps — the batch-product pair {#batch-product-caps}
 
 FU-8b, 2026-08-06. §3.10.8's two caps scale on the support mesh's **face
