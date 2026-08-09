@@ -4252,6 +4252,110 @@ the owner's queue rather than folded into the fix.
 editing (this section is the branch's only delta beyond H0's). The `fe79124` scratch worktree
 was removed and pruned after its control runs.
 
+## FU-31 FIXED 2026-08-08 — one seat per position by construction, and the treant walks to the wall {#fu31-fixed-2026-08-08}
+
+**What landed (commit `55b4d99`, option (b) as adjudicated).** The demand-disposition loop in
+`crates/plinth-support/src/specialized.rs` is extracted into `dispose_demands`, which seats
+uncovered demands in **one grouping pass** keyed on the nominated position's f64 bits
+(negative zero normalized to positive zero per coordinate, so key equality coincides exactly
+with the `same_point` `==` test `canonicalize_and_validate` applies at its
+`DuplicatePhysicalSeat` scan — both sites cite each other, making the by-construction claim
+checkable in source). A demand whose key matches an already-pushed specialized seat joins that
+seat's demand vector — which stays `compare_demands`-sorted and duplicate-free, matching
+`commit_merge`'s union postcondition — instead of minting a bit-identical sibling. Seat order
+is first-occurrence order, so any model with no same-position pushed group is behaviorally
+untouched; the seat representative is the group's `compare_demands`-minimal demand,
+`gather_pair_proposals`' own `selected_demand` convention. No per-demand scan of the physical
+vector exists (one map lookup per demand). `coalesce_exact_regular_seats`, its owner-ratified
+`coalesced_seat_count`, and every cap, floor and constant are untouched. Downstream was
+verified from source before landing: the tournament (`demands()` chained iterators), load-row
+construction, census hashing and evidence all consume multi-demand seats as first-class —
+seat 164 itself was one before this fix.
+
+**Mutation-proven fixture** (`one_birth_fanned_to_two_owners_seats_once_with_both_demands`):
+one birth fanned to owners 111/113 produces ONE seat carrying both demands and canonicalizes
+clean; with the aggregation disabled (the `Occupied` arm mutated to an unconditional push) it
+fails `called `Result::unwrap()` on an `Err` value: DuplicatePhysicalSeat { left: 0, right:
+1 }` — the treant's exact failure at unit scale. Applied, observed, reverted; transcript in
+the test and function doc comments.
+
+**One honest unit-fixture re-pin, attributed exactly.** The raking-blade fixture in
+`required_table_raking_and_thin_fin_fixtures_finalize_full_evidence` runs the model in its
+raw (non-census) orientation, and there the blade genuinely mints **four** island births each
+fanned to two owners — confirmed by scratch instrumentation before re-pinning. Born
+aggregated, those four pairs vanish from the tournament (gathered 10 → 0, accepted 8 → 4) and
+the pinned digest moves with those gate-evidence numbers (`12073756428966718576` →
+`13905373635452952930`). Contacts (40), coverage samples (40,192), load rows (13),
+`load_violation_count` (3) and `coalesced_seat_count` (0) are all unchanged. This is not a
+corpus, baseline, physics, or reference re-freeze.
+
+**ACCEPTANCE — the treant, attempt 1 of 2, wall reached.** Same harness and env as H0/F31
+(`cargo run --release --offline --features census --example embed_incidence_census -p
+plinth-support`, `PLINTH_CENSUS=1 PLINTH_FU8G_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant
+v1.2"`, `PLINTH_THREADS=4`, RSS watchdog unsandboxed at 90 GB / 2 s sampling / 600 s
+timebox): **202 s wall-clock, peak RSS 2,776,144 KB (2.65 GiB), watchdog never fired.**
+Specialized contact-plan construction **passes** — the working set that held 554 contacts
+with the un-merged pair now finalizes **553** — and the run advances through routing, the
+gate, and load finalization to exactly the wall FU-8g was opened to measure:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2  Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })
+```
+
+The required number is the charge formula at the new honest contact count: 553 × 4 + 553 ×
+429,120 = **237,305,572** — the same wall G6d pinned at `fe79124` (232,585,208 at 542
+contacts), now measured in-engine at this tip with 553. The two scaled-cap census lines the
+run also printed are recorded for FU-8f's file: `specialized_gate_operations` materialized
+19,562,287,872 (340 gate batches, 1,294,392 merge proposals, retained-load charged
+66,731,232,175 vs executed 6,634,686,434) and `specialized_load_operations` materialized
+4,746,695,936 — neither at floor.
+
+**FU-8g H0 treant leg — the honest in-engine numbers, captured in the same attempt.** The H0
+instrumentation (env-gated `PLINTH_FU8G_CENSUS`, the same two sites: a mirrored
+`collect_hits_with_stack` walk in `rust/geom_kernel/src/queries.rs` and a block in
+`build_initial_contacts` immediately before its `preflight` call) was reimplemented from the
+H0 record's recipe, **validated for metric fidelity on `make_box` — every H0.1 figure
+reproduced exactly** (rows 11, charged 132, honest crossings 14, honest tests 161, charged
+scratch 391,523, honest scratch 69,501, both distributions digit-for-digit) — exercised on
+the treant, and **reverted by editing before the gates** (`git diff` over `crates/` and
+`rust/` is empty at this tip; `grep -ri fu8g_census crates/ rust/` returns nothing). All
+seven corpus OD-8 digests were re-confirmed byte-identical after the fix, with and without
+the instrumentation live.
+
+| quantity | Weeping Treant v1.2, in-engine at this tip |
+|---|---|
+| rows (real physical contact stubs) | **553** (faces 429,120) |
+| crossings mean/p50/p95/p99.9/max | **10.906 / 7 / 26 / 298 / 298** |
+| traversal tests mean/p50/p95/p99.9/max | **191.982 / 81 / 654 / 3,236 / 3,236** |
+| charged work (rows × nfaces) | 237,303,360 |
+| honest work (Σ crossings) | **6,031** (**39,347×** over-charged) |
+| honest work (Σ tests, D3) | **106,166** (**2,235×** over-charged) |
+| charged scratch | 647,733,598,841 B (603 GiB) |
+| honest scratch (Σ row_scratch at honest crossings) | **149,188,000 B (142 MiB)** (**4,342×**) |
+
+Against the design's §M out-of-repo proxy (62.03 mean crossings/ray, 6,918× over-statement):
+the honest mean is **10.906**, so the real over-statement (nfaces / mean crossings) is
+**~39,347×** — the design's proxy *under*-stated the over-charge by 5.7× on the treant, the
+same direction §M's caveat 1 anticipated. Adjudicating what H1's bound does with these
+numbers is FU-8g's work, not this fix's; they are recorded so H1 starts from measurement.
+
+**The honest note, stated because the fix makes it visible.** The 0.001 mm² twig tip at
+(−11.69, 13.00, 79.68) — one physical tip, one seat now — carries the summed load of both
+owning islands' rows and reports its tip-safety-factor violation honestly in the specialized
+gate evidence, within plan tolerance (violations are recorded evidence the plan already
+tolerates — the treant's baseline carried 2 before this fix — not refusals; the stage
+completes and the pipeline advances). Whether a flagged tip should eventually hard-refuse,
+thicken, or spawn relief support remains the owner-queue physics question F31.5(c) recorded,
+unchanged by this fix.
+
+**Verification.** All seven frozen OD-8 census digests byte-identical after the fix: Sphere
+`17667468971446251870`, Cylinder `13310185350867878190`, make_box `9657051231007502658`,
+make_overhang_table `1875674282253663076`, make_toed_slab `2823659516373762066`,
+make_raking_blade `9567737006650358297`, make_thin_fin `8797083662933568276`. Five gates
+green at this tip (counts recorded in the commit); tree clean before and after; no cap,
+floor, constant or owner-ratified evidence field touched; `/private/tmp/plinth-chitubox-preview`
+untouched.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -4433,7 +4537,7 @@ Everything else here is non-blocking.
 | FU-28 | The **drilled hollow is producible but not supportable**: `run_support` refuses `plinth_hollow::run`'s own output | **Opened 2026-08-07 by export phase E2** (`export-path-design-2026-08-07.md`, *E2 LANDED* section), which was the first code anywhere to run the real hollow stage and the sealed support run back to back on a corpus model. The export design's OQ-1 asked whether `plinth_hollow::run` *completes* on corpus models and planned a typed solid-decision fallback for a refusal. It completes: the corpus Sphere hollows, plans drains and drills, returning `AwaitingInternalSupport`. **The refusal lands one stage later** — `run_support` rejects that 14,526-face drilled shell during `Preparation` (against `max_grid_bytes=67108864`, `knn_max_work=100000000`, so this is not obviously a resource-cap stop; the phase is `Preparation`, and the underlying refusal code was not extracted because doing so needs the `census` feature and E2 must not move engine behaviour). The oriented solid is 4,760 faces and seals fine — digest `17667468971446251870`, unmoved. **Consequence today:** every artifact the export path can emit for the Sphere is the *solid*, so hollowing buys the corpus nothing downstream, and the whole 7-of-8 sealed-run evidence base remains what F14 already said it was — `solid_decision` handoffs. **Consequence for E4:** `prepare()` cannot simply chain `hollow_stage` into `run_support` and expect the hollow to survive; it needs this diagnosed first or an explicit, recorded policy for which geometry ships. **First action is diagnostic, not a fix:** re-run the drilled shell under `--features census` and read `stage_errors` to name the actual `Preparation` refusal, then decide whether it is a mesh-property refusal (the drilled shell has an interior surface the oriented solid does not) or a resource stop. Pinned by `crates/plinth-pipeline/tests/first_artifact.rs`, which asserts the `DrilledShellRefusedBySupport` variant by equality, so the day this changes the gate fails and says so. Note also that **A5 internal-support planning does not exist anywhere in this workspace**, so even a supportable drilled shell would ship today with no internal supports. |
 | FU-29 | The **OQ-3 adequacy stitch site has zero corpus coverage**, and its `max_loop_vertices` cap is an unexercised refusal path | **Opened 2026-08-08 as ruling condition (2) of the FU-10 phase-C re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). §8.5 measurement (3) said the adequacy-probe path "moves zero rows on all seven models"; instrumentation at both stitch sites shows it **ran** zero rows: 2,956 print-layer rows against **0** adequacy rows, because `find_local_minima` always reaches `normalized_slice_layers(SliceStitchSpace::AdequacyProbe, …)` with an empty `probe_heights` — every local minimum matched a birth, so `suspects` is empty and the batch carries zero planes. "Moves zero rows" and "ran zero rows" are different claims and the record did not distinguish them. Consequence: the adequacy site's normalization has **no corpus-level evidence at all** — unit tests only — and the `max_loop_vertices` cap that phase-C deviation 2 adds there (a site that previously had no loop-vertex cap) is a **new refusal path that has never executed on real data**. This is a coverage gap, not a known defect. **First action:** construct a model, or a synthetic layer set, whose local minima do *not* all match births, so `probe_heights` is non-empty and the site executes on real geometry; then decide whether the cap belongs there at the value it has. |
 | FU-30 | Corpus coverage of `coalesce_exact_regular_seats` **halved** at the FU-10 phase-C cutover | **Opened 2026-08-08 by the re-pin** ([`#fu10-repin-2026-08-08`](#fu10-repin-2026-08-08)). The specialized golden asserted `coalesced_seat_count == 1` for both corpus models; measured at the re-pinned tip it is `toed slab` **0** and `raking blade` **1**. With the corrected slice geometry `make_toed_slab` no longer produces a co-located regular seat pair at all, so the terminal coalescing pass is a measured no-op there and the count is now pinned per model. The pass is still exercised — by `make_raking_blade` and by `specialized`'s unit tests — but by one corpus model instead of two, and the `DuplicatePhysicalSeat` failure mode it was built to prevent now has a single corpus witness. The disappearance is *consistent with* the four phantom island births removed from `make_toed_slab` (print layers 49, 52, 226, 228) but that causal link was **not** independently proven; only the measurement is on the record. **First action:** decide whether one corpus witness plus unit tests is adequate, or whether a fixture should pin the duplicate-seat path deliberately rather than incidentally. |
-| FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** |
+| FU-31 | The Weeping Treant now fails `Specialized(DuplicatePhysicalSeat)` before ever reaching the initial-contact preflight — FU-30's "one corpus witness" question, answered NO on the treant | **Opened 2026-08-08 by FU-8g phase H0** ([`#fu8g-h0-2026-08-08`](#fu8g-h0-2026-08-08)), directly answering [FU-30](#follow-ups-2026-08-04)'s own "First action". At `develop @ e3168c5`, three reproductions (`cargo run --release --offline --features census --example embed_incidence_census -p plinth-support`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`) all fail identically with `Preparation: Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`, before `build_initial_contacts` is ever called — three stages before the `Initial(Limit { resource: "work items", ... })` wall *FU-8f phase G6d measured 2026-08-08* ([`#fu8f-g6d-2026-08-08`](#fu8f-g6d-2026-08-08)) recorded as the treant's stopping point. That measurement was taken at `fe79124` (the G6c tip), **before** the FU-10 phase-C polygon-union cutover merged into `develop`; FU-30's own re-pinned test comment shows that same cutover moving `make_toed_slab` and `make_raking_blade`'s contact/coalesced-seat counts, and states plainly that `coalesce_exact_regular_seats`'s corpus coverage fell to one model. The treant is the second witness FU-30 asked whether was needed, and on the treant the pass does not catch the collision: physical seats 163 and 164 land at the same position under the corrected slice geometry and nothing merges them. **Consequence:** FU-8g's own design (`fu8g-design-2026-08-08.md`) is premised on a treant stopping point that is not reachable at this tip, and its H1–H6 phases cannot exercise the treant until this is fixed. **Not FU-8g's defect to fix** — it sits entirely inside `Specialized` contact-plan construction, upstream of anything FU-8g's design touches. **First action:** diagnose why seats 163/164 collide under the FU-10 slice geometry and why `coalesce_exact_regular_seats` does not merge them (a third corpus witness, or a widening of that pass's merge condition, per FU-30's own open question) — then FU-8g's H0 can be re-run to get the treant's honest crossings/traversal-test distribution. See *FU-8g phase H0 measured 2026-08-08* §H0.2 for the full derivation and the three reproduction transcripts' peak-RSS/wall-clock evidence. **[DIAGNOSED 2026-08-08 (**[`#fu31-diagnosed-2026-08-08`](#fu31-diagnosed-2026-08-08)**), fix not landed.** Seats 163/164 are **one island birth** (print layer 1593, face 137983, a 0.001 mm² twig tip) fanned out to its **two owning islands** (111/113) as two bit-identical demands, both uncovered, both pushed as pure specialized seats — one value copied twice, not a G6b-style bit tie. `coalesce_exact_regular_seats` misses them by **class** (demand-free-regular-only), not tolerance; `attach_exact_mixed_contacts` needs a demand-free side; the gated tournament — the only machine admitting the pair — gathered it in 492 rounds and the gate refused every variant on one measured component: `load_violation_count` 3 vs baseline 2 (co-located seats split nearest-won load rows and each ducks the tip safety factor; the merged seat carries the honest union and trips it). The collision is **pre-existing**: the `fe79124` control run mints the same birth (centroid moved ~1e-10 mm by the union) in a 375-group population and merges them all — specialized passes there with 542 contacts, zero duplicates — so the cutover shifted the load landscape under exactly this pair rather than creating the phenomenon. Corpus provably never builds the configuration (zero identical-position pushed groups on all seven models; digests byte-identical with instrumentation live). **Recommended fix: (b) aggregate uncovered demands with identical nominated position bits into one seat at push time** — invariant holds by construction, corpus untouched structurally, treant unblocked toward the `initial::preflight` wall; coalesce-widening (a) just re-dies as `MergeGateRegression` on the same 3-vs-2, and "two seats are real" (c) is contradicted by the data model, the other 197 merged groups, and this very pair's own history.]** **[FU-31 FIXED 2026-08-08 (**[`#fu31-fixed-2026-08-08`](#fu31-fixed-2026-08-08)**).** Option (b) landed at `55b4d99`: `dispose_demands` aggregates same-position uncovered demands into one seat at push time, keyed on position bits normalized to `same_point`'s `==` equality; mutation-proven fixture reproduces the exact `DuplicatePhysicalSeat` with the aggregation disabled. Treant acceptance (attempt 1 of 2): specialized passes with **553** contacts (was 554 with the un-merged pair) and the run advances to `Preparation: Initial(Limit { resource: "work items", required: 237305572, limit: 4000000 })` — the FU-8g wall, now measured in-engine at 553 × (4 + 429,120). FU-8g's H0 treant leg captured in the same run: crossings mean **10.906** (p50 7, max 298), tests mean **191.982**, honest work Σcrossings **6,031** vs charged 237,303,360 (**39,347×**), honest scratch **142 MiB** vs charged 603 GiB. All seven frozen corpus digests byte-identical; one unit-fixture re-pin (raking blade, raw orientation, four real two-owner births now born aggregated), attributed in full in the section. FU-8g H1–H6 are unblocked.]** |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
