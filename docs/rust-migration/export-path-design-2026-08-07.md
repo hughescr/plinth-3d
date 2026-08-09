@@ -693,3 +693,54 @@ artifact is still provably the same support the census measured — it is *both*
 moved, together, and the equality still holds. The Sphere's `routed_contacts` / live members
 (7 / 15) and every other observable are unchanged. The authority table and the full attribution
 are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.
+
+## The treant exclusion's reason, corrected — and the hollow-error fallback, 2026-08-09 — dated addendum
+
+**Nothing above is rewritten, retracted or amended.** Two sentences in this document have stopped
+being true, and this addendum records what replaced them. The full checkpoint record is
+`CURRENT-STATUS.md` [`#checkpoint-treant-artifact-2026-08-09`](CURRENT-STATUS.md#checkpoint-treant-artifact-2026-08-09).
+
+**1. "Except the Weeping Treant (its support tournament cannot yet complete)."** Written in the
+2026-08-07 corpus-sweep addendum, correct on its date, and **dead**: FU-32 phase J6 sealed the
+treant twice at 429,120 faces with identical counters. The J6 addendum above already flagged this
+sentence; what it could not yet say is what the treant then did when actually run through
+`first_artifact_chain`. **It refuses at the hollow stage** — `plinth_hollow::run` errors with
+`InvalidShellTopology` at 22.3 s, never reaching `run_support` at all, so the seal J6 measured was
+never in question and never the blocker. That refusal is filed as **FU-34** (the number FU-33 was
+already taken by `rewire::optimize`). `examples/first_artifact.rs` keeps the treant out of `--all`
+and **the stated reason on `CORPUS_MODELS` is now the true one**: it is not a frozen-digest model,
+and it costs minutes where the other seven cost seconds. It is reachable by name.
+
+**2. "Two refuse at the hollow stage, before support planning is ever reached — reported below
+rather than worked around", and the Refusal finding that follows it.** Still true as a description
+of `Cylinder` and `make_box`'s geometry, and **no longer true as a description of what the export
+path does about it.** `first_artifact_chain::run_from_oriented` now carries OQ-1's own
+recommendation, built at last: on a hollow-stage `Err` it falls back to the pre-cloned oriented
+solid through the same `HollowedModel::solid_decision(BelowThreshold)` handoff the support-refusal
+path, `embed_incidence_census` and every sealed-run gate already use, and records the typed refusal
+verbatim in `SupportedGeometry::HollowStageRefused`. **The provenance caveat is inherited knowingly
+and is documented at the variant:** `SolidDecisionReason` has only `NoCavity` and `BelowThreshold`,
+neither of which means "the hollow stage errored", so the `HollowedModel` carries a stamp no stage
+reached and the `SupportedGeometry` variant is where the truth lives.
+
+**Consequence for this document's own sweep, measured rather than predicted.** `--all` at the
+fallback's tip is **7 of 7, exit code 0**, where this document recorded 5 of 7. `Cylinder`
+(1,613,616 bytes) and `make_box` (343,392 bytes) now reach written, re-parsed,
+format-gate-passed artifacts by the same standard as the other five. **This was not the goal of the
+change and is a side effect of putting the fallback where it belongs** — in the shared composition
+rather than behind a model-name special case — and it is reported here rather than left for someone
+to discover.
+
+**The change is inert for every model that does not take the new path, and that was proved, not
+argued.** Control experiment in one worktree at one tip, same target directory, the diff stashed
+and restored as the only variable: the five models that already emitted produce **byte-identical
+sha256 with and without the change** — Sphere `d59044b8…`, `make_overhang_table` `9aea3648…`,
+`make_toed_slab` `12ebdcde…`, `make_raking_blade` `9acfa270…`, `make_thin_fin` `b7337798…`.
+
+**A correction this control forced, and it is not about the fallback.** The per-model stats table
+above is **stale at `063115f`** for three of its five rows: Sphere is now 899,664 bytes
+(`d59044b8…`, and `DrilledShellSealed` rather than the solid path), `make_toed_slab` 2,110,344 and
+`make_raking_blade` 904,848. Those movements are **FU-32 J1–J5's**, already attributed at
+[`#fu32-j4-2026-08-09`](CURRENT-STATUS.md#fu32-j4-2026-08-09), and are recorded here only so the
+table above is not read as current. **`make_overhang_table` and `make_thin_fin` are unmoved**, and
+the checked-in `exports/` copies in the main checkout still carry the 2026-08-07 bytes.
