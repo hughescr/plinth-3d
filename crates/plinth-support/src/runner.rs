@@ -2763,7 +2763,16 @@ impl SupportRunContext<'_> {
                 .transcript
                 .initial_post_quarantine_forest_digest()
                 != state.routed.initial.post_quarantine_forest_digest()
-            || state.routed.transcript.final_controller_digest() != state.routed.controller.digest()
+            // FU-32 J2 (§D2.2/F6) -- REAL tripwire: recompute-from-state and
+            // compare.  `sealed_digest_matches_rebuilt` rebuilds both digest
+            // accumulators from scratch (never the cached fields) and also
+            // cross-checks the cached pair, so a controller mutated after
+            // seal AND a controller whose incremental accumulators drifted
+            // both fail here.
+            || !state
+                .routed
+                .controller
+                .sealed_digest_matches_rebuilt(state.routed.transcript.final_controller_digest())
         {
             return Err(SupportBraceError::TranscriptDigestMismatch);
         }
@@ -2832,7 +2841,11 @@ impl SupportRunContext<'_> {
             || state.transcript.initial_post_quarantine_forest_digest()
                 != state.initial.post_quarantine_forest_digest()
             || state.transcript.final_forest_digest() != state.initial.forest().digest()
-            || state.transcript.final_controller_digest() != state.controller.digest()
+            // FU-32 J2 (§D2.2/F6) -- REAL tripwire: recompute-from-state and
+            // compare, exactly as at the brace boundary above.
+            || !state
+                .controller
+                .sealed_digest_matches_rebuilt(state.transcript.final_controller_digest())
         {
             return Err(SupportRewireError::TranscriptDigestMismatch);
         }

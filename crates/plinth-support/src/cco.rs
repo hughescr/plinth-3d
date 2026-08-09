@@ -1406,7 +1406,6 @@ struct FinalizedAnchorValidationContext<'a, 'surface> {
     geometry_fingerprint: GeometryFingerprint,
 }
 
-#[derive(Default)]
 /// The only integration seam retained for the pending support runner.
 pub(crate) struct CcoController {
     hosts: HostCache,
@@ -1425,6 +1424,42 @@ pub(crate) struct CcoController {
     /// rows. Read once by the runner and folded into the run's contact
     /// attestation chain alongside the stub-stage head.
     contact_attestation_digest: u64,
+    /// FU-32 J2 (§D2.1) — commutative accumulator of per-record hashes:
+    /// `wrapping_add` of [`terminal_record_hash`] over every finished record,
+    /// maintained in O(1) per record at [`Self::finish_terminal`], the sole
+    /// record-insertion site.  [`Self::digest`] folds this value instead of
+    /// re-walking every record's refusal lists per call (the Θ(N·R) term that
+    /// was ~99.7 % of the treant's routing stage).
+    ///
+    /// See [`Self::digest`] for why this is an order-free accumulator and not
+    /// a chain, and [`Self::rebuild_accumulators`] for the from-scratch path
+    /// the F6 stage-boundary tripwires use.
+    records_acc: u64,
+    /// FU-32 J2 (§D2.1) — FNV-1a over the host kd-tree cache
+    /// ([`host_cache_digest`]), refreshed only in [`Self::finish_terminal`]'s
+    /// `KDTREE_REBUILD_EVERY` branch — the only place hosts change
+    /// ([`HostCache::rebuild`]'s only caller).
+    hosts_acc: u64,
+}
+
+impl Default for CcoController {
+    fn default() -> Self {
+        let hosts = HostCache::default();
+        // The cached hosts accumulator must start equal to the from-scratch
+        // hash of the empty cache, not to zero, so `rebuild_accumulators`
+        // agrees with the cached pair from the very first `digest()` call.
+        let hosts_acc = host_cache_digest(&hosts);
+        Self {
+            hosts,
+            inserted: 0,
+            terminals: BTreeMap::new(),
+            terminal_cadence: Vec::new(),
+            sealed: false,
+            contact_attestation_digest: 0,
+            records_acc: 0,
+            hosts_acc,
+        }
+    }
 }
 
 impl CcoController {
@@ -1530,7 +1565,12 @@ impl CcoController {
         // Only after every final-state and authority check succeeds does the
         // controller become unable to route another terminal.
         self.sealed = true;
-        let final_controller_digest = self.digest();
+        // FU-32 J2 (§D2.2) -- the seal is one of the three genuine-recompute
+        // sites: both accumulators are rebuilt from scratch here, never read
+        // from the cached fields, so the sealed value is a pure function of
+        // the controller's actual state at seal time.
+        let (records_acc, hosts_acc) = self.rebuild_accumulators();
+        let final_controller_digest = self.digest_with_accumulators(records_acc, hosts_acc);
         let mut transcript = FinalizedCcoTranscript {
             plan_digest,
             finalized_load_digest: loads.digest(),
@@ -1982,6 +2022,14 @@ impl CcoController {
     }
 
     fn finish_terminal(&mut self, forest: &Forest, terminal: u32, record: TerminalCadenceRecord) {
+        // FU-32 J2 (§D2.1) -- fold this record's own hash into the
+        // commutative accumulator EXACTLY ONCE, at the sole record-insertion
+        // site, before the map takes ownership.  The record's refusal lists
+        // are hashed here, once, and never re-walked by `digest()`.
+        let cadence_index = self.terminal_cadence.len();
+        self.records_acc =
+            self.records_acc
+                .wrapping_add(terminal_record_hash(cadence_index, terminal, &record));
         let previous = self.terminals.insert(terminal, record);
         assert!(previous.is_none(), "terminal cadence was preflighted");
         self.terminal_cadence.push(terminal);
@@ -1990,12 +2038,145 @@ impl CcoController {
         assert_eq!(self.inserted, self.terminal_cadence.len());
         if self.inserted.is_multiple_of(KDTREE_REBUILD_EVERY) {
             self.hosts.rebuild(forest);
+            // J2 -- hosts change only on this branch (`HostCache::rebuild`
+            // has no other caller), so the hosts accumulator refreshes only
+            // on this branch.  Skipping this refresh is mutation (b) of the
+            // J2 triad and is pinned by
+            // `fu32_mutation_b_stale_hosts_accumulator_at_rebuild_boundary_fails_equivalence`.
+            self.hosts_acc = host_cache_digest(&self.hosts);
         }
     }
 
     /// Stable evidence for terminal dispositions and the exact host-cache
     /// scheduling state they produced.
+    ///
+    /// FU-32 J2 (§D2.1) — **state-pure incremental**.  The two expensive
+    /// segments of the pre-J2 whole-state walk (every record's refusal lists,
+    /// the whole host kd-tree) enter this stream through accumulators that
+    /// are maintained in O(delta) where state changes and are rebuildable in
+    /// O(state) by [`Self::rebuild_accumulators`]:
+    ///
+    /// - `records_acc` — a **commutative** (`wrapping_add`) combination of
+    ///   [`terminal_record_hash`] values, folded once per record at
+    ///   [`Self::finish_terminal`].  Commutativity is what makes the
+    ///   `BTreeMap` iteration order irrelevant — F5 proved a hash CHAIN is
+    ///   impossible twice over (FNV-1a has no composition law, and the
+    ///   `(k,k,k)` header plus mid-stream `BTreeMap` splices invalidate any
+    ///   retained fold at every step), while an order-free accumulator
+    ///   composes.  Order is still bound twice: by the `cadence_index` inside
+    ///   every record hash, and by the `terminal_cadence` vector, which stays
+    ///   hashed in full below.
+    /// - `hosts_acc` — [`host_cache_digest`] over the host kd-tree cache,
+    ///   refreshed only in the `KDTREE_REBUILD_EVERY` branch, the only place
+    ///   hosts change.
+    ///
+    /// The house precedent for O(1) maintenance at the arrival site under a
+    /// justifying doc comment is [`Self::extend_contact_attestation`] just
+    /// above: the F3 attestation head already folds per-terminal evidence in
+    /// O(1) instead of re-walking history.  The difference here — an
+    /// accumulator rather than a chain — is forced by F6: `digest()` must
+    /// stay a **pure function of controller state** so the stage-boundary
+    /// tripwires (`runner.rs` brace/rewire preflights) can genuinely
+    /// recompute it, and by F5's proof that no chain can splice into this
+    /// stream.
+    ///
+    /// **This restructure moves the digest's VALUE** — and with it, per F4,
+    /// all seven frozen OD-8 snapshot digests.  That movement is licensed
+    /// only under §D2.4's stop-and-report protocol: J2 lands with the digests
+    /// moved and NOTHING re-pinned; the owner rules on the from→to table in
+    /// J4.  The pre-J2 walk is retained verbatim as the `#[cfg(test)]` oracle
+    /// ([`Self::digest_full_walk_oracle`], the G3/G6 retention idiom).
     pub(crate) fn digest(&self) -> u64 {
+        self.digest_with_accumulators(self.records_acc, self.hosts_acc)
+    }
+
+    /// The §D2.1 word stream:
+    /// `FNV(inserted, |terminals|, |cadence|, cadence…, sealed, records_acc, hosts_acc)`
+    /// — Θ(k) cheap words per call (≈1.2 MB over a whole treant run, F5),
+    /// against the Θ(N·R) ≈ 777 GB the pre-J2 walk cost.
+    fn digest_with_accumulators(&self, records_acc: u64, hosts_acc: u64) -> u64 {
+        let mut fnv = FnvWords::new();
+        fnv.word(self.inserted as u64);
+        fnv.word(self.terminals.len() as u64);
+        fnv.word(self.terminal_cadence.len() as u64);
+        for terminal in &self.terminal_cadence {
+            fnv.word(u64::from(*terminal));
+        }
+        fnv.word(u64::from(self.sealed));
+        fnv.word(records_acc);
+        fnv.word(hosts_acc);
+        fnv.finish()
+    }
+
+    /// FU-32 J2 (§D2.2) — the genuine recompute-from-state path: both
+    /// accumulators rebuilt from scratch, never read from the cached fields.
+    ///
+    /// O(state) by design, and called from exactly the three sites that need
+    /// a real recompute — [`Self::finalize_transcript`]'s seal and the two
+    /// stage-boundary tripwires ([`Self::sealed_digest_matches_rebuilt`],
+    /// called by the brace and rewire preflights in `runner.rs`) — versus the
+    /// N per-cadence-entry calls that ride the cached pair.  This is the G3
+    /// severance between *charged* and *executed*: incremental where the
+    /// digest is consumed as evidence, exhaustive where it is consumed as a
+    /// check.
+    ///
+    /// A cadence entry with no matching record folds nothing; the resulting
+    /// accumulator then disagrees with any honestly sealed value (and the
+    /// `(inserted, |terminals|, |cadence|)` header words diverge besides), so
+    /// a tampered map still fails the comparison rather than panicking a
+    /// tripwire.
+    pub(crate) fn rebuild_accumulators(&self) -> (u64, u64) {
+        let mut records_acc = 0_u64;
+        for (cadence_index, &terminal) in self.terminal_cadence.iter().enumerate() {
+            if let Some(record) = self.terminals.get(&terminal) {
+                records_acc =
+                    records_acc.wrapping_add(terminal_record_hash(cadence_index, terminal, record));
+            }
+        }
+        (records_acc, host_cache_digest(&self.hosts))
+    }
+
+    /// F6/§D2.2 — the stage-boundary tripwire arm: recompute-and-compare
+    /// against the sealed controller digest.
+    ///
+    /// This never trusts the cached accumulators.  Both are genuinely rebuilt
+    /// from state by [`Self::rebuild_accumulators`], and the rebuilt pair is
+    /// *additionally* compared against the cached pair, so the tripwire
+    /// catches BOTH failure modes:
+    ///
+    /// 1. a controller whose **state** was mutated after seal — the rebuilt
+    ///    digest moves off the sealed value (the pre-J2 tripwire's teeth,
+    ///    kept whole);
+    /// 2. a controller whose **cached accumulators** drifted from its state —
+    ///    the incremental maintenance itself corrupted.  A pure rebuild
+    ///    cannot see this case (state still matches the seal), and the cached
+    ///    `digest()` alone cannot see case 1; comparing both arms is what
+    ///    keeps a cache-corruption bug from silently signing every
+    ///    per-terminal `controller_digest_before` with a wrong value while
+    ///    the sealed comparison passes.
+    ///
+    /// Pinned by
+    /// `fu32_a_corrupted_accumulator_is_caught_at_the_stage_boundary_tripwire`.
+    pub(crate) fn sealed_digest_matches_rebuilt(&self, sealed: u64) -> bool {
+        let (records_acc, hosts_acc) = self.rebuild_accumulators();
+        self.digest_with_accumulators(records_acc, hosts_acc) == sealed
+            && (records_acc, hosts_acc) == (self.records_acc, self.hosts_acc)
+    }
+
+    /// The pre-J2 whole-state walk, retained VERBATIM as the test oracle —
+    /// the FU-8c G3/G6 retention idiom (`first_safe_proposal`,
+    /// `reference_contacts_x_rows_scan`).  Deliberately self-contained (its
+    /// own inline FNV fold, its own record match) so a defect in the shared
+    /// helpers cannot fool it.
+    ///
+    /// Post-J2 its VALUE necessarily differs from [`Self::digest`] — F5
+    /// proved no value-preserving restructure of this stream exists — so
+    /// tests compare it for the *partition* it induces on states (two states
+    /// the old walk distinguished must stay distinguished by the new digest,
+    /// and trajectories the old walk called identical must stay identical),
+    /// not for equality with the new stream.
+    #[cfg(test)]
+    fn digest_full_walk_oracle(&self) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut word = |value: u64| {
             for byte in value.to_le_bytes() {
@@ -2085,6 +2266,142 @@ impl CcoController {
         }
         hash
     }
+}
+
+/// FNV-1a (`h ← (h ⊕ b) · p`) over little-endian `u64` words — the exact
+/// fold `CcoController::digest` has always used (F5), factored so the
+/// per-record hashes, the hosts accumulator and the digest stream itself are
+/// provably one algorithm.
+struct FnvWords(u64);
+
+impl FnvWords {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    const fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn word(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    const fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// FU-32 J2 (§D2.1) — the per-record hash folded into `records_acc`: a fresh
+/// FNV-1a over `cadence_index ‖ terminal_id ‖ record words`, computed ONCE,
+/// at `finish_terminal`, over that record's own refusal lists only.
+///
+/// `cadence_index` is bound INSIDE each record hash so the commutative fold
+/// cannot equate two trajectories that inserted the same records at swapped
+/// positions — mutation (c) of the J2 triad, pinned by
+/// `fu32_mutation_c_dropping_cadence_index_makes_swapped_records_collide`.
+/// The record words after the header are emitted by the same
+/// `digest_terminal_record` walk on both the incremental and the rebuild
+/// paths.
+fn terminal_record_hash(
+    cadence_index: usize,
+    terminal: u32,
+    record: &TerminalCadenceRecord,
+) -> u64 {
+    let mut fnv = FnvWords::new();
+    fnv.word(cadence_index as u64);
+    fnv.word(u64::from(terminal));
+    let mut word = |value: u64| fnv.word(value);
+    digest_terminal_record(&mut word, record);
+    fnv.finish()
+}
+
+/// One terminal record's disposition words — word-identical to the segment
+/// the pre-J2 whole-state walk emitted for the same record (retained verbatim
+/// as `digest_full_walk_oracle`).
+fn digest_terminal_record(word: &mut impl FnMut(u64), record: &TerminalCadenceRecord) {
+    match &record.disposition {
+        TerminalDisposition::Routed { route, winner } => {
+            word(0);
+            digest_route_evidence(word, route);
+            word(candidate_family_digest(winner.family));
+            word(winner.generation_index as u64);
+            word(winner.price_ml.to_bits());
+            word(winner.clearance_rows as u64);
+        }
+        TerminalDisposition::SkippedQuarantined {
+            terminal_id,
+            original_key,
+            forest_digest,
+            controller_digest_before,
+        } => {
+            word(1);
+            word(u64::from(*terminal_id));
+            word(u64::from(original_key.slot()));
+            word(u64::from(original_key.generation()));
+            word(*forest_digest);
+            word(*controller_digest_before);
+        }
+        TerminalDisposition::UnroutedNoWinner { route, reason } => {
+            word(2);
+            digest_route_evidence(word, route);
+            match reason {
+                NoWinnerEvidence::NoCandidatesGenerated {
+                    anchor_seat_refusals,
+                } => {
+                    word(0);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                }
+                NoWinnerEvidence::NoFeasibleCandidate {
+                    candidates_generated,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(1);
+                    word(*candidates_generated as u64);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
+                NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                    candidates_generated,
+                    candidates_feasible,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(2);
+                    word(*candidates_generated as u64);
+                    word(*candidates_feasible as u64);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
+            }
+        }
+    }
+}
+
+/// FU-32 J2 (§D2.1) — `hosts_acc`: a fresh FNV-1a over the host kd-tree
+/// cache, word-identical to the final segment of the pre-J2 walk.  Hosts
+/// change only in `finish_terminal`'s `KDTREE_REBUILD_EVERY` branch
+/// (`HostCache::rebuild` has no other caller), so that branch is the only
+/// place the cached value refreshes.
+fn host_cache_digest(hosts: &HostCache) -> u64 {
+    let mut fnv = FnvWords::new();
+    fnv.word(hosts.indexed_members.len() as u64);
+    for key in &hosts.indexed_members {
+        fnv.word(u64::from(key.slot()));
+        fnv.word(u64::from(key.generation()));
+    }
+    fnv.word(hosts.samples.len() as u64);
+    for (point, key) in &hosts.samples {
+        for coordinate in point {
+            fnv.word(coordinate.to_bits());
+        }
+        fnv.word(u64::from(key.slot()));
+        fnv.word(u64::from(key.generation()));
+    }
+    fnv.finish()
 }
 
 fn digest_route_evidence(word: &mut impl FnMut(u64), route: &TerminalRouteEvidence) {
@@ -5611,6 +5928,345 @@ mod tests {
         }
         assert!(!processed.hosts.samples.is_empty());
         assert_eq!(processed.hosts.samples.len(), 3);
+    }
+
+    /// FU-32 J2 — scripted disposition covering every record shape the
+    /// digest walks: all three disposition variants and all three
+    /// `NoWinnerEvidence` variants, with non-empty seat-refusal lists (the
+    /// Θ(N·R) term the accumulator exists to collapse).
+    fn scripted_disposition(index: usize, entry: &TerminalLedgerEntry) -> TerminalCadenceRecord {
+        let seed = index as u64 + 1;
+        let refusals = |count: usize| -> Vec<AnchorSeatRefusal> {
+            (0..count)
+                .map(|row| AnchorSeatRefusal {
+                    sample_index: index * 100 + row,
+                    source_sample_face_id: (row as u32) * 7 + entry.contact,
+                    reason: match row % 3 {
+                        0 => crate::anchor::AnchorSeatRefusalReason::TooShort,
+                        1 => crate::anchor::AnchorSeatRefusalReason::NoFirstHit,
+                        _ => crate::anchor::AnchorSeatRefusalReason::NearerNonExteriorObstruction,
+                    },
+                    first_hit_t: (row % 2 == 0).then(|| Finite::new(0.25 + row as f64).unwrap()),
+                })
+                .collect()
+        };
+        let route = TerminalRouteEvidence {
+            physical_contact_id: u64::from(entry.contact),
+            terminal_id: entry.contact,
+            original_key: entry.original_key,
+            plan_digest: seed.wrapping_mul(3),
+            loads_digest: seed.wrapping_mul(5),
+            geometry_digest: seed.wrapping_mul(7),
+            forest_digest_before: seed.wrapping_mul(11),
+            controller_digest_before: seed.wrapping_mul(13),
+        };
+        let disposition = match index % 5 {
+            0 => TerminalDisposition::Routed {
+                route,
+                winner: CcoCandidateEvidence {
+                    family: CandidateFamily::PlateDescent,
+                    generation_index: index,
+                    price_ml: 0.5 + index as f64,
+                    clearance_rows: index * 3,
+                },
+            },
+            1 => TerminalDisposition::SkippedQuarantined {
+                terminal_id: entry.contact,
+                original_key: entry.original_key,
+                forest_digest: seed.wrapping_mul(17),
+                controller_digest_before: seed.wrapping_mul(19),
+            },
+            2 => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::NoCandidatesGenerated {
+                    anchor_seat_refusals: refusals(3 + index % 4),
+                },
+            },
+            3 => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::NoFeasibleCandidate {
+                    candidates_generated: index + 1,
+                    anchor_seat_refusals: refusals(2 + index % 3),
+                    anchor_refusals: Vec::new(),
+                },
+            },
+            _ => TerminalDisposition::UnroutedNoWinner {
+                route,
+                reason: NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                    candidates_generated: index + 2,
+                    candidates_feasible: index + 1,
+                    anchor_seat_refusals: refusals(1 + index % 5),
+                    anchor_refusals: Vec::new(),
+                },
+            },
+        };
+        TerminalCadenceRecord { disposition }
+    }
+
+    /// The J2 equivalence check, asserted after EVERY insertion: the cached
+    /// accumulator pair equals the from-scratch rebuild bit-for-bit, and the
+    /// incremental digest equals the digest over the rebuilt pair.
+    fn assert_incremental_equals_rebuilt(controller: &CcoController) {
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        assert_eq!(
+            (records_acc, hosts_acc),
+            (controller.records_acc, controller.hosts_acc),
+            "cached accumulators drifted from the from-scratch rebuild"
+        );
+        assert_eq!(
+            controller.digest(),
+            controller.digest_with_accumulators(records_acc, hosts_acc),
+            "incremental digest diverged from the full recompute"
+        );
+    }
+
+    #[test]
+    fn fu32_incremental_digest_equals_the_full_walk_after_n_terminals() {
+        // Arm 1 -- GROWN on real geometry, committed winner.
+        let (mut forest, request, surface) = growth_fixture();
+        let mut grown = CcoController::default();
+        assert_incremental_equals_rebuilt(&grown);
+        grown
+            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .unwrap();
+        assert_incremental_equals_rebuilt(&grown);
+
+        // Arm 1b -- GROWN on real geometry, no winner: the refusal-carrying
+        // evidence arm that dominates the treant (0 of 3429 model anchors
+        // survive corpus-wide).
+        let (mut forest, request, surface) = no_winner_fixture();
+        let mut unrouted = CcoController::default();
+        unrouted
+            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .unwrap();
+        assert_incremental_equals_rebuilt(&unrouted);
+
+        // Arm 2 -- SKIPPED-QUARANTINED via the production path, across the
+        // KDTREE_REBUILD_EVERY boundary so the hosts-accumulator refresh is
+        // exercised where hosts actually change.
+        let (forest, skipped, _) = quarantined_cadence_fixture(26, 0);
+        let mut quarantined = CcoController::default();
+        for entry in skipped {
+            quarantined
+                .advance_skipped_terminal(&forest, entry)
+                .unwrap();
+            assert_incremental_equals_rebuilt(&quarantined);
+        }
+
+        // Scripted mix -- every disposition variant, every NoWinnerEvidence
+        // variant, refusal lists attached, 30 records crossing the rebuild
+        // boundary; checked after EVERY insertion, on two identical
+        // trajectories that must agree step by step (oracle and new digest
+        // alike).
+        let (forest, skipped, _) = quarantined_cadence_fixture(30, 100);
+        let mut first = CcoController::default();
+        let mut second = CcoController::default();
+        let mut oracle_values = vec![first.digest_full_walk_oracle()];
+        let mut new_values = vec![first.digest()];
+        for (index, entry) in skipped.iter().enumerate() {
+            let record = scripted_disposition(index, entry);
+            first.finish_terminal(&forest, entry.contact, record.clone());
+            second.finish_terminal(&forest, entry.contact, record);
+            assert_incremental_equals_rebuilt(&first);
+            assert_eq!(first.digest(), second.digest());
+            assert_eq!(
+                first.digest_full_walk_oracle(),
+                second.digest_full_walk_oracle()
+            );
+            oracle_values.push(first.digest_full_walk_oracle());
+            new_values.push(first.digest());
+        }
+        // The retained pre-J2 walk is the PARTITION oracle -- its values
+        // necessarily moved (F5 proved no value-preserving restructure
+        // exists), so what it certifies is discrimination: every state the
+        // old walk distinguished along this trajectory, the restructured
+        // digest must distinguish too.
+        for i in 0..oracle_values.len() {
+            for j in (i + 1)..oracle_values.len() {
+                assert_ne!(
+                    oracle_values[i], oracle_values[j],
+                    "oracle collision at ({i},{j})"
+                );
+                assert_ne!(
+                    new_values[i], new_values[j],
+                    "state distinguished by the retained walk collided under the incremental digest at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    /// FU-32 J2 (F6/§D2.2) — the stage-boundary tripwires
+    /// (`validate_brace_preflight` / `validate_rewire_preflight` in
+    /// `runner.rs`) compare the sealed controller digest through
+    /// [`CcoController::sealed_digest_matches_rebuilt`].  This pins both of
+    /// that method's teeth: a corrupted ACCUMULATOR is caught (the rebuilt
+    /// pair is cross-checked against the cached pair), and a mutated STATE is
+    /// caught by genuine recompute even when the cached digest still matches
+    /// the seal — the trust-the-cache failure mode F6 forbids.
+    #[test]
+    fn fu32_a_corrupted_accumulator_is_caught_at_the_stage_boundary_tripwire() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(30, 200);
+        let mut controller = CcoController::default();
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        // `finalize_transcript` seals with the digest over the REBUILT pair
+        // (§D2.2); with a coherent cache that value equals `digest()`.
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        let sealed = controller.digest_with_accumulators(records_acc, hosts_acc);
+        assert_eq!(sealed, controller.digest());
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A corrupted records accumulator is CAUGHT at the tripwire.
+        let pristine = controller.records_acc;
+        controller.records_acc ^= 0x5eed_0bad_c0ff_ee00;
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a corrupted records accumulator must fail the tripwire"
+        );
+        controller.records_acc = pristine;
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A corrupted hosts accumulator is CAUGHT at the tripwire.
+        let pristine = controller.hosts_acc;
+        controller.hosts_acc = controller.hosts_acc.wrapping_add(1);
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a corrupted hosts accumulator must fail the tripwire"
+        );
+        controller.hosts_acc = pristine;
+        assert!(controller.sealed_digest_matches_rebuilt(sealed));
+
+        // A state mutation the cached digest CANNOT see (the record changes
+        // behind the accumulator's back) is still caught, because the
+        // tripwire genuinely recomputes from state.
+        let tampered = skipped[0].contact;
+        match &mut controller
+            .terminals
+            .get_mut(&tampered)
+            .expect("scripted terminal present")
+            .disposition
+        {
+            TerminalDisposition::Routed { winner, .. } => winner.price_ml += 1.0,
+            _ => unreachable!("scripted index 0 is Routed"),
+        }
+        assert_eq!(
+            controller.digest(),
+            sealed,
+            "the cached digest is blind to this tamper -- exactly why the tripwire must rebuild"
+        );
+        assert!(
+            !controller.sealed_digest_matches_rebuilt(sealed),
+            "a state mutation after seal must fail the genuine recompute"
+        );
+    }
+
+    /// J2 mutation triad (a): a record folded twice must fail the
+    /// equivalence harness.
+    #[test]
+    fn fu32_mutation_a_double_folded_record_fails_equivalence() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(8, 300);
+        let mut controller = CcoController::default();
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        let honest = controller.digest();
+        assert_incremental_equals_rebuilt(&controller);
+
+        // Simulate the mutant: the first record's hash folded a second time.
+        let doubled = terminal_record_hash(
+            0,
+            skipped[0].contact,
+            controller
+                .terminals
+                .get(&skipped[0].contact)
+                .expect("first scripted record present"),
+        );
+        controller.records_acc = controller.records_acc.wrapping_add(doubled);
+        assert_ne!(controller.digest(), honest);
+        let (records_acc, hosts_acc) = controller.rebuild_accumulators();
+        assert_ne!(
+            (records_acc, hosts_acc),
+            (controller.records_acc, controller.hosts_acc),
+            "the equivalence harness must catch a double fold"
+        );
+        assert_ne!(
+            controller.digest(),
+            controller.digest_with_accumulators(records_acc, hosts_acc)
+        );
+    }
+
+    /// J2 mutation triad (b): skipping the hosts-accumulator refresh at a
+    /// KDTREE_REBUILD_EVERY boundary must fail the equivalence harness.
+    #[test]
+    fn fu32_mutation_b_stale_hosts_accumulator_at_rebuild_boundary_fails_equivalence() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(25, 400);
+        let mut controller = CcoController::default();
+        // Hosts change only at insertion 25, so the pre-trajectory value IS
+        // the stale value the (b) mutant would have kept.
+        let stale_hosts_acc = controller.hosts_acc;
+        for (index, entry) in skipped.iter().enumerate() {
+            controller.finish_terminal(&forest, entry.contact, scripted_disposition(index, entry));
+        }
+        // The fixture forest has a live trunk, so the rebuild at 25 made the
+        // cache non-empty and the refresh moved the accumulator.
+        assert_ne!(controller.hosts_acc, stale_hosts_acc);
+        assert_eq!(controller.rebuild_accumulators().1, controller.hosts_acc);
+        assert_ne!(
+            controller.digest_with_accumulators(controller.records_acc, stale_hosts_acc),
+            controller.digest(),
+            "the equivalence harness must catch a skipped hosts refresh"
+        );
+    }
+
+    /// J2 mutation triad (c): with `cadence_index` dropped from the
+    /// per-record hash, two identical-content records inserted at swapped
+    /// positions collide under the commutative fold; with it bound, the two
+    /// orders stay distinct.
+    #[test]
+    fn fu32_mutation_c_dropping_cadence_index_makes_swapped_records_collide() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(2, 500);
+        let t1 = skipped[0].contact;
+        let t2 = skipped[1].contact;
+        // IDENTICAL record content for both terminals -- only the outer
+        // terminal id and the cadence position differ.
+        let record = TerminalCadenceRecord {
+            disposition: TerminalDisposition::SkippedQuarantined {
+                terminal_id: 9,
+                original_key: skipped[0].original_key,
+                forest_digest: 1234,
+                controller_digest_before: 5678,
+            },
+        };
+        let mut forward = CcoController::default();
+        forward.finish_terminal(&forest, t1, record.clone());
+        forward.finish_terminal(&forest, t2, record.clone());
+        let mut backward = CcoController::default();
+        backward.finish_terminal(&forest, t2, record.clone());
+        backward.finish_terminal(&forest, t1, record.clone());
+
+        // Computed exactly as the (c) mutant would -- no cadence_index in the
+        // per-record hash -- the two trajectories' accumulators are one and
+        // the same sum, i.e. the swap is invisible.
+        let no_index_hash = |terminal: u32| {
+            let mut fnv = FnvWords::new();
+            fnv.word(u64::from(terminal));
+            let mut word = |value: u64| fnv.word(value);
+            digest_terminal_record(&mut word, &record);
+            fnv.finish()
+        };
+        assert_eq!(
+            no_index_hash(t1).wrapping_add(no_index_hash(t2)),
+            no_index_hash(t2).wrapping_add(no_index_hash(t1)),
+            "the index-free mutant cannot tell the two orders apart"
+        );
+        // With cadence_index bound inside every record hash, the swap moves
+        // the accumulator (and the digest), so the harness catches the mutant.
+        assert_ne!(
+            forward.records_acc, backward.records_acc,
+            "cadence_index must bind insertion order into the accumulator"
+        );
+        assert_ne!(forward.digest(), backward.digest());
     }
 
     #[test]
