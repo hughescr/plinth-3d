@@ -68,7 +68,7 @@ mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
 // (brace/cco/rewire) are gated on the open owner decisions recorded in
-// `docs/rust-migration/CURRENT-STATUS.md`, so the allow is scoped and temporary.
+// `docs/engineering-journal/CURRENT-STATUS.md`, so the allow is scoped and temporary.
 #[allow(
     dead_code,
     reason = "crate-private designed embed masks await the gated verifier wiring in brace/cco/rewire"

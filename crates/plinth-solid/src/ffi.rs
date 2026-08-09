@@ -1,4 +1,8 @@
-#[allow(dead_code)]
+// The only dead-in-production items in the bridge are the two export-mesh call
+// counters, which exist for the `#[cfg(test)]` re-export below; narrow the
+// blanket allow to non-test builds so a genuinely unused bridge item still
+// warns under the test-target gates.
+#[cfg_attr(not(test), allow(dead_code))]
 #[cxx::bridge(namespace = "plinth::solid")]
 mod bridge {
     struct FfiMesh {

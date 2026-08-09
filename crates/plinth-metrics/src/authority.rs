@@ -20,7 +20,7 @@ use crate::{
     ComparisonError, ComparisonMilestone, ComparisonPolicy, ComparisonReport, ScoredArtifact,
 };
 
-const GATE_DOCUMENT_RELATIVE: &str = "docs/rust-migration/06-conventions.md";
+const GATE_DOCUMENT_RELATIVE: &str = "docs/engineering-journal/06-conventions.md";
 const MAIN_START: &str = "<!-- PLINTH_GATE_MAIN_START -->";
 const MAIN_END: &str = "<!-- PLINTH_GATE_MAIN_END -->";
 const CORRECTION_START: &str = "<!-- PLINTH_GATE_CORRECTIONS_START -->";
@@ -944,7 +944,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("plinth-authority-{label}-{nonce}"));
-        fs::create_dir_all(root.join("docs/rust-migration")).unwrap();
+        fs::create_dir_all(root.join("docs/engineering-journal")).unwrap();
         root
     }
 

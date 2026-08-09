@@ -4,8 +4,9 @@
 //! # Why this exists
 //!
 //! The owner's standing rule, recorded in
-//! `docs/decisions/2026-07-28-rust-rewrite.md`, is that the decision core is
-//! restarted in Rust and **no new Python is written here**. That rule is a
+//! `docs/engineering-journal/decisions/2026-07-28-rust-rewrite.md`, is that
+//! the decision core is restarted in Rust and **no new Python is written
+//! here**. That rule is a
 //! training-data guardrail as much as a performance one: Python-shaped
 //! instincts (scalar loops, per-item calls in hot paths) leak into whatever
 //! language is next, and the cheapest way to stop the leak is to remove the
@@ -155,7 +156,7 @@ fn the_repository_contains_no_python_and_no_python_bindings() {
         "Cargo.toml",
         "Cargo.lock",
         "README.md",
-        "docs/decisions/2026-07-28-rust-rewrite.md",
+        "docs/engineering-journal/decisions/2026-07-28-rust-rewrite.md",
         "rust/chitubox_io/src/lib.rs",
         "scripts/tests/fixtures/chitubox/two-supports.chitubox",
     ] {
@@ -206,7 +207,7 @@ fn the_repository_contains_no_python_and_no_python_bindings() {
     assert!(
         python.is_empty(),
         "Python has reappeared in the repository ({} file(s)).\n\
-         The owner's standing rule (docs/decisions/2026-07-28-rust-rewrite.md) \
+         The owner's standing rule (docs/engineering-journal/decisions/2026-07-28-rust-rewrite.md) \
          is that no new Python is written here, and the last of it was deleted \
          on 2026-08-08. Write it in Rust; if you need a scratch tool, write a \
          Rust example or an integration test rather than a script.\n\

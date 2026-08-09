@@ -4,7 +4,7 @@
 //! when algebraically neutral — these outputs feed bit-parity pins.
 
 use crate::consts::{CLOSEST_DENOM_REG, SEGSEG_EPS};
-use crate::vec3::{add, cross, dot, scale, sub, V3};
+use crate::vec3::{add, dot, scale, sub, V3};
 
 /// Closest point on triangle (Ericson), geometry_exact.py:81-107.
 ///
@@ -111,13 +111,4 @@ pub fn segseg(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3) {
     let c2 = add(p2, scale(d2, t));
     let dist = crate::vec3::dist(c1, c2);
     (dist, c1, c2)
-}
-
-// re-export cross for callers building normals if ever needed
-#[allow(unused_imports)]
-pub(crate) use crate::vec3::cross as _cross_reexport;
-#[inline]
-#[allow(dead_code)]
-pub fn tri_cross(e1: V3, e2: V3) -> V3 {
-    cross(e1, e2)
 }

@@ -726,11 +726,11 @@ fn named_authority_paths_exist_without_runtime_ledger_parsing() {
     for (subject, relative) in [
         (
             "placeholder numeric and grade authority",
-            "docs/rust-migration/03-physics-and-constants.md",
+            "docs/engineering-journal/03-physics-and-constants.md",
         ),
         (
             "performance trial domain definitions",
-            "docs/specs/SPEC-V5-PERF.md",
+            "docs/engineering-journal/specs/SPEC-V5-PERF.md",
         ),
     ] {
         let path = repository.join(relative);

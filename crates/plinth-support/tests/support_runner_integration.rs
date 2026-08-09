@@ -76,7 +76,7 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 ///
 /// Every unit of that delta is PR-8 `NotAttached` quarantining FOUR stubs whose
 /// model contact has no renderable interface
-/// (`docs/rust-migration/contact-physics-2026-08-04.md`, PR-8 / OD-4).
+/// (`docs/engineering-journal/contact-physics-2026-08-04.md`, PR-8 / OD-4).
 /// Measured against the run's 0.05 mm process resolution by the attestation
 /// witness (centreline false, 0 of 8 rim rays) and independently by a parity
 /// sweep along the contact normal at 0.0025 mm:
@@ -105,7 +105,7 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// 64/179 -> 64/170 and `make_raking_blade` 32/89 -> 27/72. Every unit of that
 /// delta is the removal of **24 phantom island births**, each traced to a named
 /// print layer by the census attribution
-/// (`docs/rust-migration/slicer-union-design-2026-08-07.md` sec 8.5 and its
+/// (`docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 8.5 and its
 /// 2026-08-08 addendum):
 ///
 /// - `make_raking_blade`: 20 births at layers 90..=109 — one per layer, the
@@ -141,7 +141,7 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// contact, membership, live member, coverage sample or island line differs).
 /// The owner ruled: "The fingerprints aren't sacred  if things change slightly
 /// that's to be expected (because the algorithm wasn't right when the
-/// fingerprints were generated!)". See `docs/rust-migration/CURRENT-STATUS.md`
+/// fingerprints were generated!)". See `docs/engineering-journal/CURRENT-STATUS.md`
 /// sections `#fu32-j3-2026-08-09` (the attribution) and `#fu32-j4-2026-08-09`
 /// (this re-pin).
 #[test]

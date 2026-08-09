@@ -71,7 +71,7 @@ fn scar_area_cap_policy_reuses_the_canonical_typed_registry_authority() {
         source.view(),
         EvidenceSourceView::OwnerDecision { id, record, locator, date }
             if id.as_str() == "print-floor-owner-decision-2026-07-24"
-                && record == "docs/specs/SPEC-EMBED-POLICY.md"
+                && record == "docs/engineering-journal/specs/SPEC-EMBED-POLICY.md"
                 && locator == "PRINT-FLOOR amendment and Normative constants"
                 && date == &EvidenceDate::exact(CalendarDate::new("2026-07-24").unwrap())
     ));

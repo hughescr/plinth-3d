@@ -1300,7 +1300,7 @@ impl SliceStitchSpace {
 /// Stitch, orient and normalize every layer of one kernel slice batch.
 ///
 /// FU-10 phase C: the cutover both stitch sites now go through. Design:
-/// `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 3.4 ("both
+/// `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3.4 ("both
 /// stitch sites consume normalized output") and phase table row C. The
 /// pipeline is exactly the three stages sec 3.4 prescribes -- stitch (the
 /// legacy undirected walk, semantics unchanged, inside
@@ -1481,7 +1481,7 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 
 /// FU-10 phase A -- consumer-side in-plane loop orientation.
 ///
-/// Design: `docs/rust-migration/slicer-union-design-2026-08-07.md` sec 3.3 and
+/// Design: `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3.3 and
 /// phase table row A. The frozen kernel slice stream carries no in-plane
 /// winding convention: segment endpoint order is an artifact of which triangle
 /// vertex is the odd one out (`geom_kernel::slicing`). For a face with outward
@@ -3145,7 +3145,7 @@ fn reference_contacts_x_rows_scan(
 
 /// Why the merge gate may reuse a load transpose across rounds, and the four
 /// guards that decide when it must not (FU-8f phase G6a, design record
-/// `docs/rust-migration/fu8f-g6-design-2026-08-07.md`, D-G6-1..D-G6-3).
+/// `docs/engineering-journal/fu8f-g6-design-2026-08-07.md`, D-G6-1..D-G6-3).
 ///
 /// # What is retained
 ///
@@ -8475,7 +8475,7 @@ mod tests {
     // ----------------------------------------------------------------------
     // FU-8f phase G6a — the retained load transpose's four guards.
     //
-    // Design record: `docs/rust-migration/fu8f-g6-design-2026-08-07.md`,
+    // Design record: `docs/engineering-journal/fu8f-g6-design-2026-08-07.md`,
     // D-G6-3.  Every guard below is **mutation-proven**: the doc comment on
     // each test names the exact deletion in `RetainedLoadTranspose` that the
     // test is required to catch, and the transcript of that proof is recorded

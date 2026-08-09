@@ -1,7 +1,7 @@
 # Calibration plate 6 — support-arm capacity: results record
 
 **This file is the record of record for plate 6.** It supersedes the interim
-record in [`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
+record in [`../03-physics-and-constants.md`](../03-physics-and-constants.md)
 §4, which was written first and which says so itself. Where the two differ,
 this file governs and the difference is flagged below (§9).
 
@@ -548,14 +548,14 @@ rebuilt (§8).
 7. **X = 22 / 25 / 28 triplets** to narrow the (19.91, 30.48) bracket.
 8. **Record the resin vendor and batch at print time.** "Black resin, ≈ 30 °C"
    is all that was captured for plate 6; the resin datasheets in
-   [`../datasheets/resins/`](../datasheets/resins/) cannot be matched to this
+   [`../../datasheets/resins/`](../../datasheets/resins/) cannot be matched to this
    plate without it.
 
 ---
 
 ## 9. Relationship to the migration guide
 
-[`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
+[`../03-physics-and-constants.md`](../03-physics-and-constants.md)
 §4 is the engine-facing reconciliation of this record, and it carries the
 **engine-facing resolution** of each constant — `X_STAR_CYLINDER`,
 `X_STAR_CONE`, `X_ALLOWED`, `LOAD_SHARING`, `n_eff_cap`, `N_eff`, the

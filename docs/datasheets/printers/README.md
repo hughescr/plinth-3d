@@ -15,5 +15,5 @@ The current vendor record is
 [`saturn-4-ultra-16k.md`](saturn-4-ultra-16k.md). Inline prose should cite the
 record rather than restating its printer values.
 
-See `../README.md` for how datasheets differ from specs and from run
-artifacts.
+See [`../README.md`](../README.md) for what belongs in a datasheet and what
+does not.

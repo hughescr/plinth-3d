@@ -296,7 +296,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 286] = [
 fn golden_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/rust-migration/constants.md")
+        .join("docs/engineering-journal/constants.md")
 }
 
 #[test]
