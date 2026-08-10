@@ -559,6 +559,17 @@ pub enum PipelineError {
     /// The prepared mesh has no finite Z extent, so no layer plan spans it.
     #[error("model {model} has no finite z extent to plan layers over")]
     DegenerateExtent { model: ModelId },
+    /// The prepared mesh's delicacy field could not be evaluated, so the
+    /// support stage has no measurement of which faces are delicate. There is
+    /// no substitute: an all-zeros field is not "no delicacy", it is the claim
+    /// that nothing on the model is delicate, and this stage does not make
+    /// claims it has not measured.
+    #[error("model {model} could not have its prepared-mesh delicacy field evaluated")]
+    Delicacy {
+        model: ModelId,
+        #[source]
+        source: plinth_mesh::DelicacyError,
+    },
     /// The layer plan support planning plans against could not be built.
     #[error("model {model} could not be given a layer plan for support planning")]
     LayerPlan {
@@ -648,7 +659,7 @@ impl PipelineError {
             | Self::DegenerateExtent { .. }
             | Self::Decimate { .. }
             | Self::Orient { .. } => PipelineExitCode::Input,
-            Self::LayerPlan { .. } => PipelineExitCode::Supports,
+            Self::Delicacy { .. } | Self::LayerPlan { .. } => PipelineExitCode::Supports,
             Self::Hollow { .. } => PipelineExitCode::Hollow,
             Self::Gates { .. } => PipelineExitCode::Gates,
             Self::Support { .. } | Self::SealedRun { .. } | Self::Lowering { .. } => {
@@ -1339,5 +1350,100 @@ mod tests {
             request.lift_mm.get(),
             *printer.lift_default_mm().diagnostic()
         );
+    }
+
+    /// The prepared mesh that reaches `seal_and_emit`, for one fixture.
+    fn prepared_mesh(mesh: Mesh) -> Mesh {
+        match hollow_stage(oriented(mesh), &hollow_request()).expect("hollow stage") {
+            HollowStageOutput::AwaitingInternalSupport(candidate) => {
+                candidate.hollowed().mesh().clone()
+            }
+            HollowStageOutput::Solid(model) => model.mesh().clone(),
+        }
+    }
+
+    /// The real delicacy field is not a zero field on production geometry.
+    ///
+    /// This is the defect the 2026-08-10 owner ruling closed, asserted as a
+    /// property rather than left to inspection: `prepare` fed
+    /// `vec![0.0; prepared_faces]` to the support stage, so
+    /// `strut_model_anchor_max_delicacy` could never be reached and the
+    /// delicate-face protection was structurally dead. A field that measured
+    /// zero everywhere would pass every other test in this workspace and
+    /// silently restore exactly that state.
+    #[test]
+    fn the_prepared_delicacy_field_measures_real_geometry() {
+        let fin = prepared_mesh(plinth_mesh::make_thin_fin().expect("procedural thin fin"));
+        let field = prepare::prepared_delicacy_field(&fin).expect("thin fin delicacy");
+        assert_eq!(field.face_values().len(), fin.tris().len());
+        assert_eq!(field.face_table().lod(), prepare::PREPARED_MESH_LOD);
+        let peak = field
+            .face_values()
+            .iter()
+            .map(|value| value.weight())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            peak > 0.0,
+            "the 0.6 mm thin fin measured no delicacy anywhere: the producer is a zero field again"
+        );
+    }
+
+    /// Why closing the zero-field defect moved no committed expectation.
+    ///
+    /// The recorded re-pin protocol wants an attribution, not a green suite.
+    /// This is the decision-neutrality half of it, mechanized: the support
+    /// stage's only delicacy-driven decision is
+    /// `strut_model_anchor_max_delicacy`, which rejects an anchor candidate
+    /// whose face is *more* delicate than the cap. Every model the committed
+    /// prepare fixtures seal stays under that cap on every face, so no anchor
+    /// candidate that was admissible under the old zero field is inadmissible
+    /// under the real one, and the artifacts those fixtures produce could not
+    /// move for this reason.
+    ///
+    /// This is a statement about these fixtures, not about all geometry. The
+    /// Weeping Treant carries 13.6 % of its faces above the cap and is
+    /// deliberately not claimed here — it is not one of the models these
+    /// fixtures seal.
+    #[test]
+    fn the_committed_prepare_fixtures_stay_under_the_anchor_delicacy_cap() {
+        let cap = m0_constants()
+            .expect("registered constants")
+            .placeholders()
+            .strut_model_anchor_max_delicacy()
+            .diagnostic()
+            .get();
+        assert_eq!(cap, 0.5);
+
+        let fixtures: [(&str, Mesh); 3] = [
+            (
+                "make_toed_slab.prepped.stl",
+                load_binary_stl(baseline("make_toed_slab.prepped.stl"), WeldPolicy::None)
+                    .expect("committed toed slab"),
+            ),
+            (
+                "Sphere.prepped.stl",
+                load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
+                    .expect("committed sphere"),
+            ),
+            (
+                "make_overhang_table (procedural)",
+                plinth_mesh::make_overhang_table().expect("procedural overhang table"),
+            ),
+        ];
+        for (name, mesh) in fixtures {
+            let prepared = prepared_mesh(mesh);
+            let field = prepare::prepared_delicacy_field(&prepared).expect("delicacy field");
+            let peak = field
+                .face_values()
+                .iter()
+                .map(|value| value.weight())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                peak <= cap,
+                "{name} peaks at delicacy {peak}, above the {cap} anchor cap: closing the \
+                 zero-field defect is no longer decision-neutral for it, and the artifacts it \
+                 produces need the recorded re-pin protocol rather than this assertion"
+            );
+        }
     }
 }
