@@ -19,7 +19,7 @@ pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
-use plinth_core::{m0_constants, Finite, M0ConstantsError, PrinterProfile};
+use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, PrinterProfile};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
     StrictMeshAuditError, TopologyError, TopologyValidationError, TriageAdmissionError,
@@ -34,10 +34,101 @@ use scirs2_ndimage::{distance_transform_edt, morphology3d::label3d};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Hollowing policy is selected from the printer profile and registered constants.
+/// Hollowing policy: the printer profile, plus the one hollowing value the
+/// operator selects per model.
+///
+/// Legacy exposed the shell wall as a command-line option with two values in
+/// use — `HOLLOW_WALL_DEFAULT_MM` (2.5 mm) for ordinary pieces and
+/// `HOLLOW_WALL_HANDLING_HEAVY_MM` (3.0 mm) for pieces that get handled. Both
+/// are registered `Placeholder`s carrying no measurement, so neither is an
+/// acceptance claim and nothing here classifies a model: the caller states the
+/// wall, and [`CavityEvidence::wall_thickness_mm`] records what was stated —
+/// in-process, on the returned model; no serialized artifact carries it yet
+/// (FU-37). [`HollowRequest::with_registered_wall_default`] is the ordinary
+/// construction.
+///
+/// The stated wall is not unbounded below: [`checked_wall_mm`] refuses anything
+/// finer than the frozen voxel pitch, because the lattice cannot produce it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HollowRequest {
     pub printer: PrinterProfile,
+    pub wall_mm: PositiveFinite,
+}
+
+impl HollowRequest {
+    /// The request for a piece taking the registered default wall.
+    pub fn with_registered_wall_default(printer: PrinterProfile) -> Result<Self, HollowError> {
+        Ok(Self {
+            printer,
+            wall_mm: registered_wall(WallSelection::Default).map_err(HollowError::Constants)?,
+        })
+    }
+
+    /// The request for a handling-heavy piece, at the registered heavier wall.
+    pub fn with_registered_handling_heavy_wall(
+        printer: PrinterProfile,
+    ) -> Result<Self, HollowError> {
+        Ok(Self {
+            printer,
+            wall_mm: registered_wall(WallSelection::HandlingHeavy)
+                .map_err(HollowError::Constants)?,
+        })
+    }
+}
+
+/// Which registered wall value a caller is asking for. There is deliberately no
+/// classifier that picks one: the two arms exist so a caller can name its
+/// choice, and any other wall is supplied directly as a `PositiveFinite`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallSelection {
+    Default,
+    HandlingHeavy,
+}
+
+/// Reads one of the two registered wall values. This is the one place either
+/// value is read, so the CLI's default and the stage's default cannot drift.
+pub fn registered_wall(
+    selection: WallSelection,
+) -> Result<PositiveFinite, &'static M0ConstantsError> {
+    let placeholders = m0_constants()?.placeholders();
+    Ok(match selection {
+        WallSelection::Default => *placeholders.hollow_wall_default_mm().diagnostic(),
+        WallSelection::HandlingHeavy => *placeholders.hollow_wall_handling_heavy_mm().diagnostic(),
+    })
+}
+
+/// The finest wall H0 can actually produce: the frozen `HOLLOW_PITCH_MM` voxel
+/// pitch the cavity is selected on.
+///
+/// Cavity eligibility is `edt > wall` over a lattice quantised at that pitch,
+/// so the smallest non-zero interior distance any voxel can carry is one pitch.
+/// Every wall strictly below the pitch therefore selects the *identical*
+/// cavity — 1e-9 mm and 0.4 mm produce byte-for-byte the same shell as 0.0 —
+/// while [`CavityEvidence::wall_thickness_mm`] would record the distinct number
+/// that was asked for. That is evidence asserting a wall that was never
+/// produced, so the value is refused instead ([`checked_wall_mm`]).
+pub fn minimum_representable_wall_mm() -> Result<PositiveFinite, &'static M0ConstantsError> {
+    Ok(*m0_constants()?
+        .placeholders()
+        .hollow_pitch_mm()
+        .diagnostic())
+}
+
+/// The one wall admissibility rule, shared by the stage and the CLI so they
+/// cannot come to two different answers.
+///
+/// A wall finer than [`minimum_representable_wall_mm`] is refused by name
+/// rather than quietly collapsed onto the lattice. A wall exactly at the pitch
+/// is the finest one this stage can honestly claim, and is accepted.
+pub fn checked_wall_mm(wall_mm: PositiveFinite) -> Result<PositiveFinite, HollowError> {
+    let voxel_pitch = minimum_representable_wall_mm().map_err(HollowError::Constants)?;
+    if wall_mm.get() < voxel_pitch.get() {
+        return Err(HollowError::WallBelowVoxelPitch {
+            wall_mm: wall_mm.get(),
+            voxel_pitch_mm: voxel_pitch.get(),
+        });
+    }
+    Ok(wall_mm)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,8 +438,9 @@ pub fn run(
             actual: request.printer.id().as_str().to_owned(),
         });
     }
+    let settings = HollowSettings::from_request(request)?;
     let (solid, orientation) = model.into_parts();
-    let candidate = match create_shell(solid.clone()) {
+    let candidate = match create_shell(solid.clone(), settings) {
         Ok(candidate) => candidate,
         Err(HollowError::IneligibleNoCavity) => {
             return HollowedModel::solid_decision(
@@ -383,11 +475,15 @@ pub fn run(
     )))
 }
 
-/// H0's explicit extraction settings. Both values come from the one typed M0
-/// publication; they remain diagnostic `Placeholder`s, never an acceptance
+/// H0's explicit extraction settings. Every value originates in the one typed
+/// M0 publication; they remain diagnostic `Placeholder`s, never an acceptance
 /// claim. The pitch is the frozen voxel-oracle resolution used for the EDT,
 /// component labels, and cavity eligibility; Manifold only subtracts that
 /// selected voxel-surface cavity from the source solid.
+///
+/// The wall is the one field a request may state: [`HollowSettings::from_request`]
+/// takes it from [`HollowRequest::wall_mm`], and everything else still comes
+/// from the registry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HollowSettings {
     wall_thickness_mm: Finite,
@@ -400,10 +496,23 @@ pub struct HollowSettings {
 
 impl HollowSettings {
     pub fn from_registered_constants() -> Result<Self, HollowError> {
+        Self::with_wall_mm(registered_wall(WallSelection::Default).map_err(HollowError::Constants)?)
+    }
+
+    /// The production seam: the operator's stated wall, the registry for the rest.
+    pub fn from_request(request: &HollowRequest) -> Result<Self, HollowError> {
+        Self::with_wall_mm(request.wall_mm)
+    }
+
+    fn with_wall_mm(wall_mm: PositiveFinite) -> Result<Self, HollowError> {
+        // A wall the frozen lattice cannot represent is refused here, before it
+        // can reach the extraction and be recorded as evidence of a shell that
+        // was never cut. See `checked_wall_mm`.
+        let wall_mm = checked_wall_mm(wall_mm)?;
         let constants = m0_constants().map_err(HollowError::Constants)?;
         let placeholders = constants.placeholders();
         finite_settings(
-            placeholders.hollow_wall_default_mm().diagnostic().get(),
+            wall_mm.get(),
             placeholders.hollow_pitch_mm().diagnostic().get(),
             placeholders.hollow_bulk_min_mm().diagnostic().get(),
             placeholders.hollow_save_min_ml().diagnostic().get() * 1000.0,
@@ -763,20 +872,24 @@ impl ShellCandidate {
     }
 }
 
-/// Convert a triaged, strict oriented solid into a single shell
-/// mesh. H0 does not add drains and therefore does not expose `run`.
-pub fn create_shell(input: Mesh) -> Result<ShellCandidate, HollowError> {
-    let settings = HollowSettings::from_registered_constants()?;
+/// Convert a triaged, strict oriented solid into a single shell mesh under the
+/// caller's extraction settings. H0 does not add drains and therefore does not
+/// expose `run`.
+///
+/// Settings are an argument rather than a registry read inside this function:
+/// [`run`] builds them from the operator's [`HollowRequest`], and callers with
+/// no request of their own build them with
+/// [`HollowSettings::from_registered_constants`]. There is no separate
+/// test-only settings entry point — this is it.
+pub fn create_shell(input: Mesh, settings: HollowSettings) -> Result<ShellCandidate, HollowError> {
     create_shell_with_admission_limits(input, settings, H0AdmissionLimits::production())
 }
 
-/// Testable H0 implementation with explicit settings. Production callers use
-/// [`create_shell`], which is the only route that reads the registry.
-pub fn create_shell_with_settings(
-    input: Mesh,
-    settings: HollowSettings,
-) -> Result<ShellCandidate, HollowError> {
-    create_shell_with_admission_limits(input, settings, H0AdmissionLimits::production())
+/// The registry-default settings, for the tests in this crate that exercise
+/// H0 itself rather than an operator's wall selection.
+#[cfg(test)]
+pub(crate) fn registered_settings() -> HollowSettings {
+    HollowSettings::from_registered_constants().expect("M0 settings")
 }
 
 /// H0 with explicit caller-owned admission limits for each named work domain.
@@ -1803,6 +1916,10 @@ pub enum HollowError {
         "hollow request printer profile {actual} does not match registered profile {expected}"
     )]
     PrinterProfileMismatch { expected: String, actual: String },
+    #[error(
+        "requested wall {wall_mm} mm is finer than the frozen {voxel_pitch_mm} mm voxel pitch, which cannot produce it"
+    )]
+    WallBelowVoxelPitch { wall_mm: f64, voxel_pitch_mm: f64 },
     #[error("drain planning refused: {0}")]
     DrainPlanning(drains::DrainPlanningRefusal),
     #[error("drilling proof refused: {0}")]
@@ -2180,7 +2297,8 @@ mod tests {
     fn registered_shell_is_closed_with_one_retained_2_5mm_cavity() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let source_bounds = bounds(&source);
-        let candidate = create_shell(source).expect("frozen sphere is hollow-eligible");
+        let candidate =
+            create_shell(source, registered_settings()).expect("frozen sphere is hollow-eligible");
         let output = candidate.mesh();
         assert_eq!(
             bounds(output),
@@ -2245,7 +2363,7 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            create_shell(open),
+            create_shell(open, settings),
             Err(HollowError::NotClosedOrOriented)
         ));
 
@@ -2262,23 +2380,168 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            create_shell(prehollowed),
+            create_shell(prehollowed, settings),
             Err(HollowError::Triage(TriageError::PreHollowed(_)))
         ));
 
         let thin = frozen_mesh("make_overhang_table.prepped.stl");
         assert!(matches!(
-            create_shell(thin),
+            create_shell(thin, settings),
             Err(HollowError::IneligibleBelowBulk)
         ));
+    }
+
+    fn registered_printer() -> PrinterProfile {
+        m0_constants()
+            .expect("registered constants")
+            .saturn4_ultra()
+            .clone()
+    }
+
+    #[test]
+    fn the_wall_is_the_one_registry_value_a_request_states_and_both_options_are_registered() {
+        let default = HollowRequest::with_registered_wall_default(registered_printer())
+            .expect("registered wall default");
+        let heavy = HollowRequest::with_registered_handling_heavy_wall(registered_printer())
+            .expect("registered handling-heavy wall");
+        assert_eq!(default.wall_mm.get(), 2.5);
+        assert_eq!(heavy.wall_mm.get(), 3.0);
+
+        // `from_request` replaces the wall and nothing else: every other field
+        // still comes from the one M0 publication.
+        let registered = HollowSettings::from_registered_constants().expect("M0 settings");
+        assert_eq!(
+            HollowSettings::from_request(&default).expect("default request settings"),
+            registered
+        );
+        let heavy_settings = HollowSettings::from_request(&heavy).expect("heavy request settings");
+        assert_eq!(heavy_settings.wall_thickness_mm().get(), 3.0);
+        assert_eq!(
+            HollowSettings {
+                wall_thickness_mm: registered.wall_thickness_mm(),
+                ..heavy_settings
+            },
+            registered,
+            "only the wall may differ between a request and the registry defaults"
+        );
+
+        // An arbitrary operator wall is carried verbatim; nothing rounds it to
+        // one of the two registered values, and nothing classifies the model.
+        let stated = HollowRequest {
+            printer: registered_printer(),
+            wall_mm: PositiveFinite::new(1.75).expect("positive finite wall"),
+        };
+        assert_eq!(
+            HollowSettings::from_request(&stated)
+                .expect("stated request settings")
+                .wall_thickness_mm()
+                .get(),
+            1.75
+        );
+    }
+
+    #[test]
+    fn a_wall_finer_than_the_frozen_voxel_pitch_is_refused_rather_than_silently_unrepresentable() {
+        let pitch = minimum_representable_wall_mm().expect("the frozen pitch must publish");
+        assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");
+
+        // Cavity selection is `edt > wall` on a lattice quantised at the pitch,
+        // so every one of these picks the identical cavity while asking the
+        // evidence to record a different number. The settings seam refuses them
+        // by name instead of producing a shell that does not match its record.
+        for unrepresentable in [1e-9, 0.001, 0.25, 0.4, 0.499_999_999] {
+            let request = HollowRequest {
+                printer: registered_printer(),
+                wall_mm: PositiveFinite::new(unrepresentable).expect("positive finite wall"),
+            };
+            let refusal = HollowSettings::from_request(&request);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(HollowError::WallBelowVoxelPitch {
+                        wall_mm,
+                        voxel_pitch_mm,
+                    }) if wall_mm == unrepresentable && voxel_pitch_mm == pitch.get()
+                ),
+                "wall {unrepresentable} mm must be refused by name, got {refusal:?}"
+            );
+            assert!(
+                matches!(
+                    checked_wall_mm(PositiveFinite::new(unrepresentable).unwrap()),
+                    Err(HollowError::WallBelowVoxelPitch { .. })
+                ),
+                "the shared rule must refuse {unrepresentable} mm for every caller"
+            );
+        }
+
+        // The pitch itself is the finest wall this stage can honestly claim, so
+        // it is accepted — the bound is a floor, not a rounding.
+        for representable in [pitch.get(), 0.500_000_001, 0.75, 2.5] {
+            let request = HollowRequest {
+                printer: registered_printer(),
+                wall_mm: PositiveFinite::new(representable).expect("positive finite wall"),
+            };
+            assert_eq!(
+                HollowSettings::from_request(&request)
+                    .expect("a wall at or above the pitch is representable")
+                    .wall_thickness_mm()
+                    .get(),
+                representable
+            );
+            assert_eq!(
+                checked_wall_mm(PositiveFinite::new(representable).unwrap())
+                    .expect("a wall at or above the pitch is representable")
+                    .get(),
+                representable
+            );
+        }
+
+        // Both registered walls sit above the floor; neither option can be
+        // refused by the rule that guards the operator's own values.
+        for selection in [WallSelection::Default, WallSelection::HandlingHeavy] {
+            let registered = registered_wall(selection).expect("registered wall");
+            assert!(registered.get() >= pitch.get());
+            assert!(checked_wall_mm(registered).is_ok());
+        }
+    }
+
+    #[test]
+    fn the_requested_wall_reaches_the_extraction_and_is_recorded_as_cavity_evidence() {
+        let shell = |request: &HollowRequest| {
+            create_shell(
+                frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+                HollowSettings::from_request(request).expect("request settings"),
+            )
+            .expect("the frozen Sphere is hollow-eligible at either registered wall")
+        };
+        let default = shell(
+            &HollowRequest::with_registered_wall_default(registered_printer())
+                .expect("registered wall default"),
+        );
+        let heavy = shell(
+            &HollowRequest::with_registered_handling_heavy_wall(registered_printer())
+                .expect("registered handling-heavy wall"),
+        );
+
+        assert_eq!(default.cavity().wall_thickness_mm().get(), 2.5);
+        assert_eq!(heavy.cavity().wall_thickness_mm().get(), 3.0);
+        assert!(
+            heavy.cavity().cavity_volume_mm3().get() < default.cavity().cavity_volume_mm3().get(),
+            "a heavier wall must remove less material, not merely be recorded"
+        );
+        assert_eq!(
+            heavy.cavity().source_volume_mm3().get(),
+            default.cavity().source_volume_mm3().get(),
+            "the outer solid is untouched by the wall selection"
+        );
     }
 
     #[test]
     fn preserves_authored_extra_bodies_while_hollowing_only_the_largest_cavity() {
         let main = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let detail = make_box([2.0, 2.0, 2.0], [14.0, 0.0, 1.0]).expect("detail fixture");
-        let candidate =
-            create_shell(join(&main, &detail)).expect("extra authored body is retained");
+        let candidate = create_shell(join(&main, &detail), registered_settings())
+            .expect("extra authored body is retained");
         let topology =
             build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("output topology");
         let certificate =
@@ -2304,7 +2567,8 @@ mod tests {
             Err(HollowError::InvalidAdmissionLimits)
         ));
         let huge = make_box([300.0, 300.0, 300.0], [0.0, 0.0, 0.0]).expect("300mm box");
-        let error = create_shell(huge).expect_err("300mm at 0.5mm must preflight-refuse");
+        let error = create_shell(huge, registered_settings())
+            .expect_err("300mm at 0.5mm must preflight-refuse");
         assert!(matches!(
             error,
             HollowError::VoxelCellLimitExceeded { cells, max_cells }
@@ -2427,8 +2691,11 @@ mod tests {
 
     #[test]
     fn boolean_volume_invariant_accepts_shell_and_rejects_wrong_cavity_evidence() {
-        let candidate = create_shell(frozen_mesh("Sphere.prepped.oriented-solid.stl"))
-            .expect("frozen sphere shell");
+        let candidate = create_shell(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            registered_settings(),
+        )
+        .expect("frozen sphere shell");
         let evidence = *candidate.cavity();
         validate_shell_topology(
             candidate.mesh(),

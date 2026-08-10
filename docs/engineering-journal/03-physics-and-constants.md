@@ -652,6 +652,7 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | Stable ID | Value / disposition | Source meaning |
 |---|---|---|
 | `HOLLOW_WALL_DEFAULT_MM` | 2.5 mm, **P** | generation/tool default |
+| `HOLLOW_WALL_HANDLING_HEAVY_MM` | 3.0 mm, **P** | the other value the operator wall option was given, for handling-heavy pieces; selected per model, never inferred |
 | `HOLLOW_ORIENT_ENABLE_DEFAULT` | true, **P** | independently surviving pipeline default |
 | `HOLLOW_SHARD_MAX_FACES` / `HOLLOW_SHARD_MAX_DIM_MM` / `HOLLOW_SHARD_MAX_VOLUME_MM3` | 64 / 1.0 mm / 0.01 mm3 | component-triage gates |
 | `HOLLOW_CONTAINMENT_SAMPLES` / `HOLLOW_CONTAINMENT_MIN_FRACTION` | 32 / 0.9 | internal-component evidence gate |
@@ -664,6 +665,37 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_VENT_TOP_BAND_MM` | 2.0 mm | cavity-top band searched for a horizontal vent site |
 | `HOLLOW_VENT_SAMPLE_DIVISOR` | 40 | deterministic top-band sampling divisor |
 | `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
+
+**The wall is an operator input, not an inference.** Legacy exposed it as a
+command-line option; the first Rust port read `HOLLOW_WALL_DEFAULT_MM` inside
+`create_shell` and offered no way to say anything else, which silently dropped
+the knob. It is restored on `HollowRequest::wall_mm` and spelled
+`plinth prepare --wall-mm MM`, defaulting to the registered 2.5 mm.
+`HOLLOW_WALL_HANDLING_HEAVY_MM` registers the 3.0 mm an operator reached for on
+a piece that gets handled, at exactly the provenance the default carries — the
+same unmeasured legacy option, **P**, no plate and no study behind either number.
+**There is deliberately no classifier**: nothing decides that a model is
+handling-heavy. The caller states the wall, and `CavityEvidence::wall_thickness_mm`
+records what was stated — **in-process evidence only**. `CavityEvidence` is not
+`Serialize`; it hangs off `HollowedModel::cavity_authority` and dies with the
+process, while the serialized `HollowReport`, `CavityRecord` and
+`DrillingEvidence` carry no wall field at all. Two artifacts prepared at 2.5 mm
+and 3.0 mm are therefore **indistinguishable in every file the pipeline writes**.
+Auditing the choice from a persisted artifact is **FU-37**, an open follow-up,
+not a property this stage has today: persisting the wall moves frozen goldens
+and is deliberately not done in the same commit that restored the knob.
+
+**The wall has a floor, and it is the lattice's, not a policy's.** Cavity
+eligibility is `edt > wall` over the frozen `HOLLOW_PITCH_MM` = 0.5 mm voxel
+grid, so the smallest non-zero interior distance a voxel can carry is one pitch
+and *every* wall strictly below the pitch selects the identical cavity. A
+requested 1e-9 mm wall would have produced the 0-mm-wall shell while the
+evidence recorded 1e-9 — a record of a wall that was never cut. So
+`plinth_hollow::checked_wall_mm` refuses any wall finer than the pitch by name
+(`HollowError::WallBelowVoxelPitch`, surfaced by the CLI as an `InvalidWallMm`
+refusal of `--wall-mm`), and the pitch itself is admissible as the finest wall
+this stage can honestly claim. This is a **representability bound, not a gate
+threshold**: it moves only if the frozen pitch moves.
 
 The frozen orientation heuristic is **retired/no-port as a policy**, not silently
 unaccounted: proxy reduction 0.9; identity plus ±10/20/30 degrees about X and Y;

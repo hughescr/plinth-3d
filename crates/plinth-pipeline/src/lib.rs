@@ -505,12 +505,41 @@ mod tests {
     }
 
     fn hollow_request() -> HollowRequest {
-        HollowRequest {
-            printer: m0_constants()
+        HollowRequest::with_registered_wall_default(
+            m0_constants()
                 .expect("registered constants")
                 .saturn4_ultra()
                 .clone(),
-        }
+        )
+        .expect("registered wall default")
+    }
+
+    /// The wall the caller states must reach the geometry, not merely be
+    /// carried. The Sphere fixture is about 20 mm across, so a 40 mm wall
+    /// leaves no voxel further than the wall from the surface: the stage must
+    /// decide `Solid { NoCavity }` where the same model at the registered
+    /// default hollows and drills. Only a request whose wall reaches the
+    /// extraction can produce that difference.
+    #[test]
+    fn hollow_stage_hollows_against_the_wall_the_request_states() {
+        let sphere = load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
+            .expect("committed Sphere fixture");
+        let thick = HollowRequest {
+            wall_mm: plinth_core::PositiveFinite::new(40.0).expect("positive finite wall"),
+            ..hollow_request()
+        };
+        let output = hollow_stage(oriented(sphere.clone()), &thick)
+            .expect("an ineligible model is a decision, not an error");
+        assert_eq!(
+            project_hollow_stage(&output).disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::NoCavity
+            }
+        );
+        assert!(matches!(
+            hollow_stage(oriented(sphere), &hollow_request()).expect("registered default wall"),
+            HollowStageOutput::AwaitingInternalSupport(_)
+        ));
     }
 
     #[test]
@@ -657,7 +686,10 @@ mod tests {
         .expect("profile serializes");
         wire["id"] = serde_json::Value::String("unregistered-profile".to_owned());
         let printer = serde_json::from_value(wire).expect("alternate profile remains well-formed");
-        let request = HollowRequest { printer };
+        let request = HollowRequest {
+            printer,
+            ..hollow_request()
+        };
         let model = oriented(make_box([20.0, 8.0, 8.0], [0.0; 3]).expect("thin closed box"));
         let error = hollow_stage(model, &request).expect_err("profile mismatch must refuse");
         assert_eq!(error.category(), HollowFailureCategory::PrinterProfile);

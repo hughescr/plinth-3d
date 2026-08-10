@@ -230,8 +230,8 @@ Stated plainly, because the numbers are quotable and the boundaries are not obvi
   because the ratio is unmeasured for green resin — that is where the next calibration plate
   should be spent.
 - **Concave seats are a sampling bound**, not a proof.
-- **Most constants are not measured.** The registry currently holds **286** values: **20**
-  measured, **11** derived from measured ones, and **255** placeholders. That ratio is the
+- **Most constants are not measured.** The registry currently holds **287** values: **20**
+  measured, **11** derived from measured ones, and **256** placeholders. That ratio is the
   point rather than an embarrassment — see below.
 
 ## 7. Every constant carries its provenance

@@ -10,4 +10,8 @@ name = "plinth"
 path = "src/main.rs"
 
 [dependencies]
+# The wall-thickness default is a registered constant, so the parser reads the
+# one M0 publication directly rather than restating 2.5 as a CLI literal.
+plinth-core = { path = "../plinth-core" }
+plinth-hollow = { path = "../plinth-hollow" }
 plinth-pipeline = { path = "../plinth-pipeline" }

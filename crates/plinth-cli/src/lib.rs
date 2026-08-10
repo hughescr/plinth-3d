@@ -4,17 +4,25 @@
 //! pipeline resolver consumes [`PrepareSelection`] and owns construction of a
 //! complete `plinth_pipeline::PrepareRequest`, including all resource and
 //! physics values which are not CLI arguments.
+//!
+//! The one thing parsing reads beyond its arguments is the registered default
+//! for an omitted optional flag — today only `--wall-mm`. That is the M0
+//! registry, a pure publication, and reading it here is what keeps the CLI
+//! default and the hollow stage's default the same number. No environment
+//! variable is read, and no file or model is opened.
 
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use plinth_core::{M0ConstantsError, PositiveFinite};
+use plinth_hollow::{checked_wall_mm, registered_wall, HollowError, WallSelection};
 use plinth_pipeline::{OrientationPolicy, OutputProfile};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheMode {
@@ -33,16 +41,24 @@ impl CacheMode {
 /// The complete user-selected CLI state and the compile-time handoff seam for
 /// a later resource resolver. It is intentionally not a partial or fabricated
 /// `PrepareRequest`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: `wall_mm` is a millimetre quantity, and a
+/// selection is compared for equality in tests, never keyed on.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PrepareSelection {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub orientation: OrientationPolicy,
     pub output_profile: OutputProfile,
+    /// The hollow shell wall the operator selected for every model in this
+    /// request, defaulted from `HOLLOW_WALL_DEFAULT_MM` when `--wall-mm` is
+    /// absent. Nothing here infers it from the model; the resolver hands this
+    /// value straight to `plinth_hollow::HollowRequest::wall_mm`.
+    pub wall_mm: PositiveFinite,
     pub cache: CacheMode,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CliAction {
     RootHelp,
     PrepareHelp,
@@ -50,7 +66,7 @@ pub enum CliAction {
     Prepare(PrepareSelection),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParseError {
     MissingSubcommand,
     UnknownSubcommand(OsString),
@@ -61,6 +77,14 @@ pub enum ParseError {
     UnexpectedPositional(OsString),
     NonUnicodeOutputProfile(OsString),
     UnknownOutputProfile(String),
+    NonUnicodeWallMm(OsString),
+    /// `--wall-mm` was given a wall the hollow stage will not accept: not a
+    /// positive finite number of millimetres, or finer than the frozen voxel
+    /// pitch that stage selects cavities on.
+    InvalidWallMm(String),
+    /// The registered wall default could not be read, so no default exists to
+    /// fall back to. The parser refuses rather than substituting a literal.
+    RegisteredWallUnavailable(&'static M0ConstantsError),
 }
 
 impl std::fmt::Display for ParseError {
@@ -95,6 +119,18 @@ impl std::fmt::Display for ParseError {
                 "unknown output profile {value:?}; expected {:?}",
                 OutputProfile::SATURN4_ULTRA_CLI_VALUE
             ),
+            Self::NonUnicodeWallMm(value) => write!(
+                formatter,
+                "wall thickness is not valid Unicode: {:?}",
+                value.to_string_lossy()
+            ),
+            Self::InvalidWallMm(value) => write!(
+                formatter,
+                "wall thickness {value:?} is not a wall this stage can produce: expected a positive finite number of millimetres, no finer than the frozen hollow voxel pitch"
+            ),
+            Self::RegisteredWallUnavailable(error) => {
+                write!(formatter, "registered wall default is unavailable: {error}")
+            }
         }
     }
 }
@@ -127,6 +163,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut input_models_dir = None;
     let mut output_dir = None;
     let mut output_profile = None;
+    let mut wall_mm = None;
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
     let mut index = 0;
@@ -164,6 +201,29 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                         .map_err(|_| ParseError::UnknownOutputProfile(value.to_owned()))?,
                 );
             }
+            Some("--wall-mm") => {
+                let raw = take_value("--wall-mm", arguments, &mut index)?;
+                if wall_mm.is_some() {
+                    return Err(ParseError::DuplicateFlag("--wall-mm"));
+                }
+                let value = raw
+                    .to_str()
+                    .ok_or_else(|| ParseError::NonUnicodeWallMm(raw.clone()))?;
+                let millimetres = value
+                    .parse::<f64>()
+                    .map_err(|_| ParseError::InvalidWallMm(value.to_owned()))?;
+                let positive = PositiveFinite::new(millimetres)
+                    .map_err(|_| ParseError::InvalidWallMm(value.to_owned()))?;
+                // The hollow stage owns the admissibility rule; the parser
+                // refuses the same values it does rather than restating one.
+                wall_mm = Some(match checked_wall_mm(positive) {
+                    Ok(checked) => checked,
+                    Err(HollowError::Constants(error)) => {
+                        return Err(ParseError::RegisteredWallUnavailable(error))
+                    }
+                    Err(_) => return Err(ParseError::InvalidWallMm(value.to_owned())),
+                });
+            }
             Some("--no-cache") => {
                 if no_cache_seen {
                     return Err(ParseError::DuplicateFlag("--no-cache"));
@@ -185,8 +245,18 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
         output_dir: output_dir.ok_or(ParseError::MissingRequiredFlag("--out-dir"))?,
         orientation: OrientationPolicy::LegacyCoarse,
         output_profile: output_profile.ok_or(ParseError::MissingRequiredFlag("--output"))?,
+        wall_mm: match wall_mm {
+            Some(selected) => selected,
+            None => registered_wall_default()?,
+        },
         cache,
     }))
+}
+
+/// `HOLLOW_WALL_DEFAULT_MM`, read through the one hollow-stage accessor so the
+/// CLI default and the stage default cannot be two different numbers.
+fn registered_wall_default() -> Result<PositiveFinite, ParseError> {
+    registered_wall(WallSelection::Default).map_err(ParseError::RegisteredWallUnavailable)
 }
 
 fn set_value<T>(
@@ -251,6 +321,10 @@ mod tests {
         assert_eq!(parsed.output_profile, OutputProfile::Saturn4Ultra);
         assert_eq!(parsed.cache, CacheMode::Enabled);
         assert!(!parsed.cache.no_cache());
+        assert_eq!(
+            parsed.wall_mm,
+            registered_wall(WallSelection::Default).expect("registered wall default")
+        );
 
         // The later resolver takes this type directly; no tuple or stringly
         // compatibility representation sits between CLI and policy assembly.
@@ -268,6 +342,98 @@ mod tests {
         for alias in ["--cache=false", "--no_cache", "--disable-cache"] {
             let mut arguments = stable_arguments().map(OsString::from).to_vec();
             arguments.push(alias.into());
+            assert_eq!(
+                parse_args(arguments),
+                Err(ParseError::UnknownFlag(alias.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn wall_mm_is_optional_and_defaults_to_the_registered_constant() {
+        let registered =
+            registered_wall(WallSelection::Default).expect("registered wall default must publish");
+        assert_eq!(registered.get(), 2.5, "the registered default moved");
+        assert_eq!(
+            selection(parse_args(stable_arguments()).unwrap()).wall_mm,
+            registered,
+            "an omitted --wall-mm must take the registry value, not a CLI literal"
+        );
+
+        // The handling-heavy value is a registered constant an operator may
+        // spell out; the parser has no classifier that picks it.
+        let heavy = registered_wall(WallSelection::HandlingHeavy)
+            .expect("registered handling-heavy wall must publish");
+        assert_eq!(heavy.get(), 3.0);
+        let mut arguments = stable_arguments().map(OsString::from).to_vec();
+        arguments.extend(["--wall-mm".into(), OsString::from("3.0")]);
+        assert_eq!(selection(parse_args(arguments).unwrap()).wall_mm, heavy);
+    }
+
+    #[test]
+    fn wall_mm_refuses_a_wall_finer_than_the_frozen_voxel_pitch() {
+        let pitch = plinth_hollow::minimum_representable_wall_mm().expect("frozen pitch publishes");
+        assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");
+
+        // Sub-pitch walls parse as positive finite numbers and would have
+        // threaded straight to a cavity identical to every other sub-pitch
+        // wall's. The parser refuses them at the same bound the stage does.
+        for value in ["1e-9", "0.001", "0.25", "0.4", "0.499999999"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend(["--wall-mm".into(), OsString::from(value)]);
+            assert_eq!(
+                parse_args(arguments),
+                Err(ParseError::InvalidWallMm(value.to_owned())),
+                "sub-pitch wall {value:?} must be refused by name"
+            );
+        }
+
+        // The pitch itself is admissible, and so is anything above it.
+        for value in ["0.5", "0.500000001", "0.75", "12"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend(["--wall-mm".into(), OsString::from(value)]);
+            assert_eq!(
+                selection(parse_args(arguments).unwrap()).wall_mm.get(),
+                value.parse::<f64>().unwrap(),
+                "wall {value:?} is at or above the pitch and must be accepted verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn wall_mm_accepts_only_a_positive_finite_millimetre_value() {
+        for value in ["0", "-1.5", "nan", "inf", "2.5mm", "", "thick"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend(["--wall-mm".into(), OsString::from(value)]);
+            assert_eq!(
+                parse_args(arguments),
+                Err(ParseError::InvalidWallMm(value.to_owned())),
+                "value {value:?} must be refused by name"
+            );
+        }
+
+        let mut arguments = stable_arguments().map(OsString::from).to_vec();
+        arguments.extend([
+            "--wall-mm".into(),
+            OsString::from("3.0"),
+            "--wall-mm".into(),
+            OsString::from("2.5"),
+        ]);
+        assert_eq!(
+            parse_args(arguments),
+            Err(ParseError::DuplicateFlag("--wall-mm"))
+        );
+
+        let mut arguments = stable_arguments().map(OsString::from).to_vec();
+        arguments.push("--wall-mm".into());
+        assert_eq!(
+            parse_args(arguments),
+            Err(ParseError::MissingFlagValue("--wall-mm"))
+        );
+
+        for alias in ["--wall", "--wall_mm", "--wall-thickness-mm"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend([alias.into(), OsString::from("3.0")]);
             assert_eq!(
                 parse_args(arguments),
                 Err(ParseError::UnknownFlag(alias.into()))

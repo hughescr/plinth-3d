@@ -385,7 +385,12 @@ pub fn run_from_oriented(
     let hollow_error_reserve_mesh = oriented.mesh().clone();
     let hollow_error_reserve_history = oriented.history().clone();
 
-    let output = match hollow_stage(oriented, &HollowRequest { printer }) {
+    // This chain has no per-model operator input, so it takes the registered
+    // default wall. A handling-heavy piece is a different request, not a
+    // different code path.
+    let hollow_request = HollowRequest::with_registered_wall_default(printer)
+        .map_err(|error| format!("registered hollow wall default: {error}"))?;
+    let output = match hollow_stage(oriented, &hollow_request) {
         Ok(output) => output,
         // OQ-1's anticipated case, reached for the first time by the Weeping
         // Treant (FU-34). Carry the oriented solid through the same

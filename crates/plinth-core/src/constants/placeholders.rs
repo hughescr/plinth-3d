@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 255], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 256], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1189,6 +1189,8 @@ placeholder_declarations! {
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "1", "scalar", "Final volume-balance tolerance relative to solid volume.";
     hollow_wall_default_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "HOLLOW_WALL_DEFAULT_MM", "mm", "scalar", "Hollow generation and tool wall default.";
+    hollow_wall_handling_heavy_mm: PositiveFinite = PositiveFinite::new(3.0)?;
+    "HOLLOW_WALL_HANDLING_HEAVY_MM", "mm", "scalar", "Hollow generation and tool wall value offered for handling-heavy pieces; the same unmeasured legacy operator option as the default.";
     initial_axis_majority_cap: NonZeroU64 = nonzero(80)?;
     "INITIAL_AXIS_MAJORITY_CAP", "count", "scalar", "O-10 legacy compatibility interval majority cap; docs/engineering-journal/04-migration-plan.md §O-10, not safety evidence.";
     initial_axis_majority_step_mm: PositiveFinite = PositiveFinite::new(0.12)?;

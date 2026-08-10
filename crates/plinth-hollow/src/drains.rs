@@ -1086,7 +1086,7 @@ fn scale(value: V3, amount: f64) -> V3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_shell, CavityEvidence};
+    use crate::{create_shell, registered_settings, CavityEvidence};
     use plinth_core::Finite;
     use plinth_mesh::{load_binary_stl, make_box, WeldPolicy};
     use scirs2_core::ndarray::Array3;
@@ -1133,8 +1133,11 @@ mod tests {
             path.is_file(),
             "required frozen baseline STL is missing: {path:?}"
         );
-        create_shell(load_binary_stl(path, WeldPolicy::None).expect("frozen input"))
-            .expect("frozen eligible shell")
+        create_shell(
+            load_binary_stl(path, WeldPolicy::None).expect("frozen input"),
+            registered_settings(),
+        )
+        .expect("frozen eligible shell")
     }
 
     fn frozen_candidate_with_unequal_field_capacities() -> ShellCandidate {
@@ -1586,6 +1589,7 @@ mod tests {
                 WeldPolicy::None,
             )
             .expect("frozen input"),
+            registered_settings(),
         )
         .expect("shell");
         let (mesh, mut cavity, field) = candidate.into_parts();
