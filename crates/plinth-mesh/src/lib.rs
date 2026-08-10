@@ -23,7 +23,7 @@ pub use fixtures::{
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use topology::{
     build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,
-    ClosedComponent, ClosedComponentCertificate, EdgeTopologyCounts, FaceTopology, TopologyDigest,
+    ClosedComponent, ClosedComponentCertificate, FaceTopology, TopologyCounts, TopologyDigest,
     TopologyError, TopologySchema, TopologyValidationError, WeldedView, FACE_TOPOLOGY_SCHEMA,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,

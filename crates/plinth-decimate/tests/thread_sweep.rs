@@ -163,11 +163,31 @@ fn canonical_production_report() -> String {
         "topology_before.nonmanifold",
         before.nonmanifold_edges,
     );
+    push_usize(
+        &mut report,
+        "topology_before.duplicate_faces",
+        before.duplicate_faces,
+    );
+    push_usize(
+        &mut report,
+        "topology_before.duplicate_face_groups",
+        before.duplicate_face_groups,
+    );
     push_usize(&mut report, "topology_after.boundary", after.boundary_edges);
     push_usize(
         &mut report,
         "topology_after.nonmanifold",
         after.nonmanifold_edges,
+    );
+    push_usize(
+        &mut report,
+        "topology_after.duplicate_faces",
+        after.duplicate_faces,
+    );
+    push_usize(
+        &mut report,
+        "topology_after.duplicate_face_groups",
+        after.duplicate_face_groups,
     );
     push_mesh(&mut report, success.mesh());
     let digest = Sha256::digest(report.as_bytes());

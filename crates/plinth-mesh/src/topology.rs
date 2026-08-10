@@ -36,13 +36,24 @@ pub struct TopologyDigest {
     hex: String,
 }
 
-/// Counts of undirected edge incidences as classified by Plinth's canonical
-/// face-topology construction.  These are edge counts, not counts of faces
-/// bearing a cut flag.
+/// Counts established by Plinth's canonical face-topology construction.
+///
+/// `boundary_edges` and `nonmanifold_edges` count undirected edge incidences.
+/// `duplicate_faces` and `duplicate_face_groups` count faces and exact
+/// duplicate groups: a group is a set of two or more faces whose welded vertex
+/// triples are equal as unordered sets, and `duplicate_faces` counts every
+/// member of every such group.
+///
+/// None of these are counts of faces bearing a cut flag.  A face can carry
+/// `TOPOLOGY_CUT_DUPLICATE` because it meets a duplicate across one ambiguous
+/// edge without being a duplicate itself, so the flag is deliberately broader
+/// than `duplicate_faces`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EdgeTopologyCounts {
+pub struct TopologyCounts {
     pub boundary_edges: usize,
     pub nonmanifold_edges: usize,
+    pub duplicate_faces: usize,
+    pub duplicate_face_groups: usize,
 }
 
 impl TopologyDigest {
@@ -155,7 +166,7 @@ pub struct FaceTopology {
     indices: Vec<u32>,
     component_ids: Vec<u32>,
     cut_flags: Vec<u8>,
-    edge_counts: EdgeTopologyCounts,
+    counts: TopologyCounts,
     source_vertex_to_welded: Vec<u32>,
     welded_vertex_count: u32,
     weld_policy: WeldPolicy,
@@ -229,12 +240,12 @@ impl FaceTopology {
     pub fn cut_flags(&self) -> &[u8] {
         &self.cut_flags
     }
-    /// Edge-incidence counts established by this topology view's one canonical
-    /// construction pass.  Consumers must use these rather than re-auditing
-    /// raw triangle indices locally.
+    /// Edge-incidence and duplicate-face counts established by this topology
+    /// view's one canonical construction.  Consumers must use these rather
+    /// than re-auditing raw triangle indices locally.
     #[must_use]
-    pub const fn edge_counts(&self) -> EdgeTopologyCounts {
-        self.edge_counts
+    pub const fn counts(&self) -> TopologyCounts {
+        self.counts
     }
     #[must_use]
     pub fn source_vertex_to_welded(&self) -> &[u32] {
@@ -293,15 +304,25 @@ pub fn build_face_topology(
         ]);
     }
 
+    // The duplicate-face set is established once, in full, before any edge is
+    // classified: `duplicate_face[f]` says that `f` is itself one of two or
+    // more faces sharing a welded vertex triple.  Everything that must not
+    // depend on iteration order reads this frozen snapshot rather than
+    // `cut_flags`, which the edge pass below is still writing.
     let mut triangles_by_key: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
     for (face, triangle) in canonical_faces.iter().enumerate() {
         let mut key = *triangle;
         key.sort_unstable();
         triangles_by_key.entry(key).or_default().push(face);
     }
+    let mut duplicate_face = vec![false; n_faces];
+    let mut counts = TopologyCounts::default();
     for faces in triangles_by_key.values() {
         if faces.len() > 1 {
+            counts.duplicate_face_groups += 1;
+            counts.duplicate_faces += faces.len();
             for &face in faces {
+                duplicate_face[face] = true;
                 cut_flags[face] |= TOPOLOGY_CUT_DUPLICATE;
             }
         }
@@ -331,23 +352,20 @@ pub fn build_face_topology(
         }
     }
 
+    // First pass: cut flags and adjacency.  A face that meets a duplicate
+    // across one edge is itself cut there, and `cut_flags` carries that
+    // outward through the pass, so an edge reached later sees a face already
+    // marked ambiguous and refuses to accept it as a manifold partner.  That
+    // propagation only ever severs adjacency, never restores it, so it is kept
+    // exactly as it stands; what it must not do is decide a *count*, which is
+    // why the counting pass below reads `duplicate_face` instead.
     let mut adjacency = vec![Vec::<u32>::new(); n_faces];
     let mut accepted_edges = Vec::<(usize, usize)>::new();
-    let mut edge_counts = EdgeTopologyCounts::default();
     for occurrences in edges.values() {
         let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
         let duplicate = occurrences
             .iter()
             .any(|occurrence| cut_flags[occurrence.face] & TOPOLOGY_CUT_DUPLICATE != 0);
-        if occurrences.len() == 1 {
-            edge_counts.boundary_edges += 1;
-        }
-        // Keep the existing classification's exclusions: a degenerate edge
-        // or duplicate face is surfaced under its own canonical cut reason,
-        // not silently relabelled as a non-manifold edge.
-        if occurrences.len() > 2 && !degenerate && !duplicate {
-            edge_counts.nonmanifold_edges += 1;
-        }
         let valid_pair = occurrences.len() == 2
             && occurrences[0].face != occurrences[1].face
             && occurrences[0].forward != occurrences[1].forward
@@ -385,6 +403,30 @@ pub fn build_face_topology(
             {
                 cut_flags[occurrence.face] |= TOPOLOGY_CUT_NONMANIFOLD;
             }
+        }
+    }
+
+    // Second pass: the counts, taken only once every flag has been written and
+    // taken against the frozen duplicate-face set rather than the flags the
+    // pass above was still writing.  Counting inside that pass made an edge's
+    // verdict depend on how many earlier edges had already spread
+    // `TOPOLOGY_CUT_DUPLICATE` onto one of its faces, so a genuinely
+    // non-manifold edge reached late fell out of the total: deterministic in
+    // `BTreeMap` key order, but a floor on the damage rather than a count of
+    // it.  Every exclusion below is now reported somewhere — a degenerate edge
+    // and a duplicate face each carry their own named cut, and duplicate faces
+    // are counted in this same struct — so excluding them from
+    // `nonmanifold_edges` no longer hides them.
+    for occurrences in edges.values() {
+        let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
+        let duplicate = occurrences
+            .iter()
+            .any(|occurrence| duplicate_face[occurrence.face]);
+        if occurrences.len() == 1 {
+            counts.boundary_edges += 1;
+        }
+        if occurrences.len() > 2 && !degenerate && !duplicate {
+            counts.nonmanifold_edges += 1;
         }
     }
 
@@ -450,7 +492,7 @@ pub fn build_face_topology(
         indices,
         component_ids,
         cut_flags,
-        edge_counts,
+        counts,
         source_vertex_to_welded: welded.map,
         welded_vertex_count: welded.vertex_count,
         weld_policy,
