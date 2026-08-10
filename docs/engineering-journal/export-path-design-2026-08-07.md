@@ -345,6 +345,12 @@ and per-model dispositions were added to `PrepareReport` (`Refused`, `Failed`)
 because "one bad model must not abort the folder" cannot be expressed with
 `Artifact`/`Stopped` alone. OQ-2's acceptance item is **answered in the
 negative**: `LegacyCoarse` has no implementation, so it refuses per model.
+Review pass 2026-08-09: the "stop_after tests per stage" acceptance item below
+is now met, and `OrientationPolicy::Pinned` became a per-stem map — a pinned
+baseline is one mesh's rotation and `plinth_orient::run` cannot tell it was
+handed a different mesh, so a run-wide baseline would silently misorient every
+model but the first. **The `--orient` flag of E5/§6 must therefore name a
+baseline per model, not one for the run.**
 
 Implement the documented signature (F13): enumerate `*.stl` in
 `input_models_dir` (deterministic order), per model run the stage chain,

@@ -51,7 +51,8 @@ use plinth_decimate::{
 };
 use plinth_emit::EmitRequest;
 use plinth_hollow::{
-    HollowDisposition, HollowRequest, HollowStageOutput, HollowedModel, SolidDecisionReason,
+    HollowDisposition, HollowError, HollowRequest, HollowStageOutput, HollowedModel,
+    SolidDecisionReason,
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
@@ -277,6 +278,23 @@ impl ChainStop {
         matches!(*self.error, PipelineError::Gates { .. })
     }
 
+    /// Whether **support planning** is what stopped this model — the one stop
+    /// the oriented-solid reserve answers.
+    ///
+    /// The reserve's claim is "this *geometry* could not be sealed", so only a
+    /// refusal by the sealed run or the planner may reach it. A `Lowering`, an
+    /// `Emit` (the post-write disk audit refusing the bytes), a `LayerPlan` or
+    /// a `DegenerateExtent` says nothing about whether the geometry is
+    /// supportable, and re-planning a different geometry after one of those
+    /// would write a *substitute* artifact and label it a support refusal.
+    #[must_use]
+    pub fn is_support_refusal(&self) -> bool {
+        matches!(
+            *self.error,
+            PipelineError::SealedRun { .. } | PipelineError::Support { .. }
+        )
+    }
+
     /// The gate that refused, as a value.
     #[must_use]
     pub const fn gate(&self) -> Option<PreWriteGate> {
@@ -408,6 +426,13 @@ impl StagePolicy {
 /// policy that will not assemble. Nothing has been written when one of those
 /// is returned.
 ///
+/// **No model's artifact path survives its own run.** Every model's target is
+/// cleared before that model is attempted, so a folder re-run after a model
+/// started failing reports the failure *and* the earlier artifact is gone.
+/// A stale file beside an ERROR or GATE-REFUSED line is read by the next thing
+/// down the line as this run's answer, and that is the hand-off the pre-write
+/// gate exists to prevent.
+///
 /// # Errors
 ///
 /// - [`PipelineError::InputFolder`] when the source folder cannot be read.
@@ -514,6 +539,29 @@ fn prepare_one(
         outcome,
     };
 
+    // **Clear the target before anything can fail.** The no-file guarantee is
+    // about the *path*, not about one call: `judge_then_emit` removes a stale
+    // artifact when a gate refuses, but a model that stops earlier -- load,
+    // decimation, scale sanity, orientation, layer planning, the sealed support
+    // run -- never reaches that code at all, and would leave the previous run's
+    // file sitting at the target beside an ERROR line. The next reader takes it
+    // for this run's answer. Clearing here, once, covers every disposition this
+    // function can produce including ones it does not have yet.
+    //
+    // A removal that fails is reported, never swallowed: "refused, and the old
+    // file is still there" is the misleading hand-off this exists to stop, so
+    // it fails the model by name instead of proceeding.
+    if let Err(source) = clear_stale_artifact(target) {
+        return report(
+            None,
+            failure(&ChainStop::new(PipelineError::StaleArtifact {
+                model: model.clone(),
+                path: target.to_path_buf(),
+                source,
+            })),
+        );
+    }
+
     let mesh = match load_binary_stl(source_path, WeldPolicy::None) {
         Ok(mesh) => mesh,
         Err(source) => {
@@ -582,9 +630,18 @@ fn prepare_one(
     }
 
     match run_from_oriented(model, source_faces, oriented, policy, target, stop_after) {
+        // The provenance travels with the artifact. Two of the four
+        // `SupportedGeometry` values mean "the chain could not use the geometry
+        // it planned and substituted another", and a report that dropped them
+        // would make a substituted artifact indistinguishable from the intended
+        // drilled shell.
         Ok(Some(outcome)) => report(
             assumed,
-            ModelPreparationOutcome::Artifact { emit: outcome.emit },
+            ModelPreparationOutcome::Artifact {
+                emit: outcome.emit,
+                geometry: outcome.supported_geometry,
+                hollow_disposition: outcome.hollow_disposition,
+            },
         ),
         Ok(None) => report(
             assumed,
@@ -593,6 +650,20 @@ fn prepare_one(
             },
         ),
         Err(stop) => report(assumed, failure(&stop)),
+    }
+}
+
+/// Remove anything sitting at one model's artifact path.
+///
+/// `NotFound` is the ordinary case and is not an error; every other io error
+/// is, including the target being a directory, because in both of those the
+/// path this model is about to claim is still occupied by something that is not
+/// this run's answer.
+fn clear_stale_artifact(target: &Path) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -622,6 +693,17 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 /// named reason rather than silently choosing identity — identity is a
 /// rotation like any other and `plinth-orient` refuses to pick it implicitly
 /// too. This is a refusal, never a panic, and never a fallback.
+///
+/// **A pinned baseline is resolved per model, by name.** `plinth_orient::run`
+/// applies whatever rotation the report it is handed states, to whatever mesh
+/// it is handed, and has no way to check that the two describe the same object.
+/// One run-wide baseline over a folder of different minis would therefore give
+/// every one of them the first one's rotation, and a misoriented model seals,
+/// gate-passes and emits exactly like a correct one — there is no downstream
+/// stage that would catch it. So the policy is keyed by source stem, and a
+/// model the map does not name is refused
+/// ([`PipelineError::OrientationBaselineMissing`]) rather than given a
+/// neighbour's answer.
 fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
@@ -633,18 +715,25 @@ fn orient_model(
                 model: model.clone(),
             },
         )),
-        OrientationPolicy::Pinned(pinned) => run_orientation(
-            decimated,
-            &OrientRequest {
-                pinned: pinned.clone(),
-            },
-        )
-        .map_err(|source| {
-            ChainStop::new(PipelineError::Orient {
-                model: model.clone(),
-                source,
+        OrientationPolicy::Pinned(baselines) => {
+            let Some(pinned) = baselines.get(model.as_str()) else {
+                return Err(ChainStop::new(PipelineError::OrientationBaselineMissing {
+                    model: model.clone(),
+                }));
+            };
+            run_orientation(
+                decimated,
+                &OrientRequest {
+                    pinned: pinned.clone(),
+                },
+            )
+            .map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
             })
-        }),
+        }
     }
 }
 
@@ -726,6 +815,18 @@ pub fn run_from_oriented(
         // below, `embed_incidence_census` and every sealed-run gate already
         // use, and record the typed refusal verbatim in `SupportedGeometry`
         // -- see `HollowStageRefused` for the provenance caveat this inherits.
+        // A hollow error that is *not* a refusal of this mesh's geometry is
+        // this model's failure, full stop. The reserve says "the engine could
+        // not hollow this shape"; it cannot say "the operator asked for a wall
+        // the stage will not cut" or "the constants registry would not read",
+        // and emitting a solid for either would answer a bad request with a
+        // plausible artifact instead of the error that names it.
+        Err(error) if !hollow_error_refuses_this_geometry(&error) => {
+            return Err(ChainStop::new(PipelineError::Hollow {
+                model: model.clone(),
+                source: error,
+            }))
+        }
         Err(error) => {
             let refusal = error.to_string();
             let solid = HollowedModel::solid_decision(
@@ -792,8 +893,14 @@ pub fn run_from_oriented(
         stop_after,
     ) {
         Ok(outcome) => Ok(outcome),
-        // The gate spoke about the plan, not about the geometry. Stop.
-        Err(stop) if stop.is_gates() => Err(stop),
+        // **Only a support refusal reaches the reserve.** The gate speaks about
+        // the plan rather than the geometry, and lowering, layer planning, a
+        // degenerate extent and the emitter's post-write disk audit speak about
+        // neither -- re-planning the oriented solid after one of those would
+        // write a different object to the same path and label the unrelated
+        // error a support refusal. Everything that is not a sealed-run or
+        // planner refusal is this model's `Failed` disposition, unchanged.
+        Err(stop) if !stop.is_support_refusal() => Err(stop),
         Err(stop) => {
             let solid = HollowedModel::solid_decision(
                 reserve_mesh,
@@ -819,6 +926,71 @@ pub fn run_from_oriented(
                 stop_after,
             )
         }
+    }
+}
+
+/// Whether a hollow-stage error is a refusal of **this mesh's geometry**, and
+/// therefore one the oriented-solid reserve is a legitimate answer to.
+///
+/// OQ-1/FU-34 authorized the reserve for exactly one thing: a model whose shape
+/// the hollow stage cannot turn into a shell (`InvalidShellTopology` and its
+/// relatives). It did not authorize laundering a *bad request* or a *broken
+/// environment* into a successful solid emission — an operator who passes a
+/// parse-valid but inadmissible `--wall-mm`, or whose constants registry will
+/// not publish, must get the error that names what they did, not an artifact
+/// that looks like the run worked.
+///
+/// Matched exhaustively and deliberately without a `_` arm: a new `HollowError`
+/// variant is a compile error here, so nobody gets to add one and have it
+/// silently inherit the fallback.
+fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
+    match error {
+        // Configuration and infrastructure. None of these is a statement about
+        // the mesh, and a solid artifact is not an answer to any of them.
+        HollowError::Constants(_)
+        | HollowError::PrinterProfileMismatch { .. }
+        | HollowError::WallBelowVoxelPitch { .. }
+        | HollowError::InvalidAdmissionLimits
+        | HollowError::Kernel
+        | HollowError::VoxelStack
+        | HollowError::RasterWorkMismatch { .. }
+        | HollowError::OutputIndexOverflow { .. }
+        | HollowError::InvalidArithmetic => false,
+        // Resource ceilings. FU-8b: a cap that was reached is a finding to
+        // report, never a reason to take a different route to an artifact.
+        HollowError::VoxelGridTooLarge
+        | HollowError::ResourceAccountingOverflow
+        | HollowError::VoxelCellLimitExceeded { .. }
+        | HollowError::RasterWorkLimitExceeded { .. }
+        | HollowError::RasterSubdivisionLimitExceeded
+        | HollowError::TriageAdmission(_) => false,
+        // The model does not fit the machine. Emitting the solid would hand
+        // back an artifact for a print that cannot be started.
+        HollowError::OutsidePrintableEnvelope { .. } => false,
+        // Geometry refusals: the shape could not be hollowed, drained or
+        // drilled. This is the reserve's own case, FU-34 included.
+        HollowError::DrainPlanning(_)
+        | HollowError::Drilling(_)
+        | HollowError::Triage(_)
+        | HollowError::StrictAudit(_)
+        | HollowError::Topology(_)
+        | HollowError::TopologyValidation(_)
+        | HollowError::NotClosedOrOriented
+        | HollowError::SolidMesh(_)
+        | HollowError::Solid(_)
+        | HollowError::OutputMesh(_)
+        | HollowError::InvalidShellTopology
+        | HollowError::BooleanVolumeMismatch { .. }
+        | HollowError::CavityExtractionFailed
+        | HollowError::DrainGeometryFailed
+        | HollowError::InvalidProductionMesh => true,
+        // Unreachable through `plinth_hollow::run`, which converts all three
+        // into a typed `HollowStageOutput::Solid` rather than propagating them.
+        // Listed as geometry anyway, because if one ever did propagate, "keep
+        // the solid" is precisely what it means.
+        HollowError::IneligibleBelowBulk
+        | HollowError::IneligibleNoCavity
+        | HollowError::IneligibleSavings => true,
     }
 }
 
@@ -944,5 +1116,133 @@ impl From<ScaleSanity> for AssumedPrintSize {
             longest_axis_mm: scale.longest_axis_mm,
             dimensions_mm: scale.dimensions_mm,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GateRefusal;
+
+    /// **Only a geometry refusal may be answered with a solid.**
+    ///
+    /// The hollow fallback used to swallow every `HollowError` and emit the
+    /// oriented solid as a success, so an operator who passed an inadmissible
+    /// `--wall-mm`, or whose constants registry would not publish, got a
+    /// plausible artifact instead of the error naming what they did. This pins
+    /// the classification on one representative of each class; the match itself
+    /// is exhaustive with no `_` arm, so a new variant is a compile error and
+    /// cannot inherit the fallback by default.
+    #[test]
+    fn only_a_geometry_refusal_reaches_the_oriented_solid_reserve() {
+        // Configuration: the operator's own request, or the machine selection.
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::WallBelowVoxelPitch {
+                wall_mm: 0.25,
+                voxel_pitch_mm: 0.5,
+            }
+        ));
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::PrinterProfileMismatch {
+                expected: "saturn4-ultra".to_owned(),
+                actual: "other".to_owned(),
+            }
+        ));
+        // Infrastructure.
+        assert!(!hollow_error_refuses_this_geometry(&HollowError::Kernel));
+        // A reached resource cap is a finding, never a route to an artifact
+        // by another path (FU-8b).
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::VoxelCellLimitExceeded {
+                cells: 2,
+                max_cells: 1,
+            }
+        ));
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::VoxelGridTooLarge
+        ));
+        // A model that does not fit the machine is not answered with a solid
+        // that also does not fit it.
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::OutsidePrintableEnvelope { axis: 2 }
+        ));
+
+        // The case OQ-1/FU-34 authorized the reserve for, and its relatives.
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::InvalidShellTopology
+        ));
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::NotClosedOrOriented
+        ));
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::CavityExtractionFailed
+        ));
+    }
+
+    /// **Only a support refusal reaches the reserve either.**
+    ///
+    /// The guard used to be "anything that is not a gate stop", so a refusal by
+    /// the emitter's post-write disk audit, by lowering, or by layer planning
+    /// re-planned a *different geometry*, wrote it to the same target, and
+    /// labelled the unrelated error a support refusal.
+    #[test]
+    fn only_a_sealed_run_or_planner_refusal_is_a_support_refusal() {
+        let model = ModelId::new("fixture");
+        let stop = |error| ChainStop::new(error);
+
+        assert!(stop(PipelineError::SealedRun {
+            model: model.clone(),
+            source: plinth_support::SupportRunError::InvalidResourceCaps,
+        })
+        .is_support_refusal());
+
+        for error in [
+            PipelineError::DegenerateExtent {
+                model: model.clone(),
+            },
+            PipelineError::Gates {
+                model: model.clone(),
+                source: GateRefusal::ConstantsUnavailable,
+            },
+            PipelineError::Hollow {
+                model: model.clone(),
+                source: HollowError::InvalidShellTopology,
+            },
+        ] {
+            let stop = stop(error);
+            assert!(
+                !stop.is_support_refusal(),
+                "{} must not be answered with a substitute geometry",
+                stop.detail()
+            );
+        }
+    }
+
+    /// The target is cleared idempotently, and a target that cannot be cleared
+    /// is reported rather than swallowed.
+    #[test]
+    fn clearing_a_target_is_idempotent_and_a_failure_is_not_swallowed() {
+        let root = std::env::temp_dir().join(format!("plinth-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+
+        // Absent is not an error; the ordinary case is a first run.
+        let absent = root.join("absent.chitubox");
+        assert!(clear_stale_artifact(&absent).is_ok());
+
+        // Present is removed, and removing it again is still fine.
+        let present = root.join("present.chitubox");
+        std::fs::write(&present, b"an earlier run").expect("plant");
+        assert!(clear_stale_artifact(&present).is_ok());
+        assert!(!present.exists());
+        assert!(clear_stale_artifact(&present).is_ok());
+
+        // A directory sitting on the target path still occupies it, and that
+        // is reported, not ignored.
+        let occupied = root.join("occupied.chitubox");
+        std::fs::create_dir_all(&occupied).expect("plant a directory");
+        assert!(clear_stale_artifact(&occupied).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

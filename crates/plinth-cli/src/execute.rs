@@ -19,7 +19,7 @@ use plinth_hollow::HollowRequest;
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, PipelineError, PipelineExitCode,
-    PrepareReport, PrepareRequest,
+    PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
 use crate::{CacheMode, PrepareSelection};
@@ -28,8 +28,14 @@ use crate::{CacheMode, PrepareSelection};
 ///
 /// Returns the process exit code, which is the pipeline's own exit-code
 /// projection and not a second contract: `0` when every model reached an
-/// artifact, and otherwise the code of the first model in report order that did
-/// not — `3` for a pre-write gate refusal, per [`PipelineExitCode`].
+/// artifact, `3` whenever **any** model in the run was refused by the pre-write
+/// physics gates, and otherwise the code of the first model in report order
+/// that did not reach one, per [`PipelineExitCode`].
+///
+/// `3` is sticky because it is the one code a calling script acts on. A folder
+/// containing both an unreadable file and a gate refusal must not exit `1`: the
+/// unreadable file is a nuisance, the refusal is a safety verdict, and a script
+/// that only sees `1` learns nothing about it.
 pub fn execute(selection: PrepareSelection) -> ExitCode {
     let request = match resolve(&selection) {
         Ok(request) => request,
@@ -150,12 +156,25 @@ fn print_model(model: &ModelPreparationReport) {
         print_size(model.assumed_print_size)
     );
     match &model.outcome {
-        ModelPreparationOutcome::Artifact { emit } => println!(
-            "  result  EMITTED  {}  ({} support records, {} bytes)",
-            emit.artifact_path.display(),
-            emit.support_record_count,
-            emit.artifact_bytes
-        ),
+        ModelPreparationOutcome::Artifact {
+            emit,
+            geometry,
+            hollow_disposition,
+        } => {
+            println!(
+                "  result  EMITTED  {}  ({} support records, {} bytes)",
+                emit.artifact_path.display(),
+                emit.support_record_count,
+                emit.artifact_bytes
+            );
+            // What is actually in the file. Two of the four geometries are
+            // substitutions -- the chain planned a drilled shell, could not
+            // seal or could not hollow it, and carried the oriented solid
+            // instead -- and without this line a substituted artifact reads
+            // exactly like the intended one.
+            println!("  geometry  {}", describe(geometry));
+            println!("  hollow disposition  {hollow_disposition:?}");
+        }
         ModelPreparationOutcome::Refused {
             gate,
             geometry,
@@ -180,6 +199,28 @@ fn print_model(model: &ModelPreparationReport) {
         }
         ModelPreparationOutcome::Stopped { after } => {
             println!("  result  STOPPED after {after:?}");
+        }
+    }
+}
+
+/// One line naming the geometry the artifact was actually built from, and
+/// saying outright when that is not the geometry the pipeline set out to make.
+fn describe(geometry: &SupportedGeometry) -> String {
+    match geometry {
+        SupportedGeometry::DrilledShellSealed => {
+            "drilled hollow shell (the intended geometry)".to_owned()
+        }
+        SupportedGeometry::HollowStageDecidedSolid => {
+            "solid, by the hollow stage's own decision".to_owned()
+        }
+        SupportedGeometry::DrilledShellRefusedBySupport {
+            drilled_faces,
+            refusal,
+        } => format!(
+            "SUBSTITUTED solid -- support refused the {drilled_faces}-face drilled shell: {refusal}"
+        ),
+        SupportedGeometry::HollowStageRefused { refusal } => {
+            format!("SUBSTITUTED solid -- the hollow stage refused this geometry: {refusal}")
         }
     }
 }

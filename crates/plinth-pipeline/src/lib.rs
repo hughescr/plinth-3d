@@ -44,6 +44,7 @@ use plinth_support::{
     SupportRequest,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -105,12 +106,47 @@ pub enum StageStop {
 /// default is the legacy coarse policy. Its search implementation lands later;
 /// this boundary only makes that future work explicit rather than silently
 /// requiring a baseline artifact for every input.
+///
+/// **A pinned baseline belongs to one model, so the policy is a map and not a
+/// single value.** `plinth_orient::run` reads a rotation out of a baseline
+/// pipeline report and applies it to whatever mesh it is handed; it does not
+/// and cannot check that the report and the mesh describe the same object. A
+/// run-wide baseline over a heterogeneous folder would therefore hand every
+/// model the *first* model's rotation, and a misoriented mini still seals,
+/// still passes the gates and still emits — a plausible artifact and an
+/// unprintable one. Keying by source stem is how the proven composition has
+/// always resolved it (`corpus/baseline/<stem>.pipeline.json`), and a model the
+/// map does not name is a per-model refusal
+/// ([`PipelineError::OrientationBaselineMissing`]), never a borrowed rotation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "baseline", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "baselines", rename_all = "snake_case")]
 pub enum OrientationPolicy {
     #[default]
     LegacyCoarse,
-    Pinned(PinnedBaseline),
+    /// One baseline per source stem — the `<stem>` of `<stem>.stl`, which is
+    /// also the `<stem>` of the `<stem>.chitubox` the run writes.
+    Pinned(BTreeMap<String, PinnedBaseline>),
+}
+
+impl OrientationPolicy {
+    /// The pinned policy for a run of exactly one named model.
+    ///
+    /// Spelled out as a constructor because the one-model case is the common
+    /// one and building the map by hand at every call site is how a caller ends
+    /// up reaching for one shared baseline again.
+    #[must_use]
+    pub fn pinned_for(stem: &str, baseline: PinnedBaseline) -> Self {
+        Self::Pinned(BTreeMap::from([(stem.to_owned(), baseline)]))
+    }
+
+    /// The baseline this policy pins for one model, if it pins one.
+    #[must_use]
+    pub fn baseline_for(&self, stem: &str) -> Option<&PinnedBaseline> {
+        match self {
+            Self::LegacyCoarse => None,
+            Self::Pinned(baselines) => baselines.get(stem),
+        }
+    }
 }
 
 /// The output printer profiles currently admitted by preparation.
@@ -259,8 +295,25 @@ pub struct PrepareRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
+    /// A `.chitubox` was written, and **what was written is stated rather than
+    /// assumed**.
+    ///
+    /// `geometry` is the same field [`Self::Refused`] carries and it is
+    /// load-bearing for the same reason. Two of the four
+    /// [`prepare::SupportedGeometry`] values are *substitutions*: the chain
+    /// planned the drilled shell, could not seal or could not hollow it, and
+    /// carried the oriented solid instead. A report that said only `EMITTED`
+    /// would make an artifact produced by substitution indistinguishable from
+    /// the intended drilled shell — the reader would have no way to tell that
+    /// the object on the plate is not the object the pipeline set out to make.
+    /// `hollow_disposition` is the hollow stage's own verdict beside it, with
+    /// the caveat [`prepare::SupportedGeometry::HollowStageRefused`] records:
+    /// on the fallback paths the disposition is stamped by a stage that never
+    /// reached a threshold test, and `geometry` is where the truth lives.
     Artifact {
         emit: EmitReport,
+        geometry: prepare::SupportedGeometry,
+        hollow_disposition: HollowDisposition,
     },
     Stopped {
         after: StageStop,
@@ -342,29 +395,51 @@ impl PrepareReport {
     /// failed model contributes no artifact.
     pub fn artifacts(&self) -> impl Iterator<Item = &Path> {
         self.models.iter().filter_map(|model| match &model.outcome {
-            ModelPreparationOutcome::Artifact { emit } => Some(emit.artifact_path.as_path()),
+            ModelPreparationOutcome::Artifact { emit, .. } => Some(emit.artifact_path.as_path()),
             ModelPreparationOutcome::Stopped { .. }
             | ModelPreparationOutcome::Refused { .. }
             | ModelPreparationOutcome::Failed { .. } => None,
         })
     }
 
-    /// The run's exit status: the code of the **first** model, in the run's own
-    /// deterministic order, that did not reach an artifact.
+    /// The run's exit status: [`PipelineExitCode::Gates`] if **any** model in
+    /// the run was refused by the pre-write physics gates, and otherwise the
+    /// code of the first model, in the run's own deterministic order, that did
+    /// not reach an artifact.
     ///
-    /// First-in-order rather than worst-of-set deliberately. There is no total
-    /// severity order over the exit codes — `Gates = 3` is not "worse" than
-    /// `Hollow = 2`, it is a different verdict — so any ranking would be an
-    /// invention. Processing order is already fixed and already reported, so
-    /// the code a caller sees is the code of a disposition they can find by
-    /// reading the report from the top.
+    /// **`Gates` is sticky, and it is the only code that is.** The exit code is
+    /// the sole machine-observable safety signal a calling script has, and
+    /// `Gates = 3` is the one code with a documented meaning callers act on:
+    /// "the physics gates refused a model, there is no artifact for it, and the
+    /// refusal is the finding". First-in-order alone would let that signal be
+    /// masked by an unrelated earlier disposition — a macOS `._sidecar` that
+    /// sorts before every real model and fails to load would turn a folder
+    /// containing a gate refusal into exit 1, which reads as "one file was
+    /// unreadable" and hides the refusal completely. Every other code stays
+    /// first-in-order, because there is no total severity ranking over them
+    /// (`Hollow = 2` is not "worse" than `Input = 1`, it is a different
+    /// verdict) and inventing one would be a second contract.
     #[must_use]
     pub fn exit_code(&self) -> PipelineExitCode {
+        let mut first_non_ok = None;
+        for model in &self.models {
+            let code = model.outcome.exit_code();
+            if code == PipelineExitCode::Gates {
+                return PipelineExitCode::Gates;
+            }
+            if code != PipelineExitCode::Ok && first_non_ok.is_none() {
+                first_non_ok = Some(code);
+            }
+        }
+        first_non_ok.unwrap_or(PipelineExitCode::Ok)
+    }
+
+    /// Whether the pre-write physics gates refused any model in this run.
+    #[must_use]
+    pub fn has_gate_refusal(&self) -> bool {
         self.models
             .iter()
-            .map(|model| model.outcome.exit_code())
-            .find(|code| *code != PipelineExitCode::Ok)
-            .unwrap_or(PipelineExitCode::Ok)
+            .any(|model| matches!(model.outcome, ModelPreparationOutcome::Refused { .. }))
     }
 }
 
@@ -426,6 +501,34 @@ pub enum PipelineError {
          today, and it needs a baseline pipeline report naming the rotation to apply"
     )]
     OrientationPolicyUnavailable { model: ModelId },
+    /// The run's pinned-orientation policy names no baseline for this model.
+    ///
+    /// A pinned baseline is one mesh's recorded rotation. Applying it to a
+    /// different mesh is not an approximation of that model's orientation, it
+    /// is another model's answer — and a misoriented model still seals, still
+    /// passes the gates and still emits, so nothing downstream would catch it.
+    /// A folder whose policy does not name this stem is therefore a per-model
+    /// refusal, exactly like an unported policy.
+    #[error(
+        "model {model} has no pinned orientation baseline in this run's policy; a pinned \
+         baseline records one mesh's rotation and is never applied to another model"
+    )]
+    OrientationBaselineMissing { model: ModelId },
+    /// An artifact left at this model's target path by an earlier run could not
+    /// be removed before the run started.
+    ///
+    /// Reported rather than ignored: the whole reason the target is cleared up
+    /// front is that a stale file beside a failure disposition is read as this
+    /// run's answer. A refusal or an error announced while the old file is
+    /// still sitting there is the same misleading hand-off, so a failed removal
+    /// fails the model by name instead.
+    #[error("model {model} could not have an earlier run's artifact at {path} cleared")]
+    StaleArtifact {
+        model: ModelId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// The prepared mesh has no finite Z extent, so no layer plan spans it.
     #[error("model {model} has no finite z extent to plan layers over")]
     DegenerateExtent { model: ModelId },
@@ -514,6 +617,7 @@ impl PipelineError {
             | Self::Load { .. }
             | Self::ScaleSuspicious { .. }
             | Self::OrientationPolicyUnavailable { .. }
+            | Self::OrientationBaselineMissing { .. }
             | Self::DegenerateExtent { .. }
             | Self::Decimate { .. }
             | Self::Orient { .. } => PipelineExitCode::Input,
@@ -523,7 +627,9 @@ impl PipelineError {
             Self::Support { .. } | Self::SealedRun { .. } | Self::Lowering { .. } => {
                 PipelineExitCode::Supports
             }
-            Self::Emit { .. } => PipelineExitCode::Emit,
+            // A stale artifact that will not clear is a failure of this model's
+            // emission path: the one place the run owns the target file.
+            Self::Emit { .. } | Self::StaleArtifact { .. } => PipelineExitCode::Emit,
         }
     }
 }
@@ -556,18 +662,48 @@ mod tests {
 
     #[test]
     fn pinned_orientation_retains_the_existing_typed_baseline_authority() {
-        let policy = OrientationPolicy::Pinned(PinnedBaseline {
-            pipeline_report: PathBuf::from("baseline/Sphere.pipeline.json"),
-        });
+        let policy = OrientationPolicy::pinned_for(
+            "Sphere",
+            PinnedBaseline {
+                pipeline_report: PathBuf::from("baseline/Sphere.pipeline.json"),
+            },
+        );
         let wire = serde_json::to_string(&policy).expect("policy serializes");
         assert_eq!(
             wire,
-            r#"{"kind":"pinned","baseline":{"pipeline_report":"baseline/Sphere.pipeline.json"}}"#
+            r#"{"kind":"pinned","baselines":{"Sphere":{"pipeline_report":"baseline/Sphere.pipeline.json"}}}"#
         );
         assert_eq!(
             serde_json::from_str::<OrientationPolicy>(&wire).expect("policy deserializes"),
             policy
         );
+    }
+
+    /// A pinned policy answers **by name**, and refuses to answer for a model
+    /// it does not name.
+    ///
+    /// This is the whole defence against a heterogeneous folder receiving one
+    /// model's rotation for every model: `plinth_orient::run` applies whatever
+    /// baseline it is handed to whatever mesh it is handed, and a misoriented
+    /// model seals, gate-passes and emits like any other, so the binding has to
+    /// happen here or nowhere.
+    #[test]
+    fn a_pinned_policy_resolves_per_model_and_lends_no_model_anothers_baseline() {
+        let baseline = |name: &str| PinnedBaseline {
+            pipeline_report: PathBuf::from(format!("baseline/{name}.pipeline.json")),
+        };
+        let policy = OrientationPolicy::Pinned(BTreeMap::from([
+            ("mini-a".to_owned(), baseline("mini-a")),
+            ("mini-b".to_owned(), baseline("mini-b")),
+        ]));
+        assert_eq!(policy.baseline_for("mini-a"), Some(&baseline("mini-a")));
+        assert_eq!(policy.baseline_for("mini-b"), Some(&baseline("mini-b")));
+        assert_eq!(
+            policy.baseline_for("mini-c"),
+            None,
+            "an unnamed model must get no baseline at all, never a neighbour's"
+        );
+        assert_eq!(OrientationPolicy::LegacyCoarse.baseline_for("mini-a"), None);
     }
 
     #[test]
@@ -933,6 +1069,8 @@ mod tests {
                             support_record_count: 4,
                             artifact_bytes: 2048,
                         },
+                        geometry: SupportedGeometry::DrilledShellSealed,
+                        hollow_disposition: HollowDisposition::HollowedAndDrilled,
                     },
                 },
                 ModelPreparationReport {
@@ -994,14 +1132,14 @@ mod tests {
                             support_record_count: 1,
                             artifact_bytes: 1,
                         },
+                        geometry: SupportedGeometry::DrilledShellSealed,
+                        hollow_disposition: HollowDisposition::HollowedAndDrilled,
                     },
                 ),
                 model("refused", refused),
                 model("failed", failed),
             ],
         };
-        // First non-Ok in model order, never a severity ranking the exit-code
-        // contract does not define.
         assert_eq!(report.exit_code(), PipelineExitCode::Gates);
         assert_eq!(
             report.artifacts().collect::<Vec<_>>(),
@@ -1017,6 +1155,83 @@ mod tests {
             "drilled_shell_sealed"
         );
         assert_eq!(wire["models"][2]["outcome"]["exit_code"], "input");
+        assert_eq!(
+            wire["models"][0]["outcome"]["geometry"]["kind"], "drilled_shell_sealed",
+            "a successful artifact must carry the geometry it was built from"
+        );
+        assert_eq!(
+            wire["models"][0]["outcome"]["hollow_disposition"]["kind"],
+            "hollowed_and_drilled"
+        );
+    }
+
+    /// **A gate refusal cannot be masked by an earlier, unrelated failure.**
+    ///
+    /// The named case: a macOS `._sidecar` sorts before every real model and
+    /// fails to load, so a first-in-order exit code would report `1` for a
+    /// folder in which the physics gates refused a mini. Exit `3` is the only
+    /// machine-observable safety signal a calling script has, and it is the one
+    /// code with a documented meaning callers act on, so it is sticky.
+    #[test]
+    fn a_gate_refusal_anywhere_in_a_run_outranks_an_earlier_unrelated_failure() {
+        let model = |name: &str, outcome| ModelPreparationReport {
+            model: ModelId::new(name),
+            source_path: PathBuf::from(format!("models/{name}.stl")),
+            assumed_print_size: None,
+            outcome,
+        };
+        let sidecar = model(
+            "._mini",
+            ModelPreparationOutcome::Failed {
+                exit_code: PipelineExitCode::Input,
+                detail: "not a binary STL".to_owned(),
+            },
+        );
+        let refused = model(
+            "mini",
+            ModelPreparationOutcome::Refused {
+                gate: Some(PreWriteGate::UncoveredIslands),
+                geometry: Some(SupportedGeometry::DrilledShellSealed),
+                violation: "nine uncovered islands".to_owned(),
+            },
+        );
+
+        let report = PrepareReport {
+            no_cache: false,
+            models: vec![sidecar.clone(), refused.clone()],
+        };
+        assert_eq!(
+            report.exit_code(),
+            PipelineExitCode::Gates,
+            "the refusal sorts second and was masked by the sidecar's exit 1"
+        );
+        assert!(report.has_gate_refusal());
+
+        // Order-independent, which is the point: the same run enumerated the
+        // other way round must report the same verdict.
+        let reversed = PrepareReport {
+            no_cache: false,
+            models: vec![refused, sidecar.clone()],
+        };
+        assert_eq!(reversed.exit_code(), PipelineExitCode::Gates);
+
+        // And with no refusal in it, the run is first-in-order as before --
+        // `Gates` is the only sticky code, not a new severity ranking.
+        let no_refusal = PrepareReport {
+            no_cache: false,
+            models: vec![
+                sidecar,
+                model(
+                    "other",
+                    ModelPreparationOutcome::Failed {
+                        exit_code: PipelineExitCode::Supports,
+                        detail: "sealed run refused".to_owned(),
+                    },
+                ),
+            ],
+        };
+        assert_eq!(no_refusal.exit_code(), PipelineExitCode::Input);
+        assert!(!no_refusal.has_gate_refusal());
     }
 
     /// Every new stop this executor can produce lands on the frozen exit-code
@@ -1042,6 +1257,18 @@ mod tests {
             (
                 PipelineError::OrientationPolicyUnavailable { model: model() },
                 PipelineExitCode::Input,
+            ),
+            (
+                PipelineError::OrientationBaselineMissing { model: model() },
+                PipelineExitCode::Input,
+            ),
+            (
+                PipelineError::StaleArtifact {
+                    model: model(),
+                    path: PathBuf::from("out/fixture.chitubox"),
+                    source: std::io::Error::other("denied"),
+                },
+                PipelineExitCode::Emit,
             ),
             (
                 PipelineError::DegenerateExtent { model: model() },

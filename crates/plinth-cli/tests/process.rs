@@ -93,9 +93,13 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
 /// on the pipeline's own projection rather than a CLI-invented code.
 ///
 /// When `--orient pinned:<baseline>` lands, this test is where the artifact
-/// assertion goes. `plinth-pipeline`'s `prepare_folder.rs` already proves the
-/// executor emits a real `.chitubox` under a pinned policy, so the only missing
-/// piece is the flag.
+/// assertion — and the observed exit 3 — go. `plinth-pipeline`'s
+/// `prepare_folder.rs` already proves the executor emits a real `.chitubox`
+/// under a pinned policy, so the only missing piece is the flag. Note that the
+/// flag must name a baseline **per model**: `OrientationPolicy::Pinned` is a map
+/// keyed by source stem, because a pinned baseline is one mesh's rotation and
+/// applying it to another model produces a misoriented artifact that still
+/// seals, still passes the gates and still emits.
 #[test]
 fn prepare_executes_the_folder_and_reports_every_model_by_name() {
     let scratch = Scratch::new("execute");
