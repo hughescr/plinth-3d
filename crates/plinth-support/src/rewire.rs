@@ -726,6 +726,16 @@ fn try_retire(
     if children.iter().any(|child| braced.contains(child)) {
         return Ok(None);
     }
+    // The move re-anchors each child onto this member's parent, which is what
+    // keeps its route to ground. A root has no parent to inherit, so the same
+    // re-anchor would promote the children to roots whose rootward ends sit
+    // wherever this member's terminal-ward end was, not on the plate --
+    // `Forest::retire` refuses that stranding and this move must not perform it
+    // by hand either. Declining is the conservative direction: an unretired
+    // degenerate root leaves more material standing, never less.
+    if forest.parent_of(key).is_none() && !children.is_empty() {
+        return Ok(None);
+    }
     let before = total_volume_ml(forest)?;
     let mut candidate = forest.clone();
     let parent = candidate.parent_of(key);
@@ -1143,6 +1153,50 @@ mod tests {
                 9
             )) < cfg.degenerate_mm
         );
+    }
+
+    #[test]
+    fn degenerate_root_retire_is_declined_rather_than_stranding_its_children() {
+        let cfg = Config::current().unwrap();
+        let mut forest = Forest::new();
+        // Identical to the spliced case above except that `deg` has no parent,
+        // so there is no route to ground for its children to inherit.
+        let deg = forest.add_member(member(
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0 + 5e-5],
+            MemberKind::Shoot,
+            0,
+        ));
+        let a = forest.add_member(member(
+            [1.0, 0.0, 3.0],
+            [0.0, 0.0, 2.0],
+            MemberKind::Shoot,
+            1,
+        ));
+        let b = forest.add_member(member(
+            [-1.0, 0.0, 3.0],
+            [0.0, 0.0, 2.0],
+            MemberKind::Shoot,
+            2,
+        ));
+        forest.set_parent(a, Some(deg)).unwrap();
+        forest.set_parent(b, Some(deg)).unwrap();
+        assert!(forest.parent_of(deg).is_none());
+        let baseline = forest.digest();
+        let mut candidate = forest.clone();
+        with_far_authority(|authority| {
+            assert!(
+                try_retire(&mut candidate, deg, authority, &BTreeSet::new(), &cfg)
+                    .unwrap()
+                    .is_none(),
+                "a root's children have no parent to inherit, so the move must decline"
+            );
+        });
+        assert_eq!(candidate.digest(), baseline);
+        assert_eq!(candidate.parent_of(a), Some(deg));
+        assert_eq!(candidate.parent_of(b), Some(deg));
+        assert_eq!(candidate.roots(), vec![deg]);
+        candidate.validate().unwrap();
     }
 
     #[test]

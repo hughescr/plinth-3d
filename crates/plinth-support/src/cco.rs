@@ -7013,6 +7013,9 @@ mod tests {
 
         let mut reused = forest.clone();
         let replacement_member = reused.member(keys.root).unwrap().clone();
+        // Retirement refuses to strand live children as ungrounded roots, so
+        // the leaf goes first; the root's slot is still the lowest free one.
+        reused.retire(keys.child).unwrap();
         reused.retire(keys.root).unwrap();
         let replacement = reused.add_member(replacement_member);
         assert_eq!(replacement.slot(), keys.root.slot());
