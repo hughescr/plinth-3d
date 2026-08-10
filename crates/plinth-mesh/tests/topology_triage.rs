@@ -1,6 +1,6 @@
 use plinth_mesh::{
     build_face_topology, certify_closed_components, make_box, mesh_fingerprint, triage_components,
-    triage_settings, validate_face_topology, EdgeTopologyCounts, Mesh, TopologyError, TriageError,
+    triage_settings, validate_face_topology, Mesh, TopologyCounts, TopologyError, TriageError,
     TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
@@ -64,10 +64,12 @@ fn topology_builds_canonical_adjacency_components_and_v4_digest_once() {
     assert_eq!(topology.neighbors(0), Some(&[1][..]));
     assert_eq!(topology.welded_vertex_count(), 4);
     assert_eq!(
-        topology.edge_counts(),
-        EdgeTopologyCounts {
+        topology.counts(),
+        TopologyCounts {
             boundary_edges: 4,
             nonmanifold_edges: 0,
+            duplicate_faces: 0,
+            duplicate_face_groups: 0,
         }
     );
     assert_eq!(topology.weld_policy(), WeldPolicy::ExactBits);
@@ -95,12 +97,115 @@ fn canonical_edge_counts_distinguish_edge_incidence_from_face_flags() {
     .expect("finite soup");
     let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
     assert_eq!(
-        topology.edge_counts(),
-        EdgeTopologyCounts {
+        topology.counts(),
+        TopologyCounts {
             boundary_edges: 6,
             nonmanifold_edges: 1,
+            duplicate_faces: 0,
+            duplicate_face_groups: 0,
         },
         "three faces share one undirected edge; cut flags are per face and cannot stand in for this count"
+    );
+}
+
+/// FU-26. The count used to be taken inside the pass that writes `cut_flags`,
+/// against the flags that pass had written so far, so a face that met a
+/// genuine duplicate across one edge became "a duplicate" for every edge key
+/// visited after it and took its later non-manifold edges out of the total
+/// with it. On decimated Weeping Treant v1.2 candidates that read 24 where a
+/// frozen-snapshot classification found 25, and 170 where it found 208.
+///
+/// This fixture is that shape in five faces: faces 0 and 1 are exact
+/// duplicates on edge (0,1); face 2 shares that edge and so acquires
+/// `TOPOLOGY_CUT_DUPLICATE` from it; and edge (1,3) — visited later in
+/// `BTreeMap` key order — carries three faces of which one is that innocent
+/// face 2. Edge (1,3) is genuinely non-manifold and no duplicate face touches
+/// it.
+#[test]
+fn a_late_nonmanifold_edge_survives_a_duplicate_flag_an_earlier_edge_wrote() {
+    let mesh = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ],
+        vec![[0, 1, 2], [0, 1, 2], [1, 0, 3], [1, 3, 4], [1, 3, 5]],
+    )
+    .expect("finite soup");
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.counts(),
+        TopologyCounts {
+            boundary_edges: 5,
+            nonmanifold_edges: 1,
+            duplicate_faces: 2,
+            duplicate_face_groups: 1,
+        },
+        "edge (1,3) has three incident faces and no duplicate among them; the duplicate flag \
+         face 2 picked up at edge (0,1) must not remove it from the count"
+    );
+    assert!(
+        topology.cut_flags()[2] & TOPOLOGY_CUT_DUPLICATE != 0,
+        "the contaminating write is deliberately kept: face 2 is genuinely cut where it meets \
+         the duplicate pair, and that cut only ever severs adjacency"
+    );
+    assert!(
+        !topology
+            .cut_flags()
+            .iter()
+            .any(|flags| flags & TOPOLOGY_CUT_NONMANIFOLD != 0),
+        "no face carries the non-manifold flag here, which is exactly why the flags cannot be \
+         asked for this count"
+    );
+}
+
+/// FU-26 part two: duplicate faces are excluded from `nonmanifold_edges` by
+/// design, and before this counter they were reported nowhere, so a reduction
+/// could fuse coincident sheets without the gate's report saying anything.
+#[test]
+fn duplicate_faces_and_their_groups_are_counted_and_a_clean_mesh_reports_none() {
+    let clean = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("clean box");
+    let topology = build_face_topology(&clean, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(topology.counts().duplicate_faces, 0);
+    assert_eq!(topology.counts().duplicate_face_groups, 0);
+
+    // One group of two and one group of three, plus a face that repeats no
+    // other: five duplicate faces across two groups.
+    let mesh = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
+        ],
+        vec![
+            [0, 1, 2],
+            [0, 1, 2],
+            [0, 1, 3],
+            [1, 3, 0],
+            [3, 0, 1],
+            [0, 1, 4],
+        ],
+    )
+    .expect("finite soup");
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.counts().duplicate_faces,
+        5,
+        "a group counts every member, not the members past the first"
+    );
+    assert_eq!(topology.counts().duplicate_face_groups, 2);
+    assert!(
+        topology
+            .cut_flags()
+            .iter()
+            .all(|flags| flags & TOPOLOGY_CUT_DUPLICATE != 0),
+        "the sixth face shares edge (0,1) with both groups and is cut there too, which is why \
+         the flag is broader than the count"
     );
 }
 

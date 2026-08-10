@@ -17,8 +17,8 @@ use geom_kernel::{
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_core::{m0_constants, PositiveFinite};
 use plinth_mesh::{
-    build_face_topology, mesh_fingerprint, EdgeTopologyCounts, Mesh, StrictMeshAuditError,
-    WeldPolicy, WeldedView,
+    build_face_topology, mesh_fingerprint, Mesh, StrictMeshAuditError, TopologyCounts, WeldPolicy,
+    WeldedView,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -321,7 +321,7 @@ pub struct FinalVerificationAttempt {
     /// Absent when topology refused the candidate before the expensive full
     /// population probe.
     pub probe: Option<TwoSidedProbe>,
-    pub topology_after: EdgeTopologyCounts,
+    pub topology_after: TopologyCounts,
     pub result: FinalVerificationResult,
     pub downstream_utility: DownstreamUtilityEvidence,
 }
@@ -347,7 +347,7 @@ pub struct AdaptiveProbeStep {
     pub candidate_fingerprint: String,
     pub plateau_of_fingerprint: Option<String>,
     pub sampled_probe: TwoSidedProbe,
-    pub topology_after: Option<EdgeTopologyCounts>,
+    pub topology_after: Option<TopologyCounts>,
     pub full_probe: Option<TwoSidedProbe>,
     pub result: AdaptiveProbeResult,
 }
@@ -455,8 +455,8 @@ pub enum ReductionRefusalReason {
     },
     TopologyIncreased {
         requested_ratio: f64,
-        before: EdgeTopologyCounts,
-        after: EdgeTopologyCounts,
+        before: TopologyCounts,
+        after: TopologyCounts,
     },
     NoDownstreamUtilityEvidence {
         geometrically_eligible_candidate_count: usize,
@@ -472,8 +472,8 @@ pub struct BudgetSearchSuccess {
     chosen_ratio: f64,
     trace: BudgetSearchTrace,
     final_probe: TwoSidedProbe,
-    topology_before: EdgeTopologyCounts,
-    topology_after: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
+    topology_after: TopologyCounts,
 }
 
 impl BudgetSearchSuccess {
@@ -508,12 +508,12 @@ impl BudgetSearchSuccess {
     }
 
     #[must_use]
-    pub const fn topology_before(&self) -> EdgeTopologyCounts {
+    pub const fn topology_before(&self) -> TopologyCounts {
         self.topology_before
     }
 
     #[must_use]
-    pub const fn topology_after(&self) -> EdgeTopologyCounts {
+    pub const fn topology_after(&self) -> TopologyCounts {
         self.topology_after
     }
 }
@@ -573,8 +573,8 @@ pub struct DecimationAudit {
     chosen_ratio: f64,
     trace: BudgetSearchTrace,
     final_probe: TwoSidedProbe,
-    topology_before: EdgeTopologyCounts,
-    topology_after: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
+    topology_after: TopologyCounts,
 }
 
 impl DecimationAudit {
@@ -594,12 +594,12 @@ impl DecimationAudit {
     }
 
     #[must_use]
-    pub const fn topology_before(&self) -> EdgeTopologyCounts {
+    pub const fn topology_before(&self) -> TopologyCounts {
         self.topology_before
     }
 
     #[must_use]
-    pub const fn topology_after(&self) -> EdgeTopologyCounts {
+    pub const fn topology_after(&self) -> TopologyCounts {
         self.topology_after
     }
 
@@ -744,8 +744,8 @@ pub enum VerificationFailureReason {
         slack: f64,
     },
     TopologyIncreased {
-        before: EdgeTopologyCounts,
-        after: EdgeTopologyCounts,
+        before: TopologyCounts,
+        after: TopologyCounts,
     },
     TopologyAudit {
         message: String,
@@ -758,8 +758,8 @@ pub enum VerificationFailureReason {
 pub struct VerificationFailure {
     pub trace: BudgetSearchTrace,
     pub final_probe: Option<TwoSidedProbe>,
-    pub topology_before: EdgeTopologyCounts,
-    pub topology_after: Option<EdgeTopologyCounts>,
+    pub topology_before: TopologyCounts,
+    pub topology_after: Option<TopologyCounts>,
     pub reason: VerificationFailureReason,
 }
 
@@ -1248,7 +1248,7 @@ fn run_budget_search(
     }
 
     let topology_before = build_face_topology(original, WeldPolicy::ExactBits)
-        .map(|topology| topology.edge_counts())
+        .map(|topology| topology.counts())
         .map_err(|error| BudgetSearchError::SearchExecution {
             phase: "original topology audit",
             message: error.to_string(),
@@ -1369,7 +1369,7 @@ fn run_budget_search(
             });
         }
         let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
-            .map(|topology| topology.edge_counts())
+            .map(|topology| topology.counts())
             .map_err(|error| {
                 verification_failed(
                     trace.clone(),
@@ -1567,8 +1567,8 @@ fn assess_downstream_utility(
     policy: UtilityPolicy,
     candidate: &SimplifyOutcome,
     final_probe: &TwoSidedProbe,
-    topology_before: EdgeTopologyCounts,
-    topology_after: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
+    topology_after: TopologyCounts,
 ) -> DownstreamUtilityEvidence {
     // A non-finite deviation is a refusal, not a comparison: `NaN > limit` is
     // false, so an unguarded `>` would read a missing measurement as a pass.
@@ -1592,10 +1592,16 @@ fn assess_downstream_utility(
         // responsibility for the invariant `stitch_layer` needs, the unit tests
         // pin it in isolation, and a future reordering that probed before it
         // gated topology (or a second caller of this predicate) would otherwise
-        // silently lose the guard rather than fail a test. Its strength is
-        // bounded by FU-26: the counter it reads under-counts non-manifold
-        // edges and cannot see duplicate faces at all, so it is a floor on the
-        // damage, not a measurement of it.
+        // silently lose the guard rather than fail a test. Since FU-26 the
+        // counter it reads is a count rather than a floor: `nonmanifold_edges`
+        // is taken in its own pass against a frozen duplicate-face snapshot, so
+        // no edge's verdict depends on how many edges preceded it, and
+        // duplicate faces are reported beside the edge counts instead of
+        // vanishing into the exclusion that hid them. What remains deliberate
+        // is that this clause binds on the two edge counts alone:
+        // `duplicate_faces` is counted and serialized but does not gate,
+        // because whether a reduction may introduce duplicate faces at all is a
+        // separate decision to make with the corpus numbers in hand.
         || !topology_not_increased(topology_before, topology_after)
         || !registered_face_scaled_demand_falls(
             candidate.input_face_count,
@@ -1665,8 +1671,8 @@ fn classify_final_attempt(
     probe: &TwoSidedProbe,
     budget: ErrorBudget,
     slack: f64,
-    topology_before: EdgeTopologyCounts,
-    topology_after: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
+    topology_after: TopologyCounts,
 ) -> FinalVerificationResult {
     if !within_final_slack(probe, budget, slack) {
         FinalVerificationResult::BudgetExceeded
@@ -1723,7 +1729,7 @@ fn already_print_scale(
             message: error.to_string(),
         })?;
     let topology = build_face_topology(original, WeldPolicy::ExactBits)
-        .map(|topology| topology.edge_counts())
+        .map(|topology| topology.counts())
         .map_err(|error| BudgetSearchError::SearchExecution {
             phase: "canonical identity topology audit",
             message: error.to_string(),
@@ -1869,7 +1875,7 @@ fn run_adaptive_diagnostics(
     original: &Mesh,
     protected: &[bool],
     budget: DecimationBudget,
-    topology_before: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
     policy: &SearchPolicy,
     trace: &mut BudgetSearchTrace,
 ) -> Result<(), BudgetSearchError> {
@@ -1986,7 +1992,7 @@ fn run_adaptive_diagnostics(
             AdaptiveProbeResult::SampledBudgetExceeded
         } else {
             let topology_after = build_face_topology(&outcome.mesh, WeldPolicy::ExactBits)
-                .map(|topology| topology.edge_counts())
+                .map(|topology| topology.counts())
                 .map_err(|error| BudgetSearchError::SearchExecution {
                     phase: "adaptive topology audit",
                     message: error.to_string(),
@@ -2027,7 +2033,12 @@ fn within_final_slack(probe: &TwoSidedProbe, budget: ErrorBudget, slack: f64) ->
     probe.p99_mm <= budget.p99_mm * slack && probe.p99_9_mm <= budget.p99_9_mm * slack
 }
 
-fn topology_not_increased(before: EdgeTopologyCounts, after: EdgeTopologyCounts) -> bool {
+/// The two edge counts are the gate.  `duplicate_faces` is reported alongside
+/// them but deliberately does not bind here: FU-26 lands the counter, and
+/// whether a reduction may introduce duplicate faces at all is a separate gate
+/// decision with its own corpus consequences.  Adding the clause here would
+/// only ever refuse more candidates, never fewer.
+fn topology_not_increased(before: TopologyCounts, after: TopologyCounts) -> bool {
     after.boundary_edges <= before.boundary_edges
         && after.nonmanifold_edges <= before.nonmanifold_edges
 }
@@ -2035,9 +2046,9 @@ fn topology_not_increased(before: EdgeTopologyCounts, after: EdgeTopologyCounts)
 #[cfg(test)]
 fn verify_final_evidence(
     trace: &BudgetSearchTrace,
-    topology_before: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
     final_probe: TwoSidedProbe,
-    topology_after: EdgeTopologyCounts,
+    topology_after: TopologyCounts,
     budget: ErrorBudget,
     slack: f64,
 ) -> Result<(), BudgetSearchError> {
@@ -2071,9 +2082,9 @@ fn verify_final_evidence(
 
 fn verification_failed(
     trace: BudgetSearchTrace,
-    topology_before: EdgeTopologyCounts,
+    topology_before: TopologyCounts,
     final_probe: Option<TwoSidedProbe>,
-    topology_after: Option<EdgeTopologyCounts>,
+    topology_after: Option<TopologyCounts>,
     reason: VerificationFailureReason,
 ) -> BudgetSearchError {
     BudgetSearchError::VerificationFailed {
@@ -3490,9 +3501,9 @@ mod tests {
         );
         let error = verify_final_evidence(
             &trace_with_budget(budget),
-            EdgeTopologyCounts::default(),
+            TopologyCounts::default(),
             probe_with_percentiles(budget.p99_mm * (slack + 0.0001), budget.p99_9_mm),
-            EdgeTopologyCounts::default(),
+            TopologyCounts::default(),
             budget,
             slack,
         )
@@ -3507,16 +3518,18 @@ mod tests {
 
     #[test]
     fn topology_guard_refuses_either_canonical_edge_count_increase() {
-        let before = EdgeTopologyCounts {
+        let before = TopologyCounts {
             boundary_edges: 2,
             nonmanifold_edges: 1,
+            ..TopologyCounts::default()
         };
         assert!(topology_not_increased(before, before));
         assert!(!topology_not_increased(
             before,
-            EdgeTopologyCounts {
+            TopologyCounts {
                 boundary_edges: 3,
                 nonmanifold_edges: 1,
+                ..TopologyCounts::default()
             }
         ));
         let error = verify_final_evidence(
@@ -3526,9 +3539,10 @@ mod tests {
             }),
             before,
             probe_with_percentiles(0.0, 0.0),
-            EdgeTopologyCounts {
+            TopologyCounts {
                 boundary_edges: 2,
                 nonmanifold_edges: 2,
+                ..TopologyCounts::default()
             },
             ErrorBudget {
                 p99_mm: 1.0,
@@ -3545,9 +3559,10 @@ mod tests {
         ));
         assert!(!topology_not_increased(
             before,
-            EdgeTopologyCounts {
+            TopologyCounts {
                 boundary_edges: 2,
                 nonmanifold_edges: 2,
+                ..TopologyCounts::default()
             }
         ));
     }
@@ -3558,7 +3573,7 @@ mod tests {
             p99_mm: 1.0,
             p99_9_mm: 1.0,
         };
-        let before = EdgeTopologyCounts::default();
+        let before = TopologyCounts::default();
         // Synthetic final evidence mirrors the Treant regression: the lower
         // ratio is sampled-safe but opens non-manifold edges, while the denser
         // sampled-safe candidate is topology-safe and must remain eligible.
@@ -3568,9 +3583,10 @@ mod tests {
                 budget,
                 1.1,
                 before,
-                EdgeTopologyCounts {
+                TopologyCounts {
                     boundary_edges: 0,
                     nonmanifold_edges: 24,
+                    ..TopologyCounts::default()
                 },
             ),
             classify_final_attempt(
@@ -3598,7 +3614,7 @@ mod tests {
             p99_mm: 1.0,
             p99_9_mm: 1.0,
         };
-        let before = EdgeTopologyCounts::default();
+        let before = TopologyCounts::default();
         let attempts = [
             classify_final_attempt(
                 &probe_with_percentiles(1.101, 0.0),
@@ -3822,17 +3838,14 @@ mod tests {
         probe
     }
 
-    fn clean_topology() -> EdgeTopologyCounts {
-        EdgeTopologyCounts {
-            boundary_edges: 0,
-            nonmanifold_edges: 0,
-        }
+    fn clean_topology() -> TopologyCounts {
+        TopologyCounts::default()
     }
 
     fn assess(
         candidate: &SimplifyOutcome,
         probe: &TwoSidedProbe,
-        after: EdgeTopologyCounts,
+        after: TopologyCounts,
     ) -> DownstreamUtilityEvidence {
         assess_downstream_utility(utility_policy(), candidate, probe, clean_topology(), after)
     }
@@ -4019,13 +4032,15 @@ mod tests {
         let probe = admissible_probe();
 
         for after in [
-            EdgeTopologyCounts {
+            TopologyCounts {
                 boundary_edges: 0,
                 nonmanifold_edges: 1,
+                ..TopologyCounts::default()
             },
-            EdgeTopologyCounts {
+            TopologyCounts {
                 boundary_edges: 1,
                 nonmanifold_edges: 0,
+                ..TopologyCounts::default()
             },
         ] {
             assert_eq!(
@@ -4043,9 +4058,10 @@ mod tests {
             assess(
                 &candidate,
                 &probe,
-                EdgeTopologyCounts {
+                TopologyCounts {
                     boundary_edges: 0,
                     nonmanifold_edges: 3,
+                    ..TopologyCounts::default()
                 }
             ),
             DownstreamUtilityEvidence::NoDownstreamUtilityEvidence

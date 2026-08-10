@@ -13,10 +13,17 @@ use geom_kernel::NativeSurfaceConfig;
 use plinth_decimate::{
     run, BudgetSearchOutcome, BudgetSearchSuccess, DecimationBudget, ProbeConfig,
 };
-use plinth_mesh::{load_binary_stl, write_binary_stl, EdgeTopologyCounts, Mesh, WeldPolicy};
+use plinth_mesh::{load_binary_stl, write_binary_stl, Mesh, TopologyCounts, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// v5 (2026-08-09) adds `duplicate_faces` and `duplicate_face_groups` to every
+/// topology report. Duplicate faces are excluded from `nonmanifold_edges` by
+/// design and, before v5, were counted nowhere at all, so a reduction could
+/// fuse hundreds of coincident faces and the gate's report said nothing — 664
+/// duplicate-face groups at r = 0.50 on the Weeping Treant v1.2 were a scratch
+/// measurement precisely because no committed instrument counted them (FU-26).
+///
 /// v4 (2026-08-07) adds the worst-case deviation `max_mm` to every probe the
 /// search records — sampled bisection steps, final full-population attempts,
 /// and both the sampled and full adaptive probes — plus the model-level
@@ -28,7 +35,7 @@ use sha2::{Digest, Sha256};
 /// clean checkout without re-adding scratch instrumentation. Per-phase
 /// wall-clock, which §6 Phase 1 also lists, is deliberately NOT serialized —
 /// see the record's §9.8.
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v4";
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v5";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
     CorpusModel::already_print_scale(
@@ -210,13 +217,17 @@ struct FinalAttemptReport {
 struct TopologyReport {
     boundary_edges: usize,
     nonmanifold_edges: usize,
+    duplicate_faces: usize,
+    duplicate_face_groups: usize,
 }
 
-impl From<EdgeTopologyCounts> for TopologyReport {
-    fn from(counts: EdgeTopologyCounts) -> Self {
+impl From<TopologyCounts> for TopologyReport {
+    fn from(counts: TopologyCounts) -> Self {
         Self {
             boundary_edges: counts.boundary_edges,
             nonmanifold_edges: counts.nonmanifold_edges,
+            duplicate_faces: counts.duplicate_faces,
+            duplicate_face_groups: counts.duplicate_face_groups,
         }
     }
 }
@@ -298,10 +309,14 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
             topology_before: Some(TopologyReport {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
+                duplicate_faces: 0,
+                duplicate_face_groups: 0,
             }),
             topology_after: Some(TopologyReport {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
+                duplicate_faces: 0,
+                duplicate_face_groups: 0,
             }),
             final_attempts: Vec::new(),
             adaptive_exploration: None,
