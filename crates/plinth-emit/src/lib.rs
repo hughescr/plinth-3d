@@ -10,6 +10,7 @@ use chitubox_io::{
     ModelGeometry, ModelSource, Placement, PlacementUpdate, Project, SegmentType, SupportBatch,
     SupportMode, SupportRecord, TriangleSoup,
 };
+use geom_kernel::SoupTriangle;
 use plinth_core::PrinterProfile;
 use plinth_mesh::Mesh;
 use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportSegmentKind, SupportedModel};
@@ -438,24 +439,50 @@ fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, Em
         }
         triangles.push(triangle);
     }
-    wind_outward(&mut triangles)?;
-    soup_from_triangles(&triangles)
+    let mut soups = [triangles];
+    wind_outward(&mut soups)?;
+    soup_from_triangles(&soups[0])
 }
 
+/// Build every support record for a model in one pass.
+///
+/// Batch-first (D-37): gather every primitive's frame and raw soup, hand the
+/// whole forest to one kernel winding call, then scatter into wire records.
+/// There is deliberately no per-primitive winding call in this path.
 fn build_records(
     primitives: &[SupportPrimitive],
     center: [f64; 3],
 ) -> Result<Vec<SupportRecord>, EmitError> {
-    primitives
+    let mut frames = Vec::with_capacity(primitives.len());
+    let mut soups = Vec::with_capacity(primitives.len());
+    for primitive in primitives {
+        let (frame, triangles) = record_frame_and_soup(primitive, center)?;
+        frames.push(frame);
+        soups.push(triangles);
+    }
+    wind_outward(&mut soups)?;
+    frames
         .iter()
-        .map(|primitive| build_record(primitive, center))
+        .zip(&soups)
+        .map(|(frame, triangles)| encode_record(frame, triangles))
         .collect()
 }
 
-fn build_record(
+/// Everything a wire record needs besides its wound triangle soup.
+#[derive(Clone, Copy, Debug)]
+struct RecordFrame {
+    segment_kind: SupportSegmentKind,
+    start: [f64; 3],
+    end: [f64; 3],
+    r_start: f64,
+    r_end: f64,
+    contact_depth_mm: Option<f64>,
+}
+
+fn record_frame_and_soup(
     primitive: &SupportPrimitive,
     center: [f64; 3],
-) -> Result<SupportRecord, EmitError> {
+) -> Result<(RecordFrame, Vec<SoupTriangle>), EmitError> {
     let r_start = primitive.start_radius_mm.get();
     let r_end = primitive.end_radius_mm.get();
     let (source_start, source_end) = match primitive.segment_kind {
@@ -469,7 +496,7 @@ fn build_record(
     };
     let start = sub_center(finite_point(source_start), center);
     let end = sub_center(finite_point(source_end), center);
-    let mut triangles = match primitive.segment_kind {
+    let triangles = match primitive.segment_kind {
         // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
         // standalone joint sphere; types 1 and 3 are frusta.
         SupportSegmentKind::ContactSphere => sphere_triangles(midpoint(start, end), r_start)?,
@@ -489,24 +516,45 @@ fn build_record(
             primitive.ring_normal,
         )?,
     };
-    wind_outward(&mut triangles)?;
+    let contact_depth_mm = match primitive.segment_kind {
+        SupportSegmentKind::ContactTaper => Some(
+            primitive
+                .contact_depth_mm
+                .ok_or(EmitError::RecordEncodingRejected)?
+                .get(),
+        ),
+        _ => None,
+    };
+    Ok((
+        RecordFrame {
+            segment_kind: primitive.segment_kind,
+            start,
+            end,
+            r_start,
+            r_end,
+            contact_depth_mm,
+        },
+        triangles,
+    ))
+}
+
+fn encode_record(
+    frame: &RecordFrame,
+    triangles: &[SoupTriangle],
+) -> Result<SupportRecord, EmitError> {
     let mut record = SupportRecord::new(
-        segment_type(primitive.segment_kind),
-        point_f32(start)?,
-        point_f32(end)?,
-        f32_of(r_start)?,
-        f32_of(r_end)?,
-        soup_from_triangles(&triangles)?,
+        segment_type(frame.segment_kind),
+        point_f32(frame.start)?,
+        point_f32(frame.end)?,
+        f32_of(frame.r_start)?,
+        f32_of(frame.r_end)?,
+        soup_from_triangles(triangles)?,
     );
-    if primitive.segment_kind == SupportSegmentKind::ContactTaper {
-        let depth = primitive
-            .contact_depth_mm
-            .ok_or(EmitError::RecordEncodingRejected)?
-            .get();
+    if let Some(depth) = frame.contact_depth_mm {
         record = record.with_contact_depth(f32_of(depth)?);
     }
-    if primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge {
-        let is_bridge = !same_point(start, end);
+    if frame.segment_kind == SupportSegmentKind::RaftPadOrBridge {
+        let is_bridge = !same_point(frame.start, frame.end);
         record.trailing[0..4]
             .copy_from_slice(&(if is_bridge { 1.0_f32 } else { 0.0_f32 }).to_le_bytes());
         record.trailing[4..8].copy_from_slice(&4.0_f32.to_le_bytes());
@@ -570,7 +618,7 @@ fn point_f32(point: [f64; 3]) -> Result<[f32; 3], EmitError> {
     Ok([f32_of(point[0])?, f32_of(point[1])?, f32_of(point[2])?])
 }
 
-fn soup_from_triangles(triangles: &[[[f64; 3]; 3]]) -> Result<TriangleSoup, EmitError> {
+fn soup_from_triangles(triangles: &[SoupTriangle]) -> Result<TriangleSoup, EmitError> {
     let mut xyz = Vec::with_capacity(triangles.len() * 9);
     for triangle in triangles {
         for point in triangle {
@@ -587,7 +635,7 @@ fn frustum_triangles(
     r_end: f64,
     sides: usize,
     ring_normal: FrustumRingNormal,
-) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+) -> Result<Vec<SoupTriangle>, EmitError> {
     if sides < 3 || !r_start.is_finite() || !r_end.is_finite() {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -620,7 +668,7 @@ fn frustum_triangles(
     Ok(triangles)
 }
 
-fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, EmitError> {
     if !radius.is_finite() || radius <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -659,7 +707,7 @@ fn raft_pad_triangles(
     start: [f64; 3],
     diameter: f64,
     height: f64,
-) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+) -> Result<Vec<SoupTriangle>, EmitError> {
     if !diameter.is_finite() || !height.is_finite() || height <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -678,7 +726,7 @@ fn raft_bridge_triangles(
     end: [f64; 3],
     width: f64,
     height: f64,
-) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+) -> Result<Vec<SoupTriangle>, EmitError> {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -734,29 +782,18 @@ fn perpendicular_basis(normal: [f64; 3]) -> Result<([f64; 3], [f64; 3]), EmitErr
     Ok((u, cross(normal, u)))
 }
 
-fn wind_outward(triangles: &mut [[[f64; 3]; 3]]) -> Result<(), EmitError> {
-    let volume = signed_volume(triangles)?;
-    if volume < 0.0 {
-        for triangle in triangles {
-            triangle.swap(1, 2);
-        }
-    }
-    Ok(())
-}
-
-fn signed_volume(triangles: &[[[f64; 3]; 3]]) -> Result<f64, EmitError> {
-    let mut sum = 0.0;
-    for triangle in triangles {
-        let term = dot(triangle[0], cross(triangle[1], triangle[2])) / 6.0;
-        if !term.is_finite() {
-            return Err(EmitError::RecordEncodingRejected);
-        }
-        sum += term;
-        if !sum.is_finite() {
-            return Err(EmitError::RecordEncodingRejected);
-        }
-    }
-    Ok(sum)
+/// Wind a whole gathered batch of soups outward in one kernel call.
+///
+/// The f64 tetrahedron sum itself lives in `geom_kernel` (O-5: one
+/// implementation per capability; the 05-chitubox-and-corpus.md ruling that
+/// replaced Python's trimesh `mass_properties` winding check).  This crate
+/// keeps only the boundary mapping onto its own error enum, because a soup a
+/// signed volume cannot be stated for is exactly a record that cannot be
+/// encoded.
+fn wind_outward(soups: &mut [Vec<SoupTriangle>]) -> Result<(), EmitError> {
+    geom_kernel::wind_soups_outward(soups)
+        .map(|_| ())
+        .map_err(|_| EmitError::RecordEncodingRejected)
 }
 
 fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -793,6 +830,84 @@ mod tests {
         BuildFrame, FrustumRingNormal, SphereGeometry, SupportHistory, SupportReport,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Single-primitive convenience over the batched builder.  Only tests hold
+    /// exactly one primitive; production always hands over a whole forest.
+    fn build_record(
+        primitive: &SupportPrimitive,
+        center: [f64; 3],
+    ) -> Result<SupportRecord, EmitError> {
+        build_records(std::slice::from_ref(primitive), center)?
+            .into_iter()
+            .next()
+            .ok_or(EmitError::RecordEncodingRejected)
+    }
+
+    /// Triangles as f64, read back out of an already-encoded wire soup.
+    fn wire_triangles(xyz: &[f32]) -> Vec<SoupTriangle> {
+        xyz.chunks_exact(9)
+            .map(|t| {
+                [
+                    [t[0] as f64, t[1] as f64, t[2] as f64],
+                    [t[3] as f64, t[4] as f64, t[5] as f64],
+                    [t[6] as f64, t[7] as f64, t[8] as f64],
+                ]
+            })
+            .collect()
+    }
+
+    /// Independent orientation oracle.  Every primitive this crate synthesizes
+    /// — frustum, sphere, raft pad, raft bridge — is a convex body, and every
+    /// face of a convex body wound outward has its geometric normal pointing
+    /// away from the body's own centroid.  This decides orientation from local
+    /// face normals alone and never forms a tetrahedron sum, so it does not
+    /// restate the algorithm under test.
+    ///
+    /// Returns `(faces_checked, faces_pointing_outward)`; degenerate faces
+    /// carry no orientation and are excluded from both counts.
+    fn faces_pointing_away_from_centroid(triangles: &[SoupTriangle]) -> (usize, usize) {
+        let mut centroid = [0.0_f64; 3];
+        let mut corners = 0.0;
+        for triangle in triangles {
+            for point in triangle {
+                for (axis, value) in point.iter().enumerate() {
+                    centroid[axis] += value;
+                }
+                corners += 1.0;
+            }
+        }
+        if corners == 0.0 {
+            return (0, 0);
+        }
+        for value in &mut centroid {
+            *value /= corners;
+        }
+        let mut checked = 0;
+        let mut outward = 0;
+        for triangle in triangles {
+            let normal = cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
+            if length(normal) <= 0.0 {
+                continue;
+            }
+            checked += 1;
+            let face_centroid = scale(add(add(triangle[0], triangle[1]), triangle[2]), 1.0 / 3.0);
+            if dot(normal, sub(face_centroid, centroid)) > 0.0 {
+                outward += 1;
+            }
+        }
+        (checked, outward)
+    }
+
+    fn assert_convex_soup_is_wound_outward(triangles: &[SoupTriangle], what: &str) {
+        let (checked, outward) = faces_pointing_away_from_centroid(triangles);
+        assert!(checked > 0, "{what} carries no non-degenerate face");
+        assert_eq!(
+            checked,
+            outward,
+            "{what} has {} of {checked} faces wound inward",
+            checked - outward
+        );
+    }
 
     fn fixture_path(name: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1084,19 +1199,23 @@ mod tests {
             vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
         )
         .unwrap();
-        let soup = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
-        let triangles: Vec<_> = soup
-            .xyz
-            .chunks_exact(9)
-            .map(|t| {
-                [
-                    [t[0] as f64, t[1] as f64, t[2] as f64],
-                    [t[3] as f64, t[4] as f64, t[5] as f64],
-                    [t[6] as f64, t[7] as f64, t[8] as f64],
-                ]
-            })
-            .collect();
-        assert!(signed_volume(&triangles).unwrap() > 0.0);
+        // Same tetrahedron, every face reversed.  Emitting both pins that the
+        // correction happens, not merely that one lucky input needed none.
+        let reversed = Mesh::new(
+            mesh.verts().to_vec(),
+            mesh.tris()
+                .iter()
+                .map(|face| [face[0], face[2], face[1]])
+                .collect(),
+        )
+        .unwrap();
+        for (source, label) in [
+            (&mesh, "the outward tetrahedron"),
+            (&reversed, "the reversed one"),
+        ] {
+            let soup = model_triangle_soup(source, mesh_bbox_center(source).unwrap()).unwrap();
+            assert_convex_soup_is_wound_outward(&wire_triangles(&soup.xyz), label);
+        }
     }
 
     #[test]
@@ -1149,22 +1268,168 @@ mod tests {
                 .map(|primitive| segment_type(primitive.segment_kind))
                 .collect::<Vec<_>>()
         );
-        for record in records {
+        for (index, record) in records.iter().enumerate() {
             assert!(!record.mesh.xyz.is_empty());
             assert!(record.mesh.xyz.iter().all(|value| value.is_finite()));
-            let triangles: Vec<_> = record
-                .mesh
-                .xyz
-                .chunks_exact(9)
-                .map(|t| {
-                    [
-                        [t[0] as f64, t[1] as f64, t[2] as f64],
-                        [t[3] as f64, t[4] as f64, t[5] as f64],
-                        [t[6] as f64, t[7] as f64, t[8] as f64],
-                    ]
-                })
-                .collect();
-            assert!(signed_volume(&triangles).unwrap() >= 0.0);
+            assert_convex_soup_is_wound_outward(
+                &wire_triangles(&record.mesh.xyz),
+                &format!("record {index} ({:?})", record.segment_type),
+            );
+        }
+    }
+
+    /// Unmatched surface of a soup, as a fraction of its total area.
+    ///
+    /// The total outward area vector `Σ (v1-v0)×(v2-v0)` cancels to zero over a
+    /// closed surface and equals the missing patch over an open one, so its
+    /// norm over the soup's total area is a scale-free openness measure.  It is
+    /// also *exactly* the term that makes the tetrahedron sum frame-dependent:
+    /// translating a soup by `t` shifts the sum by `t · Σ(v1-v0)×(v2-v0) / 6`.
+    /// Measuring it needs no vertex welding, which §2 of 06-conventions.md
+    /// forbids as a production habit for good reason.
+    fn relative_closure_defect(triangles: &[SoupTriangle]) -> f64 {
+        let mut total = [0.0_f64; 3];
+        let mut area = 0.0;
+        for triangle in triangles {
+            let normal = cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
+            for (axis, value) in normal.iter().enumerate() {
+                total[axis] += value;
+            }
+            area += length(normal);
+        }
+        if area == 0.0 {
+            return 0.0;
+        }
+        length(total) / area
+    }
+
+    /// The precondition the whole winding decision rests on.
+    ///
+    /// `Σ v0 · (v1 × v2) / 6` is only translation-invariant — and therefore
+    /// only sign-stable — for a CLOSED soup.  Native
+    /// `morel_mudskipper_supports.chitubox` proves the negative case: its
+    /// merged, open records read positive or negative purely by where they sit
+    /// (see `tests/native_winding_oracle.rs`).  Every soup this crate emits is
+    /// one closed convex primitive, and that is what this test pins.
+    ///
+    /// The bound is 1e-12 rather than exactly zero for one measured reason, and
+    /// it is a recorded defect rather than a slackened test: `sphere_triangles`
+    /// closes its north cap on `sin(0) == 0` but its south cap on
+    /// `sin(PI) == 1.2246e-16`, so the south "pole" is really a 16-gon of that
+    /// radius and the sphere carries a seam of 16 sliver triangles.  The gap is
+    /// ~1e-16 of the sphere's area — six orders below anything f32 emission can
+    /// carry — so it changes no emitted byte and no winding decision.  It is
+    /// NOT repaired here: repairing it would move emitted geometry, which this
+    /// relocation is not permitted to do.
+    #[test]
+    fn every_emitted_soup_is_closed_which_the_winding_decision_requires() {
+        let primitives = vec![
+            primitive(
+                SupportSegmentKind::ContactSphere,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ),
+            primitive_with_radii(
+                SupportSegmentKind::ContactTaper,
+                [0.0, 0.0, 3.0],
+                [0.0, 0.0, 6.0],
+                0.35,
+                0.8,
+            ),
+            primitive(
+                SupportSegmentKind::JointSphere,
+                [0.0, 0.0, 6.0],
+                [0.0, 0.0, 9.0],
+            ),
+            primitive_with_radii(
+                SupportSegmentKind::Member,
+                [0.0, 0.0, 9.0],
+                [1.5, -2.0, 11.0],
+                0.8,
+                0.6,
+            ),
+            primitive(
+                SupportSegmentKind::RootFlare,
+                [0.0, 0.0, 11.0],
+                [0.0, 0.0, 12.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ),
+        ];
+        // Off-origin on every axis: a closed soup's winding decision is
+        // unchanged by the frame, an open one's is not, so a leak shows up
+        // here as a disagreement between the two centers.
+        let origin = build_records(&primitives, [0.0; 3]).unwrap();
+        let displaced = build_records(&primitives, [-37.5, 91.25, -6.0]).unwrap();
+        for (index, (near, far)) in origin.iter().zip(&displaced).enumerate() {
+            for (record, what) in [(near, "origin frame"), (far, "displaced frame")] {
+                let triangles = wire_triangles(&record.mesh.xyz);
+                let defect = relative_closure_defect(&triangles);
+                assert!(
+                    defect <= 1e-12,
+                    "record {index} ({:?}) in the {what} leaks {defect:e} of its area",
+                    record.segment_type
+                );
+                assert_convex_soup_is_wound_outward(
+                    &triangles,
+                    &format!("record {index} in the {what}"),
+                );
+            }
+        }
+    }
+
+    /// The batched builder must reach the same wire bytes it reached when each
+    /// record was wound on its own, and must do so whatever else shares the
+    /// batch.  This is the bit-identity guard on moving the sum into the
+    /// kernel and the winding call out of the per-record path.
+    #[test]
+    fn batched_winding_matches_each_record_built_alone() {
+        let primitives = vec![
+            primitive(
+                SupportSegmentKind::ContactSphere,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ),
+            primitive_with_radii(
+                SupportSegmentKind::ContactTaper,
+                [0.0, 0.0, 3.0],
+                [0.0, 0.0, 6.0],
+                0.35,
+                0.8,
+            ),
+            primitive_with_radii(
+                SupportSegmentKind::Member,
+                [0.0, 0.0, 9.0],
+                [1.5, -2.0, 11.0],
+                0.8,
+                0.6,
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ),
+        ];
+        let batched = build_records(&primitives, [0.25, -0.5, 1.0]).unwrap();
+        for (index, primitive) in primitives.iter().enumerate() {
+            let alone = build_records(std::slice::from_ref(primitive), [0.25, -0.5, 1.0]).unwrap();
+            assert!(
+                same_support_records_bits(&alone, &batched[index..=index]),
+                "record {index} differs between the batched and solitary builds"
+            );
         }
     }
 
@@ -1222,9 +1487,9 @@ mod tests {
             )],
             3.0,
         );
-        let record = build_record(&model.primitives()[0], [0.0; 3])
+        let records = build_records(model.primitives(), [0.0; 3])
             .expect("validated coincident raft primitive emits a pad record");
-        assert_eq!(record.segment_type, SegmentType::PAD_OR_BRIDGE);
+        assert_eq!(records[0].segment_type, SegmentType::PAD_OR_BRIDGE);
     }
 
     #[test]

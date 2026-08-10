@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 chitubox_io = { path = "../../rust/chitubox_io" }
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
 plinth-support = { path = "../plinth-support" }

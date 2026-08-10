@@ -14,11 +14,11 @@ This is the ChituBox format-fixture corpus, not the separate eight-model frozen 
 | `cylinder-rotated.chitubox` | Same scene, cylinder mesh baked `Ry(45)·Rz(45)` | `transforms.rs`, `roundtrip.rs` |
 | `sphere-cylinder-supported.chitubox` | Same scene with 7 supports on model 0, 13 on model 1 | `roundtrip.rs`, `support_parity.rs`, `transforms.rs`, `errors.rs` |
 | `pad_bridge_donor.chitubox` | Minimal single-model project carrying one real PAD and one real BRIDGE record | `test_chitubox_emit.py` |
-| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, and type 6 raft | `test_chitubox_emit.py` |
-| `basic-cube-supports-raft.chitubox` | Native ChituBox-authored project (20x20x20 cube, 12 tris) carrying real PAD and BRIDGE type-6 records; 71 support records demonstrating bottom-connected raft bridging | (reference only — not yet consumed by a test) |
-| `cylinder-supported-bottom-connected.chitubox` | Native ChituBox-authored project (Cylinder, 244 tris) carrying real PAD and BRIDGE type-6 records; 166 support records, bottom-connected | (reference only — not yet consumed by a test) |
+| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, and type 6 raft | `test_chitubox_emit.py`, `native_winding_oracle.rs` |
+| `basic-cube-supports-raft.chitubox` | Native ChituBox-authored project (20x20x20 cube, 12 tris) carrying real PAD and BRIDGE type-6 records; 71 support records demonstrating bottom-connected raft bridging | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
+| `cylinder-supported-bottom-connected.chitubox` | Native ChituBox-authored project (Cylinder, 244 tris) carrying real PAD and BRIDGE type-6 records; 166 support records, bottom-connected | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
 | `morel.chitubox` | Morel Mudskipper, unsupported | `roundtrip.rs` |
-| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records | `roundtrip.rs`, `support_parity.rs` |
+| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records | `roundtrip.rs`, `support_parity.rs`, `native_winding_oracle.rs` (open-soup case only) |
 | `Sphere.stl`, `Cylinder.stl` | Source meshes for the scenes above | `synth_compare.rs` |
 
 Not committed (too large, ~35MB): `treant_v5_candidate.chitubox`, pinned at 1360 support

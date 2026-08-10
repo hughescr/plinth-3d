@@ -116,6 +116,39 @@ writer bugs. (`chitubox_emit.py`'s own docstring notes it sometimes disagreed wi
 trimesh on unwelded triangle soups, so pick one algorithm and verify it
 against the corpus rather than trusting either blindly.)
 
+**Executed** (2026-08-09). The sum lives in `rust/geom_kernel/src/winding.rs`
+(`signed_soup_volumes`, `wind_soups_outward`) and is `plinth-emit`'s only
+winding authority; `plinth-emit` gathers a model's whole support forest and
+makes **one** batched call, never one per record. Validation is
+`crates/plinth-emit/tests/native_winding_oracle.rs` against 250 native
+per-segment soups — `two-supports`, `basic-cube-supports-raft`,
+`cylinder-supported-bottom-connected` — every one of which reads strictly
+outward, agrees face-for-face with an independent face-normal-versus-centroid
+oracle, and is restored bit-for-bit after being deliberately reversed. The
+regenerated set and `pad_bridge_donor.chitubox` are excluded as the ruling
+requires.
+
+Two things were measured rather than assumed, and both are recorded here
+because the docstring's warning turned out to be about a real precondition:
+
+- The sum is only translation-invariant, and therefore only sign-stable, for a
+  **closed** soup. `morel_mudskipper_supports.chitubox` is native but its 243
+  records are *merged* supports (544 triangles each) and 210 of them are open;
+  77 read negative from the origin against 15 about their own centroid. It is
+  therefore not an orientation oracle, and the test uses it as the pinned
+  negative case instead. This crate never writes a merged record — it writes
+  one closed convex primitive per segment, like the three specimens above.
+- `sphere_triangles` closes its north cap on `sin(0) == 0` but its south cap on
+  `sin(PI) == 1.2246e-16`, so the south pole is really a 16-gon of that radius
+  and the sphere carries a seam of 16 slivers — about `1e-16` of its area, far
+  below anything the f32 wire can carry, and it moves no emitted byte and no
+  winding decision. **Not repaired**, because repairing it would move emitted
+  geometry and this change is a relocation, not a numerical change. Recorded
+  here for an owner ruling rather than fixed in passing; the bound in
+  `every_emitted_soup_is_closed_which_the_winding_decision_requires` is
+  `1e-12`, which the seam clears by four orders and which a real leak would
+  not.
+
 **Batch-first shape to preserve:** `member_chain_specs`/`bottom_connected_specs`
 already batch at the whole-forest level (one call builds every `SegmentSpec`
 for a model), and `scripts/support_placement/emit.py::support_arrays()`
@@ -158,7 +191,7 @@ a role only a native fixture can fill.
 |---|---|---|---|
 | `empty.chitubox` | 420-byte empty project, no models | **Native** (original) | `roundtrip.rs` |
 | `morel.chitubox` | Morel Mudskipper, unsupported | **Native** (original) | `roundtrip.rs` |
-| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records | **Native** (original) | `roundtrip.rs`, `support_parity.rs` |
+| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records | **Native** (original) | `roundtrip.rs`, `support_parity.rs`, `native_winding_oracle.rs` (as the pinned OPEN-soup case: its records are merged supports, not per-segment primitives) |
 | `Sphere.stl`, `Cylinder.stl` | Source meshes for the sphere/cylinder scenes | **Native** (original) | `synth_compare.rs` |
 | `sphere-cylinder.chitubox` | Sphere + Cylinder, cylinder at (43.7035, 7.1448) | **Regenerated** by `chitubox_io` at commit `aa08704bfc7918be4b83a74e9d61a774ab1ae28d` (native original lost 2026-07-24) | `synth_compare.rs`, `transforms.rs`, `support_parity.rs`, `errors.rs`, `roundtrip.rs` |
 | `sphere-moved.chitubox` | Same scene, sphere translated to (10.5, 5.25) | **Regenerated**, same commit | `transforms.rs`, `roundtrip.rs` |
@@ -166,9 +199,9 @@ a role only a native fixture can fill.
 | `cylinder-rotated.chitubox` | Same scene, cylinder mesh baked `Ry(45°)·Rz(45°)` | **Regenerated**, same commit | `transforms.rs`, `roundtrip.rs` |
 | `sphere-cylinder-supported.chitubox` | Same scene, 7 supports on model 0, 13 on model 1 | **Regenerated**, same commit | `roundtrip.rs`, `support_parity.rs`, `transforms.rs`, `errors.rs` |
 | `pad_bridge_donor.chitubox` | Minimal single-model project, one PAD + one BRIDGE record | **Regenerated** (built by re-hosting two records lifted from `morel_mudskipper_supports.chitubox`, same commit) | `test_chitubox_emit.py` |
-| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, type 6 raft | **Native** (UI-authored, supplied 2026-07-26; NOT regenerated) | `test_chitubox_emit.py` |
-| `basic-cube-supports-raft.chitubox` | Native 20×20×20 cube (12 tris), real PAD + BRIDGE type-6 records, 71 support records, bottom-connected raft bridging | **Native** (UI-authored; committed 2026-07-30, held rzip-compressed outside the repo before that) | reference only — not yet consumed by a Rust test |
-| `cylinder-supported-bottom-connected.chitubox` | Native Cylinder (244 tris), real PAD + BRIDGE type-6 records, 166 support records, bottom-connected | **Native** (UI-authored; committed 2026-07-30) | reference only — not yet consumed by a Rust test |
+| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, type 6 raft | **Native** (UI-authored, supplied 2026-07-26; NOT regenerated) | `test_chitubox_emit.py`, `native_winding_oracle.rs` |
+| `basic-cube-supports-raft.chitubox` | Native 20×20×20 cube (12 tris), real PAD + BRIDGE type-6 records, 71 support records, bottom-connected raft bridging | **Native** (UI-authored; committed 2026-07-30, held rzip-compressed outside the repo before that) | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
+| `cylinder-supported-bottom-connected.chitubox` | Native Cylinder (244 tris), real PAD + BRIDGE type-6 records, 166 support records, bottom-connected | **Native** (UI-authored; committed 2026-07-30) | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
 
 Not committed (~35 MB, `CHITUBOX_CORPUS_DIR`-only): `treant_v5_candidate.chitubox`,
 pinned at 1360 support records by `support_parity.rs` (replaces the older
