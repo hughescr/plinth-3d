@@ -10,6 +10,16 @@
 //! `no_cache`, which is wired only from the future CLI spelling `--no-cache`.
 #![forbid(unsafe_code)]
 
+pub mod gates;
+
+// `judge_pre_write_gates` is deliberately absent: it takes a caller-supplied
+// coverage request, which is an override in all but name, so `judge_then_emit`
+// is the only public way to reach the gate set.
+pub use gates::{
+    judge_then_emit, registered_coverage_request, GateRefusal, GatedEmission, PreWriteGate,
+    PreWriteGateReport,
+};
+
 use plinth_core::{m0_constants, ModelId, PrinterProfile};
 use plinth_decimate::{BudgetConfigError, DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
@@ -291,6 +301,29 @@ pub enum PipelineError {
         #[source]
         source: SupportError,
     },
+    /// Lowering a gate-passed authority into the emittable scene failed.
+    ///
+    /// This is the support stage's own last step, so it projects to the same
+    /// exit code; it is a separate variant only because it carries the runner's
+    /// error type rather than the planner's.
+    #[error("model {model} failed to lower its sealed support authority")]
+    Lowering {
+        model: ModelId,
+        #[source]
+        source: plinth_support::SupportRunError,
+    },
+    /// The pre-write physics gates refused this model.
+    ///
+    /// This is the only producer of [`PipelineExitCode::Gates`], and it is
+    /// always returned *before* `plinth_emit::write` is reached, so a model
+    /// that lands here has no artifact on disk. The refusal carries the gate
+    /// and, for a blocking verdict, the full `CoverageReport` behind it.
+    #[error("model {model} was refused by the pre-write physics gates")]
+    Gates {
+        model: ModelId,
+        #[source]
+        source: GateRefusal,
+    },
     #[error("model {model} failed final ChituBox emission")]
     Emit {
         model: ModelId,
@@ -307,7 +340,8 @@ impl PipelineError {
                 PipelineExitCode::Input
             }
             Self::Hollow { .. } => PipelineExitCode::Hollow,
-            Self::Support { .. } => PipelineExitCode::Supports,
+            Self::Gates { .. } => PipelineExitCode::Gates,
+            Self::Support { .. } | Self::Lowering { .. } => PipelineExitCode::Supports,
             Self::Emit { .. } => PipelineExitCode::Emit,
         }
     }

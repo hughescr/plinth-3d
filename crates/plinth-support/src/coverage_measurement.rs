@@ -17,6 +17,7 @@ pub struct CoverageMeasurementLimits {
     max_distance_work: usize,
     max_logical_peak_bytes: usize,
     max_assessment_work: usize,
+    max_route_knn_peak_bytes: usize,
 }
 
 impl CoverageMeasurementLimits {
@@ -36,6 +37,11 @@ impl CoverageMeasurementLimits {
             max_distance_work,
             max_logical_peak_bytes,
             max_assessment_work,
+            // Absent an explicit owner for the route kNN batch's own peak, the
+            // measurement's retained-peak ceiling stands in for it. That is the
+            // behavior this constructor has always had; `with_route_knn_peak_bytes`
+            // is how a caller that *has* a registered owner names it.
+            max_route_knn_peak_bytes: max_logical_peak_bytes,
         };
         if limits.max_route_memberships == 0
             || limits.max_indexed_points == 0
@@ -47,6 +53,35 @@ impl CoverageMeasurementLimits {
             return Err(CoverageMeasurementError::InvalidLimits);
         }
         Ok(limits)
+    }
+
+    /// Names the registered owner of the coverage-route kNN batch's own
+    /// logical peak, which is a *different* cap from this measurement's
+    /// retained-peak ceiling.
+    ///
+    /// The two answer different questions. `max_logical_peak_bytes` bounds the
+    /// whole measurement's retained peak — the nearest vector, the normalized
+    /// route projection, and whichever of the route or assessment phase peaks
+    /// is larger. The kNN batch's own ceiling bounds one summand of that, and
+    /// in production it has its own registered owner
+    /// (`coverage_route_knn.max_logical_peak_bytes`), which is not the
+    /// specialized stage's coverage scratch ceiling. Passing the scratch
+    /// ceiling to the kNN batch made one cap silently do two jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoverageMeasurementError::InvalidLimits`] if the ceiling is zero.
+    pub const fn with_route_knn_peak_bytes(
+        self,
+        max_route_knn_peak_bytes: usize,
+    ) -> Result<Self, CoverageMeasurementError> {
+        if max_route_knn_peak_bytes == 0 {
+            return Err(CoverageMeasurementError::InvalidLimits);
+        }
+        Ok(Self {
+            max_route_knn_peak_bytes,
+            ..self
+        })
     }
 
     #[must_use]
@@ -72,6 +107,13 @@ impl CoverageMeasurementLimits {
     #[must_use]
     pub const fn max_assessment_work(self) -> usize {
         self.max_assessment_work
+    }
+    /// The coverage-route kNN batch's own logical-peak ceiling. Equal to
+    /// [`Self::max_logical_peak_bytes`] unless a caller named its registered
+    /// owner through [`Self::with_route_knn_peak_bytes`].
+    #[must_use]
+    pub const fn max_route_knn_peak_bytes(self) -> usize {
+        self.max_route_knn_peak_bytes
     }
 }
 

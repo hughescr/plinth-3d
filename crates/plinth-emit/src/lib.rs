@@ -52,9 +52,67 @@ pub enum EmitError {
 /// `SupportedModel` is the only source of model and support geometry.  Its retained lift is
 /// assigned to the ChituBox model placement exactly once; support vertices remain in their
 /// model-local frame, where that placement applies to the complete assembly.
+///
+/// **A refused write leaves no path at `target_path`.**  The project is saved to a sibling
+/// staging path and reaches `target_path` only by a rename performed *after* the disk audit
+/// has accepted it, so an audit rejection cannot hand anyone the file it just refused.  On
+/// every failure path the staging file is removed and so is `target_path` itself, which is
+/// what makes the invariant hold for a *stale* artifact left by an earlier run: a caller
+/// that asks for this file and is refused is left with no file, not with last week's.
+///
+/// # Errors
+///
+/// - [`EmitError::TargetUnavailable`] if the target or its staging sibling cannot be created,
+///   or if the accepted staging file cannot be renamed into place.
+/// - [`EmitError::RecordEncodingRejected`] if the scene does not convert to wire records.
+/// - [`EmitError::DiskAuditRejected`] if the freshly reopened staging file fails its audit.
 pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport, EmitError> {
     validate_target(&request.target_path)?;
+    let staging = staging_path(&request.target_path);
+    // A leftover staging file from a killed run is not evidence about this one.
+    let _ = std::fs::remove_file(&staging);
 
+    match write_staged(model, request, &staging) {
+        Ok(mut report) => {
+            if std::fs::rename(&staging, &request.target_path).is_err() {
+                let _ = std::fs::remove_file(&staging);
+                let _ = std::fs::remove_file(&request.target_path);
+                return Err(EmitError::TargetUnavailable {
+                    path: request.target_path.clone(),
+                });
+            }
+            report.artifact_path = request.target_path.clone();
+            Ok(report)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            let _ = std::fs::remove_file(&request.target_path);
+            Err(error)
+        }
+    }
+}
+
+/// The staging sibling `write` builds before the audit decides.
+///
+/// Deterministic and derived only from the target name — no clock, no counter,
+/// no randomness — because two concurrent writes to one target path are
+/// already a caller defect, and a nondeterministic name would trade that
+/// defect for an unremovable litter of partial files.
+fn staging_path(target: &Path) -> PathBuf {
+    const STAGING_SUFFIX: &str = ".plinth-partial";
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(STAGING_SUFFIX);
+    target.with_file_name(name)
+}
+
+fn write_staged(
+    model: &SupportedModel,
+    request: &EmitRequest,
+    staging: &Path,
+) -> Result<EmitReport, EmitError> {
     let center = mesh_bbox_center(model.mesh()).ok_or(EmitError::RecordEncodingRejected)?;
     let geometry = model_triangle_soup(model.mesh(), center)?;
     let lift = model.lift_mm().get();
@@ -95,13 +153,13 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
             .map_err(|_| EmitError::RecordEncodingRejected)?;
     }
     project
-        .save(&request.target_path)
+        .save(staging)
         .map_err(|_| EmitError::TargetUnavailable {
             path: request.target_path.clone(),
         })?;
 
     audit_disk(
-        &request.target_path,
+        staging,
         &request.printer,
         AuditExpected {
             lift,
@@ -184,8 +242,21 @@ fn audit_disk(
         return Err(EmitError::DiskAuditRejected);
     }
 
+    // The world datum is `expected.plate_z` -- the one binary32 the raft pads
+    // were actually emitted at -- and deliberately NOT `reopened_plate_z`.
+    // Both name the same plate, but they are separately rounded derivations of
+    // it: the pads carry `f32(plate_z_mm - center_z)`, while `reopened_plate_z`
+    // is an f32 subtraction of the reopened lift from the reopened model
+    // minimum. When `lift` and `lift + center_z` straddle a binade boundary the
+    // second derivation double-rounds and lands 1-2 ulp above the first, so a
+    // pad sitting exactly on the plate measures a negative world Z and the
+    // `min[2] < 0.0` floor below refuses a perfect layout. Measuring against
+    // the pads' own datum makes a pad on the plate read exactly 0.0. The frame
+    // check above still binds the two derivations together, so this cannot
+    // hide a genuinely wrong plate or a second lift.
+    let plate_datum = expected.plate_z;
     let mut bounds = WorldBounds::empty();
-    bounds.extend_f32(&model_triangles, info.placement, reopened_plate_z)?;
+    bounds.extend_f32(&model_triangles, info.placement, plate_datum)?;
     for record in &records {
         if !record.r_start.is_finite()
             || !record.r_end.is_finite()
@@ -197,9 +268,9 @@ fn audit_disk(
         {
             return Err(EmitError::DiskAuditRejected);
         }
-        bounds.extend_f32(&record.mesh.xyz, info.placement, reopened_plate_z)?;
-        bounds.extend_point(record.start, info.placement, reopened_plate_z)?;
-        bounds.extend_point(record.end, info.placement, reopened_plate_z)?;
+        bounds.extend_f32(&record.mesh.xyz, info.placement, plate_datum)?;
+        bounds.extend_point(record.start, info.placement, plate_datum)?;
+        bounds.extend_point(record.end, info.placement, plate_datum)?;
     }
     bounds.validate_against(printer)?;
 
@@ -1572,6 +1643,74 @@ mod tests {
             ),
             Err(EmitError::DiskAuditRejected)
         );
+        // The refused file does not exist. It used to: the project was saved
+        // to the target and only then audited, so a rejection left behind
+        // exactly the artifact it had just refused -- and this assertion used
+        // to be `remove_file(target).unwrap()`, which is how the bug was
+        // pinned in place. Staging plus rename removes that path entirely.
+        assert!(
+            !target.exists(),
+            "the disk audit refused the scene and left {} behind",
+            target.display()
+        );
+        assert!(
+            !staging_path(&target).exists(),
+            "the refused staging file survived at {}",
+            staging_path(&target).display()
+        );
+    }
+
+    /// A raft pad sitting *exactly* on the planned plate must emit, even when
+    /// the audit's reopened plate derivation lands an ulp away from the one the
+    /// pad was written at.
+    ///
+    /// The two derivations are `f32(plate_z_mm - center_z)` (what the pad
+    /// vertices carry) and `f32(model_min_z) - f32(lift)` (what the reopened
+    /// file yields). They agree whenever `lift` and `lift + center_z` share a
+    /// binade, because the f32 grid is then translation invariant under the
+    /// exactly-representable centre offset. This lift is chosen so they do not:
+    /// `center_z` is 0.5 and `7.5 + 2^-21 + 2^-30` rounds to `7.5 + 2^-21` in
+    /// binary32, whose sum with 0.5 is the exact tie `8 + 2^-21` and rounds to
+    /// even (8.0), while the unrounded `8 + 2^-21 + 2^-30` is above that tie and
+    /// rounds to `8 + 2^-20`. One ulp of separation, the pad one ulp *below* the
+    /// reopened plate, and the `min[2] < 0.0` floor used to refuse the file.
+    #[test]
+    fn raft_pad_exactly_on_the_plate_survives_a_one_ulp_plate_derivation_split() {
+        let lift = 7.5 + 2.0_f64.powi(-21) + 2.0_f64.powi(-30);
+        let center_z = 0.5_f64;
+
+        // Prove this fixture really is the ulp case before it proves the fix:
+        // the two derivations of the same plate differ by exactly one ulp.
+        let pad_datum = (-lift - center_z) as f32;
+        let reopened_datum = ((-center_z) as f32) - (lift as f32);
+        assert_ne!(
+            pad_datum.to_bits(),
+            reopened_datum.to_bits(),
+            "fixture no longer straddles the binade boundary it was chosen for"
+        );
+        assert!(
+            pad_datum < reopened_datum,
+            "the pad datum must sit below the reopened datum for the floor to fire"
+        );
+
+        let model = fixture_model(
+            vec![primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, -lift],
+                [0.0, 0.0, -lift],
+            )],
+            lift,
+        );
+        let target = fixture_path("plate-ulp.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("a pad exactly on the plate is a perfect layout, not a defect");
+        assert_eq!(report.support_record_count, 1);
         std::fs::remove_file(target).unwrap();
     }
 
@@ -1595,6 +1734,72 @@ mod tests {
                 }
             ),
             Err(EmitError::DiskAuditRejected)
+        );
+        assert!(
+            !target.exists(),
+            "the disk audit refused the scene and left {} behind",
+            target.display()
+        );
+    }
+
+    /// A refused write leaves *no* file at the target, including one an
+    /// earlier run put there.
+    ///
+    /// This is the half of the invariant that staging alone does not buy. The
+    /// claim `plinth-pipeline`'s gate module makes is "a refused model leaves
+    /// no path on disk at all"; if a previous run's artifact simply stayed
+    /// where it was, the next reader takes it for this run's answer. It is the
+    /// same reason `judge_then_emit` clears the target on a gate refusal,
+    /// which never reaches this function at all.
+    #[test]
+    fn a_refused_write_removes_an_earlier_runs_artifact_at_the_target() {
+        let target = fixture_path("stale-then-refused.chitubox");
+        let good = fixture_model(Vec::new(), 3.0);
+        let request = EmitRequest {
+            target_path: target.clone(),
+            printer: printer(),
+        };
+        let report = write(&good, &request).expect("the first run emits");
+        assert_eq!(report.artifact_path, target);
+        assert!(target.exists());
+
+        let refused = fixture_model(
+            vec![primitive(
+                SupportSegmentKind::Member,
+                [0.0, 0.0, -4.0],
+                [0.0, 0.0, -3.1],
+            )],
+            3.0,
+        );
+        assert_eq!(write(&refused, &request), Err(EmitError::DiskAuditRejected));
+        assert!(
+            !target.exists(),
+            "a refused write left the earlier run's artifact at {}",
+            target.display()
+        );
+    }
+
+    /// The accepted path leaves the artifact and nothing else: the staging
+    /// sibling is renamed, never copied, so it cannot linger next to exports.
+    #[test]
+    fn an_accepted_write_leaves_no_staging_file_beside_the_artifact() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("no-staging-litter.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("the scene emits");
+
+        assert_eq!(report.artifact_path, target, "the report names the target");
+        assert!(target.exists());
+        assert!(
+            !staging_path(&target).exists(),
+            "the staging file survived at {}",
+            staging_path(&target).display()
         );
         std::fs::remove_file(target).unwrap();
     }

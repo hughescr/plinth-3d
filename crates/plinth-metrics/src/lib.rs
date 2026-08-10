@@ -39,9 +39,9 @@ pub use supports::{
 };
 pub use topology::{
     analyze_artifact_topology, analyze_topology, boundary_edges, signed_shell_volumes,
-    topology_metric_rows, ArtifactTopologyAnalysis, ArtifactTopologyMetrics, Edge, EdgeIncidence,
-    EdgeUse, ModelTopologyAnalysis, Shell, ShellWinding, TopologyAnalysis, TopologyMetricError,
-    TopologyMetricInput, TopologyMetricRow, TOPOLOGY_METRIC_ORDER,
+    topology_metric_rows, topology_metrics, ArtifactTopologyAnalysis, ArtifactTopologyMetrics,
+    Edge, EdgeIncidence, EdgeUse, ModelTopologyAnalysis, Shell, ShellWinding, TopologyAnalysis,
+    TopologyMetricError, TopologyMetricInput, TopologyMetricRow, TOPOLOGY_METRIC_ORDER,
 };
 
 use thiserror::Error;

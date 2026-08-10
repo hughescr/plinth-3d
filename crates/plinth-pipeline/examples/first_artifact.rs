@@ -21,6 +21,16 @@
 //! `--all` keeps going past a per-model failure: an unreachable model is a
 //! finding to report, not a reason to withhold the artifacts that did seal.
 //! The final exit code reflects whether every attempted model succeeded.
+//!
+//! **Several models now report `GATES` instead of an artifact, and that is
+//! correct.** The pre-write coverage gate judges the sealed plan before
+//! anything is written, so a model whose plan leaves uncovered islands
+//! produces no `.chitubox` at all rather than a plausible-looking one. As of
+//! 2026-08-09 that is `Sphere`, `make_overhang_table` and
+//! `make_raking_blade`; `make_box`, `make_toed_slab` and `make_thin_fin`
+//! still seal and emit. Do not "fix" this by relaxing the gate — the gate has
+//! no override, by design (`03-physics-and-constants.md`, the retirement of
+//! `PERF_GATE_EMIT_ON_VERIFY`). The uncovered islands are the finding.
 
 #[path = "shared/first_artifact_chain.rs"]
 mod chain;
@@ -111,8 +121,13 @@ fn run_one(model: &str, exports: &Path) -> Result<(), String> {
         model.to_lowercase().replace(' ', "-")
     ));
 
-    let outcome = chain::run_corpus_model(model, &target)
-        .map_err(|reason| format!("CHAIN\tUNREACHABLE\t{reason}"))?;
+    let outcome = chain::run_corpus_model(model, &target).map_err(|reason| {
+        if reason.is_gates() {
+            format!("GATES\tREFUSED\t{reason}")
+        } else {
+            format!("CHAIN\tUNREACHABLE\t{reason}")
+        }
+    })?;
     let audit = chain::audit_disk_artifact(&target, model)
         .map_err(|reason| format!("AUDIT\tFAILED\t{reason}"))?;
 
@@ -130,6 +145,10 @@ fn run_one(model: &str, exports: &Path) -> Result<(), String> {
         outcome.primitive_count,
         outcome.lift_mm,
         outcome.plate_z_mm,
+    );
+    println!(
+        "GATES\tpassed=uncovered_islands\tnot_yet_ported={:?}",
+        outcome.pending_gates,
     );
     println!(
         "EMIT\trecords={}\tbytes={}",

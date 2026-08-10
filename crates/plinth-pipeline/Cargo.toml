@@ -12,15 +12,15 @@ plinth-emit = { path = "../plinth-emit" }
 plinth-hollow = { path = "../plinth-hollow" }
 plinth-orient = { path = "../plinth-orient" }
 plinth-support = { path = "../plinth-support" }
+plinth-verify = { path = "../plinth-verify" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# The E2 first-artifact seam re-reads what it wrote: chitubox_io parses the
-# emitted container back, plinth-verify runs the independent format gate.
-# Both are test/example-only here; the library boundary still consumes only
-# plinth-emit's report types.
+# The E2 first-artifact seam re-reads what it wrote, and chitubox_io parses the
+# emitted container back. That is example/test-only. plinth-verify is a real
+# dependency above, not a dev one: the pre-write gate consults its coverage
+# verdict before the library ever calls plinth-emit.
 chitubox_io = { path = "../../rust/chitubox_io" }
 plinth-mesh = { path = "../plinth-mesh" }
-plinth-verify = { path = "../plinth-verify" }
 serde_json = { workspace = true }

@@ -255,11 +255,34 @@ corpus/models/Sphere.stl
   → plinth_orient::run (Pinned corpus baseline)         [exists, frozen]
   → plinth_pipeline::hollow_stage                       [exists; viability OQ-1]
   → plinth_support::run_support (production limits)     [exists, seals 7/8]
-  → FinalSupportAuthority::into_supported_model()       [exists, never emitted]
-  → plinth_emit::write (Saturn 4 Ultra profile)         [exists, fixture-only]
+  → FinalSupportAuthority::verification_snapshot()      [exists]
+  → PRE-WRITE GATES on that snapshot                    [wired 2026-08-09]
+      plinth_verify::verify_coverage  = gate 1 of 12, ported
+      the other 11 guide gates        = named, not yet ported
+      refuse -> PipelineExitCode::Gates (3), NO FILE IS CREATED
+  → FinalSupportAuthority::into_supported_model()       [only on a pass]
+  → plinth_emit::write (Saturn 4 Ultra profile)         [only on a pass]
   → plinth_verify format gate on the disk artifact      [exists]
   → owner opens it in ChituBox Basic                    [NEVER DONE from a sealed run]
 ```
+
+**Correction, 2026-08-09.** The chain above previously ran
+`into_supported_model → write → verify`, which put every verification arrow
+*after* the file existed. That was not a drafting slip; the code matched it,
+and the consequence was that no physics verdict was consulted before a
+`.chitubox` was written. There are two distinct verifications here and they
+belong on opposite sides of the write:
+
+- the **pre-write physics gates** judge the *plan* (does this support layout
+  actually cover the model?) and must run while the authority is still
+  un-lowered, so a refusal leaves nothing on disk;
+- the **format gate** judges the *bytes* and can only run after the write, by
+  construction — it re-reads the file. It stays where it is.
+
+The pre-write gate has no override parameter and will not acquire one:
+`03-physics-and-constants.md` retires `PERF_GATE_EMIT_ON_VERIFY` and makes
+`EMIT_REQUIRE_PASSED_GATES_DEFAULT=true` the sole emission authorization,
+which the gate now reads and can only ever *refuse* on.
 
 Every arrow except the last two joins already compiles against the one before
 it. The work is (1) the preview fallback so ChituBox will open the file at
