@@ -149,35 +149,98 @@ feeds** — 1.65 s on the treant, whose support run is ~470 s, so ~0.35 %.
 
 ## Why no committed expectation moved
 
-`cargo test --workspace` is green with the real field in place, and the reason is
-attributable rather than lucky. The support stage's only delicacy-driven decision is
-`strut_model_anchor_max_delicacy` (0.5): a candidate whose face is *more* delicate than the
-cap is rejected. Every model the committed prepare fixtures seal — `make_toed_slab.prepped`,
-`Sphere.prepped`, and the procedural `make_overhang_table` — stays under that cap on every
-face, so no anchor candidate that was admissible under the old zero field is inadmissible
-under the real one. That is asserted, not inspected:
-`the_committed_prepare_fixtures_stay_under_the_anchor_delicacy_cap` in
-`crates/plinth-pipeline/src/lib.rs` re-measures it on the prepared meshes and fails loudly
-if any fixture ever crosses the cap, which is precisely when the recorded re-pin protocol
-would be owed something.
+> **AMENDED 2026-08-10, same day, after review.** The paragraph that stood here claimed
+> "the support stage's only delicacy-driven decision is
+> `strut_model_anchor_max_delicacy`". **That is false**, the argument built on it was
+> therefore incomplete, and the correction is below. The conclusion — that no committed
+> expectation moved — survives; the *reason* given for it did not. The original text is
+> superseded rather than deleted from the record: it was wrong, and a record that quietly
+> replaces a wrong reason with a right one teaches nothing.
 
-**This is a statement about those fixtures, not about all geometry.** The treant carries
+`cargo test --workspace` is green with the real field in place. Two independent things had
+to be true for that, and only the first was recorded.
+
+**Channel one — the anchor cap.** `strut_model_anchor_max_delicacy` (0.5) rejects a
+candidate whose face is *more* delicate than the cap. Every model the committed prepare
+fixtures seal — `make_toed_slab.prepped`, `Sphere.prepped`, and the procedural
+`make_overhang_table` — stays under that cap on every face, so no anchor candidate that was
+admissible under the old zero field is inadmissible under the real one. That is asserted,
+not inspected: `the_committed_prepare_fixtures_stay_under_the_anchor_delicacy_cap` in
+`crates/plinth-pipeline/src/lib.rs` re-measures it on the prepared meshes and fails loudly
+if any fixture ever crosses the cap.
+
+That guard also had a defect of its own, fixed in the same amendment: it built each
+fixture's prepared mesh through one pinned rotation (the `Sphere`'s) for all three
+fixtures. Hollowing and drain drilling are rotation-dependent — an axis-aligned voxel grid
+and build-frame drains — so for two of the three it was measuring a solid the pipeline
+never makes, and could have stayed green while covered geometry crossed the cap. Each
+fixture is now oriented by its own pinned baseline.
+
+**Channel two — the contact-selection tie-break, which this record missed.** Contact
+selection sorts each island's eligible candidates by exact Z and then breaks ties on
+**delicacy** (`crates/plinth-support/src/lib.rs:1281` — "exact geometric ties retain a
+deterministic least-scar preference before source identity"). Exact Z ties are ordinary on
+a flat underside. So real delicacy values can reorder contact selection, and with it
+support geometry and artifact bytes, **without any face coming near the cap**. A cap
+argument cannot cover that channel, because the channel never consults the cap.
+
+**Measured, not argued.** `the_zero_field_divergence_is_measured_per_committed_fixture`
+seals each fixture twice on the same hollowed geometry — once with the measured field, once
+with the zero field production used to feed — and compares the sealed verification
+snapshots. Measured 2026-08-10 on this tip:
+
+| fixture | zero field | measured field | same decision? |
+|---|---|---|---|
+| `make_toed_slab.prepped` | digest `13640335649674000245` | digest `6989898566632288617` | **no** |
+| `make_overhang_table` (procedural) | digest `3706765241747593242` | digest `3116329269026579872` | **no** |
+| `Sphere.prepped` | refuses during lowering | refuses during lowering | yes |
+
+Neither of the two that moved crosses the anchor cap. The cap argument held and the runs
+moved anyway — which is exactly the tie-break channel, demonstrated rather than
+hypothesized. (The `Sphere`'s drilled shell reaches no sealed run under either field;
+production answers that with its reserve solid, so two identical refusals are two identical
+decisions.)
+
+**So why is nothing broken?** Because every harness that pins a support digest **feeds the
+zero field itself**, and therefore remains exactly reproducible by the harness that
+produced it. Nothing in the committed record is a real-field measurement that the zero
+field would contradict. What the table above establishes is the *other* half: those pinned
+digests describe support runs production no longer performs. That is a divergence to
+attribute and put before the owner, not a failure to fix — and it is FU-38's question.
+
+**This is a statement about these fixtures, not about all geometry.** The treant carries
 13.6 % of its faces above the cap. No test seals the treant, so nothing moved — but the
 first run that does will see different anchors than the zero field would have given, and
 that difference is a correction, not a regression.
 
-## The one thing this landing deliberately did not close
+## Every surviving zero-field feed, and whether it matters
 
-`crates/plinth-support/examples/embed_incidence_census.rs` still feeds
-`vec![0.0; faces]`. It is throwaway, feature-gated instrumentation that never runs in
-`cargo test`, and its seven recorded OD-8 census digests are pinned in this journal.
-Giving it the real field would move all seven. Under the recorded protocol
-(`CURRENT-STATUS.md` `#fu10-repin-2026-08-08`) that is a **stop-and-report**: full
-attribution first, then an owner ruling, then a re-pin measured from the merged tip —
-never a silent edit folded into an implementation commit. So the harness is left as it
-stands, and the question is opened on the follow-ups ledger rather than answered here.
-The consequence, stated plainly: **the census harness now measures a support run
-production no longer performs.**
+> **AMENDED 2026-08-10, same day, after review.** This section named exactly one surviving
+> `vec![0.0]` feed. There are five, of which four reach a support run. The full enumeration
+> is below; the original single-item text is superseded.
+
+`prepare.rs`'s feed to the support stage is the one the ruling closed. These are what is
+left, all of them in test or instrumentation harnesses, none of them in production:
+
+| feed | what it produces | decision-relevant? |
+|---|---|---|
+| `crates/plinth-support/examples/embed_incidence_census.rs:171` | the seven recorded OD-8 census digests, over the eight-model corpus | **yes** — the harness measures a support run production no longer performs. This is the row FU-38 was opened for. |
+| `crates/plinth-support/tests/support_runner_integration.rs:167` | the pinned FU-32 J4 snapshot digests for `make_toed_slab` (`2198459883570957390`) and `make_raking_blade` (`74030269957898085`), plus routed/live counts | **yes.** `make_toed_slab` is measured above as moving under the real field. `make_raking_blade` is decision-relevant by this record's own table — 5 of its 24 faces (20.8 %) sit above the 0.5 cap, so it is the one corpus model where **both** channels are live, and it is not covered by the neutrality guard (that guard covers the prepare fixtures, and the blade is not one). Its divergence is **unmeasured**, deliberately: measuring it means re-pinning, and re-pinning is the owner's. |
+| `crates/plinth-verify/tests/coverage_gate.rs:88` | the frozen golden `coverage_gate_overhang_table.json`, whose `snapshot_digest` is pinned | **yes** — `make_overhang_table` is measured above as moving under the real field. |
+| `crates/plinth-support/tests/support_runner_integration.rs:222,257` | structural assertions and the hand-counted coverage resource plan for `make_overhang_table` | **yes**, same geometry as the row above; the run moves, and whether the hand-counted 81/77/50,176 move with it is unmeasured for the same reason. |
+| `crates/plinth-support/tests/resource_cap_policy.rs:44,53` and `crates/plinth-pipeline/src/lib.rs:816` | model-scaled cap arithmetic | **no.** These slices are read for their **length** only — `SupportPreparationLimits::input` treats `delicacy_by_face.len()` as the face count — and no support run consumes their values. A zero field and a measured one give the same caps. |
+
+**What this enumeration claims:** four harnesses now measure a support engine production no
+longer runs, and for three of the four the divergence is measured rather than assumed.
+**What it does not claim:** that any pinned digest is wrong. Each remains exactly
+reproducible by the harness that produced it, and each measured the engine as it then was.
+
+**Why none of them was corrected here.** Under the recorded protocol (`CURRENT-STATUS.md`
+`#fu10-repin-2026-08-08`) a movement in a pinned digest is a **stop-and-report**: full
+attribution first, then an owner ruling, then a re-pin measured from the merged tip — never
+a silent edit folded into an implementation commit. Correcting any of these harnesses moves
+pinned numbers. So the attribution is here, the question is on the follow-ups ledger
+(FU-38), and nothing was guessed.
 
 ## What this record does not claim
 

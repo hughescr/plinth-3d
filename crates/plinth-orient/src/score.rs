@@ -129,14 +129,42 @@ impl UpDirection {
     ///
     /// Row 2 is `u` by construction, so `(R·v)_z = v·u`; rows 0 and 1 are the
     /// in-plane basis the section solver measures areas in.  Written in the
-    /// singularity-free closed form `R = c·I + [v]ₓ + v·vᵀ/(1+c)` with
-    /// `v = u × ẑ` and `c = u_z`: the `v·vᵀ` term stays bounded as `c → −1`
-    /// because `|v|² = 1 − c²`, so only the exact antipode needs the convention.
+    /// closed form `R = c·I + [v]ₓ + v·vᵀ/(1+c)` with `v = u × ẑ` and `c = u_z`.
+    ///
+    /// # `1 + c` is read off `x² + y²` on the negative hemisphere
+    ///
+    /// The real quantity `1 + c` stays bounded against `|v|² = 1 − c²`, so the
+    /// closed form is singularity-free in exact arithmetic.  In `f64` it is not,
+    /// and the failure is not at the antipode alone.  `c` carries an absolute
+    /// rounding error of ~1e-16 from the normalization, so once `1 + c` is
+    /// itself of that order the naive difference has **no** correct significant
+    /// digits, and `k = 1/(1+c)` multiplies the error back up: the normalized
+    /// direction `[2e-8, 0, −1]` has a true `1 + c` of 2e-16 and a computed one
+    /// of 2.22e-16, which puts `R[1][1] = c + k·x²` at ≈ 0.8 where the true
+    /// value is unity.  That is not a rotation, and rest-pose candidates
+    /// (area-weighted `−n` aggregates) can land arbitrarily close to `−ẑ` on
+    /// real meshes, so the matrix reaches production geometry at emit.
+    ///
+    /// `x² + y²` is the same quantity's well-conditioned twin — `1 − c² =
+    /// (1 − c)(1 + c)` with `1 − c ≈ 2` there — so for `c < 0` the divisor is
+    /// read off it: `1 + c = (x² + y²)/(1 − c)`.  Substituting it back gives
+    /// `k·(x² + y²) = 1 − c` identically, which is exactly the identity row
+    /// orthonormality needs, so the rows stay orthonormal to a ulp for every
+    /// direction rather than only away from the pole.  For `c ≥ 0` the direct
+    /// `1 + c ≥ 1` is already exact to a ulp and is kept, which also keeps
+    /// `x² + y² → 0` at `+ẑ` out of the divisor.  Only the **exact** antipode
+    /// (`x = y = 0`, `c = −1`) still needs a convention, and it takes the pinned
+    /// one: 180° about `+X`.
     #[must_use]
     pub fn rotation_to_build_frame(self) -> [[f64; 3]; 3] {
         let [x, y, c] = self.0;
-        let denominator = 1.0 + c;
-        if denominator <= 0.0 {
+        let sin_squared = x * x + y * y;
+        let denominator = if c >= 0.0 {
+            1.0 + c
+        } else {
+            sin_squared / (1.0 - c)
+        };
+        if !denominator.is_finite() || denominator <= 0.0 {
             return [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
         }
         let k = 1.0 / denominator;
@@ -231,6 +259,19 @@ impl ObjectiveWeights {
 /// measured demand and the cap, before any working buffer is allocated, and it
 /// never trims the candidate set to fit.  There is no wall clock anywhere
 /// (O-4).
+///
+/// # Every cap is absolute, and that is the whole point
+///
+/// The first version of this type derived each cap from the very counts the
+/// call then charged against it — `faces × candidates` against
+/// `max(2^28, faces × 2048)`, with `candidates ≤ 653` and the multiplier 2048.
+/// Every comparison was then structurally `n·a ≤ n·b` with `a < b`, so no
+/// budget could fire for **any** mesh, and orientation was the one stage in the
+/// pipeline with no effective work bound at all.  The caps below are therefore
+/// fixed numbers derived once, from the largest model this workspace can run
+/// end to end, and are supplied by the caller's resource policy
+/// (`plinth_pipeline::PrepareResourcePolicy::orient`) exactly as the design's
+/// §6 asks — not recomputed per rung from that rung's own size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrientSearchLimits {
     pub max_candidates: usize,
@@ -246,33 +287,71 @@ impl OrientSearchLimits {
     /// Fibonacci).  It bounds an absurd caller, not the recorded grid.
     pub const MAX_CANDIDATES: usize = 2048;
 
-    /// Guards scaled to the model they will be asked to score, following the
-    /// support stage's `max(floor, per_element × count)` idiom.
+    /// The largest production mesh this workspace can hand the sweep: the
+    /// Weeping Treant's prepared mesh, `corpus/baseline/Weeping Treant
+    /// v1.2.prepped.stl`, measured 2026-08-10.
+    pub const LARGEST_PRODUCTION_FACES: usize = 429_120;
+
+    /// Its vertex count, and the structural maximum for any mesh of that many
+    /// faces: a binary STL is a triangle soup and the loader's `WeldPolicy::None`
+    /// keeps it one, so `verts = 3 × faces` exactly — measured, and an upper
+    /// bound at the same time, since no mesh can carry more than three distinct
+    /// vertices per triangle.
+    pub const LARGEST_PRODUCTION_VERTS: usize = 3 * Self::LARGEST_PRODUCTION_FACES;
+
+    /// The one production budget: five fixed work-unit ceilings.
+    ///
+    /// Each is `next_power_of_two(2 × worst case)`, the repo's own cap rule
+    /// (`SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS` and its sibling, FU-32 J5),
+    /// where the worst case is the largest reachable model scored against the
+    /// largest admissible candidate list — `LARGEST_PRODUCTION_FACES` (or
+    /// `_VERTS`) × `MAX_CANDIDATES`.  A mesh about four times the treant, or a
+    /// caller handing more than 2048 candidates, refuses; the recorded grid on
+    /// every model in the corpus passes with the stated headroom and nothing is
+    /// trimmed to fit.
     #[must_use]
-    pub fn production(faces: usize, verts: usize) -> Self {
-        const PRODUCT_FLOOR: usize = 1 << 28;
-        const BYTE_FLOOR: usize = 64 * 1024 * 1024;
-        // Four candidates in flight is the smallest tile worth calling batched,
-        // so the byte guard never forces a degenerate tile on a real model.
-        let column_bytes = column_bytes(faces, verts).saturating_mul(4);
+    pub const fn production() -> Self {
+        // 2 × 429_120 × 2048 = 1_757_675_520 → 2^31.
+        const FACE_PRODUCTS: usize = 1 << 31;
+        // 2 × 1_287_360 × 3 × 2048 = 15_818_096_640 → 2^34.
+        const VERTEX_PRODUCTS: usize = 1 << 34;
+        // 2 × 1_287_360 × 2048 = 5_272_698_880 → 2^33.
+        const SECTION_BREAKPOINTS: usize = 1 << 33;
+        // The treant's own per-candidate working set is 80_674_560 bytes
+        // (`per_candidate_bytes` below). Four candidates in flight is the
+        // smallest tile worth calling batched, so the byte ceiling is
+        // next_power_of_two(4 × that) = 2^29 — the one cap whose multiplier is
+        // the tile width rather than the usual 2×, because this cap also *sizes*
+        // the tile and a 2× ceiling would force a two-candidate tile on the
+        // largest model.
+        const WORKING_BYTES: usize = 1 << 29;
         Self {
             max_candidates: Self::MAX_CANDIDATES,
-            max_candidate_face_products: PRODUCT_FLOOR
-                .max(faces.saturating_mul(Self::MAX_CANDIDATES)),
-            max_candidate_vertex_products: PRODUCT_FLOOR
-                .max(verts.saturating_mul(3).saturating_mul(Self::MAX_CANDIDATES)),
-            max_section_breakpoints: PRODUCT_FLOOR.max(verts.saturating_mul(Self::MAX_CANDIDATES)),
-            max_working_bytes: BYTE_FLOOR.max(column_bytes),
+            max_candidate_face_products: FACE_PRODUCTS,
+            max_candidate_vertex_products: VERTEX_PRODUCTS,
+            max_section_breakpoints: SECTION_BREAKPOINTS,
+            max_working_bytes: WORKING_BYTES,
         }
     }
 }
 
-/// Bytes one candidate occupies while in flight: its column of `NZ` plus the
-/// three vertex-side projections its section solver consumes.
-fn column_bytes(faces: usize, verts: usize) -> usize {
-    faces
-        .saturating_add(verts.saturating_mul(3))
-        .saturating_mul(std::mem::size_of::<f64>())
+/// Bytes one candidate occupies while in flight, counting **every** buffer its
+/// evaluation allocates rather than only the two obvious ones.
+///
+/// Per candidate: its column of `NZ` (`faces` f64), the in-plane projection
+/// (`verts × 2` f64) and the heights (`verts` f64) that
+/// [`project_vertices`] builds, and then the section solver's own three —
+/// [`crate::section::build_profile`]'s sort permutation (`verts` u32), its
+/// distinct-height breakpoint list (up to `verts` f64) and its per-interval
+/// quadratic coefficient array (up to `verts` × `[f64; 3]`).  The last three
+/// were omitted when this guard was first written, which undercharged the
+/// treant by 36 bytes per vertex — 46 MB on a mesh whose whole charge was 34 MB.
+fn per_candidate_bytes(faces: usize, verts: usize) -> usize {
+    const F64: usize = std::mem::size_of::<f64>();
+    const U32: usize = std::mem::size_of::<u32>();
+    // NZ column + plane + heights + sort permutation + breakpoints + coefficients.
+    let vertex_side = (2 * F64 + F64 + U32 + F64 + 3 * F64).saturating_mul(verts);
+    faces.saturating_mul(F64).saturating_add(vertex_side)
 }
 
 /// What one scoring call charged before it allocated anything.
@@ -286,13 +365,28 @@ pub struct ScorePlan {
     pub candidate_tile: usize,
 }
 
-/// What it then executed. Charged and metered are both stated; the exact pair
-/// must agree, and the bounded pair may only come in under its charge.
+/// What it then executed.
+///
+/// Every field is **counted where the work happens** — one increment per
+/// `n·u` written in the tile product, one per dot product taken in
+/// [`project_vertices`], one per distinct breakpoint the section solver
+/// resolved — and never copied from [`ScorePlan`].  A meter assigned from the
+/// plan it is meant to check is an identity, not a receipt: it can only ever
+/// agree, and `ChargeDrift` could then never fire on it.  The repo's own
+/// precedent (FU-32 J5's routing meter) is a genuine independent count and this
+/// is one too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScoreMeter {
     pub face_direction_products: usize,
     pub vertex_direction_products: usize,
     pub section_breakpoints: usize,
+}
+
+/// What one candidate's evaluation executed, counted as it ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CandidateWork {
+    vertex_direction_products: usize,
+    section_breakpoints: usize,
 }
 
 /// The four terms and the assembled score for one candidate.
@@ -377,7 +471,9 @@ pub struct OrientFaceTable {
     normals: Vec<[f64; 3]>,
     degenerate: Vec<bool>,
     delicacy: Vec<f64>,
-    delicacy_digest: String,
+    /// `None` when the field was never built because the scar weight is
+    /// structurally zero — a stated absence, not a digest of zeros.
+    delicacy_digest: Option<String>,
     boundary_edges: usize,
     nonmanifold_edges: usize,
 }
@@ -401,6 +497,28 @@ impl OrientFaceTable {
         Self::with_delicacy(mesh, lod, &field)
     }
 
+    /// Builds the table with **no** delicacy field at all, for a sweep whose
+    /// scar weight is structurally zero.
+    ///
+    /// `03-physics-and-constants.md` §3.8 requires that a zero scar weight
+    /// reproduce the scar-free search *structurally rather than arithmetically*,
+    /// and the 2026-08-10 producer ruling keeps that requirement in force.
+    /// Building the field and then multiplying it by zero does not satisfy it:
+    /// the field's own digest would still enter the search record, so a
+    /// scar-free run's `search_digest` would move whenever the delicacy
+    /// evaluator changed, and a delicacy failure would refuse a search that
+    /// never wanted the number.  Here the field is simply not constructed, the
+    /// digest is [`None`] rather than a hash of zeros, and `delicacy` is empty —
+    /// which the scoring loop never indexes, because it hoists the scar branch
+    /// out of the face pass.
+    ///
+    /// # Errors
+    ///
+    /// The closure and topology refusals of [`OrientFaceTable::build`].
+    pub fn without_delicacy(mesh: &Mesh, lod: impl Into<String>) -> Result<Self, ScoreError> {
+        Self::assemble(mesh, lod.into(), None)
+    }
+
     /// Builds the table around a delicacy field that was already measured.
     ///
     /// The field must have been measured on **this** mesh at **this** LOD; both
@@ -418,14 +536,23 @@ impl OrientFaceTable {
         lod: impl Into<String>,
         field: &DelicacyField,
     ) -> Result<Self, ScoreError> {
-        let lod = lod.into();
-        if field.face_table().lod() != lod {
-            return Err(ScoreError::DelicacyLodMismatch {
-                expected: lod,
-                actual: field.face_table().lod().to_string(),
-            });
+        Self::assemble(mesh, lod.into(), Some(field))
+    }
+
+    fn assemble(
+        mesh: &Mesh,
+        lod: String,
+        field: Option<&DelicacyField>,
+    ) -> Result<Self, ScoreError> {
+        if let Some(field) = field {
+            if field.face_table().lod() != lod {
+                return Err(ScoreError::DelicacyLodMismatch {
+                    expected: lod,
+                    actual: field.face_table().lod().to_string(),
+                });
+            }
+            field.validate_mesh(mesh).map_err(ScoreError::Delicacy)?;
         }
-        field.validate_mesh(mesh).map_err(ScoreError::Delicacy)?;
 
         // Welded topology, once. `WeldPolicy::ExactBits` is stated here rather
         // than taken from a caller for the same reason the delicacy evaluator
@@ -437,9 +564,20 @@ impl OrientFaceTable {
         let counts = topology.counts();
         if counts.boundary_edges > 0 {
             // The section solver's shoelace identity assumes the section is a
-            // union of closed loops. A hole breaks that, so this is a refusal
-            // the LOD ladder can catch and answer with a finer proxy — never a
-            // silently wrong area.
+            // union of closed loops. A hole breaks that, so an open LOD is
+            // refused rather than answered with a plausible wrong area.
+            //
+            // **This precondition is wider than the design asked for, and the
+            // width is recorded rather than implied.** Design §2.1 put the
+            // closed-boundary floor on the *proxies*, where the LOD ladder can
+            // catch it and answer with a finer rung. It is enforced here on
+            // every LOD, including Exact — where there is no finer rung, so it
+            // becomes `SearchError::ExactUnscorable` and the model is
+            // unpreparable under the default `DenseSweep` policy while
+            // `--orient pinned` still prepares it. That is a refusal class the
+            // record did not have before; it is journalled with a corpus
+            // reachability measurement (all eight corpus models weld closed) and
+            // carried on the follow-ups ledger as FU-42.
             return Err(ScoreError::OpenBoundary {
                 boundary_edges: counts.boundary_edges,
             });
@@ -477,12 +615,14 @@ impl OrientFaceTable {
             areas_mm2,
             normals,
             degenerate,
-            delicacy: field
-                .face_values()
-                .iter()
-                .map(|value| value.weight())
-                .collect(),
-            delicacy_digest: field.digest().to_string(),
+            delicacy: field.map_or_else(Vec::new, |field| {
+                field
+                    .face_values()
+                    .iter()
+                    .map(|value| value.weight())
+                    .collect()
+            }),
+            delicacy_digest: field.map(|field| field.digest().to_string()),
             boundary_edges: counts.boundary_edges,
             nonmanifold_edges: counts.nonmanifold_edges,
         })
@@ -496,9 +636,11 @@ impl OrientFaceTable {
     pub fn mesh_fingerprint(&self) -> &str {
         &self.mesh_fingerprint
     }
+    /// The digest of the delicacy field this table was built around, or `None`
+    /// when no field was built because the scar weight is structurally zero.
     #[must_use]
-    pub fn delicacy_digest(&self) -> &str {
-        &self.delicacy_digest
+    pub fn delicacy_digest(&self) -> Option<&str> {
+        self.delicacy_digest.as_deref()
     }
     #[must_use]
     pub fn face_count(&self) -> usize {
@@ -573,7 +715,11 @@ pub fn score_candidates(
     let faces = table.tris.len();
     let down_limit = weights.down_limit();
     let mut outcomes = Vec::with_capacity(candidates.len());
-    let mut breakpoints_executed = 0_usize;
+    let mut executed = ScoreMeter {
+        face_direction_products: 0,
+        vertex_direction_products: 0,
+        section_breakpoints: 0,
+    };
 
     // One explicit pool per call at the workspace thread count, never rayon's
     // global pool: a one-shot global pool makes the thread sweep inert
@@ -587,18 +733,28 @@ pub fn score_candidates(
         // The one batched product: faces outer, candidates inner, so the normal
         // array streams once per tile instead of once per candidate.
         let mut nz = vec![0.0_f64; faces * tile.len()];
+        // Counted where it executes, one per product written, so the receipt is
+        // a measurement of this loop rather than a restatement of the charge.
+        let mut tile_face_products = 0_usize;
         for (face, normal) in table.normals.iter().enumerate() {
             let row = &mut nz[face * tile.len()..(face + 1) * tile.len()];
             for (slot, candidate) in row.iter_mut().zip(tile) {
                 let u = candidate.get();
                 *slot = normal[0] * u[0] + normal[1] * u[1] + normal[2] * u[2];
+                tile_face_products += 1;
             }
         }
+        executed.face_direction_products = executed
+            .face_direction_products
+            .checked_add(tile_face_products)
+            .ok_or(ScoreError::ArithmeticOverflow {
+                section: "face-direction products",
+            })?;
 
         // Index-parallel map-collect across candidates: every output lands in
         // the slot of its own index, so the tile's results are bit-identical at
         // any thread count.
-        let tile_outcomes: Vec<(CandidateOutcome, usize)> = pool.install(|| {
+        let tile_outcomes: Vec<(CandidateOutcome, CandidateWork)> = pool.install(|| {
             tile.par_iter()
                 .enumerate()
                 .map(|(column, candidate)| {
@@ -614,36 +770,66 @@ pub fn score_candidates(
                 })
                 .collect()
         });
-        for (outcome, breakpoints) in tile_outcomes {
-            breakpoints_executed = breakpoints_executed.checked_add(breakpoints).ok_or(
-                ScoreError::ArithmeticOverflow {
+        for (outcome, work) in tile_outcomes {
+            executed.vertex_direction_products = executed
+                .vertex_direction_products
+                .checked_add(work.vertex_direction_products)
+                .ok_or(ScoreError::ArithmeticOverflow {
+                    section: "vertex-direction products",
+                })?;
+            executed.section_breakpoints = executed
+                .section_breakpoints
+                .checked_add(work.section_breakpoints)
+                .ok_or(ScoreError::ArithmeticOverflow {
                     section: "section breakpoints",
-                },
-            )?;
+                })?;
             outcomes.push(outcome);
         }
     }
 
-    let meter = ScoreMeter {
-        face_direction_products: plan.face_direction_products,
-        vertex_direction_products: plan.vertex_direction_products,
-        section_breakpoints: breakpoints_executed,
-    };
-    // The two exact terms are executed exactly as charged; breakpoints are
-    // charged at their vertex-count bound and metered at the distinct heights
-    // actually resolved, so under-running is expected and over-running is drift.
-    if meter.section_breakpoints > plan.section_breakpoints {
-        return Err(ScoreError::ChargeDrift {
-            charged: plan.section_breakpoints,
-            executed: meter.section_breakpoints,
-            what: "section breakpoints",
-        });
+    // Charged and metered, both stated, and now all three are checkable: the
+    // two product counters are exhaustive passes and must land exactly on their
+    // charge, while breakpoints are charged at their vertex-count bound and
+    // metered at the distinct heights actually resolved, so under-running is
+    // expected there and over-running is drift.
+    for (charged, executed, exact, what) in [
+        (
+            plan.face_direction_products,
+            executed.face_direction_products,
+            true,
+            "face-direction products",
+        ),
+        (
+            plan.vertex_direction_products,
+            executed.vertex_direction_products,
+            true,
+            "vertex-direction products",
+        ),
+        (
+            plan.section_breakpoints,
+            executed.section_breakpoints,
+            false,
+            "section breakpoints",
+        ),
+    ] {
+        let drifted = if exact {
+            executed != charged
+        } else {
+            executed > charged
+        };
+        if drifted {
+            return Err(ScoreError::ChargeDrift {
+                charged,
+                executed,
+                what,
+            });
+        }
     }
 
     Ok(ScoredCandidates {
         outcomes,
         plan,
-        meter,
+        meter: executed,
     })
 }
 
@@ -698,7 +884,7 @@ fn charge(
     // The byte guard sizes the candidate tile; it refuses only when a single
     // candidate does not fit, because a tile boundary can never change a result
     // (no fold crosses one).
-    let per_candidate = column_bytes(faces, verts);
+    let per_candidate = per_candidate_bytes(faces, verts);
     if per_candidate > limits.max_working_bytes {
         return Err(ScoreError::WorkBudgetExceeded {
             charge: per_candidate,
@@ -728,7 +914,7 @@ fn score_one(
     nz: &[f64],
     weights: ObjectiveWeights,
     down_limit: f64,
-) -> (CandidateOutcome, usize) {
+) -> (CandidateOutcome, CandidateWork) {
     let index = column;
 
     // Support area and scar share one masked pass over faces. The scar branch is
@@ -760,10 +946,14 @@ fn score_one(
         heights,
         height_mm,
         lowest: _,
+        vertex_direction_products,
     } = project_vertices(table, candidate);
 
     let profile = build_profile(&table.tris, &table.degenerate, &plane, &heights);
-    let breakpoints = profile.breakpoint_count();
+    let work = CandidateWork {
+        vertex_direction_products,
+        section_breakpoints: profile.breakpoint_count(),
+    };
     let peak_mm2 = match profile.peak_mm2() {
         Ok(peak) => peak,
         Err(refusal) => match refusal {
@@ -776,7 +966,7 @@ fn score_one(
                             value: f64::NAN,
                         },
                     }),
-                    breakpoints,
+                    work,
                 )
             }
             SectionRefusal::NegativeArea { peak_mm2 } => {
@@ -785,7 +975,7 @@ fn score_one(
                         candidate: index,
                         reason: CandidateRefusalReason::NegativeSectionArea { peak_mm2 },
                     }),
-                    breakpoints,
+                    work,
                 )
             }
         },
@@ -807,7 +997,7 @@ fn score_one(
                     candidate: index,
                     reason: CandidateRefusalReason::NonFiniteTerm { term, value },
                 }),
-                breakpoints,
+                work,
             );
         }
     }
@@ -828,7 +1018,7 @@ fn score_one(
                     value: score,
                 },
             }),
-            breakpoints,
+            work,
         );
     }
 
@@ -842,7 +1032,7 @@ fn score_one(
             down_facing_faces,
             score: canonical_zero(score),
         }),
-        breakpoints,
+        work,
     )
 }
 
@@ -857,6 +1047,9 @@ struct Projection {
     /// The unshifted height of the lowest vertex, so an absolute query height
     /// can be converted into the shifted frame.
     lowest: f64,
+    /// Dot products actually taken here, counted one per product rather than
+    /// restated from the caller's charge.
+    vertex_direction_products: usize,
 }
 
 /// Three whole-array passes over the vertices, one per row of the candidate's
@@ -864,11 +1057,13 @@ struct Projection {
 fn project_vertices(table: &OrientFaceTable, candidate: UpDirection) -> Projection {
     let u = candidate.get();
     let rotation = candidate.rotation_to_build_frame();
+    let mut products = 0_usize;
     let mut heights = Vec::with_capacity(table.verts.len());
     let mut lowest = f64::INFINITY;
     let mut highest = f64::NEG_INFINITY;
     for vertex in &table.verts {
         let height = vertex[0] * u[0] + vertex[1] * u[1] + vertex[2] * u[2];
+        products += 1;
         if height < lowest {
             lowest = height;
         }
@@ -887,12 +1082,14 @@ fn project_vertices(table: &OrientFaceTable, candidate: UpDirection) -> Projecti
             vertex[0] * rotation[0][0] + vertex[1] * rotation[0][1] + vertex[2] * rotation[0][2],
             vertex[0] * rotation[1][0] + vertex[1] * rotation[1][1] + vertex[2] * rotation[1][2],
         ]);
+        products += 2;
     }
     Projection {
         plane,
         heights,
         height_mm,
         lowest,
+        vertex_direction_products: products,
     }
 }
 
@@ -1011,7 +1208,7 @@ mod tests {
             UpDirection::new([0.4, -0.3, 0.6]).expect("unit direction"),
             UpDirection::new([0.0, 0.0, -1.0]).expect("antipode"),
         ];
-        let limits = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+        let limits = OrientSearchLimits::production();
         let outcomes =
             score_candidates(table, &candidates, weights, limits).expect("scoring must not refuse");
         outcomes
@@ -1122,6 +1319,61 @@ mod tests {
         assert!(OrientFaceTable::with_delicacy(&mesh, "l1", &field).is_ok());
     }
 
+    /// The production budget is a real bound, not an identity.
+    ///
+    /// As first landed every cap was derived from the counts it was then
+    /// compared against — `faces × candidates` against
+    /// `max(2^28, faces × 2048)` with `candidates ≤ 653` — so every comparison
+    /// reduced to `n·a ≤ n·b` with `a < b` and **no budget could fire for any
+    /// mesh**. That defect is invisible to a test that only drives an
+    /// overridden cap, because an overridden cap is by definition independent.
+    /// So this asserts the two things that make the shipped numbers a bound:
+    /// each is the stated `next_power_of_two(2 × worst case)`, and each is
+    /// exceeded by a mesh large enough to deserve refusing.
+    #[test]
+    fn the_production_budget_is_independent_of_the_mesh_it_charges() {
+        let limits = OrientSearchLimits::production();
+        let faces = OrientSearchLimits::LARGEST_PRODUCTION_FACES;
+        let verts = OrientSearchLimits::LARGEST_PRODUCTION_VERTS;
+        let candidates = OrientSearchLimits::MAX_CANDIDATES;
+
+        // The stated rule, evaluated rather than trusted.
+        assert_eq!(
+            limits.max_candidate_face_products,
+            (2 * faces * candidates).next_power_of_two()
+        );
+        assert_eq!(
+            limits.max_candidate_vertex_products,
+            (2 * verts * 3 * candidates).next_power_of_two()
+        );
+        assert_eq!(
+            limits.max_section_breakpoints,
+            (2 * verts * candidates).next_power_of_two()
+        );
+        assert_eq!(
+            limits.max_working_bytes,
+            (4 * per_candidate_bytes(faces, verts)).next_power_of_two()
+        );
+
+        // The largest model this workspace can run fits, with headroom.
+        assert!(faces * candidates <= limits.max_candidate_face_products);
+        assert!(verts * 3 * candidates <= limits.max_candidate_vertex_products);
+        assert!(verts * candidates <= limits.max_section_breakpoints);
+        assert!(per_candidate_bytes(faces, verts) <= limits.max_working_bytes);
+
+        // And a mesh eight times its size does not, which is what "cap" means.
+        // Eight rather than four because the byte ceiling carries the tile
+        // width's 4× rather than the usual 2×, so its headroom is ~6.6× where
+        // the three product ceilings are 2.2–3.3×; a single multiplier that
+        // clears all four states the loosest of them honestly.
+        let huge_faces = faces * 8;
+        let huge_verts = verts * 8;
+        assert!(huge_faces * candidates > limits.max_candidate_face_products);
+        assert!(huge_verts * 3 * candidates > limits.max_candidate_vertex_products);
+        assert!(huge_verts * candidates > limits.max_section_breakpoints);
+        assert!(per_candidate_bytes(huge_faces, huge_verts) > limits.max_working_bytes);
+    }
+
     /// **T11.** Every budget refuses naming both numbers, before any working
     /// buffer exists, and never by trimming the candidate set to fit.
     #[test]
@@ -1129,7 +1381,7 @@ mod tests {
         let (_mesh, table) = cube_table();
         let weights = ObjectiveWeights::registered().expect("registered objective");
         let candidates = vec![UpDirection::MODEL_UP; 8];
-        let base = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+        let base = OrientSearchLimits::production();
 
         let cases = [
             (
@@ -1192,9 +1444,9 @@ mod tests {
                 UpDirection::new([angle.cos(), angle.sin(), 0.35]).expect("unit direction")
             })
             .collect();
-        let wide = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+        let wide = OrientSearchLimits::production();
         let narrow = OrientSearchLimits {
-            max_working_bytes: column_bytes(table.face_count(), table.vertex_count()),
+            max_working_bytes: per_candidate_bytes(table.face_count(), table.vertex_count()),
             ..wide
         };
 
@@ -1205,17 +1457,60 @@ mod tests {
         assert!(wide_scores.plan().candidate_tile > 1);
         assert_eq!(wide_scores.outcomes(), narrow_scores.outcomes());
 
-        // Charged and executed are both stated; the exact terms agree and the
-        // bounded one comes in under its charge.
-        let plan = wide_scores.plan();
-        let meter = wide_scores.meter();
-        assert_eq!(plan.face_direction_products, meter.face_direction_products);
-        assert_eq!(
-            plan.vertex_direction_products,
-            meter.vertex_direction_products
-        );
-        assert!(meter.section_breakpoints <= plan.section_breakpoints);
-        assert_eq!(plan.candidates, candidates.len());
+        // Charged and executed are both stated, and the meter is checked
+        // against counts derived here from the mesh rather than against the
+        // plan it is supposed to audit — a meter compared only with its own
+        // charge proves nothing about what ran.
+        let expected_face_products = table.face_count() * candidates.len();
+        let expected_vertex_products = table.vertex_count() * 3 * candidates.len();
+        for scores in [&wide_scores, &narrow_scores] {
+            let meter = scores.meter();
+            assert_eq!(meter.face_direction_products, expected_face_products);
+            assert_eq!(meter.vertex_direction_products, expected_vertex_products);
+            assert!(meter.section_breakpoints <= scores.plan().section_breakpoints);
+            assert!(meter.section_breakpoints > 0);
+            assert_eq!(scores.plan().candidates, candidates.len());
+        }
+        // The tile width is a memory decision and moves no counter.
+        assert_eq!(wide_scores.meter(), narrow_scores.meter());
+    }
+
+    /// A candidate a hair off the antipode is still a rotation.
+    ///
+    /// The closed form divides by `1 + c`, and near `−ẑ` that quantity is at
+    /// the scale of `c`'s own rounding error, so reading it off `c` alone
+    /// produced a matrix whose rows were not unit and not orthogonal — the
+    /// normalized `[2e-8, 0, −1]` came out with a row-1 diagonal near 0.8. Rest
+    /// poses are area-weighted `−n` aggregates and can land arbitrarily close
+    /// to `−ẑ` on a real mesh, and the winner's matrix is applied to production
+    /// geometry at emit, so this is a correctness fence and not a curiosity.
+    #[test]
+    fn a_near_antipode_direction_still_yields_an_orthonormal_rotation() {
+        for offset in [2e-8, 1e-9, 1e-12, 1e-16, 1e-30, 0.0] {
+            for direction in [
+                [offset, 0.0, -1.0],
+                [0.0, offset, -1.0],
+                [offset, offset, -1.0],
+            ] {
+                let up = UpDirection::new(direction).expect("unit direction");
+                let rotation = up.rotation_to_build_frame();
+                for left in 0..3 {
+                    for right in 0..3 {
+                        let dot: f64 = (0..3).map(|k| rotation[left][k] * rotation[right][k]).sum();
+                        let expected = if left == right { 1.0 } else { 0.0 };
+                        assert!(
+                            (dot - expected).abs() <= 1e-12,
+                            "offset {offset} broke orthonormality: ({left},{right}) = {dot}"
+                        );
+                    }
+                }
+                // Row 2 is still the direction itself, so the height term and
+                // the section frame cannot disagree.
+                for (component, expected) in rotation[2].iter().zip(up.get()) {
+                    assert!((component - expected).abs() <= 1e-15);
+                }
+            }
+        }
     }
 
     /// The sweep's "down-facing" is the support engine's, by construction: the

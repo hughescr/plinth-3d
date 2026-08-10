@@ -706,6 +706,27 @@ of the local layer height, not products with a global scalar.
 > and does not resolve *which point in it* — which is exactly what the recorded
 > K-doubling and Spearman calibration gates exist to quantify, and those gates are
 > not built in this slice.
+>
+> > **Corrected 2026-08-10, same day, after review — the verdict is now same-tier.**
+> > As first landed the flag compared an **exact-tier** margin (winner vs runner-up
+> > on the production mesh) against a **coarse-tier** spread (the ~2 % L2 proxy).
+> > Mixing fidelities that way is not a small thing here: the proxy's own noise
+> > inflates the spread and biases the verdict toward `false` for reasons that have
+> > nothing to do with the grid, and the paragraph above then reads that bias as a
+> > property of the grid. On the committed `Sphere` the coarse spread is **674.08**
+> > score points against a committed margin of 0.0059 — the L2 proxy is not
+> > measuring the same objective magnitude at all.
+> >
+> > Both sides of the comparison are now measured at the coarse tier (the only tier
+> > that scores the winner's grid *neighbours*, so the only tier where a spread can
+> > exist), the tier is stamped in the record beside the verdict
+> > (`margin_tier`, `spread_tier`, `winner_runner_up_margin_at_spread_tier`), and
+> > the committed exact margin is still reported separately as
+> > `winner_runner_up_margin`. Re-measured on all eight after the change, the flag
+> > still reads `false` on every one, so the finding above stands — it is now a
+> > statement about the coarse grid rather than about two instruments disagreeing.
+> > `decision_resolved` should be read as "did the coarse grid separate these two
+> > directions", never as "did the pipeline resolve the choice".
 
 ### 3.9 Removal ergonomics — all Placeholder, all human-calibrated
 

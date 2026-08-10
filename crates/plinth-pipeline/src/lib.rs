@@ -38,7 +38,7 @@ use plinth_hollow::{
     drilling::DrillingLimits, H0AdmissionLimits, HollowDisposition, HollowError, HollowRequest,
     HollowStageOutput,
 };
-use plinth_orient::{OrientError, OrientedModel, PinnedBaseline};
+use plinth_orient::{OrientError, OrientSearchLimits, OrientedModel, PinnedBaseline};
 use plinth_support::{
     SupportError, SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
     SupportRequest,
@@ -203,24 +203,29 @@ pub enum OutputProfileError {
 /// production probe default by design, so an already finite, bounded budget is
 /// required here before any stage can execute.
 ///
-/// **Orientation's recorded precondition is discharged, and deliberately not by
-/// a field here.** The search's own bound is
-/// `plinth_orient::OrientSearchLimits`, five deterministic work-unit budgets —
-/// candidates, face- and vertex-direction products, section breakpoints and
-/// working bytes — charged exactly from counts before any buffer is allocated,
-/// refusing with both the demand and the cap and never trimming the candidate
-/// set to fit. There is no wall clock anywhere in it (O-4). It is **scaled to
-/// the LOD being scored**, the way the support stage's caps are scaled to the
-/// model, so it cannot be a fixed value assembled here before any mesh has been
-/// read; it is derived per rung inside the stage from that rung's own face and
-/// vertex counts. A run-wide field would have to be either a per-model lie or a
-/// cap loose enough to bound nothing.
+/// **Orientation's recorded precondition is discharged by the `orient` field**,
+/// exactly as the dense-sweep design's §6 asks. `plinth_orient::OrientSearchLimits`
+/// is five deterministic work-unit budgets — candidates, face- and
+/// vertex-direction products, section breakpoints and working bytes — charged
+/// exactly from counts before any buffer is allocated, refusing with both the
+/// demand and the cap and never trimming the candidate set to fit. There is no
+/// wall clock anywhere in it (O-4).
+///
+/// The first version of this landing derived those caps per rung from the very
+/// counts they were then compared against, which made every comparison
+/// structurally `n·a ≤ n·b` with `a < b` — no budget could fire for any mesh,
+/// and orientation was the one stage in the pipeline with no effective work
+/// bound at all. The caps are therefore **absolute**: fixed numbers derived once
+/// from the largest model this workspace can run end to end, assembled here
+/// before any mesh has been read, and handed to the stage. A cap that scales
+/// with its own charge is not a cap.
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareResourcePolicy {
     decimation: DecimationBudget,
     hollow: H0AdmissionLimits,
     drilling: DrillingLimits,
     support: SupportPreparationLimits,
+    orient: OrientSearchLimits,
 }
 
 impl PrepareResourcePolicy {
@@ -237,6 +242,7 @@ impl PrepareResourcePolicy {
             hollow: H0AdmissionLimits::production(),
             drilling: DrillingLimits::production(),
             support,
+            orient: OrientSearchLimits::production(),
         })
     }
 
@@ -253,6 +259,12 @@ impl PrepareResourcePolicy {
     #[must_use]
     pub const fn drilling(self) -> DrillingLimits {
         self.drilling
+    }
+
+    /// The orientation search's work budget, run-wide and absolute.
+    #[must_use]
+    pub const fn orient(self) -> OrientSearchLimits {
+        self.orient
     }
 
     #[must_use]
@@ -850,11 +862,19 @@ mod tests {
             .join(name)
     }
 
-    fn oriented(mesh: Mesh) -> OrientedModel {
+    /// A model oriented by **its own** pinned baseline.
+    ///
+    /// Which baseline is not a detail: hollowing and drain drilling are
+    /// rotation-dependent (an axis-aligned voxel grid and build-frame drains),
+    /// so a fixture oriented by another model's rotation produces a prepared
+    /// mesh that is neither the sealed fixture's nor what production makes. Any
+    /// assertion about "the prepared mesh" of a fixture is about a different
+    /// solid if this argument is wrong.
+    fn oriented_by(mesh: &Mesh, baseline_report: &str) -> OrientedModel {
         let budget =
             DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered transition-test budget");
-        let decimated = run_decimation(&mesh, budget)
+        let decimated = run_decimation(mesh, budget)
             .expect("transition-test decimation")
             .into_decimated_model()
             .expect("transition-test mesh is in contract");
@@ -862,11 +882,20 @@ mod tests {
             decimated,
             &OrientRequest {
                 pinned: PinnedBaseline {
-                    pipeline_report: baseline("Sphere.pipeline.json"),
+                    pipeline_report: baseline(baseline_report),
                 },
             },
         )
         .expect("strict pinned orientation")
+    }
+
+    /// The Sphere-baseline shorthand the hollow-stage transition tests use.
+    ///
+    /// Those tests are about the hollow stage's *dispositions* on a 20 mm ball,
+    /// not about reproducing a sealed fixture, so one pinned rotation is the
+    /// point rather than a substitution.
+    fn oriented(mesh: Mesh) -> OrientedModel {
+        oriented_by(&mesh, "Sphere.pipeline.json")
     }
 
     fn hollow_request() -> HollowRequest {
@@ -1372,13 +1401,20 @@ mod tests {
         );
     }
 
-    /// The prepared mesh that reaches `seal_and_emit`, for one fixture.
-    fn prepared_mesh(mesh: Mesh) -> Mesh {
-        match hollow_stage(oriented(mesh), &hollow_request()).expect("hollow stage") {
-            HollowStageOutput::AwaitingInternalSupport(candidate) => {
-                candidate.hollowed().mesh().clone()
-            }
-            HollowStageOutput::Solid(model) => model.mesh().clone(),
+    /// The prepared mesh that reaches `seal_and_emit`, for one fixture, oriented
+    /// by that fixture's **own** pinned baseline.
+    fn prepared_mesh(mesh: &Mesh, baseline_report: &str) -> Mesh {
+        prepared_hollow(mesh, baseline_report).mesh().clone()
+    }
+
+    /// The hollowed model that reaches the support stage, for one fixture,
+    /// oriented by that fixture's own pinned baseline.
+    fn prepared_hollow(mesh: &Mesh, baseline_report: &str) -> plinth_hollow::HollowedModel {
+        match hollow_stage(oriented_by(mesh, baseline_report), &hollow_request())
+            .expect("hollow stage")
+        {
+            HollowStageOutput::AwaitingInternalSupport(candidate) => candidate.approve_hollow(),
+            HollowStageOutput::Solid(model) => *model,
         }
     }
 
@@ -1393,7 +1429,10 @@ mod tests {
     /// silently restore exactly that state.
     #[test]
     fn the_prepared_delicacy_field_measures_real_geometry() {
-        let fin = prepared_mesh(plinth_mesh::make_thin_fin().expect("procedural thin fin"));
+        let fin = prepared_mesh(
+            &plinth_mesh::make_thin_fin().expect("procedural thin fin"),
+            "make_thin_fin.pipeline.json",
+        );
         let field = prepare::prepared_delicacy_field(&fin).expect("thin fin delicacy");
         assert_eq!(field.face_values().len(), fin.tris().len());
         assert_eq!(field.face_table().lod(), prepare::PREPARED_MESH_LOD);
@@ -1408,17 +1447,51 @@ mod tests {
         );
     }
 
-    /// Why closing the zero-field defect moved no committed expectation.
+    /// The three fixtures the committed prepare path seals, each with the
+    /// pinned baseline that is **its own**.
+    fn committed_prepare_fixtures() -> [(&'static str, Mesh, &'static str); 3] {
+        [
+            (
+                "make_toed_slab.prepped.stl",
+                load_binary_stl(baseline("make_toed_slab.prepped.stl"), WeldPolicy::None)
+                    .expect("committed toed slab"),
+                "make_toed_slab.pipeline.json",
+            ),
+            (
+                "Sphere.prepped.stl",
+                load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
+                    .expect("committed sphere"),
+                "Sphere.pipeline.json",
+            ),
+            (
+                "make_overhang_table (procedural)",
+                plinth_mesh::make_overhang_table().expect("procedural overhang table"),
+                "make_overhang_table.pipeline.json",
+            ),
+        ]
+    }
+
+    /// Why closing the zero-field defect moved no committed expectation, part
+    /// one: no fixture reaches the anchor cap.
     ///
-    /// The recorded re-pin protocol wants an attribution, not a green suite.
-    /// This is the decision-neutrality half of it, mechanized: the support
-    /// stage's only delicacy-driven decision is
-    /// `strut_model_anchor_max_delicacy`, which rejects an anchor candidate
-    /// whose face is *more* delicate than the cap. Every model the committed
-    /// prepare fixtures seal stays under that cap on every face, so no anchor
-    /// candidate that was admissible under the old zero field is inadmissible
-    /// under the real one, and the artifacts those fixtures produce could not
-    /// move for this reason.
+    /// `strut_model_anchor_max_delicacy` (0.5) rejects an anchor candidate whose
+    /// face is *more* delicate than the cap. Every model the committed prepare
+    /// fixtures seal stays under it on every face, so no anchor candidate that
+    /// was admissible under the old zero field is inadmissible under the real
+    /// one.
+    ///
+    /// **Each fixture is oriented by its own pinned baseline**, and that is
+    /// load-bearing rather than tidy: hollowing and drain drilling are
+    /// rotation-dependent, so measuring the toed slab's delicacy on a mesh
+    /// hollowed under the Sphere's rotation is measuring a solid the pipeline
+    /// never makes. This guard used to do exactly that for two of its three
+    /// fixtures, and could have stayed green while covered geometry crossed the
+    /// cap.
+    ///
+    /// **This is not the whole neutrality argument**, and it never was — see
+    /// `closing_the_zero_field_defect_moves_no_sealed_support_digest` for the
+    /// contact-selection tie-break, which real delicacy values can move without
+    /// any face reaching the cap.
     ///
     /// This is a statement about these fixtures, not about all geometry. The
     /// Weeping Treant carries 13.6 % of its faces above the cap and is
@@ -1434,24 +1507,8 @@ mod tests {
             .get();
         assert_eq!(cap, 0.5);
 
-        let fixtures: [(&str, Mesh); 3] = [
-            (
-                "make_toed_slab.prepped.stl",
-                load_binary_stl(baseline("make_toed_slab.prepped.stl"), WeldPolicy::None)
-                    .expect("committed toed slab"),
-            ),
-            (
-                "Sphere.prepped.stl",
-                load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
-                    .expect("committed sphere"),
-            ),
-            (
-                "make_overhang_table (procedural)",
-                plinth_mesh::make_overhang_table().expect("procedural overhang table"),
-            ),
-        ];
-        for (name, mesh) in fixtures {
-            let prepared = prepared_mesh(mesh);
+        for (name, mesh, baseline_report) in committed_prepare_fixtures() {
+            let prepared = prepared_mesh(&mesh, baseline_report);
             let field = prepare::prepared_delicacy_field(&prepared).expect("delicacy field");
             let peak = field
                 .face_values()
@@ -1463,6 +1520,116 @@ mod tests {
                 "{name} peaks at delicacy {peak}, above the {cap} anchor cap: closing the \
                  zero-field defect is no longer decision-neutral for it, and the artifacts it \
                  produces need the recorded re-pin protocol rather than this assertion"
+            );
+        }
+    }
+
+    /// What closing the zero-field defect actually changed, measured per
+    /// fixture instead of argued.
+    ///
+    /// The anchor cap is **not** the support stage's only delicacy-driven
+    /// decision, and the 2026-08-10 decision record claimed it was. Contact
+    /// selection sorts each island's eligible candidates by exact Z and then
+    /// breaks ties on **delicacy** (`crates/plinth-support/src/lib.rs:1281`,
+    /// "exact geometric ties retain a deterministic least-scar preference").
+    /// Exact Z ties are common on a flat underside, so real delicacy values can
+    /// reorder contact selection — and with it support geometry and artifact
+    /// bytes — without any face coming near 0.5. A cap argument cannot cover
+    /// that channel, because the channel never consults the cap.
+    ///
+    /// So this is the recorded re-pin protocol's own instrument rather than an
+    /// argument: each fixture is sealed twice on the same hollowed geometry,
+    /// once with the measured field and once with the zero field production used
+    /// to feed, and the two outcomes are compared. A refusal is an outcome too —
+    /// the Sphere's drilled shell reaches no sealed run under either field, and
+    /// production answers that with its reserve solid, so two identical refusals
+    /// are two identical decisions.
+    ///
+    /// **The measured answer is that the divergence is real for two of the
+    /// three.** The cap argument held — no fixture crosses 0.5 — and the runs
+    /// moved anyway, through the tie-break. That is recorded here as a per-model
+    /// verdict rather than re-pinned: no committed expectation broke (every
+    /// harness that pins a support digest feeds the zero field itself, so each
+    /// remains exactly reproducible by the harness that produced it), but those
+    /// pinned digests describe support runs production no longer performs. The
+    /// re-pin question is FU-38's and belongs to the owner.
+    ///
+    /// This guard pins the **verdict**, not the digests: a fixture flipping in
+    /// either direction is a change in what the record has to say, and a support
+    /// change that moves a digest without changing neutrality is not.
+    #[test]
+    fn the_zero_field_divergence_is_measured_per_committed_fixture() {
+        let printer = OutputProfile::Saturn4Ultra
+            .resolve()
+            .expect("M0 profile authority");
+        let support = registered_support_request(printer).expect("registered lift");
+        let limits = SupportPreparationLimits::production().expect("production support limits");
+
+        for (name, mesh, baseline_report) in committed_prepare_fixtures() {
+            let prepared = prepared_mesh(&mesh, baseline_report);
+            // The production layer plan, derived exactly as `prepare` derives
+            // it, so this comparison is about the field and not about a
+            // different plan.
+            let (min_z, max_z) = prepared
+                .verts()
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), vertex| {
+                    (lo.min(vertex[2]), hi.max(vertex[2]))
+                });
+            let pitch = *printer.default_layer_height_mm().value();
+            let span = (max_z - min_z) + support.lift_mm.get() + 1.0;
+            let layers = printer
+                .layer_plan(((span / pitch).ceil() as usize).max(1_000))
+                .expect("layer plan");
+            let measured = prepare::prepared_delicacy_field(&prepared)
+                .expect("delicacy field")
+                .face_values()
+                .iter()
+                .map(|value| value.weight())
+                .collect::<Vec<_>>();
+            let zeros = vec![0.0_f64; prepared.tris().len()];
+            assert!(
+                measured.iter().any(|value| *value > 0.0),
+                "{name}: a field that is already zeros would make this comparison vacuous"
+            );
+
+            // A refusal is an outcome too, and two identical refusals are
+            // identical outcomes: the Sphere's drilled shell does not reach a
+            // sealed run under either field, and production answers that with
+            // its reserve solid rather than with a different support plan.
+            let outcome = |field: &[f64]| -> Result<u64, String> {
+                let authority = plinth_support::run_support(
+                    prepared_hollow(&mesh, baseline_report),
+                    support.clone(),
+                    limits.input(&layers, field, &[]),
+                )
+                .map_err(|error| error.to_string())?;
+                let snapshot = authority
+                    .verification_snapshot()
+                    .expect("borrow sealed verification snapshot");
+                snapshot.validate_integrity().expect("snapshot integrity");
+                Ok(snapshot.digest())
+            };
+
+            // Measured 2026-08-10 on this tip. `true` means the measured field
+            // and the zero field produce the same sealed outcome.
+            let recorded_neutral = match name {
+                // Both configurations refuse the drilled shell identically
+                // during lowering; production falls back to the reserve solid.
+                "Sphere.prepped.stl" => true,
+                // Both move, and neither crosses the anchor cap (the guard
+                // above proves that): this is the contact-selection tie-break,
+                // not the cap.
+                "make_toed_slab.prepped.stl" | "make_overhang_table (procedural)" => false,
+                other => panic!("unrecorded fixture {other}"),
+            };
+            assert_eq!(
+                outcome(&measured) == outcome(&zeros),
+                recorded_neutral,
+                "{name}: the zero-field divergence changed status. The record
+                 (decisions/2026-08-10-delicacy-producer.md and FU-38) states this fixture's
+                 verdict; a flip means the record is now wrong and the recorded re-pin protocol
+                 is owed a fresh from→to attribution rather than an edited expectation here"
             );
         }
     }

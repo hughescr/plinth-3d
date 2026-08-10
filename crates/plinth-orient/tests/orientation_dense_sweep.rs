@@ -67,8 +67,16 @@ fn a_cube_ties_six_ways_and_identity_wins() {
         runner_up.candidate > record.winner.candidate,
         "the tie must have been broken toward the lower id"
     );
-    // And the record says so rather than claiming a resolved decision.
-    assert!(!record.fidelity.decision_resolved);
+    // And the record says so rather than claiming a resolved decision — with
+    // the tier the verdict was measured at stated beside it, so a reader never
+    // has to guess whether an exact margin was compared against a proxy spread.
+    assert_eq!(record.fidelity.decision_resolved, Some(false));
+    assert_eq!(record.fidelity.spread_tier, SearchTier::Coarse);
+    assert_eq!(record.fidelity.margin_tier, SearchTier::Commit);
+    assert!(record
+        .fidelity
+        .winner_runner_up_margin_at_spread_tier
+        .is_some());
 }
 
 /// **T5 — never worse than the search it replaces.**
@@ -100,7 +108,7 @@ fn the_dense_winner_is_never_worse_than_the_best_legacy_candidate() {
             .map(|candidate| candidate.direction)
             .collect();
         assert_eq!(legacy.len(), 13);
-        let limits = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+        let limits = OrientSearchLimits::production();
         let scored = score_candidates(&table, &legacy, weights, limits).expect("legacy scoring");
         let best = scored
             .outcomes()
@@ -182,10 +190,20 @@ fn the_fibonacci_lattice_is_a_frozen_golden() {
 ///
 /// A 12-face box is far below the 256-face search-proxy floor, so both proxy
 /// rungs are refused — the simplifier gets there first and returns no triangles
-/// at all at a 10 % target. Which of the two reasons fires is not the point;
-/// what must not happen is what the retired heuristic did, which was to quietly
-/// score the full mesh and say nothing. Every tier here reports the exact LOD by
-/// name, and both fallbacks are in the record with a stated cause.
+/// at all at a 10 % target. What must not happen is what the retired heuristic
+/// did, which was to quietly score the full mesh and say nothing. Every tier
+/// here reports the exact LOD by name, and both fallbacks are in the record with
+/// a stated cause.
+///
+/// **The two causes are asserted separately and exactly**, because they are not
+/// interchangeable. L1's refusal is a measurement of a proxy that was built.
+/// L2's is not a measurement at all: with no L1 there is no cascade source, so
+/// no proxy was simplified and none has a face count. The record used to
+/// synthesize `BelowFaceFloor { faces: 0 }` there and publish "0 faces is below
+/// the 256-face search-proxy floor" about a mesh that never existed — a
+/// fabricated measurement of exactly the class this landing's own decision
+/// record forbids. This test is what stops it coming back: `NoCascadeSource`
+/// carries no count, and the detail must not claim one.
 #[test]
 fn a_model_below_the_proxy_floor_names_its_fallbacks() {
     let mesh = make_box([4.0, 4.0, 4.0], [0.0, 0.0, 0.0]).expect("a small box");
@@ -197,14 +215,35 @@ fn a_model_below_the_proxy_floor_names_its_fallbacks() {
         2,
         "both proxy rungs must be refused"
     );
+    let l1 = &record.fallbacks[0];
+    assert_eq!(l1.planned_lod, "orient-l1");
+    assert!(
+        matches!(
+            l1.reason,
+            ProxyFallbackReason::BelowFaceFloor { .. } | ProxyFallbackReason::SimplifyRefused
+        ),
+        "L1 refused a proxy it actually built: {l1:?}"
+    );
+
+    let l2 = &record.fallbacks[1];
+    assert_eq!(l2.planned_lod, "orient-l2");
+    assert_eq!(
+        l2.reason,
+        ProxyFallbackReason::NoCascadeSource,
+        "with no L1 there is no proxy to measure, so no proxy measurement may be reported"
+    );
+    assert!(
+        l2.detail.contains("nothing to coarsen") && l2.detail.contains("no proxy was measured"),
+        "the detail must say a proxy was never built: {}",
+        l2.detail
+    );
+    assert!(
+        !l2.detail.contains("0 faces"),
+        "a proxy that was never built does not have zero faces: {}",
+        l2.detail
+    );
+
     for fallback in &record.fallbacks {
-        assert!(
-            matches!(
-                fallback.reason,
-                ProxyFallbackReason::BelowFaceFloor { .. } | ProxyFallbackReason::SimplifyRefused
-            ),
-            "a proxy this small must be refused for a proxy reason: {fallback:?}"
-        );
         assert_eq!(fallback.used_lod, EXACT_LOD);
         assert!(!fallback.detail.is_empty(), "a fallback must say why");
     }
@@ -316,4 +355,57 @@ fn the_recorded_transform_is_the_rotation_the_winning_direction_defines() {
             );
         }
     }
+}
+
+/// **T4 at the sweep level — a zero scar weight reproduces the scar-free search
+/// *structurally*.**
+///
+/// §3.8 requires it, and the 2026-08-10 producer decision record explicitly
+/// keeps it in force: "a zero scar weight must reproduce the scar-free search
+/// structurally rather than arithmetically … remains a requirement of the
+/// sweep". The scoring loop has always honoured it inside one candidate (it
+/// hoists the branch and never reads the field), but the *sweep* did not: every
+/// rung built the delicacy field unconditionally, every `LodRecord` carried its
+/// digest into `search_digest`, and a delicacy-evaluator failure refused a
+/// search that did not want the number. A scar-free run's digest therefore
+/// depended on delicacy bytes.
+///
+/// Here it does not, and that is asserted three ways: no LOD carries a digest,
+/// the digest is unmoved by poisoning the field's inputs (there are none to
+/// poison, which is the point), and the scar terms are exactly zero.
+#[test]
+fn a_scar_free_sweep_never_builds_a_delicacy_field() {
+    let mesh = committed("make_toed_slab.prepped.stl");
+    let scar_free = SweepRequest {
+        weights: request().weights.scar_free(),
+        ..request()
+    };
+    assert!(scar_free.scar_free());
+    let outcome = search(&mesh, &scar_free).expect("a committed fixture is scorable");
+    let record = outcome.record();
+
+    for lod in &record.lods {
+        assert_eq!(
+            lod.delicacy_digest, None,
+            "a scar-free sweep must not carry delicacy bytes in its record: {}",
+            lod.lod
+        );
+    }
+    for tier in &record.tiers {
+        for ranked in &tier.ranking {
+            assert_eq!(ranked.terms.scar_term.get(), 0.0);
+            assert_eq!(ranked.terms.scar_raw_mm2.get(), 0.0);
+        }
+    }
+
+    // And the registered sweep, which does want the number, does carry it — so
+    // the assertion above is a property of the zero weight and not of the LOD
+    // record shape.
+    let weighted = search(&mesh, &request()).expect("a committed fixture is scorable");
+    assert!(weighted
+        .record()
+        .lods
+        .iter()
+        .all(|lod| lod.delicacy_digest.is_some()));
+    assert_ne!(record.search_digest, weighted.record().search_digest);
 }

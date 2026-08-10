@@ -26,7 +26,7 @@ fn score_all(
     candidates: &[UpDirection],
     weights: ObjectiveWeights,
 ) -> Vec<CandidateTerms> {
-    let limits = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+    let limits = OrientSearchLimits::production();
     let scored =
         score_candidates(table, candidates, weights, limits).expect("scoring must not refuse");
     scored

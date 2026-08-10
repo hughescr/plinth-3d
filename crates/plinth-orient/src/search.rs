@@ -198,17 +198,27 @@ fn whole(value: f64, id: &'static str) -> Result<usize, ScoreError> {
     Ok(value as usize)
 }
 
-/// Everything the sweep reads that is not the mesh. Every field is registered;
-/// there is no operator input here and no CLI flag behind any of it.
+/// Everything the sweep reads that is not the mesh.
+///
+/// The three settings fields are registered constants; `limits` is the
+/// caller's resource policy, which is not a registry member because nothing in
+/// it can change a score. There is no operator input here and no CLI flag
+/// behind any of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweepRequest {
     pub weights: ObjectiveWeights,
     pub grid: GridSettings,
     pub ladder: LadderSettings,
+    /// The work budget every tier is charged against, supplied by the caller —
+    /// `plinth_pipeline::PrepareResourcePolicy::orient` in production. It is
+    /// deliberately **not** derived from the mesh being scored: a cap computed
+    /// from the counts it is then compared against can never fire.
+    pub limits: OrientSearchLimits,
 }
 
 impl SweepRequest {
-    /// The one production configuration, read from the M0 registry.
+    /// The one production configuration: registered constants, and the
+    /// production work budget.
     ///
     /// # Errors
     ///
@@ -219,7 +229,15 @@ impl SweepRequest {
             weights: ObjectiveWeights::registered()?,
             grid: GridSettings::registered()?,
             ladder: LadderSettings::registered()?,
+            limits: OrientSearchLimits::production(),
         })
+    }
+
+    /// `true` when the scar term is switched off at the weight, so the delicacy
+    /// field is not merely multiplied by zero but never built.
+    #[must_use]
+    pub fn scar_free(&self) -> bool {
+        self.weights.scar() == 0.0
     }
 }
 
@@ -260,6 +278,18 @@ pub enum ProxyFallbackReason {
     /// The proxy's own delicacy field could not be measured, so the scar term
     /// would have had to be faked as zeros.
     FieldUnavailable,
+    /// The rung this one cascades from is absent, so there was nothing to
+    /// coarsen.
+    ///
+    /// No proxy was built and none was measured. This variant exists precisely
+    /// so the record does not have to describe a mesh that never existed in
+    /// order to say why a tier is missing: it previously borrowed
+    /// `BelowFaceFloor { faces: 0 }`, which published "0 faces is below the
+    /// 256-face search-proxy floor" about a proxy that was never simplified and
+    /// does not have zero faces. The same landing's own decision record forbids
+    /// exactly that — there is no substitute value for a measurement that did
+    /// not happen.
+    NoCascadeSource,
 }
 
 /// A tier that did not get the LOD it planned, and what it used instead.
@@ -287,7 +317,13 @@ pub struct LodRecord {
     pub achieved_ratio: Option<Finite>,
     pub boundary_edges: usize,
     pub nonmanifold_edges: usize,
-    pub delicacy_digest: String,
+    /// The digest of this LOD's delicacy field, or `null` when the scar weight
+    /// is structurally zero and no field was built.
+    ///
+    /// `null` is what makes the §3.8 requirement structural rather than
+    /// arithmetic: a scar-free run's `search_digest` cannot depend on delicacy
+    /// bytes, because there are none in the record to depend on.
+    pub delicacy_digest: Option<String>,
 }
 
 /// The four terms and the score, as a record.
@@ -416,12 +452,38 @@ pub struct FidelityLedger {
     pub proxy_agreed_with_exact: bool,
     pub winner_runner_up_angle_deg: Option<Finite>,
     pub grid_spacing_deg: Finite,
+    /// The committed margin: winner vs runner-up, both at the **commit** tier
+    /// on the production mesh. This is the number the decision was actually
+    /// made by.
     pub winner_runner_up_margin: Option<Finite>,
+    /// The tier `winner_runner_up_margin` was measured at. Always
+    /// [`SearchTier::Commit`]; stated so a reader never has to assume it.
+    pub margin_tier: SearchTier,
     /// `false` when the winner's margin over the runner-up is smaller than the
     /// score spread across the winner's own grid neighbours — the honest "this
     /// instrument did not resolve this choice".
-    pub decision_resolved: bool,
+    ///
+    /// **Both sides are measured at [`Self::spread_tier`].** They have to be:
+    /// only the coarse tier scores the winner's grid neighbours at all, so a
+    /// spread can only exist there, and comparing an Exact-tier margin against a
+    /// ~2 %-proxy spread would mix fidelities — the proxy's own noise inflates
+    /// the spread and biases the verdict toward `false` for reasons that have
+    /// nothing to do with the grid. So the margin compared here is the coarse
+    /// margin between the same two candidates, and
+    /// [`Self::winner_runner_up_margin`] beside it is the committed one.
+    ///
+    /// Read it for what it is: a statement about whether the **coarse grid**
+    /// separated these two directions, not about whether the pipeline resolved
+    /// the choice. `None` when either candidate has no coarse score, which
+    /// happens when it reached the commit tier by escort rather than promotion
+    /// and was refused at the coarse tier.
+    pub decision_resolved: Option<bool>,
+    /// The same-tier margin `decision_resolved` was computed from.
+    pub winner_runner_up_margin_at_spread_tier: Option<Finite>,
     pub neighbour_spread: Finite,
+    /// The tier `neighbour_spread` and the verdict were measured at. Always
+    /// [`SearchTier::Coarse`]; stated so the fidelity is never inferred.
+    pub spread_tier: SearchTier,
 }
 
 /// Charged and metered, both stated.
@@ -508,6 +570,10 @@ pub enum SearchError {
     ExactUnscorable(ScoreError),
     #[error("orientation search produced a non-finite {field}")]
     NonFiniteRecord { field: &'static str },
+    #[error(
+        "the orientation search record could not be serialized, so it has no determinism digest: {detail}"
+    )]
+    RecordUnserializable { detail: String },
 }
 
 fn finite(value: f64) -> Result<Finite, SearchError> {
@@ -543,17 +609,26 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
 
     // The exact rung first: if the production mesh cannot be scored there is no
     // orientation to commit to and the whole sweep refuses by name.
-    let exact = rung(mesh, EXACT_LOD, None).map_err(|error| match error {
+    let scar_free = request.scar_free();
+    let exact = rung(mesh, EXACT_LOD, None, scar_free).map_err(|error| match error {
         RungError::Score(error) => SearchError::ExactUnscorable(error),
-        RungError::Simplify(_) | RungError::BelowFloor { .. } => SearchError::ExactUnscorable(
-            ScoreError::Constants("the exact LOD is never simplified".to_owned()),
-        ),
+        RungError::Simplify(_) | RungError::BelowFloor { .. } | RungError::NoCascadeSource => {
+            SearchError::ExactUnscorable(ScoreError::Constants(
+                "the exact LOD is never simplified".to_owned(),
+            ))
+        }
     })?;
 
     // L1, then L2 cascaded FROM L1 — a refinement-consistent coarsening, so a
     // rank cannot invert merely because two independent QEM runs chose
     // different edges.
-    let l1 = build_proxy_rung(mesh, L1_LOD, request.ladder.l1_ratio(), request.ladder);
+    let l1 = build_proxy_rung(
+        mesh,
+        L1_LOD,
+        request.ladder.l1_ratio(),
+        request.ladder,
+        scar_free,
+    );
     let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
     let l2 = match l1.as_ref().and_then(Rung::proxy_mesh) {
         Some(source) => build_proxy_rung(
@@ -561,15 +636,14 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
             L2_LOD,
             request.ladder.l2_of_l1_ratio(),
             request.ladder,
+            scar_free,
         ),
         // No L1 means no cascade source. Coarsening the exact mesh directly
         // would produce an L2 that is not a coarsening of the L1 that is not
         // there, which is precisely the independent-QEM-run inversion the
-        // cascade exists to prevent.
-        None => Err(RungError::BelowFloor {
-            faces: 0,
-            floor: request.ladder.min_faces(),
-        }),
+        // cascade exists to prevent. It is recorded as its own reason: there is
+        // no proxy here to measure, so the record must not describe one.
+        None => Err(RungError::NoCascadeSource),
     };
     let l2 = record_fallback(
         l2,
@@ -627,6 +701,7 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
             &directions,
             &admitted,
             request.weights,
+            request.limits,
             &mut refusals,
             &mut work,
         )?;
@@ -702,7 +777,7 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
         refusals,
         search_digest: String::new(),
     };
-    record.search_digest = digest_record(&record);
+    record.search_digest = digest_record(&record)?;
     Ok(SweepOutcome { winner, record })
 }
 
@@ -723,12 +798,12 @@ fn score_tier(
     directions: &[crate::score::UpDirection],
     admitted: &[usize],
     weights: ObjectiveWeights,
+    limits: OrientSearchLimits,
     refusals: &mut Vec<RefusalRecord>,
     work: &mut WorkRecord,
 ) -> Result<TierRecord, SearchError> {
     let subset: Vec<crate::score::UpDirection> =
         admitted.iter().map(|index| directions[*index]).collect();
-    let limits = OrientSearchLimits::production(rung.table.face_count(), rung.table.vertex_count());
     let scored = score_candidates(&rung.table, &subset, weights, limits)?;
     let plan = scored.plan();
     let meter = scored.meter();
@@ -845,11 +920,27 @@ enum RungError {
     Score(ScoreError),
     Simplify(SimplifyError),
     BelowFloor { faces: usize, floor: usize },
+    NoCascadeSource,
 }
 
 /// Builds one rung's table and record, or says why it could not.
-fn rung(mesh: &Mesh, lod: &'static str, proxy: Option<SearchProxy>) -> Result<Rung, RungError> {
-    let table = OrientFaceTable::build(mesh, lod).map_err(RungError::Score)?;
+///
+/// `scar_free` is not a performance switch. §3.8 requires a zero scar weight to
+/// reproduce the scar-free search **structurally**, so at a zero weight the
+/// delicacy field is not built here at all: it cannot fail the sweep, and its
+/// digest cannot enter `search_digest`.
+fn rung(
+    mesh: &Mesh,
+    lod: &'static str,
+    proxy: Option<SearchProxy>,
+    scar_free: bool,
+) -> Result<Rung, RungError> {
+    let table = if scar_free {
+        OrientFaceTable::without_delicacy(mesh, lod)
+    } else {
+        OrientFaceTable::build(mesh, lod)
+    }
+    .map_err(RungError::Score)?;
     let record = LodRecord {
         lod: lod.to_owned(),
         mesh_fingerprint: table.mesh_fingerprint().to_owned(),
@@ -863,7 +954,7 @@ fn rung(mesh: &Mesh, lod: &'static str, proxy: Option<SearchProxy>) -> Result<Ru
             .and_then(|proxy| Finite::new(proxy.achieved_ratio).ok()),
         boundary_edges: table.boundary_edges(),
         nonmanifold_edges: table.nonmanifold_edges(),
-        delicacy_digest: table.delicacy_digest().to_owned(),
+        delicacy_digest: table.delicacy_digest().map(str::to_owned),
     };
     Ok(Rung {
         lod,
@@ -878,6 +969,7 @@ fn build_proxy_rung(
     lod: &'static str,
     ratio: f64,
     ladder: LadderSettings,
+    scar_free: bool,
 ) -> Result<Rung, RungError> {
     let proxy = SearchProxy::simplify(source, ratio).map_err(RungError::Simplify)?;
     let faces = proxy.mesh().tris().len();
@@ -888,7 +980,7 @@ fn build_proxy_rung(
         });
     }
     let mesh = proxy.mesh().clone();
-    rung(&mesh, lod, Some(proxy))
+    rung(&mesh, lod, Some(proxy), scar_free)
 }
 
 /// Turns a rung failure into a recorded fallback rather than a silent one.
@@ -908,6 +1000,13 @@ fn record_fallback(
                 RungError::BelowFloor { faces, floor } => (
                     ProxyFallbackReason::BelowFaceFloor { faces, floor },
                     format!("{faces} faces is below the {floor}-face search-proxy floor"),
+                ),
+                RungError::NoCascadeSource => (
+                    ProxyFallbackReason::NoCascadeSource,
+                    format!(
+                        "no {planned} proxy was built: the rung it cascades from is absent, so \
+                         there was nothing to coarsen and no proxy was measured"
+                    ),
                 ),
                 RungError::Score(ScoreError::OpenBoundary { boundary_edges }) => (
                     ProxyFallbackReason::OpenBoundary { boundary_edges },
@@ -1033,6 +1132,25 @@ fn ledger(
         0.0
     };
 
+    // The verdict is computed entirely on the coarse tier, because that is the
+    // only tier where the winner's grid neighbours were scored. Taking the
+    // margin from the commit tier and the spread from the coarse one compared
+    // two different instruments and reported the difference as a property of the
+    // grid.
+    let coarse_score = |candidate: usize| -> Option<f64> {
+        coarse
+            .ranking
+            .iter()
+            .find(|entry| entry.candidate == candidate)
+            .map(|entry| entry.terms.score.get())
+    };
+    let coarse_margin = match (coarse_score(winner.candidate), runner_up) {
+        (Some(winner_score), Some(entry)) => {
+            coarse_score(entry.candidate).map(|other| other - winner_score)
+        }
+        _ => None,
+    };
+
     Ok(FidelityLedger {
         coarse_rank_of_final_winner: rank_of(SearchTier::Coarse),
         refine_rank_of_final_winner: rank_of(SearchTier::Refine),
@@ -1040,8 +1158,11 @@ fn ledger(
         winner_runner_up_angle_deg: angle.map(finite).transpose()?,
         grid_spacing_deg: finite(spacing_deg)?,
         winner_runner_up_margin: margin.map(finite).transpose()?,
-        decision_resolved: margin.is_some_and(|margin| margin >= spread),
+        margin_tier: SearchTier::Commit,
+        decision_resolved: coarse_margin.map(|margin| margin >= spread),
+        winner_runner_up_margin_at_spread_tier: coarse_margin.map(finite).transpose()?,
         neighbour_spread: finite(spread)?,
+        spread_tier: SearchTier::Coarse,
     })
 }
 
@@ -1049,8 +1170,18 @@ fn ledger(
 ///
 /// The digest is computed over the record with its digest field empty, so it is
 /// a function of the search and not of itself.
-fn digest_record(record: &DenseSweepRecord) -> String {
-    let canonical = serde_json::to_vec(record).unwrap_or_default();
+///
+/// A serialization failure is a **typed refusal**, never a default. This
+/// function used to end `serde_json::to_vec(record).unwrap_or_default()`, so any
+/// failure yielded the SHA-256 of the empty string — the same constant for every
+/// record. `search_digest` is the one string T4, T7, the thread sweep and the
+/// cache-equivalence check compare on, so a path under which two different
+/// searches agree is precisely the defect the digest exists to detect.
+fn digest_record(record: &DenseSweepRecord) -> Result<String, SearchError> {
+    let canonical =
+        serde_json::to_vec(record).map_err(|error| SearchError::RecordUnserializable {
+            detail: error.to_string(),
+        })?;
     let mut hasher = Sha256::new();
     hasher.update(canonical);
     let digest = hasher.finalize();
@@ -1058,7 +1189,7 @@ fn digest_record(record: &DenseSweepRecord) -> String {
     for byte in digest {
         text.push_str(&format!("{byte:02x}"));
     }
-    text
+    Ok(text)
 }
 
 /// Every distinct LOD name a record names, for a caller that wants to assert the

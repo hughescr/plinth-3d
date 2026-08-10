@@ -665,7 +665,12 @@ fn prepare_one(
         );
     }
 
-    let oriented = match orient_model(model, decimated, &policy.orientation) {
+    let oriented = match orient_model(
+        model,
+        decimated,
+        &policy.orientation,
+        policy.resources.orient(),
+    ) {
         Ok(oriented) => oriented,
         Err(stop) => return report(assumed, failure(&stop)),
     };
@@ -760,15 +765,19 @@ fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
     policy: &OrientationPolicy,
+    limits: plinth_orient::OrientSearchLimits,
 ) -> Result<OrientedModel, ChainStop> {
     match policy {
         OrientationPolicy::DenseSweep => {
-            let request = plinth_orient::registered_sweep_request().map_err(|source| {
+            let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
                     source,
                 })
             })?;
+            // The run's resource policy owns the work budget; the registry owns
+            // every number that can change a score. Neither owns the other's.
+            request.limits = limits;
             plinth_orient::search_and_orient(decimated, &request).map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),

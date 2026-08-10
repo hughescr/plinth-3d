@@ -93,12 +93,14 @@ fn thread_sweep_child_writes_canonical_scores() {
         ("toed_slab", make_toed_slab().expect("toed slab fixture")),
     ] {
         let table = OrientFaceTable::build(&mesh, "sweep-lod").expect("scoring table");
-        let limits = OrientSearchLimits::production(table.face_count(), table.vertex_count());
+        let limits = OrientSearchLimits::production();
         let scored = score_candidates(&table, &candidates, weights, limits)
             .expect("scoring must not refuse");
         report.push_str(&format!(
             "{name} {} {}\n",
-            table.delicacy_digest(),
+            table
+                .delicacy_digest()
+                .expect("a scar-weighted table has a field"),
             scored.meter().section_breakpoints
         ));
         for (index, outcome) in scored.outcomes().iter().enumerate() {
