@@ -436,6 +436,14 @@ pub enum ForestError {
     CheckpointOrder,
     #[error("a quarantined member must have no live tree children")]
     QuarantineHasChildren,
+    #[error(
+        "retiring {member:?} would strand its live tree children {children:?} as \
+         ungrounded roots; re-anchor them first"
+    )]
+    RetireWouldStrandChildren {
+        member: MemberKey,
+        children: Vec<MemberKey>,
+    },
     #[error("forest invariant violated: {0}")]
     Invariant(&'static str),
 }
@@ -858,10 +866,38 @@ impl Forest {
         Ok(())
     }
 
-    /// Removes a member from all live topology. Live children become roots;
-    /// the old key is permanently stale, even if its slot is reused.
+    /// Removes a member from all live topology. The old key is permanently
+    /// stale, even if its slot is reused.
+    ///
+    /// Retirement **refuses** a member that still has live tree children.  It
+    /// used to promote them to roots, and that was the one reachable path to
+    /// shipping a floating support member: a promoted child keeps the rootward
+    /// endpoint it had while it hung off its parent, so its `p1` sits wherever
+    /// the retired member's terminal-ward end was — in the air, not on the
+    /// plate.  Nothing downstream catches it.  The arena holds no plate
+    /// reference, so [`Forest::validate`] cannot tell that root from a
+    /// legitimately grounded one, and `lower` simply omits the root boss for a
+    /// root outside the plate band rather than objecting.
+    ///
+    /// The arena therefore cannot re-anchor the child itself: choosing between
+    /// extending the child's rootward end down to this member's own rootward
+    /// end, splicing it onto this member's parent, and retiring the subtree is
+    /// a geometric decision that belongs to the caller, who owns the plate
+    /// frame.  The refusal names the member and the exact children that would
+    /// have been stranded, mirroring [`Forest::quarantine`]'s
+    /// [`ForestError::QuarantineHasChildren`].
+    ///
+    /// The check runs before any state changes, so a refused retirement leaves
+    /// the terminal ledger and the topology exactly as it found them.
     pub fn retire(&mut self, key: MemberKey) -> Result<(), ForestError> {
         self.require_active(key)?;
+        let children = self.children_of(key);
+        if !children.is_empty() {
+            return Err(ForestError::RetireWouldStrandChildren {
+                member: key,
+                children,
+            });
+        }
         let terminal_contacts: Vec<_> = self
             .state
             .terminal_of
@@ -870,10 +906,6 @@ impl Forest {
             .collect();
         for terminal in terminal_contacts {
             self.state.terminal_consumed.insert(terminal);
-        }
-        let children = self.children_of(key);
-        for child in children {
-            self.set_parent(child, None)?;
         }
         if self.state.parent.contains_key(&key) {
             self.set_parent(key, None)?;
@@ -1663,6 +1695,43 @@ mod tests {
             )
             .unwrap();
         assert!(!forest.certificate_valid(embed));
+    }
+
+    #[test]
+    fn retirement_refuses_to_strand_live_children_as_ungrounded_roots() {
+        let mut forest = Forest::new();
+        let root = forest.add_member(member(MemberKind::Trunk));
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(7);
+        let child = forest.add_member(terminal);
+        forest.set_parent(child, Some(root)).unwrap();
+        forest.register_terminal(7, child).unwrap();
+
+        // The child hangs off `root`; promoting it to a root would leave its
+        // rootward end wherever `root`'s terminal-ward end was — in the air.
+        assert_eq!(
+            forest.retire(root),
+            Err(ForestError::RetireWouldStrandChildren {
+                member: root,
+                children: vec![child],
+            })
+        );
+
+        // The refusal is total: no promotion, no terminal consumed, no slot
+        // retired, and the forest still audits clean.
+        assert_eq!(forest.parent_of(child), Some(root));
+        assert_eq!(forest.roots(), vec![root]);
+        assert_eq!(forest.children_of(root), vec![child]);
+        assert_eq!(forest.terminal(7), Some(child));
+        assert_eq!(forest.live_tree_members(), vec![root, child]);
+        forest.validate().unwrap();
+
+        // The caller states the re-anchor. Once the subtree is gone the same
+        // retirement is legal, and a childless member never needed the guard.
+        forest.quarantine(child).unwrap();
+        forest.retire(root).unwrap();
+        assert!(forest.live_tree_members().is_empty());
+        forest.validate().unwrap();
     }
 
     #[test]

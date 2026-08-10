@@ -729,8 +729,60 @@ fn try_retire(
     let before = total_volume_ml(forest)?;
     let mut candidate = forest.clone();
     let parent = candidate.parent_of(key);
-    for child in children {
-        candidate.set_parent(child, parent)?;
+    match parent {
+        // The ordinary case: every child inherits this member's parent, and
+        // with it the route to ground. The member is degenerate, so a child's
+        // rootward end already sits within `degenerate_mm` of the junction it
+        // moves to and no geometry has to follow.
+        Some(_) => {
+            for child in children {
+                candidate.set_parent(child, parent)?;
+            }
+        }
+        // A root has no parent to inherit, so re-anchoring by reparenting alone
+        // would promote each child to a root standing where the retiring
+        // member's terminal-ward end was rather than on its plate-side one --
+        // the stranding `Forest::retire` now refuses. Splice each child's
+        // rootward end down onto the retiring root's own instead, exactly as
+        // `try_prune` re-anchors its single child, and the promoted roots are
+        // grounded by construction rather than by proximity. Declining the move
+        // is not the safe alternative: a degenerate root left standing is a
+        // plate root whose run to the plate is shorter than `root_boss_top`
+        // allows, which fails lowering outright.
+        None => {
+            let new_p1 = member.p1_mm();
+            let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
+            for child_key in children {
+                let child = candidate
+                    .member(child_key)
+                    .cloned()
+                    .ok_or(ForestError::InactiveKey(child_key))?;
+                let required = required_radius(
+                    &compatibility,
+                    &child,
+                    child.p0_mm().map(Finite::get),
+                    new_p1.map(Finite::get),
+                    &[],
+                )?;
+                // The child's own fan-in is already carried by its current
+                // rootward radius, and the retiring root's radius is the floor
+                // the plate end had; the splice may only widen.
+                let new_r1 = PositiveFinite::new(
+                    required
+                        .get()
+                        .max(child.rootward_radius_mm().get().get())
+                        .max(member.rootward_radius_mm().get().get()),
+                )
+                .map_err(|_| RewireError::InvalidGeometry)?;
+                candidate.set_endpoints(child_key, child.p0_mm(), new_p1)?;
+                candidate.set_radii(
+                    child_key,
+                    child.terminal_radius_mm(),
+                    RootwardEndRadius::new(new_r1),
+                )?;
+                candidate.set_parent(child_key, None)?;
+            }
+        }
     }
     candidate.retire(key)?;
     if parent.is_some() {
@@ -988,8 +1040,14 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forest::{MemberSpec, Owner};
+    use crate::{
+        forest::{MemberSpec, Owner},
+        joints::{plan_joint_balls_filtered, FilteredLiveView, JointStagingLimits, LiveViewLimits},
+        lower::{lower_current, LoweringConfig, LoweringError},
+        raft::{plan_bottom_connected, RaftLimits},
+    };
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use plinth_core::LayerPlan;
     use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 
     static FAR_DELICACY: [f64; 1] = [0.0];
@@ -1038,6 +1096,36 @@ mod tests {
         .unwrap();
         let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
         run(&authority)
+    }
+
+    /// Lowers a forest exactly as the runner does, so a topology move can be
+    /// asserted to leave a forest the emitter still accepts.
+    fn lower_forest(forest: &Forest) -> Result<(), LoweringError> {
+        let frame = BuildFrame::new(f(0.0), p(5.0));
+        let layers = LayerPlan::new(0.0, vec![0.05; 200]).unwrap();
+        let config = LoweringConfig::current(
+            frame,
+            &layers,
+            1_000,
+            1_000 * std::mem::size_of::<crate::SupportPrimitive>(),
+        )?;
+        let view =
+            FilteredLiveView::current(forest, &[], LiveViewLimits::new(100, 10, 100_000)).unwrap();
+        let joints = plan_joint_balls_filtered(
+            forest,
+            &view,
+            config.joint_config(),
+            JointStagingLimits::from_joint_config(config.joint_config()),
+        )
+        .unwrap();
+        let raft = plan_bottom_connected(
+            forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        lower_current(forest, &view, &joints, &raft, config).map(|_| ())
     }
 
     fn rewire_request<'a>(geometry: &'a AnchorGeometryAuthority<'a>) -> RewireRequest<'a> {
@@ -1143,6 +1231,78 @@ mod tests {
                 9
             )) < cfg.degenerate_mm
         );
+    }
+
+    #[test]
+    fn degenerate_root_retire_grounds_its_children_and_the_forest_still_lowers() {
+        let cfg = Config::current().unwrap();
+        let mut forest = Forest::new();
+        // The spliced case above with `deg` on the plate and no parent: its
+        // rootward end is the grounded one and its children hang off the
+        // terminal-ward end `5e-5 mm` up, well inside `degenerate_mm`.
+        let deg = forest.add_member(member(
+            [0.0, 0.0, 5e-5],
+            [0.0, 0.0, 0.0],
+            MemberKind::Shoot,
+            0,
+        ));
+        let a = forest.add_member(member(
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 5e-5],
+            MemberKind::Shoot,
+            1,
+        ));
+        let b = forest.add_member(member(
+            [-1.0, 0.0, 1.0],
+            [0.0, 0.0, 5e-5],
+            MemberKind::Shoot,
+            2,
+        ));
+        forest.set_parent(a, Some(deg)).unwrap();
+        forest.set_parent(b, Some(deg)).unwrap();
+        assert!(forest.parent_of(deg).is_none());
+
+        // Leaving the degenerate root standing is not the conservative
+        // direction: it is a plate root whose run to the plate is `5e-5 mm`,
+        // and lowering refuses it outright.
+        assert!(matches!(
+            lower_forest(&forest),
+            Err(LoweringError::RootRunTooShort { member }) if member == deg
+        ));
+
+        let mut candidate = forest.clone();
+        with_far_authority(|authority| {
+            assert!(
+                try_retire(&mut candidate, deg, authority, &BTreeSet::new(), &cfg)
+                    .unwrap()
+                    .is_some(),
+                "a grounded degenerate root's children can inherit its plate end"
+            );
+        });
+        assert!(candidate.member(deg).is_none());
+        assert_eq!(candidate.roots(), vec![a, b]);
+        for child in [a, b] {
+            let member = candidate.member(child).unwrap();
+            assert!(candidate.parent_of(child).is_none());
+            // Grounded by construction: the promoted root inherited the
+            // retired root's plate-side end, not the junction it hung from.
+            assert_eq!(
+                member.p1_mm().map(Finite::get),
+                forest.member(deg).unwrap().p1_mm().map(Finite::get)
+            );
+            // The splice may only widen the rootward end.
+            assert!(
+                member.rootward_radius_mm().get().get()
+                    >= forest
+                        .member(child)
+                        .unwrap()
+                        .rootward_radius_mm()
+                        .get()
+                        .get()
+            );
+        }
+        candidate.validate().unwrap();
+        lower_forest(&candidate).expect("the post-move forest lowers");
     }
 
     #[test]
