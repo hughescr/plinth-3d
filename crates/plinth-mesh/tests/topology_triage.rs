@@ -70,6 +70,9 @@ fn topology_builds_canonical_adjacency_components_and_v4_digest_once() {
             nonmanifold_edges: 0,
             duplicate_faces: 0,
             duplicate_face_groups: 0,
+            point_only_cut_faces: 0,
+            same_direction_cut_faces: 0,
+            degenerate_cut_faces: 0,
         }
     );
     assert_eq!(topology.weld_policy(), WeldPolicy::ExactBits);
@@ -103,6 +106,9 @@ fn canonical_edge_counts_distinguish_edge_incidence_from_face_flags() {
             nonmanifold_edges: 1,
             duplicate_faces: 0,
             duplicate_face_groups: 0,
+            point_only_cut_faces: 3,
+            same_direction_cut_faces: 0,
+            degenerate_cut_faces: 0,
         },
         "three faces share one undirected edge; cut flags are per face and cannot stand in for this count"
     );
@@ -143,6 +149,9 @@ fn a_late_nonmanifold_edge_survives_a_duplicate_flag_an_earlier_edge_wrote() {
             nonmanifold_edges: 1,
             duplicate_faces: 2,
             duplicate_face_groups: 1,
+            point_only_cut_faces: 5,
+            same_direction_cut_faces: 2,
+            degenerate_cut_faces: 0,
         },
         "edge (1,3) has three incident faces and no duplicate among them; the duplicate flag \
          face 2 picked up at edge (0,1) must not remove it from the count"
@@ -438,6 +447,69 @@ fn every_ambiguous_edge_and_point_only_contact_is_a_named_cut() {
             .iter()
             .all(|value| value & TOPOLOGY_CUT_BOUNDARY != 0 || flag != TOPOLOGY_CUT_BOUNDARY));
     }
+}
+
+/// The three cut classes no edge count covers are counted per class, over the
+/// finished flag array, so a producer can compare them across a stage the way
+/// `validate_closed_mesh` compares them against zero. A clean solid reports
+/// zero in all three; each fixture below reports exactly the faces its own
+/// class flags.
+#[test]
+fn cut_face_counts_are_taken_per_class_over_the_finished_flags() {
+    let clean = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("clean box");
+    let counts = build_face_topology(&clean, WeldPolicy::ExactBits)
+        .expect("topology")
+        .counts();
+    assert_eq!(
+        (
+            counts.point_only_cut_faces,
+            counts.same_direction_cut_faces,
+            counts.degenerate_cut_faces
+        ),
+        (0, 0, 0),
+        "a closed, consistently oriented box carries no cut of any class"
+    );
+
+    // Two triangles meeting at vertex 0 alone: the fan there falls into two
+    // components and both faces are pinched.
+    let pinch = mesh(&[[0, 1, 2], [0, 3, 4]]);
+    let counts = build_face_topology(&pinch, WeldPolicy::ExactBits)
+        .expect("topology")
+        .counts();
+    assert_eq!(counts.point_only_cut_faces, 2);
+    assert_eq!(counts.same_direction_cut_faces, 0);
+    assert_eq!(counts.degenerate_cut_faces, 0);
+
+    // One shared edge traversed the same way by both faces.
+    let same_direction = mesh(&[[0, 1, 2], [0, 1, 3]]);
+    let counts = build_face_topology(&same_direction, WeldPolicy::ExactBits)
+        .expect("topology")
+        .counts();
+    assert_eq!(counts.same_direction_cut_faces, 2);
+    assert_eq!(counts.nonmanifold_edges, 0);
+
+    // A repeated index is a degenerate edge on that one face.
+    let degenerate = mesh(&[[0, 0, 1], [1, 2, 3]]);
+    let counts = build_face_topology(&degenerate, WeldPolicy::ExactBits)
+        .expect("topology")
+        .counts();
+    assert_eq!(counts.degenerate_cut_faces, 1);
+
+    // A face carrying two classes is counted in both: face 0 meets face 1 the
+    // same way across edge (1,2) *and* is pinched against face 2 at vertex 0.
+    let both = mesh(&[[0, 1, 2], [3, 1, 2], [0, 3, 4]]);
+    let topology = build_face_topology(&both, WeldPolicy::ExactBits).expect("topology");
+    let counts = topology.counts();
+    let flagged_twice = topology
+        .cut_flags()
+        .iter()
+        .filter(|flags| {
+            *flags & TOPOLOGY_CUT_POINT_ONLY != 0 && *flags & TOPOLOGY_CUT_SAME_DIRECTION != 0
+        })
+        .count();
+    assert!(flagged_twice > 0, "the fixture must carry both classes");
+    assert!(counts.point_only_cut_faces >= flagged_twice);
+    assert!(counts.same_direction_cut_faces >= flagged_twice);
 }
 
 #[test]

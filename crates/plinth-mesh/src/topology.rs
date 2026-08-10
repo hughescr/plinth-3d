@@ -44,16 +44,38 @@ pub struct TopologyDigest {
 /// triples are equal as unordered sets, and `duplicate_faces` counts every
 /// member of every such group.
 ///
-/// None of these are counts of faces bearing a cut flag.  A face can carry
+/// Those four are not counts of faces bearing a cut flag.  A face can carry
 /// `TOPOLOGY_CUT_DUPLICATE` because it meets a duplicate across one ambiguous
 /// edge without being a duplicate itself, so the flag is deliberately broader
 /// than `duplicate_faces`.
+///
+/// The three `*_cut_faces` fields *are* face counts, one per cut class that no
+/// edge count above covers, taken in one pass over the finished `cut_flags`
+/// array: a face is counted in a class exactly when it carries that class's
+/// flag, and a face carrying two classes is counted in both.  They exist
+/// because `validate_closed_mesh` refuses **any** nonzero cut flag while the
+/// counts a producer could compare against described only two of the six
+/// classes: a stage could hand on a mesh whose pinch, same-direction or
+/// degenerate cut count had gone up, with every count it published unmoved.
+/// `TOPOLOGY_CUT_BOUNDARY` needs no field — a face carries it exactly when one
+/// of its edges is a boundary edge — and `TOPOLOGY_CUT_NONMANIFOLD` sits beside
+/// `nonmanifold_edges`, which is the incidence form of the same evidence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TopologyCounts {
     pub boundary_edges: usize,
     pub nonmanifold_edges: usize,
     pub duplicate_faces: usize,
     pub duplicate_face_groups: usize,
+    /// Faces flagged `TOPOLOGY_CUT_POINT_ONLY`: their vertex fan falls into
+    /// more than one component, i.e. the surface pinches to a point there.
+    pub point_only_cut_faces: usize,
+    /// Faces flagged `TOPOLOGY_CUT_SAME_DIRECTION`: they meet exactly one other
+    /// face across an edge both traverse the same way, so the two cannot be
+    /// consistently oriented.
+    pub same_direction_cut_faces: usize,
+    /// Faces flagged `TOPOLOGY_CUT_DEGENERATE`: some edge of the face collapses
+    /// to a single welded vertex.
+    pub degenerate_cut_faces: usize,
 }
 
 impl TopologyDigest {
@@ -472,6 +494,23 @@ pub fn build_face_topology(
             for face in fan.keys() {
                 cut_flags[*face] |= TOPOLOGY_CUT_POINT_ONLY;
             }
+        }
+    }
+
+    // Third pass: the per-class face counts, taken once, after the point-only
+    // pass has written the last flag any face can acquire.  One scan over the
+    // finished array — the classes are read from the same authority that
+    // `validate_closed_mesh` reads, so a producer comparing these counts is
+    // comparing the quantity the gate downstream actually refuses on.
+    for flags in &cut_flags {
+        if flags & TOPOLOGY_CUT_POINT_ONLY != 0 {
+            counts.point_only_cut_faces += 1;
+        }
+        if flags & TOPOLOGY_CUT_SAME_DIRECTION != 0 {
+            counts.same_direction_cut_faces += 1;
+        }
+        if flags & TOPOLOGY_CUT_DEGENERATE != 0 {
+            counts.degenerate_cut_faces += 1;
         }
     }
 

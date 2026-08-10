@@ -115,7 +115,7 @@ fn canonical_production_report() -> String {
     };
 
     let mut report = String::new();
-    report.push_str("plinth/m3-thread-sweep-report/v1\n");
+    report.push_str("plinth/m3-thread-sweep-report/v3\n");
     report.push_str("status=");
     report.push_str(status);
     report.push('\n');
@@ -123,6 +123,41 @@ fn canonical_production_report() -> String {
     push_usize(&mut report, "output_faces", success.mesh().tris().len());
     push_f64(&mut report, "chosen_ratio", success.chosen_ratio());
     let trace = success.trace();
+    // v2: the zero-volume repair is the one mesh edit this crate makes to a
+    // meshoptimizer result, so it belongs in the artifact whose byte-identity
+    // across 1/4/16 threads is the determinism claim. Leaving it out meant an
+    // edit could vary with the thread count and the sweep would still pass on
+    // an output that happened to agree.
+    let repair = trace.zero_volume_repair_total();
+    // And the coverage claim itself, so it cannot rot into a vacuous zero: this
+    // fixture really does drive meshoptimizer into manufacturing zero-volume
+    // pairs (12 of them, 12 vertices dropped with them, 0 of them locked), so
+    // the byte-identity assertion above spans a run in which the repair fired.
+    assert!(
+        repair.pairs_removed > 0,
+        "ThreadSweepFixtureNoLongerExercisesTheRepair: the determinism sweep must cover the one \
+         mesh edit this crate makes, and this fixture removed no pair at all"
+    );
+    assert_eq!(
+        repair.locked_vertices_dropped, 0,
+        "ThreadSweepLockSurrendered: an emitted candidate can never have given up a hard lock"
+    );
+    push_usize(&mut report, "repair.pairs_removed", repair.pairs_removed);
+    push_usize(
+        &mut report,
+        "repair.vertices_dropped",
+        repair.vertices_dropped,
+    );
+    push_usize(
+        &mut report,
+        "repair.locked_vertices_dropped",
+        repair.locked_vertices_dropped,
+    );
+    push_usize(
+        &mut report,
+        "search.candidate_free_ratios",
+        trace.candidate_free_ratios,
+    );
     push_usize(
         &mut report,
         "protected_vertex_count",
@@ -151,48 +186,31 @@ fn canonical_production_report() -> String {
         report.push_str(&format!("step.{index}.passed={}\n", step.passed));
     }
     push_probe(&mut report, "final_probe", success.final_probe());
-    let before = success.topology_before();
-    let after = success.topology_after();
-    push_usize(
-        &mut report,
-        "topology_before.boundary",
-        before.boundary_edges,
-    );
-    push_usize(
-        &mut report,
-        "topology_before.nonmanifold",
-        before.nonmanifold_edges,
-    );
-    push_usize(
-        &mut report,
-        "topology_before.duplicate_faces",
-        before.duplicate_faces,
-    );
-    push_usize(
-        &mut report,
-        "topology_before.duplicate_face_groups",
-        before.duplicate_face_groups,
-    );
-    push_usize(&mut report, "topology_after.boundary", after.boundary_edges);
-    push_usize(
-        &mut report,
-        "topology_after.nonmanifold",
-        after.nonmanifold_edges,
-    );
-    push_usize(
-        &mut report,
-        "topology_after.duplicate_faces",
-        after.duplicate_faces,
-    );
-    push_usize(
-        &mut report,
-        "topology_after.duplicate_face_groups",
-        after.duplicate_face_groups,
-    );
+    push_topology(&mut report, "topology_before", success.topology_before());
+    push_topology(&mut report, "topology_after", success.topology_after());
     push_mesh(&mut report, success.mesh());
     let digest = Sha256::digest(report.as_bytes());
     report.push_str(&format!("sha256={digest:x}\n"));
     report
+}
+
+/// v3: every canonical count, both sides, written from one place so the two
+/// stages can never describe different quantities. The three cut classes are
+/// here because they now gate — a candidate that manufactured a pinch is
+/// refused — and a determinism artifact that omitted a gating quantity would
+/// let it vary with the thread count unobserved.
+fn push_topology(report: &mut String, prefix: &str, counts: plinth_mesh::TopologyCounts) {
+    for (field, value) in [
+        ("boundary", counts.boundary_edges),
+        ("nonmanifold", counts.nonmanifold_edges),
+        ("duplicate_faces", counts.duplicate_faces),
+        ("duplicate_face_groups", counts.duplicate_face_groups),
+        ("point_only_cut_faces", counts.point_only_cut_faces),
+        ("same_direction_cut_faces", counts.same_direction_cut_faces),
+        ("degenerate_cut_faces", counts.degenerate_cut_faces),
+    ] {
+        push_usize(report, &format!("{prefix}.{field}"), value);
+    }
 }
 
 fn push_probe(report: &mut String, prefix: &str, probe: &plinth_decimate::TwoSidedProbe) {
