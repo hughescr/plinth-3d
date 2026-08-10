@@ -115,7 +115,7 @@ fn canonical_production_report() -> String {
     };
 
     let mut report = String::new();
-    report.push_str("plinth/m3-thread-sweep-report/v1\n");
+    report.push_str("plinth/m3-thread-sweep-report/v2\n");
     report.push_str("status=");
     report.push_str(status);
     report.push('\n');
@@ -123,6 +123,41 @@ fn canonical_production_report() -> String {
     push_usize(&mut report, "output_faces", success.mesh().tris().len());
     push_f64(&mut report, "chosen_ratio", success.chosen_ratio());
     let trace = success.trace();
+    // v2: the zero-volume repair is the one mesh edit this crate makes to a
+    // meshoptimizer result, so it belongs in the artifact whose byte-identity
+    // across 1/4/16 threads is the determinism claim. Leaving it out meant an
+    // edit could vary with the thread count and the sweep would still pass on
+    // an output that happened to agree.
+    let repair = trace.zero_volume_repair_total();
+    // And the coverage claim itself, so it cannot rot into a vacuous zero: this
+    // fixture really does drive meshoptimizer into manufacturing zero-volume
+    // pairs (12 of them, 12 vertices dropped with them, 0 of them locked), so
+    // the byte-identity assertion above spans a run in which the repair fired.
+    assert!(
+        repair.pairs_removed > 0,
+        "ThreadSweepFixtureNoLongerExercisesTheRepair: the determinism sweep must cover the one \
+         mesh edit this crate makes, and this fixture removed no pair at all"
+    );
+    assert_eq!(
+        repair.locked_vertices_dropped, 0,
+        "ThreadSweepLockSurrendered: an emitted candidate can never have given up a hard lock"
+    );
+    push_usize(&mut report, "repair.pairs_removed", repair.pairs_removed);
+    push_usize(
+        &mut report,
+        "repair.vertices_dropped",
+        repair.vertices_dropped,
+    );
+    push_usize(
+        &mut report,
+        "repair.locked_vertices_dropped",
+        repair.locked_vertices_dropped,
+    );
+    push_usize(
+        &mut report,
+        "search.candidate_free_ratios",
+        trace.candidate_free_ratios,
+    );
     push_usize(
         &mut report,
         "protected_vertex_count",

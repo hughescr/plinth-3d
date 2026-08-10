@@ -17,6 +17,39 @@ use plinth_mesh::{load_binary_stl, write_binary_stl, Mesh, TopologyCounts, WeldP
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// v8 (2026-08-11) adds `search_candidate_free_ratios`. A bisection midpoint
+/// that yields no usable candidate publishes no `SearchStepReport`, so a
+/// step-count audit that reads `search_steps.len()` alone would reject a model
+/// that verified perfectly well after stepping past one unusable ratio. The
+/// count is now recorded and the audit checks `steps + candidate_free_ratios`.
+///
+/// v7 (2026-08-10) turns v6's single `zero_volume_pairs_removed` into the full
+/// `zero_volume_repair` record — `pairs_removed`, `vertices_dropped`,
+/// `locked_vertices_dropped` — and records it on **every** candidate the
+/// search describes rather than only on the winner: each bisection step, each
+/// adaptive probe, each final attempt, plus the mandatory ratio-0.20 feature
+/// probe that decides the entire protected set. Every fingerprint in this
+/// report is now self-describing: a reader can tell from the record alone
+/// whether the mesh behind it is meshoptimizer's own result or a repaired one.
+/// `locked_vertices_dropped` is the one that had no witness at all: locks are
+/// checked before the removal, so a protected vertex whose whole surviving
+/// incidence sat inside removed pairs was dropped with no error and no trace
+/// entry. It is a deliberate ordering (the other order refuses every Treant
+/// candidate at every ratio) and it is now audited rather than silent.
+/// `candidate_free_probes` and the `CandidateFree` refusals are also new: a
+/// ratio that yields no candidate is recorded and stepped past instead of
+/// ending the run.
+///
+/// v6 (2026-08-10) adds `zero_volume_pairs_removed` to every final attempt.
+/// meshoptimizer's collapse is not link-condition checked, so it manufactures
+/// opposite-winding coincident face pairs — zero-volume artifacts of a collapse
+/// that already happened — and `compact_result` now deletes them before the
+/// candidate becomes a mesh. That deletion is the only edit this crate makes to
+/// a meshoptimizer result, so it is serialized beside the counts it explains:
+/// with it, the v5 duplicate counters read zero on candidates that previously
+/// carried hundreds (1,296 duplicate faces on the Weeping Treant v1.2 at
+/// r = 0.525, and the 30,724 cut faces they dragged with them fall to 3,828).
+///
 /// v5 (2026-08-09) adds `duplicate_faces` and `duplicate_face_groups` to every
 /// topology report. Duplicate faces are excluded from `nonmanifold_edges` by
 /// design and, before v5, were counted nowhere at all, so a reduction could
@@ -35,7 +68,7 @@ use sha2::{Digest, Sha256};
 /// clean checkout without re-adding scratch instrumentation. Per-phase
 /// wall-clock, which §6 Phase 1 also lists, is deliberately NOT serialized —
 /// see the record's §9.8.
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v5";
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v8";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
     CorpusModel::already_print_scale(
@@ -138,6 +171,11 @@ struct ModelReport {
     /// the achieved ratio without a JSON f64 lexical round-trip.
     chosen_ratio: Option<String>,
     search_steps: Vec<SearchStepReport>,
+    /// Bisection midpoints that produced no usable candidate, so they have no
+    /// `SearchStepReport` to publish. `search_steps.len() +
+    /// search_candidate_free_ratios` is what the step-count audit checks; each
+    /// one is also named in `reduction_refusals`.
+    search_candidate_free_ratios: Option<usize>,
     search_p99_mm: Option<String>,
     search_p99_9_mm: Option<String>,
     final_p99_mm: Option<String>,
@@ -172,13 +210,41 @@ struct SearchStepReport {
     p99_mm: String,
     p99_9_mm: String,
     max_mm: Option<String>,
+    zero_volume_repair: ZeroVolumeRepairReport,
     passed: bool,
+}
+
+/// The one mesh edit `plinth-decimate` makes to a meshoptimizer result,
+/// serialized beside every fingerprint it applies to.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct ZeroVolumeRepairReport {
+    pairs_removed: usize,
+    vertices_dropped: usize,
+    /// Protected vertices surrendered to the removal. Locks are checked
+    /// against meshoptimizer's own result *before* the pairs are deleted, so
+    /// this can be non-zero without a `LockedVertexRemoved` error; that is the
+    /// point of serializing it.
+    locked_vertices_dropped: usize,
+}
+
+impl From<plinth_decimate::ZeroVolumeRepairRecord> for ZeroVolumeRepairReport {
+    fn from(record: plinth_decimate::ZeroVolumeRepairRecord) -> Self {
+        Self {
+            pairs_removed: record.pairs_removed,
+            vertices_dropped: record.vertices_dropped,
+            locked_vertices_dropped: record.locked_vertices_dropped,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 struct AdaptiveExplorationReport {
     probe_limit: usize,
     probes: Vec<AdaptiveProbeReport>,
+    /// Integer targets that consumed a probe from `probe_limit` and produced
+    /// no candidate at all, so they have no `AdaptiveProbeReport`. Each is
+    /// named in `reduction_refusals` as a `CandidateFree` refusal.
+    candidate_free_probes: usize,
     remaining_intervals: Vec<[usize; 2]>,
     complete: bool,
 }
@@ -192,6 +258,7 @@ struct AdaptiveProbeReport {
     sampled_p99_mm: String,
     sampled_p99_9_mm: String,
     sampled_max_mm: Option<String>,
+    zero_volume_repair: ZeroVolumeRepairReport,
     topology_after: Option<TopologyReport>,
     full_p99_mm: Option<String>,
     full_p99_9_mm: Option<String>,
@@ -209,6 +276,7 @@ struct FinalAttemptReport {
     p99_9_mm: Option<String>,
     max_mm: Option<String>,
     topology_after: TopologyReport,
+    zero_volume_repair: ZeroVolumeRepairReport,
     result: String,
     downstream_utility: String,
 }
@@ -273,6 +341,42 @@ fn corpus_budgets() {
     );
 }
 
+/// The gate's own arithmetic, pinned away from the eight corpus STLs.
+///
+/// The end-to-end shape this guards — a model that verifies *through* a
+/// candidate-free midpoint — cannot be manufactured here: reaching it would
+/// mean engineering a mesh on which a vendored heuristic produces one exact
+/// unusable answer at one exact ratio and safe answers at the rest, which is
+/// not a thing a regression test may depend on. What can be pinned exactly is
+/// the conservation law the gate reads, and `plinth-decimate`'s own
+/// `every_bisection_being_candidate_free_refuses_by_name_instead_of_ending_the_run`
+/// pins the producing half: a search whose midpoints are all refused reports
+/// one step and five candidate-free ratios, and they still sum to six.
+#[test]
+fn the_step_count_audit_counts_a_candidate_free_midpoint_as_a_bisection() {
+    // Every midpoint produced a candidate: the only shape the audit used to
+    // accept.
+    assert!(audit_search_step_count(6, 0).is_ok());
+    // One midpoint was unusable, was named as a `CandidateFree` refusal and was
+    // stepped past. The model can still verify, and before this fix the gate
+    // rejected it with `M3SearchStepCount` — a complaint about the search's
+    // shape for something that is a fact about one ratio. Latent only because
+    // all eight corpus members are `already_print_scale`.
+    assert!(audit_search_step_count(5, 1).is_ok());
+    assert!(audit_search_step_count(2, 4).is_ok());
+    assert!(audit_search_step_count(1, 5).is_ok());
+    // A genuinely short search is still a failure: refusals must be *counted*,
+    // not merely tolerated.
+    assert!(audit_search_step_count(5, 0).is_err());
+    assert!(audit_search_step_count(4, 1).is_err());
+    // And a long one: the bisection budget is a cap, never a target to exceed.
+    assert!(audit_search_step_count(6, 1).is_err());
+    assert!(audit_search_step_count(7, 0).is_err());
+    // The canonical ratio-1 identity step is mandatory and is never
+    // candidate-free, so it can never be one of the counted refusals.
+    assert!(audit_search_step_count(0, 6).is_err());
+}
+
 #[test]
 fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
     let report = GateReport {
@@ -295,8 +399,14 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 p99_mm: ratio_text(0.0),
                 p99_9_mm: ratio_text(0.0),
                 max_mm: Some(ratio_text(0.0)),
+                zero_volume_repair: ZeroVolumeRepairReport {
+                    pairs_removed: 0,
+                    vertices_dropped: 0,
+                    locked_vertices_dropped: 0,
+                },
                 passed: true,
             }],
+            search_candidate_free_ratios: Some(0),
             search_p99_mm: Some(ratio_text(0.0)),
             search_p99_9_mm: Some(ratio_text(0.0)),
             final_p99_mm: Some(ratio_text(0.0)),
@@ -424,6 +534,7 @@ fn run_one(
             output_faces: None,
             chosen_ratio: None,
             search_steps: Vec::new(),
+            search_candidate_free_ratios: None,
             search_p99_mm: None,
             search_p99_9_mm: None,
             final_p99_mm: None,
@@ -465,6 +576,7 @@ fn run_one(
             output_faces: None,
             chosen_ratio: None,
             search_steps: Vec::new(),
+            search_candidate_free_ratios: None,
             search_p99_mm: None,
             search_p99_9_mm: None,
             final_p99_mm: None,
@@ -519,9 +631,11 @@ fn success_report(
                 p99_mm: ratio_text(step.probe.p99_mm),
                 p99_9_mm: ratio_text(step.probe.p99_9_mm),
                 max_mm: step.probe.max_mm.map(ratio_text),
+                zero_volume_repair: step.zero_volume_repair.into(),
                 passed: step.passed,
             })
             .collect(),
+        search_candidate_free_ratios: Some(trace.candidate_free_ratios),
         search_p99_mm: trace.steps.last().map(|step| ratio_text(step.probe.p99_mm)),
         search_p99_9_mm: trace
             .steps
@@ -555,12 +669,14 @@ fn success_report(
                     .and_then(|probe| probe.max_mm)
                     .map(ratio_text),
                 topology_after: attempt.topology_after.into(),
+                zero_volume_repair: attempt.zero_volume_repair.into(),
                 result: format!("{:?}", attempt.result),
                 downstream_utility: format!("{:?}", attempt.downstream_utility),
             })
             .collect(),
         adaptive_exploration: Some(AdaptiveExplorationReport {
             probe_limit: trace.adaptive_exploration.probe_limit,
+            candidate_free_probes: trace.adaptive_exploration.candidate_free_probes,
             probes: trace
                 .adaptive_exploration
                 .probes
@@ -573,6 +689,7 @@ fn success_report(
                     sampled_p99_mm: ratio_text(probe.sampled_probe.p99_mm),
                     sampled_p99_9_mm: ratio_text(probe.sampled_probe.p99_9_mm),
                     sampled_max_mm: probe.sampled_probe.max_mm.map(ratio_text),
+                    zero_volume_repair: probe.zero_volume_repair.into(),
                     topology_after: probe.topology_after.map(Into::into),
                     full_p99_mm: probe
                         .full_probe
@@ -654,12 +771,74 @@ fn independently_audit_already_print_scale(
     }) {
         return Err("AlreadyPrintScaleUtility: missing named utility refusal".to_owned());
     }
+    audit_no_lock_was_surrendered(success.trace())?;
     success
         .mesh()
         .audit_strict()
         .map_err(|error| error.to_string())?;
     if expected.name == "Weeping Treant v1.2" {
         write_and_reopen_treant_artifacts(output_dir, original, success.mesh())?;
+    }
+    Ok(())
+}
+
+/// The search runs one canonical identity step and then exactly `BISECTIONS`
+/// midpoints, and every midpoint accounts for itself: either it produced a
+/// candidate and pushed a `BudgetSearchStep`, or it produced none, was named as
+/// a `CandidateFree` refusal, and was counted.
+///
+/// Reading `steps.len()` alone — which this audit did — silently required every
+/// midpoint to succeed. Any model that hit one unusable ratio and still
+/// verified would have failed the gate with `M3SearchStepCount`, a message
+/// about the search's shape for something that is a fact about one ratio. The
+/// eight current corpus members are all `already_print_scale`, which is the only
+/// reason that was latent rather than a live failure.
+fn audit_search_step_count(steps: usize, candidate_free_ratios: usize) -> Result<(), String> {
+    const BISECTIONS: usize = 5;
+    if steps + candidate_free_ratios != BISECTIONS + 1 {
+        return Err(format!(
+            "M3SearchStepCount: expected identity plus {BISECTIONS} bisections, found {steps} \
+             steps and {candidate_free_ratios} candidate-free ratios"
+        ));
+    }
+    if steps == 0 {
+        return Err(
+            "M3SearchStepCount: the canonical identity step is mandatory and never candidate-free"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// `ZeroVolumeRepairRecord::locked_vertices_dropped` documents itself as
+/// structurally zero on every emitted candidate — `compact_result` re-checks the
+/// hard lock against the *repaired* face list and refuses the candidate rather
+/// than emitting a mesh that gave a protected vertex up. The doc claims this
+/// gate's independent audit requires it to read zero everywhere; before this
+/// function that audit did not exist, and the field was a constant masquerading
+/// as a measurement. This is the standing witness it names.
+fn audit_no_lock_was_surrendered(trace: &plinth_decimate::BudgetSearchTrace) -> Result<(), String> {
+    let total = trace.zero_volume_repair_total();
+    if total.locked_vertices_dropped != 0 {
+        return Err(format!(
+            "M3LockSurrendered: {} hard-locked vertices were dropped by the zero-volume repair; \
+             the emitted candidate must refuse instead",
+            total.locked_vertices_dropped
+        ));
+    }
+    // The mandatory ratio-0.20 feature probe is not one of the trace's
+    // candidates and so is not in the total above, but it decides the entire
+    // protected set and is the one record that carried no witness at all before
+    // the repair record was plumbed onto it.
+    for reason in &trace.reduction_refusals {
+        if let plinth_decimate::ReductionRefusalReason::ProtectionCap { trace } = reason {
+            if trace.probe_zero_volume_repair.locked_vertices_dropped != 0 {
+                return Err(format!(
+                    "M3LockSurrendered: the ratio-{} feature probe dropped {} hard-locked vertices",
+                    trace.probe_ratio, trace.probe_zero_volume_repair.locked_vertices_dropped
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -683,12 +862,8 @@ fn independently_audit_verified(
             original.tris().len()
         ));
     }
-    if trace.steps.len() != 6 {
-        return Err(format!(
-            "M3SearchStepCount: expected identity plus five bisections, found {}",
-            trace.steps.len()
-        ));
-    }
+    audit_search_step_count(trace.steps.len(), trace.candidate_free_ratios)?;
+    audit_no_lock_was_surrendered(trace)?;
     for step in &trace.steps {
         if step.passed
             && (step.probe.p99_mm > search_p99_limit || step.probe.p99_9_mm > search_p99_9_limit)

@@ -89,9 +89,80 @@ pub struct SimplifyOutcome {
     /// adapter input. Output coordinates remain original f64 values.
     pub max_input_quantization_delta: f64,
     pub locked_vertex_count: usize,
+    /// The one mesh edit this crate performs, as it applied to this candidate.
+    /// Always [`ZeroVolumeRepairRecord::NONE`] on the identity bypass, which
+    /// never edits its input, and on a declined reduction, which this stage
+    /// refuses to repair.
+    pub zero_volume_repair: ZeroVolumeRepairRecord,
     /// `true` only when target ratio was exactly one and the adapter bypassed
     /// meshoptimizer to preserve source topology and f64 bits exactly.
     pub identity_bypass: bool,
+}
+
+/// What [`remove_zero_volume_face_pairs`] deleted from one meshoptimizer
+/// result, and what that deletion cost.
+///
+/// This is recorded on **every** record that describes an edited candidate
+/// mesh — [`BudgetSearchStep`], [`AdaptiveProbeStep`],
+/// [`FinalVerificationAttempt`] and [`FeatureProtectionTrace`] — so that every
+/// fingerprint in the audited record is self-describing: a reader can tell
+/// from the record alone whether the mesh behind a fingerprint, a probe or a
+/// backward error map is meshoptimizer's own result or a repaired one. Before
+/// this was plumbed, only the winning final attempt said so, and the
+/// mandatory ratio-0.20 probe — which decides the *entire* protected set —
+/// said nothing at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZeroVolumeRepairRecord {
+    /// Opposite-winding coincident face pairs removed from meshoptimizer's
+    /// result by [`compact_result`] before the candidate mesh was built. See
+    /// [`remove_zero_volume_face_pairs`] for what such a pair is and why
+    /// removing it is the identity on the represented solid.
+    pub pairs_removed: usize,
+    /// Welded vertices meshoptimizer returned whose entire incidence was
+    /// inside the removed pairs, so they are absent from the emitted mesh.
+    pub vertices_dropped: usize,
+    /// The subset of `vertices_dropped` that a hard feature lock protected.
+    ///
+    /// **Structurally zero on every emitted candidate, and that is the point.**
+    /// A hard lock is a constraint on the mesh this stage *emits*, so
+    /// [`compact_result`] re-checks it against the repaired face list and
+    /// refuses the candidate with
+    /// [`SimplifyError::LockedVertexLostToZeroVolumeRepair`] rather than
+    /// emitting a mesh that gave a protected vertex up. This field is the
+    /// standing witness of that invariant: it is serialized beside every
+    /// fingerprint in the corpus report, and the gate's independent audit
+    /// requires it to read zero everywhere. A non-zero value anywhere is a
+    /// contradiction, not a measurement.
+    ///
+    /// The refused candidates are not silent either — the count that *would*
+    /// have been surrendered is carried by the refusal itself, in
+    /// [`CandidateFreeCause::LockedVertexLostToZeroVolumeRepair`], so the trace
+    /// records both that a ratio was refused and how much lock it would have
+    /// cost.
+    pub locked_vertices_dropped: usize,
+}
+
+impl ZeroVolumeRepairRecord {
+    /// No pair was removed and nothing was dropped: the identity bypass, a
+    /// declined reduction, and a clean meshoptimizer result all report this.
+    pub const NONE: Self = Self {
+        pairs_removed: 0,
+        vertices_dropped: 0,
+        locked_vertices_dropped: 0,
+    };
+
+    /// Componentwise sum, for the trace-level totals.  Saturating rather than
+    /// wrapping so an implausible count can never present as a small one.
+    #[must_use]
+    const fn plus(self, other: Self) -> Self {
+        Self {
+            pairs_removed: self.pairs_removed.saturating_add(other.pairs_removed),
+            vertices_dropped: self.vertices_dropped.saturating_add(other.vertices_dropped),
+            locked_vertices_dropped: self
+                .locked_vertices_dropped
+                .saturating_add(other.locked_vertices_dropped),
+        }
+    }
 }
 
 /// The boundary failures that D0 can establish without inventing repair.
@@ -127,10 +198,194 @@ pub enum SimplifyError {
     },
     #[error("meshopt returned no triangles")]
     EmptyResult,
+    #[error(
+        "every face meshopt returned belonged to one of {pairs_removed} opposite-winding \
+         coincident pairs, so the candidate is a zero-volume shell that bounds no solid"
+    )]
+    AllFacesWereZeroVolume { pairs_removed: usize },
     #[error("mesh construction after deterministic compaction failed: {message}")]
     OutputMesh { message: String },
+    #[error(
+        "the compacted candidate has an exactly zero-area triangle {triangle}: three distinct \
+         welded vertices that are exactly collinear in f64. meshoptimizer measures the collapse \
+         in f32 and cannot see this"
+    )]
+    DegenerateOutputTriangle { triangle: usize },
+    #[error(
+        "welded vertex triple {vertices:?} still carries {face_count} identically wound coincident \
+         faces after every opposite-winding pair was removed; that is coincident surface, not a \
+         zero-volume artifact, and this stage does not invent a repair for it"
+    )]
+    CoincidentFacesRemain {
+        vertices: [u32; 3],
+        face_count: usize,
+    },
+    #[error(
+        "removing a zero-volume face pair would leave welded edge {edge:?} with exactly one \
+         incident face, opening a boundary the candidate did not have"
+    )]
+    ZeroVolumePairOpensBoundary { edge: (u32, u32) },
     #[error("hard-locked source vertex {vertex} disappeared from the result")]
     LockedVertexRemoved { vertex: usize },
+    #[error(
+        "deleting the manufactured zero-volume face pairs would drop {locked_vertices_dropped} \
+         hard-locked source vertices from the emitted mesh, the first of them {vertex}: their \
+         entire surviving incidence was inside the removed pairs. The lock is a hard constraint \
+         on the mesh this stage emits, so the candidate is refused rather than the lock"
+    )]
+    LockedVertexLostToZeroVolumeRepair {
+        vertex: usize,
+        locked_vertices_dropped: usize,
+    },
+}
+
+/// A [`simplify_locked`] outcome that is a fact about **one requested ratio**
+/// rather than a failure of the machinery.
+///
+/// Every member of this set means the same thing to the search: *there is no
+/// usable candidate at this ratio*. None of them says the model cannot be
+/// decimated, and none of them says the engine is broken. Before this type
+/// existed each one propagated out of `sampled_step`, the final-verification
+/// loop or `run_adaptive_diagnostics` as a `BudgetSearchError::SearchExecution`
+/// and ended the entire run — so one unusable ratio out of six discarded the
+/// five that were fine (`zombie-2-a` at r = 0.525, FU-43). They are now
+/// recorded as [`ReductionRefusalReason::CandidateFree`] and stepped past, the
+/// same demotion the feature probe already makes with
+/// [`FeatureProtectionError::ProbeHasNoCandidate`].
+///
+/// [`SimplifyError::LockedVertexRemoved`] is deliberately **not** a member. It
+/// is not a candidate-free outcome: it says meshoptimizer violated a hard
+/// constraint it was given, which is a fact about the machinery and stays
+/// loud. Its sibling
+/// [`SimplifyError::LockedVertexLostToZeroVolumeRepair`] *is* a member, because
+/// that one is not a violation by anybody: meshoptimizer honoured the lock and
+/// this crate's own pair removal is what would have dropped the vertex, at
+/// this ratio, on this candidate. The lock is still enforced — the candidate is
+/// refused, never emitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateFreeCause {
+    /// meshoptimizer returned no triangles at all.
+    EmptyResult,
+    /// Every face it returned belonged to an opposite-winding pair, so the
+    /// "candidate" was a zero-volume shell bounding nothing.
+    AllFacesWereZeroVolume { pairs_removed: usize },
+    /// The compacted candidate carries three distinct welded vertices that are
+    /// exactly collinear in f64 — a needle meshoptimizer measured in f32 and
+    /// could not see.
+    DegenerateOutputTriangle { triangle: usize },
+    /// Identically wound coincident faces survived the pair removal. That is
+    /// coincident *surface*; this stage does not invent a repair for it.
+    CoincidentFacesRemain {
+        vertices: [u32; 3],
+        face_count: usize,
+    },
+    /// Removing a pair would have left an edge with a single incident face.
+    ZeroVolumePairOpensBoundary { edge: (u32, u32) },
+    /// Emitting this candidate would have required surrendering a hard feature
+    /// lock to the pair removal, so the candidate was refused instead. See
+    /// [`SimplifyError::LockedVertexLostToZeroVolumeRepair`].
+    LockedVertexLostToZeroVolumeRepair {
+        vertex: usize,
+        locked_vertices_dropped: usize,
+    },
+}
+
+/// Which way one candidate-free ratio moves the bisection interval.
+///
+/// These are the same two moves an ordinary step makes and they mean the same
+/// things, so a refused ratio steers the search rather than merely skipping a
+/// turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BisectionResponse {
+    /// `low = midpoint`: ask for **less** simplification next. The right move
+    /// whenever the ratio was already too aggressive for the model to keep
+    /// bounding a solid, or too aggressive for the protected set to survive.
+    LessSimplification,
+    /// `high = midpoint`: ask for **more** simplification next. The right move
+    /// only when the obstruction is *denser* than the ratio asked for, so
+    /// backing off would walk straight back into it.
+    MoreSimplification,
+}
+
+impl CandidateFreeCause {
+    /// The bisection move this cause implies. **Per cause, deliberately.**
+    ///
+    /// FU-43 proposed one direction for all of them — `high = midpoint`, the
+    /// branch a meshoptimizer no-op takes. That is right for exactly one
+    /// member and inverted for the rest, and taking it uniformly is
+    /// self-reinforcing: a ratio too aggressive to leave anything bounding a
+    /// solid answered with a *more* aggressive ratio guarantees the next one
+    /// is candidate-free too, so the whole bisection budget is spent walking
+    /// into the wall and a model with real candidates at higher ratios comes
+    /// out as an unconditional `already_print_scale` refusal.
+    fn bisection_response(&self) -> BisectionResponse {
+        match self {
+            // Nothing came back, or what came back bounded no solid: the ratio
+            // asked for fewer faces than the model has surface. `make_box`,
+            // `make_overhang_table`, `make_raking_blade` and `make_thin_fin`
+            // all reach exactly these two at the deeper ratios (FU-43), and
+            // every one of them has candidates further up.
+            Self::EmptyResult | Self::AllFacesWereZeroVolume { .. } => {
+                BisectionResponse::LessSimplification
+            }
+            // Coincident surface and an opened boundary are residues of
+            // collapses that happened; both get rarer, not commoner, as fewer
+            // collapses are asked for.
+            Self::CoincidentFacesRemain { .. } | Self::ZeroVolumePairOpensBoundary { .. } => {
+                BisectionResponse::LessSimplification
+            }
+            // Measured, and the one exception: `zombie-2-a` flattens a straight
+            // source edge into an exactly-collinear needle at r = 0.525 and is
+            // clean at r = 0.2875, 0.2 and 0.16875 (FU-43). Its candidates are
+            // on the denser side, so this is the cause that keeps FU-43's
+            // original direction.
+            Self::DegenerateOutputTriangle { .. } => BisectionResponse::MoreSimplification,
+            // Measured on the Weeping Treant v1.2: 27 protected vertices would
+            // be surrendered at r = 0.525, 4 at 0.7625, 1 at 0.88125 and 0 at
+            // 0.940625. The overlap between the protected set and the
+            // manufactured pairs thins out as the ratio backs off.
+            Self::LockedVertexLostToZeroVolumeRepair { .. } => {
+                BisectionResponse::LessSimplification
+            }
+        }
+    }
+}
+
+/// Classifies a [`SimplifyError`] as candidate-free or not.  Returning `None`
+/// keeps an error fatal, which is the default for anything not enumerated in
+/// [`CandidateFreeCause`].
+fn candidate_free_cause(error: &SimplifyError) -> Option<CandidateFreeCause> {
+    match error {
+        SimplifyError::EmptyResult => Some(CandidateFreeCause::EmptyResult),
+        SimplifyError::AllFacesWereZeroVolume { pairs_removed } => {
+            Some(CandidateFreeCause::AllFacesWereZeroVolume {
+                pairs_removed: *pairs_removed,
+            })
+        }
+        SimplifyError::DegenerateOutputTriangle { triangle } => {
+            Some(CandidateFreeCause::DegenerateOutputTriangle {
+                triangle: *triangle,
+            })
+        }
+        SimplifyError::CoincidentFacesRemain {
+            vertices,
+            face_count,
+        } => Some(CandidateFreeCause::CoincidentFacesRemain {
+            vertices: *vertices,
+            face_count: *face_count,
+        }),
+        SimplifyError::ZeroVolumePairOpensBoundary { edge } => {
+            Some(CandidateFreeCause::ZeroVolumePairOpensBoundary { edge: *edge })
+        }
+        SimplifyError::LockedVertexLostToZeroVolumeRepair {
+            vertex,
+            locked_vertices_dropped,
+        } => Some(CandidateFreeCause::LockedVertexLostToZeroVolumeRepair {
+            vertex: *vertex,
+            locked_vertices_dropped: *locked_vertices_dropped,
+        }),
+        _ => None,
+    }
 }
 
 /// Explicit construction and nearest-query limits for D1 probe surfaces.
@@ -301,6 +556,10 @@ pub struct BudgetSearchStep {
     /// this before its evidence can be accepted.
     pub candidate_fingerprint: String,
     pub probe: TwoSidedProbe,
+    /// What [`remove_zero_volume_face_pairs`] deleted from the mesh this step's
+    /// fingerprint and probe describe.  A bisection step publishes a
+    /// fingerprint over a possibly *edited* candidate, so it says so here.
+    pub zero_volume_repair: ZeroVolumeRepairRecord,
     /// A requested ratio below one is not success merely because meshoptimizer
     /// accepted it.  Production decimation must actually remove faces.
     pub reduced: bool,
@@ -314,6 +573,15 @@ pub struct BudgetSearchTrace {
     pub budget: ErrorBudget,
     pub protected_vertex_count: usize,
     pub steps: Vec<BudgetSearchStep>,
+    /// Bisection midpoints that produced no usable candidate at all, so they
+    /// have no [`BudgetSearchStep`]: there is no mesh, no fingerprint and no
+    /// probe to publish. Each one is named in `reduction_refusals` as a
+    /// [`ReductionRefusalReason::CandidateFree`], and each one still consumed a
+    /// bisection — `steps.len() + candidate_free_ratios` is the identity step
+    /// plus the full bisection count on every completed search, which is the
+    /// shape an independent audit checks. Counting them is what keeps that
+    /// audit from reading a refused ratio as a missing step.
+    pub candidate_free_ratios: usize,
     /// Every full-population attempt, in deterministic most-aggressive-first
     /// order. A failed attempt never suppresses denser sampled-safe candidates.
     pub final_attempts: Vec<FinalVerificationAttempt>,
@@ -338,6 +606,37 @@ pub struct BudgetSearchTrace {
     pub native_surface_builds: usize,
 }
 
+impl BudgetSearchTrace {
+    /// The one mesh edit this crate performs, summed over every candidate this
+    /// trace describes: bisection steps, adaptive probes and final
+    /// verification attempts.
+    ///
+    /// It is derived rather than accumulated so it can never disagree with the
+    /// per-record fields it sums, and the per-record fields are what an
+    /// auditor reads to attribute a total to a ratio. A non-zero
+    /// `locked_vertices_dropped` here is the run-level statement that some
+    /// candidate in this search surrendered a hard-locked vertex to the pair
+    /// removal — see [`ZeroVolumeRepairRecord::locked_vertices_dropped`].
+    #[must_use]
+    pub fn zero_volume_repair_total(&self) -> ZeroVolumeRepairRecord {
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| step.zero_volume_repair)
+            .fold(ZeroVolumeRepairRecord::NONE, ZeroVolumeRepairRecord::plus);
+        let adaptive = self
+            .adaptive_exploration
+            .probes
+            .iter()
+            .map(|probe| probe.zero_volume_repair)
+            .fold(steps, ZeroVolumeRepairRecord::plus);
+        self.final_attempts
+            .iter()
+            .map(|attempt| attempt.zero_volume_repair)
+            .fold(adaptive, ZeroVolumeRepairRecord::plus)
+    }
+}
+
 /// Full verification evidence for one sampled-safe, genuinely reduced QEM
 /// candidate.  The candidate is deterministically rebuilt to avoid retaining
 /// several production-scale meshes during the sampled search.
@@ -351,6 +650,11 @@ pub struct FinalVerificationAttempt {
     /// population probe.
     pub probe: Option<TwoSidedProbe>,
     pub topology_after: TopologyCounts,
+    /// What [`remove_zero_volume_face_pairs`] deleted from this candidate. A
+    /// production reduction can only ever be one of these candidates, so this
+    /// is where an edited candidate says so; every probe, fingerprint and
+    /// topology count on this attempt already describes the edited mesh.
+    pub zero_volume_repair: ZeroVolumeRepairRecord,
     pub result: FinalVerificationResult,
     pub downstream_utility: DownstreamUtilityEvidence,
 }
@@ -359,6 +663,16 @@ pub struct FinalVerificationAttempt {
 pub struct AdaptiveExplorationTrace {
     pub probe_limit: usize,
     pub probes: Vec<AdaptiveProbeStep>,
+    /// Integer targets that consumed a probe from `probe_limit` and produced
+    /// no candidate to record, so they have no [`AdaptiveProbeStep`]: there is
+    /// no mesh, no fingerprint and no probe to publish. Each one is named in
+    /// `reduction_refusals` as a [`ReductionRefusalReason::CandidateFree`].
+    /// They are counted here because they consume the *same* bounded budget as
+    /// a real probe — `probes.len() + candidate_free_probes` is what
+    /// `probe_limit` binds, so a model whose dense targets are all
+    /// candidate-free cannot spend more simplification work than one whose
+    /// targets all succeed.
+    pub candidate_free_probes: usize,
     pub remaining_intervals: Vec<IntegerTargetInterval>,
     pub complete: bool,
 }
@@ -376,6 +690,11 @@ pub struct AdaptiveProbeStep {
     pub candidate_fingerprint: String,
     pub plateau_of_fingerprint: Option<String>,
     pub sampled_probe: TwoSidedProbe,
+    /// What [`remove_zero_volume_face_pairs`] deleted from the mesh this
+    /// probe's fingerprint and both probes describe.  These probes feed
+    /// `geometrically_eligible_candidate_count`, so they say whether the mesh
+    /// behind that count was edited.
+    pub zero_volume_repair: ZeroVolumeRepairRecord,
     pub topology_after: Option<TopologyCounts>,
     pub full_probe: Option<TwoSidedProbe>,
     pub result: AdaptiveProbeResult,
@@ -489,6 +808,30 @@ pub enum ReductionRefusalReason {
     },
     NoDownstreamUtilityEvidence {
         geometrically_eligible_candidate_count: usize,
+    },
+    /// The mandatory ratio-0.20 backward probe had no candidate to measure
+    /// against, so nothing about this model's features is known and the
+    /// canonical original is returned unreduced.
+    ///
+    /// `cause` is the whole point of this variant carrying more than a ratio.
+    /// A coarse corpus member such as `make_box` (12 faces, probe target 2)
+    /// reaches this with `AllFacesWereZeroVolume` — the model is simply too
+    /// coarse for r = 0.20, which is unremarkable. The other members of
+    /// [`CandidateFreeCause`] are not unremarkable at all: they say the probe
+    /// hit a *defect*, and before the cause was carried they were indexed under
+    /// the same "already print scale" headline with no operator-visible signal
+    /// that anything had gone wrong.
+    FeatureProbeHasNoCandidate {
+        probe_ratio: f64,
+        cause: CandidateFreeCause,
+    },
+    /// One requested ratio inside the search produced no usable candidate, and
+    /// the search recorded it and stepped past instead of ending the run. See
+    /// [`CandidateFreeCause`] for the exact set and why each member is a fact
+    /// about the ratio rather than about the machinery.
+    CandidateFree {
+        requested_ratio: f64,
+        cause: CandidateFreeCause,
     },
 }
 
@@ -829,6 +1172,17 @@ pub struct FeatureProtectionAttempt {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeatureProtectionTrace {
     pub probe_ratio: f64,
+    /// What [`remove_zero_volume_face_pairs`] deleted from the mandatory
+    /// ratio-0.20 probe candidate.
+    ///
+    /// This one matters more than the others: the backward error map that
+    /// decides the **entire** protected set is computed against this mesh, so
+    /// if it was repaired, every seed, every halo and every lock downstream of
+    /// it was selected against a repaired mesh. That fact now lives in the
+    /// trace instead of nowhere. `locked_vertices_dropped` is structurally
+    /// zero here — the probe runs with an all-false lock vector — and is
+    /// carried anyway so the record has one shape everywhere.
+    pub probe_zero_volume_repair: ZeroVolumeRepairRecord,
     pub cap_count: usize,
     pub attempts: Vec<FeatureProtectionAttempt>,
 }
@@ -842,6 +1196,25 @@ pub enum FeatureProtectionError {
     Constants { message: String },
     #[error("feature-probe simplification failed: {message}")]
     ProbeSimplify { message: String },
+    #[error(
+        "the ratio-{probe_ratio} feature probe produced no candidate at all: {message}. There is \
+         no backward error map to select features from, so nothing about this model's features is \
+         known and no reduction may be attempted"
+    )]
+    ProbeHasNoCandidate {
+        probe_ratio: f64,
+        /// *Which* candidate-free outcome the probe hit. Carried rather than
+        /// flattened away because the downgrade this variant triggers reports
+        /// as `already_print_scale`, and "the model is too coarse for r = 0.20"
+        /// (`EmptyResult`, `AllFacesWereZeroVolume`) is a different fact about
+        /// the model than "the probe hit a defect at r = 0.20"
+        /// (`DegenerateOutputTriangle`, `CoincidentFacesRemain`,
+        /// `ZeroVolumePairOpensBoundary`, `LockedVertexLostToZeroVolumeRepair`).
+        /// Both refuse; only one of them is unremarkable, and an operator
+        /// reading the report must be able to tell them apart.
+        cause: CandidateFreeCause,
+        message: String,
+    },
     #[error("feature-probe backward error map failed: {message}")]
     ProbeBackward { message: String },
     #[error("feature-protection input has {errors} errors for {vertices} vertices")]
@@ -938,6 +1311,21 @@ pub fn run(
 
     match select_feature_protection(original, budget.probe) {
         Ok((protected, _)) => Ok(run_budget_search(original, &protected, budget)?),
+        // A probe that produced no candidate is a refusal to reduce, not an
+        // execution failure: the model is too coarse for the probe ratio to
+        // leave anything behind, which is precisely the case for reducing
+        // nothing. It joins `CapExceeded` on the audited identity path.
+        Err(FeatureProtectionError::ProbeHasNoCandidate {
+            probe_ratio, cause, ..
+        }) => {
+            let trace = new_budget_trace(scale, budget, &policy, 0);
+            Ok(already_print_scale(
+                original,
+                budget.probe,
+                trace,
+                ReductionRefusalReason::FeatureProbeHasNoCandidate { probe_ratio, cause },
+            )?)
+        }
         Err(FeatureProtectionError::CapExceeded {
             trace: protection_trace,
         }) => {
@@ -1009,15 +1397,43 @@ pub fn select_feature_protection(
             vertex_locks: vec![false; original.verts().len()],
         },
     )
-    .map_err(|error| FeatureProtectionError::ProbeSimplify {
-        message: error.to_string(),
+    .map_err(|error| {
+        // A candidate-free probe is a fact about the model at this ratio, not
+        // a failure of the machinery, and the caller distinguishes it so a
+        // coarse model refuses rather than crashes. The set is the same one
+        // the search steps past — see [`CandidateFreeCause`].
+        if let Some(cause) = candidate_free_cause(&error) {
+            FeatureProtectionError::ProbeHasNoCandidate {
+                probe_ratio: policy.probe_ratio,
+                cause,
+                message: error.to_string(),
+            }
+        } else {
+            FeatureProtectionError::ProbeSimplify {
+                message: error.to_string(),
+            }
+        }
     })?;
     let errors = backward_error_map(original, &probe.mesh, probe_config).map_err(|error| {
         FeatureProtectionError::ProbeBackward {
             message: error.to_string(),
         }
     })?;
-    select_feature_protection_from_errors(original, &errors, policy)
+    // The backward error map that decides the entire protected set was
+    // computed against `probe.mesh`, which may have been repaired. Whichever
+    // way the selection goes, the trace that documents it says so.
+    let repair = probe.zero_volume_repair;
+    match select_feature_protection_from_errors(original, &errors, policy) {
+        Ok((locks, mut trace)) => {
+            trace.probe_zero_volume_repair = repair;
+            Ok((locks, trace))
+        }
+        Err(FeatureProtectionError::CapExceeded { mut trace }) => {
+            trace.probe_zero_volume_repair = repair;
+            Err(FeatureProtectionError::CapExceeded { trace })
+        }
+        Err(other) => Err(other),
+    }
 }
 
 fn select_feature_protection_from_errors(
@@ -1040,6 +1456,10 @@ fn select_feature_protection_from_errors(
     let cap_count = (original.verts().len() as f64 * policy.cap_fraction).floor() as usize;
     let mut trace = FeatureProtectionTrace {
         probe_ratio: policy.probe_ratio,
+        // Filled in by `select_feature_protection`, which owns the probe. A
+        // caller that supplies its own error map never ran a probe, so
+        // `NONE` is the honest value here.
+        probe_zero_volume_repair: ZeroVolumeRepairRecord::NONE,
         cap_count,
         attempts: Vec::with_capacity(policy.backoff_attempts + 1),
     };
@@ -1317,11 +1737,40 @@ fn run_budget_search(
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
         let midpoint = (low + high) / 2.0;
-        let step = sampled_step(original, protected, midpoint, budget.probe, error_budget)
+        let step = match sampled_step(original, protected, midpoint, budget.probe, error_budget)
             .map_err(|error| BudgetSearchError::SearchExecution {
                 phase: "ratio bisection",
                 message: error,
-            })?;
+            })? {
+            SampledStepOutcome::Candidate(step) => *step,
+            // No candidate at this ratio is a fact about the ratio. Record it,
+            // move the interval, and keep searching — the alternative, which
+            // this branch replaces, was ending the whole run on one bad ratio
+            // (FU-43). The direction is asked of the cause rather than fixed:
+            // `high = midpoint` is right only for the degenerate needle, whose
+            // candidates are on the denser side, and self-reinforcing for
+            // every other member, where a lower midpoint is strictly more
+            // aggressive than the one that just failed and one refusal would
+            // otherwise burn the whole remaining budget. See
+            // [`CandidateFreeCause::bisection_response`]. No probe ran, so no
+            // native surface was built and the counter does not move; the
+            // ratio is counted instead, because it consumed a bisection.
+            SampledStepOutcome::CandidateFree(cause) => {
+                let response = cause.bisection_response();
+                trace
+                    .reduction_refusals
+                    .push(ReductionRefusalReason::CandidateFree {
+                        requested_ratio: midpoint,
+                        cause,
+                    });
+                trace.candidate_free_ratios += 1;
+                match response {
+                    BisectionResponse::LessSimplification => low = midpoint,
+                    BisectionResponse::MoreSimplification => high = midpoint,
+                }
+                continue;
+            }
+        };
         trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
         match (step.reduced, step.passed) {
             // A real, budget-safe candidate lets us try for still fewer faces.
@@ -1364,24 +1813,39 @@ fn run_budget_search(
     }
 
     for candidate in candidates {
-        let final_outcome = simplify_locked(
+        let final_outcome = match simplify_locked(
             original,
             &SimplifyRequest {
                 target_ratio: candidate.ratio,
                 vertex_locks: protected.to_vec(),
             },
-        )
-        .map_err(|error| {
-            verification_failed(
-                trace.clone(),
-                topology_before,
-                None,
-                None,
-                VerificationFailureReason::FinalSimplify {
-                    message: error.to_string(),
-                },
-            )
-        })?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The deterministic rebuild of a sampled-safe candidate found
+                // no candidate at all. That is a fact about this ratio, so the
+                // *next* candidate still gets its turn; before FU-43 it ended
+                // the run and discarded every denser candidate behind it.
+                let Some(cause) = candidate_free_cause(&error) else {
+                    return Err(verification_failed(
+                        trace.clone(),
+                        topology_before,
+                        None,
+                        None,
+                        VerificationFailureReason::FinalSimplify {
+                            message: error.to_string(),
+                        },
+                    ));
+                };
+                trace
+                    .reduction_refusals
+                    .push(ReductionRefusalReason::CandidateFree {
+                        requested_ratio: candidate.ratio,
+                        cause,
+                    });
+                continue;
+            }
+        };
         let rebuilt_fingerprint = mesh_fingerprint(&final_outcome.mesh).map_err(|error| {
             BudgetSearchError::SearchExecution {
                 phase: "final candidate fingerprint",
@@ -1418,6 +1882,7 @@ fn run_budget_search(
                 candidate_fingerprint: rebuilt_fingerprint,
                 probe: None,
                 topology_after,
+                zero_volume_repair: final_outcome.zero_volume_repair,
                 result: FinalVerificationResult::TopologyIncreased,
                 downstream_utility: DownstreamUtilityEvidence::NoDownstreamUtilityEvidence,
             });
@@ -1469,6 +1934,7 @@ fn run_budget_search(
             candidate_fingerprint: rebuilt_fingerprint,
             probe: Some(final_probe.clone()),
             topology_after,
+            zero_volume_repair: final_outcome.zero_volume_repair,
             result: result.clone(),
             downstream_utility: downstream_utility.clone(),
         });
@@ -1726,10 +2192,12 @@ fn new_budget_trace(
         },
         protected_vertex_count,
         steps: Vec::with_capacity(policy.bisections + 1),
+        candidate_free_ratios: 0,
         final_attempts: Vec::with_capacity(policy.bisections),
         adaptive_exploration: AdaptiveExplorationTrace {
             probe_limit: policy.bisections,
             probes: Vec::with_capacity(policy.bisections),
+            candidate_free_probes: 0,
             remaining_intervals: Vec::new(),
             complete: true,
         },
@@ -1817,6 +2285,7 @@ fn canonical_identity_step(
         candidate_fingerprint: mesh_fingerprint(&outcome.mesh)
             .map_err(|error| error.to_string())?,
         probe,
+        zero_volume_repair: outcome.zero_volume_repair,
         reduced: false,
         passed: false,
     })
@@ -1849,21 +2318,36 @@ fn exact_identity_probe(
     })
 }
 
+/// What one bisection ratio produced: either a candidate to measure, or the
+/// named reason there was none. A candidate-free ratio is a recorded refusal
+/// and a step the search takes, never the end of the run — see
+/// [`CandidateFreeCause`].
+enum SampledStepOutcome {
+    Candidate(Box<BudgetSearchStep>),
+    CandidateFree(CandidateFreeCause),
+}
+
 fn sampled_step(
     original: &Mesh,
     protected: &[bool],
     ratio: f64,
     probe_config: ProbeConfig,
     budget: ErrorBudget,
-) -> Result<BudgetSearchStep, String> {
-    let outcome = simplify_locked(
+) -> Result<SampledStepOutcome, String> {
+    let outcome = match simplify_locked(
         original,
         &SimplifyRequest {
             target_ratio: ratio,
             vertex_locks: protected.to_vec(),
         },
-    )
-    .map_err(|error| error.to_string())?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return candidate_free_cause(&error)
+                .map(SampledStepOutcome::CandidateFree)
+                .ok_or_else(|| error.to_string())
+        }
+    };
     let probe = probe_two_sided(
         original,
         &outcome.mesh,
@@ -1873,16 +2357,17 @@ fn sampled_step(
     .map_err(|error| error.to_string())?;
     let reduced = outcome.output_face_count < original.tris().len();
     let passed = reduced && within_budget(&probe, budget);
-    Ok(BudgetSearchStep {
+    Ok(SampledStepOutcome::Candidate(Box::new(BudgetSearchStep {
         ratio,
         output_face_count: outcome.output_face_count,
         output_vertex_count: outcome.output_vertex_count,
         candidate_fingerprint: mesh_fingerprint(&outcome.mesh)
             .map_err(|error| error.to_string())?,
         probe,
+        zero_volume_repair: outcome.zero_volume_repair,
         reduced,
         passed,
-    })
+    })))
 }
 
 fn ratio_for_integer_target(input_faces: usize, target_faces: usize) -> Result<f64, String> {
@@ -1938,7 +2423,17 @@ fn run_adaptive_diagnostics(
         )
         .collect::<Vec<_>>();
 
-    while trace.adaptive_exploration.probes.len() < policy.bisections && !intervals.is_empty() {
+    // The probe budget binds *simplification attempts*, not recorded probes: a
+    // candidate-free target consumes a `simplify_locked` call exactly like a
+    // successful one, and if it did not count here a model whose dense targets
+    // are all candidate-free could walk every integer target in the interval
+    // — hundreds of thousands of production-scale simplifications — while the
+    // recorded probe count stayed at zero. This is a work cap being *held*,
+    // not raised: the total is still `policy.bisections`.
+    while trace.adaptive_exploration.probes.len() + trace.adaptive_exploration.candidate_free_probes
+        < policy.bisections
+        && !intervals.is_empty()
+    {
         let interval_index = intervals
             .iter()
             .enumerate()
@@ -1969,17 +2464,35 @@ fn run_adaptive_diagnostics(
                     message,
                 }
             })?;
-        let outcome = simplify_locked(
+        let outcome = match simplify_locked(
             original,
             &SimplifyRequest {
                 target_ratio: ratio,
                 vertex_locks: protected.to_vec(),
             },
-        )
-        .map_err(|error| BudgetSearchError::SearchExecution {
-            phase: "adaptive simplification",
-            message: error.to_string(),
-        })?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // No candidate at this integer target. There is no mesh, no
+                // fingerprint and no probe, so there is no `AdaptiveProbeStep`
+                // to publish; the refusal is named in `reduction_refusals` and
+                // the interval subdivision continues with the next target.
+                let Some(cause) = candidate_free_cause(&error) else {
+                    return Err(BudgetSearchError::SearchExecution {
+                        phase: "adaptive simplification",
+                        message: error.to_string(),
+                    });
+                };
+                trace.adaptive_exploration.candidate_free_probes += 1;
+                trace
+                    .reduction_refusals
+                    .push(ReductionRefusalReason::CandidateFree {
+                        requested_ratio: ratio,
+                        cause,
+                    });
+                continue;
+            }
+        };
         let sampled_probe = probe_two_sided(
             original,
             &outcome.mesh,
@@ -2009,6 +2522,7 @@ fn run_adaptive_diagnostics(
             candidate_fingerprint: candidate_fingerprint.clone(),
             plateau_of_fingerprint,
             sampled_probe,
+            zero_volume_repair: outcome.zero_volume_repair,
             topology_after: None,
             full_probe: None,
             result: AdaptiveProbeResult::NoActualReduction,
@@ -2525,6 +3039,7 @@ pub fn simplify_locked(
         mesh,
         request,
         &welded,
+        &indices,
         result,
         ResultMetadata {
             input_faces,
@@ -2640,6 +3155,13 @@ fn identity_outcome(
         meshopt_advisory_error: 0.0,
         max_input_quantization_delta,
         locked_vertex_count,
+        // The identity bypass never reaches meshoptimizer and never edits its
+        // input, so a source mesh that already carries coincident faces passes
+        // through this path byte-identically. Removal is a property of an
+        // actual reduction, not of every call — and `compact_result` enforces
+        // the same rule on the sub-1.0 ratios this bypass never sees, by
+        // declining to repair a result meshoptimizer handed back verbatim.
+        zero_volume_repair: ZeroVolumeRepairRecord::NONE,
         identity_bypass: true,
     }
 }
@@ -2656,6 +3178,7 @@ fn compact_result(
     mesh: &Mesh,
     request: &SimplifyRequest,
     welded: &WeldedSimplificationInput,
+    meshopt_input: &[u32],
     result: Vec<u32>,
     metadata: ResultMetadata,
 ) -> Result<SimplifyOutcome, SimplifyError> {
@@ -2667,23 +3190,134 @@ fn compact_result(
             index_count: result.len(),
         });
     }
-    let mut retained = vec![false; welded.view.vertex_count() as usize];
+    let welded_vertex_count = welded.view.vertex_count() as usize;
     for (position, &index) in result.iter().enumerate() {
-        let original = index as usize;
-        if original >= retained.len() {
+        if index as usize >= welded_vertex_count {
             return Err(SimplifyError::ResultIndexOutOfRange {
                 position,
                 index,
-                vertex_count: retained.len(),
+                vertex_count: welded_vertex_count,
             });
         }
-        retained[original] = true;
+    }
+    let returned_faces = result
+        .chunks_exact(3)
+        .map(|face| [face[0], face[1], face[2]])
+        .collect::<Vec<_>>();
+    // The repair is told what the *source* already carried, because that is
+    // what decides which coincident groups this reduction wrote and may
+    // therefore touch. Repairing a source mesh is a pre-pass decision (D-22),
+    // not something a simplification may do by accident, and the difference is
+    // load-bearing in both directions:
+    //
+    //   * The census counts real source pairs — 4 duplicate faces in 2 groups
+    //     on `Giant Bat`, 2 in 1 on `Plague Zombie`. Deleting one of those
+    //     would hand back F - 2 faces; `reduced` is decided on face count
+    //     alone, so a meshoptimizer *no-op* would come out `reduced = true`
+    //     with ~zero measured deviation, and a "reduction" that was purely an
+    //     input repair would be eligible to win. Group-local eligibility makes
+    //     the census property — **where the decimator declines to reduce, the
+    //     mesh passes through unedited** — a consequence of what the repair is
+    //     allowed to touch rather than a special case guarded by comparing
+    //     index buffers, which would have missed any no-op that reordered or
+    //     rewound the same face set.
+    //   * An identically wound source pair would otherwise raise
+    //     `CoincidentFacesRemain` at every genuinely reducing ratio, turning a
+    //     decimatable model into a blanket refusal over a defect the source
+    //     brought with it.
+    //
+    // What the source may *not* decide is how much of a touched group pairs
+    // off: a manufactured face and the retained source face it coincides with
+    // are a pair, and both go. See `remove_zero_volume_face_pairs`.
+    let source_faces = meshopt_input
+        .chunks_exact(3)
+        .map(|face| [face[0], face[1], face[2]])
+        .collect::<Vec<_>>();
+    // The lock is checked twice, against two different meshes, because it is
+    // two different statements.
+    //
+    // Here, against meshoptimizer's own answer: did the simplifier honour the
+    // constraint it was given? A `no` is a fact about the machinery and stays
+    // loud and fatal ([`SimplifyError::LockedVertexRemoved`]).
+    //
+    // Then again below, against the *repaired* face list, because the hard lock
+    // is a constraint on the mesh this stage emits and nothing else makes that
+    // true. A protected vertex whose entire surviving incidence sits inside
+    // removed pairs would otherwise be deleted with them, silently, with no
+    // error and nothing in the trace — an unbounded relaxation of a hard
+    // constraint. That candidate is refused instead
+    // ([`SimplifyError::LockedVertexLostToZeroVolumeRepair`]), and because the
+    // refusal is a fact about this ratio rather than about the engine, the
+    // search records it and steps on. Measured consequence on the Weeping
+    // Treant v1.2: the ratios that would have surrendered 27, 4 and 1
+    // protected vertices are refused, r = 0.940625 surrenders none and is
+    // still measured, and the corpus disposition is unchanged.
+    let mut returned_retention = vec![false; welded_vertex_count];
+    for face in &returned_faces {
+        for &index in face {
+            returned_retention[index as usize] = true;
+        }
     }
     for (source, &locked) in request.vertex_locks.iter().enumerate() {
         let welded_vertex = welded.view.map()[source] as usize;
-        if locked && !retained[welded_vertex] {
+        if locked && !returned_retention[welded_vertex] {
             return Err(SimplifyError::LockedVertexRemoved { vertex: source });
         }
+    }
+    let repair = remove_zero_volume_face_pairs(&returned_faces, &source_faces)?;
+    let result = repair.faces;
+    if result.is_empty() {
+        // Every face meshoptimizer returned belonged to an opposite-winding
+        // pair: the whole "candidate" was a zero-volume shell enclosing nothing.
+        // That is a candidate-free result, reported as its own outcome rather
+        // than emitted as a mesh that bounds no solid.
+        return Err(SimplifyError::AllFacesWereZeroVolume {
+            pairs_removed: repair.pairs_removed,
+        });
+    }
+    // Compaction reads the repaired face list, so a vertex that only a removed
+    // pair used is dropped rather than emitted as an unreferenced point the
+    // probes would sample as if it were surface.
+    let mut retained = vec![false; welded_vertex_count];
+    for face in &result {
+        for &index in face {
+            retained[index as usize] = true;
+        }
+    }
+    // One gathered pass over the three welded-vertex bitmaps, not a query per
+    // lock: `welded.vertex_locks` already carries the source locks scattered
+    // onto welded positions, so the surrendered-lock count and the first
+    // surrendered welded vertex are two more columns of the same zip that
+    // counts the ordinary drops.
+    let (vertices_dropped, locked_vertices_dropped, first_locked_dropped) = returned_retention
+        .iter()
+        .zip(&retained)
+        .zip(&welded.vertex_locks)
+        .enumerate()
+        .filter(|&(_, ((&returned, &kept), _))| returned && !kept)
+        .fold(
+            (0_usize, 0_usize, None),
+            |(dropped, locked_dropped, first), (welded_vertex, (_, &lock))| {
+                if lock {
+                    (
+                        dropped + 1,
+                        locked_dropped + 1,
+                        first.or(Some(welded_vertex)),
+                    )
+                } else {
+                    (dropped + 1, locked_dropped, first)
+                }
+            },
+        );
+    // The hard lock, enforced on the mesh that would actually be emitted. The
+    // named source vertex is the repaired welded vertex's f64 provenance, so
+    // the refusal points at a vertex the caller supplied rather than at an
+    // internal index.
+    if let Some(welded_vertex) = first_locked_dropped {
+        return Err(SimplifyError::LockedVertexLostToZeroVolumeRepair {
+            vertex: welded.representative_original_ids[welded_vertex] as usize,
+            locked_vertices_dropped,
+        });
     }
     let mut retained_welded_and_original = retained
         .iter()
@@ -2710,7 +3344,7 @@ fn compact_result(
         })
         .collect::<Vec<_>>();
     let compact_triangles = result
-        .chunks_exact(3)
+        .iter()
         .map(|face| {
             [
                 welded_to_output[face[0] as usize],
@@ -2724,11 +3358,18 @@ fn compact_result(
             message: error.to_string(),
         }
     })?;
-    compact_mesh
-        .audit_strict()
-        .map_err(|error| SimplifyError::OutputMesh {
-            message: error.to_string(),
-        })?;
+    compact_mesh.audit_strict().map_err(|error| match error {
+        // Named separately from every other audit failure because it is a
+        // distinct, understood mechanism rather than a corrupt result: the
+        // three surviving vertices are exactly collinear in f64, which the
+        // f32 collapse test inside meshoptimizer cannot see.  See FU-43.
+        StrictMeshAuditError::ZeroAreaOrCollinear { triangle } => {
+            SimplifyError::DegenerateOutputTriangle { triangle }
+        }
+        other => SimplifyError::OutputMesh {
+            message: other.to_string(),
+        },
+    })?;
     Ok(SimplifyOutcome {
         output_face_count: compact_mesh.tris().len(),
         output_vertex_count: compact_mesh.verts().len(),
@@ -2738,12 +3379,318 @@ fn compact_result(
         input_vertex_count: mesh.verts().len(),
         requested_ratio: request.target_ratio,
         target_face_count: metadata.target_faces,
-        achieved_ratio: result.len() as f64 / 3.0 / metadata.input_faces as f64,
+        achieved_ratio: result.len() as f64 / metadata.input_faces as f64,
         meshopt_advisory_error: metadata.meshopt_advisory_error,
         max_input_quantization_delta: metadata.max_input_quantization_delta,
         locked_vertex_count: metadata.locked_vertex_count,
+        zero_volume_repair: ZeroVolumeRepairRecord {
+            pairs_removed: repair.pairs_removed,
+            vertices_dropped,
+            locked_vertices_dropped,
+        },
         identity_bypass: false,
     })
+}
+
+/// The one mesh edit this crate performs, and the reason it is not a repair
+/// pass in disguise.
+///
+/// **What goes wrong.** meshoptimizer's edge collapse is not link-condition
+/// checked. Collapsing edge `(x, y)` is topologically admissible only when
+/// `link(x) ∩ link(y)` is exactly `link(xy)`; meshoptimizer instead classifies
+/// vertices and rejects collapses that flip a triangle normal, which does not
+/// imply that condition. So whenever the mesh contains an edge `(a, b)` whose
+/// two opposite vertices are precisely `x` and `y` — a configuration every
+/// dense organic mesh has thousands of — collapsing `x → y` rewrites the two
+/// faces `(a, b, x)` and `(b, a, y)` into `(a, b, y)` and `(b, a, y)`: one
+/// triangle, stored twice, wound in opposite directions.
+///
+/// That pair is the artifact this function removes. It is **zero-volume**: the
+/// two faces have equal area and exactly opposite normals, contribute exactly
+/// nothing to the divergence-theorem volume, and any ray crossing them crosses
+/// twice, so they are not part of the boundary of the represented solid. They
+/// are a bookkeeping residue of a collapse that already happened, not geometry.
+///
+/// **Why removing them cannot open the surface.** The two faces of a pair span
+/// the same three welded vertices with opposite winding, so across each of
+/// their three undirected edges they contribute exactly one forward and one
+/// backward directed occurrence. Removing both therefore decrements every
+/// affected edge by one occurrence in *each* direction: an edge whose only
+/// faces were the pair drops to zero occurrences and ceases to be an edge of
+/// the mesh at all, and every other affected edge keeps its forward/backward
+/// balance exactly. The one way that could still open a boundary is an edge
+/// that carried an odd number of occurrences before the removal — already
+/// non-manifold input — so that case is measured rather than assumed and
+/// refused by name ([`SimplifyError::ZeroVolumePairOpensBoundary`]).
+///
+/// **Why a *pair*, and not "duplicates".** Two coincident faces with the *same*
+/// winding are two copies of a real piece of surface, not a zero-volume
+/// artifact; deleting one of them would change the solid. Groups are therefore
+/// reduced by opposite-winding pairs only — `min(even, odd)` of them — and
+/// anything that survives that is reported by name and not repaired
+/// ([`SimplifyError::CoincidentFacesRemain`]).
+///
+/// **Why the source is an argument, and what it may and may not decide.**
+/// `source_faces` is meshoptimizer's own input in the same welded index space.
+/// It decides **which groups this function is allowed to touch**, and nothing
+/// else. A group whose occupancy the source already fully accounts for —
+/// `even ≤ source_even` and `odd ≤ source_odd` — is not something this
+/// reduction made, so it is neither removed nor refused: it passes through, and
+/// repairing it stays a pre-pass decision (D-22). A group that carries even one
+/// face the source did not is a group this reduction wrote, and it is then
+/// paired over its **full** occupancy, `min(even, odd)`, source copies included.
+///
+/// Subtracting the source's occupancy *before* pairing — the shape this
+/// function shipped with — reads plausibly and is wrong, because it disables
+/// the repair in exactly the case the doc example above describes. Collapsing
+/// `x → y` turns `(a, b, x)` into `(a, b, y)`, whose partner `(b, a, y)` is a
+/// **source** face that meshoptimizer retained untouched. The group over
+/// `{a, b, y}` is then `even = 1, odd = 1` against a source occupancy of
+/// `even = 0, odd = 1`; per-winding subtraction leaves `manufactured_even = 1`,
+/// `manufactured_odd = 0`, so `min` is zero, nothing is removed, and one
+/// surviving face over the triple is too few to trip
+/// `CoincidentFacesRemain` — the manufactured zero-volume pair ships in
+/// silence. That is the primary mechanism, not a corner: it is how the census
+/// found `Cat (wild shape)` and `zombie-9-b` gaining duplicate faces from clean
+/// input. A pair is a pair; deleting the manufactured face *requires* deleting
+/// its retained partner, and doing so is still the identity on the represented
+/// solid because the two together bound nothing.
+///
+/// Group-local eligibility keeps every property the subtraction was reached for:
+///
+///   * A meshoptimizer **no-op** manufactures nothing in any group, so it edits
+///     nothing — *whatever order it hands the same faces back in*. That is the
+///     property the corpus census rests on ("where the decimator declines to
+///     reduce, the mesh passes through unedited"), and it is now a consequence
+///     of what this function may touch rather than of comparing index buffers,
+///     which would have missed a reordered no-op.
+///   * A source that carries **identically wound** coincident faces does not
+///     turn every genuinely reducing ratio into a `CoincidentFacesRemain`
+///     refusal: an untouched group is skipped outright, and a touched one is
+///     refused only when what survives pairing exceeds what the source already
+///     had at that winding.
+///   * `reduced` is still decided on face count alone, and a declined reduction
+///     still hands back `F` faces, so an input repair can never mint a
+///     "reduction" whose measured deviation is zero by construction.
+///
+/// The same rule governs the degenerate class. A welded triple with a repeated
+/// index is a zero-area triangle, not a coincident pair, and is left for the
+/// strict audit to name — but it is only *refused* here when this reduction
+/// added a copy the source did not have, so a source that already carried a
+/// duplicated degenerate triple cannot produce a blanket refusal at every
+/// reducing ratio.
+///
+/// The removal runs on meshoptimizer's welded index space before compaction, so
+/// a vertex that only the removed pair used is dropped by the ordinary
+/// compaction that follows, and the emitted mesh, its fingerprint, its probes
+/// and its topology counts all describe the repaired candidate.
+///
+/// **What has been measured.** The committed synthetic fixtures below pin every
+/// branch, including `a_manufactured_face_coinciding_with_a_retained_source_face_is_paired_away`,
+/// which is the doc example above run through the production compaction path.
+/// `local_minis_zero_volume_repair` (in `tests/local_minis_repair.rs`,
+/// `#[ignore]`d because its inputs are local, read-only STLs that are not in
+/// git) runs the production reduction over the census-named models at declared
+/// ratios and is the instrument for the corpus-scale claim: that the models the
+/// census named clean-raw-but-damaged-by-decimation come through with no
+/// manufactured duplicate faces, and that neither `CoincidentFacesRemain` nor
+/// `ZeroVolumePairOpensBoundary` fires on them.
+fn remove_zero_volume_face_pairs(
+    faces: &[[u32; 3]],
+    source_faces: &[[u32; 3]],
+) -> Result<ZeroVolumeRepair, SimplifyError> {
+    // Gather: one sorted key per face, sorted once. Runs of equal keys are the
+    // coincident groups; nothing below this line queries a map per face.
+    let mut keyed = faces
+        .iter()
+        .enumerate()
+        .map(|(face, triangle)| {
+            let mut vertices = *triangle;
+            vertices.sort_unstable();
+            (vertices, even_permutation(*triangle, vertices), face as u32)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_unstable();
+    // Gather again, once, over the source: the same key and winding, with no
+    // face index because only the per-group occupancy is wanted. Sorting both
+    // sides lets the group walk below advance a single cursor in lockstep
+    // instead of querying a map per group.
+    let mut source_keyed = source_faces
+        .iter()
+        .map(|triangle| {
+            let mut vertices = *triangle;
+            vertices.sort_unstable();
+            (vertices, even_permutation(*triangle, vertices))
+        })
+        .collect::<Vec<_>>();
+    source_keyed.sort_unstable();
+    let mut source_cursor = 0_usize;
+
+    let mut discarded = vec![false; faces.len()];
+    let mut pairs_removed = 0_usize;
+    let mut group_start = 0_usize;
+    while group_start < keyed.len() {
+        let mut group_end = group_start + 1;
+        while group_end < keyed.len() && keyed[group_end].0 == keyed[group_start].0 {
+            group_end += 1;
+        }
+        let group = &keyed[group_start..group_end];
+        group_start = group_end;
+        if group.len() < 2 {
+            continue;
+        }
+        let vertices = group[0].0;
+        // The source's own occupancy of this exact triple, found by advancing
+        // the shared cursor: groups arrive in ascending key order, so the
+        // cursor only ever moves forward and the whole walk stays linear.
+        while source_cursor < source_keyed.len() && source_keyed[source_cursor].0 < vertices {
+            source_cursor += 1;
+        }
+        let source_group_end = source_keyed[source_cursor..]
+            .iter()
+            .take_while(|&&(key, _)| key == vertices)
+            .count();
+        let source_group = &source_keyed[source_cursor..source_cursor + source_group_end];
+        let source_even = source_group.iter().filter(|&&(_, even)| even).count();
+        let source_odd = source_group.len() - source_even;
+
+        // A triple with a repeated index is a degenerate triangle, not a
+        // coincident pair; leave it for the strict audit to name. Refused only
+        // when this reduction added a copy the source did not have, so a source
+        // that already carried a duplicated degenerate triple is not a blanket
+        // refusal at every reducing ratio.
+        if vertices[0] == vertices[1] || vertices[1] == vertices[2] {
+            if group.len() > source_group.len() {
+                return Err(SimplifyError::CoincidentFacesRemain {
+                    vertices,
+                    face_count: group.len(),
+                });
+            }
+            continue;
+        }
+        let even = group
+            .iter()
+            .filter(|&&(_, even, _)| even)
+            .map(|&(_, _, face)| face)
+            .collect::<Vec<_>>();
+        let odd = group
+            .iter()
+            .filter(|&&(_, even, _)| !even)
+            .map(|&(_, _, face)| face)
+            .collect::<Vec<_>>();
+        // The source decides *whether this group may be touched*, never how
+        // much of it pairs off. A group the source already fully accounts for
+        // is not something this reduction wrote: skip it whole (D-22). See the
+        // doc comment for why subtracting the occupancy before pairing instead
+        // disables the repair in the primary manufactured-pair case.
+        if even.len() <= source_even && odd.len() <= source_odd {
+            continue;
+        }
+        // Pairing walks both windings from the highest face index down, so an
+        // odd group keeps its earliest-emitted copy and the surviving face list
+        // stays in meshoptimizer's order. Both windings are already in
+        // ascending face order inside the sorted run, and the source's own
+        // copies sit at the front of it, so they are the last to be paired away
+        // and only ever go as the partner a manufactured face requires.
+        let paired = even.len().min(odd.len());
+        for (&even_face, &odd_face) in even
+            .iter()
+            .rev()
+            .take(paired)
+            .zip(odd.iter().rev().take(paired))
+        {
+            discarded[even_face as usize] = true;
+            discarded[odd_face as usize] = true;
+        }
+        // What survives is all one winding: coincident *surface*, which this
+        // stage never invents a repair for. One face over a triple is ordinary;
+        // more than one is coincidence, and it is this reduction's coincidence
+        // only insofar as it exceeds what the source already carried at that
+        // winding.
+        let surviving_even = even.len() - paired;
+        let surviving_odd = odd.len() - paired;
+        let surviving = surviving_even + surviving_odd;
+        let source_at_surviving_winding = if surviving_even > 0 {
+            source_even
+        } else {
+            source_odd
+        };
+        if surviving > 1 && surviving > source_at_surviving_winding {
+            return Err(SimplifyError::CoincidentFacesRemain {
+                vertices,
+                face_count: surviving,
+            });
+        }
+        pairs_removed += paired;
+    }
+    if pairs_removed == 0 {
+        return Ok(ZeroVolumeRepair {
+            faces: faces.to_vec(),
+            pairs_removed: 0,
+        });
+    }
+
+    // One gathered edge set, one scan over every face, one scattered verdict:
+    // only the edges the removal actually touches are counted, and they are
+    // counted in a single pass rather than once per removed pair.
+    let mut affected = discarded
+        .iter()
+        .enumerate()
+        .filter(|&(_, &discarded)| discarded)
+        .flat_map(|(face, _)| undirected_edges(faces[face]))
+        .collect::<Vec<_>>();
+    affected.sort_unstable();
+    affected.dedup();
+    let mut incident = vec![0_u32; affected.len()];
+    let mut removed = vec![0_u32; affected.len()];
+    for (face, triangle) in faces.iter().enumerate() {
+        for edge in undirected_edges(*triangle) {
+            if let Ok(slot) = affected.binary_search(&edge) {
+                incident[slot] += 1;
+                if discarded[face] {
+                    removed[slot] += 1;
+                }
+            }
+        }
+    }
+    for (slot, &edge) in affected.iter().enumerate() {
+        if incident[slot] - removed[slot] == 1 {
+            return Err(SimplifyError::ZeroVolumePairOpensBoundary { edge });
+        }
+    }
+
+    Ok(ZeroVolumeRepair {
+        faces: faces
+            .iter()
+            .enumerate()
+            .filter(|&(face, _)| !discarded[face])
+            .map(|(_, &triangle)| triangle)
+            .collect(),
+        pairs_removed,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ZeroVolumeRepair {
+    faces: Vec<[u32; 3]>,
+    pairs_removed: usize,
+}
+
+/// `true` when `triangle` is an even permutation of its own sorted `vertices`,
+/// i.e. one of the three rotations. Only meaningful for distinct vertices.
+fn even_permutation(triangle: [u32; 3], vertices: [u32; 3]) -> bool {
+    triangle == vertices
+        || triangle == [vertices[1], vertices[2], vertices[0]]
+        || triangle == [vertices[2], vertices[0], vertices[1]]
+}
+
+fn undirected_edges(triangle: [u32; 3]) -> [(u32, u32); 3] {
+    [
+        (triangle[0], triangle[1]),
+        (triangle[1], triangle[2]),
+        (triangle[2], triangle[0]),
+    ]
+    .map(|(first, second)| (first.min(second), first.max(second)))
 }
 
 #[cfg(test)]
@@ -2923,14 +3870,18 @@ mod tests {
         let second = topology.close(&locks).unwrap();
         assert_eq!(first.source_locks, vec![true, true, true, false]);
         assert_eq!(first.source_locks, second.source_locks);
-        let outcome = simplify_locked(&mesh, &request(0.34, first.source_locks)).unwrap();
-        assert!(outcome.output_face_count < mesh.tris().len());
-        assert!(outcome.mesh.tris().iter().any(|triangle| {
-            let mut sources =
-                triangle.map(|output| outcome.retained_original_vertex_ids[output as usize]);
-            sources.sort_unstable();
-            sources == [0, 1, 2]
-        }));
+        // The closure reserves the whole triangle 0-1-2, and until the
+        // zero-volume repair landed this assertion read a surviving [0, 1, 2]
+        // face and called the fan preserved. It was not: collapsing the fan's
+        // one free vertex leaves 0-1-2 stored twice with opposite winding, a
+        // shell that bounds nothing, and a *half* of that pair is what the old
+        // assertion found. Three faces around one free vertex cannot reduce at
+        // all, and the honest closure result is a named candidate-free outcome
+        // rather than a two-face sliver dressed as a reduction.
+        assert_eq!(
+            simplify_locked(&mesh, &request(0.34, first.source_locks)),
+            Err(SimplifyError::AllFacesWereZeroVolume { pairs_removed: 1 })
+        );
     }
 
     #[test]
@@ -3311,10 +4262,12 @@ mod tests {
             budget,
             protected_vertex_count: 0,
             steps: Vec::new(),
+            candidate_free_ratios: 0,
             final_attempts: Vec::new(),
             adaptive_exploration: AdaptiveExplorationTrace {
                 probe_limit: 0,
                 probes: Vec::new(),
+                candidate_free_probes: 0,
                 remaining_intervals: Vec::new(),
                 complete: true,
             },
@@ -3807,7 +4760,12 @@ mod tests {
 
     #[test]
     fn feature_locks_are_hard_constraints_in_simplification() {
-        let mesh = octahedron();
+        // A torus, not the octahedron: halving an eight-face octahedron with
+        // one vertex locked leaves only opposite-winding coincident pairs, so
+        // the candidate the old form of this assertion inspected bounded no
+        // solid. The lock is a hard constraint either way; this fixture is
+        // dense enough for a real reduction to be what proves it.
+        let mesh = torus(8, 4);
         let mut errors = vec![0.0; mesh.verts().len()];
         errors[2] = 1.0;
         let (locks, _) = select_feature_protection_from_errors(
@@ -3821,17 +4779,71 @@ mod tests {
         )
         .unwrap();
         let outcome = simplify_locked(&mesh, &request(0.5, locks)).unwrap();
+        assert!(outcome.output_face_count < mesh.tris().len());
         assert!(outcome.retained_original_vertex_ids.contains(&2));
     }
 
     #[test]
     fn production_feature_selection_pins_the_ratio_twenty_probe() {
-        let (mesh, _) = locked_box(10.0);
+        let mesh = torus(8, 4);
         let error = select_feature_protection(&mesh, d2_probe_config()).unwrap_err();
         let FeatureProtectionError::CapExceeded { trace } = error else {
             panic!("the production path must refuse a candidate when the cap cannot be met")
         };
         assert_eq!(trace.probe_ratio, 0.2);
+    }
+
+    #[test]
+    fn a_model_too_coarse_for_the_probe_ratio_refuses_instead_of_failing() {
+        // `make_box` is twelve faces, so the mandatory ratio-0.20 probe targets
+        // two: whatever meshoptimizer returns there is one opposite-winding
+        // coincident pair and bounds no solid. Before the zero-volume repair
+        // this two-face pancake was handed to the backward error map and scored
+        // as if it were a surface, and the resulting all-vertices-are-features
+        // verdict is what produced the cap refusal. The refusal is now named
+        // for what actually happened, and it is still a refusal and not an
+        // execution failure — the corpus keeps its `already_print_scale`.
+        let (mesh, _) = locked_box(10.0);
+        let error = select_feature_protection(&mesh, d2_probe_config()).unwrap_err();
+        let FeatureProtectionError::ProbeHasNoCandidate {
+            probe_ratio, cause, ..
+        } = error
+        else {
+            panic!("a candidate-free probe must be named, not reported as a simplify failure")
+        };
+        assert_eq!(probe_ratio, 0.2);
+        // The cause is carried, not flattened: this one is "too coarse for
+        // r = 0.20", which is the only reading of this refusal that is
+        // unremarkable. A defect cause reaching the same downgrade must stay
+        // distinguishable in the report.
+        assert_eq!(
+            cause,
+            CandidateFreeCause::AllFacesWereZeroVolume { pairs_removed: 1 }
+        );
+
+        // `run` validates the budget for execution, which refuses the
+        // unbounded `usize::MAX` grid cap the pure-probe helpers use.
+        let executable = ProbeConfig {
+            surface: NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+            nearest_upper_bound_mm: 10_000.0,
+        };
+        let budget = DecimationBudget::ratified_default(executable).unwrap();
+        let outcome = run(&mesh, budget).unwrap();
+        let BudgetSearchOutcome::AlreadyPrintScale(success) = outcome else {
+            panic!("a candidate-free probe must return the audited canonical original")
+        };
+        assert_eq!(success.mesh(), &mesh);
+        assert!(success.trace().reduction_refusals.iter().any(|reason| {
+            matches!(
+                reason,
+                ReductionRefusalReason::FeatureProbeHasNoCandidate { probe_ratio, cause }
+                    if *probe_ratio == 0.2
+                        && matches!(cause, CandidateFreeCause::AllFacesWereZeroVolume { .. })
+            )
+        }));
     }
 
     // ---- The registered downstream-utility witness -------------------------
@@ -3857,6 +4869,7 @@ mod tests {
             meshopt_advisory_error: 0.0,
             max_input_quantization_delta: 0.0,
             locked_vertex_count: 0,
+            zero_volume_repair: ZeroVolumeRepairRecord::NONE,
             identity_bypass: false,
         }
     }
@@ -4173,5 +5186,841 @@ mod tests {
             *constants.evidence().print_floor_chord_mm().value()
         );
         assert_eq!(policy.utility.max_absolute_deviation_mm, 0.08);
+    }
+
+    // ---- Zero-volume coincident face pairs ---------------------------------
+    //
+    // The synthetic surface below is a torus on purpose. The configuration
+    // meshoptimizer mishandles is an edge `(x, y)` whose endpoints are also the
+    // two vertices opposite some *other* edge `(a, b)`; a sphere never offers
+    // one, because collapsing across a sphere's surface cannot fuse two sheets,
+    // and every uv-sphere in this crate's exploration stayed clean at every
+    // target down to four faces. A torus offers one the moment its tube is
+    // short enough that opposite walls become neighbours — the same thing that
+    // happens locally on every organic model, where a limb pressed against a
+    // body, a wing membrane or an eye socket is a torus-like neighbourhood.
+
+    fn torus(major_segments: usize, minor_segments: usize) -> Mesh {
+        let (major_radius_mm, minor_radius_mm) = (10.0, 3.0);
+        let mut vertices = Vec::with_capacity(major_segments * minor_segments);
+        for major in 0..major_segments {
+            let around = std::f64::consts::TAU * major as f64 / major_segments as f64;
+            for minor in 0..minor_segments {
+                let through = std::f64::consts::TAU * minor as f64 / minor_segments as f64;
+                let radius = major_radius_mm + minor_radius_mm * through.cos();
+                vertices.push([
+                    radius * around.cos(),
+                    radius * around.sin(),
+                    minor_radius_mm * through.sin(),
+                ]);
+            }
+        }
+        let vertex = |major: usize, minor: usize| -> u32 {
+            ((major % major_segments) * minor_segments + minor % minor_segments) as u32
+        };
+        let mut triangles = Vec::with_capacity(major_segments * minor_segments * 2);
+        for major in 0..major_segments {
+            for minor in 0..minor_segments {
+                let a = vertex(major, minor);
+                let b = vertex(major + 1, minor);
+                let c = vertex(major + 1, minor + 1);
+                let d = vertex(major, minor + 1);
+                triangles.push([a, b, c]);
+                triangles.push([a, c, d]);
+            }
+        }
+        Mesh::new(vertices, triangles).expect("torus fixture must be constructible")
+    }
+
+    /// The end-to-end regression. Before the repair this sweep produced meshes
+    /// carrying up to twelve coincident faces; the assertion is that no target
+    /// produces even one, and that the sweep genuinely exercises the removal
+    /// rather than passing because meshoptimizer happened to stop making them.
+    #[test]
+    fn a_locked_qem_sweep_never_emits_a_coincident_face() {
+        let mesh = torus(8, 4);
+        let input_faces = mesh.tris().len();
+        let mut removals = 0_usize;
+        let mut examined = 0_usize;
+        for target_faces in 12..input_faces {
+            let ratio = ratio_for_integer_target(input_faces, target_faces).unwrap();
+            let outcome = simplify_locked(
+                &mesh,
+                &SimplifyRequest {
+                    target_ratio: ratio,
+                    vertex_locks: vec![false; mesh.verts().len()],
+                },
+            )
+            .unwrap_or_else(|error| panic!("target {target_faces} failed: {error}"));
+            examined += 1;
+            removals += outcome.zero_volume_repair.pairs_removed;
+            let counts = build_face_topology(&outcome.mesh, WeldPolicy::ExactBits)
+                .expect("candidate topology")
+                .counts();
+            assert_eq!(
+                (counts.duplicate_faces, counts.duplicate_face_groups),
+                (0, 0),
+                "target {target_faces} emitted coincident faces"
+            );
+            outcome.mesh.audit_strict().unwrap_or_else(|error| {
+                panic!("target {target_faces} failed strict audit: {error}")
+            });
+        }
+        assert!(examined > 0);
+        assert!(
+            removals > 0,
+            "the sweep stopped exercising the removal; it no longer regresses anything"
+        );
+    }
+
+    /// The face-count arithmetic every later stage reads must describe the
+    /// emitted mesh, not meshoptimizer's pre-repair result.
+    #[test]
+    fn removed_pairs_are_absent_from_the_emitted_counts_and_ratio() {
+        let mesh = torus(8, 4);
+        let input_faces = mesh.tris().len();
+        let outcome = simplify_locked(
+            &mesh,
+            &SimplifyRequest {
+                target_ratio: ratio_for_integer_target(input_faces, 20).unwrap(),
+                vertex_locks: vec![false; mesh.verts().len()],
+            },
+        )
+        .unwrap();
+        assert!(outcome.zero_volume_repair.pairs_removed > 0);
+        assert_eq!(outcome.output_face_count, outcome.mesh.tris().len());
+        assert_eq!(
+            outcome.achieved_ratio,
+            outcome.mesh.tris().len() as f64 / input_faces as f64
+        );
+        assert_eq!(
+            outcome.retained_original_vertex_ids.len(),
+            outcome.mesh.verts().len(),
+            "a vertex only the removed pair used must not survive compaction"
+        );
+    }
+
+    #[test]
+    fn the_identity_bypass_never_removes_a_pair_from_its_input() {
+        let mut vertices = octahedron().verts().to_vec();
+        let mut triangles = octahedron().tris().to_vec();
+        // A source that already carries a coincident pair: the identity path
+        // must hand it back untouched rather than quietly repairing an input.
+        vertices.push([0.0, 0.0, 1.1]);
+        triangles.push([4, 2, 0]);
+        triangles.push([0, 2, 4]);
+        let carrier = Mesh::new(vertices, triangles).unwrap();
+        let outcome = simplify_locked(
+            &carrier,
+            &SimplifyRequest {
+                target_ratio: 1.0,
+                vertex_locks: vec![false; carrier.verts().len()],
+            },
+        )
+        .unwrap();
+        assert!(outcome.identity_bypass);
+        assert_eq!(outcome.zero_volume_repair, ZeroVolumeRepairRecord::NONE);
+        assert_eq!(outcome.mesh, carrier);
+    }
+
+    fn octahedron_faces() -> Vec<[u32; 3]> {
+        octahedron().tris().to_vec()
+    }
+
+    #[test]
+    fn an_opposite_winding_pair_is_removed_and_leaves_the_rest_untouched() {
+        // Exactly what a non-link-condition collapse leaves behind: one face
+        // stored twice with opposite winding, over a surface that is otherwise
+        // whole.  Both copies go; the original octahedron comes back.
+        let mut faces = octahedron_faces();
+        faces.push([0, 2, 4]);
+        faces.push([4, 2, 0]);
+        let repair = remove_zero_volume_face_pairs(&faces, &octahedron_faces()).unwrap();
+        assert_eq!(repair.pairs_removed, 1);
+        assert_eq!(repair.faces, octahedron_faces());
+    }
+
+    #[test]
+    fn a_manufactured_face_paired_with_a_retained_source_face_is_still_removed() {
+        // THE primary mechanism, at the level of this function: the doc
+        // comment's own example. The source carries `(b, a, y)`; the collapse
+        // `x -> y` rewrites `(a, b, x)` into `(a, b, y)`, and the pair those two
+        // now form is exactly one manufactured face plus one *retained source*
+        // face. Subtracting the source's occupancy per winding before pairing
+        // scores this group as `manufactured_even = 1, manufactured_odd = 0`,
+        // pairs nothing, and ships the zero-volume pair in silence. It is a
+        // pair; both faces go.
+        // The source is a tent over apex 6, so `[0, 2, 6]` is real source
+        // surface. The answer retains it and adds its reverse — the residue of
+        // the collapse that flattened the tent — so the group is
+        // `even = 1, odd = 1` against a source occupancy of `even = 1, odd = 0`.
+        let source = octahedron_with_apex().tris().to_vec();
+        let mut faces = octahedron_faces();
+        faces.push([0, 2, 6]);
+        faces.push([6, 2, 0]);
+        let repair = remove_zero_volume_face_pairs(&faces, &source).unwrap();
+        assert_eq!(
+            repair.pairs_removed, 1,
+            "one manufactured face plus the retained source face it coincides with is a pair"
+        );
+        assert_eq!(
+            repair.faces,
+            octahedron_faces(),
+            "both faces of the pair go, leaving the surface the source describes"
+        );
+    }
+
+    #[test]
+    fn a_group_is_reduced_by_every_opposite_winding_pair_it_contains() {
+        let mut faces = octahedron_faces();
+        for extra in [[0, 2, 4], [4, 2, 0], [2, 4, 0], [2, 0, 4]] {
+            faces.push(extra);
+        }
+        let repair = remove_zero_volume_face_pairs(&faces, &octahedron_faces()).unwrap();
+        assert_eq!(repair.pairs_removed, 2);
+        assert_eq!(repair.faces, octahedron_faces());
+    }
+
+    #[test]
+    fn identically_wound_coincident_faces_are_named_and_never_repaired() {
+        // Two copies of one face with the *same* winding are two copies of real
+        // surface. Deleting either would change the solid, so this stage
+        // refuses by name instead of inventing a repair.
+        let mut faces = octahedron_faces();
+        faces.push([0, 2, 4]);
+        assert_eq!(
+            remove_zero_volume_face_pairs(&faces, &octahedron_faces()),
+            Err(SimplifyError::CoincidentFacesRemain {
+                vertices: [0, 2, 4],
+                face_count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn identically_wound_coincidence_the_source_already_carried_is_passed_through() {
+        // The same shape, but the source had it. Refusing here would turn a
+        // decimatable model into a blanket refusal over a defect the caller
+        // brought, and repairing it is a pre-pass decision (D-22), so the group
+        // is neither touched nor named.
+        let mut faces = octahedron_faces();
+        faces.push([0, 2, 4]);
+        let repair = remove_zero_volume_face_pairs(&faces, &faces).unwrap();
+        assert_eq!(repair.pairs_removed, 0);
+        assert_eq!(repair.faces, faces);
+    }
+
+    #[test]
+    fn a_removal_that_would_open_a_boundary_is_refused_by_name() {
+        // One reversed copy and no forward partner: removing the pair would
+        // strip the octahedron's own face too, leaving three edges with a
+        // single incident face each.
+        let mut faces = octahedron_faces();
+        faces.push([4, 2, 0]);
+        assert_eq!(
+            remove_zero_volume_face_pairs(&faces, &octahedron_faces()),
+            Err(SimplifyError::ZeroVolumePairOpensBoundary { edge: (0, 2) })
+        );
+    }
+
+    #[test]
+    fn a_repeated_index_is_a_degeneracy_and_not_a_coincident_pair() {
+        let faces = vec![[0, 1, 1], [0, 1, 1]];
+        assert_eq!(
+            remove_zero_volume_face_pairs(&faces, &[]),
+            Err(SimplifyError::CoincidentFacesRemain {
+                vertices: [0, 1, 1],
+                face_count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_degenerate_triple_the_source_already_duplicated_is_left_to_the_audit() {
+        // The counterpart asymmetry: the degeneracy guard reads the group's
+        // size against the *source's*, not raw, so a source that already
+        // carried a duplicated degenerate triple is not refused at every
+        // reducing ratio. The strict audit still names the zero-area triangle
+        // downstream; this function does not pre-empt it with a coincidence
+        // claim it cannot support.
+        let faces = vec![[0, 1, 1], [0, 1, 1]];
+        let repair = remove_zero_volume_face_pairs(&faces, &faces).unwrap();
+        assert_eq!(repair.pairs_removed, 0);
+        assert_eq!(repair.faces, faces);
+    }
+
+    #[test]
+    fn a_clean_result_is_returned_unchanged_and_reports_no_removal() {
+        let faces = octahedron_faces();
+        let repair = remove_zero_volume_face_pairs(&faces, &faces).unwrap();
+        assert_eq!(repair.pairs_removed, 0);
+        assert_eq!(repair.faces, faces);
+    }
+
+    #[test]
+    fn a_reordered_no_op_is_not_a_reduction_and_is_never_repaired() {
+        // The property the corpus census rests on, in the one shape an
+        // index-buffer comparison would have missed: the same faces handed back
+        // in a different order, over a source that carries a coincident pair of
+        // its own. Nothing in any group exceeds what the source had, so nothing
+        // is touched and the face count is unchanged — an input repair can
+        // never mint a "reduction" whose deviation is zero by construction.
+        let mut source = octahedron_faces();
+        source.push([0, 2, 4]);
+        source.push([4, 2, 0]);
+        let mut faces = source.clone();
+        faces.rotate_left(1);
+        let repair = remove_zero_volume_face_pairs(&faces, &source).unwrap();
+        assert_eq!(repair.pairs_removed, 0);
+        assert_eq!(repair.faces, faces);
+    }
+
+    #[test]
+    fn the_removal_is_a_deterministic_function_of_the_face_list() {
+        let mut faces = octahedron_faces();
+        faces.push([0, 2, 4]);
+        faces.push([4, 2, 0]);
+        faces.push([1, 3, 4]);
+        faces.push([4, 3, 1]);
+        let source = octahedron_faces();
+        let first = remove_zero_volume_face_pairs(&faces, &source).unwrap();
+        let second = remove_zero_volume_face_pairs(&faces, &source).unwrap();
+        assert_eq!(first.pairs_removed, second.pairs_removed);
+        assert_eq!(first.faces, second.faces);
+        assert_eq!(first.pairs_removed, 2);
+    }
+
+    // ---- the compaction contract, driven with a chosen simplifier answer ----
+
+    /// Runs the real [`compact_result`] over a *chosen* meshoptimizer answer.
+    ///
+    /// The fixtures below pin what compaction does with a specific simplifier
+    /// result: one that surrenders a lock, one that is the input handed back
+    /// verbatim, one that is an exactly-collinear needle. Reaching those
+    /// through [`simplify_locked`] would mean assuming a vendored heuristic
+    /// produces one exact answer, which is not a thing a regression test may
+    /// depend on. So the vendor call is the only step replaced; every line
+    /// under test — the lock check, the removal, the drop accounting, the
+    /// compaction and the strict audit — is the production one.
+    ///
+    /// `answer` is in source-vertex space and is mapped through the same weld
+    /// view the real path uses, so the fixtures read as face lists.
+    fn compact_meshopt_answer(
+        mesh: &Mesh,
+        vertex_locks: Vec<bool>,
+        answer: &[[u32; 3]],
+    ) -> Result<SimplifyOutcome, SimplifyError> {
+        let request = SimplifyRequest {
+            target_ratio: 0.5,
+            vertex_locks,
+        };
+        let welded = prepare_welded_input(mesh, &request.vertex_locks).unwrap();
+        let meshopt_input = flatten_mapped_indices(mesh.tris(), welded.view.map());
+        let result = flatten_mapped_indices(answer, welded.view.map());
+        let locked_vertex_count = request
+            .vertex_locks
+            .iter()
+            .filter(|&&locked| locked)
+            .count();
+        compact_result(
+            mesh,
+            &request,
+            &welded,
+            &meshopt_input,
+            result,
+            ResultMetadata {
+                input_faces: mesh.tris().len(),
+                target_faces: target_face_count(mesh.tris().len(), request.target_ratio),
+                meshopt_advisory_error: 0.0,
+                max_input_quantization_delta: 0.0,
+                locked_vertex_count,
+            },
+        )
+    }
+
+    /// The octahedron with face `[0, 2, 4]` replaced by a tent over a seventh
+    /// vertex.  In the source that apex is real surface; a collapse can leave
+    /// it carrying nothing but a zero-volume pair.
+    fn octahedron_with_apex() -> Mesh {
+        let mut vertices = octahedron().verts().to_vec();
+        vertices.push([0.7, 0.7, 0.7]);
+        let mut triangles = octahedron_faces();
+        triangles[0] = [0, 2, 6];
+        triangles.push([2, 4, 6]);
+        triangles.push([4, 0, 6]);
+        Mesh::new(vertices, triangles).unwrap()
+    }
+
+    #[test]
+    fn a_lock_surrendered_to_a_removed_pair_refuses_the_candidate() {
+        // The hard-lock check runs twice, against two different meshes. Against
+        // meshoptimizer's own result it asks whether the simplifier honoured the
+        // constraint — here it did, vertex 6 is present in the answer. Against
+        // the *repaired* face list it asks the question that actually binds:
+        // does the mesh this stage would EMIT still carry the protected vertex?
+        // It does not — vertex 6's entire surviving incidence is the zero-volume
+        // pair — so the candidate is refused by name. Emitting it, with nothing
+        // but a counter to say so, would be an unbounded relaxation of a hard
+        // constraint; the refusal is a fact about this ratio, so the search
+        // records it and steps on.
+        let mesh = octahedron_with_apex();
+        let mut locks = vec![false; mesh.verts().len()];
+        locks[6] = true;
+        let mut answer = octahedron_faces();
+        answer.push([0, 2, 6]);
+        answer.push([6, 2, 0]);
+        assert_eq!(
+            compact_meshopt_answer(&mesh, locks, &answer),
+            Err(SimplifyError::LockedVertexLostToZeroVolumeRepair {
+                vertex: 6,
+                locked_vertices_dropped: 1,
+            }),
+            "the lock is refused, never surrendered, and the refusal names the cost"
+        );
+        // And the refusal is a candidate-free fact about the ratio, not a
+        // failure of the machinery: the search demotes it and keeps going.
+        assert_eq!(
+            candidate_free_cause(&SimplifyError::LockedVertexLostToZeroVolumeRepair {
+                vertex: 6,
+                locked_vertices_dropped: 1,
+            }),
+            Some(CandidateFreeCause::LockedVertexLostToZeroVolumeRepair {
+                vertex: 6,
+                locked_vertices_dropped: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unlocked_vertex_dropped_with_a_pair_is_counted_but_not_as_a_lock() {
+        // Same surrender, no lock: the general counter moves and the
+        // lock-specific one does not, so a non-zero
+        // `locked_vertices_dropped` always means a *protected* vertex.
+        let mesh = octahedron_with_apex();
+        let mut answer = octahedron_faces();
+        answer.push([0, 2, 6]);
+        answer.push([6, 2, 0]);
+        let outcome =
+            compact_meshopt_answer(&mesh, vec![false; mesh.verts().len()], &answer).unwrap();
+        assert_eq!(
+            outcome.zero_volume_repair,
+            ZeroVolumeRepairRecord {
+                pairs_removed: 1,
+                vertices_dropped: 1,
+                locked_vertices_dropped: 0,
+            }
+        );
+    }
+
+    /// A source that already carries an opposite-winding coincident pair —
+    /// the class the corpus census counts on `Giant Bat` (4 faces / 2 groups)
+    /// and `Plague Zombie` (2 / 1).
+    fn octahedron_carrying_a_source_pair() -> Mesh {
+        let mut vertices = octahedron().verts().to_vec();
+        vertices.push([0.7, 0.7, 0.7]);
+        let mut triangles = octahedron_faces();
+        triangles.push([0, 2, 6]);
+        triangles.push([6, 2, 0]);
+        Mesh::new(vertices, triangles).unwrap()
+    }
+
+    #[test]
+    fn a_declined_reduction_is_never_repaired_into_a_reduction() {
+        // meshoptimizer handing its own index buffer back is a *declined*
+        // reduction. Repairing it would delete a pair that was in the SOURCE,
+        // emit F - 2 faces, flip `reduced` true on a candidate whose deviation
+        // is ~zero by construction, and mint a "reduction" that is purely an
+        // input repair — silently breaking the property the census is built
+        // on: where the decimator declines to reduce, the mesh passes through
+        // unedited. The requested ratio here is 0.5, so this is not the
+        // ratio-1 identity bypass; it is the sub-1.0 path.
+        let mesh = octahedron_carrying_a_source_pair();
+        let verbatim = mesh.tris().to_vec();
+        let outcome =
+            compact_meshopt_answer(&mesh, vec![false; mesh.verts().len()], &verbatim).unwrap();
+        assert!(!outcome.identity_bypass);
+        assert_eq!(outcome.zero_volume_repair, ZeroVolumeRepairRecord::NONE);
+        assert_eq!(outcome.output_face_count, outcome.input_face_count);
+        assert_eq!(outcome.mesh.tris(), mesh.tris());
+        assert_eq!(outcome.achieved_ratio, 1.0);
+    }
+
+    #[test]
+    fn a_reordered_no_op_is_a_declined_reduction_too() {
+        // The guard is "no group of this answer holds anything the source did
+        // not", never "the returned index buffer is byte-identical to its
+        // input". A reordering is still a no-op: repairing it would delete a
+        // SOURCE pair, hand back F - 2 faces and mint a `reduced = true`
+        // candidate whose deviation is zero by construction. An index-buffer
+        // comparison would have missed exactly this.
+        let mesh = octahedron_carrying_a_source_pair();
+        let mut answer = mesh.tris().to_vec();
+        answer.rotate_left(1);
+        let outcome =
+            compact_meshopt_answer(&mesh, vec![false; mesh.verts().len()], &answer).unwrap();
+        assert_eq!(outcome.zero_volume_repair, ZeroVolumeRepairRecord::NONE);
+        assert_eq!(outcome.output_face_count, outcome.input_face_count);
+        assert_eq!(outcome.achieved_ratio, 1.0);
+    }
+
+    #[test]
+    fn a_manufactured_face_coinciding_with_a_retained_source_face_is_paired_away() {
+        // The census defect, driven through the production compaction path:
+        // `Cat (wild shape)` and `zombie-9-b` are clean raw and come out of
+        // decimation carrying duplicate faces. This is the shape that does it —
+        // the source's `[0, 2, 6]` survives the collapse, the collapse writes
+        // its reverse, and the pair they form is one manufactured face plus one
+        // retained source face. Per-winding subtraction scored that pair as
+        // `min(1, 0) = 0` and emitted it; a pair is a pair, and both faces go.
+        let mesh = octahedron_with_apex();
+        let mut answer = octahedron_faces();
+        answer.push([0, 2, 6]);
+        answer.push([6, 2, 0]);
+        let outcome =
+            compact_meshopt_answer(&mesh, vec![false; mesh.verts().len()], &answer).unwrap();
+        assert_eq!(outcome.zero_volume_repair.pairs_removed, 1);
+        assert_eq!(
+            outcome.mesh.tris(),
+            octahedron_faces(),
+            "the emitted mesh carries no coincident face at all"
+        );
+        assert_eq!(
+            build_face_topology(&outcome.mesh, WeldPolicy::ExactBits)
+                .unwrap()
+                .counts()
+                .duplicate_faces,
+            0,
+            "the counter FU-26 landed must read zero on what this stage emits"
+        );
+    }
+
+    /// Three *distinct* f64 points that are exactly collinear, taken verbatim
+    /// from the FU-43 row: `zombie-2-a` output triangle 63,345, three
+    /// consecutive vertices of a straight source edge that a collapse
+    /// flattened into a needle. `p1` is the exact midpoint of `p0` and `p2`.
+    /// Model coordinates come from binary STL and are f32-exact, which is why
+    /// exact collinearity is common enough to hit rather than a measure-zero
+    /// curiosity.
+    const COLLINEAR_NEEDLE: [[f64; 3]; 3] = [
+        [
+            -1.082_801_699_638_366_7,
+            -2.585_498_571_395_874,
+            15.263_912_200_927_734,
+        ],
+        [
+            -1.067_898_988_723_754_9,
+            -2.585_669_279_098_510_7,
+            15.246_969_223_022_461,
+        ],
+        [
+            -1.052_996_277_809_143,
+            -2.585_839_986_801_147_5,
+            15.230_026_245_117_188,
+        ],
+    ];
+
+    #[test]
+    fn the_needle_fixture_really_is_exactly_collinear_in_f64() {
+        // Guards the fixture itself: if a future edit perturbs a coordinate,
+        // the test below would pass vacuously by never reaching the audit.
+        let mesh = Mesh::new(
+            vec![
+                COLLINEAR_NEEDLE[0],
+                COLLINEAR_NEEDLE[1],
+                COLLINEAR_NEEDLE[2],
+            ],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        assert_eq!(
+            mesh.audit_strict(),
+            Err(StrictMeshAuditError::ZeroAreaOrCollinear { triangle: 0 })
+        );
+    }
+
+    /// A tetrahedron over the needle's two ends plus two off-line points, with
+    /// the long edge split at the needle's midpoint — the source shape FU-43
+    /// describes. No face of it is degenerate; the needle only appears once a
+    /// collapse flattens the split edge into a triangle.
+    fn needle_source() -> Mesh {
+        let mut vertices = COLLINEAR_NEEDLE.to_vec();
+        vertices.push([-1.2, -2.4, 15.3]);
+        vertices.push([-0.9, -2.7, 15.2]);
+        Mesh::new(
+            vertices,
+            vec![
+                [0, 1, 3],
+                [1, 2, 3],
+                [2, 1, 4],
+                [1, 0, 4],
+                [0, 3, 4],
+                [2, 4, 3],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_exactly_collinear_output_triangle_is_named_by_its_own_mechanism() {
+        // The zero-area half of the spec's fixture requirement. meshoptimizer
+        // measured this collapse in f32, where the cross product rounds to a
+        // small non-zero value with an arbitrary sign, so it cannot see the
+        // needle; `robust::orient2d` returns exactly zero on all three
+        // projections and the strict audit does. The error is named for that
+        // mechanism rather than folded into a generic construction message.
+        let mesh = needle_source();
+        let answer = [[0, 1, 2], [0, 2, 3], [3, 2, 1], [1, 0, 3]];
+        assert_eq!(
+            compact_meshopt_answer(&mesh, vec![false; mesh.verts().len()], &answer),
+            Err(SimplifyError::DegenerateOutputTriangle { triangle: 0 })
+        );
+    }
+
+    #[test]
+    fn a_needle_is_a_candidate_free_ratio_and_not_a_run_ending_error() {
+        // The control-flow half: the same error the fixture above produces is
+        // classified as a fact about one ratio, so the search records it and
+        // steps past instead of ending the run (FU-43).
+        assert_eq!(
+            candidate_free_cause(&SimplifyError::DegenerateOutputTriangle { triangle: 63_345 }),
+            Some(CandidateFreeCause::DegenerateOutputTriangle { triangle: 63_345 })
+        );
+    }
+
+    #[test]
+    fn candidate_free_covers_the_ratio_facts_and_nothing_else() {
+        // Every member is "no usable candidate at this ratio". Everything else
+        // stays fatal — in particular `LockedVertexRemoved`, which says
+        // meshoptimizer violated a constraint it was given, and the malformed
+        // and out-of-range results, which say the vendor answer is not
+        // interpretable at all.
+        for error in [
+            SimplifyError::EmptyResult,
+            SimplifyError::AllFacesWereZeroVolume { pairs_removed: 1 },
+            SimplifyError::DegenerateOutputTriangle { triangle: 0 },
+            SimplifyError::CoincidentFacesRemain {
+                vertices: [0, 1, 2],
+                face_count: 2,
+            },
+            SimplifyError::ZeroVolumePairOpensBoundary { edge: (0, 1) },
+        ] {
+            assert!(
+                candidate_free_cause(&error).is_some(),
+                "{error} must be steppable"
+            );
+        }
+        for error in [
+            SimplifyError::LockedVertexRemoved { vertex: 0 },
+            SimplifyError::MalformedResultIndexCount { index_count: 5 },
+            SimplifyError::ResultIndexOutOfRange {
+                position: 0,
+                index: 9,
+                vertex_count: 3,
+            },
+            SimplifyError::OutputMesh {
+                message: "x".to_owned(),
+            },
+            SimplifyError::InvalidRatio { ratio: 2.0 },
+        ] {
+            assert!(
+                candidate_free_cause(&error).is_none(),
+                "{error} must stay fatal"
+            );
+        }
+    }
+
+    /// A print-scale tetrahedron: four faces, so every bisection ratio the
+    /// search tries asks for two faces or fewer and meshoptimizer answers with
+    /// a zero-volume pancake or nothing at all.
+    fn print_scale_tetrahedron() -> Mesh {
+        Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [12.0, 0.0, 0.0],
+                [0.0, 12.0, 0.0],
+                [0.0, 0.0, 12.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_bisection_being_candidate_free_refuses_by_name_instead_of_ending_the_run() {
+        // Before FU-43's control-flow half, this mesh ended the entire run
+        // with `SearchExecution { phase: "ratio bisection" }` on the very
+        // first bisection. Now every unusable ratio is a named refusal, the
+        // search runs to completion, and the audited identity is returned —
+        // the same disposition a model with no safe reduction has always had.
+        let mesh = print_scale_tetrahedron();
+        let locks = vec![false; mesh.verts().len()];
+        let outcome = run_budget_search(&mesh, &locks, d2_budget(19.0)).unwrap();
+        let BudgetSearchOutcome::AlreadyPrintScale(success) = outcome else {
+            panic!("a mesh with no usable candidate at any ratio must refuse, not reduce");
+        };
+        assert_eq!(success.mesh(), &mesh);
+        let candidate_free = success
+            .trace()
+            .reduction_refusals
+            .iter()
+            .filter_map(|reason| match reason {
+                ReductionRefusalReason::CandidateFree {
+                    requested_ratio,
+                    cause,
+                } => Some((*requested_ratio, cause.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidate_free.len(),
+            5,
+            "all five bisections were candidate-free and all five are named: {:?}",
+            success.trace().reduction_refusals
+        );
+        for (_, cause) in &candidate_free {
+            assert!(
+                matches!(
+                    cause,
+                    CandidateFreeCause::AllFacesWereZeroVolume { .. }
+                        | CandidateFreeCause::EmptyResult
+                ),
+                "a four-face tetrahedron can only run out of surface: {cause:?}"
+            );
+        }
+        // The steering, which is the whole reason `bisection_response` exists.
+        // Both causes here mean "this ratio asked for fewer faces than the model
+        // has surface", so each refusal must back OFF — `low = midpoint`, a
+        // strictly higher ratio next. Answering them with `high = midpoint`, as
+        // this arm did before, halves straight back into the same wall and
+        // spends the whole remaining budget proving it, which is how a model
+        // with real candidates further up falls out as `already_print_scale`.
+        for pair in candidate_free.windows(2) {
+            assert!(
+                pair[1].0 > pair[0].0,
+                "a candidate-free ratio must move the search away from the wall, not into it: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // Only the ratio-1 identity produced a step, and no probe ran for the
+        // refused ratios, so no native surface was built for them either. The
+        // five refused ratios are counted instead: they consumed bisections,
+        // and an audit that reads `steps.len()` alone must be able to see that.
+        assert_eq!(success.trace().steps.len(), 1);
+        assert_eq!(success.trace().candidate_free_ratios, 5);
+        assert_eq!(success.trace().native_surface_builds, 0);
+    }
+
+    #[test]
+    fn each_candidate_free_cause_steers_the_bisection_the_way_its_evidence_points() {
+        // One direction for all six is not a simplification, it is a bug: five
+        // of them get *rarer* as fewer collapses are asked for, so answering
+        // them with a more aggressive ratio guarantees the next one refuses too.
+        // Only the degenerate needle has its candidates on the denser side
+        // (`zombie-2-a`: collinear at r = 0.525, clean at 0.2875, 0.2, 0.16875).
+        for cause in [
+            CandidateFreeCause::EmptyResult,
+            CandidateFreeCause::AllFacesWereZeroVolume { pairs_removed: 3 },
+            CandidateFreeCause::CoincidentFacesRemain {
+                vertices: [0, 1, 2],
+                face_count: 2,
+            },
+            CandidateFreeCause::ZeroVolumePairOpensBoundary { edge: (0, 1) },
+            CandidateFreeCause::LockedVertexLostToZeroVolumeRepair {
+                vertex: 7,
+                locked_vertices_dropped: 1,
+            },
+        ] {
+            assert_eq!(
+                cause.bisection_response(),
+                BisectionResponse::LessSimplification,
+                "{cause:?} thins out as the ratio backs off"
+            );
+        }
+        assert_eq!(
+            CandidateFreeCause::DegenerateOutputTriangle { triangle: 63_350 }.bisection_response(),
+            BisectionResponse::MoreSimplification,
+            "the measured exception: the needle's candidates are on the denser side"
+        );
+    }
+
+    #[test]
+    fn the_adaptive_probe_budget_binds_simplifications_not_recorded_probes() {
+        // A candidate-free adaptive target consumes a `simplify_locked` call
+        // exactly like a successful probe, so it must consume the same bounded
+        // budget. This asserts the cap is held, not raised.
+        let mesh = plinth_mesh::make_toed_slab().unwrap();
+        let locks = vec![false; mesh.verts().len()];
+        let outcome = run_budget_search(&mesh, &locks, d2_budget(19.0)).unwrap();
+        let (BudgetSearchOutcome::AlreadyPrintScale(success)
+        | BudgetSearchOutcome::Verified(success)) = outcome
+        else {
+            panic!("the toed slab is print-scale and must not be skipped");
+        };
+        let adaptive = &success.trace().adaptive_exploration;
+        assert!(adaptive.probes.len() + adaptive.candidate_free_probes <= adaptive.probe_limit);
+        assert!(
+            !adaptive.probes.is_empty(),
+            "this fixture must actually reach the adaptive stage"
+        );
+    }
+
+    #[test]
+    fn every_search_record_describes_its_own_candidates_repair() {
+        // The wiring proof. Each bisection step's repair record must equal the
+        // record of the very candidate its fingerprint and probe describe;
+        // rebuilding that candidate is exactly what the final-verification
+        // loop already does, so this leans on determinism the search relies on
+        // anyway and applies it to the newly plumbed field. Without it, the
+        // field could be wired to any outcome at all and read zero.
+        let mesh = torus(12, 6);
+        let locks = vec![false; mesh.verts().len()];
+        let outcome = run_budget_search(&mesh, &locks, d2_budget(19.0)).unwrap();
+        let (BudgetSearchOutcome::AlreadyPrintScale(success)
+        | BudgetSearchOutcome::Verified(success)) = outcome
+        else {
+            panic!("the torus is print-scale and must not be skipped");
+        };
+        let trace = success.trace();
+        assert!(trace.steps.len() > 1, "the search must have bisected");
+        for step in &trace.steps {
+            let rebuilt = simplify_locked(
+                &mesh,
+                &SimplifyRequest {
+                    target_ratio: step.ratio,
+                    vertex_locks: locks.clone(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("step at ratio {} rebuilt as {error}", step.ratio));
+            assert_eq!(
+                step.zero_volume_repair, rebuilt.zero_volume_repair,
+                "the step at ratio {} publishes a repair record for a different mesh",
+                step.ratio
+            );
+        }
+        let summed = trace
+            .steps
+            .iter()
+            .map(|step| step.zero_volume_repair.pairs_removed)
+            .chain(
+                trace
+                    .adaptive_exploration
+                    .probes
+                    .iter()
+                    .map(|probe| probe.zero_volume_repair.pairs_removed),
+            )
+            .chain(
+                trace
+                    .final_attempts
+                    .iter()
+                    .map(|attempt| attempt.zero_volume_repair.pairs_removed),
+            )
+            .sum::<usize>();
+        let total = trace.zero_volume_repair_total();
+        assert_eq!(total.pairs_removed, summed);
+        assert_eq!(
+            total.locked_vertices_dropped, 0,
+            "an unlocked search cannot surrender a protected vertex"
+        );
     }
 }
