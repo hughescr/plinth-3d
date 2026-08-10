@@ -20,7 +20,6 @@ use crate::{
     member_sizing::{MemberSizingError, MemberSpan},
 };
 
-const BRACE_ATTACHMENT_TOLERANCE_MM: f64 = 0.25;
 const BRACE_ENDPOINT_BATCH_SIZE: usize = 256;
 const TRANSIENT_TIE_TOLERANCE_MM: f64 = 1e-9;
 #[allow(
@@ -188,6 +187,12 @@ fn span_intervals(
 pub fn derive_brace_attachments(
     forest: &Forest,
 ) -> Result<BTreeMap<MemberKey, Vec<BraceAttachment>>, TransientError> {
+    let brace_attachment_tolerance_mm = m0_constants()
+        .map_err(|error| TransientError::RegisteredConstantsUnavailable(error.to_string()))?
+        .placeholders()
+        .connectivity_axis_attach_tol_mm()
+        .diagnostic()
+        .get();
     let braces = forest.braces();
     let brace_set = braces.iter().copied().collect::<BTreeSet<_>>();
     let hosts = forest
@@ -252,7 +257,7 @@ pub fn derive_brace_attachments(
                 .row(endpoint_index)
                 .expect("batch retains one result row per gathered endpoint");
             for (host_index, distance) in row.iter().enumerate() {
-                if *distance <= BRACE_ATTACHMENT_TOLERANCE_MM {
+                if *distance <= brace_attachment_tolerance_mm {
                     let host = host_geometry[host_index].0;
                     out.entry(host).or_default().push(BraceAttachment {
                         brace: *brace,

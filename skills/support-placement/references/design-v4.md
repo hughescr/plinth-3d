@@ -196,7 +196,14 @@ Per terminal, candidate set:
     canopy geometry; verifier blocker, in from Phase 2). Phase 4 adds
     curved descent following the free-space gradient on top;
 (b) model anchor within `strut_max_length_mm`, priced with
-    `struts.cost`'s two-scar delicacy pricing (resurrected charter #4);
+    `struts.cost`'s two-scar delicacy pricing (resurrected charter #4)
+    — **superseded by the volume-delta acceptance rule below**: the
+    ported Rust anchor module (`plinth-support::anchor`) does not port
+    `struts.cost` or its `scar_cost_weight`/`material_cost_per_mm`
+    inputs, which priced v3-era Python deleted with the migration, and
+    `strut_min_length_saved_mm`'s second-scar tradeoff is likewise
+    unported. Every candidate, including model-anchor candidates, is
+    instead accepted by the single "Acceptance" rule that follows;
 (c) bifurcation into each of the k nearest existing members (k≈5,
     filtered to junction points below the stub end and cone-reachable):
     insert junction J on the member, connect terminal→J, locally

@@ -3,6 +3,23 @@ name: prep-mini
 description: Full workflow to take a problematic 3D mesh (STL/OBJ/blend) and make it resin-printable in Blender via the Blender MCP - inspect, orient, union shells, repair geometry, scale to tabletop size, error-bounded decimate, and export STL. Use this whenever the user wants to "prep", "fix", "clean up", or "make printable" a mini/model, mentions non-manifold errors, slicer problems, wrong orientation/scale, multi-shell kitbashes, or asks to get a mesh ready for Chitubox/Lychee - even if they only mention one symptom, the full sweep catches the rest.
 ---
 
+> **Superseded.** This Blender-MCP workflow is superseded by `plinth
+> prepare` (native Rust CLI, M9 of the zero-Python migration). The
+> `scripts/tools/` scripts this page and its references point to were
+> deleted with the migration and no longer exist on disk; this page is
+> kept only as historical reasoning for the repair/orient/scale/decimate
+> sweep it describes, ported into the `plinth-orient`, `plinth-decimate`,
+> and `plinth-hollow` crates.
+>
+> **Units contract, carried forward:** source coordinates ARE final
+> printed millimetres — `plinth prepare` reads every source STL on that
+> assumption, exactly as this page's `sizing.md` bakes scale into the
+> mesh before export so "slicers read STL units as mm" holds. A slicer
+> rescale after export, or a source model exported at the wrong unit
+> scale in the first place, silently invalidates the decimation error
+> budget, the hollow wall thickness, and every support tip/member size
+> `plinth prepare` computes downstream.
+
 # Prep a Mini for Resin Printing
 
 Take a mesh with issues and walk it through repair -> staging -> density

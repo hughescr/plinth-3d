@@ -278,6 +278,33 @@ impl From<SupportPreparationLimitsError> for PrepareResourcePolicyError {
 }
 
 /// One batch request: every source STL in `input_models_dir` maps to one output stem.
+///
+/// # Units contract: source coordinates ARE final printed millimetres
+///
+/// Every STL under `input_models_dir` is read on the assumption that one
+/// mesh unit is one millimetre of cured resin at final print size — this
+/// chain does not scale on the way in, and nothing downstream of it expects
+/// to be rescaled on the way out. That assumption is load-bearing for every
+/// stage this request drives: the decimation deviation budget, the hollow
+/// wall thickness, support tip diameters, and support member/contact sizing
+/// are all registered in millimetres and are all measured against the
+/// geometry exactly as loaded. A slicer rescale applied to the emitted
+/// `.chitubox` — or a source model exported at the wrong unit scale in the
+/// first place — silently invalidates every one of those commitments at
+/// once, without producing any error this chain can raise: the geometry
+/// changes size after the only stage that measured it against a millimetre
+/// bound.
+///
+/// `decimation_budget`'s scale-sanity check (the registered
+/// `DECIMATION_SCALE_ACCEPTANCE_MM`, an inclusive `[10, 300]` mm
+/// longest-bbox-axis window) is the one automated backstop in this path, and
+/// it catches only gross unit errors — a model left in metres, centimetres,
+/// or an arbitrary CAD unit. It does not catch a model that is wrong by a
+/// plausible scale factor: 1.5x, 2x, or a percent-level manual
+/// scale-to-fit all land inside a still-plausible 10-300 mm mini size and
+/// pass silently, with every registered millimetre bound downstream then
+/// judging the wrong physical object. Confirm the units contract on the
+/// source models before calling [`prepare`], not after.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepareRequest {
     pub input_models_dir: PathBuf,

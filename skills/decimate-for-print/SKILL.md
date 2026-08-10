@@ -3,6 +3,21 @@ name: decimate-for-print
 description: Reduce a dense mesh (or a whole folder of STLs) to exactly the detail a resin printer can express, using error-bounded selective decimation in Blender via the Blender MCP - protects thin features, verifies against the original surface, then exports. Use whenever a slicer (Chitubox/Lychee) is slow or choking on a huge STL, a mesh has "too many polygons/faces", files are tens of MB, or the user wants meshes "reduced", "simplified", "optimized", or "decimated" for printing - and for batch-processing minis folders. Assumes mesh is otherwise sound; for broken meshes run prep-mini first.
 ---
 
+> **Superseded.** This Blender-MCP workflow is superseded by `plinth
+> prepare` (native Rust CLI, M9 of the zero-Python migration). Blender is
+> retired from this project: its scripting is Python, and it segfaults
+> headless in sandboxes. `scripts/tools/decimate_pipeline.py`, named
+> below, was deleted with the migration and no longer exists on disk —
+> the algorithm it implemented (error-bounded QEM decimation with
+> feature protection) is carried forward in `crates/plinth-decimate`.
+> This page is kept only as historical reasoning for that algorithm.
+>
+> **Units contract, carried forward:** source coordinates ARE final
+> printed millimetres — `plinth prepare` makes the same assumption this
+> skill's "Everything is in printed mm" line below made, and a slicer
+> rescale after the fact silently invalidates the deviation budget just
+> as it did here.
+
 # Error-Bounded Decimation for Resin Printing
 
 Guessed decimate ratios either waste faces or destroy detail. This skill

@@ -6,6 +6,35 @@
 //! consume.  Probing, protection-halo selection, error-budget measurement,
 //! and bisection belong to later M3 leaves; this leaf only performs one
 //! deterministic locked simplification request.
+//!
+//! # Units contract: source coordinates ARE final printed millimetres
+//!
+//! Every mesh this crate reads is assumed to already be at final print scale —
+//! one mesh unit is one millimetre of cured resin, with no pending slicer
+//! rescale between this stage and the plate. That assumption is load-bearing,
+//! not decorative: the deviation budget (`DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`
+//! and its p99/p99.9 siblings) is derived from the printer's addressable
+//! pixel pitch in millimetres, so a slicer rescale after export silently
+//! invalidates it — a mesh decimated to stay inside 0.019 mm at 99.9% and
+//! then scaled 2x in the slicer actually carries ~0.038 mm of deviation,
+//! unmeasured. The same rescale silently invalidates every other
+//! millimetre-denominated commitment downstream of this stage that assumed
+//! the exported mesh was final: hollow wall thickness, support tip
+//! diameters, and support member/contact sizing all read their registered
+//! millimetre constants against the geometry as decimated, not as later
+//! resized.
+//!
+//! `DECIMATION_SCALE_ACCEPTANCE_MM` — the inclusive `[10, 300]` mm
+//! longest-bbox-axis window `search_policy` checks before a budget search
+//! ever runs — is a coarse sanity net, not a units proof. It catches only
+//! gross errors (a model exported in metres or centimetres, or one still in
+//! an arbitrary CAD unit), because any humanoid or prop mini plausibly spans
+//! 10-300 mm at ordinary printer scale too. A mesh that is wrong by a
+//! rational factor a hobbyist slicer would actually apply — 1.5x, 2x, a
+//! percent or two of manual scale-to-fit — passes this window silently and
+//! every millimetre-denominated bound downstream is then checked against the
+//! wrong physical size. Confirm the units contract before decimating, not
+//! after: this crate cannot see a scale that a caller applies afterward.
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;

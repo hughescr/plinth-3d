@@ -28,7 +28,6 @@ use crate::{
 
 const VOLUME_EPS_ML: f64 = 1e-9;
 const SLIDE_MIN_STEP_MM: f64 = 0.02;
-const BRACE_HOST_TOL_MM: f64 = 0.25;
 
 pub(crate) struct RewireRequest<'a> {
     pub(crate) frame: BuildFrame,
@@ -933,6 +932,12 @@ fn within_cone(p0: [f64; 3], p1: [f64; 3], radius: f64) -> Result<bool, RewireEr
 }
 
 fn assert_no_stale_braces(forest: &Forest) -> Result<(), RewireError> {
+    let brace_host_tol_mm = m0_constants()
+        .map_err(|error| RewireError::Constants(error.to_string()))?
+        .placeholders()
+        .connectivity_axis_attach_tol_mm()
+        .diagnostic()
+        .get();
     let hosts = forest.live_tree_members();
     for brace_key in forest.braces() {
         let brace = forest
@@ -957,7 +962,7 @@ fn assert_no_stale_braces(forest: &Forest) -> Result<(), RewireError> {
                     )
                 })
                 .fold(f64::INFINITY, f64::min);
-            if nearest > BRACE_HOST_TOL_MM {
+            if nearest > brace_host_tol_mm {
                 return Err(RewireError::StaleBrace);
             }
         }

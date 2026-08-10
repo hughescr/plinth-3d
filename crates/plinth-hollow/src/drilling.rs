@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
-use plinth_core::Finite;
+use plinth_core::{m0_constants, Finite};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, validate_face_topology, Mesh, WeldPolicy,
 };
@@ -22,11 +22,15 @@ use crate::{
     HollowedModel,
 };
 
+// Registered as `HOLLOW_EXTRA_DRAIN_POLICY.cylinder_sides` (currently 24).
+// Kept as a compile-time const rather than a live read: it sizes the
+// `DEFAULT_MAX_CUTTER_VERTICES`/`DEFAULT_MAX_CUTTER_TRIANGLES` const
+// expressions below, which need a `usize` available at const-eval time, not
+// a runtime registry lookup. `cylinder_sections_matches_the_registered_
+// hollow_extra_drain_policy` pins this value against the registry so a
+// registry change is loud here instead of silently diverging.
 const CYLINDER_SECTIONS: usize = 24;
 const PROOF_EPSILON_MM: f64 = 1.0e-7;
-const AUDIT_MIN_ML: f64 = 0.5;
-const AUDIT_MAX_DRAINS: usize = 3;
-const AUDIT_MAX_EXIT_MM: f64 = 8.0;
 const AUDIT_DIRECTIONS: [V3; 5] = [
     [0.0, 0.0, -1.0],
     [0.5, 0.0, -1.0],
@@ -497,6 +501,8 @@ pub enum DrillingRefusal {
     MissingRequiredRole,
     #[error("checked H1b arithmetic overflowed")]
     ResourceAccountingOverflow,
+    #[error("M0 constants publication failed")]
+    Constants,
     #[error("H1b {resource} count {requested} exceeds admitted {cap}")]
     CountAdmission {
         resource: &'static str,
@@ -792,6 +798,15 @@ fn prepare_audit_plan(
     planned: &PlannedShell,
     limits: DrillingLimits,
 ) -> Result<AuditPlan, DrillingRefusal> {
+    let drain_policy = m0_constants()
+        .map_err(|_| DrillingRefusal::Constants)?
+        .placeholders()
+        .hollow_extra_drain_policy()
+        .diagnostic();
+    let audit_min_ml = drain_policy.min_pocket_ml();
+    let audit_max_drains = usize::try_from(drain_policy.max_extra_drains().get())
+        .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
+    let audit_max_exit_mm = drain_policy.exit_max_mm();
     let field = planned.cavity_field();
     let planned_holes = planned.drain_plan().holes();
     let (members, flags) = drainability_map(field, planned_holes, limits)?;
@@ -802,7 +817,15 @@ fn prepare_audit_plan(
     let components = trapped_components(field, &trapped, limits)?;
     let qualifying_count = components
         .iter()
-        .filter(|component| qualifies_audit_drain(component.len(), field.pitch_mm().get(), 0))
+        .filter(|component| {
+            qualifies_audit_drain(
+                component.len(),
+                field.pitch_mm().get(),
+                0,
+                audit_min_ml,
+                audit_max_drains,
+            )
+        })
         .count();
     let candidate_upper_bound = qualifying_count
         .checked_mul(AUDIT_DIRECTIONS.len())
@@ -814,14 +837,20 @@ fn prepare_audit_plan(
     )?;
     let mut candidates = Vec::with_capacity(candidate_upper_bound);
     for (component_id, component) in components.iter().enumerate() {
-        if qualifies_audit_drain(component.len(), field.pitch_mm().get(), 0) {
+        if qualifies_audit_drain(
+            component.len(),
+            field.pitch_mm().get(),
+            0,
+            audit_min_ml,
+            audit_max_drains,
+        ) {
             let origin = component_low_origin(field, component)?;
             for (direction_order, direction) in AUDIT_DIRECTIONS.into_iter().enumerate() {
                 let direction = normalize(direction)?;
                 if let Some(sampled_mm) =
-                    sampled_exit_along(field, origin, direction, AUDIT_MAX_EXIT_MM)
+                    sampled_exit_along(field, origin, direction, audit_max_exit_mm)
                 {
-                    if sampled_mm <= AUDIT_MAX_EXIT_MM {
+                    if sampled_mm <= audit_max_exit_mm {
                         candidates.push(AuditCandidate {
                             component_id,
                             direction_order,
@@ -870,10 +899,10 @@ fn prepare_audit_plan(
             .map(|candidate| candidate.direction)
             .collect();
         let (offsets, ts, _) = surface
-            .cast_rays(&origins, &directions, AUDIT_MAX_EXIT_MM)
+            .cast_rays(&origins, &directions, audit_max_exit_mm)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
         for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
-            if audit_holes.len() == AUDIT_MAX_DRAINS {
+            if audit_holes.len() == audit_max_drains {
                 break;
             }
             let mut accepted_holes = planned_holes.to_vec();
@@ -986,8 +1015,14 @@ fn select_exact_audit_candidate(
     Ok(None)
 }
 
-fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, added: usize) -> bool {
-    component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= AUDIT_MIN_ML && added < AUDIT_MAX_DRAINS
+fn qualifies_audit_drain(
+    component_voxels: usize,
+    pitch_mm: f64,
+    added: usize,
+    min_pocket_ml: f64,
+    max_extra_drains: usize,
+) -> bool {
+    component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= min_pocket_ml && added < max_extra_drains
 }
 
 fn trapped_components(
@@ -2311,10 +2346,38 @@ mod tests {
     #[test]
     fn frozen_audit_threshold_and_three_drain_cap_are_inclusive_and_ordered() {
         // 4000 half-millimetre voxels are exactly 0.5ml.
-        assert!(qualifies_audit_drain(4000, 0.5, 0));
-        assert!(qualifies_audit_drain(4000, 0.5, 2));
-        assert!(!qualifies_audit_drain(3999, 0.5, 0));
-        assert!(!qualifies_audit_drain(4000, 0.5, 3));
+        assert!(qualifies_audit_drain(4000, 0.5, 0, 0.5, 3));
+        assert!(qualifies_audit_drain(4000, 0.5, 2, 0.5, 3));
+        assert!(!qualifies_audit_drain(3999, 0.5, 0, 0.5, 3));
+        assert!(!qualifies_audit_drain(4000, 0.5, 3, 0.5, 3));
+    }
+
+    #[test]
+    fn qualifies_audit_drain_thresholds_match_the_registered_hollow_extra_drain_policy() {
+        let policy = plinth_core::m0_constants()
+            .expect("registered constants")
+            .placeholders()
+            .hollow_extra_drain_policy()
+            .diagnostic();
+        assert_eq!(policy.min_pocket_ml(), 0.5);
+        assert_eq!(policy.max_extra_drains().get(), 3);
+        assert_eq!(policy.exit_max_mm(), 8.0);
+    }
+
+    #[test]
+    fn cylinder_sections_matches_the_registered_hollow_extra_drain_policy() {
+        let policy = plinth_core::m0_constants()
+            .expect("registered constants")
+            .placeholders()
+            .hollow_extra_drain_policy()
+            .diagnostic();
+        assert_eq!(
+            u64::try_from(CYLINDER_SECTIONS).expect("cylinder section count fits u64"),
+            policy.cylinder_sides().get(),
+            "CYLINDER_SECTIONS sizes the DEFAULT_MAX_CUTTER_VERTICES/TRIANGLES const \
+             expressions above at compile time and so cannot be a live registry read; this \
+             pin makes a registry change loud instead of silently divergent.",
+        );
     }
 
     #[test]
