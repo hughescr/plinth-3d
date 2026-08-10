@@ -437,6 +437,21 @@ pub struct ModelPreparationReport {
     pub source_path: PathBuf,
     /// `None` only when the model failed before decimation measured it.
     pub assumed_print_size: Option<AssumedPrintSize>,
+    /// What the automatic repair pre-pass did to this model's loaded input,
+    /// per defect class and per action.
+    ///
+    /// `None` only when the model failed before it was loaded. An
+    /// all-zero-count evidence and a `None` are different statements and the
+    /// report keeps them apart: the first says the pre-pass looked and found
+    /// nothing, the second says it never ran.
+    ///
+    /// **This is where a silent geometry change would otherwise hide.** The
+    /// 2026-08-10 ruling made repair automatic; an automatic repair that is
+    /// not reported is an unrecorded edit to the owner's model, so every
+    /// action carries its own row here and the run report prints a line for
+    /// any model the pre-pass touched.
+    #[serde(default)]
+    pub repair: Option<plinth_mesh::RepairEvidence>,
     pub outcome: ModelPreparationOutcome,
 }
 
@@ -592,6 +607,18 @@ pub enum PipelineError {
         #[source]
         source: plinth_core::LayerPlanError,
     },
+    // **There is deliberately no `Repair` variant.** The automatic repair
+    // pre-pass has no failure disposition at all: `plinth_mesh::repair_mesh`
+    // returns a mesh, not a `Result`. An unrepairable defect is recorded in
+    // [`plinth_mesh::RepairEvidence`] and left for the unchanged closed-solid
+    // gate to judge, which is the whole shape of the 2026-08-10 ruling; an
+    // input the pass cannot work on at all — over its resource bound (FU-45),
+    // or any internal failure below it — has every action **skipped and
+    // recorded** in `RepairEvidence::actions_skipped` with the mesh returned
+    // bit-identical; and a plan that would empty the mesh is rolled back the
+    // same way (FU-46). This enum used to carry a `Repair` variant, and it was
+    // reachable: it made a stage added to *help* a model into a stage that
+    // could refuse one, which is the inversion the ruling forbids.
     #[error("model {model} failed production decimation")]
     Decimate {
         model: ModelId,
@@ -1140,6 +1167,7 @@ mod tests {
                     model: ModelId::new("mini-a"),
                     source_path: PathBuf::from("models/mini-a.stl"),
                     assumed_print_size: size(32.0),
+                    repair: None,
                     outcome: ModelPreparationOutcome::Artifact {
                         emit: EmitReport {
                             artifact_path: PathBuf::from("out/mini-a.chitubox"),
@@ -1154,6 +1182,7 @@ mod tests {
                     model: ModelId::new("mini-b"),
                     source_path: PathBuf::from("models/mini-b.stl"),
                     assumed_print_size: size(28.0),
+                    repair: None,
                     outcome: ModelPreparationOutcome::Stopped {
                         after: StageStop::Hollow,
                     },
@@ -1196,6 +1225,7 @@ mod tests {
             model: ModelId::new(name),
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: size(30.0),
+            repair: None,
             outcome,
         };
         let report = PrepareReport {
@@ -1255,6 +1285,7 @@ mod tests {
             model: ModelId::new(name),
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: None,
+            repair: None,
             outcome,
         };
         let sidecar = model(

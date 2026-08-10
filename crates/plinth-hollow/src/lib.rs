@@ -577,12 +577,12 @@ fn finite_settings(
 const DEFAULT_DRAIN_PLANNING_BYTES: usize = 1024 * 1024 * 1024;
 const DEFAULT_QUERY_WORKING_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_RASTER_WORK_ITEMS: usize = 16 * 1024 * 1024;
-const DEFAULT_MAX_RAW_VERTICES: usize = 16 * 1024 * 1024;
-const DEFAULT_MAX_RAW_FACES: usize = 8 * 1024 * 1024;
-const DEFAULT_MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
-const DEFAULT_MAX_EDGE_OCCURRENCES: usize = 24 * 1024 * 1024;
-const DEFAULT_MAX_VERTEX_INCIDENCES: usize = 24 * 1024 * 1024;
-const DEFAULT_MAX_CONTAINMENT_PROBE_SLOTS: usize = 256 * 1024 * 1024;
+/// The six raw-input ceilings, taken from the one place they are defined:
+/// `plinth_mesh::TriageTopologyLimits::production()`, which the repair pre-pass
+/// admits raw input with as well. Keeping a private second copy here would let
+/// the two stages drift into disagreeing about how large an input is too large
+/// to open.
+const PRODUCTION_TRIAGE_LIMITS: TriageTopologyLimits = TriageTopologyLimits::production();
 const DEFAULT_MAX_VOXEL_CELLS: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_BOOLEAN_PRIMITIVE_UNITS: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_BOOLEAN_MARSHALLED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -664,12 +664,13 @@ impl H0AdmissionLimits {
     #[must_use]
     pub const fn production() -> Self {
         Self {
-            max_raw_vertices: DEFAULT_MAX_RAW_VERTICES,
-            max_raw_faces: DEFAULT_MAX_RAW_FACES,
-            max_retained_source_buffer_bytes: DEFAULT_MAX_RETAINED_SOURCE_BYTES,
-            max_edge_occurrences: DEFAULT_MAX_EDGE_OCCURRENCES,
-            max_vertex_incidences: DEFAULT_MAX_VERTEX_INCIDENCES,
-            max_containment_probe_slots: DEFAULT_MAX_CONTAINMENT_PROBE_SLOTS,
+            max_raw_vertices: PRODUCTION_TRIAGE_LIMITS.raw_vertices(),
+            max_raw_faces: PRODUCTION_TRIAGE_LIMITS.raw_faces(),
+            max_retained_source_buffer_bytes: PRODUCTION_TRIAGE_LIMITS
+                .retained_source_buffer_bytes(),
+            max_edge_occurrences: PRODUCTION_TRIAGE_LIMITS.edge_occurrences(),
+            max_vertex_incidences: PRODUCTION_TRIAGE_LIMITS.vertex_incidences(),
+            max_containment_probe_slots: PRODUCTION_TRIAGE_LIMITS.containment_probe_slots(),
             max_voxel_cells: DEFAULT_MAX_VOXEL_CELLS,
             query_working_bytes: DEFAULT_QUERY_WORKING_BYTES,
             max_raster_work_items: DEFAULT_MAX_RASTER_WORK_ITEMS,
@@ -1018,7 +1019,24 @@ pub fn create_shell_with_admission_limits(
 
 const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
 
-fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
+/// **The closed-solid gate**, exactly as every hollow-stage caller runs it.
+///
+/// Made public by the D-22 revision of 2026-08-10 and **not otherwise
+/// touched** — same three checks, same order, same error values. The repair
+/// pre-pass lands strictly upstream of this function and earns no exemption
+/// from it, so the diagnostic that measures whether repair rescued a model
+/// (`plinth-pipeline`'s `repair_probe` example) has to consult the production
+/// gate rather than a paraphrase of it. A second copy of these three lines
+/// living in a diagnostic is exactly how a diagnostic starts reporting that
+/// models pass a gate they do not pass.
+///
+/// # Errors
+///
+/// [`HollowError::StrictAudit`] for a repeated index or a zero-area face,
+/// [`HollowError::Topology`] / [`HollowError::TopologyValidation`] when the
+/// topology cannot be built or does not validate, and
+/// [`HollowError::NotClosedOrOriented`] when any face carries any cut flag.
+pub fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
     mesh.audit_strict().map_err(HollowError::StrictAudit)?;
     let topology =
         build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;

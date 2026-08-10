@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 271] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 272] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -187,6 +187,7 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 271] = [
     "PIPELINE_P8_RELOCATE_DEFAULT",
     "PLATE_BAND_MM",
     "PULL_DIST_MM",
+    "REPAIR_PINCH_SPLIT_MAX_MM",
     "REWIRE_DEGENERATE_LEN_MM",
     "REWIRE_MAX_SLIDE_EVALS",
     "REWIRE_ROLL_EPS",
@@ -295,7 +296,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 271] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 272] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -474,6 +475,7 @@ static EXPECTED_ROWS: [ExpectedRow; 271] = rows! {
     "PIPELINE_P8_RELOCATE_DEFAULT", "false", "1", "scalar";
     "PLATE_BAND_MM", "0.2", "mm", "scalar";
     "PULL_DIST_MM", "15.0", "mm", "scalar";
+    "REPAIR_PINCH_SPLIT_MAX_MM", "0.00005", "mm", "scalar";
     "REWIRE_DEGENERATE_LEN_MM", "0.0001", "mm", "scalar";
     "REWIRE_MAX_SLIDE_EVALS", "50", "count", "scalar";
     "REWIRE_ROLL_EPS", "0.0025", "1", "scalar";
@@ -570,7 +572,7 @@ static EXPECTED_ROWS: [ExpectedRow; 271] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 271 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 272 placeholder declarations must construct")
 }
 
 #[test]
@@ -581,7 +583,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 271);
+    assert_eq!(descriptors.len(), 272);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -672,7 +674,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_302_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_303_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -680,14 +682,14 @@ fn evidence_and_placeholder_fixture_builds_one_302_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 302);
+    assert_eq!(registry.len(), 303);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        302
+        303
     );
 }
 

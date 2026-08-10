@@ -151,6 +151,21 @@ pub fn stage_policy() -> StagePolicy {
 }
 
 /// Load, decimate and orient one model from its checked-in pinned baseline.
+///
+/// **This path deliberately does not run the automatic repair pre-pass**, which
+/// `plinth-pipeline`'s production `prepare_one` runs immediately after the
+/// load. Two reasons, and neither is "repair is optional": this composition is
+/// the frozen-digest harness, and inserting any stage that *could* move
+/// geometry into it would put the frozen digests at the mercy of a repair
+/// change; and every corpus model is already clean at this gate, so the
+/// pre-pass would be a no-op on all eight and would prove nothing here.
+/// **Measured, not assumed** (2026-08-10, `--example repair_probe corpus/models`):
+/// all eight — including the 429,120-face Weeping Treant — PASS the
+/// closed-solid gate raw *and* decimated, with zero shard faces, zero duplicate
+/// groups and zero pinch vertices between them. The
+/// pre-pass's own rescue evidence lives in `plinth-mesh`'s and
+/// `plinth-hollow`'s repair tests, against fixtures that actually carry the
+/// defects.
 pub fn prepare_from_corpus(name: &str) -> Result<(Mesh, plinth_orient::OrientedModel), String> {
     let mesh = load_binary_stl(corpus_stl(name), WeldPolicy::None)
         .map_err(|error| format!("load {name}: {error}"))?;
