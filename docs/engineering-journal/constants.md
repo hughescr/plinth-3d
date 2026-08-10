@@ -102,6 +102,7 @@
 | HOLLOW&#95;VENT&#95;TOP&#95;BAND&#95;MM | 2.0 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Cavity-top band searched for a horizontal vent site.") |
 | HOLLOW&#95;VOLUME&#95;BALANCE&#95;REL&#95;TOL | 0.02 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Final volume-balance tolerance relative to solid volume.") |
 | HOLLOW&#95;WALL&#95;DEFAULT&#95;MM | 2.5 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Hollow generation and tool wall default.") |
+| HOLLOW&#95;WALL&#95;HANDLING&#95;HEAVY&#95;MM | 3.0 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Hollow generation and tool wall value offered for handling-heavy pieces; the same unmeasured legacy operator option as the default.") |
 | INITIAL&#95;AXIS&#95;MAJORITY&#95;CAP | 80 | count | scalar | placeholder(note="Placeholder; non-AcceptSafe. O-10 legacy compatibility interval majority cap; docs/engineering-journal/04-migration-plan.md §O-10, not safety evidence.") |
 | INITIAL&#95;AXIS&#95;MAJORITY&#95;STEP&#95;MM | 0.12 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. O-10 legacy compatibility interval majority step; docs/engineering-journal/04-migration-plan.md §O-10, not safety evidence.") |
 | ISLAND&#95;ATTACH&#95;REACH&#95;MM | 0.2 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Tuning tied to the legacy Placeholder tip default.") |

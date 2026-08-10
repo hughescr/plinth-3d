@@ -23,12 +23,13 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]"
     ));
     for essential in [
         "--input-models-dir DIR",
         "--output PROFILE",
         "--out-dir DIR",
+        "--wall-mm MM",
         "--no-cache",
     ] {
         assert!(stdout.contains(essential), "missing help item {essential}");
@@ -84,6 +85,10 @@ fn invalid_forms_exit_nonzero_with_named_deterministic_diagnostics() {
         (
             &["prepare", "--cache=false"],
             "unknown flag \"--cache=false\"",
+        ),
+        (
+            &["prepare", "--wall-mm", "-2.5"],
+            "wall thickness \"-2.5\" is not a positive finite number of millimetres",
         ),
     ];
     for (arguments, expected) in cases {

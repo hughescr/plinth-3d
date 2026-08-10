@@ -1026,6 +1026,19 @@
       "provenance_detail": "wall default"
     },
     {
+      "id": "HOLLOW_WALL_HANDLING_HEAVY_MM",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/prep_one.py:wall option",
+        "scripts/tools/hollow_drill.py:wall option",
+        "crates/plinth-hollow/src/lib.rs:registered_wall",
+        "crates/plinth-cli/src/lib.rs:parse_prepare --wall-mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 3.0 mm",
+      "provenance_detail": "The second value the legacy operator wall option was given: 2.5 mm ordinarily (HOLLOW_WALL_DEFAULT_MM) and 3.0 mm for a piece that gets handled. Registered here at the restoration of the operator wall knob, which the Rust port had hardcoded to the default alone. It carries EXACTLY the provenance the default carries and no more: the same unmeasured legacy CLI option, no cited measurement, no plate, no study -- a Placeholder in the strict sense, never an acceptance claim. It is offered, never inferred: nothing in the workspace classifies a model as handling-heavy, the caller states the wall on the request, and CavityEvidence::wall_thickness_mm records what was stated. No gate, cap or bound was raised, lowered or touched by this registration."
+    },
+    {
       "id": "INITIAL_AXIS_MAJORITY_CAP",
       "classification": "runtime_search_cap",
       "provenance_wrapper": "Placeholder",

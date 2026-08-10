@@ -259,7 +259,7 @@ impl M0Constants {
 
         // Gather every declaration before one structural batch validation and
         // publication. Do not register constants incrementally.
-        let mut declarations = Vec::with_capacity(286);
+        let mut declarations = Vec::with_capacity(287);
         declarations.extend(evidence.descriptors()?);
         declarations.extend(placeholders.descriptors()?);
         let registry = ConstantsRegistry::build_batch(declarations)?;
@@ -349,7 +349,7 @@ impl M0Constants {
 /// The sole workspace-wide global constants initialization point.
 ///
 /// Its fallible result is itself published atomically: callers observe either
-/// the complete 286-entry registry and profile or the same construction error.
+/// the complete 287-entry registry and profile or the same construction error.
 static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
     LazyLock::new(M0Constants::build);
 

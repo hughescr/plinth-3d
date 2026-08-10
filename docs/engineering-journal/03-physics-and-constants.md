@@ -652,6 +652,7 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | Stable ID | Value / disposition | Source meaning |
 |---|---|---|
 | `HOLLOW_WALL_DEFAULT_MM` | 2.5 mm, **P** | generation/tool default |
+| `HOLLOW_WALL_HANDLING_HEAVY_MM` | 3.0 mm, **P** | the other value the operator wall option was given, for handling-heavy pieces; selected per model, never inferred |
 | `HOLLOW_ORIENT_ENABLE_DEFAULT` | true, **P** | independently surviving pipeline default |
 | `HOLLOW_SHARD_MAX_FACES` / `HOLLOW_SHARD_MAX_DIM_MM` / `HOLLOW_SHARD_MAX_VOLUME_MM3` | 64 / 1.0 mm / 0.01 mm3 | component-triage gates |
 | `HOLLOW_CONTAINMENT_SAMPLES` / `HOLLOW_CONTAINMENT_MIN_FRACTION` | 32 / 0.9 | internal-component evidence gate |
@@ -664,6 +665,18 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_VENT_TOP_BAND_MM` | 2.0 mm | cavity-top band searched for a horizontal vent site |
 | `HOLLOW_VENT_SAMPLE_DIVISOR` | 40 | deterministic top-band sampling divisor |
 | `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
+
+**The wall is an operator input, not an inference.** Legacy exposed it as a
+command-line option; the first Rust port read `HOLLOW_WALL_DEFAULT_MM` inside
+`create_shell` and offered no way to say anything else, which silently dropped
+the knob. It is restored on `HollowRequest::wall_mm` and spelled
+`plinth prepare --wall-mm MM`, defaulting to the registered 2.5 mm.
+`HOLLOW_WALL_HANDLING_HEAVY_MM` registers the 3.0 mm an operator reached for on
+a piece that gets handled, at exactly the provenance the default carries — the
+same unmeasured legacy option, **P**, no plate and no study behind either number.
+**There is deliberately no classifier**: nothing decides that a model is
+handling-heavy. The caller states the wall, and `CavityEvidence::wall_thickness_mm`
+records what was stated, so the choice is auditable per model.
 
 The frozen orientation heuristic is **retired/no-port as a policy**, not silently
 unaccounted: proxy reduction 0.9; identity plus ±10/20/30 degrees about X and Y;

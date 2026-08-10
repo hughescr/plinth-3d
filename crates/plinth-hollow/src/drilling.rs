@@ -1708,7 +1708,7 @@ fn segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, DrillingRefus
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_shell, drains::plan_drains};
+    use crate::{create_shell, drains::plan_drains, registered_settings};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
     use plinth_mesh::{load_binary_stl, mesh_fingerprint};
     use plinth_orient::{BaselineSelection, OrientationReport, RigidTransform};
@@ -1720,7 +1720,8 @@ mod tests {
             .join("../../corpus/baseline/Sphere.prepped.oriented-solid.stl");
         let mesh =
             load_binary_stl(&path, WeldPolicy::None).expect("committed analytic Sphere fixture");
-        plan_drains(create_shell(mesh).expect("Sphere shell")).expect("Sphere drain plan")
+        plan_drains(create_shell(mesh, registered_settings()).expect("Sphere shell"))
+            .expect("Sphere drain plan")
     }
 
     fn orientation_history() -> OrientationHistory {
