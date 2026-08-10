@@ -5,6 +5,71 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-09 — `plinth prepare` executes, and it cannot yet orient anything
+
+<a id="prepare-execution-2026-08-09"></a>
+
+Design phases E4 and E5 (`export-path-design-2026-08-07.md`) land together.
+`plinth_pipeline::prepare(PrepareRequest) -> Result<PrepareReport, PipelineError>` is
+real; `crates/plinth-cli` no longer prints "execution is not implemented".
+
+**The composition moved rather than being copied.** The whole end-to-end chain lived in
+`crates/plinth-pipeline/examples/shared/first_artifact_chain.rs`, reachable only from a
+test and an artifact-producing example. It is now `crates/plinth-pipeline/src/prepare.rs`,
+and the example's shared module is a thin corpus-fixture wrapper over it — so the code the
+first-artifact test gates and the code the CLI runs are one implementation (O-5). All five
+`tests/first_artifact.rs` cases still pass unchanged, including the same three gate
+refusals, which is the evidence that the promotion was behaviour-neutral.
+
+**What the executor guarantees.** Sources are `*.stl` in `input_models_dir`, enumerated in
+sorted order; each emits `<stem>.chitubox` into `output_dir`. **One bad model never aborts
+the folder**: a load failure, an unorientable model, a stage error and a gate refusal are
+all per-model dispositions in `PrepareReport`, and the returned `Err` is reserved for
+failures of the *run* (unreadable input folder, uncreatable output folder, unassemblable
+resource policy). A gate refusal writes no file — not this run's, not an earlier run's —
+and projects to `PipelineExitCode::Gates = 3`. The run's exit code is the first non-`Ok`
+disposition in report order; first-in-order rather than worst-of-set, because the exit-code
+contract defines no severity ranking and inventing one would be a second contract.
+
+**The run report carries the assumed print size.** Every model that reached decimation
+reports `trace.scale.longest_axis_mm` and its bounding box, on the success path as well as
+on refusals. A mini silently processed at a tenth of its intended size produces a
+completely plausible artifact and an unusable print, and this line is the only place that
+is visible.
+
+**The blocker, stated plainly: the CLI can prepare nothing today.** `parse_args` hardcodes
+`OrientationPolicy::LegacyCoarse`, the ratified command line has no `--orient` flag, and
+the native coarse orientation search of `02-target-architecture.md` §6 is unported. So
+`plinth prepare` reaches a per-model orientation refusal for every model — named,
+non-fatal, and never a silent identity, because choosing identity in the search's absence
+would be *inferring* an orientation and `plinth-orient` refuses to do that even for
+identity. **`prepare` itself is complete**: under `OrientationPolicy::Pinned` it produces a
+real `.chitubox` that survives the independent disk audit and the `plinth-verify` format
+gate (`crates/plinth-pipeline/tests/prepare_folder.rs`). The only missing piece between
+here and a usable `plinth prepare` is the `--orient pinned:<baseline>` flag §6 already
+specifies, which is a parser change and therefore a separate landing.
+
+**A fixture finding, recorded rather than papered over.** No checked-in
+`corpus/baseline/*.prepped.stl` is refused by the pre-write gates: both
+`make_overhang_table.prepped.stl` and `Sphere.prepped.stl` seal and emit through the whole
+chain, while the procedural `make_overhang_table()` and the provisioned
+`corpus/models/Sphere.stl` are refused for uncovered islands. That is consistent — a
+`.prepped.stl` is the legacy prep's *output*, already oriented and cleaned — but it means
+the folder-level refusal test is driven by a procedural mesh written out as a binary STL.
+
+**Three constants were registered and no number moved.** `ProbeConfig::new(1.0, 64 MiB,
+10_000.0)` was restated by hand at 18 call sites and never registered. `prepare` reads it
+in production, so it is now `DECIMATION_PROBE_GRID_PITCH_MM`,
+`DECIMATION_PROBE_MAX_GRID_BYTES` and `DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM`
+(Placeholder), read through `plinth_pipeline::registered_decimation_budget`. The registry
+is 290 constants (259 Placeholder). A unit test asserts the registered budget equals the
+hand-written one every gate already used, which is why no decimation digest moved. The run
+lift is likewise read off the profile's registered `LIFT_MM` rather than restated, and the
+layer pitch off `LAYER_HEIGHT_DEFAULT_MM`.
+
+**No cap was raised and no gate was relaxed.** `judge_then_emit` is still the only door to
+the gate set and still takes no override parameter.
+
 ## 2026-08-09 — the pre-write gate is wired, and it refuses three corpus models
 
 <a id="pre-write-gate-2026-08-09"></a>

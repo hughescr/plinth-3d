@@ -535,6 +535,36 @@
       "provenance_detail": "backward percentile sampling"
     },
     {
+      "id": "DECIMATION_PROBE_GRID_PITCH_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:ProbeConfig::new grid_pitch_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 1.0 mm",
+      "provenance_detail": "selected D1 probe-surface grid pitch; the pitch every frozen decimation digest in this workspace was produced at, published when plinth prepare began reading it in production instead of restating it as a call-site literal"
+    },
+    {
+      "id": "DECIMATION_PROBE_MAX_GRID_BYTES",
+      "classification": "resource_exclusion",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:ProbeConfig::new max_grid_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 67108864 bytes (64 MiB)",
+      "provenance_detail": "allocation ceiling for one probe surface; a refusal bound, not a physics value"
+    },
+    {
+      "id": "DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM",
+      "classification": "resource_exclusion",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:ProbeConfig::new nearest_upper_bound_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 10000.0 mm",
+      "provenance_detail": "effectively-unbounded nearest-query termination bound, deliberately far above any Saturn build-volume diagonal so an oversized input model is still measured honestly before the emit bounds audit refuses it"
+    },
+    {
       "id": "DECIMATION_PROTECTED_CAP_FRACTION",
       "classification": "runtime_decimation",
       "provenance_wrapper": "Placeholder",

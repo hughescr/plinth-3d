@@ -1,17 +1,21 @@
-//! Typed parser for the stable `plinth` command-line surface.
+//! Typed parser for the stable `plinth` command-line surface, and the resolver
+//! that turns one parsed selection into an executed run.
 //!
-//! Parsing deliberately stops before execution policy is assembled. The later
-//! pipeline resolver consumes [`PrepareSelection`] and owns construction of a
-//! complete `plinth_pipeline::PrepareRequest`, including all resource and
-//! physics values which are not CLI arguments.
+//! Parsing still deliberately stops before execution policy is assembled. The
+//! resolver in [`execute`] consumes [`PrepareSelection`] and owns construction
+//! of a complete `plinth_pipeline::PrepareRequest`, including all resource and
+//! physics values which are not CLI arguments — every one of them read from the
+//! ratified registry rather than restated here.
 //!
 //! The one thing parsing reads beyond its arguments is the registered default
 //! for an omitted optional flag — today only `--wall-mm`. That is the M0
 //! registry, a pure publication, and reading it here is what keeps the CLI
 //! default and the hollow stage's default the same number. No environment
-//! variable is read, and no file or model is opened.
+//! variable is read, and no file or model is opened during parsing.
 
 #![forbid(unsafe_code)]
+
+pub mod execute;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

@@ -336,7 +336,16 @@ the nearest native specimen (F17) — this is the phase with fat tails.
 **2 pts agent-side. p50 0.5h + owner latency / p90 8h** (failure-loop
 investigation). Parallel-safe: YES.
 
-**E4 — `plinth_pipeline::prepare()` executor.**
+**E4 — `plinth_pipeline::prepare()` executor. LANDED 2026-08-09.**
+Implemented in `crates/plinth-pipeline/src/prepare.rs`, gated by
+`tests/prepare_folder.rs`. Deviations from the plan below, all deliberate:
+`stop_after` is honoured but the CLI never sets it; `no_cache` is accepted and
+reported and changes nothing, because no cache exists (OQ-5's recommendation);
+and per-model dispositions were added to `PrepareReport` (`Refused`, `Failed`)
+because "one bad model must not abort the folder" cannot be expressed with
+`Artifact`/`Stopped` alone. OQ-2's acceptance item is **answered in the
+negative**: `LegacyCoarse` has no implementation, so it refuses per model.
+
 Implement the documented signature (F13): enumerate `*.stl` in
 `input_models_dir` (deterministic order), per model run the stage chain,
 produce one artifact per model in `output_dir`, assemble `PrepareReport`
@@ -351,7 +360,18 @@ stage; exit-code mapping tests against `PipelineExitCode`.
 **13 pts. p50 8h / p90 20h.** Parallel-safe: MOSTLY (new code in
 plinth-pipeline; consumes plinth-support public API only).
 
-**E5 — CLI execution wiring.**
+**E5 — CLI execution wiring. LANDED 2026-08-09, and it cannot yet emit.**
+`crates/plinth-cli/src/execute.rs` is the resolver named at
+`plinth-cli/src/lib.rs:33-36`. One deviation: the report on stdout is the
+human-readable run report the operator needs (per-model disposition plus the
+assumed print size), **not** JSONL. A second machine contract with no consumer
+and no test would have been invented, not ported; `PrepareReport` is `Serialize`
+and JSONL remains a one-line addition when something needs it.
+**`plinth prepare` reaches no artifact today**, because the ratified command
+line has no `--orient` flag and `OrientationPolicy::LegacyCoarse` is unported —
+see CURRENT-STATUS "prepare execution 2026-08-09". Adding that flag is a parser
+change and therefore its own landing.
+
 The resolver seam named at `plinth-cli/src/lib.rs:33-36`:
 `PrepareSelection` → `PrepareResourcePolicy::for_saturn4_ultra` →
 `PrepareRequest` → `prepare()`; replace the `main.rs:20` stub; JSON report to
