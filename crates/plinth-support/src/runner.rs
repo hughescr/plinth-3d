@@ -263,8 +263,8 @@ impl SupportPreparationLimits {
     /// numbers invented for the verifier — there is exactly one owner for each
     /// of these caps and it is not this function.
     ///
-    /// The mapping is one-for-one with what
-    /// [`SupportVerificationSnapshot::measure_coverage`] charges:
+    /// Each ceiling is taken from the registered owner of the quantity it
+    /// bounds, and no cap is asked to do a second job:
     ///
     /// - route memberships and indexed points are both the coverage-route kNN
     ///   batch's source points, because `measure_coverage` pushes exactly one
@@ -273,9 +273,20 @@ impl SupportPreparationLimits {
     /// - query rows are that batch's query points, one per coverage sample;
     /// - distance work is that batch's `max_work`, the same `source × query`
     ///   product the kernel charges;
-    /// - logical peak bytes and assessment work are the specialized stage's
-    ///   own `max_coverage_scratch_bytes` / `max_coverage_operations`, which
-    ///   `measure_coverage` passes straight into `CoverageAssessmentLimits`.
+    /// - the route kNN batch's own logical peak is that batch's own
+    ///   `max_logical_peak_bytes`, its registered owner — it is deliberately
+    ///   NOT the coverage scratch ceiling below, which bounds a different and
+    ///   larger quantity. Charging the batch against the scratch ceiling held
+    ///   it to a quarter of its registered ceiling and made a support run the
+    ///   specialized stage was permitted to complete read as an unmeasurable
+    ///   physics refusal at the gate;
+    /// - assessment work and the *measurement's* retained peak are the
+    ///   specialized stage's own `max_coverage_operations` /
+    ///   `max_coverage_scratch_bytes`. The retained peak is the sum of the
+    ///   nearest vector, the normalized route projection and the larger of the
+    ///   route and assessment phase peaks, so it legitimately bounds the kNN
+    ///   peak as one of its summands; that aggregate statement is this
+    ///   ceiling's own job, not a second charge of the batch's.
     ///
     /// # Errors
     ///
@@ -292,7 +303,8 @@ impl SupportPreparationLimits {
             knn.max_work,
             self.specialized_limits.max_coverage_scratch_bytes,
             self.specialized_limits.max_coverage_operations,
-        )
+        )?
+        .with_route_knn_peak_bytes(knn.max_logical_peak_bytes)
     }
 
     /// Binds this authority to one model, materializing the two model-scaled
@@ -951,23 +963,22 @@ impl<'a> SupportVerificationSnapshot<'a> {
             }
         }
 
-        let query_route_count = self
-            .coverage_samples
-            .iter()
-            .enumerate()
-            .filter(|(sample_index, sample)| {
-                !self.coverage_samples[..*sample_index].iter().any(|prior| {
-                    prior.island_id == sample.island_id && prior.component_id == sample.component_id
-                })
-            })
-            .count();
+        // Batch-first (D-37).  Both counts below used to be quadratic scalar
+        // scans over the coverage samples — a per-sample rescan of the sample
+        // prefix, and a per-sample linear walk of the named islands ending in a
+        // linear `Vec::contains` over that island's faces.  On a flagship model
+        // (~4e5 samples) that is ~1e10-1e11 comparisons on every production
+        // emission, because the pre-write gate now runs this preflight per
+        // artifact.  Both are now one gathered pass: a single sort/dedup for
+        // the distinct route keys, and a single sorted island index answering
+        // every sample by two binary searches.
+        let query_route_count = distinct_sample_route_keys(self.coverage_samples)?;
+        let island_index = IslandFaceIndex::build(self.named_islands)?;
         let island_row_count = self
             .coverage_samples
             .iter()
             .try_fold(0usize, |total, sample| {
-                if self.named_islands.iter().any(|island| {
-                    island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
-                }) {
+                if island_index.contains(sample.island_id, sample.face_id) {
                     total
                         .checked_add(1)
                         .ok_or(CoverageMeasurementError::ArithmeticOverflow {
@@ -1082,7 +1093,11 @@ impl<'a> SupportVerificationSnapshot<'a> {
             max_source_points: limits.max_indexed_points(),
             max_query_points: limits.max_query_rows(),
             max_neighbors: 1,
-            max_logical_peak_bytes: limits.max_logical_peak_bytes(),
+            // The batch's own registered ceiling, not the measurement's
+            // retained-peak ceiling. The latter still bounds this peak as one
+            // of its summands in `measurement_preflight`; what it must not do
+            // is stand in for the batch's own owner.
+            max_logical_peak_bytes: limits.max_route_knn_peak_bytes(),
             max_work: limits.max_distance_work(),
         };
         // This complete scalar pass must precede every measurement allocation.
@@ -1162,11 +1177,12 @@ impl<'a> SupportVerificationSnapshot<'a> {
         .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
             reason: "coverage traversal",
         })?;
+        // The same single sorted membership index the preflight built, for the
+        // same reason: this loop asks the identical question once per sample.
+        let island_index = IslandFaceIndex::build(self.named_islands)?;
         let mut island_rows = Vec::with_capacity(preflight.island_row_count);
         for sample in self.coverage_samples {
-            if self.named_islands.iter().any(|island| {
-                island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
-            }) {
+            if island_index.contains(sample.island_id, sample.face_id) {
                 island_rows.push((sample.island_id, sample.component_id, sample.face_id));
             }
         }
@@ -3597,6 +3613,81 @@ fn named_islands_digest(islands: &[SupportIsland]) -> u64 {
     hash.finish()
 }
 
+/// The number of distinct `(island_id, component_id)` route keys the coverage
+/// samples query, in one gathered sort/dedup pass.
+///
+/// Batch-first (D-37): the per-sample rescan of the sample prefix this
+/// replaces was `O(samples²)`, which the pre-write gate turned into a
+/// per-emission cost. The scratch is one `(u32, u32)` per sample and is
+/// released before any measurement allocation is charged.
+fn distinct_sample_route_keys(
+    samples: &[CoverageSample],
+) -> Result<usize, CoverageMeasurementError> {
+    let mut keys: Vec<(u32, u32)> = Vec::new();
+    keys.try_reserve_exact(samples.len())
+        .map_err(|_| CoverageMeasurementError::ResourceLimit {
+            resource: "sample route keys",
+        })?;
+    keys.extend(
+        samples
+            .iter()
+            .map(|sample| (sample.island_id, sample.component_id)),
+    );
+    keys.sort_unstable();
+    keys.dedup();
+    Ok(keys.len())
+}
+
+/// One sorted island-id → ascending-face-ids membership index over the named
+/// island sidecar, built once per measurement and asked once per coverage
+/// sample by two binary searches.
+///
+/// This replaces a linear `named_islands` walk ending in a linear
+/// `Vec::contains` on that island's faces, evaluated once per sample.
+struct IslandFaceIndex<'a> {
+    islands: Vec<(u32, &'a [u32])>,
+}
+
+impl<'a> IslandFaceIndex<'a> {
+    /// # Errors
+    ///
+    /// Returns [`CoverageMeasurementError::SnapshotBinding`] if the sidecar
+    /// does not satisfy the two invariants the binary searches rest on —
+    /// unique island ids and strictly ascending face ids. Both are already
+    /// proved by [`validate_named_islands`] through `validate_integrity`,
+    /// which every measurement entry point runs first; this is the fail-closed
+    /// restatement of that precondition at the place that depends on it,
+    /// rather than a silent wrong answer if the two ever drift apart.
+    fn build(islands: &'a [SupportIsland]) -> Result<Self, CoverageMeasurementError> {
+        let mut rows: Vec<(u32, &'a [u32])> = Vec::new();
+        rows.try_reserve_exact(islands.len()).map_err(|_| {
+            CoverageMeasurementError::ResourceLimit {
+                resource: "island membership index",
+            }
+        })?;
+        rows.extend(
+            islands
+                .iter()
+                .map(|island| (island.id, island.face_ids.as_slice())),
+        );
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        if rows.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || rows
+                .iter()
+                .any(|(_, faces)| faces.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(CoverageMeasurementError::SnapshotBinding);
+        }
+        Ok(Self { islands: rows })
+    }
+
+    fn contains(&self, island_id: u32, face_id: u32) -> bool {
+        self.islands
+            .binary_search_by_key(&island_id, |(id, _)| *id)
+            .is_ok_and(|position| self.islands[position].1.binary_search(&face_id).is_ok())
+    }
+}
+
 fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) -> bool {
     let face_count = topology.component_ids().len();
     let mut ids = BTreeSet::new();
@@ -3913,6 +4004,139 @@ mod tests {
 
     use super::*;
     use geom_kernel::KnnBatchLimits;
+
+    /// The two questions the coverage measurement asks once per sample,
+    /// answered at a scale a per-sample rescan cannot reach.
+    ///
+    /// 200,000 samples is a fraction of a flagship model's coverage set and
+    /// runs in milliseconds through a sort/dedup and a pair of binary
+    /// searches. The forms these replaced — a rescan of the sample prefix per
+    /// sample, and a linear island walk ending in a linear `Vec::contains` per
+    /// sample — are ~4e10 comparisons on this same fixture, so a revert to
+    /// either does not merely slow this test down, it stops it finishing.
+    /// That is the regression worth pinning: the pre-write gate made these run
+    /// on every production emission (D-37).
+    #[test]
+    fn coverage_sample_keys_and_island_membership_are_answered_at_corpus_scale() {
+        const SAMPLES: u32 = 200_000;
+        const ISLANDS: u32 = 64;
+        const FACES_PER_ISLAND: u32 = 1_000;
+        const COMPONENTS: u32 = 7;
+
+        let islands = (0..ISLANDS)
+            .map(|id| SupportIsland {
+                id,
+                face_ids: (0..FACES_PER_ISLAND)
+                    .map(|face| id * FACES_PER_ISLAND + face)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let samples = (0..SAMPLES)
+            .map(|index| {
+                let island_id = index % ISLANDS;
+                CoverageSample {
+                    island_id,
+                    face_id: island_id * FACES_PER_ISLAND + index % FACES_PER_ISLAND,
+                    component_id: index % COMPONENTS,
+                    point_mm: [0.0; 3],
+                    area_mm2: 1.0,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // `ISLANDS` and `COMPONENTS` are coprime, so the index walks every
+        // pair: the distinct route keys are the whole product.
+        assert_eq!(
+            distinct_sample_route_keys(&samples).expect("sample route keys"),
+            (ISLANDS * COMPONENTS) as usize,
+        );
+
+        let index = IslandFaceIndex::build(&islands).expect("well-formed island sidecar");
+        assert!(
+            samples
+                .iter()
+                .all(|sample| index.contains(sample.island_id, sample.face_id)),
+            "every sample names a face of its own island",
+        );
+        assert!(
+            !index.contains(ISLANDS, 0),
+            "an island id that is not in the sidecar has no faces",
+        );
+        assert!(
+            !index.contains(0, FACES_PER_ISLAND),
+            "a face belonging to another island is not a member of this one",
+        );
+    }
+
+    /// The membership index refuses a sidecar its binary searches cannot
+    /// answer, rather than reporting a confident wrong membership.
+    ///
+    /// `validate_named_islands` already proves both invariants through
+    /// `validate_integrity`, which runs before every measurement; this is the
+    /// fail-closed restatement at the point that depends on them.
+    #[test]
+    fn the_island_membership_index_refuses_a_sidecar_it_cannot_binary_search() {
+        let unsorted_faces = vec![SupportIsland {
+            id: 0,
+            face_ids: vec![3, 1],
+        }];
+        assert_eq!(
+            IslandFaceIndex::build(&unsorted_faces).err(),
+            Some(CoverageMeasurementError::SnapshotBinding),
+        );
+
+        let duplicate_ids = vec![
+            SupportIsland {
+                id: 4,
+                face_ids: vec![0],
+            },
+            SupportIsland {
+                id: 4,
+                face_ids: vec![1],
+            },
+        ];
+        assert_eq!(
+            IslandFaceIndex::build(&duplicate_ids).err(),
+            Some(CoverageMeasurementError::SnapshotBinding),
+        );
+    }
+
+    /// Every ceiling the pre-write coverage gate measures under comes from the
+    /// registered owner of the quantity it bounds — in particular the route
+    /// kNN batch is charged to its own `max_logical_peak_bytes` and not to the
+    /// specialized stage's coverage *scratch* ceiling.
+    ///
+    /// The two are not interchangeable and the substitution was not
+    /// conservative bookkeeping: the scratch ceiling is a quarter of the
+    /// batch's, so a support run the specialized stage was permitted to
+    /// complete could come back from the gate as `Unmeasurable`, which reads
+    /// as a physics refusal.
+    #[test]
+    fn the_coverage_gate_charges_the_route_knn_batch_to_its_own_registered_ceiling() {
+        let production = SupportPreparationLimits::production().expect("registered support policy");
+        let route_knn = production.specialized_limits.coverage_route_knn;
+        let scratch_bytes = production.specialized_limits.max_coverage_scratch_bytes;
+        let limits = production
+            .coverage_measurement_limits()
+            .expect("registered coverage ceilings");
+
+        assert_eq!(
+            limits.max_route_knn_peak_bytes(),
+            route_knn.max_logical_peak_bytes,
+            "the route kNN batch must be held to its own registered ceiling",
+        );
+        assert_eq!(
+            limits.max_logical_peak_bytes(),
+            scratch_bytes,
+            "the measurement's retained peak keeps the coverage scratch ceiling",
+        );
+        assert_ne!(
+            limits.max_route_knn_peak_bytes(),
+            limits.max_logical_peak_bytes(),
+            "these are two different registered caps; if they ever coincide, \
+             this test stops proving that one is not standing in for the other",
+        );
+    }
 
     fn transit_limits(snapshot: &SupportVerificationSnapshot<'_>) -> TransitIntervalLimits {
         let (members, stubs) =

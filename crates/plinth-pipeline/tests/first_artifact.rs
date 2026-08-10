@@ -28,6 +28,14 @@ use chitubox_io::SegmentType;
 use plinth_hollow::{HollowDisposition, SolidDecisionReason};
 use plinth_mesh::{make_overhang_table, make_toed_slab};
 
+/// The geometry `make_overhang_table` reaches the pre-write gate on.
+///
+/// Pinned rather than left implicit: the gate refusal below is only the
+/// refusal this test is about if it was spoken over the geometry the hollow
+/// stage actually decided on, and not over a fallback the chain substituted.
+const EXPECTED_OVERHANG_TABLE_GEOMETRY: chain::SupportedGeometry =
+    chain::SupportedGeometry::HollowStageDecidedSolid;
+
 /// A per-test scratch path that is removed on the way in and on the way out.
 struct Scratch(PathBuf);
 
@@ -184,9 +192,24 @@ fn corpus_sphere_drilled_plan_is_refused_before_any_file_exists() {
         refusal.is_gates(),
         "Sphere must be refused by the gates, not by an earlier stage: {refusal}"
     );
-    assert!(
-        refusal.detail().contains("gate UncoveredIslands refused"),
+    // The gate as a value, not a rendered substring: a renamed variant must be
+    // a compile error, not an assertion that silently becomes permanently
+    // false.
+    assert_eq!(
+        refusal.gate(),
+        Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
         "the refusal must name the gate that spoke: {refusal}"
+    );
+    // **What was refused**, which `is_gates()` alone cannot say. This is the
+    // old OQ-1 pin restored to the place it now belongs: the drilled shell
+    // *sealed*, and the gate refused that sealed plan. Without it this test
+    // passes just as happily on "support refused the drilled shell, the chain
+    // fell back to the oriented solid, and the gate refused that instead" --
+    // the exact substitution the terminal-Gates design exists to prevent.
+    assert_eq!(
+        refusal.refused_geometry(),
+        Some(&chain::SupportedGeometry::DrilledShellSealed),
+        "the Sphere's drilled shell must reach the gate sealed: {refusal}"
     );
 
     // The whole point: refused *before* the write, so there is nothing on disk
@@ -194,6 +217,31 @@ fn corpus_sphere_drilled_plan_is_refused_before_any_file_exists() {
     assert!(
         !scratch.path().exists(),
         "a gate-refused model wrote {}",
+        scratch.path().display()
+    );
+}
+
+/// The refusal removes a *stale* artifact at the target too.
+///
+/// "A refused model leaves no path on disk" is a claim about the path, not
+/// about one call. A model that emitted on an earlier run and is refused on
+/// this one would otherwise leave the earlier run's file sitting at the target,
+/// where the next thing to read it — the owner, or `run_one` in
+/// `examples/first_artifact.rs`, which unlike `Scratch` does not unlink first —
+/// would take it for this run's answer.
+#[test]
+fn a_gate_refusal_removes_a_stale_artifact_already_at_the_target() {
+    require_corpus_stl("Sphere");
+    let scratch = Scratch::new("sphere-stale");
+    std::fs::write(scratch.path(), b"an artifact from an earlier run")
+        .expect("plant a stale artifact");
+
+    let refusal = chain::run_corpus_model("Sphere", scratch.path())
+        .expect_err("the Sphere's drilled plan does not cover its islands");
+    assert!(refusal.is_gates(), "{refusal}");
+    assert!(
+        !scratch.path().exists(),
+        "a gate refusal left the previous run's artifact at {}",
         scratch.path().display()
     );
 }
@@ -211,6 +259,16 @@ fn procedural_overhang_table_is_refused_before_any_file_exists() {
     assert!(
         refusal.is_gates(),
         "make_overhang_table must be refused by the gates: {refusal}"
+    );
+    assert_eq!(
+        refusal.gate(),
+        Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
+        "the refusal must name the gate that spoke: {refusal}"
+    );
+    assert_eq!(
+        refusal.refused_geometry(),
+        Some(&EXPECTED_OVERHANG_TABLE_GEOMETRY),
+        "make_overhang_table reached the gate on a different geometry: {refusal}"
     );
     assert!(
         !scratch.path().exists(),
@@ -235,6 +293,16 @@ fn procedural_toed_slab_passes_the_gates_and_still_emits() {
 
     assert_artifact_is_sound(&outcome, &audit);
     assert_eq!(outcome.lift_mm, chain::LIFT_MM);
+
+    // *What* was emitted, not merely that something was. An accepted artifact
+    // whose provenance quietly moved from the hollow stage's own verdict to a
+    // fallback is a different artifact for the same file name, and nothing
+    // else in this suite would notice.
+    assert_eq!(
+        outcome.supported_geometry,
+        chain::SupportedGeometry::HollowStageDecidedSolid,
+        "make_toed_slab's artifact is made of something else now"
+    );
 
     // Eleven of the twelve gates in `00-migration-guide.md` have no ported
     // implementation yet. That is carried out to the caller rather than

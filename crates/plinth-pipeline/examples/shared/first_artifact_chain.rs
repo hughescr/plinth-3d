@@ -133,10 +133,30 @@ pub enum SupportedGeometry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChainRefusal {
     /// The pre-write physics gates refused. Terminal; no artifact on disk.
-    Gates(String),
+    Gates(GateStop),
     /// Anything else on the way to an artifact, including a support-run
     /// refusal that the oriented-solid reserve may answer.
     Other(String),
+}
+
+/// The refused gate attempt, carried whole rather than rendered.
+///
+/// Both fields exist because a refusal string cannot answer the question the
+/// terminal-`Gates` design turns on: *which geometry* was refused. "The
+/// drilled shell sealed and the gate refused its plan" and "support refused
+/// the drilled shell, the chain fell back to the oriented solid, and the gate
+/// refused that" produce the same `is_gates()` and very nearly the same
+/// message, and they are exactly the substitution the terminal refusal exists
+/// to prevent. The gate is likewise carried as an enum value, so a renamed
+/// variant is a compile error rather than a silently-permanently-false
+/// substring assertion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateStop {
+    pub detail: String,
+    /// The gate that spoke, when one gate owns the refusal.
+    pub gate: Option<PreWriteGate>,
+    /// The geometry the refused plan was built on.
+    pub geometry: SupportedGeometry,
 }
 
 impl ChainRefusal {
@@ -148,7 +168,26 @@ impl ChainRefusal {
     #[must_use]
     pub fn detail(&self) -> &str {
         match self {
-            Self::Gates(detail) | Self::Other(detail) => detail,
+            Self::Gates(stop) => &stop.detail,
+            Self::Other(detail) => detail,
+        }
+    }
+
+    /// The gate that refused, as a value.
+    #[must_use]
+    pub const fn gate(&self) -> Option<PreWriteGate> {
+        match self {
+            Self::Gates(stop) => stop.gate,
+            Self::Other(_) => None,
+        }
+    }
+
+    /// The geometry whose sealed plan the gate refused.
+    #[must_use]
+    pub const fn refused_geometry(&self) -> Option<&SupportedGeometry> {
+        match self {
+            Self::Gates(stop) => Some(&stop.geometry),
+            Self::Other(_) => None,
         }
     }
 }
@@ -156,7 +195,11 @@ impl ChainRefusal {
 impl std::fmt::Display for ChainRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Gates(detail) => write!(formatter, "pre-write gates refused: {detail}"),
+            Self::Gates(stop) => write!(
+                formatter,
+                "pre-write gates refused on {:?}: {}",
+                stop.geometry, stop.detail
+            ),
             Self::Other(detail) => formatter.write_str(detail),
         }
     }
@@ -481,22 +524,31 @@ pub fn seal_and_emit(
     // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
     // no file at `target` at all. There is no override parameter and there is
     // not going to be one.
-    let gated = plinth_pipeline::judge_then_emit(
+    let gated = match plinth_pipeline::judge_then_emit(
         &ModelId::new(name),
         authority,
         &EmitRequest {
             target_path: target.to_path_buf(),
             printer: saturn4_ultra().clone(),
         },
-    )
-    .map_err(|error| match &error {
-        // Carry the gate's own reason, not just the stage name: a refusal
-        // without the verdict behind it is not a measurement.
-        PipelineError::Gates { source, .. } => {
-            ChainRefusal::Gates(format!("{name}: {error}: {source}"))
+    ) {
+        Ok(gated) => gated,
+        Err(error) => {
+            return Err(match &error {
+                // Carry the gate's own reason, the gate itself, and the
+                // geometry it was refusing -- a refusal without the verdict
+                // behind it is not a measurement, and a gate verdict without
+                // the geometry it judged cannot be told apart from a verdict
+                // on the fallback.
+                PipelineError::Gates { source, .. } => ChainRefusal::Gates(GateStop {
+                    detail: format!("{name}: {error}: {source}"),
+                    gate: source.gate(),
+                    geometry: supported_geometry,
+                }),
+                _ => ChainRefusal::Other(format!("{name}: {error}")),
+            });
         }
-        _ => ChainRefusal::Other(format!("{name}: {error}")),
-    })?;
+    };
 
     Ok(ChainOutcome {
         model: name.to_owned(),

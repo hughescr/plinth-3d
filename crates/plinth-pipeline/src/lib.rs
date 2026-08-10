@@ -12,9 +12,12 @@
 
 pub mod gates;
 
+// `judge_pre_write_gates` is deliberately absent: it takes a caller-supplied
+// coverage request, which is an override in all but name, so `judge_then_emit`
+// is the only public way to reach the gate set.
 pub use gates::{
-    judge_pre_write_gates, judge_then_emit, registered_coverage_request, GateRefusal,
-    GatedEmission, PreWriteGate, PreWriteGateReport,
+    judge_then_emit, registered_coverage_request, GateRefusal, GatedEmission, PreWriteGate,
+    PreWriteGateReport,
 };
 
 use plinth_core::{m0_constants, ModelId, PrinterProfile};

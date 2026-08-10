@@ -98,8 +98,12 @@ pub struct TopologyAnalysis {
     pub shells: Vec<Shell>,
     /// Sealed shells nested at odd depth inside another sealed shell.
     pub cavities: usize,
-    /// Indices into `shells` of the negative-signed-volume cavities a correct
-    /// hollow is required to have, ascending. See [`mandated_cavity_shells`].
+    /// Indices into `shells` of the negative-signed-volume cavities that have
+    /// the *shape* of the one a correct hollow is required to have, ascending.
+    /// This is a structural classification, not a licence: a correct hollow
+    /// has exactly one, so only one of these is ever exempt from
+    /// `negative_shells` and any surplus is counted as a defect. See
+    /// [`mandated_cavity_shells`] and [`negative_shell_count`].
     pub mandated_cavity_shells: Vec<usize>,
 }
 
@@ -323,20 +327,42 @@ pub fn topology_metrics(analysis: &TopologyAnalysis) -> ArtifactTopologyMetrics 
         // exactly one negative-signed-volume cavity, so counting it would make
         // the metric's `= 0` bound unsatisfiable for every hollowed model. Only
         // inversion defects are counted. See [`mandated_cavity_shells`].
-        negative_shells: analysis
-            .shells
-            .iter()
-            .enumerate()
-            .filter(|(index, shell)| {
-                shell.signed_volume < 0.0 && !analysis.mandated_cavity_shells.contains(index)
-            })
-            .count(),
+        //
+        // **At most one.** The rule this exemption rests on is
+        // `plinth-hollow::validate_shell_topology`'s *exactly one* negative
+        // cavity, so the surplus of a multi-cavity mesh is counted back in. A
+        // genuine cavity paired with a nested inverted duplicate of the outer
+        // surface is structurally indistinguishable from two mandated cavities
+        // here, and the `cavities` metric carries no absolute bound, so this
+        // independent disk auditor is the only thing that would catch it.
+        negative_shells: negative_shell_count(analysis),
         winding: analysis
             .shells
             .iter()
             .map(|shell| shell.winding.metric_count())
             .sum(),
     }
+}
+
+/// Inward-wound shells that are not the single cavity a correct hollow is
+/// required to have.
+///
+/// Exactly one mandated cavity is exempt, because that is exactly what
+/// `plinth-hollow::validate_shell_topology` proves. Every further one is a
+/// surplus negative shell and is counted, so `negative_shells = 0` still
+/// refuses an inverted duplicate nested inside a genuine cavity.
+fn negative_shell_count(analysis: &TopologyAnalysis) -> usize {
+    let mandated = &analysis.mandated_cavity_shells;
+    let unexplained = analysis
+        .shells
+        .iter()
+        .enumerate()
+        .filter(|(index, shell)| {
+            // `mandated_cavity_shells` is ascending by construction.
+            shell.signed_volume < 0.0 && mandated.binary_search(index).is_err()
+        })
+        .count();
+    unexplained + mandated.len().saturating_sub(1)
 }
 
 fn add_metrics(total: &mut ArtifactTopologyMetrics, item: ArtifactTopologyMetrics) {
@@ -678,8 +704,13 @@ fn shell_nesting(mesh: &Mesh, shells: &[Shell]) -> Result<Nesting, MetricsError>
     })
 }
 
-/// Shells that are the one negative-signed-volume cavity a correct hollow is
-/// *required* to have, rather than an inversion defect.
+/// Shells shaped like the one negative-signed-volume cavity a correct hollow
+/// is *required* to have, rather than like an inversion defect.
+///
+/// This function classifies; it does not bound. The cardinality rule — at most
+/// one such cavity is exempt, because `validate_shell_topology` proves exactly
+/// one — is applied in [`negative_shell_count`], which counts every surplus
+/// back in.
 ///
 /// `plinth-hollow` proves a drilled shell only when the post-Boolean mesh is
 /// exactly one negative-signed-volume cavity component enclosed by positive

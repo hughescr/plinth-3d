@@ -22,6 +22,17 @@
 //! only then is `plinth_emit::write` called. A refused model therefore leaves
 //! no path on disk at all — not a truncated one, not an empty one.
 //!
+//! That claim is about the *path*, not merely about this call, so
+//! [`judge_then_emit`] also removes anything already sitting at the target on
+//! every refusal. Two ways an artifact could otherwise survive a refusal, both
+//! of which were reachable: `plinth_emit::write` used to save the project
+//! before auditing it, so a disk-audit rejection left the file it had just
+//! refused (it now stages and renames, and cleans up); and a *stale* artifact
+//! from an earlier run was never touched, so a model that emitted yesterday
+//! and is gate-refused today would still have had yesterday's file at the
+//! target. The acceptance test is "the output path does not exist", and it is
+//! the path this stage owns.
+//!
 //! [`PipelineExitCode::Gates`]: crate::PipelineExitCode::Gates
 
 use plinth_core::{m0_constants, ArtifactId, ModelId};
@@ -269,12 +280,21 @@ fn judge(
 
 /// Run every pre-write gate against one sealed snapshot.
 ///
+/// **Deliberately private.** It takes a caller-supplied
+/// [`CoverageMeasurementRequest`], and a caller-supplied radius is an override
+/// in all but name — pass a large enough one and every layout "covers". Public,
+/// it would have been the override [`judge_then_emit`] refuses to be, and
+/// [`PreWriteGateReport`] is constructible only here, so leaving it public
+/// would have made the gate set's verdict forgeable from outside the crate.
+/// The one public entry point is `judge_then_emit`, which derives the request
+/// from the registry.
+///
 /// # Errors
 ///
 /// Returns the first [`GateRefusal`] in [`PreWriteGate::ALL`] order. The
 /// authorization read and the snapshot integrity check precede every gate, so
 /// an unauthorized or incoherent run refuses before any measurement runs.
-pub fn judge_pre_write_gates(
+fn judge_pre_write_gates(
     artifact: &ArtifactId,
     snapshot: &SupportVerificationSnapshot<'_>,
     request: CoverageMeasurementRequest,
@@ -336,7 +356,15 @@ pub struct GatedEmission {
 /// caller-supplied radius would be an override in all but name — pass a large
 /// enough one and every layout "covers" — so the request is derived here from
 /// the registry, through [`registered_coverage_request`]. The one knob is what
-/// the constants say, and the constants are the ratified authority.
+/// the constants say, and the constants are the ratified authority. The
+/// request-taking [`judge_pre_write_gates`] is private for the same reason,
+/// which makes this the only public door to the gate set.
+///
+/// **On every error path `request.target_path` is left nonexistent**, including
+/// a path that was already occupied when this was called. See the module
+/// documentation: the invariant is about the path, not about this call, and a
+/// stale artifact at a refused model's target is exactly the misleading
+/// hand-off the gate exists to prevent.
 ///
 /// # Errors
 ///
@@ -347,6 +375,25 @@ pub struct GatedEmission {
 /// - [`PipelineError::Emit`] (exit code 4) when the write or its disk audit
 ///   fails.
 pub fn judge_then_emit(
+    model: &ModelId,
+    authority: FinalSupportAuthority<'_>,
+    request: &EmitRequest,
+) -> Result<GatedEmission, PipelineError> {
+    match judged_emission(model, authority, request) {
+        Ok(emission) => Ok(emission),
+        Err(error) => {
+            // The invariant is "a refused model leaves no path on disk", and
+            // this stage owns the path. `plinth_emit::write` already cleans up
+            // after itself; what only this scope can clean up is an artifact
+            // an *earlier* run left at the same target, which a gate refusal
+            // never reaches `write` to remove.
+            let _ = std::fs::remove_file(&request.target_path);
+            Err(error)
+        }
+    }
+}
+
+fn judged_emission(
     model: &ModelId,
     authority: FinalSupportAuthority<'_>,
     request: &EmitRequest,
