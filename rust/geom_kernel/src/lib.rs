@@ -20,6 +20,7 @@ mod queries;
 mod segment_batch;
 mod slicing;
 mod vec3;
+mod winding;
 
 pub mod testkit;
 
@@ -53,6 +54,9 @@ pub use slicing::{
     PLANE_SLICE_MERGE_TOLERANCE_MM,
 };
 pub use vec3::V3;
+pub use winding::{
+    signed_soup_volumes, wind_soups_outward, SignedSoupVolumeBatch, SignedVolumeError, SoupTriangle,
+};
 
 pub const KERNEL_API_VERSION: u32 = 1;
 
