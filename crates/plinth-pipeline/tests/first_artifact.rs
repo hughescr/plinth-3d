@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use chitubox_io::SegmentType;
 use plinth_hollow::{HollowDisposition, SolidDecisionReason};
-use plinth_mesh::make_overhang_table;
+use plinth_mesh::{make_overhang_table, make_toed_slab};
 
 /// A per-test scratch path that is removed on the way in and on the way out.
 struct Scratch(PathBuf);
@@ -156,92 +156,101 @@ fn assert_artifact_is_sound(outcome: &chain::ChainOutcome, audit: &chain::DiskAu
     );
 }
 
-/// The corpus Sphere is the model this phase exists for: it seals natively and
-/// it is the one model with a Python-era baseline artifact to compare against.
+/// **The corpus Sphere no longer reaches disk, and that is the fix.**
+///
+/// The Sphere hollows, drains, drills and seals — every one of those arrows
+/// still works, and this test still drives all of them. What changed is the
+/// last arrow: the pre-write coverage gate now judges the sealed plan, and the
+/// drilled shell's plan leaves uncovered islands. Before the gate was wired,
+/// that plan was written to a `.chitubox` and handed to the owner anyway,
+/// because *nothing* consulted a physics verdict before the write.
+///
+/// The refusal is terminal by design: `ChainRefusal::Gates` does not fall back
+/// to the oriented-solid reserve. The reserve answers "this geometry could not
+/// be sealed"; substituting a different geometry for a model the engine just
+/// declared under-supported would hand the owner a plausible artifact for a
+/// question it failed.
+///
+/// The uncovered islands themselves are a support-planning finding, not this
+/// seam's to fix. What this seam owes is that they stop the file.
 #[test]
-fn corpus_sphere_seals_lowers_and_emits_a_reparseable_chitubox() {
+fn corpus_sphere_drilled_plan_is_refused_before_any_file_exists() {
     require_corpus_stl("Sphere");
     let scratch = Scratch::new("sphere");
 
-    let outcome = chain::run_corpus_model("Sphere", scratch.path())
-        .expect("Sphere must reach a written file");
-    let audit = chain::audit_disk_artifact(scratch.path(), "Sphere")
-        .expect("reopen and audit the artifact");
-
-    assert_artifact_is_sound(&outcome, &audit);
-
-    // OQ-1, measured rather than assumed — RE-DERIVED 2026-08-08 (FU-8g H1),
-    // exactly as the previous pin demanded when it fired. The Sphere hollows,
-    // drains and drills, and the sealed support run now ACCEPTS the drilled
-    // shell: the `Preparation` refusal the previous pin recorded was the
-    // FU-8g wall itself — `initial::preflight` charging `contacts x faces`
-    // against the flat 4,000,000 work-items cap, which the drilled shell's
-    // face count blew. H1 replaced that fiction with the census pass's
-    // counted demand (no cap raised, lowered or touched), the counted demand
-    // fits, and the artifact is emitted from the drilled shell — the path the
-    // chain's own doc calls "the path the pipeline is ultimately meant to
-    // take". The OD-8 census and its seven frozen digests still run the
-    // solid handoff and are byte-identical; this seam is the only place the
-    // verdict moved.
-    //
-    // Pinned as an equality, not a `matches!`, so that the day the verdict
-    // moves again this fails and says so, instead of quietly changing what
-    // the owner is handed.
-    assert_eq!(
-        outcome.supported_geometry,
-        chain::SupportedGeometry::DrilledShellSealed,
-        "Sphere's supported geometry moved; re-derive what the export seam \
-         emits before trusting this artifact"
+    let refusal = chain::run_corpus_model("Sphere", scratch.path())
+        .expect_err("the Sphere's drilled plan does not cover its islands");
+    assert!(
+        refusal.is_gates(),
+        "Sphere must be refused by the gates, not by an earlier stage: {refusal}"
     );
     assert!(
-        outcome.prepared_faces > outcome.source_faces,
-        "the sealed drilled shell should have more faces than the source solid \
-         ({} vs {})",
-        outcome.prepared_faces,
-        outcome.source_faces
-    );
-    assert_eq!(
-        outcome.hollow_disposition,
-        HollowDisposition::HollowedAndDrilled,
-        "the emitted Sphere carries the drilled shell's own disposition"
+        refusal.detail().contains("gate UncoveredIslands refused"),
+        "the refusal must name the gate that spoke: {refusal}"
     );
 
-    // All three of the emitter's mesh families are exercised by this one model:
-    // frusta (taper/joiner/flare), spheres (tip/shaft) and the raft.
+    // The whole point: refused *before* the write, so there is nothing on disk
+    // to hand anyone — not a truncated file, not an empty one.
     assert!(
-        audit.frustum_records() > 0,
-        "Sphere emitted no frustum records: {:?}",
-        audit.records_by_segment_type
+        !scratch.path().exists(),
+        "a gate-refused model wrote {}",
+        scratch.path().display()
     );
-    assert!(
-        audit.sphere_records() > 0,
-        "Sphere emitted no sphere records: {:?}",
-        audit.records_by_segment_type
-    );
-    assert!(
-        audit.raft_records() > 0,
-        "Sphere emitted no raft records: {:?}",
-        audit.records_by_segment_type
-    );
-
-    // Frame invariant: the one lift the seal chose, carried once.
-    assert_eq!(outcome.lift_mm, chain::LIFT_MM);
 }
 
-/// A second model through the same seam, procedurally generated so this half of
-/// the phase needs no provisioned corpus at all.
+/// The same refusal on a model that needs no provisioned corpus, and the one
+/// `plinth-verify`'s own frozen coverage golden is built from: nine uncovered
+/// islands measured on `make_overhang_table`.
 #[test]
-fn procedural_overhang_table_seals_lowers_and_emits_a_reparseable_chitubox() {
+fn procedural_overhang_table_is_refused_before_any_file_exists() {
     let scratch = Scratch::new("overhang-table");
     let mesh = make_overhang_table().expect("procedural overhang table");
 
-    let outcome = chain::run_procedural_model("make_overhang_table", mesh, scratch.path())
-        .expect("make_overhang_table must reach a written file");
-    let audit = chain::audit_disk_artifact(scratch.path(), "make_overhang_table")
+    let refusal = chain::run_procedural_model("make_overhang_table", mesh, scratch.path())
+        .expect_err("make_overhang_table's plan leaves uncovered islands");
+    assert!(
+        refusal.is_gates(),
+        "make_overhang_table must be refused by the gates: {refusal}"
+    );
+    assert!(
+        !scratch.path().exists(),
+        "a gate-refused model wrote {}",
+        scratch.path().display()
+    );
+}
+
+/// The accepted path, unchanged by the gate: a plan whose coverage the verifier
+/// agrees with still lowers, still writes, and still survives the disk audit.
+///
+/// This is the assertion that the gate is a *gate* and not a wall.
+#[test]
+fn procedural_toed_slab_passes_the_gates_and_still_emits() {
+    let scratch = Scratch::new("toed-slab");
+    let mesh = make_toed_slab().expect("procedural toed slab");
+
+    let outcome = chain::run_procedural_model("make_toed_slab", mesh, scratch.path())
+        .expect("make_toed_slab's plan covers its islands and must reach a written file");
+    let audit = chain::audit_disk_artifact(scratch.path(), "make_toed_slab")
         .expect("reopen and audit the artifact");
 
     assert_artifact_is_sound(&outcome, &audit);
     assert_eq!(outcome.lift_mm, chain::LIFT_MM);
+
+    // Eleven of the twelve gates in `00-migration-guide.md` have no ported
+    // implementation yet. That is carried out to the caller rather than
+    // described in a comment, and pinned here so it cannot silently grow.
+    assert_eq!(
+        outcome.pending_gates.len(),
+        11,
+        "the ported-gate count moved: {:?}",
+        outcome.pending_gates
+    );
+    assert!(
+        !outcome
+            .pending_gates
+            .contains(&plinth_pipeline::PreWriteGate::UncoveredIslands),
+        "the coverage gate is ported and must not be listed as pending"
+    );
 }
 
 /// The hollow-error fallback, gated on a model that actually takes it.

@@ -5,6 +5,70 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-09 — the pre-write gate is wired, and it refuses three corpus models
+
+<a id="pre-write-gate-2026-08-09"></a>
+
+Until this landing, **nothing consulted a physics verdict before a `.chitubox` was
+written**. `plinth_emit::write` took no verdict, `plinth_verify::verify_coverage` had no
+non-test caller, `EMIT_REQUIRE_PASSED_GATES_DEFAULT` had zero readers, and
+`PipelineExitCode::Gates = 3` was reserved and unproduced. The only verification that ran
+was the format gate, *after* the write, on the bytes.
+
+`plinth_pipeline::gates` closes that. `judge_then_emit` judges the sealed verification
+snapshot while the authority is still un-lowered, and only a passing verdict reaches
+`into_supported_model` and `plinth_emit::write`. A refusal returns
+`PipelineError::Gates` (exit code 3) with the full `CoverageReport` attached and **no file
+at the target path**. There is no override parameter and there will not be one:
+`EMIT_REQUIRE_PASSED_GATES_DEFAULT` is read at the gate and can only ever refuse, which is
+the standing retirement of `PERF_GATE_EMIT_ON_VERIFY` made executable.
+
+**What it measures.** Gate 1 of the twelve in `00-migration-guide.md` is ported —
+uncovered islands, through `verify_coverage`. Its radius and patch-area floor are the
+*planner's own*, read from the same registered constants `plinth-support` builds its
+selection config from (`COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm, and
+`VOXEL_PITCH_MM²` = 0.16 mm²), so the gate measures the promise the planner made rather
+than inventing a second coverage physics. Its resource ceilings are the support policy's
+own registered coverage caps, through
+`SupportPreparationLimits::coverage_measurement_limits`. **No new constant was
+registered and no cap was raised, lowered or bypassed.** The other eleven gates are named
+in the same enum and reported through `PreWriteGateReport::pending`, so the incompleteness
+is a value a caller can read rather than eleven silent omissions.
+
+**The finding.** At the planner's own radius, three of the six reachable corpus models
+leave uncovered islands and therefore no longer reach disk:
+
+| model | verdict |
+|---|---|
+| `Sphere` (drilled shell) | refused — 2 blocking island defects |
+| `make_overhang_table` | refused — 1 blocking island defect |
+| `make_raking_blade` | refused — 2 blocking island defects |
+| `make_box` | passes, emits |
+| `make_toed_slab` | passes, emits |
+| `make_thin_fin` | passes, emits |
+
+Those artifacts were being produced and handed to the owner before this landing. The
+uncovered islands are a **support-planning finding**, not an export-seam one; what the
+export seam owed was that they stop the file, and now they do. A gate refusal is
+deliberately *terminal* in the first-artifact chain: it does not fall back to the
+oriented-solid reserve, because the reserve answers "this geometry could not be sealed",
+not "the sealed plan does not adequately support the model" — substituting a different
+geometry there would hand the owner a plausible artifact for a question the engine just
+failed.
+
+Landed alongside, in the same branch:
+
+- **`negative_shells` corrected.** The metric counted the mandated hollow cavity, which
+  made its `= 0` acceptance bound unsatisfiable for every correctly hollowed model. The
+  bound is unchanged; the counter now exempts a sealed shell nested at odd depth inside a
+  positive shell. See `04-migration-plan.md` §3.
+- **Plate-bound ulp false reject fixed.** `plinth-emit`'s disk audit measured world Z
+  against a second, separately rounded derivation of the plate; when `lift` and
+  `lift + centre_z` straddle a binade boundary it double-rounds and a raft pad sitting
+  exactly on the plate reads 1–2 ulp below it. The audit now measures against the binary32
+  the pads were actually emitted at; the frame check still binds the two derivations
+  together.
+
 ## 2026-08-05 — the line of record moved to `develop`
 
 Everything below this section was written while the engine line lived on a topic branch in

@@ -98,6 +98,9 @@ pub struct TopologyAnalysis {
     pub shells: Vec<Shell>,
     /// Sealed shells nested at odd depth inside another sealed shell.
     pub cavities: usize,
+    /// Indices into `shells` of the negative-signed-volume cavities a correct
+    /// hollow is required to have, ascending. See [`mandated_cavity_shells`].
+    pub mandated_cavity_shells: Vec<usize>,
 }
 
 /// The artifact-level portion of the M1 format metrics.
@@ -196,13 +199,20 @@ pub fn analyze_topology(mesh: &Mesh) -> Result<TopologyAnalysis, MetricsError> {
         .into_iter()
         .map(|faces| analyze_shell(mesh, &faces, &incidences))
         .collect::<Result<Vec<_>, _>>()?;
-    let cavities = closed_cavities(mesh, &shells)?;
+    let nesting = shell_nesting(mesh, &shells)?;
+    let cavities = nesting
+        .depths
+        .iter()
+        .filter(|depth| *depth % 2 == 1)
+        .count();
+    let mandated_cavity_shells = mandated_cavity_shells(&shells, &nesting);
     Ok(TopologyAnalysis {
         boundary_edges,
         nonmanifold_edges,
         inconsistent_winding_faces: inconsistent_winding_faces.into_iter().collect(),
         shells,
         cavities,
+        mandated_cavity_shells,
     })
 }
 
@@ -232,9 +242,9 @@ pub fn analyze_artifact_topology(
             .iter()
             .map(|support| analyze_topology(support.mesh()))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut metrics = metrics_for(&model);
+        let mut metrics = topology_metrics(&model);
         for support in &supports {
-            add_metrics(&mut metrics, metrics_for(support));
+            add_metrics(&mut metrics, topology_metrics(support));
         }
         add_metrics(&mut total, metrics);
         models.push(ModelTopologyAnalysis {
@@ -299,14 +309,27 @@ fn metric_value(value: usize) -> MetricValue {
     MetricValue::new(value as f64).expect("usize converts to finite f64")
 }
 
-fn metrics_for(analysis: &TopologyAnalysis) -> ArtifactTopologyMetrics {
+/// The artifact-level format metrics implied by one shell analysis.
+///
+/// Public so that the negative-shell and cavity accounting can be exercised
+/// directly on an analytic mesh, without routing a fixture through a written
+/// `.chitubox` first.
+#[must_use]
+pub fn topology_metrics(analysis: &TopologyAnalysis) -> ArtifactTopologyMetrics {
     ArtifactTopologyMetrics {
         cavities: analysis.cavities,
         boundary_edges: analysis.boundary_edges.len(),
+        // The mandated hollow cavity is exempt: a correct hollow *requires*
+        // exactly one negative-signed-volume cavity, so counting it would make
+        // the metric's `= 0` bound unsatisfiable for every hollowed model. Only
+        // inversion defects are counted. See [`mandated_cavity_shells`].
         negative_shells: analysis
             .shells
             .iter()
-            .filter(|shell| shell.signed_volume < 0.0)
+            .enumerate()
+            .filter(|(index, shell)| {
+                shell.signed_volume < 0.0 && !analysis.mandated_cavity_shells.contains(index)
+            })
             .count(),
         winding: analysis
             .shells
@@ -576,10 +599,24 @@ fn signed_volume(
     Ok(sum)
 }
 
-fn closed_cavities(mesh: &Mesh, shells: &[Shell]) -> Result<usize, MetricsError> {
-    let sealed = shells
+/// Per-shell containment nesting, indexed exactly like [`TopologyAnalysis::shells`].
+struct Nesting {
+    /// How many other sealed shells enclose this shell. Unsealed shells are 0.
+    depths: Vec<usize>,
+    /// The innermost enclosing shell index, when this shell is enclosed at all.
+    innermost_container: Vec<Option<usize>>,
+}
+
+fn shell_nesting(mesh: &Mesh, shells: &[Shell]) -> Result<Nesting, MetricsError> {
+    let sealed_indices = shells
         .iter()
-        .filter(|shell| shell.sealed)
+        .enumerate()
+        .filter(|(_, shell)| shell.sealed)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let sealed = sealed_indices
+        .iter()
+        .map(|&index| &shells[index])
         .collect::<Vec<_>>();
     let bounds = sealed
         .iter()
@@ -590,6 +627,9 @@ fn closed_cavities(mesh: &Mesh, shells: &[Shell]) -> Result<usize, MetricsError>
         .map(|shell| shell_boundary_probes(mesh, shell))
         .collect::<Vec<_>>();
     let mut depths = vec![0_usize; sealed.len()];
+    // Containers in ascending outer-shell order, so the innermost selection
+    // below is order-independent and therefore deterministic.
+    let mut containers: Vec<Vec<usize>> = vec![Vec::new(); sealed.len()];
     for (outer_index, outer) in sealed.iter().enumerate() {
         let shell_mesh = shell_mesh(mesh, &outer.faces)?;
         let mut gathered = Vec::new();
@@ -614,10 +654,56 @@ fn closed_cavities(mesh: &Mesh, shells: &[Shell]) -> Result<usize, MetricsError>
                 >= count * CAVITY_CONTAINMENT_MIN_NUMERATOR
             {
                 depths[inner_index] += 1;
+                containers[inner_index].push(outer_index);
             }
         }
     }
-    Ok(depths.into_iter().filter(|depth| depth % 2 == 1).count())
+
+    // Scatter the sealed-only result back onto the full shell list.
+    let mut shell_depths = vec![0_usize; shells.len()];
+    let mut innermost_container = vec![None; shells.len()];
+    for (sealed_index, &shell_index) in sealed_indices.iter().enumerate() {
+        shell_depths[shell_index] = depths[sealed_index];
+        // The innermost container is the enclosing shell that is itself
+        // enclosed by the most others; ties keep the lowest shell index.
+        innermost_container[shell_index] = containers[sealed_index]
+            .iter()
+            .copied()
+            .max_by_key(|&container| (depths[container], std::cmp::Reverse(container)))
+            .map(|container| sealed_indices[container]);
+    }
+    Ok(Nesting {
+        depths: shell_depths,
+        innermost_container,
+    })
+}
+
+/// Shells that are the one negative-signed-volume cavity a correct hollow is
+/// *required* to have, rather than an inversion defect.
+///
+/// `plinth-hollow` proves a drilled shell only when the post-Boolean mesh is
+/// exactly one negative-signed-volume cavity component enclosed by positive
+/// outer material (`validate_shell_topology`). Counting that mandated cavity as
+/// a `negative_shells` defect made the metric's `= 0` bound unsatisfiable for
+/// every correctly hollowed model, which is a defect in the counter and not in
+/// the bound. The exemption is narrow and structural: the shell must be sealed,
+/// enclosed at odd depth, and its innermost enclosing shell must have positive
+/// signed volume. An inverted outer shell is at depth 0 and keeps its count; a
+/// mesh whose outer shell is inverted *and* whose cavity is wound outward still
+/// counts the inverted outer shell, so the bound still catches it.
+fn mandated_cavity_shells(shells: &[Shell], nesting: &Nesting) -> Vec<usize> {
+    shells
+        .iter()
+        .enumerate()
+        .filter(|(index, shell)| {
+            shell.sealed
+                && shell.signed_volume < 0.0
+                && nesting.depths[*index] % 2 == 1
+                && nesting.innermost_container[*index]
+                    .is_some_and(|container| shells[container].signed_volume > 0.0)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 #[derive(Clone, Copy)]

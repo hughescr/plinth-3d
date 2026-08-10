@@ -20,15 +20,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chitubox_io::{Project, SegmentType};
-use plinth_core::{ArtifactId, LayerPlan, PositiveFinite, PrinterProfile};
+use plinth_core::{ArtifactId, LayerPlan, ModelId, PositiveFinite, PrinterProfile};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
-use plinth_emit::{write as emit_write, EmitReport, EmitRequest};
+use plinth_emit::{EmitReport, EmitRequest};
 use plinth_hollow::{
     HollowDisposition, HollowRequest, HollowStageOutput, HollowedModel, SolidDecisionReason,
 };
 use plinth_mesh::{load_binary_stl, Mesh, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
-use plinth_pipeline::{hollow_stage, OutputProfile};
+use plinth_pipeline::{hollow_stage, OutputProfile, PipelineError, PreWriteGate};
 use plinth_support::{run_support, SupportPreparationLimits, SupportRequest};
 use plinth_verify::{verify_artifact, StructuralFormatStatus};
 
@@ -120,6 +120,54 @@ pub enum SupportedGeometry {
     HollowStageRefused { refusal: String },
 }
 
+/// Why the chain did not reach an artifact.
+///
+/// The distinction is load-bearing, not cosmetic. The oriented-solid reserve
+/// answers a **support-run** refusal: the runner could not seal *this
+/// geometry*, so a different geometry is a legitimate second attempt. It does
+/// not answer a **gate** refusal, which is a physics verdict on a plan that
+/// sealed perfectly well; retrying it against the reserve would turn "this
+/// model is not adequately supported" into "here is a different artifact",
+/// which is precisely the substitution the pre-write gate exists to stop. A
+/// `Gates` refusal is therefore terminal, and no file is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainRefusal {
+    /// The pre-write physics gates refused. Terminal; no artifact on disk.
+    Gates(String),
+    /// Anything else on the way to an artifact, including a support-run
+    /// refusal that the oriented-solid reserve may answer.
+    Other(String),
+}
+
+impl ChainRefusal {
+    #[must_use]
+    pub const fn is_gates(&self) -> bool {
+        matches!(self, Self::Gates(_))
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Gates(detail) | Self::Other(detail) => detail,
+        }
+    }
+}
+
+impl std::fmt::Display for ChainRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gates(detail) => write!(formatter, "pre-write gates refused: {detail}"),
+            Self::Other(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
+impl From<String> for ChainRefusal {
+    fn from(detail: String) -> Self {
+        Self::Other(detail)
+    }
+}
+
 /// Everything the composition observed, reported rather than asserted so both
 /// callers can decide what to do with it.
 #[derive(Clone, Debug)]
@@ -132,6 +180,10 @@ pub struct ChainOutcome {
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
+    /// The pre-write gates that are named and consulted but not yet ported.
+    /// Carried out rather than described: the artifact below was authorized by
+    /// one gate out of twelve, and this is the list of the other eleven.
+    pub pending_gates: Vec<PreWriteGate>,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
@@ -266,12 +318,19 @@ fn orient(mesh: Mesh, baseline: &str) -> Result<plinth_orient::OrientedModel, St
 /// **Cases 0 and 3 are fallbacks and say so.** Neither is the path the pipeline
 /// is meant to take; both exist so that a model the engine cannot yet hollow or
 /// support as a shell still reaches an artifact, with the reason attached.
+///
+/// **A pre-write gate refusal is not one of them.** `ChainRefusal::Gates` is
+/// terminal here: the reserve answers "this geometry could not be sealed", not
+/// "the sealed plan does not adequately support the model". Retrying a gate
+/// refusal against a different geometry would hand the owner a *substitute*
+/// artifact for a model the engine just declared unsupported, which is the
+/// exact substitution the gate exists to prevent.
 pub fn run_from_oriented(
     name: &str,
     source_faces: usize,
     oriented: plinth_orient::OrientedModel,
     target: &Path,
-) -> Result<ChainOutcome, String> {
+) -> Result<ChainOutcome, ChainRefusal> {
     let printer = saturn4_ultra().clone();
 
     // Hold the oriented solid before the hollow stage consumes it. `OrientedModel`
@@ -298,7 +357,9 @@ pub fn run_from_oriented(
                 hollow_error_reserve_history,
                 SolidDecisionReason::BelowThreshold,
             )
-            .map_err(|error| format!("{name}: hollow-error solid handoff: {error}"))?;
+            .map_err(|error| {
+                ChainRefusal::Other(format!("{name}: hollow-error solid handoff: {error}"))
+            })?;
             return seal_and_emit(
                 name,
                 source_faces,
@@ -337,20 +398,24 @@ pub fn run_from_oriented(
         target,
     ) {
         Ok(outcome) => Ok(outcome),
+        // The gate spoke about the plan, not about the geometry. Stop.
+        Err(refusal @ ChainRefusal::Gates(_)) => Err(refusal),
         Err(refusal) => {
             let solid = HollowedModel::solid_decision(
                 reserve_mesh,
                 reserve_history,
                 SolidDecisionReason::BelowThreshold,
             )
-            .map_err(|error| format!("{name}: oriented-solid handoff: {error}"))?;
+            .map_err(|error| {
+                ChainRefusal::Other(format!("{name}: oriented-solid handoff: {error}"))
+            })?;
             seal_and_emit(
                 name,
                 source_faces,
                 solid,
                 SupportedGeometry::DrilledShellRefusedBySupport {
                     drilled_faces,
-                    refusal,
+                    refusal: refusal.detail().to_owned(),
                 },
                 target,
             )
@@ -358,17 +423,18 @@ pub fn run_from_oriented(
     }
 }
 
-/// Seal supports, lower to a `SupportedModel`, and emit one `.chitubox`.
+/// Seal supports, judge the pre-write gates, lower, and emit one `.chitubox`.
 ///
-/// This is the composition the design record calls the load-bearing gap: three
-/// existing arrows joined for the first time.
+/// This is the composition the design record calls the load-bearing gap —
+/// plus the gate the design record's own diagram left out. Nothing here
+/// creates `target` until every gate has spoken.
 pub fn seal_and_emit(
     name: &str,
     source_faces: usize,
     hollowed: HollowedModel,
     supported_geometry: SupportedGeometry,
     target: &Path,
-) -> Result<ChainOutcome, String> {
+) -> Result<ChainOutcome, ChainRefusal> {
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
 
@@ -380,17 +446,17 @@ pub fn seal_and_emit(
             (lo.min(vertex[2]), hi.max(vertex[2]))
         });
     if !min_z.is_finite() || !max_z.is_finite() {
-        return Err(format!("{name}: degenerate z extent"));
+        return Err(ChainRefusal::Other(format!("{name}: degenerate z extent")));
     }
     let span_mm = (max_z - min_z) + LIFT_MM + 1.0;
     let layer_count = ((span_mm / LAYER_PITCH_MM).ceil() as usize).max(1_000);
     let layers = LayerPlan::new(0.0, vec![LAYER_PITCH_MM; layer_count])
-        .map_err(|error| format!("layers: {error}"))?;
+        .map_err(|error| ChainRefusal::Other(format!("layers: {error}")))?;
     let delicacy = vec![0.0; prepared_faces];
 
-    let input = SupportPreparationLimits::production()
-        .map_err(|error| format!("limits: {error}"))?
-        .input(&layers, &delicacy, &[]);
+    let production_limits = SupportPreparationLimits::production()
+        .map_err(|error| ChainRefusal::Other(format!("limits: {error}")))?;
+    let input = production_limits.input(&layers, &delicacy, &[]);
     // A refusal without the bounds it was measured against is not a
     // measurement; carry the model-scaled caps on the failure path, as the
     // census harness does.
@@ -403,38 +469,34 @@ pub fn seal_and_emit(
     let authority = run_support(
         hollowed,
         SupportRequest {
-            lift_mm: PositiveFinite::new(LIFT_MM).map_err(|_| "lift".to_owned())?,
+            lift_mm: PositiveFinite::new(LIFT_MM)
+                .map_err(|_| ChainRefusal::Other("lift".to_owned()))?,
         },
         input,
     )
-    .map_err(|error| format!("{name}: support: {error} [{scaled_caps}]"))?;
+    .map_err(|error| ChainRefusal::Other(format!("{name}: support: {error} [{scaled_caps}]")))?;
 
-    let (routed_contacts, final_live_members, snapshot_digest) = {
-        let snapshot = authority
-            .verification_snapshot()
-            .map_err(|error| format!("snapshot: {error}"))?;
-        snapshot
-            .validate_integrity()
-            .map_err(|error| format!("snapshot integrity: {error}"))?;
-        (
-            snapshot.routed_contacts().count(),
-            snapshot.final_live_members().count(),
-            snapshot.digest(),
-        )
-    };
-
-    let supported = authority
-        .into_supported_model()
-        .map_err(|error| format!("{name}: lowering: {error}"))?;
-
-    let emit = emit_write(
-        &supported,
+    // The pre-write gate. `judge_then_emit` judges the sealed snapshot while
+    // the authority is still alive, and only a passing verdict reaches
+    // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
+    // no file at `target` at all. There is no override parameter and there is
+    // not going to be one.
+    let gated = plinth_pipeline::judge_then_emit(
+        &ModelId::new(name),
+        authority,
         &EmitRequest {
             target_path: target.to_path_buf(),
             printer: saturn4_ultra().clone(),
         },
     )
-    .map_err(|error| format!("{name}: emit: {error}"))?;
+    .map_err(|error| match &error {
+        // Carry the gate's own reason, not just the stage name: a refusal
+        // without the verdict behind it is not a measurement.
+        PipelineError::Gates { source, .. } => {
+            ChainRefusal::Gates(format!("{name}: {error}: {source}"))
+        }
+        _ => ChainRefusal::Other(format!("{name}: {error}")),
+    })?;
 
     Ok(ChainOutcome {
         model: name.to_owned(),
@@ -442,24 +504,29 @@ pub fn seal_and_emit(
         prepared_faces,
         hollow_disposition,
         supported_geometry,
-        routed_contacts,
-        final_live_members,
-        snapshot_digest,
-        primitive_count: supported.primitives().len(),
-        lift_mm: supported.lift_mm().get(),
-        plate_z_mm: supported.plate_z_mm().get(),
-        emit,
+        routed_contacts: gated.routed_contacts,
+        final_live_members: gated.final_live_members,
+        snapshot_digest: gated.snapshot_digest,
+        pending_gates: gated.gates.pending().to_vec(),
+        primitive_count: gated.primitive_count,
+        lift_mm: gated.lift_mm,
+        plate_z_mm: gated.plate_z_mm,
+        emit: gated.emit,
     })
 }
 
 /// The whole chain for one corpus model, start to written file.
-pub fn run_corpus_model(name: &str, target: &Path) -> Result<ChainOutcome, String> {
+pub fn run_corpus_model(name: &str, target: &Path) -> Result<ChainOutcome, ChainRefusal> {
     let (source, oriented) = prepare_from_corpus(name)?;
     run_from_oriented(name, source.tris().len(), oriented, target)
 }
 
 /// The whole chain for an in-repo procedural mesh.
-pub fn run_procedural_model(name: &str, mesh: Mesh, target: &Path) -> Result<ChainOutcome, String> {
+pub fn run_procedural_model(
+    name: &str,
+    mesh: Mesh,
+    target: &Path,
+) -> Result<ChainOutcome, ChainRefusal> {
     let source_faces = mesh.tris().len();
     let (_, oriented) = prepare_from_mesh(mesh, name)?;
     run_from_oriented(name, source_faces, oriented, target)

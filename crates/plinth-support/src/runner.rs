@@ -254,6 +254,47 @@ impl SupportPreparationLimits {
         })
     }
 
+    /// The coverage-verification ceilings implied by this same policy.
+    ///
+    /// The pre-write coverage gate re-measures the routed-contact projection
+    /// this policy's own specialized stage already routed, and then runs the
+    /// same `assess_coverage` traversal that stage ran. So it is held to that
+    /// stage's registered coverage ceilings rather than to a second set of
+    /// numbers invented for the verifier — there is exactly one owner for each
+    /// of these caps and it is not this function.
+    ///
+    /// The mapping is one-for-one with what
+    /// [`SupportVerificationSnapshot::measure_coverage`] charges:
+    ///
+    /// - route memberships and indexed points are both the coverage-route kNN
+    ///   batch's source points, because `measure_coverage` pushes exactly one
+    ///   `CoverageRoutePoint` per membership and hands that vector to the
+    ///   kernel as the source cloud;
+    /// - query rows are that batch's query points, one per coverage sample;
+    /// - distance work is that batch's `max_work`, the same `source × query`
+    ///   product the kernel charges;
+    /// - logical peak bytes and assessment work are the specialized stage's
+    ///   own `max_coverage_scratch_bytes` / `max_coverage_operations`, which
+    ///   `measure_coverage` passes straight into `CoverageAssessmentLimits`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoverageMeasurementError::InvalidLimits`] if any registered
+    /// ceiling is zero.
+    pub fn coverage_measurement_limits(
+        self,
+    ) -> Result<crate::CoverageMeasurementLimits, crate::CoverageMeasurementError> {
+        let knn = self.specialized_limits.coverage_route_knn;
+        crate::CoverageMeasurementLimits::new(
+            knn.max_source_points,
+            knn.max_source_points,
+            knn.max_query_points,
+            knn.max_work,
+            self.specialized_limits.max_coverage_scratch_bytes,
+            self.specialized_limits.max_coverage_operations,
+        )
+    }
+
     /// Binds this authority to one model, materializing the two model-scaled
     /// caps against that model's own face count.
     ///

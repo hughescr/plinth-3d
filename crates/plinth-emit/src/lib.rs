@@ -184,8 +184,21 @@ fn audit_disk(
         return Err(EmitError::DiskAuditRejected);
     }
 
+    // The world datum is `expected.plate_z` -- the one binary32 the raft pads
+    // were actually emitted at -- and deliberately NOT `reopened_plate_z`.
+    // Both name the same plate, but they are separately rounded derivations of
+    // it: the pads carry `f32(plate_z_mm - center_z)`, while `reopened_plate_z`
+    // is an f32 subtraction of the reopened lift from the reopened model
+    // minimum. When `lift` and `lift + center_z` straddle a binade boundary the
+    // second derivation double-rounds and lands 1-2 ulp above the first, so a
+    // pad sitting exactly on the plate measures a negative world Z and the
+    // `min[2] < 0.0` floor below refuses a perfect layout. Measuring against
+    // the pads' own datum makes a pad on the plate read exactly 0.0. The frame
+    // check above still binds the two derivations together, so this cannot
+    // hide a genuinely wrong plate or a second lift.
+    let plate_datum = expected.plate_z;
     let mut bounds = WorldBounds::empty();
-    bounds.extend_f32(&model_triangles, info.placement, reopened_plate_z)?;
+    bounds.extend_f32(&model_triangles, info.placement, plate_datum)?;
     for record in &records {
         if !record.r_start.is_finite()
             || !record.r_end.is_finite()
@@ -197,9 +210,9 @@ fn audit_disk(
         {
             return Err(EmitError::DiskAuditRejected);
         }
-        bounds.extend_f32(&record.mesh.xyz, info.placement, reopened_plate_z)?;
-        bounds.extend_point(record.start, info.placement, reopened_plate_z)?;
-        bounds.extend_point(record.end, info.placement, reopened_plate_z)?;
+        bounds.extend_f32(&record.mesh.xyz, info.placement, plate_datum)?;
+        bounds.extend_point(record.start, info.placement, plate_datum)?;
+        bounds.extend_point(record.end, info.placement, plate_datum)?;
     }
     bounds.validate_against(printer)?;
 
@@ -1572,6 +1585,60 @@ mod tests {
             ),
             Err(EmitError::DiskAuditRejected)
         );
+        std::fs::remove_file(target).unwrap();
+    }
+
+    /// A raft pad sitting *exactly* on the planned plate must emit, even when
+    /// the audit's reopened plate derivation lands an ulp away from the one the
+    /// pad was written at.
+    ///
+    /// The two derivations are `f32(plate_z_mm - center_z)` (what the pad
+    /// vertices carry) and `f32(model_min_z) - f32(lift)` (what the reopened
+    /// file yields). They agree whenever `lift` and `lift + center_z` share a
+    /// binade, because the f32 grid is then translation invariant under the
+    /// exactly-representable centre offset. This lift is chosen so they do not:
+    /// `center_z` is 0.5 and `7.5 + 2^-21 + 2^-30` rounds to `7.5 + 2^-21` in
+    /// binary32, whose sum with 0.5 is the exact tie `8 + 2^-21` and rounds to
+    /// even (8.0), while the unrounded `8 + 2^-21 + 2^-30` is above that tie and
+    /// rounds to `8 + 2^-20`. One ulp of separation, the pad one ulp *below* the
+    /// reopened plate, and the `min[2] < 0.0` floor used to refuse the file.
+    #[test]
+    fn raft_pad_exactly_on_the_plate_survives_a_one_ulp_plate_derivation_split() {
+        let lift = 7.5 + 2.0_f64.powi(-21) + 2.0_f64.powi(-30);
+        let center_z = 0.5_f64;
+
+        // Prove this fixture really is the ulp case before it proves the fix:
+        // the two derivations of the same plate differ by exactly one ulp.
+        let pad_datum = (-lift - center_z) as f32;
+        let reopened_datum = ((-center_z) as f32) - (lift as f32);
+        assert_ne!(
+            pad_datum.to_bits(),
+            reopened_datum.to_bits(),
+            "fixture no longer straddles the binade boundary it was chosen for"
+        );
+        assert!(
+            pad_datum < reopened_datum,
+            "the pad datum must sit below the reopened datum for the floor to fire"
+        );
+
+        let model = fixture_model(
+            vec![primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, -lift],
+                [0.0, 0.0, -lift],
+            )],
+            lift,
+        );
+        let target = fixture_path("plate-ulp.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("a pad exactly on the plate is a perfect layout, not a defect");
+        assert_eq!(report.support_record_count, 1);
         std::fs::remove_file(target).unwrap();
     }
 
