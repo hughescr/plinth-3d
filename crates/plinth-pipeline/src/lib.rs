@@ -437,6 +437,21 @@ pub struct ModelPreparationReport {
     pub source_path: PathBuf,
     /// `None` only when the model failed before decimation measured it.
     pub assumed_print_size: Option<AssumedPrintSize>,
+    /// What the automatic repair pre-pass did to this model's loaded input,
+    /// per defect class and per action.
+    ///
+    /// `None` only when the model failed before it was loaded. An
+    /// all-zero-count evidence and a `None` are different statements and the
+    /// report keeps them apart: the first says the pre-pass looked and found
+    /// nothing, the second says it never ran.
+    ///
+    /// **This is where a silent geometry change would otherwise hide.** The
+    /// 2026-08-10 ruling made repair automatic; an automatic repair that is
+    /// not reported is an unrecorded edit to the owner's model, so every
+    /// action carries its own row here and the run report prints a line for
+    /// any model the pre-pass touched.
+    #[serde(default)]
+    pub repair: Option<plinth_mesh::RepairEvidence>,
     pub outcome: ModelPreparationOutcome,
 }
 
@@ -592,6 +607,25 @@ pub enum PipelineError {
         #[source]
         source: plinth_core::LayerPlanError,
     },
+    /// The automatic repair pre-pass could not run at all.
+    ///
+    /// This is **not** the disposition of a model whose defects the pre-pass
+    /// could not fix: an unrepairable defect is recorded in
+    /// [`plinth_mesh::RepairEvidence`] and left for the unchanged closed-solid
+    /// gate to judge, which is the whole shape of the 2026-08-10 ruling. Nor is
+    /// it the disposition of an input the pre-pass declines to work on: an
+    /// input over the shard strip's resource bound has that action **skipped
+    /// and recorded** (FU-45), and a plan that would empty the mesh is rolled
+    /// back with the input returned unchanged (FU-46) — a repair pass may
+    /// always decline, and may never refuse a model. This variant means the
+    /// stage itself failed: the topology would not build, or the constants
+    /// registry would not publish.
+    #[error("model {model} could not be repaired before the gates")]
+    Repair {
+        model: ModelId,
+        #[source]
+        source: plinth_mesh::RepairError,
+    },
     #[error("model {model} failed production decimation")]
     Decimate {
         model: ModelId,
@@ -672,6 +706,9 @@ impl PipelineError {
             | Self::OrientationBaselineMissing { .. }
             | Self::DegenerateExtent { .. }
             | Self::Decimate { .. }
+            // The pre-pass reads the loaded input and nothing else, so a
+            // failure of it is a failure to make sense of the input file.
+            | Self::Repair { .. }
             | Self::Orient { .. } => PipelineExitCode::Input,
             Self::Delicacy { .. } | Self::LayerPlan { .. } => PipelineExitCode::Supports,
             Self::Hollow { .. } => PipelineExitCode::Hollow,
@@ -1140,6 +1177,7 @@ mod tests {
                     model: ModelId::new("mini-a"),
                     source_path: PathBuf::from("models/mini-a.stl"),
                     assumed_print_size: size(32.0),
+                    repair: None,
                     outcome: ModelPreparationOutcome::Artifact {
                         emit: EmitReport {
                             artifact_path: PathBuf::from("out/mini-a.chitubox"),
@@ -1154,6 +1192,7 @@ mod tests {
                     model: ModelId::new("mini-b"),
                     source_path: PathBuf::from("models/mini-b.stl"),
                     assumed_print_size: size(28.0),
+                    repair: None,
                     outcome: ModelPreparationOutcome::Stopped {
                         after: StageStop::Hollow,
                     },
@@ -1196,6 +1235,7 @@ mod tests {
             model: ModelId::new(name),
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: size(30.0),
+            repair: None,
             outcome,
         };
         let report = PrepareReport {
@@ -1255,6 +1295,7 @@ mod tests {
             model: ModelId::new(name),
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: None,
+            repair: None,
             outcome,
         };
         let sidecar = model(

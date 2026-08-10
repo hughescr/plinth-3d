@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 271], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 272], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1353,6 +1353,8 @@ placeholder_declarations! {
     "PLATE_BAND_MM", "mm", "scalar", "One owner for joint and connectivity plate-band tolerance.";
     pull_dist_mm: PositiveFinite = PositiveFinite::new(15.0)?;
     "PULL_DIST_MM", "mm", "scalar", "Uncalibrated opt-in removal translation distance.";
+    repair_pinch_split_max_mm: PositiveFinite = PositiveFinite::new(5.0e-5)?;
+    "REPAIR_PINCH_SPLIT_MAX_MM", "mm", "scalar", "Upper bound on the displacement the automatic repair pre-pass may give one copy of a split pinch vertex (plinth-mesh::repair, D-22 revision 2026-08-10). Not a target: the pre-pass escalates from one f32 ULP of the vertex's own magnitude and stops at the first displacement that survives both the exact-bit weld and the f32 binary-STL round trip, which on mini-scale coordinates lands near 1e-5 mm. This is a refusal boundary -- a pinch that still cannot be separated below it is left unrepaired and reported to the gate, never opened wider. Placeholder, not measured: a selected ceiling 280x below the Saturn 4 Ultra's 14 um narrow pixel pitch and 1000x below its 50 um layer, so a displacement at the cap cannot reach one printed voxel, and half the 1e-4 mm epsilon-weld tolerance the 2026-08-10 corpus census probed with. It bounds a repair, never a physics claim, and it is not on the accept path.";
     rewire_degenerate_len_mm: PositiveFinite = PositiveFinite::new(1e-4)?;
     "REWIRE_DEGENERATE_LEN_MM", "mm", "scalar", "Result-changing degenerate-span threshold.";
     rewire_max_slide_evals: NonZeroU64 = nonzero(50)?;

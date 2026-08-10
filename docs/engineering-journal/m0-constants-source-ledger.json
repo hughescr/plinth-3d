@@ -2004,6 +2004,16 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "REPAIR_PINCH_SPLIT_MAX_MM",
+      "classification": "runtime_repair_bound",
+      "normative": "docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md = 5.0e-5 mm",
+      "source_locators": [
+        "crates/plinth-mesh/src/repair.rs:separate"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder. New at the D-22 revision (owner ruling 2026-08-10); no legacy Python source, so no source locator outside this workspace. A selected refusal ceiling on the pinch-split displacement, not a measurement and not a target: the pre-pass escalates from one f32 ULP and stops at the first f32-exact position that separates the fans, which on mini-scale coordinates lands near 1e-5 mm. Two orders below the Saturn 4 Ultra pixel pitch and half the 1e-4 mm epsilon-weld tolerance the 2026-08-10 corpus census probed with."
+    },
+    {
       "id": "REWIRE_DEGENERATE_LEN_MM",
       "classification": "runtime_search",
       "normative": "03-physics-and-constants.md §3.10.1 = 1e-4 mm",

@@ -10,6 +10,7 @@ mod delicacy;
 mod delicacy_eval;
 mod fixtures;
 mod io;
+mod repair;
 mod topology;
 mod triage;
 
@@ -19,17 +20,24 @@ pub use delicacy::{
 };
 pub use delicacy_eval::evaluate_delicacy;
 pub use fixtures::{
-    make_box, make_box_default, make_overhang_table, make_overhang_table_with, make_raking_blade,
-    make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab, make_toed_slab_with,
+    make_box, make_box_default, make_doubled_sheet_box, make_duplicated_face_box,
+    make_dust_shard_box, make_edge_shared_boxes, make_overhang_table, make_overhang_table_with,
+    make_pinched_boxes, make_raking_blade, make_raking_blade_with, make_thin_fin,
+    make_thin_fin_with, make_toed_slab, make_toed_slab_with, make_triply_wound_face_box,
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
+pub use repair::{
+    repair_mesh, DuplicateDisposition, DuplicateFaceEvidence, DuplicateFaceGroup,
+    EmptyResultRefusal, PinchFanMove, PinchSplit, PinchSplitEvidence, RepairError, RepairEvidence,
+    RepairedMesh, ResidualTopology, ShardStripEvidence, UnrepairedPinch,
+};
 pub use topology::{
     build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,
-    ClosedComponent, ClosedComponentCertificate, FaceTopology, TopologyCounts, TopologyDigest,
-    TopologyError, TopologySchema, TopologyValidationError, WeldedView, FACE_TOPOLOGY_SCHEMA,
-    FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
-    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
-    TOPOLOGY_CUT_SAME_DIRECTION,
+    ClosedComponent, ClosedComponentCertificate, FaceTopology, PointOnlyVertex, TopologyCounts,
+    TopologyDigest, TopologyError, TopologySchema, TopologyValidationError, WeldedView,
+    FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
+    TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
+    TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
     triage_components, triage_settings, ComponentDescription, PreHollowed, TriageAdmissionError,

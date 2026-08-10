@@ -217,6 +217,7 @@ fn print_model(model: &ModelPreparationReport) {
         "  assumed print size  {}",
         print_size(model.assumed_print_size)
     );
+    print_repair(model);
     match &model.outcome {
         ModelPreparationOutcome::Artifact {
             emit,
@@ -265,6 +266,79 @@ fn print_model(model: &ModelPreparationReport) {
     }
 }
 
+/// What the automatic repair pre-pass did to this model, printed whenever it
+/// did anything at all **or declined to**.
+///
+/// **An automatic edit to the owner's geometry that nobody is told about is
+/// not automation, it is a silent modification.** The 2026-08-10 ruling made
+/// repair automatic and the reporting is the other half of that bargain: a
+/// model whose input was altered says so, on the same card as its result, with
+/// the counts per defect class. A model that needed nothing prints nothing —
+/// the pre-pass returned its input bit-identical and there is nothing to
+/// report.
+///
+/// **A refusal is not nothing.** A model whose only findings are
+/// refusal-shaped — the shard strip skipped because the raw input triages as
+/// pre-hollowed, or every pinch left unrepaired — changed no face, so gating
+/// this block on "did the pass change anything" would print a blank card and
+/// then let the model be refused with no stated reason. Those unrepaired
+/// entries are precisely the automation work items the standing doctrine of
+/// the same ruling says every remaining refusal must become; they were already
+/// in the serialized evidence and are now in the human-readable report too.
+fn print_repair(model: &ModelPreparationReport) {
+    for line in repair_lines(model) {
+        println!("{line}");
+    }
+}
+
+/// The repair block's lines, built rather than printed, so the decision about
+/// *what* gets reported is testable without capturing stdout.
+fn repair_lines(model: &ModelPreparationReport) -> Vec<String> {
+    let Some(repair) = &model.repair else {
+        return Vec::new();
+    };
+    let has_finding = repair.changed()
+        || repair.shards.skipped.is_some()
+        || repair.refused_to_empty.is_some()
+        || !repair.pinches.unrepaired.is_empty()
+        || repair.duplicates.degenerate_groups_skipped > 0;
+    if !has_finding {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("  repaired  {}", repair.summary_line())];
+    if let Some(refusal) = repair.refused_to_empty {
+        // The loudest line the block can print: the pass found a plan that
+        // deleted every triangle in the model and declined to apply it. The
+        // geometry below is the operator's own, unmodified.
+        lines.push(format!(
+            "  repair refused  applying this pass would have removed all {} face(s) ({} shard + {} duplicate); nothing was applied and the input is unchanged",
+            refusal.source_faces, refusal.shard_faces_planned, refusal.duplicate_faces_planned
+        ));
+    }
+    if let Some(reason) = &repair.shards.skipped {
+        lines.push(format!("  repair note  {reason}"));
+    }
+    if repair.duplicates.degenerate_groups_skipped > 0 {
+        lines.push(format!(
+            "  repair left in place  {} degenerate duplicate group(s), which belong to the edge-collapse doctrine and not to this pass",
+            repair.duplicates.degenerate_groups_skipped
+        ));
+    }
+    for pinch in &repair.pinches.unrepaired {
+        // A defect the pre-pass could not fix is named here and left to the
+        // gate. It is never a reason to move the cap it hit.
+        lines.push(format!("  repair left in place  {pinch:?}"));
+    }
+    if let Some(residual) = repair.residual {
+        if !residual.is_clean() {
+            lines.push(format!(
+                "  repair residual  {residual:?}  (the gate below judges this, unchanged)"
+            ));
+        }
+    }
+    lines
+}
+
 /// One line naming the geometry the artifact was actually built from, and
 /// saying outright when that is not the geometry the pipeline set out to make.
 fn describe(geometry: &SupportedGeometry) -> String {
@@ -306,4 +380,85 @@ fn print_size(size: Option<AssumedPrintSize>) -> String {
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use plinth_core::ModelId;
+    use plinth_mesh::{RepairEvidence, UnrepairedPinch};
+    use plinth_pipeline::{ModelPreparationOutcome, ModelPreparationReport};
+
+    use super::repair_lines;
+
+    fn report(repair: Option<RepairEvidence>) -> ModelPreparationReport {
+        ModelPreparationReport {
+            model: ModelId::new("fixture"),
+            source_path: std::path::PathBuf::from("fixture.stl"),
+            assumed_print_size: None,
+            repair,
+            outcome: ModelPreparationOutcome::Stopped {
+                after: plinth_pipeline::StageStop::Decimate,
+            },
+        }
+    }
+
+    #[test]
+    fn a_model_the_pre_pass_had_nothing_to_do_to_prints_nothing() {
+        assert!(repair_lines(&report(None)).is_empty());
+        assert!(repair_lines(&report(Some(RepairEvidence::default()))).is_empty());
+    }
+
+    /// **The refusal-shaped model.** Nothing was changed, so a `changed()`
+    /// gate would print an empty card and leave the reader with a gate refusal
+    /// and no stated cause. Each of the three refusal shapes has to reach the
+    /// report on its own.
+    #[test]
+    fn a_pre_pass_that_only_refused_still_reports_what_it_refused() {
+        let mut unrepaired = RepairEvidence::default();
+        unrepaired
+            .pinches
+            .unrepaired
+            .push(UnrepairedPinch::NoFanDirection { welded_vertex: 4 });
+        let lines = repair_lines(&report(Some(unrepaired)));
+        assert!(
+            lines.iter().any(|line| line.contains("NoFanDirection")),
+            "{lines:?}"
+        );
+
+        let mut skipped = RepairEvidence::default();
+        skipped.shards.skipped = Some("raw input triages as pre-hollowed".to_owned());
+        let lines = repair_lines(&report(Some(skipped)));
+        assert!(
+            lines.iter().any(|line| line.contains("pre-hollowed")),
+            "{lines:?}"
+        );
+
+        let mut degenerate = RepairEvidence::default();
+        degenerate.duplicates.degenerate_groups_skipped = 2;
+        let lines = repair_lines(&report(Some(degenerate)));
+        assert!(
+            lines.iter().any(|line| line.contains("degenerate")),
+            "{lines:?}"
+        );
+
+        // The refuse-to-empty case changed nothing *by construction* — that is
+        // the whole point of it — so a `changed()` gate would hide the single
+        // most important thing this pass can report.
+        let refused = RepairEvidence {
+            source_faces: 2,
+            refused_to_empty: Some(plinth_mesh::EmptyResultRefusal {
+                source_faces: 2,
+                shard_faces_planned: 0,
+                duplicate_faces_planned: 2,
+            }),
+            ..RepairEvidence::default()
+        };
+        let lines = repair_lines(&report(Some(refused)));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("would have removed all 2 face(s)")),
+            "{lines:?}"
+        );
+    }
 }

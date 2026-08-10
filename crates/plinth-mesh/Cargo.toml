@@ -12,9 +12,13 @@ publish = false
 geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 robust = { workspace = true }
+# The repair pre-pass's per-action evidence travels into the `plinth prepare`
+# run report, which is serialized. The evidence type is owned here, beside the
+# code that produces it, rather than copied into a report-side DTO that could
+# drift from it.
+serde = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 
 [dev-dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }

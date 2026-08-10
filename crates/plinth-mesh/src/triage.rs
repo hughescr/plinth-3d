@@ -80,6 +80,19 @@ pub fn triage_settings() -> Result<TriageSettings, TriageError> {
     TriageSettings::load()
 }
 
+/// The absolute ceilings [`TriageTopologyLimits::production`] publishes.
+///
+/// They live here, in the crate that owns the admission check, because two
+/// stages now admit raw input through it — the hollow stage's H0 boundary and
+/// the repair pre-pass — and a second private copy of these numbers is a
+/// second authority that will eventually disagree with the first.
+const PRODUCTION_MAX_RAW_VERTICES: usize = 16 * 1024 * 1024;
+const PRODUCTION_MAX_RAW_FACES: usize = 8 * 1024 * 1024;
+const PRODUCTION_MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
+const PRODUCTION_MAX_EDGE_OCCURRENCES: usize = 24 * 1024 * 1024;
+const PRODUCTION_MAX_VERTEX_INCIDENCES: usize = 24 * 1024 * 1024;
+const PRODUCTION_MAX_CONTAINMENT_PROBE_SLOTS: usize = 256 * 1024 * 1024;
+
 /// Resource limits for the raw-mesh triage admission check.
 ///
 /// These are limits on named inputs and bounded triage working slots, not a
@@ -113,6 +126,34 @@ impl TriageTopologyLimits {
             edge_occurrences,
             vertex_incidences,
             containment_probe_slots,
+        }
+    }
+
+    /// The absolute production ceiling for one raw mesh entering triage.
+    ///
+    /// **A cap that scales with its own charge is not a cap.** A caller that
+    /// builds these limits out of the very mesh it is about to admit makes
+    /// every comparison `n <= n`, so no budget can ever fire — the defect the
+    /// workspace already found and fixed once for the orientation search's own
+    /// work budget. These six numbers are therefore fixed, absolute, and
+    /// independent of the input: they are the values `plinth-hollow`'s
+    /// `H0AdmissionLimits::production()` has always admitted raw input with,
+    /// stated once here so the hollow stage and the repair pre-pass cannot
+    /// drift apart about how large an input is too large to open at all.
+    ///
+    /// They are resource exclusions and nothing else: they bound named input
+    /// counts and bounded working slots, never a physics claim and never a
+    /// verdict about geometry. Raising one is a resource decision with an
+    /// owner, not a fix for a refused model.
+    #[must_use]
+    pub const fn production() -> Self {
+        Self {
+            raw_vertices: PRODUCTION_MAX_RAW_VERTICES,
+            raw_faces: PRODUCTION_MAX_RAW_FACES,
+            retained_source_buffer_bytes: PRODUCTION_MAX_RETAINED_SOURCE_BYTES,
+            edge_occurrences: PRODUCTION_MAX_EDGE_OCCURRENCES,
+            vertex_incidences: PRODUCTION_MAX_VERTEX_INCIDENCES,
+            containment_probe_slots: PRODUCTION_MAX_CONTAINMENT_PROBE_SLOTS,
         }
     }
 
@@ -294,6 +335,42 @@ impl<'mesh> TriageTopologyAdmission<'mesh> {
     pub fn triage(self, weld_policy: WeldPolicy) -> Result<TriagedMesh, TriageError> {
         triage_components(self, weld_policy)
     }
+
+    /// The triage **verdict** alone: which components are shards and which
+    /// source faces they own, without building the welded, compacted mesh.
+    ///
+    /// **Why this exists.** The repair pre-pass runs on every raw input the
+    /// pipeline is handed, and it must not adopt a re-indexed mesh: its whole
+    /// byte-identity contract is that surviving faces keep the caller's own
+    /// numbering. It therefore reads [`TriageSummary::stripped_faces`] and
+    /// deletes those rows from its own arrays — so the compacted `TriagedMesh`
+    /// [`Self::triage`] returns was allocated at raw size (up to ~459k faces
+    /// in the corpus) and dropped unread on every single call.
+    ///
+    /// **Why skipping [`Self::verify_exact_bit_triage_output`] is not a
+    /// loosened check.** That postcondition proves the triaged *mesh* cannot
+    /// enlarge the raw vertex/face counts or expand the raw bounds before it
+    /// reaches voxel-grid construction. This entry point produces no mesh; it
+    /// produces a set of source face indices, and the only operation a caller
+    /// can perform with them is deletion. Both postconditions are then
+    /// satisfied by construction — deleting rows cannot raise a count and
+    /// cannot move a vertex, so no bound can expand — and there is no third
+    /// artifact for the check to have covered. The admission limits, which are
+    /// the actual cap, ran in [`Self::from_raw_mesh`] and are untouched. A
+    /// caller that wants the compacted mesh must still go through
+    /// [`Self::triage`] and its verification.
+    pub fn triage_summary(self, weld_policy: WeldPolicy) -> Result<TriageSummary, TriageError> {
+        let parts = triage_admitted(self.mesh, weld_policy, self.settings)?;
+        debug_assert!(
+            parts
+                .summary
+                .stripped_faces
+                .last()
+                .is_none_or(|face| *face < self.raw_faces),
+            "triage named a face outside the admitted raw mesh"
+        );
+        Ok(parts.summary)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -436,6 +513,7 @@ pub struct TriageSummary {
     component_count: usize,
     main_component: usize,
     stripped_components: Vec<usize>,
+    stripped_faces: Vec<usize>,
 }
 
 impl TriageSummary {
@@ -450,6 +528,19 @@ impl TriageSummary {
     #[must_use]
     pub fn stripped_components(&self) -> &[usize] {
         &self.stripped_components
+    }
+    /// The **source** face indices the shard criteria removed, ascending.
+    ///
+    /// [`TriagedMesh`] hands back a welded, compacted mesh, which is the right
+    /// answer for the hollow stage and the wrong one for a caller that must
+    /// leave every surviving byte of its input alone. This is the same verdict
+    /// expressed against the caller's own face numbering, so a repair can drop
+    /// exactly these rows instead of adopting a re-indexed mesh — and so the
+    /// shard criteria stay in this one place rather than being re-implemented
+    /// by whoever needs source indices.
+    #[must_use]
+    pub fn stripped_faces(&self) -> &[usize] {
+        &self.stripped_faces
     }
 }
 
@@ -524,6 +615,48 @@ fn triage_components_admitted(
     weld_policy: WeldPolicy,
     settings: TriageSettings,
 ) -> Result<TriagedMesh, TriageError> {
+    let parts = triage_admitted(mesh, weld_policy, settings)?;
+    // `stripped_faces` is exactly the set the criteria removed, in this same
+    // face numbering, so the kept rows are read off it rather than from a
+    // second copy of the component test.
+    let stripped = parts
+        .summary
+        .stripped_faces
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let kept_faces = parts
+        .faces
+        .iter()
+        .enumerate()
+        .filter_map(|(face, triangle)| (!stripped.contains(&face)).then_some(*triangle))
+        .collect::<Vec<_>>();
+    let compacted = compact_mesh(&parts.verts, &kept_faces, weld_policy)?;
+    Ok(TriagedMesh {
+        mesh: compacted,
+        summary: parts.summary,
+    })
+}
+
+/// The welded arrays and the shard verdict, before either is turned into a
+/// mesh.
+///
+/// Splitting this out is what lets [`TriageTopologyAdmission::triage_summary`]
+/// answer "which faces are dust" without allocating a compacted mesh the
+/// caller is going to drop. There is exactly one implementation of the six
+/// criteria and it is here; the two entry points differ only in what they do
+/// with its answer.
+struct TriageParts {
+    verts: Vec<[f64; 3]>,
+    faces: Vec<[u32; 3]>,
+    summary: TriageSummary,
+}
+
+fn triage_admitted(
+    mesh: &Mesh,
+    weld_policy: WeldPolicy,
+    settings: TriageSettings,
+) -> Result<TriageParts, TriageError> {
     if matches!(weld_policy, WeldPolicy::None) {
         return Err(TriageError::UnweldedInput);
     }
@@ -635,18 +768,20 @@ fn triage_components_admitted(
         }));
     }
 
-    let kept_faces = faces
-        .iter()
-        .enumerate()
-        .filter_map(|(face, triangle)| (!shards.contains(&components[face])).then_some(*triangle))
+    // `components` is indexed by source face, so the stripped rows are read off
+    // in the caller's own numbering in one ascending pass -- no second pass and
+    // no second copy of the criteria.
+    let stripped_faces = (0..faces.len())
+        .filter(|face| shards.contains(&components[*face]))
         .collect::<Vec<_>>();
-    let compacted = compact_mesh(&view.verts, &kept_faces, weld_policy)?;
-    Ok(TriagedMesh {
-        mesh: compacted,
+    Ok(TriageParts {
+        verts: view.verts,
+        faces,
         summary: TriageSummary {
             component_count,
             main_component: main,
             stripped_components: shards.into_iter().collect(),
+            stripped_faces,
         },
     })
 }
