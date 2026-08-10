@@ -14,4 +14,5 @@ path = "src/main.rs"
 # one M0 publication directly rather than restating 2.5 as a CLI literal.
 plinth-core = { path = "../plinth-core" }
 plinth-hollow = { path = "../plinth-hollow" }
+plinth-orient = { path = "../plinth-orient" }
 plinth-pipeline = { path = "../plinth-pipeline" }

@@ -4000,7 +4000,10 @@ mod tests {
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
     use plinth_hollow::{HollowedModel, SolidDecisionReason};
     use plinth_mesh::{make_box, make_overhang_table};
-    use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationHistory, OrientationProvenance, OrientationReport,
+        RigidTransform,
+    };
 
     use super::*;
     use geom_kernel::KnnBatchLimits;
@@ -4217,7 +4220,9 @@ mod tests {
         let orientation = OrientationHistory::from_reports(
             decimation,
             OrientationReport {
-                pinned_report: PathBuf::from("runner-required-fixture.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("runner-required-fixture.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },

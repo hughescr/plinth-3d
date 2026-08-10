@@ -2314,7 +2314,10 @@ mod tests {
     use plinth_hollow::{
         HollowDisposition, HollowHistory, HollowReport, HollowedModel, SolidDecisionReason,
     };
-    use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationHistory, OrientationProvenance, OrientationReport,
+        RigidTransform,
+    };
     use std::path::PathBuf;
 
     fn fixture_decimation_audit() -> DecimationAudit {
@@ -2353,7 +2356,9 @@ mod tests {
         let orientation = OrientationHistory::from_reports(
             decimation,
             OrientationReport {
-                pinned_report: PathBuf::from("fixture.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("fixture.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },
@@ -2615,7 +2620,9 @@ mod tests {
         let orientation = OrientationHistory::from_reports(
             decimation,
             OrientationReport {
-                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },

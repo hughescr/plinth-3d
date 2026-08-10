@@ -22,11 +22,11 @@ use std::path::PathBuf;
 
 use plinth_core::{M0ConstantsError, PositiveFinite};
 use plinth_hollow::{checked_wall_mm, registered_wall, HollowError, WallSelection};
-use plinth_pipeline::{OrientationPolicy, OutputProfile};
+use plinth_pipeline::OutputProfile;
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheMode {
@@ -42,6 +42,33 @@ impl CacheMode {
     }
 }
 
+/// The orientation authority the operator selected.
+///
+/// **`--orient dense` is the default and is what an omitted flag means** — the
+/// recorded M8 default (`04-migration-plan.md:1721`). Until this flag existed
+/// the CLI hardcoded a policy with no implementation, so `plinth prepare`
+/// refused every model it was ever handed; flipping the default is what closes
+/// that standing product defect.
+///
+/// **Parsing opens no file.** `pinned:DIR` records a path and nothing else; the
+/// directory scan that turns it into a per-stem policy lives in
+/// [`execute`](crate::execute), because a parser that reads the filesystem
+/// cannot be tested without one.
+///
+/// There is deliberately **no `--orient-scar-weight`**: the scar weight is a
+/// registered constant, not an operator input, and a flag for it would be a
+/// second authority over a number the registry already owns.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum OrientSelection {
+    /// Search every model's orientation.
+    #[default]
+    Dense,
+    /// Replay `DIR/<stem>.pipeline.json` for each model, by stem. A model the
+    /// directory does not name is refused per model, never given a neighbour's
+    /// rotation.
+    Pinned(PathBuf),
+}
+
 /// The complete user-selected CLI state and the compile-time handoff seam for
 /// a later resource resolver. It is intentionally not a partial or fabricated
 /// `PrepareRequest`.
@@ -52,7 +79,7 @@ impl CacheMode {
 pub struct PrepareSelection {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
-    pub orientation: OrientationPolicy,
+    pub orientation: OrientSelection,
     pub output_profile: OutputProfile,
     /// The hollow shell wall the operator selected for every model in this
     /// request, defaulted from `HOLLOW_WALL_DEFAULT_MM` when `--wall-mm` is
@@ -82,6 +109,11 @@ pub enum ParseError {
     NonUnicodeOutputProfile(OsString),
     UnknownOutputProfile(String),
     NonUnicodeWallMm(OsString),
+    NonUnicodeOrientMode(OsString),
+    /// `--orient` was given a mode that is not one of the two sanctioned
+    /// spellings. There is exactly one spelling per concept, so a near-miss is
+    /// refused rather than guessed at.
+    UnknownOrientMode(String),
     /// `--wall-mm` was given a wall the hollow stage will not accept: not a
     /// positive finite number of millimetres, or finer than the frozen voxel
     /// pitch that stage selects cavities on.
@@ -112,6 +144,15 @@ impl std::fmt::Display for ParseError {
                 formatter,
                 "unexpected positional argument {:?}",
                 value.to_string_lossy()
+            ),
+            Self::NonUnicodeOrientMode(value) => write!(
+                formatter,
+                "orientation mode is not valid Unicode: {:?}",
+                value.to_string_lossy()
+            ),
+            Self::UnknownOrientMode(value) => write!(
+                formatter,
+                "unknown orientation mode {value:?}; expected dense or pinned:DIR"
             ),
             Self::NonUnicodeOutputProfile(value) => write!(
                 formatter,
@@ -168,6 +209,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut output_dir = None;
     let mut output_profile = None;
     let mut wall_mm = None;
+    let mut orientation = None;
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
     let mut index = 0;
@@ -228,6 +270,27 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     Err(_) => return Err(ParseError::InvalidWallMm(value.to_owned())),
                 });
             }
+            Some("--orient") => {
+                let raw = take_value("--orient", arguments, &mut index)?;
+                if orientation.is_some() {
+                    return Err(ParseError::DuplicateFlag("--orient"));
+                }
+                let value = raw
+                    .to_str()
+                    .ok_or_else(|| ParseError::NonUnicodeOrientMode(raw.clone()))?;
+                orientation = Some(match value {
+                    "dense" => OrientSelection::Dense,
+                    _ => match value.strip_prefix("pinned:") {
+                        // An empty directory is refused here rather than
+                        // resolving to the process working directory, which is
+                        // not a thing the operator named.
+                        Some(directory) if !directory.is_empty() => {
+                            OrientSelection::Pinned(PathBuf::from(directory))
+                        }
+                        _ => return Err(ParseError::UnknownOrientMode(value.to_owned())),
+                    },
+                });
+            }
             Some("--no-cache") => {
                 if no_cache_seen {
                     return Err(ParseError::DuplicateFlag("--no-cache"));
@@ -247,7 +310,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
         input_models_dir: input_models_dir
             .ok_or(ParseError::MissingRequiredFlag("--input-models-dir"))?,
         output_dir: output_dir.ok_or(ParseError::MissingRequiredFlag("--out-dir"))?,
-        orientation: OrientationPolicy::LegacyCoarse,
+        orientation: orientation.unwrap_or_default(),
         output_profile: output_profile.ok_or(ParseError::MissingRequiredFlag("--output"))?,
         wall_mm: match wall_mm {
             Some(selected) => selected,
@@ -321,7 +384,7 @@ mod tests {
         let parsed = selection(parse_args(stable_arguments()).unwrap());
         assert_eq!(parsed.input_models_dir, PathBuf::from("input models"));
         assert_eq!(parsed.output_dir, PathBuf::from("prepared output"));
-        assert_eq!(parsed.orientation, OrientationPolicy::LegacyCoarse);
+        assert_eq!(parsed.orientation, OrientSelection::Dense);
         assert_eq!(parsed.output_profile, OutputProfile::Saturn4Ultra);
         assert_eq!(parsed.cache, CacheMode::Enabled);
         assert!(!parsed.cache.no_cache());
@@ -334,6 +397,56 @@ mod tests {
         // compatibility representation sits between CLI and policy assembly.
         fn later_prepare_request_resolver(_: PrepareSelection) {}
         later_prepare_request_resolver(parsed);
+    }
+
+    /// The two sanctioned spellings, and nothing between them.
+    ///
+    /// Parsing opens no file: `pinned:DIR` records the path and the directory
+    /// scan happens in `execute`, so this test can name a directory that does
+    /// not exist and still describe the parser completely.
+    #[test]
+    fn orient_accepts_exactly_dense_and_pinned_and_defaults_to_dense() {
+        let with = |mode: &str| {
+            let mut arguments = stable_arguments().to_vec();
+            arguments.extend(["--orient", mode]);
+            parse_args(arguments)
+        };
+
+        assert_eq!(
+            selection(with("dense").unwrap()).orientation,
+            OrientSelection::Dense
+        );
+        assert_eq!(
+            selection(with("pinned:corpus/baseline").unwrap()).orientation,
+            OrientSelection::Pinned(PathBuf::from("corpus/baseline"))
+        );
+        // An omitted flag is the dense sweep, which is the recorded M8 default.
+        assert_eq!(
+            selection(parse_args(stable_arguments()).unwrap()).orientation,
+            OrientSelection::Dense
+        );
+
+        for rejected in [
+            "",
+            "pinned",
+            "pinned:",
+            "Dense",
+            "legacy_coarse",
+            "legacy-13",
+        ] {
+            assert_eq!(
+                with(rejected),
+                Err(ParseError::UnknownOrientMode(rejected.to_owned())),
+                "{rejected:?} must be refused rather than guessed at"
+            );
+        }
+
+        let mut twice = stable_arguments().to_vec();
+        twice.extend(["--orient", "dense", "--orient", "dense"]);
+        assert_eq!(
+            parse_args(twice),
+            Err(ParseError::DuplicateFlag("--orient"))
+        );
     }
 
     #[test]

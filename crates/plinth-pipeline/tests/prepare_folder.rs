@@ -110,19 +110,21 @@ impl Drop for Scratch {
     }
 }
 
-/// A request whose orientation is pinned per model, by source stem.
+/// A request whose orientation is pinned per model, by source stem — or, when
+/// no baselines are named, the default dense sweep.
 ///
-/// `OrientationPolicy::Pinned` is the only policy that can orient anything
-/// today, and it is a **map**: a pinned baseline records one mesh's rotation
-/// and `plinth_orient::run` cannot tell that it was handed a different mesh, so
-/// each model in a folder names its own or is refused.
+/// `OrientationPolicy::Pinned` is a **map**: a pinned baseline records one
+/// mesh's rotation and `plinth_orient::run` cannot tell that it was handed a
+/// different mesh, so each model in a folder names its own or is refused. The
+/// dense sweep has no such hazard — it measures the mesh in front of it — which
+/// is why it, and not a pin, is the default.
 fn request(scratch: &Scratch, orientation: &[(&str, &str)]) -> PrepareRequest {
     let printer = OutputProfile::Saturn4Ultra
         .resolve()
         .expect("M0 Saturn profile")
         .clone();
     let orientation = if orientation.is_empty() {
-        OrientationPolicy::LegacyCoarse
+        OrientationPolicy::DenseSweep
     } else {
         OrientationPolicy::Pinned(
             orientation
@@ -410,36 +412,66 @@ fn a_refusal_removes_an_earlier_runs_artifact_at_the_same_target() {
     );
 }
 
-/// The legacy-coarse orientation policy refuses **per model**, and does not
-/// crash, guess, or quietly choose identity.
+/// **The dense sweep orients a corpus model end to end, deterministically.**
 ///
-/// This is the current honest state of the ratified CLI surface: `parse_args`
-/// hardcodes `OrientationPolicy::LegacyCoarse` and there is no `--orient` flag,
-/// so `plinth prepare` reaches this refusal for every model. The native coarse
-/// search of `02-target-architecture.md` §6 is unported; choosing identity in
-/// its absence would be inferring an orientation, which `plinth-orient` refuses
-/// to do even for identity.
+/// This is the test the previous one could not be. Before `--orient` and the
+/// `DenseSweep` default landed, the only policy that could orient anything was
+/// a pin, so `plinth prepare` on arbitrary input reached a per-model refusal
+/// and wrote nothing at all. Here a committed corpus model goes in with **no
+/// baseline named anywhere**, the sweep chooses its own orientation, and a real
+/// `.chitubox` comes out of a temp directory.
+///
+/// Three things are asserted, and the third is the one that matters:
+///
+/// 1. the run emits, under the default policy, with no pin in sight;
+/// 2. the orientation is a *searched* one — the report carries the sweep's own
+///    provenance, not a replayed rotation;
+/// 3. two runs agree **byte for byte**, artifact and report both. The sweep
+///    reads no clock and seeds nothing, its folds are serial in index order and
+///    its rayon use is index-parallel map-collect, so this is a determinism
+///    claim rather than a coincidence of one process.
 #[test]
-fn the_unported_orientation_policy_refuses_per_model_rather_than_crashing() {
-    let scratch = Scratch::new("legacy-coarse");
+fn the_dense_sweep_orients_a_corpus_model_end_to_end_and_is_bit_stable() {
+    let scratch = Scratch::new("dense-sweep");
     scratch.place("make_toed_slab.prepped.stl", "mini");
+    let target = scratch.output().join("mini.chitubox");
 
-    let report = prepare(request(&scratch, &[]))
-        .expect("an unorientable model is a disposition, not a run failure");
-
-    let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, "mini") else {
-        panic!("an unorientable model must fail by name");
+    // `request(&scratch, &[])` is the DEFAULT policy: no baseline is named for
+    // this model or any other.
+    let first = prepare(request(&scratch, &[])).expect("the dense sweep must orient this model");
+    let ModelPreparationOutcome::Artifact { emit, .. } = outcome(&first, "mini") else {
+        panic!(
+            "the searched model must reach an artifact; it reported {:?}",
+            outcome(&first, "mini")
+        );
     };
-    assert_eq!(*exit_code, PipelineExitCode::Input);
-    assert!(
-        detail.contains("orientation is never inferred"),
-        "the refusal must say why it is a refusal: {detail}"
-    );
-    assert!(!scratch.output().join("mini.chitubox").exists());
+    assert_eq!(emit.artifact_path, target);
+    assert!(target.is_file(), "{} was not written", target.display());
+    let artifact = std::fs::read(&target).expect("read the emitted artifact");
+    assert!(!artifact.is_empty());
 
-    // The model was still measured before the policy refused it, so the
-    // operator learns the assumed print size even on this path.
-    assert!(report.models[0].assumed_print_size.is_some());
+    // Nothing was pinned, and nothing borrowed a rotation: the request this
+    // test built names no baseline for any stem.
+    assert_eq!(
+        request(&scratch, &[]).orientation,
+        OrientationPolicy::DenseSweep
+    );
+
+    let second = prepare(request(&scratch, &[])).expect("the second run must also orient");
+    assert_eq!(
+        first, second,
+        "the run report is not bit-stable under search"
+    );
+    assert_eq!(
+        serde_json::to_string(&first).expect("report serializes"),
+        serde_json::to_string(&second).expect("report serializes"),
+        "the serialized report is not byte-identical across searched runs"
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("read the re-emitted artifact"),
+        artifact,
+        "two dense-sweep runs produced different bytes for the same model"
+    );
 }
 
 /// Two runs over the same folder produce the same report, byte for byte.

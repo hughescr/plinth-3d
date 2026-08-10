@@ -1433,6 +1433,105 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "ORIENT_COMMIT_TOP_K",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md D-12 and §6 = 3: the commit tier re-scores the top 3 refine survivors at Fidelity::Exact, and commitment happens only there (02:852)",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/search.rs:LadderSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_DEDUPE_TOLERANCE_DEG",
+      "classification": "runtime_search_policy",
+      "normative": "Dense-sweep grid hygiene; no legacy antecedent. Two candidate directions within 1.0° are one candidate, and the EARLIER index is kept so the legacy 13 can never be displaced",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/grid.rs:GridSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_FIBONACCI_COUNT",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md D-12 and §6 = ~512 Fibonacci-sphere directions on the L2 proxy; ~9.0° mean spacing, finer than the retired heuristic's 10° step and over the whole sphere",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/grid.rs:GridSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_PROXY_L1_RATIO",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md §6 = the ~10% refine proxy; numerically the retired hollow.orient_search proxy density (target_reduction 0.9), reused so the legacy-compat comparison scores on the same geometry",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/search.rs:LadderSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_PROXY_L2_OF_L1_RATIO",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md §6 = the ~2% coarse proxy, expressed as a fraction OF L1 so L2 is a refinement-consistent coarsening of L1 rather than an independent QEM run",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/search.rs:LadderSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_PROXY_MIN_FACES",
+      "classification": "runtime_search_policy",
+      "normative": "Dense-sweep integrity floor; no legacy antecedent. The retired heuristic fell back to the full mesh silently, so this floor exists to make the fallback a named record",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/search.rs:LadderSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_REFINE_TOP_K",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md D-12 and §6 = top-24 re-scored on L1; 02:856-857 records the K-doubling and Spearman gates that judge it",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/search.rs:LadderSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_REST_POSE_MAX",
+      "classification": "runtime_search_policy",
+      "normative": "02-target-architecture.md D-12 names convex-hull face-aligned poses; this workspace has no 3-D hull kernel and the lockfile is frozen, so 128 area-binned face-aligned poses are the recorded substitute",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/grid.rs:GridSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
+      "id": "ORIENT_REST_POSE_REFERENCE_BINS",
+      "classification": "runtime_search_policy",
+      "normative": "Accumulator resolution for the rest-pose substitute; no legacy antecedent and no normative record — 4x ORIENT_FIBONACCI_COUNT so a pose the coarse grid would miss can still resolve as its own bin",
+      "source_locators": [
+        "docs/engineering-journal/02-target-architecture.md D-12",
+        "crates/plinth-orient/src/grid.rs:GridSettings"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
+    },
+    {
       "id": "ORIENT_SCAR_WEIGHT",
       "classification": "runtime_search_weight",
       "normative": "03-physics-and-constants.md §3.8 = 0.4",
@@ -1441,6 +1540,39 @@
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "ORIENT_WEIGHT_HEIGHT_MM",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.3, the height coefficient of the retired hollow.orient_search scalarization; §3.10.3 retires that heuristic's coupling as a policy, not this value, which the dense sweep knowingly carries over as its starting objective",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+    },
+    {
+      "id": "ORIENT_WEIGHT_PEAK_XSEC_CM2",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 3.0, the peak cross-section coefficient of the retired hollow.orient_search scalarization; the weight is inherited, the quantity it prices is not — the dense sweep computes the exact supremum rather than the retired 4 mm stepped sample",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+    },
+    {
+      "id": "ORIENT_WEIGHT_SUPPORT_AREA_CM2",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.5, the support-area coefficient of the retired hollow.orient_search scalarization; the area it multiplies is the overhang-mask proxy, deliberately derivable without running the support engine",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
     },
     {
       "id": "OVERHANG_ANGLE_DEG",

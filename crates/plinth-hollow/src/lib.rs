@@ -2023,7 +2023,9 @@ mod tests {
     use super::*;
     use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
     use plinth_mesh::{load_binary_stl, make_box, mesh_fingerprint};
-    use plinth_orient::{BaselineSelection, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform,
+    };
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
@@ -2051,7 +2053,9 @@ mod tests {
         OrientationHistory::from_reports(
             fixture_decimation_audit(),
             OrientationReport {
-                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },

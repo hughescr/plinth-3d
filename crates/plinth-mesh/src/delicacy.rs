@@ -1,8 +1,8 @@
 //! Canonical, mesh-bound delicacy field contract.
 //!
 //! This module owns the immutable authority and result shape.  The batched
-//! evaluator is deliberately introduced separately: A1 must not manufacture
-//! spatial results before its geometry contract is implemented.
+//! evaluator that fills it lives in [`crate::delicacy_eval`]; the split is
+//! deliberate, so the contract can be read without reading the geometry.
 
 use plinth_core::m0_constants;
 use sha2::{Digest, Sha256};
@@ -86,34 +86,56 @@ impl DelicacySettings {
     }
 }
 
+/// Resource guards for one delicacy evaluation.
+///
+/// These are limits, not policy: nothing here can change a delicacy value.
+/// The evaluator either fits under the guard and computes the field exactly,
+/// or it refuses naming both the measured demand and the cap — it never
+/// coarsens the evaluation to fit, and it never samples, so there is no seed
+/// and no sample count to configure.  That is why these fields are not
+/// registry members: everything output-changing in this crate is a registered
+/// Placeholder read through [`DelicacySettings::production`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DelicacyBuildConfig {
-    pub seed: u32,
-    pub requested_samples: usize,
-    pub max_samples: usize,
-    pub max_working_bytes: usize,
-    pub max_operations: usize,
+    /// Ceiling on the shared geometry kernel's conservative peak index memory
+    /// for the mesh being scored, charged before any index is allocated.
+    pub max_index_bytes: usize,
 }
 
 impl DelicacyBuildConfig {
-    pub fn validate(self) -> Result<(), DelicacyError> {
-        if self.requested_samples == 0
-            || self.max_samples == 0
-            || self.requested_samples > self.max_samples
-        {
-            return Err(DelicacyError::InvalidSampleLimit {
-                requested: self.requested_samples,
-                maximum: self.max_samples,
-            });
+    /// The established guard set, scaled to the mesh it will be asked to
+    /// score.
+    ///
+    /// `max(64 MiB, 2 KiB × faces)` follows the support stage's own
+    /// `max(floor, per_face × face_count)` idiom: the floor covers a mini
+    /// whose index is dominated by fixed structure, the per-face term covers
+    /// a model the size of the treant, and the measured per-face cost of the
+    /// kernel's face store plus BVH is several times under 2 KiB, so the
+    /// guard refuses only genuinely unreasonable geometry.  Saturating, so an
+    /// absurd face count yields `usize::MAX` rather than wrapping to a tiny
+    /// cap.
+    #[must_use]
+    pub const fn production(face_count: usize) -> Self {
+        const FLOOR_BYTES: usize = 64 * 1024 * 1024;
+        const BYTES_PER_FACE: usize = 2 * 1024;
+        let scaled = BYTES_PER_FACE.saturating_mul(face_count);
+        Self {
+            max_index_bytes: if scaled > FLOOR_BYTES {
+                scaled
+            } else {
+                FLOOR_BYTES
+            },
         }
-        if self.max_working_bytes == 0 {
+    }
+
+    /// # Errors
+    ///
+    /// [`DelicacyError::InvalidResourceLimit`] when a guard is zero, which
+    /// would refuse every mesh including an empty one.
+    pub const fn validate(self) -> Result<(), DelicacyError> {
+        if self.max_index_bytes == 0 {
             return Err(DelicacyError::InvalidResourceLimit {
-                name: "max_working_bytes",
-            });
-        }
-        if self.max_operations == 0 {
-            return Err(DelicacyError::InvalidResourceLimit {
-                name: "max_operations",
+                name: "max_index_bytes",
             });
         }
         Ok(())
@@ -175,7 +197,6 @@ pub struct DelicacyFaceValue {
     weight: f64,
 }
 impl DelicacyFaceValue {
-    #[allow(dead_code)]
     pub(crate) fn new(curvature: f64, thinness: f64, weight: f64) -> Result<Self, DelicacyError> {
         for (field, value) in [
             ("curvature", curvature),
@@ -214,9 +235,8 @@ pub struct DelicacyField {
     digest: String,
 }
 impl DelicacyField {
-    /// Sole A2/A3 evaluator boundary: batch geometry emits one source-order
+    /// Sole evaluator boundary: batch geometry emits one source-order
     /// face value; support only reads the resulting weights.
-    #[allow(dead_code)]
     pub(crate) fn from_face_values(
         table: FaceTable,
         settings: DelicacySettings,
@@ -257,7 +277,6 @@ impl DelicacyField {
     }
 }
 
-#[allow(dead_code)]
 fn digest(table: &FaceTable, settings: DelicacySettings, values: &[DelicacyFaceValue]) -> String {
     let mut hash = Sha256::new();
     hash.update(DELICACY_FIELD_SCHEMA.as_bytes());
@@ -287,16 +306,22 @@ const fn canonical_zero(value: f64) -> f64 {
     }
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum DelicacyError {
     #[error("registered delicacy constants are unavailable: {0}")]
     Constants(String),
     #[error("delicacy setting {name} must be finite and in range, got {value}")]
     InvalidSetting { name: &'static str, value: f64 },
-    #[error("delicacy sample request {requested} exceeds valid maximum {maximum}")]
-    InvalidSampleLimit { requested: usize, maximum: usize },
     #[error("delicacy resource limit {name} must be positive")]
     InvalidResourceLimit { name: &'static str },
+    #[error("delicacy {what} charges {charge} bytes against a {cap}-byte cap")]
+    IndexBudgetExceeded {
+        charge: usize,
+        cap: usize,
+        what: &'static str,
+    },
+    #[error("delicacy geometry kernel refused the mesh or the batch: {0}")]
+    Kernel(String),
     #[error("delicacy LOD identity must not be empty")]
     EmptyLod,
     #[error("delicacy face values require {expected} source-order rows, got {actual}")]
@@ -334,16 +359,23 @@ mod tests {
             Err(DelicacyError::InvalidSetting { .. })
         ));
         assert!(matches!(
-            DelicacyBuildConfig {
-                seed: 0,
-                requested_samples: 0,
-                max_samples: 1,
-                max_working_bytes: 1,
-                max_operations: 1
-            }
-            .validate(),
-            Err(DelicacyError::InvalidSampleLimit { .. })
+            DelicacyBuildConfig { max_index_bytes: 0 }.validate(),
+            Err(DelicacyError::InvalidResourceLimit { .. })
         ));
+        assert_eq!(DelicacyBuildConfig::production(1).validate(), Ok(()));
+        // The floor governs a mini; the per-face term governs the treant.
+        assert_eq!(
+            DelicacyBuildConfig::production(1).max_index_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            DelicacyBuildConfig::production(429_120).max_index_bytes,
+            429_120 * 2 * 1024
+        );
+        assert_eq!(
+            DelicacyBuildConfig::production(usize::MAX).max_index_bytes,
+            usize::MAX
+        );
         assert!(matches!(
             DelicacyFaceValue::new(0.0, f64::INFINITY, 0.0),
             Err(DelicacyError::InvalidFaceValue { .. })

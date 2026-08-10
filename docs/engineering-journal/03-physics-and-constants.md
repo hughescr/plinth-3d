@@ -563,10 +563,170 @@ of the local layer height, not products with a global scalar.
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `delicacy_curvature_weight` / `delicacy_thinness_weight` (457/458) | 0.6 / 0.4 | — | **P** | `plinth-support::perceive` | Blend of two geometric proxies. |
-| `thin_feature_mm` (460) | 1.5 | mm | **P** — saturation threshold | `plinth-support::perceive` | |
+| `delicacy_curvature_weight` / `delicacy_thinness_weight` (457/458) | 0.6 / 0.4 | — | **P** | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Blend of two geometric proxies. **Owner column corrected 2026-08-10**: it read `plinth-support::perceive`, which O-5 superseded — `plinth-mesh` is the sole delicacy implementation, and `plinth-support` is a *reader* of the resulting per-face weights, not their producer. The producer landed 2026-08-10 ([`decisions/2026-08-10-delicacy-producer.md`](decisions/2026-08-10-delicacy-producer.md)); until then nothing on the production path read these two at all. |
+| `thin_feature_mm` (460) | 1.5 | mm | **P** — saturation threshold | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Same 2026-08-10 owner correction. It is also the geometry-kernel grid pitch the producer's thinness ray cast is indexed at, deliberately so there is one length scale rather than two to keep aligned. |
 | `orient_scar_weight` (481) | 0.4 | — | **P** — "the starting default", additive/opt-in; 0.0 exactly reproduces the pre-scar-term search | `plinth-orient` | Scored as `sum(face_area_mm² × delicacy)` over down-facing faces, normalized `/100.0` to match the existing `sup` term's cm² scale. |
-| orientation objective weights (`hollow.orient_search`) | `0.5·support_area_cm² + 3·peak_xsec_cm² + 0.3·height_mm` (+ scar term) | — | **P — ad hoc, DO NOT PORT AS-IS** | `plinth-orient` | 13 hand-picked candidates (identity + ±10/20/30° about X and Y only; **no Z, no combined axes**), scored on a 90 %-decimated proxy while the delicacy field is built on the full mesh. Plan of record is a **dense sweep on a decimated proxy** scoring the support / scar / height triad jointly. |
+| orientation objective weights (`hollow.orient_search`) | `0.5·support_area_cm² + 3·peak_xsec_cm² + 0.3·height_mm` (+ scar term) | — | **P — ad hoc, DO NOT PORT AS-IS** | `plinth-orient` | 13 hand-picked candidates (identity + ±10/20/30° about X and Y only; **no Z, no combined axes**), scored on a 90 %-decimated proxy while the delicacy field is built on the full mesh. Plan of record is a **dense sweep on a decimated proxy** scoring the support / scar / height triad jointly. **Registered 2026-08-10** as `ORIENT_WEIGHT_SUPPORT_AREA_CM2` / `ORIENT_WEIGHT_PEAK_XSEC_CM2` / `ORIENT_WEIGHT_HEIGHT_MM`; see the addendum below for what that registration does and does not claim. |
+
+> **Addendum 2026-08-10 — the three scalarization weights are registered, and
+> the carry-over is stated rather than laundered.** The dense sweep's scoring
+> substrate landed in `plinth-orient::score`, so the three coefficients above are
+> now read from the M0 registry instead of living in a retired Python literal.
+> They are `Placeholder`, they are **not** measured, and registering them changes
+> nothing about their standing: §3.10.3 retires the frozen heuristic **as a
+> coupled policy** — proxy reduction 0.9, the 13 candidates, the score form as one
+> unit, the 0.1 mm margin at a 4 mm section step, and the −0.707 cutoff — and the
+> values are knowingly reused as the dense sweep's *starting* objective, which is
+> exactly what the §3.8 plan-of-record sentence directs. A search weight selects a
+> candidate and never accepts one (D-25); acceptance remains the `DefectReport`.
+>
+> Two of the four quantities the weights price are deliberately **not** the ones
+> the legacy heuristic priced, and the difference is recorded here rather than
+> absorbed into the weights:
+>
+> * **Peak cross-section is now the exact supremum**, computed from the
+>   divergence form as a piecewise quadratic in the build height with breakpoints
+>   at the vertex heights — no step, no margin, no aliasing and, deliberately, no
+>   new constant. The retired 4 mm sampler is not replaced by another sampler
+>   because a sampler's plane phase is anchored to each candidate's own `h_min`:
+>   across 13 candidates that is noise, but across ~650 the argmin systematically
+>   prefers directions whose grid under-reports their peak, so a denser search
+>   would optimize the sampler. The identity is `area(t) = Σ_faces ½(p×q)` over
+>   each face's chord oriented with the solid on its left, which is additive over
+>   faces and therefore needs no loop stitching or polygon union in the hot loop;
+>   `plinth-orient`'s section-oracle test is what licenses that skip, checking the
+>   solver against `geom_kernel`'s own plane-slice batch. **Stated assumption:**
+>   the identity measures the winding-number-weighted area, so two *interpenetrating*
+>   closed shells in one mesh would be counted twice in their overlap. That is the
+>   same convention the kernel's own slice sum carries, it is correct for any
+>   consistently wound solid, and it is a documented precondition rather than a
+>   silent one.
+> * **Support area is an overhang-mask proxy**, using the identical expression
+>   `-(OVERHANG_ANGLE_DEG.to_radians().sin())` and the identical strict `<` that
+>   `plinth-support/src/lib.rs:814,820` evaluates from the same registered
+>   constant — copied rather than re-registered, so the sweep's "down-facing"
+>   cannot drift from the engine's. It deliberately omits the engine's exterior,
+>   near-plate and grounded-column filters, because §3.8 requires a proxy
+>   derivable without running the support engine; at orient time the mesh is
+>   pre-hollow solid, so the exterior mask is trivially true anyway. The residual
+>   over-count is a per-model bias to be **measured** by the calibration driver,
+>   not asserted away.
+>
+> Measured at the landing tip on the committed baseline meshes (dev-opt),
+> scar-free where noted: the 4,760-face `Sphere` scores `sup = 1.8306 cm²`,
+> `peak = 3.1334 cm²`, `height = 19.997 mm`, total **16.3146** against the
+> analytic sphere's `0.5·1.84032 + 3·π/100·100 + 0.3·20 = 16.34494` and the
+> recorded legacy fixture's 16.6 (which carries the scar term this figure omits);
+> the 429,120-face `Weeping Treant v1.2` scores 57.4044 at identity against the
+> fixture's recorded 57.6 at X −30. Neither number is a re-pin of anything: no
+> committed artifact, baseline or digest is read or written by this substrate.
+
+> **Addendum 2026-08-10 (second) — the search tier lands, and nine grid/ladder
+> constants are registered as `Placeholder` search policy.** The scoring
+> substrate above became a search: `plinth-orient` now enumerates the D-12
+> candidate grid, runs the recorded three-tier funnel, and commits a winner at
+> the production mesh. `OrientationPolicy::DenseSweep` is the pipeline default,
+> `plinth prepare --orient dense|pinned:DIR` is the operator surface, and the
+> unimplemented `LegacyCoarse` policy is **deleted** — with it goes the standing
+> product defect in which `plinth prepare` refused every model it was ever handed.
+>
+> | Registered 2026-08-10 | Value | What it shapes |
+> |---|---|---|
+> | `ORIENT_FIBONACCI_COUNT` | 512 | the coarse grid on S², ~9.0° mean spacing |
+> | `ORIENT_REST_POSE_MAX` / `ORIENT_REST_POSE_REFERENCE_BINS` | 128 / 2048 | the face-aligned rest-pose block |
+> | `ORIENT_DEDUPE_TOLERANCE_DEG` | 1.0 | when two candidates are one candidate |
+> | `ORIENT_REFINE_TOP_K` / `ORIENT_COMMIT_TOP_K` | 24 / 3 | the two funnel widths |
+> | `ORIENT_PROXY_L1_RATIO` / `ORIENT_PROXY_L2_OF_L1_RATIO` / `ORIENT_PROXY_MIN_FACES` | 0.10 / 0.20 / 256 | the search-proxy ladder and its integrity floor |
+>
+> All nine are `Placeholder` search policy: they shape **which candidate is
+> selected** and never whether one is accepted (D-25). None of them is a physical
+> quantity, and none is measured. `ORIENT_SCAR_WEIGHT` and `OVERHANG_ANGLE_DEG`
+> are reused, not restated. No gate, cap or bound moved.
+>
+> **The search space is S², not SO(3), and that is a theorem rather than a
+> simplification.** Writing a candidate as the build-up direction `u = Rᵀẑ`, every
+> term of the objective is a function of `u` alone — the masks depend on `n·u`,
+> height is `max(v·u) − min(v·u)`, and a planar area is invariant under rotation
+> *within* its own plane. A k-fold z-spin sweep would therefore cost k× for
+> exactly zero objective change. §4.2 refuses an azimuthal term independently, and
+> z-spin already belongs to the future `plinth-plate` (02:979). The scorer's public
+> candidate type is a unit direction, so azimuth is **inexpressible** rather than
+> merely unused.
+>
+> **One deviation from the recorded funnel, with its measurement:** the legacy 13
+> are escorted to the exact tier rather than only enumerated at the coarse one.
+> D-12's "never worse by construction" is a property of the candidate set at the
+> tier that *decides*, and the tier that decides is the exact tier; on the
+> committed `Sphere` the L1 proxy ranks the winning legacy X −20 pose **478th of
+> 643**, so without the escort the sweep committed to 16.3173 against that pose's
+> 16.3009. Recorded in full at
+> [`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md).
+> Neither funnel width moved.
+>
+> **Rest poses are a substitute and say so.** D-12 names convex-hull face-aligned
+> poses; this workspace has no 3-D hull kernel and the lockfile is frozen, so
+> face normals are area-binned into a 2048-point reference lattice and the
+> heaviest bins emit their area-weighted mean direction, at O(F) with no new
+> dependency. Genuine three-point rest poses — a treant balanced on three toes —
+> are **not** covered; the loss is bounded by one grid spacing (~9°) because every
+> direction on S² is within that of a block-2 candidate, and a real hull kernel is
+> a filed follow-up.
+>
+> **Measured 2026-08-10 at the landing tip** (release build, committed baseline
+> meshes, all four terms at the registered weights, full three-tier funnel):
+>
+> | Model | Faces | Candidates | Committed pose | Score | Sweep |
+> |---|---|---|---|---|---|
+> | `Weeping Treant v1.2` | 429,120 | 641 | Fibonacci `(−0.0320, 0.2037, −0.9785)` | **54.4131** | 3.07 s |
+> | `Sphere` | 4,760 | 643 | legacy **X −20** | **16.3009** | 25.7 ms |
+> | `make_toed_slab` | 140 | 592 | Fibonacci | 13.5067 | 3.7 ms |
+> | `make_overhang_table` | 60 | 529 | Fibonacci | 18.2115 | 2.5 ms |
+> | `make_raking_blade` | 24 | 533 | rest pose `+X` | 8.8501 | 2.1 ms |
+> | `make_thin_fin` | 24 | 529 | rest pose `−Y` | 9.1684 | 2.0 ms |
+> | `Cylinder` | 244 | 584 | rest pose `−Z` | 33.7316 | 4.7 ms |
+> | `make_box` | 12 | 529 | **identity** | 6.5600 | 2.2 ms |
+>
+> The treant's whole sweep is ~0.65 % of its ~470 s support run. Two of these are
+> worth reading rather than skimming:
+>
+> * **`Sphere` reproduces the committed baseline's own pose** (X −20) without
+>   being told it, which is a stronger agreement than the design asked for.
+> * **`Cylinder` commits to `−Z` where the committed baseline records identity**,
+>   by a margin of **0.00088 in 33.73** — 0.003 %. The legacy 13 contained no
+>   180° flip, so this is a candidate the retired grid could not express, and for
+>   a symmetric cylinder the two poses are the same physical print. It is recorded
+>   as a divergence rather than treated as one: nothing committed moved, because
+>   the corpus baselines are legacy artifacts this sweep reads and never writes.
+>
+> **The `decision_resolved` flag reads `false` on all eight**, and that is a
+> finding, not a bug. It compares the winner's margin over the runner-up against
+> the spread of scores across the winner's own grid neighbours, and at ~9° spacing
+> the objective moves more between adjacent directions than any of these winners
+> led by. The honest reading is that this grid resolves *where* the good region is
+> and does not resolve *which point in it* — which is exactly what the recorded
+> K-doubling and Spearman calibration gates exist to quantify, and those gates are
+> not built in this slice.
+>
+> > **Corrected 2026-08-10, same day, after review — the verdict is now same-tier.**
+> > As first landed the flag compared an **exact-tier** margin (winner vs runner-up
+> > on the production mesh) against a **coarse-tier** spread (the ~2 % L2 proxy).
+> > Mixing fidelities that way is not a small thing here: the proxy's own noise
+> > inflates the spread and biases the verdict toward `false` for reasons that have
+> > nothing to do with the grid, and the paragraph above then reads that bias as a
+> > property of the grid. On the committed `Sphere` the coarse spread is **674.08**
+> > score points against a committed margin of 0.0059 — the L2 proxy is not
+> > measuring the same objective magnitude at all.
+> >
+> > Both sides of the comparison are now measured at the coarse tier (the only tier
+> > that scores the winner's grid *neighbours*, so the only tier where a spread can
+> > exist), the tier is stamped in the record beside the verdict
+> > (`margin_tier`, `spread_tier`, `winner_runner_up_margin_at_spread_tier`), and
+> > the committed exact margin is still reported separately as
+> > `winner_runner_up_margin`. Re-measured on all eight after the change, the flag
+> > still reads `false` on every one, so the finding above stands — it is now a
+> > statement about the coarse grid rather than about two instruments disagreeing.
+> > `decision_resolved` should be read as "did the coarse grid separate these two
+> > directions", never as "did the pipeline resolve the choice".
 
 ### 3.9 Removal ergonomics — all Placeholder, all human-calibrated
 

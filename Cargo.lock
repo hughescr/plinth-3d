@@ -1036,6 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "plinth-core",
  "plinth-hollow",
+ "plinth-orient",
  "plinth-pipeline",
 ]
 
@@ -1116,6 +1117,7 @@ dependencies = [
 name = "plinth-mesh"
 version = "0.1.0"
 dependencies = [
+ "geom_kernel",
  "plinth-core",
  "robust",
  "serde",
@@ -1140,10 +1142,14 @@ dependencies = [
 name = "plinth-orient"
 version = "0.1.0"
 dependencies = [
+ "geom_kernel",
  "plinth-core",
  "plinth-decimate",
  "plinth-mesh",
+ "rayon",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 

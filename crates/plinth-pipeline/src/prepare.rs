@@ -72,6 +72,55 @@ const SOURCE_EXTENSION: &str = "stl";
 /// The extension of every artifact this executor writes.
 pub const ARTIFACT_EXTENSION: &str = "chitubox";
 
+/// The LOD identity bound into the prepared mesh's delicacy field.
+///
+/// Owner override O-8 makes the protected, decimated mesh the sole production
+/// geometry, and the recorded FaceTable ruling makes delicacy a property of
+/// the LOD being scored. This is that LOD: the sealed, hollowed, drilled mesh
+/// the support stage plans against, and the only one whose delicacy the
+/// support stage may ever read. A search proxy is a different LOD and carries
+/// a different name; the two can never be confused because the name is inside
+/// the field's own digest.
+pub const PREPARED_MESH_LOD: &str = "prepared";
+
+/// The delicacy field the support stage anchors against, measured on the
+/// prepared mesh itself.
+///
+/// This fed `vec![0.0; prepared_faces]` until 2026-08-10. That was not a
+/// neutral default: `strut_model_anchor_max_delicacy` rejects an anchor
+/// candidate whose face is *more* delicate than the cap, so an all-zeros field
+/// asserted that no face on any model is delicate and left the cap structurally
+/// unreachable — the support stage carried the machinery to protect delicate
+/// geometry and was handed, on every model, a measurement that could never trip
+/// it. The owner ruling of 2026-08-10 closed that by building the producer-side
+/// evaluator; see
+/// `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md`.
+///
+/// The field is bound to this mesh at [`PREPARED_MESH_LOD`], which is what
+/// makes the per-face weights and the per-face areas the support stage measures
+/// two views of one object rather than two meshes silently mixed.
+///
+/// This is a named function rather than four lines inside `seal_and_emit` so a
+/// test can assert against exactly what production computes, not against a
+/// second copy of it.
+///
+/// # Errors
+///
+/// [`plinth_mesh::DelicacyError`] whenever the field cannot be measured. There
+/// is deliberately no fallback: an all-zeros field is not "delicacy unknown",
+/// it is the positive claim that nothing on this model is delicate, and this
+/// stage does not make claims it has not measured.
+pub fn prepared_delicacy_field(
+    mesh: &plinth_mesh::Mesh,
+) -> Result<plinth_mesh::DelicacyField, plinth_mesh::DelicacyError> {
+    plinth_mesh::evaluate_delicacy(
+        mesh,
+        PREPARED_MESH_LOD,
+        plinth_mesh::DelicacySettings::production()?,
+        plinth_mesh::DelicacyBuildConfig::production(mesh.tris().len()),
+    )
+}
+
 /// The production decimation probe configuration, read from the M0 registry.
 ///
 /// `plinth-decimate` states outright that it publishes no default probe
@@ -616,7 +665,12 @@ fn prepare_one(
         );
     }
 
-    let oriented = match orient_model(model, decimated, &policy.orientation) {
+    let oriented = match orient_model(
+        model,
+        decimated,
+        &policy.orientation,
+        policy.resources.orient(),
+    ) {
         Ok(oriented) => oriented,
         Err(stop) => return report(assumed, failure(&stop)),
     };
@@ -685,14 +739,17 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 
 /// Apply the run's orientation policy to one decimated model.
 ///
-/// **Orientation is never inferred.** `plinth-orient` deliberately does not
-/// search: it reads the selected rotation out of a pinned baseline report and
-/// applies it. [`OrientationPolicy::LegacyCoarse`] names the native coarse
-/// search of `02-target-architecture.md` §6, which has no implementation in
-/// this workspace, so a run under that policy refuses **per model** with a
-/// named reason rather than silently choosing identity — identity is a
-/// rotation like any other and `plinth-orient` refuses to pick it implicitly
-/// too. This is a refusal, never a panic, and never a fallback.
+/// **Orientation is never inferred, and it is now searched.**
+/// [`OrientationPolicy::DenseSweep`] — the default — runs the recorded D-12
+/// funnel: the whole candidate grid on the ~2 % proxy, the top
+/// `ORIENT_REFINE_TOP_K` on the ~10 % proxy, the top `ORIENT_COMMIT_TOP_K` at
+/// the production mesh, where the committed score is computed and only there.
+/// The winner arrives with its full evidence attached, so a searched rotation
+/// is auditable and re-pinnable rather than a bare matrix. Nothing about the
+/// old refusal's *reason* has been softened: a model the sweep cannot measure
+/// is still a per-model refusal with a named cause, never a fallback to
+/// identity. Identity is a rotation like any other and is chosen here only by
+/// winning.
 ///
 /// **A pinned baseline is resolved per model, by name.** `plinth_orient::run`
 /// applies whatever rotation the report it is handed states, to whatever mesh
@@ -708,13 +765,26 @@ fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
     policy: &OrientationPolicy,
+    limits: plinth_orient::OrientSearchLimits,
 ) -> Result<OrientedModel, ChainStop> {
     match policy {
-        OrientationPolicy::LegacyCoarse => Err(ChainStop::new(
-            PipelineError::OrientationPolicyUnavailable {
-                model: model.clone(),
-            },
-        )),
+        OrientationPolicy::DenseSweep => {
+            let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
+            })?;
+            // The run's resource policy owns the work budget; the registry owns
+            // every number that can change a score. Neither owns the other's.
+            request.limits = limits;
+            plinth_orient::search_and_orient(decimated, &request).map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
+            })
+        }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
                 return Err(ChainStop::new(PipelineError::OrientationBaselineMissing {
@@ -1039,7 +1109,17 @@ pub fn seal_and_emit(
             source,
         })
     })?;
-    let delicacy = vec![0.0; prepared_faces];
+    let delicacy_field = prepared_delicacy_field(hollowed.mesh()).map_err(|source| {
+        ChainStop::new(PipelineError::Delicacy {
+            model: model.clone(),
+            source,
+        })
+    })?;
+    let delicacy = delicacy_field
+        .face_values()
+        .iter()
+        .map(|value| value.weight())
+        .collect::<Vec<_>>();
 
     let input = policy.resources.support_input(&layers, &delicacy, &[]);
     // A refusal without the bounds it was measured against is not a

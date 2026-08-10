@@ -907,7 +907,10 @@ mod tests {
     use plinth_core::{m0_constants, Finite, PositiveFinite};
     use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
     use plinth_hollow::{HollowHistory, HollowReport, SolidDecisionReason};
-    use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationHistory, OrientationProvenance, OrientationReport,
+        RigidTransform,
+    };
     use plinth_support::{
         BuildFrame, FrustumRingNormal, SphereGeometry, SupportHistory, SupportReport,
     };
@@ -1038,7 +1041,9 @@ mod tests {
         let orientation = OrientationHistory::from_reports(
             decimation,
             OrientationReport {
-                pinned_report: PathBuf::from("fixture.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("fixture.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },

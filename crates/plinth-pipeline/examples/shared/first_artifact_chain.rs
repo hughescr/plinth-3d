@@ -139,7 +139,7 @@ pub fn stage_policy() -> StagePolicy {
         // already-oriented model, having applied their own checked-in pinned
         // baseline in `orient` below. The field is the run-level policy
         // `prepare` consults when it does the orienting itself.
-        orientation: plinth_pipeline::OrientationPolicy::LegacyCoarse,
+        orientation: plinth_pipeline::OrientationPolicy::DenseSweep,
         hollow: plinth_hollow::HollowRequest::with_registered_wall_default(printer.clone())
             .expect("registered hollow wall default"),
         support: registered_support_request(&printer).expect("registered lift"),

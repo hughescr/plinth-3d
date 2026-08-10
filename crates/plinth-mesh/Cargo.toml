@@ -6,6 +6,10 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+# The shared, batch-first geometry kernel (owner override O-5: one spatial
+# implementation).  The delicacy evaluator's thinness proxy needs a batched ray
+# cast; it does not get its own BVH.
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 robust = { workspace = true }
 sha2 = "0.10"

@@ -5,6 +5,152 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-10 — the orientation-search review's twelve, applied in place {#orient-search-review-2026-08-10}
+
+<a id="orient-search-review-2026-08-10"></a>
+
+Two independent reviews of the dense-orientation-search landing returned twelve findings.
+All twelve are applied on `feature/orient-search` before merge. **No gate, cap, acceptance
+bound or funnel width was raised, loosened or bypassed**, and no pinned digest outside this
+unmerged branch was re-pinned. Two findings turned out to be worse than reported once
+measured, and those measurements are the most important thing in this section.
+
+**The record was wrong about why nothing moved (BLOCKING).** The delicacy-producer decision
+record claimed the anchor cap was the support stage's only delicacy-driven decision, and
+named exactly one surviving `vec![0.0]` feed. Both are false: contact selection breaks
+exact-Z ties on delicacy, and there are five surviving feeds of which four reach a support
+run. The re-pin protocol's own instrument was then run rather than argued —
+`make_toed_slab` (`13640335649674000245` → `6989898566632288617`) and `make_overhang_table`
+(`3706765241747593242` → `3116329269026579872`) **both move** under the real field, and
+neither crosses the cap. Nothing committed broke, because every harness that pins a support
+digest feeds the zero field itself and so remains internally reproducible — but those pinned
+digests describe support runs production no longer performs. Full attribution is in
+[`decisions/2026-08-10-delicacy-producer.md`](decisions/2026-08-10-delicacy-producer.md);
+the re-pin question is FU-38's and stays with the owner.
+
+**The neutrality guard was measuring the wrong solid.** It built all three fixtures'
+prepared meshes through one pinned rotation (the `Sphere`'s). Hollowing and drain drilling
+are rotation-dependent, so for two of three it asserted about geometry the pipeline never
+makes and could have stayed green while covered geometry crossed the cap. Each fixture now
+orients by its own pinned baseline.
+
+**The orientation work budget could never fire.** Every cap in `OrientSearchLimits` was
+derived from the very counts it was then compared against — `faces × candidates` against
+`max(2^28, faces × 2048)` with `candidates ≤ 653` — so every comparison was structurally
+`n·a ≤ n·b` with `a < b`, and orientation was the one stage in the pipeline with **no
+effective work bound at all**. The caps are now absolute, derived once by the repo's own
+`next_power_of_two(2 × worst case)` rule from the largest model this workspace can run end
+to end (the treant, 429,120 faces / 1,287,360 verts), and **`PrepareResourcePolicy` gains
+the `orient` field the design's §6 asked for**, so the deviation is removed rather than
+recorded. The byte guard also undercharged: it omitted the section solver's sort
+permutation, breakpoint list and quadratic coefficient array — 36 bytes per vertex, 46 MB
+on a mesh whose whole charge was 34 MB.
+
+**A fabricated measurement in a provenance record.** With no L1 rung there is no cascade
+source for L2, and the code synthesized `RungError::BelowFloor { faces: 0 }`, publishing
+"0 faces is below the 256-face search-proxy floor" about a proxy that was never built.
+That is precisely the class this landing's own decision record forbids — "there is no
+substitute value for a measurement that did not happen". It is now
+`ProxyFallbackReason::NoCascadeSource`, carrying no count, and the covering test asserts
+the detail does **not** claim one.
+
+**The determinism digest could degrade to a constant.** `serde_json::to_vec(record)
+.unwrap_or_default()` made any serialization failure yield the SHA-256 of the empty string
+— the same value for every record. `search_digest` is the one string T4, T7, the thread
+sweep and cache-equivalence compare on, so a path under which two different searches agree
+is the exact defect the digest exists to detect. It is now a typed refusal.
+
+**`decision_resolved` compared two instruments.** An exact-tier margin against a ~2 % proxy
+spread; on the `Sphere` that spread is 674.08 score points against a committed margin of
+0.0059. Both sides are now measured at the coarse tier, the tier is stamped in the record
+(`margin_tier`, `spread_tier`, `winner_runner_up_margin_at_spread_tier`), and the committed
+exact margin is still reported beside it. **Re-measured on all eight after the change, the
+flag still reads `false` on every one**, so 03 §3.8's finding stands — as a statement about
+the coarse grid rather than about two instruments disagreeing.
+
+**Near-antipode rotations were not rotations.** The closed form divides by `1 + c`, and
+near `−ẑ` that quantity is at the scale of `c`'s own rounding error: the normalized
+`[2e-8, 0, −1]` produced a row-1 diagonal of ≈ 0.8 instead of 1. Only the *exact* antipode
+took the pinned branch. Rest poses are area-weighted `−n` aggregates and can land
+arbitrarily close to `−ẑ` on a real mesh, and the winner's matrix is applied to production
+geometry at emit. `1 + c` is now read off `x² + y²` on the negative hemisphere, where it is
+well-conditioned, and a near-antipode test covers six offsets down to exact.
+
+**The charge-beside-meter receipt was vacuous.** Two of three counters were assigned from
+the plan they were meant to audit, so `ChargeDrift` could only ever fire on breakpoints and
+the covering test asserted `plan == meter`. All three are now counted where the work
+executes — one increment per product written — and the test checks them against counts
+derived from the mesh rather than from the plan.
+
+**A zero scar weight now reproduces the scar-free search structurally.** Every rung built
+the delicacy field unconditionally and carried its digest into `search_digest`, so a
+scar-free run's digest depended on delicacy bytes and a delicacy failure refused a search
+that never wanted the number — contradicting a requirement the producer ruling explicitly
+kept in force. At a structurally zero weight the field is now not built, and `LodRecord`
+carries `delicacy_digest: null` rather than a hash of zeros.
+
+**A widened precondition, recorded.** The closed-boundary refusal is enforced on the Exact
+tier, where the LOD ladder cannot answer it, so a not-perfectly-closed welded mesh is
+unpreparable under the default policy while `--orient pinned` still prepares it. That is a
+new refusal class; it is journalled as FU-42 with the reachability measurement — all eight
+corpus models weld closed, `boundary_edges = 0` and `nonmanifold_edges = 0` on every one.
+
+**Nine ledger locators named types that do not exist.** `search.rs:SearchLadder` is
+`LadderSettings`; the three grid constants named `grid.rs:SweepGrid`, which does not read
+them, and `search.rs`, which does not either. `constants_ledger_consistency.rs` compares id
+sets only, so nothing caught it. All nine now name the type that performs the registry
+read.
+
+## 2026-08-10 — `plinth prepare` orients, and the standing product blocker is closed
+
+<a id="dense-orientation-search-2026-08-10"></a>
+
+**Read this before the 2026-08-09 section below.** That section's headline blocker —
+"the CLI can prepare nothing today" — is **closed**. Every sentence in it about
+`LegacyCoarse`, the missing `--orient` flag and the per-model orientation refusal
+describes a state that no longer exists; it is left standing as the record of what was
+true rather than rewritten.
+
+`plinth-orient` now searches. `plinth_orient::search_and_orient` runs the D-12 funnel
+over the recorded candidate grid and commits a winner at the production mesh;
+`OrientationPolicy::DenseSweep` is the pipeline default; `plinth prepare` takes
+`--orient dense|pinned:DIR` and defaults to `dense`. **`OrientationPolicy::LegacyCoarse`
+and `PipelineError::OrientationPolicyUnavailable` are deleted**, not left standing beside
+the search — a persisted policy carrying `"kind":"legacy_coarse"` now fails to
+deserialize by name, which is the intended loud failure.
+
+**What it is.** Three candidate blocks in one contract order — the legacy 13 first (so
+identity is `CandidateId` 0 and the legacy identity-wins-ties semantics two committed
+baselines depend on is reproduced), then ≤128 face-aligned rest poses, then the 512-point
+Fibonacci lattice on S², deduplicated at 1.0° keeping the **earlier** index. Three tiers:
+the whole grid on the ~2 % proxy, the top 24 on the ~10 % proxy, the top 3 **plus the
+escorted legacy block** at the production mesh, where the committed score is computed and
+only there. Nine new `Placeholder` constants, registry 293 → 302.
+
+**Measured** (release, committed baselines, all four objective terms): Weeping Treant
+v1.2, 429,120 faces, 641 candidates, whole sweep **3.07 s** — about 0.65 % of that
+model's ~470 s support run. Every mini is single-digit milliseconds. The full table,
+including the two divergences worth reading, is the second 2026-08-10 addendum to
+[`03-physics-and-constants.md`](03-physics-and-constants.md) §3.8.
+
+**One recorded deviation, with its measurement.** The legacy 13 are escorted to the exact
+tier rather than merely enumerated at the coarse one, because D-12's "never worse by
+construction" is a property of the candidate set at the tier that *decides*. On the
+committed `Sphere` the L1 proxy ranks the winning legacy X −20 pose 478th of 643, so
+unescorted the sweep committed to 16.3173 against that pose's 16.3009 — worse than the
+search it replaces, on a corpus model. Escorted, it reproduces the pose the `Sphere`
+baseline itself records. Neither funnel width moved; no gate, cap or bound moved.
+[`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md).
+
+**Still open, and named rather than implied.** Three pieces of the design are
+deliberately not in this landing: the `<stem>.orientation.json` sidecar and the native
+pin format that would let a searched winner be replayed by fingerprint (the report
+carries the full `DenseSweepRecord` provenance today, but nothing persists it to disk);
+the legacy-13 comparison **driver** and its `LegacyStepped` section method, which is what
+T1/T2's reproduction fixtures need; and `plinth calibrate` with the recorded
+Spearman/K-doubling gates. The `decision_resolved` flag reads `false` on all eight corpus
+models, which is precisely the signal those calibration gates exist to quantify.
+
 ## 2026-08-09 — `plinth prepare` executes, and it cannot yet orient anything
 
 <a id="prepare-execution-2026-08-09"></a>
@@ -6591,6 +6737,11 @@ Everything else here is non-blocking.
 | FU-35 | **FU-8f phase G6c's "a retained round executes no more than it is charged" invariant is FALSE on the `Cylinder`** — executed 23,203 against a charge of 4,146, a 5.6× overrun | **Opened 2026-08-09 by the treant `.chitubox` checkpoint** ([`#checkpoint-treant-artifact-2026-08-09`](#checkpoint-treant-artifact-2026-08-09)), found incidentally while gating the FU-34 fallback and **not caused by it**. `crates/plinth-support/src/specialized.rs:4858` carries `debug_assert!(executed_operations <= baseline_resource.operations)` under a comment stating the property is **"provable, not merely hoped"** and that it is "checked here every round in debug, and pinned by `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged` in release". On the `Cylinder` it is false: the assertion fires with `a retained round executed 23203 load operations against a charge of 4146`. **Independent of the checkpoint's change, and proved so rather than asserted:** `examples/embed_incidence_census` shares none of the export-seam code and takes the same `HollowedModel::solid_decision(BelowThreshold)` handoff, and a **debug** build of it at this tip panics identically — `PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Cylinder" ./target/debug/examples/embed_incidence_census`. The census's own last flushed row before the panic reads `retained_load_charged_operations=4146 retained_load_executed_operations=4146`, so the overrun belongs to a **later** round than the one the meter had flushed. **Why nobody had seen it:** every routine consumer of this path is a **release** build, where `debug_assert!` is compiled out, and the release pin named in the comment is a unit fixture rather than a corpus run — so no gate in the workspace has ever carried the `Cylinder` into `run_support` in a debug profile. `make_box` on the same path is clean (executed 532 ≤ charged 716), which is why the checkpoint's new test uses `make_box`; the checkpoint deliberately did **not** pick a model that hides this. **What this row does NOT claim:** that the charge is too low, or that the meter is wrong, or that any cap should move — the direction of the defect is exactly what has not been established. It could be an under-charge (a real accounting gap) or an over-count in `state.executed_operations` (a metering bug costing nothing real); those have opposite remedies and **the evidence does not yet separate them**. **First action:** run the `Cylinder` in debug, capture the round index and the per-round charge/executed pair for every round rather than the flushed subset, and determine which of the two figures is wrong before touching either. **Do NOT raise the charge to make the assertion pass** — that would enshrine the defect as a budget, which is FU-8b's whole lesson. **No cap, floor, constant or registry entry is touched by opening this row**, and the treant's own artifact is unaffected: the treant does not trip this assertion and the checkpoint's release runs are unaffected either way. |
 | FU-36 | **Every emitted sphere carries a 16-sliver south-pole seam**: `sphere_triangles` closes its north cap on `sin(0) == 0` but its south cap on `sin(PI) == 1.2246e-16`, so the emitted sphere is not exactly closed — and the one slackened bound in the emit closure test exists solely to accommodate it | **Opened 2026-08-09 by the `wind_outward` ruling execution** (`05-chitubox-and-corpus.md` §2, the *Executed (2026-08-09)* record's second measured item, where the full derivation lives). **Number note: filed at the next free number under the recorded collision protocol** — FU-34 was appended to this same table earlier on 2026-08-09 by concurrent checkpoint work, which is precedent, not an obstacle — and **no existing row was renumbered, edited or displaced**. **The measurement.** `crates/plinth-emit/src/lib.rs`'s `sphere_triangles` walks its rings on `sin(theta)` with `theta` spanning `0..=PI`; `f64::sin(PI)` is `1.2246467991473532e-16`, not `0.0`. With `SPHERE_LATITUDES = 8` and `SPHERE_LONGITUDES = 16`, the north cap therefore closes on a single true point while the south cap's 16 fan apices land on a **16-gon of radius `r * 1.2246e-16`** instead of one point — so each sphere soup is a closed surface with a 16-sided sliver seam of about `1e-16` of its area. Every `ContactSphere` (type 7) and `JointSphere` (type 9) record this crate writes carries it; on the seven-model corpus sweep that is **624 of 1,728 records** — 257 type-7 contact spheres and 367 type-9 joint spheres. **Why this is a ledger item and not just a curiosity:** the closure bound in `every_emitted_soup_is_closed_which_the_winding_decision_requires` is `1e-12` rather than exactly `0.0` **solely** to accommodate this seam — the seam clears it by four orders and a real leak would not — so the single loosened bound on the emit side has, until this row, had no tracked item to trace to, and the implementer's own test comment asks for an owner ruling that a topic-journal note alone would never prompt. **What this row does NOT claim:** that any emitted byte is wrong, or that any artifact already shipped is unsound. The area defect is ~`1e-16` of the sphere and it changes no winding decision — the signed-volume sign is stable across it, proved on the same seven-model sweep (1,728 soups, every one reading outward, 257 correctly reversed). **This is not a bound to raise:** `1e-12` is the accommodation already made and it must not be widened; if a future closure defect exceeds it, the geometry is wrong, not the bound (FU-8b's standing lesson). **Why it was not repaired when found:** the `wind_outward` change was a relocation with a bit-identity acceptance condition, and **repairing the seam moves emitted geometry**: the 16 south apices move in x and y from `r*1.2246e-16` to `0.0` in every sphere record the crate writes. Whether that reaches the wire is per-record and must be measured rather than assumed — the apices are `center + r*sin*cos`, so for a sphere centred well away from the model origin the offset rounds away in f32 and the bytes hold, while near the origin, or if the now-degenerate slivers are dropped rather than kept (which changes the record's triangle count), they do not. Either way it is a numerical change needing its own phase, and the relocation's acceptance condition was bit-identity, so it could not be made there. **First action:** an owner ruling on whether the seam is repaired at all (it costs nothing today), and if so, that the repair lands in a change permitted to move emitted bytes, with the corpus artifacts re-measured against the A/B baseline recorded in `05-chitubox-and-corpus.md` and the `1e-12` bound **tightened** rather than left slack once the seam is gone. |
 | FU-37 | **The selected hollow wall is recorded in-process only — no persisted artifact says which wall built it** | **Opened 2026-08-09 by the wall-knob restoration review.** **Number note: this row was opened as "FU-36" on `feature/hollow-wall`, and "FU-36" was already taken** by the sphere south-pole-seam row directly above (opened 2026-08-09 by the `wind_outward` ruling execution, landed on `develop` first); it is filed at the next free number instead and **no existing row was renumbered, edited or displaced** — the same collision protocol FU-34 records. `CavityEvidence::wall_thickness_mm` (`crates/plinth-hollow/src/lib.rs`) does record the operator's stated wall, and that is what §3.10.3 leans on, but `CavityEvidence` is **not `Serialize`**: it hangs off `HollowedModel::cavity_authority` and dies with the process. The serialized `HollowReport`, `CavityRecord` and `DrillingEvidence` carry **no wall field**, so two artifacts prepared at 2.5 mm and 3.0 mm are byte-indistinguishable in metadata in every file the pipeline writes — the geometry differs, the record does not say why. **What this row does NOT claim:** that the wall is unrecorded (it is, in-process, and the CLI refuses walls the lattice cannot produce), or that any gate is wrong. **Why it is deferred rather than fixed in the restoration commit:** adding a wall field to `HollowReport` changes serialized report bytes and therefore moves frozen goldens, which is a separate, gated change with its own re-pin. **First action:** decide whether the wall belongs on `HollowReport` or on the drilling evidence, then land the field and the golden re-pin together. Until then §3.10.3 states the in-process limitation explicitly rather than claiming persisted auditability. **No cap, floor, constant or registry entry is touched by opening this row.** |
+| FU-38 | **Four harnesses still feed an all-zeros delicacy field, so they measure a support run production no longer performs** — and correcting any of them moves pinned digests, which is an owner decision, not an implementer's | **Opened 2026-08-10 by the delicacy-producer landing; widened the same day after review** ([`decisions/2026-08-10-delicacy-producer.md`](decisions/2026-08-10-delicacy-producer.md)). The 2026-08-10 owner ruling built the producer-side delicacy evaluator and replaced `prepare.rs`'s `vec![0.0; prepared_faces]` feed to the support stage with the measured field. **This row first named exactly one surviving feed. There are five, four of which reach a support run.** The full enumeration, with the per-harness verdict, is the decision record's "Every surviving zero-field feed, and whether it matters" table; in summary: (1) `crates/plinth-support/examples/embed_incidence_census.rs:171` — the seven pinned OD-8 census digests over the eight-model corpus, **decision-relevant**; (2) `crates/plinth-support/tests/support_runner_integration.rs:167` — the pinned FU-32 J4 snapshot digests for `make_toed_slab` (`2198459883570957390`) and `make_raking_blade` (`74030269957898085`), **decision-relevant** (`make_toed_slab` is *measured* to move; `make_raking_blade` carries 5 of 24 faces above the 0.5 anchor cap and is the one corpus model where both delicacy channels are live, and it is **not** covered by the prepare-fixture neutrality guard); (3) `crates/plinth-verify/tests/coverage_gate.rs:88` — the frozen golden `coverage_gate_overhang_table.json` with its pinned `snapshot_digest`, **decision-relevant** (`make_overhang_table` is *measured* to move); (4) `crates/plinth-support/tests/support_runner_integration.rs:222,257` — the same geometry's structural asserts and hand-counted coverage resource plan, **decision-relevant**; (5) `crates/plinth-support/tests/resource_cap_policy.rs:44,53` and `crates/plinth-pipeline/src/lib.rs:816` — **not** decision-relevant: those slices are read for their **length** only (`SupportPreparationLimits::input` treats `delicacy_by_face.len()` as the face count) and no run consumes their values. **The measurement that widened this row.** The recorded neutrality argument rested on a false premise — that `strut_model_anchor_max_delicacy` is the support stage's only delicacy-driven decision. It is not: contact selection breaks exact-Z ties on delicacy (`crates/plinth-support/src/lib.rs:1281`), and exact Z ties are ordinary on a flat underside. `the_zero_field_divergence_is_measured_per_committed_fixture` now seals each committed prepare fixture twice and compares: `make_toed_slab` `13640335649674000245` → `6989898566632288617` and `make_overhang_table` `3706765241747593242` → `3116329269026579872` both **move**, neither crosses the cap, and `Sphere` refuses identically under both fields. **What this row claims:** four harnesses and production have diverged in one named input; the divergence is measured for three of them and named-but-unmeasured for `make_raking_blade` (measuring it means re-pinning, and re-pinning is the owner's). **What it does NOT claim:** that any pinned digest is wrong (each remains exactly reproducible by the harness that produced it), that past measurements are invalidated (they measured the zero-field engine, which is what the engine then was), or that any gate, cap or bound should move — none did. **The question before the owner:** re-point these harnesses at the real field and re-pin every affected digest with a from→to attribution, or leave them pinned to the zero field as frozen historical instruments and say so in the record. **First action:** the owner ruling; the remaining attribution measurements are cheap and come after it, not before. |
+| FU-39 | **A searched orientation cannot be pinned yet — nothing persists it to disk** | **Opened 2026-08-10 by the dense-orientation-search landing.** The winner arrives with its full evidence attached: `OrientationProvenance::DenseSweep(Box<DenseSweepRecord>)` carries the grid, the LOD manifest, every tier's complete ranking, the fidelity ledger, the work counters and a `search_digest`. All of it lives **in process only**, exactly as the pre-search `OrientationReport` did. The design's §5.3 sidecar (`<out-dir>/<stem>.orientation.json`, written only on the success path inside the emit branch so a gate refusal still leaves no files), `PinnedBaseline::format: BaselineFormat{LegacyPython, PlinthOrientation}`, and the `model_fingerprint` check that would close the recorded hazard "the pinned path cannot check that the report and the mesh describe the same object" are **all unbuilt**. **What this row claims:** a run's orientation decision is reproducible by re-running the search (it is deterministic, and `search_digest` proves it), but it is not *replayable from an artifact*, so design test T13's round-trip — `--orient dense`, take the sidecar, rerun `--orient pinned:DIR`, byte-identical `.chitubox` — cannot be written. **What it does NOT claim:** that `--orient pinned:DIR` is missing; it exists and replays the legacy `<stem>.pipeline.json` format today. **First action:** land the sidecar write plus the native-format reader together, since a writer without a reader is an artifact nothing consumes. |
+| FU-40 | **The legacy-13 comparison driver and `plinth calibrate` are unbuilt, so the sweep's fidelity is recorded but not gated** | **Opened 2026-08-10 by the dense-orientation-search landing.** Two recorded pieces are deliberately absent. (1) The legacy-compat **driver** — block-0 candidates only, `PeakSectionMethod::LegacyStepped{margin_mm: 0.1, step_mm: 4.0}`, the literal `-0.707` cutoff, the L1 proxy, scar off — which `04-migration-plan.md:1009-1012` records as a driver rather than a policy, and which is what design tests T1 (reproduce the recorded argmin for all 8 baselines) and T2 (the six recorded scores as a one-sided bound) need. (2) `plinth calibrate` and D-12's own safety valves: Spearman(coarse, exact) ≥ 0.7 or the sweep is demoted, exact-best inside the top-24 or K doubles, outside the top-48 after one doubling → the recorded fallback ladder (02:856-857). **What this row claims:** the sweep measures and records its own fidelity honestly — `coarse_rank_of_final_winner`, `refine_rank_of_final_winner`, `proxy_agreed_with_exact`, `decision_resolved`, the winner–runner-up angle beside the grid spacing — but **nothing acts on any of it**, so a proxy that degrades is visible and not stopped. Two concrete cases are already waiting for those gates: the committed `Sphere`, whose winning pose the L1 proxy ranks **478th of 643** (which is why the legacy block is escorted to the exact tier — [`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md)), and the fact that `decision_resolved` reads **false on all eight** corpus models — re-measured 2026-08-10 after the flag was corrected to compare margin and spread at the **same** tier (it first compared an exact-tier margin against a ~2 % proxy spread, which biased it toward `false` for reasons unrelated to the grid; on the `Sphere` that proxy spread is 674.08 score points against a committed margin of 0.0059). The verdict now carries its tier in the record (`margin_tier`, `spread_tier`) and reads as "did the coarse grid separate these two directions", never as "did the pipeline resolve the choice". **What it does NOT claim:** that any orientation shipped so far is wrong. **First action:** the driver, because T1 is the cheapest evidence that the objective did not change meaning, and it needs no new constant. |
+| FU-41 | **Rest poses are an area-binned substitute for convex-hull face-aligned poses, and three-point rest poses are not covered** | **Opened 2026-08-10 by the dense-orientation-search landing.** D-12 names convex-hull **face-aligned** poses. This workspace has no 3-D convex hull kernel in any crate or in the lockfile, and the lockfile is frozen, so the shipped substitute bins each face's down direction `-n_f` into a 2048-point reference Fibonacci lattice, accumulates area, and emits the area-weighted mean direction of the heaviest `ORIENT_REST_POSE_MAX` bins — O(F), no new dependency, and it finds a cube's six axis poses exactly. **What this row claims:** a genuine three-point rest pose — a treant balanced on three toes, a figure on a narrow base — has no single large facet and this substitute will not propose it as its own candidate. **What it does NOT claim:** that such a pose is unreachable; every direction on S² is within one grid spacing (~9.0° at `ORIENT_FIBONACCI_COUNT` = 512) of a block-2 Fibonacci candidate, so the loss is bounded by the grid resolution rather than unbounded. **First action:** decide whether a hull kernel is worth a lockfile change at all — the honest prior is that it is not until calibration (FU-40) shows a model whose best pose the grid misses by more than the spacing. |
+| FU-42 | **The dense sweep's closed-boundary precondition is enforced on the Exact tier, which makes a not-perfectly-closed mesh unpreparable under the default policy** | **Opened 2026-08-10 by the dense-orientation-search review.** The exact section solver's shoelace identity assumes each section is a union of closed loops, so `OrientFaceTable` refuses any LOD with `boundary_edges > 0` after `WeldPolicy::ExactBits` welding. Design §2.1 put that floor on the **proxies**, where the LOD ladder catches it and answers with a finer rung. Enforced on Exact there is no finer rung: it becomes `SearchError::ExactUnscorable`, and since `--orient dense` is the default, such a model is unpreparable — while `--orient pinned` still prepares it, because the pinned path never builds a section profile. **What this row claims:** this is a **new refusal class** the record did not previously carry, and it is now recorded rather than latent. **What it does NOT claim:** that the refusal is wrong. It is arguably necessary — a hole makes the identity produce a plausible *wrong* area rather than a slow one, and a silently wrong peak cross-section would be scored against 653 candidates. **Reachability, measured 2026-08-10:** all eight corpus models weld closed — `boundary_edges = 0` on `make_box` (12 faces), `make_raking_blade` (24), `make_thin_fin` (24), `make_overhang_table` (60), `make_toed_slab` (140), `Cylinder` (244), `Sphere` (4,760) and the Weeping Treant (429,120), and `nonmanifold_edges = 0` on every one. No input class in the corpus reaches it. **First action:** decide whether a hole should refuse the *model* or degrade the *term* — the honest options are a typed per-model refusal (today's behaviour, now named), or a section method that tolerates open boundaries and is recorded as a different, weaker measurement. Do not widen it silently in either direction. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
