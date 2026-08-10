@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 259] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 262] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -140,6 +140,9 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 259] = [
     "NEAR_PLATE_MM",
     "ON_AXIS_TOL_MM",
     "ORIENT_SCAR_WEIGHT",
+    "ORIENT_WEIGHT_HEIGHT_MM",
+    "ORIENT_WEIGHT_PEAK_XSEC_CM2",
+    "ORIENT_WEIGHT_SUPPORT_AREA_CM2",
     "OVERHANG_ANGLE_DEG",
     "P8_BALL_SLIDE_MAX_MM",
     "P8_BALL_SLIDE_STEP_MM",
@@ -283,7 +286,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 259] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 262] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -415,6 +418,9 @@ static EXPECTED_ROWS: [ExpectedRow; 259] = rows! {
     "NEAR_PLATE_MM", "1.5", "mm", "scalar";
     "ON_AXIS_TOL_MM", "0.2", "mm", "scalar";
     "ORIENT_SCAR_WEIGHT", "0.4", "1", "scalar";
+    "ORIENT_WEIGHT_HEIGHT_MM", "0.3", "1/mm", "scalar";
+    "ORIENT_WEIGHT_PEAK_XSEC_CM2", "3.0", "1/cm²", "scalar";
+    "ORIENT_WEIGHT_SUPPORT_AREA_CM2", "0.5", "1/cm²", "scalar";
     "OVERHANG_ANGLE_DEG", "45.0", "°", "scalar";
     "P8_BALL_SLIDE_MAX_MM", "2.0", "mm", "scalar";
     "P8_BALL_SLIDE_STEP_MM", "0.25", "mm", "scalar";
@@ -546,7 +552,7 @@ static EXPECTED_ROWS: [ExpectedRow; 259] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 259 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 262 placeholder declarations must construct")
 }
 
 #[test]
@@ -557,7 +563,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 259);
+    assert_eq!(descriptors.len(), 262);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -648,7 +654,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_290_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_293_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -656,14 +662,14 @@ fn evidence_and_placeholder_fixture_builds_one_290_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 290);
+    assert_eq!(registry.len(), 293);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        290
+        293
     );
 }
 

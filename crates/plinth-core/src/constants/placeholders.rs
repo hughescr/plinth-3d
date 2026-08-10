@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 259], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 262], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1259,6 +1259,12 @@ placeholder_declarations! {
     "ON_AXIS_TOL_MM", "mm", "scalar", "Joint on-axis tolerance.";
     orient_scar_weight: NonNegativeFinite = NonNegativeFinite::new(0.4)?;
     "ORIENT_SCAR_WEIGHT", "1", "scalar", "Opt-in additive scar weight; zero reproduces the pre-scar objective.";
+    orient_weight_height_mm: NonNegativeFinite = NonNegativeFinite::new(0.3)?;
+    "ORIENT_WEIGHT_HEIGHT_MM", "1/mm", "scalar", "Dense-sweep objective weight on model height. Deliberately carried over from the retired hollow.orient_search heuristic (03-physics-and-constants.md §3.8) with NO measurement behind it: §3.10.3 retires that heuristic's COUPLING as a policy -- the 0.9 proxy reduction, the 13 candidates, the score form as one unit, the 0.1 mm/4 mm section sampler and the -0.707 cutoff -- while this value is knowingly reused as the dense sweep's starting objective. A search weight selects a candidate and never accepts one (D-25); acceptance remains the DefectReport.";
+    orient_weight_peak_xsec_cm2: NonNegativeFinite = NonNegativeFinite::new(3.0)?;
+    "ORIENT_WEIGHT_PEAK_XSEC_CM2", "1/cm²", "scalar", "Dense-sweep objective weight on peak cross-section area. Same knowing carry-over as ORIENT_WEIGHT_HEIGHT_MM, and the same non-acceptance status. The area it multiplies is the EXACT supremum over the build axis, not the retired 4 mm stepped sample, so the weight is inherited while the quantity it prices is not.";
+    orient_weight_support_area_cm2: NonNegativeFinite = NonNegativeFinite::new(0.5)?;
+    "ORIENT_WEIGHT_SUPPORT_AREA_CM2", "1/cm²", "scalar", "Dense-sweep objective weight on down-facing support area. Same knowing carry-over as ORIENT_WEIGHT_HEIGHT_MM, and the same non-acceptance status. The area it multiplies is a PROXY derivable without running the support engine: the overhang mask alone, deliberately without the engine's exterior, near-plate and grounded-column filters, so its bias against realized support area is a measured quantity rather than an asserted equality.";
     overhang_angle_deg: PositiveFinite = PositiveFinite::new(45.0)?;
     "OVERHANG_ANGLE_DEG", "°", "scalar", "Legacy tool convention lacking the required geometric-extent criterion.";
     p8_ball_slide_max_mm: PositiveFinite = PositiveFinite::new(2.0)?;

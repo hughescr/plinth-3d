@@ -566,7 +566,60 @@ of the local layer height, not products with a global scalar.
 | `delicacy_curvature_weight` / `delicacy_thinness_weight` (457/458) | 0.6 / 0.4 | — | **P** | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Blend of two geometric proxies. **Owner column corrected 2026-08-10**: it read `plinth-support::perceive`, which O-5 superseded — `plinth-mesh` is the sole delicacy implementation, and `plinth-support` is a *reader* of the resulting per-face weights, not their producer. The producer landed 2026-08-10 ([`decisions/2026-08-10-delicacy-producer.md`](decisions/2026-08-10-delicacy-producer.md)); until then nothing on the production path read these two at all. |
 | `thin_feature_mm` (460) | 1.5 | mm | **P** — saturation threshold | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Same 2026-08-10 owner correction. It is also the geometry-kernel grid pitch the producer's thinness ray cast is indexed at, deliberately so there is one length scale rather than two to keep aligned. |
 | `orient_scar_weight` (481) | 0.4 | — | **P** — "the starting default", additive/opt-in; 0.0 exactly reproduces the pre-scar-term search | `plinth-orient` | Scored as `sum(face_area_mm² × delicacy)` over down-facing faces, normalized `/100.0` to match the existing `sup` term's cm² scale. |
-| orientation objective weights (`hollow.orient_search`) | `0.5·support_area_cm² + 3·peak_xsec_cm² + 0.3·height_mm` (+ scar term) | — | **P — ad hoc, DO NOT PORT AS-IS** | `plinth-orient` | 13 hand-picked candidates (identity + ±10/20/30° about X and Y only; **no Z, no combined axes**), scored on a 90 %-decimated proxy while the delicacy field is built on the full mesh. Plan of record is a **dense sweep on a decimated proxy** scoring the support / scar / height triad jointly. |
+| orientation objective weights (`hollow.orient_search`) | `0.5·support_area_cm² + 3·peak_xsec_cm² + 0.3·height_mm` (+ scar term) | — | **P — ad hoc, DO NOT PORT AS-IS** | `plinth-orient` | 13 hand-picked candidates (identity + ±10/20/30° about X and Y only; **no Z, no combined axes**), scored on a 90 %-decimated proxy while the delicacy field is built on the full mesh. Plan of record is a **dense sweep on a decimated proxy** scoring the support / scar / height triad jointly. **Registered 2026-08-10** as `ORIENT_WEIGHT_SUPPORT_AREA_CM2` / `ORIENT_WEIGHT_PEAK_XSEC_CM2` / `ORIENT_WEIGHT_HEIGHT_MM`; see the addendum below for what that registration does and does not claim. |
+
+> **Addendum 2026-08-10 — the three scalarization weights are registered, and
+> the carry-over is stated rather than laundered.** The dense sweep's scoring
+> substrate landed in `plinth-orient::score`, so the three coefficients above are
+> now read from the M0 registry instead of living in a retired Python literal.
+> They are `Placeholder`, they are **not** measured, and registering them changes
+> nothing about their standing: §3.10.3 retires the frozen heuristic **as a
+> coupled policy** — proxy reduction 0.9, the 13 candidates, the score form as one
+> unit, the 0.1 mm margin at a 4 mm section step, and the −0.707 cutoff — and the
+> values are knowingly reused as the dense sweep's *starting* objective, which is
+> exactly what the §3.8 plan-of-record sentence directs. A search weight selects a
+> candidate and never accepts one (D-25); acceptance remains the `DefectReport`.
+>
+> Two of the four quantities the weights price are deliberately **not** the ones
+> the legacy heuristic priced, and the difference is recorded here rather than
+> absorbed into the weights:
+>
+> * **Peak cross-section is now the exact supremum**, computed from the
+>   divergence form as a piecewise quadratic in the build height with breakpoints
+>   at the vertex heights — no step, no margin, no aliasing and, deliberately, no
+>   new constant. The retired 4 mm sampler is not replaced by another sampler
+>   because a sampler's plane phase is anchored to each candidate's own `h_min`:
+>   across 13 candidates that is noise, but across ~650 the argmin systematically
+>   prefers directions whose grid under-reports their peak, so a denser search
+>   would optimize the sampler. The identity is `area(t) = Σ_faces ½(p×q)` over
+>   each face's chord oriented with the solid on its left, which is additive over
+>   faces and therefore needs no loop stitching or polygon union in the hot loop;
+>   `plinth-orient`'s section-oracle test is what licenses that skip, checking the
+>   solver against `geom_kernel`'s own plane-slice batch. **Stated assumption:**
+>   the identity measures the winding-number-weighted area, so two *interpenetrating*
+>   closed shells in one mesh would be counted twice in their overlap. That is the
+>   same convention the kernel's own slice sum carries, it is correct for any
+>   consistently wound solid, and it is a documented precondition rather than a
+>   silent one.
+> * **Support area is an overhang-mask proxy**, using the identical expression
+>   `-(OVERHANG_ANGLE_DEG.to_radians().sin())` and the identical strict `<` that
+>   `plinth-support/src/lib.rs:814,820` evaluates from the same registered
+>   constant — copied rather than re-registered, so the sweep's "down-facing"
+>   cannot drift from the engine's. It deliberately omits the engine's exterior,
+>   near-plate and grounded-column filters, because §3.8 requires a proxy
+>   derivable without running the support engine; at orient time the mesh is
+>   pre-hollow solid, so the exterior mask is trivially true anyway. The residual
+>   over-count is a per-model bias to be **measured** by the calibration driver,
+>   not asserted away.
+>
+> Measured at the landing tip on the committed baseline meshes (dev-opt),
+> scar-free where noted: the 4,760-face `Sphere` scores `sup = 1.8306 cm²`,
+> `peak = 3.1334 cm²`, `height = 19.997 mm`, total **16.3146** against the
+> analytic sphere's `0.5·1.84032 + 3·π/100·100 + 0.3·20 = 16.34494` and the
+> recorded legacy fixture's 16.6 (which carries the scar term this figure omits);
+> the 429,120-face `Weeping Treant v1.2` scores 57.4044 at identity against the
+> fixture's recorded 57.6 at X −30. Neither number is a re-pin of anything: no
+> committed artifact, baseline or digest is read or written by this substrate.
 
 ### 3.9 Removal ergonomics — all Placeholder, all human-calibrated
 

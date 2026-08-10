@@ -6,8 +6,14 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+# The shared kernel is depended on for exactly one thing: `current_threads`,
+# the single `PLINTH_THREADS` pool authority every crate's batch calls share
+# (06-conventions §3).  No spatial query in this crate goes anywhere else, and
+# there is no second BVH here (O-5).
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-mesh = { path = "../plinth-mesh" }
+rayon = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

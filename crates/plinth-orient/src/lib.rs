@@ -4,7 +4,24 @@
 //! required pipeline JSON, applies that rigid rotation, then recreates the legacy frame: the
 //! transformed bounding box is centered in XY and rests at Z=0. The output replaces the
 //! production mesh and retains only reports, never an untransformed second mesh.
+//!
+//! The dense sweep's **scoring substrate** lives beside it in [`score`]: the
+//! four objective terms of `03-physics-and-constants.md` §3.8, batched over
+//! candidate build directions, with the exact peak cross-section solver in
+//! [`section`].  That module computes scores; it does not select, and this
+//! stage's `run` still applies a pinned baseline and nothing else.
 #![forbid(unsafe_code)]
+
+mod score;
+mod section;
+
+pub use score::{
+    score_candidates, section_area_mm2_at, CandidateOutcome, CandidateRefusal,
+    CandidateRefusalReason, CandidateTerms, ObjectiveWeights, OrientFaceTable, OrientSearchLimits,
+    ScoreError, ScoreMeter, ScorePlan, ScoredCandidates, UpDirection, ORIENT_SCAR_WEIGHT_ID,
+    ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
+    OVERHANG_ANGLE_DEG_ID,
+};
 
 use plinth_core::Finite;
 use plinth_decimate::{DecimatedModel, DecimationAudit};

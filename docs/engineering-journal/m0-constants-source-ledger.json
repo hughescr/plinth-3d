@@ -1443,6 +1443,39 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "ORIENT_WEIGHT_HEIGHT_MM",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.3, the height coefficient of the retired hollow.orient_search scalarization; §3.10.3 retires that heuristic's coupling as a policy, not this value, which the dense sweep knowingly carries over as its starting objective",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+    },
+    {
+      "id": "ORIENT_WEIGHT_PEAK_XSEC_CM2",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 3.0, the peak cross-section coefficient of the retired hollow.orient_search scalarization; the weight is inherited, the quantity it prices is not — the dense sweep computes the exact supremum rather than the retired 4 mm stepped sample",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+    },
+    {
+      "id": "ORIENT_WEIGHT_SUPPORT_AREA_CM2",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.5, the support-area coefficient of the retired hollow.orient_search scalarization; the area it multiplies is the overhang-mask proxy, deliberately derivable without running the support engine",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search score",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+    },
+    {
       "id": "OVERHANG_ANGLE_DEG",
       "classification": "runtime_perception",
       "normative": "03-physics-and-constants.md §3.4 = 45.0 deg; Placeholder tool convention",

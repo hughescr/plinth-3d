@@ -1141,9 +1141,11 @@ dependencies = [
 name = "plinth-orient"
 version = "0.1.0"
 dependencies = [
+ "geom_kernel",
  "plinth-core",
  "plinth-decimate",
  "plinth-mesh",
+ "rayon",
  "serde",
  "thiserror 1.0.69",
 ]
