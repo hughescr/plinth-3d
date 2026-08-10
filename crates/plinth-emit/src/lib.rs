@@ -11,7 +11,7 @@ use chitubox_io::{
     SupportMode, SupportRecord, TriangleSoup,
 };
 use geom_kernel::SoupTriangle;
-use plinth_core::PrinterProfile;
+use plinth_core::{m0_constants, PrinterProfile};
 use plinth_mesh::Mesh;
 use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportSegmentKind, SupportedModel};
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const MODEL_NAME: &str = "plinth-model";
-const FRUSTUM_SIDES: usize = 24;
 const SPHERE_LATITUDES: usize = 8;
 const SPHERE_LONGITUDES: usize = 16;
-const RAFT_SIDES: usize = 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmitRequest {
@@ -46,6 +44,8 @@ pub enum EmitError {
     RecordEncodingRejected,
     #[error("the freshly reopened ChituBox artifact failed its disk audit")]
     DiskAuditRejected,
+    #[error("M0 constants publication failed")]
+    Constants,
 }
 
 /// Write one newly-created project and derive the report from a fresh disk read.
@@ -519,15 +519,23 @@ fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, Em
 ///
 /// Batch-first (D-37): gather every primitive's frame and raw soup, hand the
 /// whole forest to one kernel winding call, then scatter into wire records.
-/// There is deliberately no per-primitive winding call in this path.
+/// There is deliberately no per-primitive winding call in this path. The
+/// registered frustum/raft side counts are likewise read exactly once, here,
+/// rather than once per primitive.
 fn build_records(
     primitives: &[SupportPrimitive],
     center: [f64; 3],
 ) -> Result<Vec<SupportRecord>, EmitError> {
+    let policy = m0_constants()
+        .map_err(|_| EmitError::Constants)?
+        .placeholders();
+    let frustum_sides = policy.chitubox_emit_n_sides().diagnostic().get() as usize;
+    let raft_sides = policy.chitubox_pad_n_sides().diagnostic().get() as usize;
     let mut frames = Vec::with_capacity(primitives.len());
     let mut soups = Vec::with_capacity(primitives.len());
     for primitive in primitives {
-        let (frame, triangles) = record_frame_and_soup(primitive, center)?;
+        let (frame, triangles) =
+            record_frame_and_soup(primitive, center, frustum_sides, raft_sides)?;
         frames.push(frame);
         soups.push(triangles);
     }
@@ -553,6 +561,8 @@ struct RecordFrame {
 fn record_frame_and_soup(
     primitive: &SupportPrimitive,
     center: [f64; 3],
+    frustum_sides: usize,
+    raft_sides: usize,
 ) -> Result<(RecordFrame, Vec<SoupTriangle>), EmitError> {
     let r_start = primitive.start_radius_mm.get();
     let r_end = primitive.end_radius_mm.get();
@@ -573,7 +583,7 @@ fn record_frame_and_soup(
         SupportSegmentKind::ContactSphere => sphere_triangles(midpoint(start, end), r_start)?,
         SupportSegmentKind::JointSphere => sphere_triangles(midpoint(start, end), r_start)?,
         SupportSegmentKind::RaftPadOrBridge if same_point(start, end) => {
-            raft_pad_triangles(start, r_start, r_end)?
+            raft_pad_triangles(start, r_start, r_end, raft_sides)?
         }
         SupportSegmentKind::RaftPadOrBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
         SupportSegmentKind::ContactTaper
@@ -583,7 +593,7 @@ fn record_frame_and_soup(
             end,
             r_start,
             r_end,
-            FRUSTUM_SIDES,
+            frustum_sides,
             primitive.ring_normal,
         )?,
     };
@@ -778,6 +788,7 @@ fn raft_pad_triangles(
     start: [f64; 3],
     diameter: f64,
     height: f64,
+    raft_sides: usize,
 ) -> Result<Vec<SoupTriangle>, EmitError> {
     if !diameter.is_finite() || !height.is_finite() || height <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
@@ -787,7 +798,7 @@ fn raft_pad_triangles(
         add(start, [0.0, 0.0, height]),
         diameter * 0.5,
         diameter * 0.5,
-        RAFT_SIDES,
+        raft_sides,
         FrustumRingNormal::SegmentAxis,
     )
 }
@@ -1524,7 +1535,7 @@ mod tests {
                 [0.0; 3],
                 1.0,
                 1.0,
-                FRUSTUM_SIDES,
+                24,
                 FrustumRingNormal::SegmentAxis,
             ),
             Err(EmitError::RecordEncodingRejected)

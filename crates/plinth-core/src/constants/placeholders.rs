@@ -1101,7 +1101,7 @@ placeholder_declarations! {
     decimation_utility_min_input_faces: NonZeroU64 = nonzero(32_768)?;
     "DECIMATION_UTILITY_MIN_INPUT_FACES", "count", "scalar", "Input-face floor below which the downstream-utility witness refuses without examining geometry; corpus-shaped policy, not printer physics, and it decides only whether to attempt, never whether a result is safe. It is deliberately NOT derivable: gating on 'finer than the printer can resolve' (area / (pixel x layer)) puts a mini-sized model's resolvable face count near 1e6, which would forbid decimating the 429,120-face Weeping Treant too. The honest statement is that downstream cost is superlinear in face count while the geometric price is bounded by the Derived deviation limits. Value: the smallest power of two strictly above 4x the largest reachable corpus model (Sphere, 4,760 faces), chosen over 65,536 because it sits below the 65,024-face thread_sweep UV sphere and so gives the reduced path cross-thread determinism coverage at no frozen-digest cost. Single-specimen basis (R4-shaped standing trigger): n = 1 large specimen; a second corpus model above ~4,760 faces triggers re-derivation, never silent inheritance.";
     decimation_vertex_group_factor: PositiveFinite = PositiveFinite::new(10.0)?;
-    "DECIMATION_VERTEX_GROUP_FACTOR", "1", "scalar", "Protected vertex-group sizing factor.";
+    "DECIMATION_VERTEX_GROUP_FACTOR", "1", "scalar", "Registered but unread. Sized a weighted Blender vertex group in the deleted decimate_pipeline.py (skills/decimate-for-print), removed with the Python migration; this crate's meshopt QEM engine protects features with a boolean per-vertex lock (SimplifyRequest::vertex_locks) instead of a weighted group, so no live reader was ported.";
     default_contact_depth_mm: PositiveFinite = PositiveFinite::new(0.3)?;
     "DEFAULT_CONTACT_DEPTH_MM", "mm", "scalar", "Generation/profile default, not ChituBox format authority.";
     delicacy_curvature_weight: UnitFraction = UnitFraction::new(0.6)?;
@@ -1139,7 +1139,7 @@ placeholder_declarations! {
     hollow_allow_output_default: bool = false;
     "HOLLOW_ALLOW_OUTPUT_DEFAULT", "1", "scalar", "Hollow output remains disabled without a dedicated verifier.";
     hollow_breathing_voxel_pitch_mm: PositiveFinite = PositiveFinite::new(0.4)?;
-    "HOLLOW_BREATHING_VOXEL_PITCH_MM", "mm", "scalar", "Final cavity-breathing verification voxel pitch.";
+    "HOLLOW_BREATHING_VOXEL_PITCH_MM", "mm", "scalar", "Registered but unread. Sized the final cavity-breathing verification voxelization in the deleted scripts/support_placement/hollow.py, removed with the Python migration; this crate's drilling stage proves drainability with exact ray casts against the frozen cavity field (see plinth-hollow::drilling), not a re-voxelized breathing check at this pitch, so no live reader was ported.";
     hollow_bulk_min_mm: PositiveFinite = PositiveFinite::new(10.0)?;
     "HOLLOW_BULK_MIN_MM", "mm", "scalar", "Hollowing bulk-size policy.";
     hollow_containment_min_fraction: UnitFraction = UnitFraction::new(0.9)?;
@@ -1218,13 +1218,13 @@ placeholder_declarations! {
     l_scar_max_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "L_SCAR_MAX_MM", "mm", "scalar", "Owner-ratified maximum scar-patch dimension.";
     material_cost_per_mm: NonNegativeFinite = NonNegativeFinite::new(0.05)?;
-    "MATERIAL_COST_PER_MM", "per-mm", "scalar", "Strut-selection material cost weight.";
+    "MATERIAL_COST_PER_MM", "per-mm", "scalar", "Registered but unread. Priced the anchor-length term of the deleted scripts/support_placement/struts.py two-scar cost function, removed with the Python migration; the ported anchor module accepts the cheapest candidate by real volume delta instead (plinth-support::anchor; skills/support-placement/references/design-v4.md), so no live reader was ported.";
     max_deflection_mm: PositiveFinite = PositiveFinite::new(0.15)?;
     "MAX_DEFLECTION_MM", "mm", "scalar", "Subjective visual-ribbing serviceability threshold.";
     max_segment_angle_deg: PositiveFinite = PositiveFinite::new(45.0)?;
     "MAX_SEGMENT_ANGLE_DEG", "°", "scalar", "Qualitative printability policy, not measured authority.";
     max_trunk_r_mm: PositiveFinite = PositiveFinite::new(2.4)?;
-    "MAX_TRUNK_R_MM", "mm", "scalar", "Live trunk-radius ceiling.";
+    "MAX_TRUNK_R_MM", "mm", "scalar", "Registered but unread. Its only reader was trunks.py:size_trunks, dead v3 code deleted with the Python migration (see 03-physics-and-constants.md §3.3); the ported sizing path reads only the paired MIN_TRUNK_R_MM floor (plinth-support::member_sizing, plinth-support::cco), and this ceiling was never carried forward.";
     max_unbraced_shaft_r_mm: PositiveFinite = PositiveFinite::new(0.9)?;
     "MAX_UNBRACED_SHAFT_R_MM", "mm", "scalar", "Corpus rationale does not derive the unbraced-shaft ceiling.";
     minima_birth_match_layers: PositiveFinite = PositiveFinite::new(2.0)?;
@@ -1342,7 +1342,7 @@ placeholder_declarations! {
     rewire_work_budget: TrialSetting<NonZeroU64> = TrialSetting::disabled();
     "REWIRE_WORK_BUDGET", "count", "trial_setting<nonzero_u64>", "B5 exact-search baseline is Disabled with no wall-clock fallback and no selected enabled budget.";
     scar_cost_weight: NonNegativeFinite = NonNegativeFinite::new(1.0)?;
-    "SCAR_COST_WEIGHT", "1", "scalar", "Strut-selection scar cost weight.";
+    "SCAR_COST_WEIGHT", "1", "scalar", "Registered but unread. Priced the delicacy term of the deleted scripts/support_placement/struts.py two-scar cost function, removed with the Python migration; the ported anchor module accepts the cheapest candidate by real volume delta instead (plinth-support::anchor; skills/support-placement/references/design-v4.md), so no live reader was ported.";
     slice_union_max_abs_mm: PositiveFinite = PositiveFinite::new(1.0e4)?;
     "SLICE_UNION_MAX_ABS_MM", "mm", "scalar", "FU-10 layer-normalizer coordinate domain half-width; keeps quantized magnitudes at or below 1e12 so i128 wide arithmetic in the pinned integer overlay engine cannot overflow. A refusal boundary, not printable reach.";
     slice_union_quantum_mm: PositiveFinite = PositiveFinite::new(1.0e-8)?;
@@ -1356,7 +1356,7 @@ placeholder_declarations! {
     strut_max_length_mm: PositiveFinite = PositiveFinite::new(20.0)?;
     "STRUT_MAX_LENGTH_MM", "mm", "scalar", "Corpus outcomes do not establish a safe strut maximum.";
     strut_min_length_saved_mm: PositiveFinite = PositiveFinite::new(8.0)?;
-    "STRUT_MIN_LENGTH_SAVED_MM", "mm", "scalar", "Minimum material saving that justifies a second scar.";
+    "STRUT_MIN_LENGTH_SAVED_MM", "mm", "scalar", "Registered but unread. Gated the deleted scripts/support_placement/struts.py second-scar cost tradeoff, removed with the Python migration; the ported anchor module (plinth-support::anchor) accepts the cheapest candidate by real volume delta instead of a length-saved threshold, so no live reader was ported.";
     strut_model_anchor_max_candidates: NonZeroU64 = nonzero(40)?;
     "STRUT_MODEL_ANCHOR_MAX_CANDIDATES", "count", "scalar", "Model-anchor candidate-selection cap.";
     strut_model_anchor_max_delicacy: UnitFraction = UnitFraction::new(0.5)?;

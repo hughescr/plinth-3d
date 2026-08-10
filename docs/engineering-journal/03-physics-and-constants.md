@@ -455,7 +455,7 @@ accept-safe dispositions.
 | `stub_length_mm` (247) | 2.5 | mm | **P** | `plinth-support::placement` | |
 | `min_shaft_r_mm` (139) | 0.3 | mm | **P** | `plinth-support::placement` | |
 | `max_unbraced_shaft_r_mm` (138) | 0.9 | mm | **P** — corpus-rationale policy; realized "Heavy" radius 0.75 mm does not derive the ceiling | `plinth-support::placement` | Above this, brace instead of thickening. |
-| `min_trunk_r_mm` / `max_trunk_r_mm` (348/349) | 0.8 / 2.4 | mm | **P** — "removal-friendly band" | `plinth-support::placement` | |
+| `min_trunk_r_mm` / `max_trunk_r_mm` (348/349) | 0.8 / 2.4 | mm | **P** — "removal-friendly band" | `plinth-support::placement` | The Rust owner column is true only for `min_trunk_r_mm`, read by `plinth-support::member_sizing`/`cco`. `max_trunk_r_mm` is **registered but unread**: its only reader was `trunks.py:size_trunks`, dead v3 code deleted with the Python migration (§3.3), and the ceiling was never carried forward. |
 | `min_shoot_r_mm` (351) | 0.35 | mm | **P** | `plinth-support::placement` | Also the threshold selecting `branch_angle_deg` over `max_segment_angle_deg`. This is the **shaft/member** minimum and it governs **routing through narrow gaps** — a different question from tip size, and the tip-diameter floor above does **not** set it. Observed consequence: at 0.35 mm the router cannot reach into thin-rib features, which are then left genuinely unsupported. Counter-pressure in the other direction: Cao measured a 0.5 × 0.5 mm as-printed strut fracturing at **4.8 MPa**, so thin struts are real but weak. Resolving this one needs a strut ladder printed on this machine, not more reading. |
 
 ### 3.3 Deflection / bracing / transient
@@ -506,9 +506,9 @@ accept-safe dispositions.
 | `max_segment_angle_deg` (293) | 45.0 | ° | **P** — qualitative layer-continuity policy, not measured or binding-derived | `plinth-verify` (gate) / `plinth-support::cco` (sizing) | Keeps every layer >90 % seated on cured material for members ≥0.7 mm across, and bounds the peel moment arm. Pure horizontal runs are banned except two-end-supported raft bridges at plate level. |
 | `branch_angle_deg` (405) | 60.0 | ° | **P** — widened by fiat (v3.6) | `plinth-verify` (gate) / `plinth-support::cco` (sizing) | **Required pairing:** any member past 45° must be sized with the angle-aware term `F_eff = F_drag + peel · π·r²·tan θ` in `_shaft_r_for_L`. Do not allow the wider cone without the load term. |
 | `strut_fallback_max_angle_deg` (390) | 60.0 | ° | **P** | `plinth-support::anchor` | |
-| `strut_min_length_saved_mm` (432) | 8.0 | mm | **P** | `plinth-support::anchor` | Minimum material saving to justify a second scar. |
+| `strut_min_length_saved_mm` (432) | 8.0 | mm | **P** | `plinth-support::anchor` | Minimum material saving to justify a second scar. **Registered but unread** in `plinth-support::anchor`: it gated `struts.py`'s second-scar cost tradeoff, dead Python deleted with the migration; the ported anchor module accepts the cheapest candidate by real volume delta instead (`design-v4.md`), not by a length-saved threshold. |
 | `strut_max_length_mm` (442) | 20.0 | mm | **P** — corpus outcomes do not establish a safe maximum | `plinth-support::anchor` | Uncapped, 307/353 Treant contacts chose model anchors, most producing clearance violations; that rationale does not make 20.0 AcceptSafe. |
-| `scar_cost_weight` / `material_cost_per_mm` (445/450) | 1.0 / 0.05 | — / per-mm | **P** | `plinth-support::anchor` | Cost-function weights. |
+| `scar_cost_weight` / `material_cost_per_mm` (445/450) | 1.0 / 0.05 | — / per-mm | **P** | `plinth-support::anchor` | Cost-function weights. **Registered but unread** in `plinth-support::anchor`: both priced `struts.py`'s two-scar cost function (`material_cost_per_mm × length + scar_cost_weight × delicacy`), dead Python deleted with the migration; the ported anchor module accepts the cheapest candidate by real volume delta instead (`design-v4.md`). |
 | `LIFT_MM` (legacy config `lift_mm`, 235) | **5.0** | mm | **P**, diagnostic local profile default | `plinth-core::printer` | Canonical future value and one owner. It is not vendor evidence. Retire the pipeline's 3.0 override and remove any emit-time authority: emit consumes the plated frame/profile and cannot override lift. |
 | `wall_mm` (`pipeline.prep_one` signature) | 2.5 | mm | **P** — bare default, no cited measurement | `plinth-hollow` | |
 
@@ -657,7 +657,7 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_SHARD_MAX_FACES` / `HOLLOW_SHARD_MAX_DIM_MM` / `HOLLOW_SHARD_MAX_VOLUME_MM3` | 64 / 1.0 mm / 0.01 mm3 | component-triage gates |
 | `HOLLOW_CONTAINMENT_SAMPLES` / `HOLLOW_CONTAINMENT_MIN_FRACTION` | 32 / 0.9 | internal-component evidence gate |
 | `HOLLOW_ALLOW_OUTPUT_DEFAULT` | false, **P** | hollow output stays disabled without the dedicated verifier |
-| `HOLLOW_BREATHING_VOXEL_PITCH_MM` | 0.4 mm | final cavity-breathing verification/export voxel pitch |
+| `HOLLOW_BREATHING_VOXEL_PITCH_MM` | 0.4 mm | final cavity-breathing verification/export voxel pitch. **Registered but unread**: it sized the final breathing check in `scripts/support_placement/hollow.py`, deleted with the Python migration; `plinth-hollow::drilling` proves drainability with exact ray casts against the frozen cavity field instead of a re-voxelized breathing check at this pitch. |
 | `HOLLOW_VOLUME_BALANCE_REL_TOL` | 0.02 | final volume-balance tolerance relative to the solid-model volume |
 | `HOLLOW_EXIT_RAY_MAX_MM` | 45 mm | drain/vent exit search ceiling |
 | `HOLLOW_DRAIN_DIRECTIONS` | `(0,0,-1)`, `(0.5,0,-1)`, `(-0.5,0,-1)`, `(0,0.5,-1)`, `(0,-0.5,-1)` | one structured downward-direction policy |
@@ -748,7 +748,7 @@ claim that 25 is physics.
 | `CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY` | `n_lat=8`, `n_lon=16` | default 224-triangle UV-sphere policy; changes the cached geometry of every default-emitted tip/contact and joint sphere |
 | `DECIMATION_FEATURE_PROBE_RATIO` / `DECIMATION_SEED_ERROR_MM` / `DECIMATION_FEATURE_HALO_MM` / `DECIMATION_PROTECTED_CAP_FRACTION` | 0.2 / 0.050 mm / 0.4 mm / 0.12 | feature-protection controls |
 | `DECIMATION_ADAPTATION_POLICY` | 3 adaptations; feature multiplier 2.0; error multiplier 0.6 | one structured adaptive policy |
-| `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing |
+| `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing. **Registered but unread**: it sized a weighted Blender vertex group in the deleted `decimate_pipeline.py` (`skills/decimate-for-print`), removed with the Python migration; `plinth-decimate`'s meshopt QEM engine protects features with a boolean per-vertex lock (`SimplifyRequest::vertex_locks`) instead of a weighted group. |
 | `DECIMATION_RATIO_SEARCH` | [0.05, 1.00], 5 bisections; only a genuinely reduced candidate may win | **Placeholder** search policy. The owner corrected the former 0.50 ceiling on 2026-08-01: it was unmeasured and must not force damage or rejection of already-print-scale geometry. |
 | `DECIMATION_P99_SAMPLE_POLICY` / `DECIMATION_P999_SAMPLE_POLICY` | seed/cap 42/120000 and 1/150000 | independent error-sampling policies |
 | `DECIMATION_SCALE_ACCEPTANCE_MM` | [10, 300] mm | scale sanity interval |
