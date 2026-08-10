@@ -128,6 +128,68 @@ oracle, and is restored bit-for-bit after being deliberately reversed. The
 regenerated set and `pad_bridge_donor.chitubox` are excluded as the ruling
 requires.
 
+**Bit-identity discharged by measurement, not by inspection.** The acceptance
+condition on this change is that currently-emitted geometry does not move, and
+until now that condition rested on reading the two versions side by side: three
+parties agreed the relocation is bit-identical *by construction* (identical
+dot/cross element order, the same `/6.0` term, the same serial per-soup
+accumulation and the same two finiteness checks, the same `< 0.0` `swap(1, 2)`,
+and no FMA contraction on this target), and
+`batched_winding_matches_each_record_built_alone` only compares the new code
+with itself. So the bytes were compared across the two commits directly, once:
+
+- **Before** — `develop @ 5846a20`, the parent commit, in the `plinth-3d`
+  checkout.
+- **After** — `feature/wind-outward @ df2b3d2`, the relocation, in the
+  `plinth-wt-wind-outward` worktree.
+- Both built `cargo build --release --offline --example first_artifact -p
+  plinth-pipeline` and both ran `./target/release/examples/first_artifact
+  --all` — the seven frozen-digest corpus models — and then both ran it once
+  more on `"Weeping Treant v1.2"` by name, which the sweep excludes for cost.
+  Every model is supported, and every artifact is re-read from disk by the
+  chain's own audit before it is compared.
+
+**All eight artifacts are byte-identical across the two commits** — same length
+and same SHA-256, 37,928,928 bytes over 4,313 support records in total:
+
+| Model | Records | Bytes | SHA-256 (identical on both commits) |
+|---|---:|---:|---|
+| `Sphere` | 70 | 899,664 | `d59044b8…2cc9b8` |
+| `Cylinder` | 363 | 1,613,616 | `ddcbd8d2…539ab8` |
+| `make_box` | 69 | 343,392 | `70bfec4e…3e2f03` |
+| `make_overhang_table` | 544 | 2,826,024 | `9aea3648…c4b504` |
+| `make_toed_slab` | 402 | 2,110,344 | `12ebdcde…751a0d` |
+| `make_raking_blade` | 171 | 904,848 | `9acfa270…da84ab` |
+| `make_thin_fin` | 109 | 560,688 | `b7337798…f94c1a` |
+| `Weeping Treant v1.2` | 2,585 | 28,670,352 | `fb4594b6…b9c7d1` |
+
+The treant leg is worth its eight minutes twice over: it is the flagship, it
+reaches the artifact through the `HollowStageRefused` fallback (FU-34) rather
+than the ordinary hollow path, and its **28,670,352 bytes and 2,585 records
+reproduce the 2026-08-09 checkpoint's figures exactly**, on both commits — so
+this A/B also re-confirms that checkpoint at a later tip.
+
+**The comparison is not vacuous on the path it is meant to guard: on the seven
+sweep models the winding reverses 257 of their 1,728 soups**, and reverses them
+on *both* sides. The reversed set is exactly the type-6 pad/bridge records —
+`raft_pad_triangles` and `raft_bridge_triangles` emit inward and are turned —
+11 on `Sphere`, 95 on `Cylinder`, 15 on `make_box`, 49 on
+`make_overhang_table`, 47 on `make_toed_slab`, 21 on `make_raking_blade`, 19 on
+`make_thin_fin`, matching each model's `by_type` type-6 count exactly (the
+treant carries 167 type-6 records of its own). That count was taken with a
+temporary env-gated counter in `wind_outward`, read once and reverted; it is in
+no committed file, and the artifacts compared above were produced by
+uninstrumented builds of both commits.
+
+**Deliberately not committed: a frozen digest of the emit bitstream.**
+`crates/plinth-pipeline/tests/first_artifact.rs:12-16` (design record OQ-3)
+keeps frozen digests off the export path on purpose, because concurrent
+support-gate work legitimately moves member counts and therefore these bytes;
+digest authority stays with `plinth-support`'s own integration goldens. The
+digests above are a dated measurement of two named commits, not a gate — a
+one-time recorded A/B satisfies this ruling's condition without contradicting
+that one.
+
 Two things were measured rather than assumed, and both are recorded here
 because the docstring's warning turned out to be about a real precondition:
 
@@ -147,7 +209,10 @@ because the docstring's warning turned out to be about a real precondition:
   here for an owner ruling rather than fixed in passing; the bound in
   `every_emitted_soup_is_closed_which_the_winding_decision_requires` is
   `1e-12`, which the seam clears by four orders and which a real leak would
-  not.
+  not. **The ruling this asks for is tracked as FU-36** in `CURRENT-STATUS.md`'s
+  follow-ups ledger (`#follow-ups-2026-08-04`), opened by this change on
+  2026-08-09 — a deferred ruling recorded only in a topic journal is a ruling
+  nobody is ever prompted for, and the `1e-12` bound needs an item to trace to.
 
 **Batch-first shape to preserve:** `member_chain_specs`/`bottom_connected_specs`
 already batch at the whole-forest level (one call builds every `SegmentSpec`
