@@ -10,6 +10,7 @@ plinth-core = { path = "../plinth-core" }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-emit = { path = "../plinth-emit" }
 plinth-hollow = { path = "../plinth-hollow" }
+plinth-mesh = { path = "../plinth-mesh" }
 plinth-orient = { path = "../plinth-orient" }
 plinth-support = { path = "../plinth-support" }
 plinth-verify = { path = "../plinth-verify" }
@@ -18,9 +19,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 # The E2 first-artifact seam re-reads what it wrote, and chitubox_io parses the
-# emitted container back. That is example/test-only. plinth-verify is a real
-# dependency above, not a dev one: the pre-write gate consults its coverage
-# verdict before the library ever calls plinth-emit.
+# emitted container back. That is example/test-only. plinth-verify and
+# plinth-mesh are real dependencies above, not dev ones: the pre-write gate
+# consults plinth-verify's coverage verdict before the library ever calls
+# plinth-emit, and `prepare` loads every source model through plinth-mesh.
 chitubox_io = { path = "../../rust/chitubox_io" }
-plinth-mesh = { path = "../plinth-mesh" }
 serde_json = { workspace = true }

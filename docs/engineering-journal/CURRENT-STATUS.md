@@ -5,6 +5,139 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-09 — `plinth prepare` executes, and it cannot yet orient anything
+
+<a id="prepare-execution-2026-08-09"></a>
+
+Design phases E4 and E5 (`export-path-design-2026-08-07.md`) land together.
+`plinth_pipeline::prepare(PrepareRequest) -> Result<PrepareReport, PipelineError>` is
+real; `crates/plinth-cli` no longer prints "execution is not implemented".
+
+**The composition moved rather than being copied.** The whole end-to-end chain lived in
+`crates/plinth-pipeline/examples/shared/first_artifact_chain.rs`, reachable only from a
+test and an artifact-producing example. It is now `crates/plinth-pipeline/src/prepare.rs`,
+and the example's shared module is a thin corpus-fixture wrapper over it — so the code the
+first-artifact test gates and the code the CLI runs are one implementation (O-5). All five
+`tests/first_artifact.rs` cases still pass unchanged, including the same three gate
+refusals, which is the evidence that the promotion was behaviour-neutral.
+
+**What the executor guarantees.** Sources are `*.stl` in `input_models_dir`, enumerated in
+sorted order; each emits `<stem>.chitubox` into `output_dir`. **One bad model never aborts
+the folder**: a load failure, an unorientable model, a stage error and a gate refusal are
+all per-model dispositions in `PrepareReport`, and the returned `Err` is reserved for
+failures of the *run* (unreadable input folder, uncreatable output folder, unassemblable
+resource policy). **No model's artifact path survives its own run**: every model's target
+is cleared before that model is attempted, so a folder re-run after a model started failing
+reports the failure *and* the earlier artifact is gone. A gate refusal writes no file and
+projects to `PipelineExitCode::Gates = 3`. The run's exit code is `Gates` if **any** model
+in the run was gate-refused, and otherwise the first non-`Ok` disposition in report order.
+`Gates` is the only sticky code: it is the one code with a documented meaning callers act
+on, and first-in-order alone would let a `._sidecar` that fails to load mask a physics
+refusal behind exit 1. Every other code stays first-in-order, because the exit-code
+contract defines no severity ranking over them and inventing one would be a second
+contract.
+
+**The run report carries the assumed print size.** Every model that reached decimation
+reports `trace.scale.longest_axis_mm` and its bounding box, on the success path as well as
+on refusals. A mini silently processed at a tenth of its intended size produces a
+completely plausible artifact and an unusable print, and this line is the only place that
+is visible.
+
+**The blocker, stated plainly: the CLI can prepare nothing today.** `parse_args` hardcodes
+`OrientationPolicy::LegacyCoarse`, the ratified command line has no `--orient` flag, and
+the native coarse orientation search of `02-target-architecture.md` §6 is unported. So
+`plinth prepare` reaches a per-model orientation refusal for every model — named,
+non-fatal, and never a silent identity, because choosing identity in the search's absence
+would be *inferring* an orientation and `plinth-orient` refuses to do that even for
+identity. **`prepare` itself is complete**: under `OrientationPolicy::Pinned` it produces a
+real `.chitubox` that survives the independent disk audit and the `plinth-verify` format
+gate (`crates/plinth-pipeline/tests/prepare_folder.rs`). The only missing piece between
+here and a usable `plinth prepare` is the `--orient pinned:<baseline>` flag §6 already
+specifies, which is a parser change and therefore a separate landing.
+
+**A fixture finding, recorded rather than papered over.** No checked-in
+`corpus/baseline/*.prepped.stl` is refused by the pre-write gates: both
+`make_overhang_table.prepped.stl` and `Sphere.prepped.stl` seal and emit through the whole
+chain, while the procedural `make_overhang_table()` and the provisioned
+`corpus/models/Sphere.stl` are refused for uncovered islands. That is consistent — a
+`.prepped.stl` is the legacy prep's *output*, already oriented and cleaned — but it means
+the folder-level refusal test is driven by a procedural mesh written out as a binary STL.
+
+**Three constants were registered and no number moved.** `ProbeConfig::new(1.0, 64 MiB,
+10_000.0)` was restated by hand at 18 call sites and never registered. `prepare` reads it
+in production, so it is now `DECIMATION_PROBE_GRID_PITCH_MM`,
+`DECIMATION_PROBE_MAX_GRID_BYTES` and `DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM`
+(Placeholder), read through `plinth_pipeline::registered_decimation_budget`. The registry
+is 290 constants (259 Placeholder). A unit test asserts the registered budget equals the
+hand-written one every gate already used, which is why no decimation digest moved. The run
+lift is likewise read off the profile's registered `LIFT_MM` rather than restated, and the
+layer pitch off `LAYER_HEIGHT_DEFAULT_MM`.
+
+**No cap was raised and no gate was relaxed.** `judge_then_emit` is still the only door to
+the gate set and still takes no override parameter.
+
+### 2026-08-09, second pass — the review's seven, and the one that is a follow-up
+
+The landing above was reviewed and seven findings were fixed on the same branch. They are
+listed here because five of them are *silent-substitution* defects, which is the class this
+whole export path exists to eliminate, and one of them changes a documented contract.
+
+**Stale artifacts no longer survive a pre-gate failure (BLOCKING).** `judge_then_emit`
+owned the no-file guarantee only for models that reached it. A model that stopped earlier —
+load, decimation, scale sanity, orientation, layer planning, the sealed support run — never
+touched its target, so re-running a folder whose model had started failing reported ERROR
+while leaving the previous run's `.chitubox` standing for the next reader to take as this
+run's answer. Every model's target is now cleared once, at the top of `prepare_one`, before
+anything can fail; a removal that itself fails is `PipelineError::StaleArtifact`, a named
+per-model failure, never swallowed.
+
+**The oriented-solid reserve answers only a support refusal.** The guard was
+`Err(stop) if stop.is_gates()`, so `Lowering`, `Emit` (the post-write disk audit refusing
+the bytes), `LayerPlan` and `DegenerateExtent` all took the fallback: the chain re-planned
+the oriented solid, wrote it to the same target, labelled it `DrilledShellRefusedBySupport`
+with an unrelated error as the "refusal", and reported success. The reserve's own claim is
+"this *geometry* could not be sealed", so it now fires only on `SealedRun`/`Support`.
+
+**The hollow-stage fallback no longer launders configuration errors.** Case 0 converted
+*every* `HollowError` into `solid_decision(BelowThreshold)` and emitted — including
+`PrinterProfileMismatch`, `WallBelowVoxelPitch`, constants-registry failures and the voxel
+resource caps. An operator who passed a parse-valid but inadmissible `--wall-mm` got a solid
+artifact reported as success instead of the error naming their request.
+`hollow_error_refuses_this_geometry` now classifies the variants exhaustively and without a
+`_` arm, so a new `HollowError` is a compile error rather than a silent inheritance of the
+fallback; only geometry refusals (the `InvalidShellTopology` class OQ-1/FU-34 authorized)
+reach the reserve, and resource-cap refusals explicitly do not (FU-8b: a cap that was
+reached is a finding, not a reason to take another route to an artifact).
+
+**A successful artifact now says what it is made of.** `ModelPreparationOutcome::Artifact`
+carried only `{ emit }`, so an artifact produced by either fallback was indistinguishable in
+the report from the intended drilled shell — the exact substitution `Refused`'s `geometry`
+field exists to expose. It now carries `geometry` and `hollow_disposition`, and the CLI
+prints them, spelling substitutions `SUBSTITUTED solid -- ...` rather than a bare `EMITTED`.
+
+**A pinned baseline is per model, not per run.** `PrepareRequest.orientation` carried ONE
+`OrientationPolicy::Pinned` baseline for the whole folder, and `plinth_orient::run` applies
+the recorded rotation to whatever mesh it is handed without binding it to the source — so a
+heterogeneous folder silently received one model's rotation for every model, and a
+misoriented mini still seals, still gate-passes and still emits. `OrientationPolicy::Pinned`
+is now a `BTreeMap<String, PinnedBaseline>` keyed by source stem, which is how the proven
+composition always resolved it; a model the map does not name is
+`PipelineError::OrientationBaselineMissing`, a per-model refusal, never a borrowed rotation.
+**This binds the `--orient` follow-up**: the flag must name a baseline per model, not one
+for the run.
+
+**`stop_after` has the per-stage tests E4's acceptance item asked for.** All eight branch
+points, every `Stopped` disposition, the `Ok(None)` protocol between `prepare_one`,
+`run_from_oriented` and `seal_and_emit`, and the `expect()` guard that turns a broken
+protocol into a whole-run panic were unexecuted workspace-wide.
+
+**Still open, and it is the product-level blocker: the CLI can prepare nothing.** The
+`--orient pinned:<baseline>` flag of `02-target-architecture.md` §6 is unbuilt, so
+`parse_args` still hardcodes `LegacyCoarse` and every model on every invocation takes the
+orientation-refusal path. It is a parser change and its own landing, and it must also add
+the two process-level tests that are impossible until it exists: a real `.chitubox` produced
+through the binary, and an observed exit 3.
+
 ## 2026-08-09 — the pre-write gate is wired, and it refuses three corpus models
 
 <a id="pre-write-gate-2026-08-09"></a>

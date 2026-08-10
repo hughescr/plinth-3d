@@ -56,9 +56,15 @@ supports and slice.
 The corpus STLs are inputs rather than source and are not stored in git; see
 [`docs/development.md`](docs/development.md) for how to provision them.
 
-**The command-line front end is not wired up yet.** `plinth prepare` parses its flags and
-stops there — the folder-level runner behind it is the next thing being built, and the flag
-spelling is not settled.
+**The command-line front end runs, but it cannot orient a model yet.** `plinth prepare`
+now walks the folder for real: it loads and measures every `.stl`, prints a per-model run
+report including the size it assumed the model was, and writes one `.chitubox` per model
+that passes the pre-write physics gates. What is missing is one flag. Orientation is never
+inferred — the engine applies a rotation a pinned baseline states, and the automatic
+orientation search is not ported — so with no way to name a baseline on the command line,
+every model stops at a named orientation refusal. The folder runner underneath it is
+complete and produces real artifacts under a pinned orientation policy; until the flag
+lands, `cargo run --example first_artifact` above is the way to get a file.
 
 ## How it fits together
 

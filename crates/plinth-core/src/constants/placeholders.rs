@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 256], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 259], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1082,6 +1082,12 @@ placeholder_declarations! {
     "DECIMATION_P99_FACTOR", "1", "scalar", "Selected pixel-pitch divisor fraction; arithmetic does not establish authority.";
     decimation_p99_sample_policy: DecimationSamplingPolicy = DecimationSamplingPolicy::new(42, 120_000)?;
     "DECIMATION_P99_SAMPLE_POLICY", "count", "record{cap,seed}", "Backward percentile sampling seed and cap.";
+    decimation_probe_grid_pitch_mm: PositiveFinite = PositiveFinite::new(1.0)?;
+    "DECIMATION_PROBE_GRID_PITCH_MM", "mm", "scalar", "Nearest-surface probe grid pitch the decimation error search builds its D1 probe surfaces at. Selected, never measured: it is the pitch every sealed-run gate, corpus budget and frozen decimation digest in this workspace was produced at, published here because `plinth prepare` now reads it in production instead of restating it as a call-site literal. Changing it moves decimation output and therefore every frozen digest downstream of it.";
+    decimation_probe_max_grid_bytes: NonZeroU64 = nonzero(64 * 1024 * 1024)?;
+    "DECIMATION_PROBE_MAX_GRID_BYTES", "bytes", "scalar", "Allocation ceiling for one decimation probe surface. A resource exclusion, not a physics value: a model whose probe grid would exceed it is refused rather than silently coarsened. Same 64 MiB every call site in this workspace already passed.";
+    decimation_probe_nearest_upper_bound_mm: PositiveFinite = PositiveFinite::new(10_000.0)?;
+    "DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM", "mm", "scalar", "Upper bound on one nearest-surface query distance during the decimation error search. Deliberately far larger than any Saturn build-volume diagonal, i.e. effectively unbounded: it exists so a runaway query terminates, not to clamp a real measurement. Not derived from the build volume, because an oversized input model must still be measured honestly before the emit-stage bounds audit refuses it.";
     decimation_protected_cap_fraction: UnitFraction = UnitFraction::new(0.12)?;
     "DECIMATION_PROTECTED_CAP_FRACTION", "1", "scalar", "Protected-vertex fraction cap.";
     decimation_ratio_search: DecimationRatioSearchPolicy = DecimationRatioSearchPolicy::new(0.05, 1.0, 5)?;

@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 256] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 259] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -57,6 +57,9 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 256] = [
     "DECIMATION_P999_SAMPLE_POLICY",
     "DECIMATION_P99_FACTOR",
     "DECIMATION_P99_SAMPLE_POLICY",
+    "DECIMATION_PROBE_GRID_PITCH_MM",
+    "DECIMATION_PROBE_MAX_GRID_BYTES",
+    "DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM",
     "DECIMATION_PROTECTED_CAP_FRACTION",
     "DECIMATION_RATIO_SEARCH",
     "DECIMATION_RECHECK_SLACK",
@@ -280,7 +283,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 256] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 259] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -329,6 +332,9 @@ const EXPECTED_ROWS: [ExpectedRow; 256] = rows! {
     "DECIMATION_P999_SAMPLE_POLICY", "{cap:150000,seed:1}", "count", "record{cap,seed}";
     "DECIMATION_P99_FACTOR", "0.0005", "1", "scalar";
     "DECIMATION_P99_SAMPLE_POLICY", "{cap:120000,seed:42}", "count", "record{cap,seed}";
+    "DECIMATION_PROBE_GRID_PITCH_MM", "1.0", "mm", "scalar";
+    "DECIMATION_PROBE_MAX_GRID_BYTES", "67108864", "bytes", "scalar";
+    "DECIMATION_PROBE_NEAREST_UPPER_BOUND_MM", "10000.0", "mm", "scalar";
     "DECIMATION_PROTECTED_CAP_FRACTION", "0.12", "1", "scalar";
     "DECIMATION_RATIO_SEARCH", "{bisections:5,lower:0.05,upper:1.0}", "1", "record{bisections,lower,upper}";
     "DECIMATION_RECHECK_SLACK", "1.1", "1", "scalar";
@@ -540,7 +546,7 @@ const EXPECTED_ROWS: [ExpectedRow; 256] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 256 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 259 placeholder declarations must construct")
 }
 
 #[test]
@@ -551,7 +557,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 256);
+    assert_eq!(descriptors.len(), 259);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -642,7 +648,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_287_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_290_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -650,14 +656,14 @@ fn evidence_and_placeholder_fixture_builds_one_287_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 287);
+    assert_eq!(registry.len(), 290);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        287
+        290
     );
 }
 
