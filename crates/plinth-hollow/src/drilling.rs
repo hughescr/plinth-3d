@@ -1746,7 +1746,9 @@ mod tests {
     use crate::{create_shell, drains::plan_drains, registered_settings};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
     use plinth_mesh::{load_binary_stl, mesh_fingerprint};
-    use plinth_orient::{BaselineSelection, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform,
+    };
     use scirs2_core::ndarray::Array3;
     use std::path::PathBuf;
 
@@ -1772,7 +1774,9 @@ mod tests {
         OrientationHistory::from_reports(
             audit,
             OrientationReport {
-                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                },
                 selection: BaselineSelection::Identity,
                 transform: RigidTransform::identity(),
             },

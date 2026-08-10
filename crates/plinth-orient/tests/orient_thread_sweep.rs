@@ -6,6 +6,13 @@
 //! `PLINTH_THREADS` in-process would make the assertion both racy and vacuous;
 //! the parent below launches this same binary in three fresh processes instead,
 //! exactly as `plinth-decimate`'s sweep does.
+//!
+//! The child writes two things: every term of every candidate as raw f64 bits
+//! (the scoring substrate), and the **`search_digest` of a whole dense sweep**
+//! (the search tier). The second is the stronger claim, because the digest
+//! covers the grid, the LOD ladder, every tier's full ranking, the fidelity
+//! ledger and the work counters — so a thread count that moved *any* of them,
+//! including which candidate was committed to, changes one string.
 
 use std::env;
 use std::fs;
@@ -14,6 +21,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use plinth_mesh::{make_overhang_table, make_thin_fin, make_toed_slab};
+use plinth_orient::search::{search, SweepRequest};
 use plinth_orient::{
     score_candidates, CandidateOutcome, ObjectiveWeights, OrientFaceTable, OrientSearchLimits,
     UpDirection,
@@ -110,6 +118,27 @@ fn thread_sweep_child_writes_canonical_scores() {
             }
         }
     }
+    // The search tier, end to end. One string per fixture that is a function of
+    // everything the sweep decided.
+    let request = SweepRequest::registered().expect("the registered sweep configuration");
+    for (name, mesh) in [
+        ("thin_fin", make_thin_fin().expect("thin fin fixture")),
+        (
+            "overhang_table",
+            make_overhang_table().expect("overhang table fixture"),
+        ),
+        ("toed_slab", make_toed_slab().expect("toed slab fixture")),
+    ] {
+        let outcome = search(&mesh, &request).expect("the dense sweep must not refuse a fixture");
+        let record = outcome.record();
+        report.push_str(&format!(
+            "sweep {name} {} winner={} score={:016x}\n",
+            record.search_digest,
+            record.winner.candidate,
+            record.winner.terms.score.get().to_bits(),
+        ));
+    }
+
     fs::write(PathBuf::from(output), report).expect("write the child's canonical score report");
 }
 

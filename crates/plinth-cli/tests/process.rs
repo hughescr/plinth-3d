@@ -67,12 +67,13 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]"
     ));
     for essential in [
         "--input-models-dir DIR",
         "--output PROFILE",
         "--out-dir DIR",
+        "--orient MODE",
         "--wall-mm MM",
         "--no-cache",
     ] {
@@ -80,28 +81,23 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     }
 }
 
-/// `plinth prepare` now executes, and this is the whole of what it does today.
+/// **`plinth prepare` prepares.** A folder in, a real `.chitubox` out, with no
+/// baseline named anywhere.
 ///
-/// **The CLI cannot produce an artifact, and that is a wiring gap, not a bug in
-/// this run.** `parse_args` hardcodes `OrientationPolicy::LegacyCoarse` — the
-/// ratified command line has no `--orient` flag — and the native coarse
-/// orientation search of `02-target-architecture.md` §6 is unported. So every
-/// model reaches a per-model orientation refusal. What this test pins is that
-/// the refusal is *per model, named, and non-fatal to the run*: the process
-/// enumerates the folder, measures each model, prints the run report including
-/// the assumed print size, creates the output folder, writes nothing, and exits
-/// on the pipeline's own projection rather than a CLI-invented code.
+/// This test used to assert the opposite, and the comment it carried explained
+/// why: `parse_args` hardcoded an orientation policy with no implementation, so
+/// every model reached a per-model refusal and the CLI could not produce an
+/// artifact at all. That was the standing product defect. `--orient` landed
+/// with `dense` as the default, and this is where the artifact assertion and
+/// the observed exit 0 said they would go.
 ///
-/// When `--orient pinned:<baseline>` lands, this test is where the artifact
-/// assertion — and the observed exit 3 — go. `plinth-pipeline`'s
-/// `prepare_folder.rs` already proves the executor emits a real `.chitubox`
-/// under a pinned policy, so the only missing piece is the flag. Note that the
-/// flag must name a baseline **per model**: `OrientationPolicy::Pinned` is a map
-/// keyed by source stem, because a pinned baseline is one mesh's rotation and
-/// applying it to another model produces a misoriented artifact that still
-/// seals, still passes the gates and still emits.
+/// What is pinned here is the whole process boundary: the folder is enumerated,
+/// each model measured and reported by name with its assumed print size, the
+/// orientation authority is stated, the output folder is created, a real file
+/// is written at the stem-derived path, and the exit code is the pipeline's own
+/// projection rather than a CLI-invented one.
 #[test]
-fn prepare_executes_the_folder_and_reports_every_model_by_name() {
+fn prepare_searches_each_model_orientation_and_writes_one_artifact_each() {
     let scratch = Scratch::new("execute");
     scratch.place("make_toed_slab.prepped.stl", "mini");
 
@@ -126,12 +122,18 @@ fn prepare_executes_the_folder_and_reports_every_model_by_name() {
         stdout.contains("assumed print size  longest axis 30.000 mm"),
         "the run report must carry the assumed print size: {stdout}"
     );
+    // Which authority chose the rotation. A searched artifact and a replayed
+    // one are indistinguishable from the file alone.
     assert!(
-        stdout.contains("orientation is never inferred"),
-        "an unorientable model must say why, by name: {stdout}"
+        stdout.contains("orientation  dense sweep (searched per model)"),
+        "the run report must state the orientation authority: {stdout}"
     );
     assert!(
-        stdout.contains("SUMMARY  emitted=0  gate-refused=0  failed=1  stopped=0"),
+        stdout.contains("result  EMITTED"),
+        "the searched model must reach an artifact: {stdout}"
+    );
+    assert!(
+        stdout.contains("SUMMARY  emitted=1  gate-refused=0  failed=0  stopped=0"),
         "the run report must total the dispositions: {stdout}"
     );
     // `--no-cache` is accepted and honestly reported: no cache exists yet, so
@@ -142,14 +144,89 @@ fn prepare_executes_the_folder_and_reports_every_model_by_name() {
     );
 
     // The pipeline's own exit-code projection, not a second contract.
-    assert_eq!(output.status.code(), Some(1), "stdout was: {stdout}");
+    assert_eq!(output.status.code(), Some(0), "stdout was: {stdout}");
     assert!(
         scratch.output().is_dir(),
         "prepare owns creating its output folder"
     );
+    let artifact = scratch.output().join("mini.chitubox");
     assert!(
-        !scratch.output().join("mini.chitubox").exists(),
-        "a model that never oriented wrote an artifact"
+        artifact.is_file(),
+        "the searched model wrote no artifact at {}",
+        artifact.display()
+    );
+}
+
+/// `--orient pinned:DIR` still replays a baseline, per model and by stem.
+///
+/// Deleting the unimplemented policy did not delete the pinned one: replaying a
+/// frozen rotation is how the corpus baselines stay reproducible. The
+/// resolution is per stem — a directory that does not name this model refuses
+/// it individually rather than lending it a neighbour's rotation — and that
+/// refusal is asserted here beside the successful replay.
+#[test]
+fn the_pinned_orientation_mode_replays_a_baseline_by_stem() {
+    let scratch = Scratch::new("pinned");
+    scratch.place("make_toed_slab.prepped.stl", "make_toed_slab");
+    scratch.place("Sphere.prepped.stl", "unpinned-model");
+
+    let baselines = workspace_root().join("corpus/baseline");
+    let output = plinth(&[
+        "prepare",
+        "--input-models-dir",
+        scratch.input().to_str().expect("scratch path is Unicode"),
+        "--output",
+        "saturn4-ultra",
+        "--out-dir",
+        scratch.output().to_str().expect("scratch path is Unicode"),
+        "--orient",
+        &format!("pinned:{}", baselines.display()),
+    ]);
+    let stdout = text(&output.stdout);
+
+    assert!(
+        stdout.contains("orientation  pinned baselines from"),
+        "the run report must state the pinned authority: {stdout}"
+    );
+    assert!(
+        scratch.output().join("make_toed_slab.chitubox").is_file(),
+        "the pinned model wrote no artifact: {stdout}"
+    );
+    assert!(
+        stdout.contains("no pinned orientation baseline"),
+        "a model the directory does not name must be refused by name: {stdout}"
+    );
+    assert!(
+        !scratch.output().join("unpinned-model.chitubox").exists(),
+        "an unpinned model must not borrow a neighbour's rotation"
+    );
+}
+
+/// One spelling per concept: a near-miss orientation mode is refused, not
+/// guessed at.
+#[test]
+fn an_unknown_orientation_mode_is_refused_by_name() {
+    let scratch = Scratch::new("orient-mode");
+    let output = plinth(&[
+        "prepare",
+        "--input-models-dir",
+        scratch.input().to_str().expect("scratch path is Unicode"),
+        "--output",
+        "saturn4-ultra",
+        "--out-dir",
+        scratch.output().to_str().expect("scratch path is Unicode"),
+        "--orient",
+        "densest",
+    ]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("unknown orientation mode") && stderr.contains("dense or pinned:DIR"),
+        "the refusal must name the sanctioned spellings: {stderr}"
+    );
+    assert!(
+        !scratch.output().exists(),
+        "a parse refusal must create nothing"
     );
 }
 

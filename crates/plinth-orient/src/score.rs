@@ -516,6 +516,25 @@ impl OrientFaceTable {
     pub const fn boundary_edges(&self) -> usize {
         self.boundary_edges
     }
+    /// Face areas in mm², in source face order.
+    ///
+    /// Exposed so the grid's rest-pose accumulator can weight face normals by
+    /// the area they actually present to the plate, reading the very table that
+    /// will score the poses it proposes rather than re-deriving a second face
+    /// geometry pass over the same mesh.
+    #[must_use]
+    pub fn areas_mm2(&self) -> &[f64] {
+        &self.areas_mm2
+    }
+
+    /// Unit outward normals, in source face order. A degenerate face carries a
+    /// placeholder normal and a zero area, so an area-weighted read of this
+    /// slice never sees it.
+    #[must_use]
+    pub fn normals(&self) -> &[[f64; 3]] {
+        &self.normals
+    }
+
     /// Total surface area, in mm² — the scale every area term is measured
     /// against.
     #[must_use]
@@ -939,7 +958,7 @@ const fn canonical_zero(value: f64) -> f64 {
     }
 }
 
-#[derive(Debug, PartialEq, Error)]
+#[derive(Clone, Debug, PartialEq, Error)]
 pub enum ScoreError {
     #[error("registered orientation constants are unavailable: {0}")]
     Constants(String),

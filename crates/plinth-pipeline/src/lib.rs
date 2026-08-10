@@ -102,12 +102,16 @@ pub enum StageStop {
 
 /// The orientation authority selected for a preparation run.
 ///
-/// Arbitrary input has no frozen baseline report, so the public preparation
-/// default is the legacy coarse policy. Its search implementation lands later;
-/// this boundary only makes that future work explicit rather than silently
-/// requiring a baseline artifact for every input.
+/// **The dense sweep is the default** (`04-migration-plan.md:1659-1669, 1721`).
+/// Arbitrary input has no frozen baseline report, and the previous default —
+/// `LegacyCoarse`, a named policy with no implementation — meant that
+/// `plinth prepare` refused every model it was ever given. That variant is
+/// **deleted**, not left standing beside the search: a dead second orientation
+/// authority is one more thing to keep honest for no benefit, and reproducing
+/// the retired 13-candidate objective is the job of a library driver and
+/// `plinth calibrate`, not of a policy the CLI can select.
 ///
-/// **A pinned baseline belongs to one model, so the policy is a map and not a
+/// **A pinned baseline belongs to one model, so that arm is a map and not a
 /// single value.** `plinth_orient::run` reads a rotation out of a baseline
 /// pipeline report and applies it to whatever mesh it is handed; it does not
 /// and cannot check that the report and the mesh describe the same object. A
@@ -118,11 +122,14 @@ pub enum StageStop {
 /// always resolved it (`corpus/baseline/<stem>.pipeline.json`), and a model the
 /// map does not name is a per-model refusal
 /// ([`PipelineError::OrientationBaselineMissing`]), never a borrowed rotation.
+/// The dense sweep has no such hazard: it measures the mesh in front of it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "baselines", rename_all = "snake_case")]
 pub enum OrientationPolicy {
+    /// Search: the recorded D-12 funnel over the whole candidate grid, scoring
+    /// all four terms of §3.8 and committing at the production mesh.
     #[default]
-    LegacyCoarse,
+    DenseSweep,
     /// One baseline per source stem — the `<stem>` of `<stem>.stl`, which is
     /// also the `<stem>` of the `<stem>.chitubox` the run writes.
     Pinned(BTreeMap<String, PinnedBaseline>),
@@ -143,7 +150,7 @@ impl OrientationPolicy {
     #[must_use]
     pub fn baseline_for(&self, stem: &str) -> Option<&PinnedBaseline> {
         match self {
-            Self::LegacyCoarse => None,
+            Self::DenseSweep => None,
             Self::Pinned(baselines) => baselines.get(stem),
         }
     }
@@ -194,9 +201,20 @@ pub enum OutputProfileError {
 ///
 /// Numerical caps stay owned by their stage crates. Decimation has no
 /// production probe default by design, so an already finite, bounded budget is
-/// required here before any stage can execute. Orientation is intentionally
-/// absent: the later LegacyCoarse search must introduce its own typed bound
-/// before it is connected to this policy.
+/// required here before any stage can execute.
+///
+/// **Orientation's recorded precondition is discharged, and deliberately not by
+/// a field here.** The search's own bound is
+/// `plinth_orient::OrientSearchLimits`, five deterministic work-unit budgets —
+/// candidates, face- and vertex-direction products, section breakpoints and
+/// working bytes — charged exactly from counts before any buffer is allocated,
+/// refusing with both the demand and the cap and never trimming the candidate
+/// set to fit. There is no wall clock anywhere in it (O-4). It is **scaled to
+/// the LOD being scored**, the way the support stage's caps are scaled to the
+/// model, so it cannot be a fixed value assembled here before any mesh has been
+/// read; it is derived per rung inside the stage from that rung's own face and
+/// vertex counts. A run-wide field would have to be either a per-model lie or a
+/// cap loose enough to bound nothing.
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareResourcePolicy {
     decimation: DecimationBudget,
@@ -513,21 +531,6 @@ pub enum PipelineError {
         model: ModelId,
         longest_axis_mm: f64,
     },
-    /// The run's orientation policy has no implementation that can orient this
-    /// model, and orientation is never inferred.
-    ///
-    /// `plinth-orient` deliberately does not search: it applies the rotation a
-    /// pinned baseline states. [`OrientationPolicy::LegacyCoarse`] names the
-    /// native coarse search of `02-target-architecture.md` §6, which is not
-    /// ported. Refusing here is the whole point — silently choosing identity
-    /// would be inferring an orientation, and identity is a rotation like any
-    /// other.
-    #[error(
-        "model {model} cannot be oriented: the legacy-coarse orientation search is not ported, \
-         and orientation is never inferred. Only OrientationPolicy::Pinned can orient a model \
-         today, and it needs a baseline pipeline report naming the rotation to apply"
-    )]
-    OrientationPolicyUnavailable { model: ModelId },
     /// The run's pinned-orientation policy names no baseline for this model.
     ///
     /// A pinned baseline is one mesh's recorded rotation. Applying it to a
@@ -654,7 +657,6 @@ impl PipelineError {
             | Self::ResourcePolicy { .. }
             | Self::Load { .. }
             | Self::ScaleSuspicious { .. }
-            | Self::OrientationPolicyUnavailable { .. }
             | Self::OrientationBaselineMissing { .. }
             | Self::DegenerateExtent { .. }
             | Self::Decimate { .. }
@@ -686,15 +688,23 @@ mod tests {
     use plinth_mesh::{load_binary_stl, make_box, Mesh, WeldPolicy};
     use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 
+    /// The recorded M8 default, as a fact about the type rather than a comment.
+    ///
+    /// This is the standing product defect closing: the previous default named
+    /// a search that did not exist, so `plinth prepare` refused every model it
+    /// was ever handed. Nothing selects `legacy_coarse` any more because the
+    /// variant is gone; a persisted policy still carrying that tag now fails to
+    /// deserialize by name, which is the intended loud failure.
     #[test]
-    fn arbitrary_input_orientation_defaults_to_legacy_coarse() {
-        assert_eq!(
-            OrientationPolicy::default(),
-            OrientationPolicy::LegacyCoarse
-        );
+    fn arbitrary_input_orientation_defaults_to_the_dense_sweep() {
+        assert_eq!(OrientationPolicy::default(), OrientationPolicy::DenseSweep);
         assert_eq!(
             serde_json::to_string(&OrientationPolicy::default()).expect("policy serializes"),
-            r#"{"kind":"legacy_coarse"}"#
+            r#"{"kind":"dense_sweep"}"#
+        );
+        assert!(
+            serde_json::from_str::<OrientationPolicy>(r#"{"kind":"legacy_coarse"}"#).is_err(),
+            "the deleted policy must not silently deserialize into anything"
         );
     }
 
@@ -741,7 +751,7 @@ mod tests {
             None,
             "an unnamed model must get no baseline at all, never a neighbour's"
         );
-        assert_eq!(OrientationPolicy::LegacyCoarse.baseline_for("mini-a"), None);
+        assert_eq!(OrientationPolicy::DenseSweep.baseline_for("mini-a"), None);
     }
 
     #[test]
@@ -1293,7 +1303,17 @@ mod tests {
                 PipelineExitCode::Input,
             ),
             (
-                PipelineError::OrientationPolicyUnavailable { model: model() },
+                // The dense sweep's own refusal, which replaced the deleted
+                // unported-policy refusal on this same exit code.
+                PipelineError::Orient {
+                    model: model(),
+                    source: plinth_orient::OrientError::Search(
+                        plinth_orient::SearchError::NoCandidateSurvived {
+                            tier: plinth_orient::search::SearchTier::Commit,
+                            first: "fixture".to_owned(),
+                        },
+                    ),
+                },
                 PipelineExitCode::Input,
             ),
             (

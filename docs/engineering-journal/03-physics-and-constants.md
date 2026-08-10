@@ -621,6 +621,92 @@ of the local layer height, not products with a global scalar.
 > fixture's recorded 57.6 at X −30. Neither number is a re-pin of anything: no
 > committed artifact, baseline or digest is read or written by this substrate.
 
+> **Addendum 2026-08-10 (second) — the search tier lands, and nine grid/ladder
+> constants are registered as `Placeholder` search policy.** The scoring
+> substrate above became a search: `plinth-orient` now enumerates the D-12
+> candidate grid, runs the recorded three-tier funnel, and commits a winner at
+> the production mesh. `OrientationPolicy::DenseSweep` is the pipeline default,
+> `plinth prepare --orient dense|pinned:DIR` is the operator surface, and the
+> unimplemented `LegacyCoarse` policy is **deleted** — with it goes the standing
+> product defect in which `plinth prepare` refused every model it was ever handed.
+>
+> | Registered 2026-08-10 | Value | What it shapes |
+> |---|---|---|
+> | `ORIENT_FIBONACCI_COUNT` | 512 | the coarse grid on S², ~9.0° mean spacing |
+> | `ORIENT_REST_POSE_MAX` / `ORIENT_REST_POSE_REFERENCE_BINS` | 128 / 2048 | the face-aligned rest-pose block |
+> | `ORIENT_DEDUPE_TOLERANCE_DEG` | 1.0 | when two candidates are one candidate |
+> | `ORIENT_REFINE_TOP_K` / `ORIENT_COMMIT_TOP_K` | 24 / 3 | the two funnel widths |
+> | `ORIENT_PROXY_L1_RATIO` / `ORIENT_PROXY_L2_OF_L1_RATIO` / `ORIENT_PROXY_MIN_FACES` | 0.10 / 0.20 / 256 | the search-proxy ladder and its integrity floor |
+>
+> All nine are `Placeholder` search policy: they shape **which candidate is
+> selected** and never whether one is accepted (D-25). None of them is a physical
+> quantity, and none is measured. `ORIENT_SCAR_WEIGHT` and `OVERHANG_ANGLE_DEG`
+> are reused, not restated. No gate, cap or bound moved.
+>
+> **The search space is S², not SO(3), and that is a theorem rather than a
+> simplification.** Writing a candidate as the build-up direction `u = Rᵀẑ`, every
+> term of the objective is a function of `u` alone — the masks depend on `n·u`,
+> height is `max(v·u) − min(v·u)`, and a planar area is invariant under rotation
+> *within* its own plane. A k-fold z-spin sweep would therefore cost k× for
+> exactly zero objective change. §4.2 refuses an azimuthal term independently, and
+> z-spin already belongs to the future `plinth-plate` (02:979). The scorer's public
+> candidate type is a unit direction, so azimuth is **inexpressible** rather than
+> merely unused.
+>
+> **One deviation from the recorded funnel, with its measurement:** the legacy 13
+> are escorted to the exact tier rather than only enumerated at the coarse one.
+> D-12's "never worse by construction" is a property of the candidate set at the
+> tier that *decides*, and the tier that decides is the exact tier; on the
+> committed `Sphere` the L1 proxy ranks the winning legacy X −20 pose **478th of
+> 643**, so without the escort the sweep committed to 16.3173 against that pose's
+> 16.3009. Recorded in full at
+> [`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md).
+> Neither funnel width moved.
+>
+> **Rest poses are a substitute and say so.** D-12 names convex-hull face-aligned
+> poses; this workspace has no 3-D hull kernel and the lockfile is frozen, so
+> face normals are area-binned into a 2048-point reference lattice and the
+> heaviest bins emit their area-weighted mean direction, at O(F) with no new
+> dependency. Genuine three-point rest poses — a treant balanced on three toes —
+> are **not** covered; the loss is bounded by one grid spacing (~9°) because every
+> direction on S² is within that of a block-2 candidate, and a real hull kernel is
+> a filed follow-up.
+>
+> **Measured 2026-08-10 at the landing tip** (release build, committed baseline
+> meshes, all four terms at the registered weights, full three-tier funnel):
+>
+> | Model | Faces | Candidates | Committed pose | Score | Sweep |
+> |---|---|---|---|---|---|
+> | `Weeping Treant v1.2` | 429,120 | 641 | Fibonacci `(−0.0320, 0.2037, −0.9785)` | **54.4131** | 3.07 s |
+> | `Sphere` | 4,760 | 643 | legacy **X −20** | **16.3009** | 25.7 ms |
+> | `make_toed_slab` | 140 | 592 | Fibonacci | 13.5067 | 3.7 ms |
+> | `make_overhang_table` | 60 | 529 | Fibonacci | 18.2115 | 2.5 ms |
+> | `make_raking_blade` | 24 | 533 | rest pose `+X` | 8.8501 | 2.1 ms |
+> | `make_thin_fin` | 24 | 529 | rest pose `−Y` | 9.1684 | 2.0 ms |
+> | `Cylinder` | 244 | 584 | rest pose `−Z` | 33.7316 | 4.7 ms |
+> | `make_box` | 12 | 529 | **identity** | 6.5600 | 2.2 ms |
+>
+> The treant's whole sweep is ~0.65 % of its ~470 s support run. Two of these are
+> worth reading rather than skimming:
+>
+> * **`Sphere` reproduces the committed baseline's own pose** (X −20) without
+>   being told it, which is a stronger agreement than the design asked for.
+> * **`Cylinder` commits to `−Z` where the committed baseline records identity**,
+>   by a margin of **0.00088 in 33.73** — 0.003 %. The legacy 13 contained no
+>   180° flip, so this is a candidate the retired grid could not express, and for
+>   a symmetric cylinder the two poses are the same physical print. It is recorded
+>   as a divergence rather than treated as one: nothing committed moved, because
+>   the corpus baselines are legacy artifacts this sweep reads and never writes.
+>
+> **The `decision_resolved` flag reads `false` on all eight**, and that is a
+> finding, not a bug. It compares the winner's margin over the runner-up against
+> the spread of scores across the winner's own grid neighbours, and at ~9° spacing
+> the objective moves more between adjacent directions than any of these winners
+> led by. The honest reading is that this grid resolves *where* the good region is
+> and does not resolve *which point in it* — which is exactly what the recorded
+> K-doubling and Spearman calibration gates exist to quantify, and those gates are
+> not built in this slice.
+
 ### 3.9 Removal ergonomics — all Placeholder, all human-calibrated
 
 | Name | Value | Unit | Prov. | Rust owner |

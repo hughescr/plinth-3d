@@ -1,18 +1,31 @@
-//! Pinned-baseline orientation for the vertical slice.
+//! Orientation: the dense sweep, and the pinned baseline it can be replayed as.
 //!
-//! This stage deliberately does not search. It takes the selected legacy orientation from the
-//! required pipeline JSON, applies that rigid rotation, then recreates the legacy frame: the
-//! transformed bounding box is centered in XY and rests at Z=0. The output replaces the
-//! production mesh and retains only reports, never an untransformed second mesh.
+//! Two entry points, and the difference between them is where the rotation came
+//! from, never what is done with it:
 //!
-//! The dense sweep's **scoring substrate** lives beside it in [`score`]: the
-//! four objective terms of `03-physics-and-constants.md` §3.8, batched over
-//! candidate build directions, with the exact peak cross-section solver in
-//! [`section`].  That module computes scores; it does not select, and this
-//! stage's `run` still applies a pinned baseline and nothing else.
+//! - [`search_and_orient`] runs the recorded three-tier dense sweep ([`search`])
+//!   over the candidate grid ([`grid`]), scoring `03-physics-and-constants.md`
+//!   §3.8's four terms in one batched call per tier ([`score`]) with the exact
+//!   peak cross-section solver ([`section`]), and commits the winner at the
+//!   production mesh.
+//! - [`run`] takes the selected legacy orientation out of a required pipeline
+//!   JSON and applies that rigid rotation, unchanged.
+//!
+//! Both then recreate the legacy frame — the transformed bounding box is
+//! centered in XY and rests at Z=0 — through the one `transform_mesh`, so a
+//! searched orientation and a pinned one differ in nothing downstream. The
+//! output replaces the production mesh and retains only reports, never an
+//! untransformed second mesh.
+//!
+//! **Orientation is still never inferred.** The sweep does not guess: it
+//! measures every candidate and records what it measured, including when the
+//! answer it commits to is identity. Identity is a rotation like any other and
+//! is chosen here only by winning, never by default.
 #![forbid(unsafe_code)]
 
+pub mod grid;
 mod score;
+pub mod search;
 mod section;
 
 pub use score::{
@@ -22,6 +35,7 @@ pub use score::{
     ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
     OVERHANG_ANGLE_DEG_ID,
 };
+pub use search::{DenseSweepRecord, SearchError, SweepOutcome, SweepRequest};
 
 use plinth_core::Finite;
 use plinth_decimate::{DecimatedModel, DecimationAudit};
@@ -53,12 +67,34 @@ pub enum BaselineAxis {
     Y,
 }
 
-/// The orientation explicitly encoded by the pinned baseline.
+/// The orientation a run selected, however it selected it.
+///
+/// The first two variants are what a legacy pinned baseline can encode, and the
+/// legacy reader that produces them is deliberately untouched by the dense
+/// sweep: `orientation_rederivation.rs` is the regression fence for this enum
+/// and must keep passing unmodified.
+///
+/// [`BaselineSelection::UpDirection`] is what the sweep actually chose — the
+/// build-up direction in model frame, which is the whole search space (S², not
+/// SO(3); see [`score`]). A dense winner drawn from the legacy 13 emits
+/// [`BaselineSelection::AxisDegrees`] through the same [`rotation`] builder the
+/// pinned path uses, so a searched −30° about X and a pinned −30° about X are
+/// the same rotation bit for bit rather than merely equal to within a
+/// normalization.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BaselineSelection {
     Identity,
-    AxisDegrees { axis: BaselineAxis, degrees: Finite },
+    AxisDegrees {
+        axis: BaselineAxis,
+        degrees: Finite,
+    },
+    /// A searched direction. The transform is derived from it by the pinned
+    /// shortest-arc convention of [`UpDirection::rotation_to_build_frame`],
+    /// whose single antipode is resolved as 180° about `+X`.
+    UpDirection {
+        up_model_frame: [Finite; 3],
+    },
 }
 
 /// The chosen rigid transform, including the required post-rotation re-centering translation.
@@ -97,7 +133,7 @@ pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedMod
     let (mesh, decimation) = model.into_parts();
     let (mesh, transform) = transform_mesh(mesh, transform)?;
     let orientation = OrientationReport {
-        pinned_report,
+        provenance: OrientationProvenance::Pinned { pinned_report },
         selection,
         transform,
     };
@@ -106,6 +142,61 @@ pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedMod
         mesh,
         history: OrientationHistory::from_reports(decimation, orientation),
     })
+}
+
+/// Searches for this model's build orientation and applies the winner.
+///
+/// The sweep runs the recorded D-12 funnel over the production mesh it is
+/// handed: the whole candidate grid on the ~2 % proxy, the top
+/// `ORIENT_REFINE_TOP_K` on the ~10 % proxy, and the top `ORIENT_COMMIT_TOP_K`
+/// at `Fidelity::Exact` — the production mesh itself, where the committed score
+/// is computed and only there. The winner's full evidence travels in the report
+/// as [`OrientationProvenance::DenseSweep`], so the answer is auditable and
+/// re-pinnable rather than a bare matrix.
+///
+/// The result is bit-stable: the grid is a pure function of `(mesh, registered
+/// constants)`, every reduction is a serial fold in index order, rayon is used
+/// across candidates only as index-parallel map-collect, and the comparator is a
+/// first-index scan with no epsilon. Nothing here reads a clock or a seed.
+///
+/// # Errors
+///
+/// [`OrientError::Search`] when the production mesh cannot be scored at all —
+/// deliberately a refusal, because falling back to identity would be inferring
+/// an orientation; [`OrientError::InvalidTransformedMesh`] when the winning
+/// rotation does not produce a finite mesh.
+pub fn search_and_orient(
+    model: DecimatedModel,
+    request: &SweepRequest,
+) -> Result<OrientedModel, OrientError> {
+    let (mesh, decimation) = model.into_parts();
+    let outcome = search::search(&mesh, request).map_err(OrientError::Search)?;
+    let selection = outcome.winner().selection;
+    let transform = transform_for(selection)?;
+    let (mesh, transform) = transform_mesh(mesh, transform)?;
+    let orientation = OrientationReport {
+        provenance: OrientationProvenance::DenseSweep(Box::new(outcome.into_record())),
+        selection,
+        transform,
+    };
+    Ok(OrientedModel {
+        mesh,
+        history: OrientationHistory::from_reports(decimation, orientation),
+    })
+}
+
+/// The one production sweep configuration, read from the M0 registry.
+///
+/// Every number the sweep uses is registered, so the pipeline default and the
+/// stage default cannot be two different numbers — the `registered_wall`
+/// discipline, applied to orientation.
+///
+/// # Errors
+///
+/// [`OrientError::Search`] when a registered constant is unavailable or is not
+/// the shape the sweep requires.
+pub fn registered_sweep_request() -> Result<SweepRequest, OrientError> {
+    SweepRequest::registered().map_err(|error| OrientError::Search(SearchError::Score(error)))
 }
 
 fn read_selection(path: &Path) -> Result<BaselineSelection, OrientError> {
@@ -189,6 +280,13 @@ fn transform_for(selection: BaselineSelection) -> Result<RigidTransform, OrientE
     let rotation = match selection {
         BaselineSelection::Identity => identity_rotation(),
         BaselineSelection::AxisDegrees { axis, degrees } => rotation(axis, degrees.get())?,
+        BaselineSelection::UpDirection { up_model_frame } => UpDirection::new([
+            up_model_frame[0].get(),
+            up_model_frame[1].get(),
+            up_model_frame[2].get(),
+        ])
+        .map_err(|_| OrientError::InvalidTransformedMesh)?
+        .rotation_to_build_frame(),
     };
     Ok(RigidTransform {
         rotation: finite_matrix(rotation)?,
@@ -585,10 +683,31 @@ fn hex(byte: u8) -> Option<u32> {
     }
 }
 
+/// Where a run's orientation came from.
+///
+/// A report that only carried the rotation could not distinguish a searched
+/// answer from a replayed one, and a searched winner that cannot be told apart
+/// from a pin cannot be pinned later either. So the provenance is part of the
+/// report rather than something a reader infers from which fields are present.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrientationProvenance {
+    /// The rotation was read out of a frozen baseline report and applied
+    /// verbatim.
+    Pinned { pinned_report: PathBuf },
+    /// The rotation was searched. The record carries the grid, the ladder, the
+    /// full ranking at every tier, the fidelity ledger and the `search_digest`
+    /// — everything needed to re-derive the same answer or to pin it.
+    ///
+    /// Boxed because it is two orders of magnitude larger than the pinned arm,
+    /// and an enum is as large as its largest variant.
+    DenseSweep(Box<DenseSweepRecord>),
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrientationReport {
-    pub pinned_report: PathBuf,
+    pub provenance: OrientationProvenance,
     pub selection: BaselineSelection,
     pub transform: RigidTransform,
 }
@@ -651,7 +770,7 @@ impl OrientedModel {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Error)]
 pub enum OrientError {
     #[error("cannot read pinned baseline report {path}")]
     PinnedBaselineUnreadable { path: PathBuf },
@@ -659,6 +778,11 @@ pub enum OrientError {
     PinnedBaselineInvalid { path: PathBuf },
     #[error("the rigid transform produced an invalid production mesh")]
     InvalidTransformedMesh,
+    /// The dense sweep could not measure this model. Never a fallback to
+    /// identity: identity is a rotation like any other, and choosing it because
+    /// the search failed would be inferring an orientation.
+    #[error("the dense orientation sweep could not choose an orientation: {0}")]
+    Search(SearchError),
 }
 
 #[cfg(test)]
@@ -960,7 +1084,9 @@ mod tests {
         let allocation = mesh.verts().as_ptr();
         let decimation = fixture_decimation_audit();
         let orientation = OrientationReport {
-            pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+            provenance: OrientationProvenance::Pinned {
+                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+            },
             selection: BaselineSelection::Identity,
             transform: RigidTransform::identity(),
         };

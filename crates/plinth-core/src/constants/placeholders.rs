@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 262], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 271], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1257,6 +1257,24 @@ placeholder_declarations! {
     "NEAR_PLATE_MM", "mm", "scalar", "Near-plate perception band.";
     on_axis_tol_mm: PositiveFinite = PositiveFinite::new(0.2)?;
     "ON_AXIS_TOL_MM", "mm", "scalar", "Joint on-axis tolerance.";
+    orient_commit_top_k: PositiveFinite = PositiveFinite::new(3.0)?;
+    "ORIENT_COMMIT_TOP_K", "count", "scalar", "Dense-sweep commit tier width: how many refine-tier survivors are re-scored at Fidelity::Exact, where the winner's committed score is computed and only there (02-target-architecture.md D-12, §6). A funnel width, not a physical quantity; widening it costs exact-tier work and cannot make a candidate better.";
+    orient_dedupe_tolerance_deg: PositiveFinite = PositiveFinite::new(1.0)?;
+    "ORIENT_DEDUPE_TOLERANCE_DEG", "°", "scalar", "Angular tolerance below which two candidate build directions are the same candidate, keeping the EARLIER index. Enumeration order is the tie-break key, so keeping the earlier one is what makes the legacy 13 undisplaceable and D-12's never-worse-by-construction claim structural rather than statistical.";
+    orient_fibonacci_count: PositiveFinite = PositiveFinite::new(512.0)?;
+    "ORIENT_FIBONACCI_COUNT", "count", "scalar", "Dense-sweep coarse grid size on S² (02-target-architecture.md D-12). 512 Fibonacci-lattice directions give ~9.0° mean spacing over the whole sphere, finer than the retired heuristic's 10° step and covering the combined axes it could not express. A grid density, not a measurement: the recorded K-doubling and Spearman gates are what discover it is too coarse.";
+    orient_proxy_l1_ratio: PositiveFinite = PositiveFinite::new(0.1)?;
+    "ORIENT_PROXY_L1_RATIO", "1", "scalar", "Refine-tier search proxy: target face fraction of the Exact production mesh (02-target-architecture.md §6, ~10%). Deliberately the retired heuristic's own 0.9 reduction, so the legacy-compat comparison scores on the same proxy density. A SEARCH ACCELERATOR ONLY; 02:244-245 forbids a search proxy from ever becoming an alternate downstream production mesh, and the newtype in plinth-orient enforces it.";
+    orient_proxy_l2_of_l1_ratio: PositiveFinite = PositiveFinite::new(0.2)?;
+    "ORIENT_PROXY_L2_OF_L1_RATIO", "1", "scalar", "Coarse-tier search proxy: target face fraction OF L1, so ~2% of Exact (02-target-architecture.md §6). Cascading from L1 rather than decimating Exact twice makes L2 a refinement-consistent coarsening of L1, so a rank cannot invert merely because two independent QEM runs chose different edges. Same search-only status as ORIENT_PROXY_L1_RATIO.";
+    orient_proxy_min_faces: PositiveFinite = PositiveFinite::new(256.0)?;
+    "ORIENT_PROXY_MIN_FACES", "count", "scalar", "Integrity floor below which a search proxy is not scored at all and the tier falls back to the next finer LOD, recorded by name. The retired heuristic fell back to the full mesh SILENTLY; this floor exists so a proxy too coarse to carry the objective is a stated fallback rather than an invisible one.";
+    orient_refine_top_k: PositiveFinite = PositiveFinite::new(24.0)?;
+    "ORIENT_REFINE_TOP_K", "count", "scalar", "Dense-sweep refine tier width: how many coarse-tier candidates are re-scored on L1 (02-target-architecture.md D-12, §6). The recorded calibration gate is that the exact-best candidate lies inside this K or K doubles; outside top-48 after one doubling is the recorded fallback ladder, reported and not tuned away.";
+    orient_rest_pose_max: PositiveFinite = PositiveFinite::new(128.0)?;
+    "ORIENT_REST_POSE_MAX", "count", "scalar", "Maximum face-aligned rest poses admitted to the coarse grid, taken by descending accumulated face area. D-12 names convex-hull face-aligned poses; this workspace has no 3-D hull kernel and the lockfile is frozen, so the area-binned substitute captures the same intent at O(F). Genuine three-point rest poses are NOT covered, and the loss is bounded by one grid spacing.";
+    orient_rest_pose_reference_bins: PositiveFinite = PositiveFinite::new(2048.0)?;
+    "ORIENT_REST_POSE_REFERENCE_BINS", "count", "scalar", "Reference Fibonacci-lattice resolution the rest-pose accumulator bins face normals into. Four times ORIENT_FIBONACCI_COUNT so a pose the coarse grid would have missed can still be resolved as its own bin; the bin index is only an accumulator key, and each emitted pose is the area-weighted mean of its bin, not the bin centre.";
     orient_scar_weight: NonNegativeFinite = NonNegativeFinite::new(0.4)?;
     "ORIENT_SCAR_WEIGHT", "1", "scalar", "Opt-in additive scar weight; zero reproduces the pre-scar objective.";
     orient_weight_height_mm: NonNegativeFinite = NonNegativeFinite::new(0.3)?;

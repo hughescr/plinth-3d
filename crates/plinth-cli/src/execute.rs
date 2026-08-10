@@ -13,16 +13,18 @@
 //! precision, and nothing reads a clock. Two runs over the same folder print
 //! the same bytes.
 
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use plinth_hollow::HollowRequest;
+use plinth_orient::PinnedBaseline;
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
-    ModelPreparationOutcome, ModelPreparationReport, PipelineError, PipelineExitCode,
-    PrepareReport, PrepareRequest, SupportedGeometry,
+    ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
+    PipelineExitCode, PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
-use crate::{CacheMode, PrepareSelection};
+use crate::{CacheMode, OrientSelection, PrepareSelection};
 
 /// Run one parsed `plinth prepare` invocation to completion.
 ///
@@ -68,7 +70,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
     Ok(PrepareRequest {
         input_models_dir: selection.input_models_dir.clone(),
         output_dir: selection.output_dir.clone(),
-        orientation: selection.orientation.clone(),
+        orientation: resolve_orientation(&selection.orientation)?,
         output_profile: selection.output_profile,
         decimation_budget,
         // The operator's wall, defaulted by the parser from the registry. The
@@ -85,6 +87,52 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
         // not.
         stop_after: None,
     })
+}
+
+/// Turn the operator's `--orient` selection into the run's policy.
+///
+/// This is where the filesystem is read, deliberately and not in the parser.
+/// `pinned:DIR` is resolved by scanning `DIR` for `<stem>.pipeline.json` and
+/// keying the policy by that stem — **the baseline directory is scanned, not
+/// the model directory**, so this does not grow a second, drifting copy of the
+/// executor's own model enumeration. A model whose stem the map does not name
+/// is refused per model by the pipeline (`OrientationBaselineMissing`), which
+/// is the same refusal it has always been: a pinned baseline is one mesh's
+/// rotation and is never applied to another model.
+///
+/// An unreadable directory is a failure of the run, not of one model: every
+/// model in it would be refused for the same reason, and reporting that N times
+/// would bury the one thing wrong.
+fn resolve_orientation(selection: &OrientSelection) -> Result<OrientationPolicy, PipelineError> {
+    let directory = match selection {
+        OrientSelection::Dense => return Ok(OrientationPolicy::DenseSweep),
+        OrientSelection::Pinned(directory) => directory,
+    };
+    let entries = std::fs::read_dir(directory).map_err(|source| PipelineError::InputFolder {
+        path: directory.clone(),
+        source,
+    })?;
+    let mut baselines = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| PipelineError::InputFolder {
+            path: directory.clone(),
+            source,
+        })?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".pipeline.json") else {
+            continue;
+        };
+        baselines.insert(
+            stem.to_owned(),
+            PinnedBaseline {
+                pipeline_report: path,
+            },
+        );
+    }
+    Ok(OrientationPolicy::Pinned(baselines))
 }
 
 fn fail(error: &PipelineError) -> ExitCode {
@@ -118,6 +166,20 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
             // that is not there; this states what actually happened.
             CacheMode::Enabled => "no cache implemented (flag absent)",
             CacheMode::Disabled => "no cache implemented (--no-cache is a no-op)",
+        }
+    );
+
+    // Which orientation authority ran. A searched rotation and a replayed one
+    // produce the same kind of artifact, so without this line the two runs are
+    // indistinguishable from their output.
+    println!(
+        "  orientation  {}",
+        match &selection.orientation {
+            OrientSelection::Dense => "dense sweep (searched per model)".to_owned(),
+            OrientSelection::Pinned(directory) => format!(
+                "pinned baselines from {} (per model, by stem)",
+                directory.display()
+            ),
         }
     );
 

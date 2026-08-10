@@ -1,0 +1,1073 @@
+//! The dense sweep itself: the recorded three-tier funnel, the bit-stable
+//! argmin, and the provenance record that makes a searched winner pinnable.
+//!
+//! [`grid`](crate::grid) says which directions exist and in what order;
+//! [`score`](crate::score) evaluates the objective for a whole candidate list at
+//! once.  This module is what runs between them — the LOD ladder, the
+//! promotion, the comparator, and the record.
+//!
+//! # The funnel is the recorded one (D-12, `02-target-architecture.md:1103`, §6)
+//!
+//! | Tier | Candidates | LOD |
+//! |---|---|---|
+//! | coarse | the whole grid (≤ 653) | L2, ~2 % of Exact |
+//! | refine | top `ORIENT_REFINE_TOP_K` | L1, ~10 % of Exact |
+//! | commit | top `ORIENT_COMMIT_TOP_K`, **plus the legacy 13** | **Exact** |
+//!
+//! The escort in the commit row is the one place this deviates from the
+//! recorded funnel, and it is there because the recorded funnel measurably did
+//! not deliver what D-12 claims for it — see [`escort`], which carries the
+//! measurement. Neither recorded width moved.
+//!
+//! "Exact" is the protected, decimated **production mesh** this stage is handed,
+//! not the original high-detail input (02:243-245) — orientation runs after
+//! decimation by construction, so there is no higher-detail mesh in scope at
+//! all.  Commitment happens only at the exact tier (02:852): a proxy can
+//! mis-rank, never mis-report, because the winner's published score is always
+//! recomputed on the production mesh.
+//!
+//! # Search proxies can never become production geometry
+//!
+//! [`SearchProxy`] wraps a mesh with no conversion into `DecimatedModel`,
+//! `OrientedModel` or anything the emit path can reach.  02:244-245 records that
+//! L1/L2 "may never become alternate downstream production meshes"; here that is
+//! a property of what compiles, not a rule someone has to remember.  The proxies
+//! deliberately bypass the production decimation gates — error budget, topology
+//! gate, downstream-utility witness — because those gates protect *shipped*
+//! geometry and these meshes are never shipped.
+//!
+//! # Fallback is loud
+//!
+//! The retired heuristic fell back to the full mesh silently when its proxy
+//! failed.  Here a tier whose proxy has fewer than `ORIENT_PROXY_MIN_FACES`
+//! faces, has any boundary edge (which breaks the exact section solver's closed
+//! shoelace identity), or that the simplifier refuses outright, falls back to
+//! the next finer LOD and is recorded as a typed [`ProxyFallback`] naming the
+//! tier, the reason and the LOD actually used.
+//!
+//! # The argmin is bit-stable and has exactly one key
+//!
+//! Candidates are scanned by id ascending with strict `<`, so the **first** id
+//! attaining the minimum wins.  That is not aesthetics: identity is
+//! `CandidateId` 0, and the legacy writer's `np.eye(4)` seed made identity win
+//! every tie it took part in — two committed baselines (`Cylinder`, `make_box`)
+//! record exactly that.  There is **no epsilon anywhere**: an `|a−b| < ε`
+//! comparator is not transitive and would re-introduce the order dependence this
+//! is built to remove.  A non-finite term is a typed refusal carried in the
+//! record and excluded from ranking — never a sentinel score and never a silent
+//! skip.
+
+use std::collections::BTreeSet;
+
+use plinth_core::{m0_constants, Fidelity, Finite};
+use plinth_decimate::{simplify_locked, SimplifyError, SimplifyRequest};
+use plinth_mesh::Mesh;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::grid::{Candidate, CandidateBlock, GridSettings, SweepGrid};
+use crate::score::{
+    score_candidates, CandidateOutcome, CandidateRefusalReason, CandidateTerms, ObjectiveWeights,
+    OrientFaceTable, OrientSearchLimits, ScoreError, ORIENT_SCAR_WEIGHT_ID,
+    ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
+    OVERHANG_ANGLE_DEG_ID,
+};
+use crate::BaselineSelection;
+
+/// Registered `ConstantId`s of the ladder.
+pub const ORIENT_PROXY_L1_RATIO_ID: &str = "ORIENT_PROXY_L1_RATIO";
+pub const ORIENT_PROXY_L2_OF_L1_RATIO_ID: &str = "ORIENT_PROXY_L2_OF_L1_RATIO";
+pub const ORIENT_PROXY_MIN_FACES_ID: &str = "ORIENT_PROXY_MIN_FACES";
+pub const ORIENT_REFINE_TOP_K_ID: &str = "ORIENT_REFINE_TOP_K";
+pub const ORIENT_COMMIT_TOP_K_ID: &str = "ORIENT_COMMIT_TOP_K";
+
+/// The LOD names that appear in every record. The exact tier's name is distinct
+/// from the pipeline's own `"prepared"` because a delicacy field is bound to a
+/// `(mesh, LOD)` pair and two fields over the same mesh at two names are two
+/// distinguishable fields — which is the point of naming them at all.
+pub const EXACT_LOD: &str = "orient-exact";
+pub const L1_LOD: &str = "orient-l1";
+pub const L2_LOD: &str = "orient-l2";
+
+/// A mesh built only to rank candidates faster.
+///
+/// There is deliberately no `From<SearchProxy>` for any production model type
+/// and no accessor that yields an owned `Mesh`: a search proxy cannot reach the
+/// emit path in code that compiles (02:244-245).
+#[derive(Clone, Debug)]
+pub struct SearchProxy {
+    mesh: Mesh,
+    requested_ratio: f64,
+    achieved_ratio: f64,
+}
+
+impl SearchProxy {
+    fn simplify(mesh: &Mesh, ratio: f64) -> Result<Self, SimplifyError> {
+        let outcome = simplify_locked(
+            mesh,
+            &SimplifyRequest {
+                target_ratio: ratio,
+                vertex_locks: vec![false; mesh.verts().len()],
+            },
+        )?;
+        Ok(Self {
+            mesh: outcome.mesh,
+            requested_ratio: outcome.requested_ratio,
+            achieved_ratio: outcome.achieved_ratio,
+        })
+    }
+
+    fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
+}
+
+/// The registered ladder: two proxy ratios, the integrity floor, and the two
+/// funnel widths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LadderSettings {
+    l1_ratio_bits: u64,
+    l2_of_l1_ratio_bits: u64,
+    min_faces: usize,
+    refine_top_k: usize,
+    commit_top_k: usize,
+}
+
+impl LadderSettings {
+    /// Reads all five numbers from the one M0 registry.
+    ///
+    /// # Errors
+    ///
+    /// [`ScoreError::Constants`] when the registry cannot be constructed or a
+    /// count constant is not a whole positive number.
+    pub fn registered() -> Result<Self, ScoreError> {
+        let values = m0_constants()
+            .map_err(|error| ScoreError::Constants(error.to_string()))?
+            .placeholders();
+        Ok(Self {
+            l1_ratio_bits: values.orient_proxy_l1_ratio().diagnostic().get().to_bits(),
+            l2_of_l1_ratio_bits: values
+                .orient_proxy_l2_of_l1_ratio()
+                .diagnostic()
+                .get()
+                .to_bits(),
+            min_faces: whole(
+                values.orient_proxy_min_faces().diagnostic().get(),
+                ORIENT_PROXY_MIN_FACES_ID,
+            )?,
+            refine_top_k: whole(
+                values.orient_refine_top_k().diagnostic().get(),
+                ORIENT_REFINE_TOP_K_ID,
+            )?,
+            commit_top_k: whole(
+                values.orient_commit_top_k().diagnostic().get(),
+                ORIENT_COMMIT_TOP_K_ID,
+            )?,
+        })
+    }
+
+    #[must_use]
+    pub fn l1_ratio(self) -> f64 {
+        f64::from_bits(self.l1_ratio_bits)
+    }
+    #[must_use]
+    pub fn l2_of_l1_ratio(self) -> f64 {
+        f64::from_bits(self.l2_of_l1_ratio_bits)
+    }
+    #[must_use]
+    pub const fn min_faces(self) -> usize {
+        self.min_faces
+    }
+    #[must_use]
+    pub const fn refine_top_k(self) -> usize {
+        self.refine_top_k
+    }
+    #[must_use]
+    pub const fn commit_top_k(self) -> usize {
+        self.commit_top_k
+    }
+}
+
+fn whole(value: f64, id: &'static str) -> Result<usize, ScoreError> {
+    if !value.is_finite() || value < 1.0 || value.fract() != 0.0 || value > 1_048_576.0 {
+        return Err(ScoreError::Constants(format!(
+            "{id} = {value} is not a whole count"
+        )));
+    }
+    Ok(value as usize)
+}
+
+/// Everything the sweep reads that is not the mesh. Every field is registered;
+/// there is no operator input here and no CLI flag behind any of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SweepRequest {
+    pub weights: ObjectiveWeights,
+    pub grid: GridSettings,
+    pub ladder: LadderSettings,
+}
+
+impl SweepRequest {
+    /// The one production configuration, read from the M0 registry.
+    ///
+    /// # Errors
+    ///
+    /// [`ScoreError::Constants`] when any registered number is unavailable or
+    /// malformed.
+    pub fn registered() -> Result<Self, ScoreError> {
+        Ok(Self {
+            weights: ObjectiveWeights::registered()?,
+            grid: GridSettings::registered()?,
+            ladder: LadderSettings::registered()?,
+        })
+    }
+}
+
+/// Which tier a number was measured at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchTier {
+    Coarse,
+    Refine,
+    Commit,
+}
+
+impl SearchTier {
+    /// The cost vocabulary's own fidelity word for this tier: a cost always
+    /// states how much it lied.
+    #[must_use]
+    pub const fn fidelity(self) -> Fidelity {
+        match self {
+            Self::Coarse => Fidelity::Surrogate,
+            Self::Refine => Fidelity::ProxyRefined,
+            Self::Commit => Fidelity::Exact,
+        }
+    }
+}
+
+/// Why a tier could not use the proxy it planned to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProxyFallbackReason {
+    /// The simplifier refused the request outright.
+    SimplifyRefused,
+    /// Below `ORIENT_PROXY_MIN_FACES`; too coarse to carry the objective.
+    BelowFaceFloor { faces: usize, floor: usize },
+    /// A hole. The exact section solver's shoelace identity assumes the section
+    /// is a union of closed loops, so an open proxy would give a wrong area
+    /// rather than a slower one.
+    OpenBoundary { boundary_edges: usize },
+    /// The proxy's own delicacy field could not be measured, so the scar term
+    /// would have had to be faked as zeros.
+    FieldUnavailable,
+}
+
+/// A tier that did not get the LOD it planned, and what it used instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyFallback {
+    pub planned_lod: String,
+    pub reason: ProxyFallbackReason,
+    pub used_lod: String,
+    pub detail: String,
+}
+
+/// One LOD's identity and shape, so every rank is auditable against the exact
+/// geometry it was computed on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LodRecord {
+    pub lod: String,
+    pub mesh_fingerprint: String,
+    pub faces: usize,
+    pub verts: usize,
+    /// Absent for the exact LOD, which is not a simplification of anything in
+    /// scope.
+    pub requested_ratio: Option<Finite>,
+    pub achieved_ratio: Option<Finite>,
+    pub boundary_edges: usize,
+    pub nonmanifold_edges: usize,
+    pub delicacy_digest: String,
+}
+
+/// The four terms and the score, as a record.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TermsRecord {
+    pub support_area_cm2: Finite,
+    pub peak_xsec_cm2: Finite,
+    pub height_mm: Finite,
+    pub scar_term: Finite,
+    pub scar_raw_mm2: Finite,
+    pub down_facing_faces: usize,
+    pub score: Finite,
+}
+
+impl TermsRecord {
+    fn new(terms: CandidateTerms) -> Result<Self, SearchError> {
+        Ok(Self {
+            support_area_cm2: finite(terms.support_area_cm2)?,
+            peak_xsec_cm2: finite(terms.peak_xsec_cm2)?,
+            height_mm: finite(terms.height_mm)?,
+            scar_term: finite(terms.scar_term)?,
+            scar_raw_mm2: finite(terms.scar_raw_mm2)?,
+            down_facing_faces: terms.down_facing_faces,
+            score: finite(terms.score)?,
+        })
+    }
+}
+
+/// One ranked candidate at one tier.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RankedCandidate {
+    pub rank: usize,
+    pub candidate: usize,
+    pub block: CandidateBlock,
+    pub terms: TermsRecord,
+}
+
+/// A candidate excluded from ranking, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefusalRecord {
+    pub tier: SearchTier,
+    pub candidate: usize,
+    pub reason: String,
+}
+
+/// One tier of the funnel, as executed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TierRecord {
+    pub tier: SearchTier,
+    pub fidelity: Fidelity,
+    pub lod: String,
+    pub scored: usize,
+    pub ranked: usize,
+    /// How many of this tier's ranking were promoted to the next tier by score.
+    pub promoted: usize,
+    /// How many candidates reached this tier by right rather than by promotion
+    /// — the legacy block's escort (see `escort`). Zero at every tier but the
+    /// commit tier.
+    pub escorted: usize,
+    /// The full ranking at this tier — the recorded eyeball artifact.
+    pub ranking: Vec<RankedCandidate>,
+}
+
+/// The grid as searched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridRecord {
+    pub legacy: usize,
+    pub rest_poses: usize,
+    pub fibonacci: usize,
+    pub duplicates_dropped: usize,
+    pub candidates: usize,
+    pub fibonacci_count: usize,
+    pub rest_pose_max: usize,
+    pub rest_pose_reference_bins: usize,
+    pub dedupe_tolerance_deg: Finite,
+    pub direction_digest: String,
+    /// Always zero. The search space is S², so azimuth is not searched; the
+    /// field exists so `plinth-plate` can fill it later with no schema change.
+    pub z_spin_deg: Finite,
+}
+
+/// One weight, with the registered id it came from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightRecord {
+    pub constant_id: String,
+    pub value: Finite,
+}
+
+/// The objective as priced, stamped with the ids rather than restating values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectiveRecord {
+    pub support_area_cm2: WeightRecord,
+    pub peak_xsec_cm2: WeightRecord,
+    pub height_mm: WeightRecord,
+    pub scar: WeightRecord,
+    pub overhang_angle_deg: WeightRecord,
+    pub down_limit: Finite,
+    /// The exact supremum, by name — the retired 4 mm/0.1 mm sampler is not
+    /// reachable from this path.
+    pub peak_section_method: String,
+}
+
+/// What the funnel's cheapness actually cost, measured rather than assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FidelityLedger {
+    /// The committed winner's rank at each proxy tier, or `None` when it never
+    /// appeared in that tier's ranking at all.
+    ///
+    /// `None` is not a decoration: it is exactly the case the legacy-block
+    /// escort exists for. On the committed `Sphere` the winner is the legacy
+    /// X −20 pose, which the L1 proxy ranked **478th** of 643 and the refine
+    /// tier therefore never saw — it reached the exact tier by right. A
+    /// sentinel rank would have hidden that; the absence states it.
+    pub coarse_rank_of_final_winner: Option<usize>,
+    pub refine_rank_of_final_winner: Option<usize>,
+    /// `true` when the coarse tier's own best candidate is the one the exact
+    /// tier committed to.
+    pub proxy_agreed_with_exact: bool,
+    pub winner_runner_up_angle_deg: Option<Finite>,
+    pub grid_spacing_deg: Finite,
+    pub winner_runner_up_margin: Option<Finite>,
+    /// `false` when the winner's margin over the runner-up is smaller than the
+    /// score spread across the winner's own grid neighbours — the honest "this
+    /// instrument did not resolve this choice".
+    pub decision_resolved: bool,
+    pub neighbour_spread: Finite,
+}
+
+/// Charged and metered, both stated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkRecord {
+    pub charged_face_direction_products: usize,
+    pub charged_vertex_direction_products: usize,
+    pub charged_section_breakpoints: usize,
+    pub executed_face_direction_products: usize,
+    pub executed_vertex_direction_products: usize,
+    pub executed_section_breakpoints: usize,
+}
+
+/// The winner, as a record that can later be replayed as a pin.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WinnerRecord {
+    pub candidate: usize,
+    pub block: CandidateBlock,
+    pub selection: BaselineSelection,
+    pub up_model_frame: [Finite; 3],
+    pub terms: TermsRecord,
+}
+
+/// Everything one dense sweep decided, and on what evidence.
+///
+/// The schema is versioned and `deny_unknown_fields`: a record written by a
+/// different search is refused rather than partially believed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenseSweepRecord {
+    pub schema_version: u32,
+    pub model_fingerprint: String,
+    pub grid: GridRecord,
+    pub objective: ObjectiveRecord,
+    pub lods: Vec<LodRecord>,
+    pub fallbacks: Vec<ProxyFallback>,
+    pub tiers: Vec<TierRecord>,
+    pub winner: WinnerRecord,
+    pub runner_up: Option<RankedCandidate>,
+    pub fidelity: FidelityLedger,
+    pub work: WorkRecord,
+    pub refusals: Vec<RefusalRecord>,
+    /// SHA-256 over the canonical serialization of everything above. One string
+    /// answers "did the search change".
+    pub search_digest: String,
+}
+
+/// The current record schema.
+pub const DENSE_SWEEP_SCHEMA_VERSION: u32 = 1;
+
+/// What one sweep produced: the winner and the evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepOutcome {
+    winner: Candidate,
+    record: DenseSweepRecord,
+}
+
+impl SweepOutcome {
+    #[must_use]
+    pub const fn winner(&self) -> &Candidate {
+        &self.winner
+    }
+    #[must_use]
+    pub const fn record(&self) -> &DenseSweepRecord {
+        &self.record
+    }
+    #[must_use]
+    pub fn into_record(self) -> DenseSweepRecord {
+        self.record
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Error)]
+pub enum SearchError {
+    #[error("orientation scoring failed: {0}")]
+    Score(#[from] ScoreError),
+    #[error(
+        "every candidate was refused at the {tier:?} tier, so there is nothing to commit to; the first reason was: {first}"
+    )]
+    NoCandidateSurvived { tier: SearchTier, first: String },
+    #[error("the exact production mesh cannot be scored, so no orientation can be committed: {0}")]
+    ExactUnscorable(ScoreError),
+    #[error("orientation search produced a non-finite {field}")]
+    NonFiniteRecord { field: &'static str },
+}
+
+fn finite(value: f64) -> Result<Finite, SearchError> {
+    Finite::new(value).map_err(|_| SearchError::NonFiniteRecord { field: "term" })
+}
+
+/// One resolved rung of the ladder: a scoring table, its record, and — for a
+/// proxy rung — the [`SearchProxy`] mesh the next rung down is cascaded from.
+///
+/// The exact rung deliberately owns no mesh: it borrows the caller's production
+/// mesh and is never a `SearchProxy`, so there is no path by which a proxy and a
+/// production mesh become interchangeable here either.
+struct Rung {
+    lod: &'static str,
+    table: OrientFaceTable,
+    record: LodRecord,
+    proxy: Option<SearchProxy>,
+}
+
+/// Runs the recorded three-tier funnel over one production mesh.
+///
+/// `mesh` is the **Exact** LOD: the protected, decimated production mesh this
+/// stage is handed. Nothing higher-detail is in scope, by construction.
+///
+/// # Errors
+///
+/// [`SearchError::ExactUnscorable`] when the production mesh itself cannot be
+/// scored — a refusal, deliberately, rather than a fallback to identity, which
+/// is a rotation like any other; [`SearchError::NoCandidateSurvived`] when every
+/// candidate at some tier produced a non-finite term.
+pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, SearchError> {
+    let mut fallbacks = Vec::new();
+
+    // The exact rung first: if the production mesh cannot be scored there is no
+    // orientation to commit to and the whole sweep refuses by name.
+    let exact = rung(mesh, EXACT_LOD, None).map_err(|error| match error {
+        RungError::Score(error) => SearchError::ExactUnscorable(error),
+        RungError::Simplify(_) | RungError::BelowFloor { .. } => SearchError::ExactUnscorable(
+            ScoreError::Constants("the exact LOD is never simplified".to_owned()),
+        ),
+    })?;
+
+    // L1, then L2 cascaded FROM L1 — a refinement-consistent coarsening, so a
+    // rank cannot invert merely because two independent QEM runs chose
+    // different edges.
+    let l1 = build_proxy_rung(mesh, L1_LOD, request.ladder.l1_ratio(), request.ladder);
+    let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
+    let l2 = match l1.as_ref().and_then(Rung::proxy_mesh) {
+        Some(source) => build_proxy_rung(
+            source,
+            L2_LOD,
+            request.ladder.l2_of_l1_ratio(),
+            request.ladder,
+        ),
+        // No L1 means no cascade source. Coarsening the exact mesh directly
+        // would produce an L2 that is not a coarsening of the L1 that is not
+        // there, which is precisely the independent-QEM-run inversion the
+        // cascade exists to prevent.
+        None => Err(RungError::BelowFloor {
+            faces: 0,
+            floor: request.ladder.min_faces(),
+        }),
+    };
+    let l2 = record_fallback(
+        l2,
+        L2_LOD,
+        if l1.is_some() { L1_LOD } else { EXACT_LOD },
+        &mut fallbacks,
+    );
+
+    let coarse = l2.as_ref().or(l1.as_ref()).unwrap_or(&exact);
+    let refine = l1.as_ref().unwrap_or(&exact);
+
+    // The grid's rest-pose block is read off the tier that scores it: rest poses
+    // are a property of the geometry being searched.
+    let grid = SweepGrid::build(&coarse.table, request.grid)?;
+    let directions = grid.directions();
+
+    let mut tiers = Vec::with_capacity(3);
+    let mut refusals = Vec::new();
+    let mut work = WorkRecord {
+        charged_face_direction_products: 0,
+        charged_vertex_direction_products: 0,
+        charged_section_breakpoints: 0,
+        executed_face_direction_products: 0,
+        executed_vertex_direction_products: 0,
+        executed_section_breakpoints: 0,
+    };
+
+    // The legacy block, always. See `escort` below.
+    let legacy: Vec<usize> = grid
+        .candidates()
+        .iter()
+        .filter(|candidate| candidate.block == CandidateBlock::Legacy)
+        .map(|candidate| candidate.id)
+        .collect();
+
+    let mut admitted: Vec<usize> = (0..grid.candidates().len()).collect();
+    let mut escorted = 0_usize;
+    for (tier, rung, width) in [
+        (
+            SearchTier::Coarse,
+            coarse,
+            Some(request.ladder.refine_top_k()),
+        ),
+        (
+            SearchTier::Refine,
+            refine,
+            Some(request.ladder.commit_top_k()),
+        ),
+        (SearchTier::Commit, &exact, None),
+    ] {
+        let mut record = score_tier(
+            tier,
+            rung,
+            &grid,
+            &directions,
+            &admitted,
+            request.weights,
+            &mut refusals,
+            &mut work,
+        )?;
+        record.promoted = width.map_or(0, |width| record.ranking.len().min(width));
+        record.escorted = if tier == SearchTier::Commit {
+            escorted
+        } else {
+            0
+        };
+        let promoted: Vec<usize> = record
+            .ranking
+            .iter()
+            .take(width.unwrap_or(0))
+            .map(|ranked| ranked.candidate)
+            .collect();
+        if tier == SearchTier::Refine {
+            let (set, added) = escort(&promoted, &legacy);
+            escorted = added;
+            admitted = set;
+        } else {
+            admitted = promoted;
+        }
+        tiers.push(record);
+    }
+
+    let commit = tiers.last().expect("three tiers were scored");
+    let winner_rank = commit
+        .ranking
+        .first()
+        .ok_or_else(|| SearchError::NoCandidateSurvived {
+            tier: SearchTier::Commit,
+            first: refusals.last().map_or_else(
+                || "no reason recorded".to_owned(),
+                |refusal| refusal.reason.clone(),
+            ),
+        })?
+        .clone();
+    let winner = grid.candidates()[winner_rank.candidate];
+    let runner_up = commit.ranking.get(1).cloned();
+
+    let fidelity = ledger(&grid, &tiers, &winner_rank, runner_up.as_ref(), request)?;
+
+    let mut lods = vec![exact.record.clone()];
+    if let Some(rung) = &l1 {
+        lods.push(rung.record.clone());
+    }
+    if let Some(rung) = &l2 {
+        lods.push(rung.record.clone());
+    }
+
+    let mut record = DenseSweepRecord {
+        schema_version: DENSE_SWEEP_SCHEMA_VERSION,
+        model_fingerprint: exact.table.mesh_fingerprint().to_owned(),
+        grid: grid_record(&grid)?,
+        objective: objective_record(request.weights)?,
+        lods,
+        fallbacks,
+        tiers,
+        winner: WinnerRecord {
+            candidate: winner.id,
+            block: winner.block,
+            selection: winner.selection,
+            up_model_frame: [
+                finite(winner.direction.get()[0])?,
+                finite(winner.direction.get()[1])?,
+                finite(winner.direction.get()[2])?,
+            ],
+            terms: winner_rank.terms,
+        },
+        runner_up,
+        fidelity,
+        work,
+        refusals,
+        search_digest: String::new(),
+    };
+    record.search_digest = digest_record(&record);
+    Ok(SweepOutcome { winner, record })
+}
+
+impl Rung {
+    /// The proxy mesh this rung was built from — the source the next, coarser
+    /// rung cascades off. Only a proxy rung has one.
+    fn proxy_mesh(&self) -> Option<&Mesh> {
+        self.proxy.as_ref().map(SearchProxy::mesh)
+    }
+}
+
+/// Scores one tier and ranks it.
+#[allow(clippy::too_many_arguments)]
+fn score_tier(
+    tier: SearchTier,
+    rung: &Rung,
+    grid: &SweepGrid,
+    directions: &[crate::score::UpDirection],
+    admitted: &[usize],
+    weights: ObjectiveWeights,
+    refusals: &mut Vec<RefusalRecord>,
+    work: &mut WorkRecord,
+) -> Result<TierRecord, SearchError> {
+    let subset: Vec<crate::score::UpDirection> =
+        admitted.iter().map(|index| directions[*index]).collect();
+    let limits = OrientSearchLimits::production(rung.table.face_count(), rung.table.vertex_count());
+    let scored = score_candidates(&rung.table, &subset, weights, limits)?;
+    let plan = scored.plan();
+    let meter = scored.meter();
+    work.charged_face_direction_products += plan.face_direction_products;
+    work.charged_vertex_direction_products += plan.vertex_direction_products;
+    work.charged_section_breakpoints += plan.section_breakpoints;
+    work.executed_face_direction_products += meter.face_direction_products;
+    work.executed_vertex_direction_products += meter.vertex_direction_products;
+    work.executed_section_breakpoints += meter.section_breakpoints;
+
+    let mut ranking = Vec::with_capacity(subset.len());
+    for (position, outcome) in scored.outcomes().iter().enumerate() {
+        let candidate = admitted[position];
+        match outcome {
+            CandidateOutcome::Scored(terms) => ranking.push(RankedCandidate {
+                rank: 0,
+                candidate,
+                block: grid.candidates()[candidate].block,
+                terms: TermsRecord::new(*terms)?,
+            }),
+            CandidateOutcome::Refused(refusal) => refusals.push(RefusalRecord {
+                tier,
+                candidate,
+                reason: describe(refusal.reason),
+            }),
+        }
+    }
+    if ranking.is_empty() {
+        return Err(SearchError::NoCandidateSurvived {
+            tier,
+            first: refusals.last().map_or_else(
+                || "no reason recorded".to_owned(),
+                |refusal| refusal.reason.clone(),
+            ),
+        });
+    }
+
+    // The one comparator: score ascending, ties to the lower CandidateId. No
+    // epsilon, no second semantic. Every score here is finite (a non-finite term
+    // is a refusal above), so `total_cmp` is a total order over exactly the
+    // values present, and `-0.0` was canonicalized to `0.0` before it arrived.
+    ranking.sort_by(|left, right| {
+        left.terms
+            .score
+            .get()
+            .total_cmp(&right.terms.score.get())
+            .then(left.candidate.cmp(&right.candidate))
+    });
+    for (rank, entry) in ranking.iter_mut().enumerate() {
+        entry.rank = rank;
+    }
+
+    Ok(TierRecord {
+        tier,
+        fidelity: tier.fidelity(),
+        lod: rung.lod.to_owned(),
+        scored: subset.len(),
+        ranked: ranking.len(),
+        promoted: 0,
+        escorted: 0,
+        ranking,
+    })
+}
+
+/// Adds the legacy block to the commit tier's candidate set, whether or not the
+/// proxies promoted it, and returns the set in ascending id order.
+///
+/// **This is a deliberate strengthening of the recorded funnel, and it is here
+/// because the recorded funnel measurably did not deliver what D-12 claims for
+/// it.** D-12 keeps the legacy 13 permanently "so the sweep is never worse by
+/// construction". Enumerating them at the coarse tier is not sufficient for
+/// that: the committed score is computed at the exact LOD, so a proxy that
+/// mis-ranks a legacy candidate out of the top `ORIENT_REFINE_TOP_K` discards
+/// the very candidate the guarantee rests on, and the guarantee quietly becomes
+/// a hope about proxy fidelity.
+///
+/// Measured, not hypothesized. On the committed `Sphere.prepped.stl` the
+/// unescorted funnel committed to a candidate scoring **16.3173** where the
+/// best of the legacy 13, scored on the same exact table, scores **16.3009** —
+/// a 0.1 % regression against the search this one replaces, produced entirely
+/// by proxy mis-ranking. Escorting makes "never worse" a property of the
+/// candidate set at the tier that decides, which is the only tier where the
+/// claim means anything.
+///
+/// The cost is bounded and small: at most 13 additional exact-tier scorings,
+/// against a `ORIENT_COMMIT_TOP_K` of 3. No cap, gate or width was raised to
+/// make room for it — the two recorded funnel widths are untouched, and the
+/// escort is counted separately in the tier record so a reader can see exactly
+/// how many candidates reached the exact tier by promotion and how many by
+/// right.
+fn escort(promoted: &[usize], legacy: &[usize]) -> (Vec<usize>, usize) {
+    let mut set: BTreeSet<usize> = promoted.iter().copied().collect();
+    let mut added = 0_usize;
+    for candidate in legacy {
+        if set.insert(*candidate) {
+            added += 1;
+        }
+    }
+    (set.into_iter().collect(), added)
+}
+
+fn describe(reason: CandidateRefusalReason) -> String {
+    match reason {
+        CandidateRefusalReason::NonFiniteTerm { term, value } => {
+            format!("{term} evaluated to {value}")
+        }
+        CandidateRefusalReason::NegativeSectionArea { peak_mm2 } => {
+            format!("the peak section area is negative: {peak_mm2} mm²")
+        }
+    }
+}
+
+enum RungError {
+    Score(ScoreError),
+    Simplify(SimplifyError),
+    BelowFloor { faces: usize, floor: usize },
+}
+
+/// Builds one rung's table and record, or says why it could not.
+fn rung(mesh: &Mesh, lod: &'static str, proxy: Option<SearchProxy>) -> Result<Rung, RungError> {
+    let table = OrientFaceTable::build(mesh, lod).map_err(RungError::Score)?;
+    let record = LodRecord {
+        lod: lod.to_owned(),
+        mesh_fingerprint: table.mesh_fingerprint().to_owned(),
+        faces: table.face_count(),
+        verts: table.vertex_count(),
+        requested_ratio: proxy
+            .as_ref()
+            .and_then(|proxy| Finite::new(proxy.requested_ratio).ok()),
+        achieved_ratio: proxy
+            .as_ref()
+            .and_then(|proxy| Finite::new(proxy.achieved_ratio).ok()),
+        boundary_edges: table.boundary_edges(),
+        nonmanifold_edges: table.nonmanifold_edges(),
+        delicacy_digest: table.delicacy_digest().to_owned(),
+    };
+    Ok(Rung {
+        lod,
+        table,
+        record,
+        proxy,
+    })
+}
+
+fn build_proxy_rung(
+    source: &Mesh,
+    lod: &'static str,
+    ratio: f64,
+    ladder: LadderSettings,
+) -> Result<Rung, RungError> {
+    let proxy = SearchProxy::simplify(source, ratio).map_err(RungError::Simplify)?;
+    let faces = proxy.mesh().tris().len();
+    if faces < ladder.min_faces() {
+        return Err(RungError::BelowFloor {
+            faces,
+            floor: ladder.min_faces(),
+        });
+    }
+    let mesh = proxy.mesh().clone();
+    rung(&mesh, lod, Some(proxy))
+}
+
+/// Turns a rung failure into a recorded fallback rather than a silent one.
+fn record_fallback(
+    outcome: Result<Rung, RungError>,
+    planned: &str,
+    used: &str,
+    fallbacks: &mut Vec<ProxyFallback>,
+) -> Option<Rung> {
+    match outcome {
+        Ok(rung) => Some(rung),
+        Err(error) => {
+            let (reason, detail) = match error {
+                RungError::Simplify(error) => {
+                    (ProxyFallbackReason::SimplifyRefused, error.to_string())
+                }
+                RungError::BelowFloor { faces, floor } => (
+                    ProxyFallbackReason::BelowFaceFloor { faces, floor },
+                    format!("{faces} faces is below the {floor}-face search-proxy floor"),
+                ),
+                RungError::Score(ScoreError::OpenBoundary { boundary_edges }) => (
+                    ProxyFallbackReason::OpenBoundary { boundary_edges },
+                    format!("the proxy has {boundary_edges} boundary edges"),
+                ),
+                RungError::Score(error) => {
+                    (ProxyFallbackReason::FieldUnavailable, error.to_string())
+                }
+            };
+            fallbacks.push(ProxyFallback {
+                planned_lod: planned.to_owned(),
+                reason,
+                used_lod: used.to_owned(),
+                detail,
+            });
+            None
+        }
+    }
+}
+
+fn grid_record(grid: &SweepGrid) -> Result<GridRecord, SearchError> {
+    Ok(GridRecord {
+        legacy: grid.legacy_count(),
+        rest_poses: grid.rest_pose_count(),
+        fibonacci: grid.fibonacci_count(),
+        duplicates_dropped: grid.duplicates_dropped(),
+        candidates: grid.candidates().len(),
+        fibonacci_count: grid.settings().fibonacci_count(),
+        rest_pose_max: grid.settings().rest_pose_max(),
+        rest_pose_reference_bins: grid.settings().reference_bins(),
+        dedupe_tolerance_deg: finite(grid.settings().dedupe_tolerance_deg())?,
+        direction_digest: grid.digest().to_owned(),
+        z_spin_deg: finite(0.0)?,
+    })
+}
+
+fn objective_record(weights: ObjectiveWeights) -> Result<ObjectiveRecord, SearchError> {
+    let weight = |id: &str, value: f64| -> Result<WeightRecord, SearchError> {
+        Ok(WeightRecord {
+            constant_id: id.to_owned(),
+            value: finite(value)?,
+        })
+    };
+    Ok(ObjectiveRecord {
+        support_area_cm2: weight(
+            ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
+            weights.support_area_cm2(),
+        )?,
+        peak_xsec_cm2: weight(ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, weights.peak_xsec_cm2())?,
+        height_mm: weight(ORIENT_WEIGHT_HEIGHT_MM_ID, weights.height_mm())?,
+        scar: weight(ORIENT_SCAR_WEIGHT_ID, weights.scar())?,
+        overhang_angle_deg: weight(OVERHANG_ANGLE_DEG_ID, weights.overhang_angle_deg())?,
+        down_limit: finite(weights.down_limit())?,
+        peak_section_method: "exact_piecewise_quadratic_supremum".to_owned(),
+    })
+}
+
+/// The fidelity ledger: what the funnel's cheapness cost, measured.
+fn ledger(
+    grid: &SweepGrid,
+    tiers: &[TierRecord],
+    winner: &RankedCandidate,
+    runner_up: Option<&RankedCandidate>,
+    request: &SweepRequest,
+) -> Result<FidelityLedger, SearchError> {
+    let rank_of = |tier: SearchTier| -> Option<usize> {
+        tiers
+            .iter()
+            .find(|record| record.tier == tier)
+            .and_then(|record| {
+                record
+                    .ranking
+                    .iter()
+                    .find(|entry| entry.candidate == winner.candidate)
+            })
+            .map(|entry| entry.rank)
+    };
+    let coarse = tiers
+        .iter()
+        .find(|record| record.tier == SearchTier::Coarse)
+        .expect("the coarse tier ran");
+    let proxy_agreed = coarse
+        .ranking
+        .first()
+        .is_some_and(|entry| entry.candidate == winner.candidate);
+
+    // `sqrt(4π/N)` is the mean angular spacing of N points spread evenly over
+    // the sphere: the resolution of the instrument, stated beside the margin it
+    // is being asked to resolve.
+    let spacing_rad = (4.0 * std::f64::consts::PI / request.grid.fibonacci_count() as f64).sqrt();
+    let spacing_deg = spacing_rad.to_degrees();
+
+    let winner_direction = grid.candidates()[winner.candidate].direction.get();
+    let angle = runner_up.map(|entry| {
+        let other = grid.candidates()[entry.candidate].direction.get();
+        let dot = (winner_direction[0] * other[0]
+            + winner_direction[1] * other[1]
+            + winner_direction[2] * other[2])
+            .clamp(-1.0, 1.0);
+        dot.acos().to_degrees()
+    });
+    let margin = runner_up.map(|entry| entry.terms.score.get() - winner.terms.score.get());
+
+    // The spread of coarse scores across the winner's own grid neighbours: if
+    // the objective moves more between neighbours than the winner beat the
+    // runner-up by, this instrument did not resolve this choice.
+    let neighbour_cosine = spacing_rad.cos();
+    let mut lowest = f64::INFINITY;
+    let mut highest = f64::NEG_INFINITY;
+    for entry in &coarse.ranking {
+        let other = grid.candidates()[entry.candidate].direction.get();
+        let dot = winner_direction[0] * other[0]
+            + winner_direction[1] * other[1]
+            + winner_direction[2] * other[2];
+        if dot >= neighbour_cosine {
+            lowest = lowest.min(entry.terms.score.get());
+            highest = highest.max(entry.terms.score.get());
+        }
+    }
+    let spread = if lowest.is_finite() && highest.is_finite() {
+        highest - lowest
+    } else {
+        0.0
+    };
+
+    Ok(FidelityLedger {
+        coarse_rank_of_final_winner: rank_of(SearchTier::Coarse),
+        refine_rank_of_final_winner: rank_of(SearchTier::Refine),
+        proxy_agreed_with_exact: proxy_agreed,
+        winner_runner_up_angle_deg: angle.map(finite).transpose()?,
+        grid_spacing_deg: finite(spacing_deg)?,
+        winner_runner_up_margin: margin.map(finite).transpose()?,
+        decision_resolved: margin.is_some_and(|margin| margin >= spread),
+        neighbour_spread: finite(spread)?,
+    })
+}
+
+/// SHA-256 over the record's own canonical serialization.
+///
+/// The digest is computed over the record with its digest field empty, so it is
+/// a function of the search and not of itself.
+fn digest_record(record: &DenseSweepRecord) -> String {
+    let canonical = serde_json::to_vec(record).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical);
+    let digest = hasher.finalize();
+    let mut text = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    text
+}
+
+/// Every distinct LOD name a record names, for a caller that wants to assert the
+/// ladder without walking the tiers.
+#[must_use]
+pub fn lods_used(record: &DenseSweepRecord) -> BTreeSet<String> {
+    record
+        .tiers
+        .iter()
+        .map(|tier| tier.lod.clone())
+        .collect::<BTreeSet<_>>()
+}

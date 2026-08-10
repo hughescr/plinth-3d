@@ -734,14 +734,17 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 
 /// Apply the run's orientation policy to one decimated model.
 ///
-/// **Orientation is never inferred.** `plinth-orient` deliberately does not
-/// search: it reads the selected rotation out of a pinned baseline report and
-/// applies it. [`OrientationPolicy::LegacyCoarse`] names the native coarse
-/// search of `02-target-architecture.md` §6, which has no implementation in
-/// this workspace, so a run under that policy refuses **per model** with a
-/// named reason rather than silently choosing identity — identity is a
-/// rotation like any other and `plinth-orient` refuses to pick it implicitly
-/// too. This is a refusal, never a panic, and never a fallback.
+/// **Orientation is never inferred, and it is now searched.**
+/// [`OrientationPolicy::DenseSweep`] — the default — runs the recorded D-12
+/// funnel: the whole candidate grid on the ~2 % proxy, the top
+/// `ORIENT_REFINE_TOP_K` on the ~10 % proxy, the top `ORIENT_COMMIT_TOP_K` at
+/// the production mesh, where the committed score is computed and only there.
+/// The winner arrives with its full evidence attached, so a searched rotation
+/// is auditable and re-pinnable rather than a bare matrix. Nothing about the
+/// old refusal's *reason* has been softened: a model the sweep cannot measure
+/// is still a per-model refusal with a named cause, never a fallback to
+/// identity. Identity is a rotation like any other and is chosen here only by
+/// winning.
 ///
 /// **A pinned baseline is resolved per model, by name.** `plinth_orient::run`
 /// applies whatever rotation the report it is handed states, to whatever mesh
@@ -759,11 +762,20 @@ fn orient_model(
     policy: &OrientationPolicy,
 ) -> Result<OrientedModel, ChainStop> {
     match policy {
-        OrientationPolicy::LegacyCoarse => Err(ChainStop::new(
-            PipelineError::OrientationPolicyUnavailable {
-                model: model.clone(),
-            },
-        )),
+        OrientationPolicy::DenseSweep => {
+            let request = plinth_orient::registered_sweep_request().map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
+            })?;
+            plinth_orient::search_and_orient(decimated, &request).map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
+            })
+        }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
                 return Err(ChainStop::new(PipelineError::OrientationBaselineMissing {

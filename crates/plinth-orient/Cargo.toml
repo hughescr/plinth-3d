@@ -16,4 +16,10 @@ plinth-decimate = { path = "../plinth-decimate" }
 plinth-mesh = { path = "../plinth-mesh" }
 rayon = { workspace = true }
 serde = { workspace = true }
+# The record is content-addressed the way every other artifact in this workspace
+# is: SHA-256 over a canonical serialization. Both crates are already in the
+# frozen lockfile (plinth-mesh hashes meshes with sha2; the pipeline serializes
+# reports with serde_json), so this adds no external crate.
+serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }

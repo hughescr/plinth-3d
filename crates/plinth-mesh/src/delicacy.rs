@@ -306,7 +306,7 @@ const fn canonical_zero(value: f64) -> f64 {
     }
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum DelicacyError {
     #[error("registered delicacy constants are unavailable: {0}")]
     Constants(String),
