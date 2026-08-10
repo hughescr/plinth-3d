@@ -17,12 +17,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use plinth_core::{M0ConstantsError, PositiveFinite};
-use plinth_hollow::{registered_wall, WallSelection};
+use plinth_hollow::{checked_wall_mm, registered_wall, HollowError, WallSelection};
 use plinth_pipeline::{OrientationPolicy, OutputProfile};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --wall-mm MM           Hollow shell wall thickness in mm; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheMode {
@@ -78,8 +78,9 @@ pub enum ParseError {
     NonUnicodeOutputProfile(OsString),
     UnknownOutputProfile(String),
     NonUnicodeWallMm(OsString),
-    /// `--wall-mm` was given something that is not a positive finite number of
-    /// millimetres.
+    /// `--wall-mm` was given a wall the hollow stage will not accept: not a
+    /// positive finite number of millimetres, or finer than the frozen voxel
+    /// pitch that stage selects cavities on.
     InvalidWallMm(String),
     /// The registered wall default could not be read, so no default exists to
     /// fall back to. The parser refuses rather than substituting a literal.
@@ -125,7 +126,7 @@ impl std::fmt::Display for ParseError {
             ),
             Self::InvalidWallMm(value) => write!(
                 formatter,
-                "wall thickness {value:?} is not a positive finite number of millimetres"
+                "wall thickness {value:?} is not a wall this stage can produce: expected a positive finite number of millimetres, no finer than the frozen hollow voxel pitch"
             ),
             Self::RegisteredWallUnavailable(error) => {
                 write!(formatter, "registered wall default is unavailable: {error}")
@@ -211,10 +212,17 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                 let millimetres = value
                     .parse::<f64>()
                     .map_err(|_| ParseError::InvalidWallMm(value.to_owned()))?;
-                wall_mm = Some(
-                    PositiveFinite::new(millimetres)
-                        .map_err(|_| ParseError::InvalidWallMm(value.to_owned()))?,
-                );
+                let positive = PositiveFinite::new(millimetres)
+                    .map_err(|_| ParseError::InvalidWallMm(value.to_owned()))?;
+                // The hollow stage owns the admissibility rule; the parser
+                // refuses the same values it does rather than restating one.
+                wall_mm = Some(match checked_wall_mm(positive) {
+                    Ok(checked) => checked,
+                    Err(HollowError::Constants(error)) => {
+                        return Err(ParseError::RegisteredWallUnavailable(error))
+                    }
+                    Err(_) => return Err(ParseError::InvalidWallMm(value.to_owned())),
+                });
             }
             Some("--no-cache") => {
                 if no_cache_seen {
@@ -360,6 +368,36 @@ mod tests {
         let mut arguments = stable_arguments().map(OsString::from).to_vec();
         arguments.extend(["--wall-mm".into(), OsString::from("3.0")]);
         assert_eq!(selection(parse_args(arguments).unwrap()).wall_mm, heavy);
+    }
+
+    #[test]
+    fn wall_mm_refuses_a_wall_finer_than_the_frozen_voxel_pitch() {
+        let pitch = plinth_hollow::minimum_representable_wall_mm().expect("frozen pitch publishes");
+        assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");
+
+        // Sub-pitch walls parse as positive finite numbers and would have
+        // threaded straight to a cavity identical to every other sub-pitch
+        // wall's. The parser refuses them at the same bound the stage does.
+        for value in ["1e-9", "0.001", "0.25", "0.4", "0.499999999"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend(["--wall-mm".into(), OsString::from(value)]);
+            assert_eq!(
+                parse_args(arguments),
+                Err(ParseError::InvalidWallMm(value.to_owned())),
+                "sub-pitch wall {value:?} must be refused by name"
+            );
+        }
+
+        // The pitch itself is admissible, and so is anything above it.
+        for value in ["0.5", "0.500000001", "0.75", "12"] {
+            let mut arguments = stable_arguments().map(OsString::from).to_vec();
+            arguments.extend(["--wall-mm".into(), OsString::from(value)]);
+            assert_eq!(
+                selection(parse_args(arguments).unwrap()).wall_mm.get(),
+                value.parse::<f64>().unwrap(),
+                "wall {value:?} is at or above the pitch and must be accepted verbatim"
+            );
+        }
     }
 
     #[test]

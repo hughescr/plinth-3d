@@ -42,9 +42,13 @@ use thiserror::Error;
 /// `HOLLOW_WALL_HANDLING_HEAVY_MM` (3.0 mm) for pieces that get handled. Both
 /// are registered `Placeholder`s carrying no measurement, so neither is an
 /// acceptance claim and nothing here classifies a model: the caller states the
-/// wall, and [`CavityEvidence::wall_thickness_mm`] records what was stated.
-/// [`HollowRequest::with_registered_wall_default`] is the ordinary
+/// wall, and [`CavityEvidence::wall_thickness_mm`] records what was stated —
+/// in-process, on the returned model; no serialized artifact carries it yet
+/// (FU-36). [`HollowRequest::with_registered_wall_default`] is the ordinary
 /// construction.
+///
+/// The stated wall is not unbounded below: [`checked_wall_mm`] refuses anything
+/// finer than the frozen voxel pitch, because the lattice cannot produce it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HollowRequest {
     pub printer: PrinterProfile,
@@ -91,6 +95,40 @@ pub fn registered_wall(
         WallSelection::Default => *placeholders.hollow_wall_default_mm().diagnostic(),
         WallSelection::HandlingHeavy => *placeholders.hollow_wall_handling_heavy_mm().diagnostic(),
     })
+}
+
+/// The finest wall H0 can actually produce: the frozen `HOLLOW_PITCH_MM` voxel
+/// pitch the cavity is selected on.
+///
+/// Cavity eligibility is `edt > wall` over a lattice quantised at that pitch,
+/// so the smallest non-zero interior distance any voxel can carry is one pitch.
+/// Every wall strictly below the pitch therefore selects the *identical*
+/// cavity — 1e-9 mm and 0.4 mm produce byte-for-byte the same shell as 0.0 —
+/// while [`CavityEvidence::wall_thickness_mm`] would record the distinct number
+/// that was asked for. That is evidence asserting a wall that was never
+/// produced, so the value is refused instead ([`checked_wall_mm`]).
+pub fn minimum_representable_wall_mm() -> Result<PositiveFinite, &'static M0ConstantsError> {
+    Ok(*m0_constants()?
+        .placeholders()
+        .hollow_pitch_mm()
+        .diagnostic())
+}
+
+/// The one wall admissibility rule, shared by the stage and the CLI so they
+/// cannot come to two different answers.
+///
+/// A wall finer than [`minimum_representable_wall_mm`] is refused by name
+/// rather than quietly collapsed onto the lattice. A wall exactly at the pitch
+/// is the finest one this stage can honestly claim, and is accepted.
+pub fn checked_wall_mm(wall_mm: PositiveFinite) -> Result<PositiveFinite, HollowError> {
+    let voxel_pitch = minimum_representable_wall_mm().map_err(HollowError::Constants)?;
+    if wall_mm.get() < voxel_pitch.get() {
+        return Err(HollowError::WallBelowVoxelPitch {
+            wall_mm: wall_mm.get(),
+            voxel_pitch_mm: voxel_pitch.get(),
+        });
+    }
+    Ok(wall_mm)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +505,10 @@ impl HollowSettings {
     }
 
     fn with_wall_mm(wall_mm: PositiveFinite) -> Result<Self, HollowError> {
+        // A wall the frozen lattice cannot represent is refused here, before it
+        // can reach the extraction and be recorded as evidence of a shell that
+        // was never cut. See `checked_wall_mm`.
+        let wall_mm = checked_wall_mm(wall_mm)?;
         let constants = m0_constants().map_err(HollowError::Constants)?;
         let placeholders = constants.placeholders();
         finite_settings(
@@ -1874,6 +1916,10 @@ pub enum HollowError {
         "hollow request printer profile {actual} does not match registered profile {expected}"
     )]
     PrinterProfileMismatch { expected: String, actual: String },
+    #[error(
+        "requested wall {wall_mm} mm is finer than the frozen {voxel_pitch_mm} mm voxel pitch, which cannot produce it"
+    )]
+    WallBelowVoxelPitch { wall_mm: f64, voxel_pitch_mm: f64 },
     #[error("drain planning refused: {0}")]
     DrainPlanning(drains::DrainPlanningRefusal),
     #[error("drilling proof refused: {0}")]
@@ -2392,6 +2438,71 @@ mod tests {
                 .get(),
             1.75
         );
+    }
+
+    #[test]
+    fn a_wall_finer_than_the_frozen_voxel_pitch_is_refused_rather_than_silently_unrepresentable() {
+        let pitch = minimum_representable_wall_mm().expect("the frozen pitch must publish");
+        assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");
+
+        // Cavity selection is `edt > wall` on a lattice quantised at the pitch,
+        // so every one of these picks the identical cavity while asking the
+        // evidence to record a different number. The settings seam refuses them
+        // by name instead of producing a shell that does not match its record.
+        for unrepresentable in [1e-9, 0.001, 0.25, 0.4, 0.499_999_999] {
+            let request = HollowRequest {
+                printer: registered_printer(),
+                wall_mm: PositiveFinite::new(unrepresentable).expect("positive finite wall"),
+            };
+            let refusal = HollowSettings::from_request(&request);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(HollowError::WallBelowVoxelPitch {
+                        wall_mm,
+                        voxel_pitch_mm,
+                    }) if wall_mm == unrepresentable && voxel_pitch_mm == pitch.get()
+                ),
+                "wall {unrepresentable} mm must be refused by name, got {refusal:?}"
+            );
+            assert!(
+                matches!(
+                    checked_wall_mm(PositiveFinite::new(unrepresentable).unwrap()),
+                    Err(HollowError::WallBelowVoxelPitch { .. })
+                ),
+                "the shared rule must refuse {unrepresentable} mm for every caller"
+            );
+        }
+
+        // The pitch itself is the finest wall this stage can honestly claim, so
+        // it is accepted — the bound is a floor, not a rounding.
+        for representable in [pitch.get(), 0.500_000_001, 0.75, 2.5] {
+            let request = HollowRequest {
+                printer: registered_printer(),
+                wall_mm: PositiveFinite::new(representable).expect("positive finite wall"),
+            };
+            assert_eq!(
+                HollowSettings::from_request(&request)
+                    .expect("a wall at or above the pitch is representable")
+                    .wall_thickness_mm()
+                    .get(),
+                representable
+            );
+            assert_eq!(
+                checked_wall_mm(PositiveFinite::new(representable).unwrap())
+                    .expect("a wall at or above the pitch is representable")
+                    .get(),
+                representable
+            );
+        }
+
+        // Both registered walls sit above the floor; neither option can be
+        // refused by the rule that guards the operator's own values.
+        for selection in [WallSelection::Default, WallSelection::HandlingHeavy] {
+            let registered = registered_wall(selection).expect("registered wall");
+            assert!(registered.get() >= pitch.get());
+            assert!(checked_wall_mm(registered).is_ok());
+        }
     }
 
     #[test]

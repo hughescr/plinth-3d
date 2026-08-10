@@ -88,7 +88,11 @@ fn invalid_forms_exit_nonzero_with_named_deterministic_diagnostics() {
         ),
         (
             &["prepare", "--wall-mm", "-2.5"],
-            "wall thickness \"-2.5\" is not a positive finite number of millimetres",
+            "wall thickness \"-2.5\" is not a wall this stage can produce: expected a positive finite number of millimetres, no finer than the frozen hollow voxel pitch",
+        ),
+        (
+            &["prepare", "--wall-mm", "0.001"],
+            "wall thickness \"0.001\" is not a wall this stage can produce: expected a positive finite number of millimetres, no finer than the frozen hollow voxel pitch",
         ),
     ];
     for (arguments, expected) in cases {

@@ -676,7 +676,26 @@ a piece that gets handled, at exactly the provenance the default carries — the
 same unmeasured legacy option, **P**, no plate and no study behind either number.
 **There is deliberately no classifier**: nothing decides that a model is
 handling-heavy. The caller states the wall, and `CavityEvidence::wall_thickness_mm`
-records what was stated, so the choice is auditable per model.
+records what was stated — **in-process evidence only**. `CavityEvidence` is not
+`Serialize`; it hangs off `HollowedModel::cavity_authority` and dies with the
+process, while the serialized `HollowReport`, `CavityRecord` and
+`DrillingEvidence` carry no wall field at all. Two artifacts prepared at 2.5 mm
+and 3.0 mm are therefore **indistinguishable in every file the pipeline writes**.
+Auditing the choice from a persisted artifact is **FU-36**, an open follow-up,
+not a property this stage has today: persisting the wall moves frozen goldens
+and is deliberately not done in the same commit that restored the knob.
+
+**The wall has a floor, and it is the lattice's, not a policy's.** Cavity
+eligibility is `edt > wall` over the frozen `HOLLOW_PITCH_MM` = 0.5 mm voxel
+grid, so the smallest non-zero interior distance a voxel can carry is one pitch
+and *every* wall strictly below the pitch selects the identical cavity. A
+requested 1e-9 mm wall would have produced the 0-mm-wall shell while the
+evidence recorded 1e-9 — a record of a wall that was never cut. So
+`plinth_hollow::checked_wall_mm` refuses any wall finer than the pitch by name
+(`HollowError::WallBelowVoxelPitch`, surfaced by the CLI as an `InvalidWallMm`
+refusal of `--wall-mm`), and the pitch itself is admissible as the finest wall
+this stage can honestly claim. This is a **representability bound, not a gate
+threshold**: it moves only if the frozen pitch moves.
 
 The frozen orientation heuristic is **retired/no-port as a policy**, not silently
 unaccounted: proxy reduction 0.9; identity plus ±10/20/30 degrees about X and Y;
