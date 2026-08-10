@@ -1749,27 +1749,67 @@ fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, Hollow
     }
 }
 
+/// Interior distance on the occupancy grid, measured against a real exterior.
+///
+/// **Why the grid is padded before the transform.** `grid_spec` spans exactly
+/// the source's bounding box, so a material voxel lying on the array boundary
+/// has no background neighbour *inside the array* — and a Euclidean distance
+/// transform can only measure to background samples the array contains. Every
+/// flat face that is tangent to its own bounding box therefore reads as
+/// interior material many millimetres deep: all six faces of a box, the end
+/// caps of a cylinder, and the flat base every mini stands on. `edt > wall`
+/// then selects a "cavity" that reaches the surface or passes through it, the
+/// difference is no longer one negative void inside positive material, and H0
+/// refuses its own shell with [`HollowError::InvalidShellTopology`].
+///
+/// One background layer on each side restores the boundary condition the field
+/// is supposed to have — outside the model is outside — and the transform is
+/// cropped back to the caller's dimensions, so nothing downstream sees the
+/// margin. The padded array is a transient derived from the already-admitted
+/// grid; it moves no cap, and the `max_voxel_cells` admission still binds on
+/// the unpadded `GridSpec::count` exactly as before.
+///
+/// The margin also makes an all-foreground padded array impossible, which is
+/// why no all-foreground special case survives here: the branch that used to
+/// reproduce SciPy's implicit background sample at `(-1, 0, 0)` was only ever
+/// reachable for a source that filled its bounding box completely — a box —
+/// and for that source it returned a field rising to 17.6 mm on a 10 mm cube.
 fn frozen_distance_transform(
     material: &Array3<bool>,
     pitch: f64,
 ) -> Result<Array3<f64>, HollowError> {
-    if material.iter().all(|filled| *filled) {
-        // SciPy's frozen all-foreground behavior measures from the implicit
-        // background sample at (-1, 0, 0); scirs2 otherwise returns infinity.
-        return Ok(Array3::from_shape_fn(material.raw_dim(), |(z, y, x)| {
-            let dz = z as f64 + 1.0;
-            let dy = y as f64;
-            let dx = x as f64;
-            pitch * dz.hypot(dy).hypot(dx)
-        }));
-    }
+    let [nz, ny, nx]: [usize; 3] = material
+        .shape()
+        .try_into()
+        .map_err(|_| HollowError::VoxelStack)?;
+    let padded = [
+        nz.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+        ny.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+        nx.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+    ];
+    padded[0]
+        .checked_mul(padded[1])
+        .and_then(|value| value.checked_mul(padded[2]))
+        .ok_or(HollowError::VoxelGridTooLarge)?;
+    let bordered = Array3::from_shape_fn((padded[0], padded[1], padded[2]), |(z, y, x)| {
+        z >= 1
+            && z <= nz
+            && y >= 1
+            && y <= ny
+            && x >= 1
+            && x <= nx
+            && material[[z - 1, y - 1, x - 1]]
+    });
     let (distances, _) =
-        distance_transform_edt(&material.clone().into_dyn(), Some(&[pitch; 3]), true, false)
+        distance_transform_edt(&bordered.into_dyn(), Some(&[pitch; 3]), true, false)
             .map_err(|_| HollowError::VoxelStack)?;
-    distances
+    let distances: Array3<f64> = distances
         .ok_or(HollowError::VoxelStack)?
         .into_dimensionality()
-        .map_err(|_| HollowError::VoxelStack)
+        .map_err(|_| HollowError::VoxelStack)?;
+    Ok(Array3::from_shape_fn((nz, ny, nx), |(z, y, x)| {
+        distances[[z + 1, y + 1, x + 1]]
+    }))
 }
 
 pub(crate) fn marching_cavity(
@@ -2116,17 +2156,40 @@ mod tests {
         assert_eq!(sphere.spec.origin, [-10.0, -10.0, 0.0]);
         assert!((sphere.bulk_mm - 20.6).abs() <= 0.1);
         assert_eq!(sphere.label_count, 1);
-        assert_eq!(sphere.cavity_voxels, 16_563);
+        // Moved 16,563 -> 16,491 on 2026-08-10 by the cavity-field exterior
+        // margin. The 72 voxels that left are the six polar tangent points
+        // where the sphere touches its own bounding box: with no background
+        // sample beyond the array edge they read as deep interior and were
+        // selected as cavity, so the shell's wall at each pole was a fraction
+        // of a millimetre rather than the stated 2.5 mm. See the 2026-08-10
+        // journal section.
+        assert_eq!(sphere.cavity_voxels, 16_491);
 
-        // Record of record: make_box is the frozen no-background boundary case.
+        // Record of record: make_box is the bounding-box-filling case. Every
+        // one of its six faces is tangent to its own grid, so its occupancy is
+        // 9,261/9,261 and the field has no interior background at all -- which
+        // is the whole reason the margin exists.
         let (box_components, box_case) =
             characterize(frozen_mesh("make_box.prepped.oriented-solid.stl"));
         assert_eq!(box_components, 1);
         assert_eq!(box_case.spec.dims, [21, 21, 21]);
         assert_eq!(box_case.spec.origin, [-5.0, -5.0, 0.0]);
-        assert!((box_case.bulk_mm - 35.2).abs() <= 0.1, "{box_case:?}");
+        // Moved 35.2 mm -> 11.0 mm on 2026-08-10. A 10 mm cube does not have
+        // 35 mm of bulk; the old figure came from the SciPy all-foreground
+        // compatibility branch measuring from an implicit sample at
+        // (-1, 0, 0). 11.0 is 2 x the true centre distance of 5.5 mm, which
+        // carries the same one-pitch centre-to-centre offset the rest of the
+        // field carries (the Sphere's 20.6 on a 20 mm sphere, above).
+        assert!((box_case.bulk_mm - 11.0).abs() <= 0.1, "{box_case:?}");
         assert_eq!(box_case.label_count, 1);
-        assert!((box_case.cavity_voxels as f64 * 0.125 / 1000.0 - 1.1).abs() <= 0.1);
+        // Moved 1.1 -> 0.166 mm^3-thousands. The old cavity was 1,148.5 mm^3
+        // against a 1,000 mm^3 source -- a "cavity" larger than the solid it
+        // was cut from, which is the arithmetic signature of the defect.
+        assert!((box_case.cavity_voxels as f64 * 0.125 / 1000.0 - 0.166).abs() <= 0.01);
+        assert!(
+            box_case.cavity_voxels as f64 * 0.125 < 1_000.0,
+            "a cavity can never be larger than the solid it is cut from"
+        );
 
         // Record of record: make_overhang_table.pipeline.json preserves four
         // authored extra bodies. Its 6.1mm source raster bulk is well below
@@ -2136,6 +2199,124 @@ mod tests {
         assert_eq!(table_components, 5);
         assert!((table.bulk_mm - 6.1).abs() <= 0.1, "{table:?}");
         assert!(table.bulk_mm < 10.0);
+    }
+
+    /// The cavity field's boundary condition, pinned on an array with no
+    /// interior background at all.
+    ///
+    /// A solid that fills its own bounding box produces an all-foreground
+    /// occupancy grid. A Euclidean distance transform can only measure to
+    /// background samples the array contains, so without a margin this case
+    /// has no answer, and the compatibility branch that used to serve it
+    /// measured from an implicit sample at (-1, 0, 0) — 17.6 mm of "interior"
+    /// on a 10 mm cube. With the margin the answer is the one the geometry
+    /// actually has: one voxel step out of the corner, three out of the
+    /// centre of a 5-cube.
+    #[test]
+    fn the_cavity_field_measures_to_the_exterior_rather_than_the_array_edge() {
+        let pitch = 0.5_f64;
+        let filled = Array3::from_elem((5, 5, 5), true);
+        let field = frozen_distance_transform(&filled, pitch).expect("padded field");
+        assert_eq!(field.shape(), &[5, 5, 5], "the margin must not escape");
+        assert_eq!(field[[0, 0, 0]], pitch);
+        assert_eq!(field[[4, 4, 4]], pitch);
+        assert_eq!(field[[2, 2, 2]], 3.0 * pitch);
+        let max = field.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(max, 3.0 * pitch);
+
+        // The margin is a boundary condition, not a bias: a voxel with real
+        // background beside it inside the array still measures to that
+        // background and is unaffected.
+        let mut punctured = Array3::from_elem((5, 5, 5), true);
+        punctured[[2, 2, 2]] = false;
+        let punctured = frozen_distance_transform(&punctured, pitch).expect("padded field");
+        assert_eq!(punctured[[2, 2, 1]], pitch);
+        assert_eq!(punctured[[0, 0, 0]], pitch);
+    }
+
+    /// The bounding-box-filling solid, end to end.
+    ///
+    /// Before the margin every cube refused with `InvalidShellTopology` — the
+    /// selected cavity was *larger than the source solid* (1,148.5 mm³ against
+    /// 1,000 mm³ on a 10 mm cube; 28,363.5 against 27,000 on this one), so the
+    /// marching surface enclosed the solid instead of sitting inside it and
+    /// the difference was not one negative void in positive material.
+    ///
+    /// A 30 mm cube rather than the corpus's 10 mm `make_box`, because the
+    /// smaller one is now correctly *ineligible*: its true 166 mm³ cavity does
+    /// not clear the registered resin-saving threshold, which is a different
+    /// verdict and would not exercise the Boolean at all.
+    #[test]
+    fn a_solid_that_fills_its_own_bounding_box_hollows_instead_of_refusing_its_shell() {
+        let source = make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("box fixture");
+        let source_bounds = bounds(&source);
+        let candidate = create_shell(source, registered_settings())
+            .expect("a box is hollow-eligible once its field has an exterior");
+        assert_eq!(
+            bounds(candidate.mesh()),
+            source_bounds,
+            "outer surface must not drift"
+        );
+        let topology =
+            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("topology");
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("certificate");
+        assert_eq!(certificate.components().len(), 2);
+        assert_eq!(
+            certificate
+                .components()
+                .iter()
+                .filter(|component| component.signed_volume_mm3() < 0.0)
+                .count(),
+            1,
+            "the inner surface must be a negative, contained cavity"
+        );
+        assert_eq!(candidate.cavity().source_volume_mm3().get(), 27_000.0);
+        // A 30 mm cube at a 2.5 mm wall leaves a 25 mm cube of cavity, plus
+        // the one-pitch centre-to-centre margin the discrete field carries.
+        assert!(
+            (16_000.0..=17_000.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            "{:?}",
+            candidate.cavity().cavity_volume_mm3()
+        );
+        assert!(
+            candidate.cavity().cavity_volume_mm3().get()
+                < candidate.cavity().source_volume_mm3().get()
+        );
+    }
+
+    /// Flat faces tangent to the bounding box, on committed corpus geometry.
+    ///
+    /// The `Cylinder`'s end caps lie exactly on the z = 0 and z = 30 grid
+    /// planes. Before the margin they read as interior, the selected cavity
+    /// reached from z = −0.25 to z = 30.25 — through both caps — and the shell
+    /// was refused. This is the class every mini standing on a flat base is
+    /// in, which is why it is gated on a corpus model and not only on the
+    /// synthetic cube above.
+    #[test]
+    fn flat_faces_tangent_to_the_bounding_box_no_longer_leak_the_cavity_through_the_surface() {
+        let source = frozen_mesh("Cylinder.prepped.oriented-solid.stl");
+        let source_bounds = bounds(&source);
+        let candidate = create_shell(source, registered_settings())
+            .expect("the frozen cylinder is hollow-eligible");
+        assert_eq!(bounds(candidate.mesh()), source_bounds);
+        let topology =
+            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("topology");
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("certificate");
+        assert_eq!(certificate.components().len(), 2);
+        assert_eq!(
+            certificate
+                .components()
+                .iter()
+                .filter(|component| component.signed_volume_mm3() < 0.0)
+                .count(),
+            1
+        );
+        assert!(
+            candidate.cavity().cavity_volume_mm3().get()
+                < candidate.cavity().source_volume_mm3().get()
+        );
     }
 
     #[test]

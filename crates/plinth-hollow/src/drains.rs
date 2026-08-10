@@ -1438,6 +1438,24 @@ mod tests {
         );
     }
 
+    /// The Sphere's drain and vent plan, and the one attributed place where it
+    /// now **diverges** from the frozen Python artifact rather than matching it.
+    ///
+    /// **Read this before re-pinning anything.** Until 2026-08-10 the cavity
+    /// field had no exterior: `grid_spec` spans exactly the source's bounding
+    /// box and a distance transform can only measure to background samples the
+    /// array contains, so the Sphere's six polar tangent points — the voxels
+    /// where it touches its own bounding box — read as deep interior and were
+    /// selected as cavity. The recorded Python artifact carries the
+    /// consequence: a drain at `z = 0.5` with `wall_mm = 1.0` on a solid whose
+    /// bottom is `z = 0`, under a **stated 2.5 mm wall**. That is a drilled
+    /// exit through a quarter of the wall the operator asked for.
+    ///
+    /// With the margin the cavity floor is the floor the wall actually implies
+    /// and the drain sits on it. The frozen artifact is **not** regenerated
+    /// here — `corpus/baseline` is evidence, not output — so this test pins
+    /// both numbers and the difference between them, and the question of
+    /// whether the artifact is re-frozen is the owner's (FU-45).
     #[test]
     fn frozen_shell_field_has_an_enclosed_drain_and_vent_plan() {
         let baseline = frozen_hollow_report();
@@ -1446,23 +1464,7 @@ mod tests {
         assert_eq!(holes.len(), 2);
         assert_eq!(holes[0].role, HoleRole::Drain);
         assert_eq!(holes[0].lobe_id, Some(1));
-        assert_eq!(
-            holes[0].center_mm,
-            [
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.5).expect("finite"),
-            ]
-        );
         assert_eq!(holes[1].role, HoleRole::Vent);
-        assert_eq!(
-            holes[1].center_mm,
-            [
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(19.5).expect("finite"),
-            ]
-        );
         let xyz = |value: &serde_json::Value| {
             let values = value.as_array().expect("baseline xyz array");
             [
@@ -1471,28 +1473,72 @@ mod tests {
                 Finite::new(values[2].as_f64().expect("z")).expect("finite z"),
             ]
         };
-        assert_eq!(holes[0].center_mm, xyz(&baseline["drains"][0]["xyz"]));
-        assert_eq!(holes[1].center_mm, xyz(&baseline["vent"]["xyz"]));
+
+        // What the frozen Python artifact records, asserted rather than
+        // described, so this divergence cannot be read as drift.
         assert_eq!(
-            holes[0].sampled_exit_mm.get(),
+            xyz(&baseline["drains"][0]["xyz"]),
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(0.5).expect("finite"),
+            ]
+        );
+        assert_eq!(
             baseline["drains"][0]["wall_mm"]
                 .as_f64()
-                .expect("drain wall_mm")
+                .expect("drain wall_mm"),
+            1.0
         );
         assert_eq!(
-            holes[1].sampled_exit_mm.get(),
-            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm")
+            xyz(&baseline["vent"]["xyz"]),
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(19.5).expect("finite"),
+            ]
         );
+
+        // What the engine produces now. The drain rises from 0.5 mm to 2.5 mm
+        // -- exactly onto the stated wall -- and the vent drops symmetrically.
+        assert_eq!(holes[0].center_mm[2].get(), 2.5);
+        assert_eq!(holes[1].center_mm[2].get(), 16.0);
+        assert!(
+            holes[0].center_mm[2].get() > xyz(&baseline["drains"][0]["xyz"])[2].get(),
+            "the drain must not sit inside the wall it is drilled through"
+        );
+        assert!(
+            holes[1].center_mm[2].get() < xyz(&baseline["vent"]["xyz"])[2].get(),
+            "the vent must not sit inside the wall it is drilled through"
+        );
+
         let keepouts = baseline["cavity_descriptor"]["drain_keepouts"]
             .as_array()
             .expect("baseline keepouts");
+        // The drain still exits straight down, as the frozen artifact records,
+        // and both radii are the two registered values. The **vent axis moves**
+        // -- +x in the frozen artifact, -y now -- because the vent's lateral
+        // exit is a tie among equal-cost directions on a body of revolution and
+        // the smaller cavity breaks that tie elsewhere. Pinned as a fact, not
+        // smoothed over: a moved vent axis is a moved keepout volume.
         assert_eq!(holes[0].direction, xyz(&keepouts[0]["axis"]));
-        assert_eq!(holes[0].keepout_start_mm, xyz(&keepouts[0]["p0"]));
-        assert_eq!(holes[0].keepout_end_mm, xyz(&keepouts[0]["p1"]));
         assert_eq!(holes[0].radius_mm.get().to_bits(), 1.5_f64.to_bits());
-        assert_eq!(holes[1].direction, xyz(&keepouts[1]["axis"]));
-        assert_eq!(holes[1].keepout_start_mm, xyz(&keepouts[1]["p0"]));
-        assert_eq!(holes[1].keepout_end_mm, xyz(&keepouts[1]["p1"]));
+        assert_eq!(
+            xyz(&keepouts[1]["axis"]),
+            [
+                Finite::new(1.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+            ]
+        );
+        assert_eq!(
+            holes[1].direction,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-1.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+            ]
+        );
         assert_eq!(holes[1].radius_mm.get().to_bits(), 1.25_f64.to_bits());
         assert!(holes.iter().all(|hole| {
             hole.inner_crossing_mm.get() > 0.0

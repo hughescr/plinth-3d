@@ -11,16 +11,22 @@
 //! symlinked. `corpus/baseline/*.prepped.stl` are checked in; `corpus/models/`
 //! is not.
 //!
-//! **A finding this test surfaced, recorded rather than papered over.** No
-//! checked-in `.prepped.stl` is refused by the pre-write gates: both
+//! **A finding this test surfaced, recorded rather than papered over — and
+//! half of it expired on 2026-08-10.** It used to read: no checked-in
+//! `.prepped.stl` is refused by the pre-write gates, because both
 //! `make_overhang_table.prepped.stl` and `Sphere.prepped.stl` seal and emit
 //! when run through the whole chain, while the *procedural*
 //! `make_overhang_table()` and the provisioned `corpus/models/Sphere.stl` are
-//! refused for uncovered islands (`tests/first_artifact.rs`). That is
-//! consistent — a `.prepped.stl` is the legacy prep's *output*, already
-//! oriented and cleaned — but it means the refusal case here is driven by the
-//! procedural mesh, which is the geometry the coverage gate was characterised
-//! on.
+//! refused for uncovered islands (`tests/first_artifact.rs`). That is still
+//! true of `make_overhang_table.prepped.stl`, and the reasoning still holds —
+//! a `.prepped.stl` is the legacy prep's *output*, already oriented and
+//! cleaned, so it seals well when run again. It is **no longer true of
+//! `Sphere.prepped.stl`**: the cavity-field exterior fix stopped its hollow
+//! cavity from breaching the wall at its poles, so its drilled shell now seals
+//! instead of being refused by the support run, reaches the gate on its own
+//! merits, and is refused there for uncovered islands like every other
+//! `Sphere`. The refusal case here is therefore driven by the procedural mesh
+//! *and* by that one committed fixture.
 //!
 //! Deliberately absent: any new frozen digest (design record OQ-3). Everything
 //! asserted is a completion, disposition or path property that a changed
@@ -627,31 +633,43 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
         ],
     ))
     .expect("run");
-    assert_eq!(report.artifacts().count(), 2);
-    assert_eq!(report.exit_code(), PipelineExitCode::Ok);
-    // **The two fixtures take different routes, and one of them is a
-    // substitution.** `mini` is decided solid by the hollow stage on its own
-    // terms. `sphere` hollows, drains and drills — and the sealed support run
-    // then refuses that drilled shell, so what is on disk for `sphere` is the
-    // oriented *solid*, not the shell the chain planned. Before the artifact
-    // outcome carried `geometry` the report said `EMITTED` for both and there
-    // was no way to tell them apart. This is the case that fix is about, and it
-    // is a real corpus fixture rather than a constructed one.
+    // **The two fixtures take different routes, and the sphere's route moved
+    // on 2026-08-10.** `mini` is decided solid by the hollow stage on its own
+    // terms and emits. `sphere` hollows, drains and drills — and until the
+    // cavity-field exterior fix its cavity reached to within 0.5 mm of the
+    // outer surface at the six points where it is tangent to its own bounding
+    // box, the sealed support run refused *that* shell, and the chain
+    // substituted the oriented solid, so this block used to assert two
+    // artifacts and a `DrilledShellRefusedBySupport` substitution. With the
+    // wall no longer breached the drilled shell **seals**, reaches the
+    // pre-write gate on its own merits, and `UncoveredIslands` refuses it —
+    // terminally, because a gate refusal is not answered by substituting
+    // different geometry. So one artifact, exit 3, and the sphere's outcome is
+    // a refusal carrying the geometry it was spoken over.
+    //
+    // This is the same verdict `first_artifact.rs`'s
+    // `corpus_sphere_drilled_plan_is_refused_before_any_file_exists` already
+    // pins; the sphere joins it rather than escaping it through a fallback. No
+    // gate, cap or bound moved. **The per-model baseline map is still proved:**
+    // both models resolved their own baseline and both reached a stage that
+    // could only be reached with it.
+    assert_eq!(report.artifacts().count(), 1);
+    assert_eq!(report.exit_code(), PipelineExitCode::Gates);
     let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "mini") else {
         panic!("mini must reach an artifact");
     };
     assert_eq!(geometry, &SupportedGeometry::HollowStageDecidedSolid);
-    let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "sphere") else {
-        panic!("sphere must reach an artifact");
+    let ModelPreparationOutcome::Refused { gate, geometry, .. } = outcome(&report, "sphere") else {
+        panic!(
+            "sphere's drilled shell must now be refused by the gate: {:?}",
+            outcome(&report, "sphere")
+        );
     };
-    let SupportedGeometry::DrilledShellRefusedBySupport { refusal, .. } = geometry else {
-        panic!("sphere's artifact is a support-refusal substitution: {geometry:?}");
-    };
-    // And the substitution names the *support* refusal it stands in for — not
-    // an unrelated stage error the reserve used to fire on as well.
-    assert!(
-        refusal.contains("sealed support run"),
-        "the substitution must carry the refusal it answers: {refusal}"
+    assert_eq!(*gate, Some(plinth_pipeline::PreWriteGate::UncoveredIslands));
+    assert_eq!(
+        geometry.as_ref(),
+        Some(&SupportedGeometry::DrilledShellSealed),
+        "the refusal must be spoken over the shell the chain planned, not over a substitute"
     );
 }
 
@@ -758,8 +776,12 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
         }
     }
 
-    // Without a stop, the same models reach their artifacts — so the assertions
-    // above are about `stop_after` and not about models that never emit.
+    // Without a stop, the same models run to their own end — so the assertions
+    // above are about `stop_after` and not about models that never get there.
+    // `mini` emits; `sphere`'s drilled shell now seals and is refused by the
+    // `UncoveredIslands` gate (see the per-model-baseline test above for the
+    // 2026-08-10 attribution), which is still a stage `stop_after` never
+    // reached and therefore still discriminates.
     let scratch = Scratch::new("stop-none");
     for (stem, fixture, _) in fixtures {
         scratch.place(fixture, stem);
@@ -772,5 +794,6 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
         ],
     ))
     .expect("run");
-    assert_eq!(report.artifacts().count(), 2);
+    assert_eq!(report.artifacts().count(), 1);
+    assert!(report.has_gate_refusal());
 }

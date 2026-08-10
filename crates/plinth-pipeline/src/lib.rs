@@ -1614,9 +1614,22 @@ mod tests {
             // Measured 2026-08-10 on this tip. `true` means the measured field
             // and the zero field produce the same sealed outcome.
             let recorded_neutral = match name {
-                // Both configurations refuse the drilled shell identically
-                // during lowering; production falls back to the reserve solid.
-                "Sphere.prepped.stl" => true,
+                // Re-recorded 2026-08-10 by the cavity-field exterior fix,
+                // true -> false, with its attribution rather than an edited
+                // expectation. Until that fix the Sphere's cavity reached to
+                // within 0.5 mm of its outer surface at the six points where
+                // it is tangent to its own bounding box, and the drilled shell
+                // that produced was refused during lowering under *both*
+                // fields — two identical refusals, which is what made the
+                // fixture read as neutral. With the wall no longer breached
+                // the drilled shell **seals** under both fields, and the two
+                // sealed digests differ (measured 6219979372923930719 against
+                // 1114015346968956405), so the Sphere now says exactly what
+                // `make_toed_slab` and `make_overhang_table` already said.
+                // This does not change FU-38's substance: the divergence it
+                // records is the same contact-selection tie-break, and no
+                // pinned digest anywhere is re-frozen by this line.
+                "Sphere.prepped.stl" => false,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
