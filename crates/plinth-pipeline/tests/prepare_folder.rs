@@ -217,6 +217,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         emit,
         geometry,
         hollow_disposition,
+        cavity_repair,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -239,6 +240,11 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             reason: plinth_hollow::SolidDecisionReason::BelowThreshold
         }
     );
+    // The repair reaches the report. This model decided solid before a cavity
+    // was ever selected, so there is nothing to record -- and `None` is the
+    // claim "no repair result exists here", which is what distinguishes it from
+    // a recorded repair of size zero.
+    assert_eq!(cavity_repair, &None);
     assert!(
         emit.support_record_count > 0,
         "an artifact with no supports"

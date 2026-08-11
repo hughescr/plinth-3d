@@ -2,7 +2,11 @@
 //!
 //! The later stage entry point owns drain and vent placement:
 //!
-//! `plinth_hollow::run(OrientedModel, &HollowRequest) -> Result<HollowStageOutput, HollowError>`.
+//! `plinth_hollow::run(OrientedModel, &HollowRequest) -> Result<HollowStageOutput, HollowStageFailure>`.
+//!
+//! The failure type is not decoration: it carries the well-composedness
+//! repair's measurement out beside the error, because the refusal record a
+//! caller builds from it is the record that decides how the model is treated.
 //!
 //! H0 deliberately does not claim that entry point: a shell without drilled
 //! drains must not become a `HollowedAndDrilled` production model. Instead
@@ -14,6 +18,7 @@
 mod cavity_field;
 pub mod drains;
 pub mod drilling;
+mod well_composed;
 
 pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
@@ -136,6 +141,40 @@ pub fn checked_wall_mm(wall_mm: PositiveFinite) -> Result<PositiveFinite, Hollow
 pub enum SolidDecisionReason {
     NoCavity,
     BelowThreshold,
+    /// The wall left a cavity and the well-composedness repair removed all of
+    /// it. **Not `NoCavity`:** that reason is a statement about the model's
+    /// shape, and a reader who cannot tell the two apart will attribute a
+    /// repair's cost to the geometry. The size of the repair travels with the
+    /// decision in [`HollowReport::cavity_repair`].
+    NoCavityAfterRepair,
+    /// The repaired cavity fell under the savings gate. Same distinction as
+    /// above: the gate was judged *after* voxels were handed back to material,
+    /// and the record has to say so.
+    BelowThresholdAfterRepair,
+}
+
+/// What the well-composedness repair did, carried into the record so that a
+/// repair-caused outcome is never reported as a property of the geometry.
+///
+/// This is the same measurement `H0ResourceDiagnostics` carries for a shell
+/// that was built; it exists separately because the refusal paths build no
+/// shell and would otherwise discard the evidence exactly where it decides how
+/// the model was treated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CavityRepairEvidence {
+    /// Critical 2×2×2 cells in the selected mask before any removal.
+    pub critical_cells: usize,
+    /// Cavity voxels turned back into material, stranded ones included.
+    pub repaired_voxels: usize,
+    /// 2×2×2 cells the repair examined.
+    pub cell_visits: usize,
+    /// Passes over the whole grid: the opening cell scan plus one per component
+    /// re-selection. Counted separately because the cell-visit bound does not
+    /// cover them. A re-selection pass is **two** whole-grid traversals — the
+    /// `label3d` and the sweep applying its verdict — so `p` here is `2p − 1`
+    /// traversals of the grid.
+    pub full_grid_passes: usize,
 }
 
 /// Exact frozen A5 refusal codes authorized to consume the oriented-solid reserve.
@@ -193,6 +232,16 @@ pub struct HollowReport {
     drains: Vec<DrainRecord>,
     drilling_evidence: Option<drilling::DrillingEvidence>,
     drain_plan: Option<drains::DrainPlan>,
+    /// What the well-composedness repair did to the cavity this report is
+    /// about, on every path that ran one — the hollowed path and the two
+    /// repair-caused solid decisions alike. `None` means no repair result was
+    /// recorded, which is the case for a report built by hand and for a model
+    /// that never reached the cavity selection.
+    ///
+    /// `default` rather than required, because reports frozen before the repair
+    /// existed have to keep deserializing.
+    #[serde(default)]
+    cavity_repair: Option<CavityRepairEvidence>,
 }
 
 impl HollowReport {
@@ -204,7 +253,14 @@ impl HollowReport {
             drains: Vec::new(),
             drilling_evidence: None,
             drain_plan: None,
+            cavity_repair: None,
         }
+    }
+
+    /// The repair measurement behind this report, when one ran.
+    #[must_use]
+    pub const fn cavity_repair(&self) -> Option<CavityRepairEvidence> {
+        self.cavity_repair
     }
 
     #[must_use]
@@ -302,6 +358,7 @@ impl HollowedModel {
         mesh: Mesh,
         orientation: OrientationHistory,
         disposition: HollowDisposition,
+        cavity_repair: Option<CavityRepairEvidence>,
     ) -> Result<Self, HollowError> {
         validate_oriented_solid(&mesh)?;
         let report = HollowReport {
@@ -310,6 +367,7 @@ impl HollowedModel {
             drains: Vec::new(),
             drilling_evidence: None,
             drain_plan: None,
+            cavity_repair,
         };
         Ok(Self {
             mesh,
@@ -323,7 +381,29 @@ impl HollowedModel {
         orientation: OrientationHistory,
         reason: SolidDecisionReason,
     ) -> Result<Self, HollowError> {
-        Self::solid(mesh, orientation, HollowDisposition::Solid { reason })
+        Self::solid(mesh, orientation, HollowDisposition::Solid { reason }, None)
+    }
+
+    /// A solid decision recorded together with whatever the well-composedness
+    /// repair measured on the shell candidate that was abandoned.
+    ///
+    /// The evidence is the point: without it a caller reading the record can
+    /// see *that* the model went solid but not whether a repair decided it, nor
+    /// how much cavity the repair handed back. `None` is a claim in its own
+    /// right — nothing reached cavity selection — and is why the parameter is
+    /// an `Option` rather than two constructors.
+    pub fn solid_decision_recording_repair(
+        mesh: Mesh,
+        orientation: OrientationHistory,
+        reason: SolidDecisionReason,
+        cavity_repair: Option<CavityRepairEvidence>,
+    ) -> Result<Self, HollowError> {
+        Self::solid(
+            mesh,
+            orientation,
+            HollowDisposition::Solid { reason },
+            cavity_repair,
+        )
     }
     #[must_use]
     pub fn mesh(&self) -> &Mesh {
@@ -395,11 +475,102 @@ impl HollowedWithSolidReserve {
         self,
         reason: InternalSupportRefusalReason,
     ) -> Result<HollowedModel, HollowError> {
+        // The shell the repair ran on is discarded here, and with it the only
+        // other copy of the measurement. The reserve is a different mesh and
+        // makes no claim about its own wall — but the record this substitution
+        // produces is the one a reader uses to decide how this *model* was
+        // treated, and "a repair ran and then the shell was refused" is not the
+        // same finding as "no repair was ever attempted". So the shell's
+        // measurement is carried onto the substitution rather than dropped with
+        // the shell.
+        let cavity_repair = self.hollowed.history().hollow().cavity_repair();
         HollowedModel::solid(
             self.reserve_mesh,
             self.reserve_history,
             HollowDisposition::SolidFallback { reason },
+            cavity_repair,
         )
+    }
+}
+
+/// A hollow-stage failure paired with whatever the well-composedness repair had
+/// already measured when it happened.
+///
+/// **Why the error is not enough on its own.** Two of the repair's outcomes name
+/// themselves ([`HollowError::CavityRepairRemovedCavity`],
+/// [`HollowError::IneligibleSavingsAfterCavityRepair`]); every *other* failure
+/// downstream of the repair — a refused shell topology, a drain plan, a drill,
+/// an invalid production mesh — says nothing about it, and the record those
+/// failures produce is exactly the record that decides how the model was
+/// treated. A repair that removed cavity voxels being invisible there is the
+/// failure mode this whole measurement exists to prevent, so the evidence
+/// travels beside the error instead of dying with the candidate that was never
+/// built.
+///
+/// `cavity_repair` is `None` when the failure happened *before* cavity
+/// selection reached the repair — there is nothing to report, as opposed to
+/// something that was dropped.
+#[derive(Debug)]
+pub struct HollowStageFailure {
+    error: HollowError,
+    cavity_repair: Option<CavityRepairEvidence>,
+}
+
+impl HollowStageFailure {
+    /// A failure that happened before the repair could have run.
+    #[must_use]
+    pub const fn before_cavity_repair(error: HollowError) -> Self {
+        Self {
+            error,
+            cavity_repair: None,
+        }
+    }
+
+    /// A failure downstream of a repair, carrying what that repair did.
+    #[must_use]
+    pub const fn after_cavity_repair(
+        error: HollowError,
+        cavity_repair: CavityRepairEvidence,
+    ) -> Self {
+        Self {
+            error,
+            cavity_repair: Some(cavity_repair),
+        }
+    }
+
+    #[must_use]
+    pub const fn error(&self) -> &HollowError {
+        &self.error
+    }
+
+    #[must_use]
+    pub const fn cavity_repair(&self) -> Option<CavityRepairEvidence> {
+        self.cavity_repair
+    }
+
+    #[must_use]
+    pub fn into_error(self) -> HollowError {
+        self.error
+    }
+}
+
+impl From<HollowError> for HollowStageFailure {
+    fn from(error: HollowError) -> Self {
+        Self::before_cavity_repair(error)
+    }
+}
+
+/// Verbatim the inner error's own text, so a refusal string recorded by a
+/// caller does not change because the evidence gained a carrier.
+impl std::fmt::Display for HollowStageFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for HollowStageFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -429,41 +600,81 @@ impl HollowStageOutput {
 pub fn run(
     model: plinth_orient::OrientedModel,
     request: &HollowRequest,
-) -> Result<HollowStageOutput, HollowError> {
+) -> Result<HollowStageOutput, HollowStageFailure> {
     let constants = m0_constants().map_err(HollowError::Constants)?;
     let registered = constants.saturn4_ultra();
     if &request.printer != registered {
         return Err(HollowError::PrinterProfileMismatch {
             expected: registered.id().as_str().to_owned(),
             actual: request.printer.id().as_str().to_owned(),
-        });
+        }
+        .into());
     }
     let settings = HollowSettings::from_request(request)?;
     let (solid, orientation) = model.into_parts();
-    let candidate = match create_shell(solid.clone(), settings) {
+    let candidate = match create_shell_recording_repair(
+        solid.clone(),
+        settings,
+        H0AdmissionLimits::production(),
+    ) {
         Ok(candidate) => candidate,
-        Err(HollowError::IneligibleNoCavity) => {
-            return HollowedModel::solid_decision(
-                solid,
-                orientation,
-                SolidDecisionReason::NoCavity,
-            )
-            .map(|model| HollowStageOutput::Solid(Box::new(model)));
+        Err(failure) => {
+            // Read the measurement off the failure *before* the error is
+            // consumed, so every arm below — the typed decisions and the bare
+            // propagation alike — hands on the same evidence. This is the seam
+            // the first version of this change lost it at: five errors became
+            // typed outputs and everything else propagated naked, and the
+            // record a naked propagation produces is the one that decides how
+            // the model is treated.
+            let cavity_repair = failure.cavity_repair();
+            let decided = |reason| {
+                HollowedModel::solid_decision_recording_repair(
+                    solid,
+                    orientation,
+                    reason,
+                    cavity_repair,
+                )
+                .map(|model| HollowStageOutput::Solid(Box::new(model)))
+                .map_err(HollowStageFailure::from)
+            };
+            return match failure.into_error() {
+                HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity),
+                HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
+                    decided(SolidDecisionReason::BelowThreshold)
+                }
+                // The two repair-caused decisions. They travel as their own
+                // reasons because "the repair removed the cavity" and "this
+                // shape has no cavity" are different findings and the record
+                // has to be able to tell them apart; the numbers themselves
+                // come from the same `cavity_repair` every other arm uses.
+                HollowError::CavityRepairRemovedCavity { .. } => {
+                    decided(SolidDecisionReason::NoCavityAfterRepair)
+                }
+                HollowError::IneligibleSavingsAfterCavityRepair { .. } => {
+                    decided(SolidDecisionReason::BelowThresholdAfterRepair)
+                }
+                error => Err(HollowStageFailure {
+                    error,
+                    cavity_repair,
+                }),
+            };
         }
-        Err(HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings) => {
-            return HollowedModel::solid_decision(
-                solid,
-                orientation,
-                SolidDecisionReason::BelowThreshold,
-            )
-            .map(|model| HollowStageOutput::Solid(Box::new(model)));
-        }
-        Err(error) => return Err(error),
     };
-    let planned = drains::plan_drains(candidate)
-        .map_err(|failure| HollowError::DrainPlanning(failure.into_reason()))?;
-    let drilled = drilling::drill_planned_shell(planned)
-        .map_err(|failure| HollowError::Drilling(failure.into_reason()))?;
+    // Drain planning and drilling consume the candidate, and with it the only
+    // other copy of the repair's measurement. Take it first.
+    let cavity_repair = candidate.cavity().resources().cavity_repair();
+    let planned = drains::plan_drains(candidate).map_err(|failure| {
+        HollowStageFailure::after_cavity_repair(
+            HollowError::DrainPlanning(failure.into_reason()),
+            cavity_repair,
+        )
+    })?;
+    let drilled = drilling::drill_planned_shell(planned).map_err(|failure| {
+        HollowStageFailure::after_cavity_repair(
+            HollowError::Drilling(failure.into_reason()),
+            cavity_repair,
+        )
+    })?;
     let reserve_history = orientation;
     let hollowed = drilled.into_hollowed_model(reserve_history.clone());
     Ok(HollowStageOutput::AwaitingInternalSupport(Box::new(
@@ -731,6 +942,7 @@ pub struct H0ResourceDiagnostics {
     boolean_marshaled_input_bytes: u64,
     boolean_output_vertex_limit: u64,
     boolean_output_triangle_limit: u64,
+    cavity_repair: CavityRepairEvidence,
 }
 
 impl H0ResourceDiagnostics {
@@ -789,6 +1001,46 @@ impl H0ResourceDiagnostics {
     #[must_use]
     pub const fn boolean_output_triangle_limit(self) -> u64 {
         self.boolean_output_triangle_limit
+    }
+    /// What the well-composedness repair did to this shell's cavity. The same
+    /// measurement travels on the repair's two refusal paths, so a repair is
+    /// visible in the record whether or not it produced a shell.
+    #[must_use]
+    pub const fn cavity_repair(self) -> CavityRepairEvidence {
+        self.cavity_repair
+    }
+    /// Critical 2×2×2 cells in the selected cavity mask before repair — the
+    /// non-well-composed configurations that would have forced a non-manifold
+    /// cavity surface out of a one-vertex-per-cell extractor. Zero on a mask
+    /// that needed nothing.
+    #[must_use]
+    pub const fn cavity_critical_cells(self) -> usize {
+        self.cavity_repair.critical_cells
+    }
+    /// Cavity voxels turned back into material to reach well-composedness,
+    /// including any left stranded off the selected component. The repair only
+    /// ever removes cavity, so this is an upper bound on the saving it cost.
+    #[must_use]
+    pub const fn cavity_repaired_voxels(self) -> usize {
+        self.cavity_repair.repaired_voxels
+    }
+    /// 2×2×2 cells the repair examined. Bounded by one full scan of the grid
+    /// the caller already admitted, plus the eight cells around each voxel it
+    /// changed.
+    #[must_use]
+    pub const fn cavity_repair_cell_visits(self) -> usize {
+        self.cavity_repair.cell_visits
+    }
+    /// Passes the repair made over the *whole* grid: the opening cell scan plus
+    /// one `label3d` re-selection per round that removed anything. The
+    /// cell-visit count above does not cover these, which is why they are
+    /// counted separately rather than folded into it. Each re-selection pass is
+    /// **two** whole-grid traversals (the `label3d` and the sweep that applies
+    /// it), so `p` passes are `2p − 1` traversals; and the pass count has no
+    /// admitted bound of its own, which is FU-48.
+    #[must_use]
+    pub const fn cavity_repair_full_grid_passes(self) -> usize {
+        self.cavity_repair.full_grid_passes
     }
 }
 
@@ -893,20 +1145,41 @@ pub(crate) fn registered_settings() -> HollowSettings {
 }
 
 /// H0 with explicit caller-owned admission limits for each named work domain.
+///
+/// The repair's measurement is dropped on the failure paths here; callers that
+/// have to *record* a refusal use [`create_shell_recording_repair`] instead.
 pub fn create_shell_with_admission_limits(
     input: Mesh,
     settings: HollowSettings,
     limits: H0AdmissionLimits,
 ) -> Result<ShellCandidate, HollowError> {
+    create_shell_recording_repair(input, settings, limits).map_err(HollowStageFailure::into_error)
+}
+
+/// H0, with every failure downstream of the well-composedness repair carrying
+/// what that repair did.
+///
+/// Same computation as [`create_shell_with_admission_limits`], different
+/// failure type. It exists because a refusal record built from a bare
+/// [`HollowError`] cannot say whether a repair removed cavity voxels first, and
+/// that record is what decides how the model is treated.
+pub fn create_shell_recording_repair(
+    input: Mesh,
+    settings: HollowSettings,
+    limits: H0AdmissionLimits,
+) -> Result<ShellCandidate, HollowStageFailure> {
     let retained_raw_source_buffer_bytes = input
         .retained_buffer_bytes()
         .ok_or(HollowError::ResourceAccountingOverflow)?;
     let admission = TriageTopologyAdmission::from_raw_mesh(
         &input,
         limits.triage_topology_limits(retained_raw_source_buffer_bytes),
-    )?;
+    )
+    .map_err(HollowError::from)?;
     let retained_raw_source_buffer_bytes = admission.retained_source_buffer_bytes();
-    let triaged = admission.triage(WeldPolicy::ExactBits)?;
+    let triaged = admission
+        .triage(WeldPolicy::ExactBits)
+        .map_err(HollowError::from)?;
     let source = triaged.into_mesh();
     let source_volume_mm3 = validate_oriented_solid(&source)?;
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
@@ -914,7 +1187,8 @@ pub fn create_shell_with_admission_limits(
         return Err(HollowError::VoxelCellLimitExceeded {
             cells: spec.count,
             max_cells: limits.max_voxel_cells,
-        });
+        }
+        .into());
     }
     let raster_work_items = raster_work_item_count(&source, spec, limits.max_raster_work_items)?;
     let grid = voxelize_filled(&source, spec, raster_work_items)?;
@@ -926,10 +1200,10 @@ pub fn create_shell_with_admission_limits(
     let edt = frozen_distance_transform(&material, grid_pitch)?;
     let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if !bulk_mm.is_finite() {
-        return Err(HollowError::InvalidArithmetic);
+        return Err(HollowError::InvalidArithmetic.into());
     }
     if bulk_mm < settings.bulk_min_mm.get() {
-        return Err(HollowError::IneligibleBelowBulk);
+        return Err(HollowError::IneligibleBelowBulk.into());
     }
     let cavity_mask = edt.mapv(|distance_mm| distance_mm > settings.wall_thickness_mm.get());
     drop(edt);
@@ -937,83 +1211,155 @@ pub fn create_shell_with_admission_limits(
         label3d(cavity_mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
     drop(cavity_mask);
     if label_count == 0 {
-        return Err(HollowError::IneligibleNoCavity);
+        return Err(HollowError::IneligibleNoCavity.into());
     }
     let largest = largest_label(&labels, label_count)?;
-    let main = labels.mapv(|label| label == largest);
-    let cavity_voxels = main.iter().filter(|value| **value).count();
-    let cavity_volume_mm3 = (cavity_voxels as f64) * grid_pitch.powi(3);
-    if !cavity_volume_mm3.is_finite() {
-        return Err(HollowError::InvalidArithmetic);
-    }
-    let required_fraction_mm3 = source_volume_mm3 * settings.save_min_fraction.get();
-    if !required_fraction_mm3.is_finite() {
-        return Err(HollowError::InvalidArithmetic);
-    }
-    if cavity_volume_mm3 < settings.save_min_mm3.get() && cavity_volume_mm3 < required_fraction_mm3
+    let selected = labels.mapv(|label| label == largest);
+    // The extractor emits one vertex per lattice cell, which is only enough
+    // where the mask is well-composed. Repair it here, before anything measures
+    // or marches it, so the cavity volume the savings gate weighs is the cavity
+    // that is actually cut. The repair only ever removes cavity voxels, so the
+    // wall can only get thicker (`well_composed`).
+    let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(selected)
     {
-        return Err(HollowError::IneligibleSavings);
-    }
+        Ok(repaired) => repaired,
+        // The fixpoint consumed the component. The error names the measurement
+        // itself, but lift it onto the failure as well so that a caller reading
+        // `cavity_repair` never has to special-case one variant to see it.
+        Err(HollowError::CavityRepairRemovedCavity {
+            critical_cells,
+            repaired_voxels,
+            cell_visits,
+            full_grid_passes,
+        }) => {
+            let evidence = CavityRepairEvidence {
+                critical_cells,
+                repaired_voxels,
+                cell_visits,
+                full_grid_passes,
+            };
+            return Err(HollowStageFailure::after_cavity_repair(
+                HollowError::CavityRepairRemovedCavity {
+                    critical_cells,
+                    repaired_voxels,
+                    cell_visits,
+                    full_grid_passes,
+                },
+                evidence,
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let repair_evidence = CavityRepairEvidence {
+        critical_cells: well_composed_repair.critical_cells(),
+        repaired_voxels: well_composed_repair.removed_voxels()
+            + well_composed_repair.reselection_dropped_voxels(),
+        cell_visits: well_composed_repair.cell_visits(),
+        full_grid_passes: well_composed_repair.full_grid_passes(),
+    };
+    // **The evidence seam.** Everything below runs on a mask the repair may
+    // already have changed, so every failure from here on is a failure *after*
+    // a repair and carries its measurement. Written as one fallible block whose
+    // single exit attaches the evidence, rather than as a `map_err` per call
+    // site, because the defect this fixes was one uncovered call site.
+    let sealed = (move || -> Result<ShellCandidate, HollowError> {
+        let cavity_voxels = main.iter().filter(|value| **value).count();
+        let cavity_volume_mm3 = (cavity_voxels as f64) * grid_pitch.powi(3);
+        if !cavity_volume_mm3.is_finite() {
+            return Err(HollowError::InvalidArithmetic);
+        }
+        let required_fraction_mm3 = source_volume_mm3 * settings.save_min_fraction.get();
+        if !required_fraction_mm3.is_finite() {
+            return Err(HollowError::InvalidArithmetic);
+        }
+        if cavity_volume_mm3 < settings.save_min_mm3.get()
+            && cavity_volume_mm3 < required_fraction_mm3
+        {
+            // A cavity the repair shrank and a cavity that was always this
+            // small are the same number here and different findings. Say which
+            // one this was in the error's own name, too, so a `create_shell`
+            // caller holding only a `HollowError` can still tell them apart.
+            if repair_evidence.repaired_voxels > 0 {
+                return Err(HollowError::IneligibleSavingsAfterCavityRepair {
+                    critical_cells: repair_evidence.critical_cells,
+                    repaired_voxels: repair_evidence.repaired_voxels,
+                    cell_visits: repair_evidence.cell_visits,
+                    full_grid_passes: repair_evidence.full_grid_passes,
+                });
+            }
+            return Err(HollowError::IneligibleSavings);
+        }
 
-    let cavity_field =
-        CavityField::from_selected_mask_and_occupancy(&main, &material, grid_origin, grid_pitch)?;
-    drop(material);
-    let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
-    drop(main);
-    let (marching_vertex_upper_bound, marching_triangle_upper_bound) =
-        marching_surface_bounds(spec)?;
-    let boolean_limits = boolean_limits_for_h0(
-        &source,
-        marching_vertex_upper_bound,
-        marching_triangle_upper_bound,
-        limits,
-    )?;
-    let operands = [to_solid(&source)?, to_solid(&inner)?];
-    let boolean_input = BooleanInputEstimate::for_meshes(&operands).map_err(HollowError::Solid)?;
-    let shell = ManifoldBackend
-        .difference_limited(&operands, boolean_limits)
-        .map_err(HollowError::Solid)?;
-    let mesh = orient_boolean_cavity(from_solid(shell)?)?;
-    validate_shell_topology(
-        &mesh,
-        source_volume_mm3,
-        cavity_volume_mm3,
-        settings.volume_balance_rel_tol.get(),
-    )?;
-    validate_printable_bounds(&mesh)?;
-    let retained_field_allocations = cavity_field.retained_allocations();
-    let query_batch_points = spec
-        .count
-        .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
-        .max(1);
-    let resources = H0ResourceDiagnostics {
-        voxel_count: spec.count,
-        query_batch_points,
-        grid_coordinate_bytes: checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?,
-        retained_raw_source_buffer_bytes,
-        raster_work_items,
-        retained_cavity_membership_bytes: retained_field_allocations.membership_bytes(),
-        retained_source_occupancy_bytes: retained_field_allocations.source_occupancy_bytes(),
-        marching_vertex_upper_bound,
-        marching_triangle_upper_bound,
-        boolean_input_primitive_units: boolean_input.operand_primitive_units,
-        boolean_marshaled_input_bytes: boolean_input.logical_marshaled_input_bytes,
-        boolean_output_vertex_limit: boolean_limits.max_output_vertices,
-        boolean_output_triangle_limit: boolean_limits.max_output_triangles,
-    };
-    let cavity = CavityEvidence {
-        wall_thickness_mm: settings.wall_thickness_mm,
-        frozen_voxel_pitch_mm: settings.voxel_pitch_mm,
-        cavity_volume_mm3: finite(cavity_volume_mm3)?,
-        source_volume_mm3: finite(source_volume_mm3)?,
-        resources,
-        drain_planning_cap_bytes: limits.drain_planning_bytes,
-    };
-    Ok(ShellCandidate {
-        mesh,
-        cavity,
-        cavity_field,
-    })
+        let cavity_field = CavityField::from_selected_mask_and_occupancy(
+            &main,
+            &material,
+            grid_origin,
+            grid_pitch,
+        )?;
+        drop(material);
+        let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
+        drop(main);
+        let (marching_vertex_upper_bound, marching_triangle_upper_bound) =
+            marching_surface_bounds(spec)?;
+        let boolean_limits = boolean_limits_for_h0(
+            &source,
+            marching_vertex_upper_bound,
+            marching_triangle_upper_bound,
+            limits,
+        )?;
+        let operands = [to_solid(&source)?, to_solid(&inner)?];
+        let boolean_input =
+            BooleanInputEstimate::for_meshes(&operands).map_err(HollowError::Solid)?;
+        let shell = ManifoldBackend
+            .difference_limited(&operands, boolean_limits)
+            .map_err(HollowError::Solid)?;
+        let mesh = orient_boolean_cavity(from_solid(shell)?)?;
+        validate_shell_topology(
+            &mesh,
+            source_volume_mm3,
+            cavity_volume_mm3,
+            settings.volume_balance_rel_tol.get(),
+        )?;
+        validate_printable_bounds(&mesh)?;
+        let retained_field_allocations = cavity_field.retained_allocations();
+        let query_batch_points = spec
+            .count
+            .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
+            .max(1);
+        let resources = H0ResourceDiagnostics {
+            voxel_count: spec.count,
+            query_batch_points,
+            grid_coordinate_bytes: checked_scale(
+                query_batch_points,
+                std::mem::size_of::<[f64; 3]>(),
+            )?,
+            retained_raw_source_buffer_bytes,
+            raster_work_items,
+            retained_cavity_membership_bytes: retained_field_allocations.membership_bytes(),
+            retained_source_occupancy_bytes: retained_field_allocations.source_occupancy_bytes(),
+            marching_vertex_upper_bound,
+            marching_triangle_upper_bound,
+            boolean_input_primitive_units: boolean_input.operand_primitive_units,
+            boolean_marshaled_input_bytes: boolean_input.logical_marshaled_input_bytes,
+            boolean_output_vertex_limit: boolean_limits.max_output_vertices,
+            boolean_output_triangle_limit: boolean_limits.max_output_triangles,
+            cavity_repair: repair_evidence,
+        };
+        let cavity = CavityEvidence {
+            wall_thickness_mm: settings.wall_thickness_mm,
+            frozen_voxel_pitch_mm: settings.voxel_pitch_mm,
+            cavity_volume_mm3: finite(cavity_volume_mm3)?,
+            source_volume_mm3: finite(source_volume_mm3)?,
+            resources,
+            drain_planning_cap_bytes: limits.drain_planning_bytes,
+        };
+        Ok(ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field,
+        })
+    })();
+    sealed.map_err(|error| HollowStageFailure::after_cavity_repair(error, repair_evidence))
 }
 
 const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
@@ -1720,7 +2066,7 @@ fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<usize, H
     Ok(high_water)
 }
 
-fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
+pub(crate) fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
     let mut counts = vec![
         0_usize;
         label_count
@@ -1807,9 +2153,52 @@ fn frozen_distance_transform(
         .ok_or(HollowError::VoxelStack)?
         .into_dimensionality()
         .map_err(|_| HollowError::VoxelStack)?;
-    Ok(Array3::from_shape_fn((nz, ny, nx), |(z, y, x)| {
-        distances[[z + 1, y + 1, x + 1]]
-    }))
+    crop_margin_in_place(distances, [nz, ny, nx], padded)
+}
+
+/// Crops the one-voxel margin off a padded field **without allocating a second
+/// full-size array**.
+///
+/// The obvious `Array3::from_shape_fn` over the caller's dimensions holds the
+/// padded `(n+2)³` f64 array alive — it is the source being read — while it
+/// allocates the `n³` f64 result: at the admitted 16,777,216-cell grid that is
+/// ~141 MB and ~134 MB **simultaneously**, which is a transient peak of ~2× the
+/// unpadded field rather than the +4 % the padding itself costs.
+///
+/// So the interior is compacted into the front of the padded array's own
+/// buffer and the buffer is truncated. Every source index is greater than or
+/// equal to its destination index, and both walk forward, so one forward sweep
+/// of whole contiguous rows can never overwrite a value it has not yet read:
+/// row `(z, y)`'s destination ends exactly where row `(z, y+1)`'s destination
+/// begins, which is at or before that row's source.
+fn crop_margin_in_place(
+    padded_field: Array3<f64>,
+    dims: [usize; 3],
+    padded: [usize; 3],
+) -> Result<Array3<f64>, HollowError> {
+    let [nz, ny, nx] = dims;
+    // The compaction addresses the buffer directly, so it is only valid on the
+    // C-order layout `distance_transform_edt` returns. Refuse rather than
+    // silently transpose the field.
+    if !padded_field.is_standard_layout() {
+        return Err(HollowError::VoxelStack);
+    }
+    let (mut buffer, offset) = padded_field.into_raw_vec_and_offset();
+    if offset.unwrap_or(0) != 0 {
+        return Err(HollowError::VoxelStack);
+    }
+    for z in 0..nz {
+        for y in 0..ny {
+            // One contiguous row per call: the copy is a `memmove`, not a
+            // per-element loop, and there are `nz × ny` of them rather than
+            // `nz × ny × nx` scalar reads.
+            let source = ((z + 1) * padded[1] + (y + 1)) * padded[2] + 1;
+            let destination = (z * ny + y) * nx;
+            buffer.copy_within(source..source + nx, destination);
+        }
+    }
+    buffer.truncate(nz * ny * nx);
+    Array3::from_shape_vec((nz, ny, nx), buffer).map_err(|_| HollowError::VoxelStack)
 }
 
 pub(crate) fn marching_cavity(
@@ -2012,6 +2401,40 @@ pub enum HollowError {
     IneligibleNoCavity,
     #[error("the largest cavity does not meet the registered resin-saving threshold")]
     IneligibleSavings,
+    /// The well-composedness repair consumed the whole selected component.
+    ///
+    /// Distinct from [`Self::IneligibleNoCavity`] on purpose: that one says the
+    /// *geometry* has no room for a cavity at the stated wall, this one says
+    /// the cavity existed and the **repair** removed it. Collapsing the two
+    /// would put a repair outcome into the record as a property of the model,
+    /// which is the one thing the diagnostics carried here exist to prevent.
+    #[error(
+        "the well-composedness repair removed the whole cavity: {critical_cells} critical cells, \
+         {repaired_voxels} voxels returned to material over {cell_visits} cell visits and \
+         {full_grid_passes} whole-grid passes"
+    )]
+    CavityRepairRemovedCavity {
+        critical_cells: usize,
+        repaired_voxels: usize,
+        cell_visits: usize,
+        full_grid_passes: usize,
+    },
+    /// The cavity survived the repair but fell under the savings gate, and the
+    /// repair had taken voxels out of it. Whether it would have passed without
+    /// the repair is not claimed here — what is claimed is that a repair ran,
+    /// how big it was, and that the gate was judged after it.
+    #[error(
+        "the largest cavity does not meet the registered resin-saving threshold after the \
+         well-composedness repair returned {repaired_voxels} voxels to material \
+         ({critical_cells} critical cells, {cell_visits} cell visits, \
+         {full_grid_passes} whole-grid passes)"
+    )]
+    IneligibleSavingsAfterCavityRepair {
+        critical_cells: usize,
+        repaired_voxels: usize,
+        cell_visits: usize,
+        full_grid_passes: usize,
+    },
     #[error("plinth-solid mesh conversion failed: {0}")]
     SolidMesh(plinth_solid::MeshValidationError),
     #[error("plinth-solid operation failed: {0}")]
@@ -2395,6 +2818,7 @@ mod tests {
             HollowDisposition::SolidFallback {
                 reason: InternalSupportRefusalReason::InternalVerifierException,
             },
+            None,
         )
         .expect("closed oriented solid is an executable public fallback handoff");
         let (mesh, history) = model.into_parts();
@@ -2404,6 +2828,129 @@ mod tests {
             HollowDisposition::SolidFallback {
                 reason: InternalSupportRefusalReason::InternalVerifierException
             }
+        );
+    }
+
+    /// A repair-caused solid decision is distinguishable in the record, and it
+    /// carries the repair's own numbers.
+    ///
+    /// Before this existed, a repair that consumed the whole cavity returned
+    /// `IneligibleNoCavity` and reached the record as `NoCavity` — a claim about
+    /// the *model's shape*, made on behalf of a repair. The reason and the
+    /// evidence are asserted together because either alone is insufficient: the
+    /// reason without the numbers cannot say how much cavity was taken, and the
+    /// numbers without the reason do not say the repair is why the model is
+    /// solid.
+    #[test]
+    fn a_repair_caused_solid_decision_carries_its_reason_and_its_measurement() {
+        let evidence = CavityRepairEvidence {
+            critical_cells: 12,
+            repaired_voxels: 34,
+            cell_visits: 5_678,
+            full_grid_passes: 2,
+        };
+        let model = HollowedModel::solid_decision_recording_repair(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            orientation_history(),
+            SolidDecisionReason::NoCavityAfterRepair,
+            Some(evidence),
+        )
+        .expect("a closed oriented solid is a valid reserve");
+        assert_eq!(
+            model.history().hollow().disposition(),
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::NoCavityAfterRepair
+            }
+        );
+        assert_eq!(model.history().hollow().cavity_repair(), Some(evidence));
+        // The plain decision path makes no repair claim at all, which is what
+        // `None` means here — not "a repair of size zero".
+        let plain = HollowedModel::solid_decision(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            orientation_history(),
+            SolidDecisionReason::NoCavity,
+        )
+        .expect("a closed oriented solid is a valid reserve");
+        assert_eq!(plain.history().hollow().cavity_repair(), None);
+    }
+
+    /// The failure type that carries the measurement past an untyped refusal.
+    ///
+    /// Both halves matter. The evidence has to be readable without consuming
+    /// the error, because a caller records the refusal string *and* the
+    /// measurement; and the text has to be the inner error's own, because a
+    /// refusal string already recorded in artifacts and journals must not
+    /// change because the evidence gained a carrier.
+    #[test]
+    fn a_hollow_stage_failure_states_its_error_verbatim_and_its_repair_beside_it() {
+        let bare = HollowStageFailure::before_cavity_repair(HollowError::IneligibleNoCavity);
+        assert_eq!(
+            bare.to_string(),
+            HollowError::IneligibleNoCavity.to_string()
+        );
+        assert_eq!(bare.cavity_repair(), None);
+
+        let evidence = CavityRepairEvidence {
+            critical_cells: 4,
+            repaired_voxels: 4,
+            cell_visits: 411_674,
+            full_grid_passes: 2,
+        };
+        let carried =
+            HollowStageFailure::after_cavity_repair(HollowError::InvalidShellTopology, evidence);
+        assert_eq!(
+            carried.to_string(),
+            HollowError::InvalidShellTopology.to_string()
+        );
+        assert_eq!(carried.cavity_repair(), Some(evidence));
+        assert!(matches!(
+            carried.into_error(),
+            HollowError::InvalidShellTopology
+        ));
+    }
+
+    /// A support refusal substitutes the oriented solid for a shell that **was
+    /// built**, so a repair may well have run on it.
+    ///
+    /// The measurement has to survive the substitution: the substituted record
+    /// is the one a reader uses to decide how the model was treated, and the
+    /// shell whose own report held the number is discarded here. The reserve
+    /// makes no claim about its own wall — that is not what is being carried.
+    #[test]
+    fn a_support_refusal_substitution_carries_the_discarded_shells_repair_measurement() {
+        let evidence = CavityRepairEvidence {
+            critical_cells: 4,
+            repaired_voxels: 4,
+            cell_visits: 411_674,
+            full_grid_passes: 2,
+        };
+        // Stands in for the drilled shell's own report; `into_solid_fallback`
+        // reads the number off it rather than restating one of its own.
+        let hollowed = HollowedModel::solid_decision_recording_repair(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            orientation_history(),
+            SolidDecisionReason::NoCavityAfterRepair,
+            Some(evidence),
+        )
+        .expect("a closed oriented solid is a valid stand-in");
+        let pair = HollowedWithSolidReserve {
+            hollowed,
+            reserve_mesh: frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            reserve_history: orientation_history(),
+        };
+        let substituted = pair
+            .into_solid_fallback(InternalSupportRefusalReason::A5GateFailure)
+            .expect("the reserve is a valid oriented solid");
+        assert_eq!(
+            substituted.history().hollow().disposition(),
+            HollowDisposition::SolidFallback {
+                reason: InternalSupportRefusalReason::A5GateFailure
+            }
+        );
+        assert_eq!(
+            substituted.history().hollow().cavity_repair(),
+            Some(evidence),
+            "the substitution dropped the repair the discarded shell recorded"
         );
     }
 
@@ -2425,7 +2972,8 @@ mod tests {
                 orientation_history(),
                 HollowDisposition::SolidFallback {
                     reason: InternalSupportRefusalReason::A5GateFailure,
-                }
+                },
+                None,
             ),
             Err(HollowError::NotClosedOrOriented)
         ));
@@ -2445,7 +2993,8 @@ mod tests {
                 orientation_history(),
                 HollowDisposition::SolidFallback {
                     reason: InternalSupportRefusalReason::A5GateFailure,
-                }
+                },
+                None,
             ),
             Err(HollowError::OutsidePrintableEnvelope { .. })
         ));
@@ -2957,5 +3506,365 @@ mod tests {
                 query_points
             );
         }
+    }
+}
+
+/// The well-composedness repair, end to end through `create_shell`: once on a
+/// small synthetic solid that a default `cargo test` runs, and once on the
+/// committed corpus fixture that made FU-43 necessary.
+///
+/// **Why this exists as its own module.** Every other test of the repair works
+/// on a synthetic *mask* a dozen voxels across, and the unit tests stop at the
+/// mask or at `marching_cavity`: without these two, nothing anywhere ran
+/// `create_shell` on a solid that formerly refused with `InvalidShellTopology`,
+/// so a regression in the marching or Boolean half of the causal chain — the
+/// half the repair exists to satisfy — would have passed unnoticed. FU-47's
+/// companion finding is the proof that this failure class is real and lives
+/// beside the repaired one: a synthetic finned block refuses with **zero**
+/// critical cells and a perfectly manifold cavity.
+///
+/// **Both halves of the corpus/synthetic pair are load-bearing.** The corpus
+/// row is release-gated because the fixture is 429,120 faces, so on its own it
+/// leaves the default `cargo test` with *no* end-to-end coverage of the fix at
+/// all — the two debug-runnable `create_shell` tests elsewhere in this file run
+/// masks with zero critical cells, in which the repair is inert. The synthetic
+/// dumbbell below closes that hole at a cost of well under a second.
+///
+/// It also makes the journal's numbers reproducible. The 2026-08-11 record
+/// stated a repair measurement no committed input could produce; the row is now
+/// this test's assertions, so the record and the engine cannot drift apart
+/// again without a failure that names the number that moved.
+#[cfg(test)]
+mod corpus_cavity_repair {
+    use super::*;
+    use plinth_mesh::load_binary_stl;
+
+    /// A UV sphere, `stacks` latitude bands by `slices` longitude bands.
+    fn sphere(radius: f64, center: [f64; 3], stacks: usize, slices: usize) -> Mesh {
+        let mut verts = vec![[center[0], center[1], center[2] + radius]];
+        for stack in 1..stacks {
+            let phi = std::f64::consts::PI * (stack as f64) / (stacks as f64);
+            for slice in 0..slices {
+                let theta = 2.0 * std::f64::consts::PI * (slice as f64) / (slices as f64);
+                verts.push([
+                    center[0] + radius * phi.sin() * theta.cos(),
+                    center[1] + radius * phi.sin() * theta.sin(),
+                    center[2] + radius * phi.cos(),
+                ]);
+            }
+        }
+        verts.push([center[0], center[1], center[2] - radius]);
+        let south = (verts.len() - 1) as u32;
+        let ring = |stack: usize, slice: usize| -> u32 {
+            (1 + (stack - 1) * slices + (slice % slices)) as u32
+        };
+        let mut tris = Vec::new();
+        for slice in 0..slices {
+            tris.push([0, ring(1, slice), ring(1, slice + 1)]);
+        }
+        for stack in 1..stacks - 1 {
+            for slice in 0..slices {
+                tris.push([
+                    ring(stack, slice),
+                    ring(stack + 1, slice),
+                    ring(stack + 1, slice + 1),
+                ]);
+                tris.push([
+                    ring(stack, slice),
+                    ring(stack + 1, slice + 1),
+                    ring(stack, slice + 1),
+                ]);
+            }
+        }
+        for slice in 0..slices {
+            tris.push([south, ring(stacks - 1, slice + 1), ring(stacks - 1, slice)]);
+        }
+        Mesh::new(verts, tris).expect("closed sphere fixture")
+    }
+
+    /// A capped cylinder along `+x` from `0` to `length`, yawed about `z`.
+    fn rod(radius: f64, length: f64, yaw: f64, sides: usize) -> Mesh {
+        let mut verts = Vec::new();
+        for side in 0..sides {
+            let theta = 2.0 * std::f64::consts::PI * (side as f64) / (sides as f64);
+            verts.push([0.0, radius * theta.cos(), radius * theta.sin()]);
+            verts.push([length, radius * theta.cos(), radius * theta.sin()]);
+        }
+        let low_center = verts.len() as u32;
+        verts.push([0.0, 0.0, 0.0]);
+        let high_center = verts.len() as u32;
+        verts.push([length, 0.0, 0.0]);
+        let mut tris = Vec::new();
+        for side in 0..sides {
+            let next = (side + 1) % sides;
+            let (a, b) = ((2 * side) as u32, (2 * side + 1) as u32);
+            let (c, d) = ((2 * next) as u32, (2 * next + 1) as u32);
+            tris.push([a, c, d]);
+            tris.push([a, d, b]);
+            tris.push([low_center, c, a]);
+            tris.push([high_center, b, d]);
+        }
+        let (sin, cos) = yaw.sin_cos();
+        let verts = verts
+            .into_iter()
+            .map(|vertex| {
+                [
+                    vertex[0] * cos - vertex[1] * sin,
+                    vertex[0] * sin + vertex[1] * cos,
+                    vertex[2],
+                ]
+            })
+            .collect::<Vec<_>>();
+        Mesh::new(verts, tris).expect("closed rod fixture")
+    }
+
+    /// **The synthetic solid whose cavity mask is not well-composed.**
+    ///
+    /// Two 10 mm-radius lobes joined by a 3.375 mm-radius waist running at 45°
+    /// in the xy plane. The waist is the whole point: at a 2.5 mm wall its
+    /// cavity is a *sub-voxel* thread, so the selected mask crosses the waist as
+    /// a chain of lattice-diagonal voxels — which is precisely Latecki's C1/C2
+    /// configuration, the one a one-vertex-per-cell extractor cannot represent.
+    ///
+    /// Every number is exact in binary (the waist is 27/8) so the lattice
+    /// decides the same way on any target. The diagonal is what makes it work:
+    /// an axis-aligned waist produces a thread that is thin but well-composed.
+    fn pinched_dumbbell() -> Mesh {
+        let yaw = std::f64::consts::FRAC_PI_4;
+        let span = 40.0;
+        let far = [span * yaw.cos(), span * yaw.sin(), 0.0];
+        let parts = [
+            sphere(10.0, [0.0, 0.0, 0.0], 32, 48),
+            sphere(10.0, far, 32, 48),
+            rod(3.375, span, yaw, 48),
+        ];
+        let operands = parts
+            .iter()
+            .map(to_solid)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture operands");
+        let welded = ManifoldBackend
+            .union_limited(&operands, BooleanLimits::UNLIMITED)
+            .expect("fixture union");
+        let mesh = from_solid(welded).expect("fixture mesh");
+        // Into the positive octant, as every oriented solid reaching H0 is.
+        let min = mesh.verts().iter().fold([f64::MAX; 3], |low, vertex| {
+            [
+                low[0].min(vertex[0]),
+                low[1].min(vertex[1]),
+                low[2].min(vertex[2]),
+            ]
+        });
+        Mesh::new(
+            mesh.verts()
+                .iter()
+                .map(|vertex| [vertex[0] - min[0], vertex[1] - min[1], vertex[2] - min[2]])
+                .collect(),
+            mesh.tris().to_vec(),
+        )
+        .expect("fixture in the positive octant")
+    }
+
+    /// The selected cavity component **before** any repair, plus the grid it
+    /// lives on: `create_shell`'s own selection, stopped one line early.
+    fn unrepaired_cavity_mask(
+        source: &Mesh,
+        settings: HollowSettings,
+    ) -> (Array3<bool>, VoxelGrid) {
+        let spec = grid_spec(source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        let work = raster_work_item_count(
+            source,
+            spec,
+            H0AdmissionLimits::production().max_raster_work_items(),
+        )
+        .expect("bounded source work");
+        let grid = voxelize_filled(source, spec, work).expect("bounded voxelization");
+        let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
+        let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
+        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
+        assert!(label_count > 0, "the fixture must select a cavity");
+        let largest = largest_label(&labels, label_count).expect("largest label");
+        (labels.mapv(|label| label == largest), grid)
+    }
+
+    /// `(boundary edges, non-manifold faces, point-only faces)`.
+    fn cut_census(mesh: &Mesh) -> (usize, usize, usize) {
+        let topology =
+            build_face_topology(mesh, WeldPolicy::ExactBits).expect("shell topology is buildable");
+        let count = |flag: u8| {
+            topology
+                .cut_flags()
+                .iter()
+                .filter(|flags| **flags & flag != 0)
+                .count()
+        };
+        (
+            topology.counts().boundary_edges,
+            count(plinth_mesh::TOPOLOGY_CUT_NONMANIFOLD),
+            count(plinth_mesh::TOPOLOGY_CUT_POINT_ONLY),
+        )
+    }
+
+    /// **The default `cargo test`'s end-to-end gate on the repair.**
+    ///
+    /// It asserts the whole chain in the order the chain runs: the mask is not
+    /// well-composed; the extractor *provably cannot* represent that mask (the
+    /// unrepaired cavity surface is non-manifold, which is the refusal FU-43
+    /// filed); the repair removes exactly the voxels the record states; and the
+    /// shell that comes out of the marching, the Boolean and
+    /// `validate_shell_topology` carries no cut face of any kind.
+    ///
+    /// The middle step is what makes this a regression test rather than a
+    /// tautology: without it, an extractor change that made the repair
+    /// unnecessary would leave this test passing while measuring nothing.
+    #[test]
+    fn a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it() {
+        let source = pinched_dumbbell();
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+
+        // 1. The mask this fixture exists to produce, and the extractor's
+        //    failure on it. The cavity thread across the 45° waist is a chain
+        //    of lattice-diagonal voxels, so the one-vertex-per-cell surface has
+        //    edges used by four faces instead of two.
+        let (unrepaired, grid) = unrepaired_cavity_mask(&source, settings);
+        let raw = marching_cavity(&unrepaired, grid.origin, grid.pitch)
+            .expect("the unrepaired mask still extracts a closed surface");
+        assert_eq!(
+            cut_census(&raw),
+            (0, 8, 26),
+            "the fixture no longer exhibits the defect the repair exists to fix: \
+             watertight but non-manifold is the whole premise"
+        );
+
+        // 2. The repair, through the production entry point. Integer
+        //    combinatorics over a deterministic voxel field, so these are
+        //    equalities.
+        let candidate = create_shell(source, settings).expect("the repaired dumbbell hollows");
+        let resources = candidate.cavity().resources();
+        assert_eq!(resources.cavity_critical_cells(), 4);
+        assert_eq!(resources.cavity_repaired_voxels(), 4);
+        // The opening cell scan plus exactly one whole-grid re-selection: the
+        // removal stranded part of the component, which is the second
+        // `O(cells)` domain the cell-visit bound does not cover.
+        assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
+        // The 98 x 98 x 41 grid's own `(n+1)³` opening scan plus eight cells per
+        // changed voxel, arrived at rather than remembered.
+        assert_eq!(resources.voxel_count(), 393_764);
+        let cells = 99 * 99 * 42;
+        assert_eq!(
+            resources.cavity_repair_cell_visits(),
+            cells + 8 * resources.cavity_repaired_voxels()
+        );
+        assert_eq!(resources.cavity_repair_cell_visits(), 411_674);
+
+        // 3. The end of the chain. Not one face of the shell or its cavity is
+        //    cut, and the difference is one negative void inside positive
+        //    material — the two things the unrepaired mask could not deliver.
+        assert_eq!(
+            cut_census(candidate.mesh()),
+            (0, 0, 0),
+            "the repaired shell is cut; the repair no longer closes FU-43"
+        );
+        let topology =
+            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("shell topology");
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("shell certificate");
+        assert_eq!(
+            certificate
+                .components()
+                .iter()
+                .filter(|component| component.signed_volume_mm3() < 0.0)
+                .count(),
+            1,
+            "the shell must hold exactly one negative, contained cavity"
+        );
+    }
+
+    /// Release-gated: the fixture is 429,120 faces and the run is seconds
+    /// optimized, minutes without optimization. `cargo test --release` runs it;
+    /// a debug `cargo test` reports it ignored rather than silently skipping it.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "429,120-face corpus fixture; run under cargo test --release"
+    )]
+    fn the_committed_treant_hollows_and_its_repair_is_the_one_the_record_states() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl");
+        assert!(
+            path.is_file(),
+            "RequiredCorpusFixtureMissing: {} is committed evidence and must be present",
+            path.display()
+        );
+        let source = load_binary_stl(&path, WeldPolicy::None).expect("committed frozen STL");
+        assert_eq!(source.tris().len(), 429_120, "the fixture itself moved");
+
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let candidate = create_shell(source, settings)
+            .expect("the committed treant is the model FU-43 was filed on and it must now hollow");
+
+        // 1. A repair actually ran on this input. Without this the rest of the
+        //    test would still pass on a mask that never needed anything, and it
+        //    would be pinning the wrong thing.
+        let resources = candidate.cavity().resources();
+        assert!(resources.cavity_critical_cells() > 0);
+        assert!(resources.cavity_repaired_voxels() > 0);
+
+        // 2. The exact measurement, which is what the journal row states. These
+        //    are integer combinatorics over a deterministic voxel field, so
+        //    they are equalities, not tolerances.
+        assert_eq!(resources.cavity_critical_cells(), 70);
+        assert_eq!(resources.cavity_repaired_voxels(), 115);
+        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_880);
+        // The opening cell scan and exactly one whole-grid re-selection. This
+        // is the second `O(cells)` domain the cell-visit bound does not cover,
+        // and it is here so that a change which turned the fixpoint into many
+        // whole-grid passes would be caught by the count rather than by a
+        // stopwatch.
+        assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
+
+        // 3. The work bound the module doc claims, checked against the grid the
+        //    caller admitted rather than against a remembered number.
+        assert_eq!(resources.voxel_count(), 5_313_000);
+        let cells = 166 * 176 * 185;
+        assert!(
+            resources.cavity_repair_cell_visits() <= cells + 8 * resources.cavity_repaired_voxels(),
+            "cell visits {} exceeded cells + 8 x changed",
+            resources.cavity_repair_cell_visits()
+        );
+
+        // 4. The cavity that survived, and the shell built from it. 8,043.875
+        //    mm3 is 64,351 voxels at the frozen 0.5 mm pitch — the 64,466 the
+        //    wall selected, less the 115 the repair handed back.
+        let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
+        assert_eq!(cavity_mm3, 8_043.875);
+        let pitch = candidate.cavity().frozen_voxel_pitch_mm().get();
+        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 64_351);
+
+        // 5. **The end of the causal chain FU-43 filed.** The shell carries the
+        //    outer surface and the cavity together, and not one face of either
+        //    is cut. Before the repair the inner surface alone carried 132
+        //    non-manifold and 483 point-only faces, the Boolean inherited them,
+        //    and `create_shell` refused its own shell.
+        assert_eq!(
+            cut_census(candidate.mesh()),
+            (0, 0, 0),
+            "the shell or its cavity is cut again; the repair no longer closes FU-43"
+        );
+
+        // 6. The diagnostics record is populated by a real run, which nothing
+        //    else asserts: every field a shell of this size must have made
+        //    nonzero is nonzero.
+        assert!(resources.query_batch_points() > 0);
+        assert!(resources.raster_work_items() > 0);
+        assert!(resources.retained_raw_source_buffer_bytes() > 0);
+        assert!(resources.retained_cavity_membership_bytes() > 0);
+        assert!(resources.retained_source_occupancy_bytes() > 0);
+        assert!(resources.marching_vertex_upper_bound() > 0);
+        assert!(resources.marching_triangle_upper_bound() > 0);
+        assert!(resources.boolean_input_primitive_units() > 0);
+        assert!(resources.boolean_marshaled_input_bytes() > 0);
+        assert!(resources.boolean_output_vertex_limit() > 0);
+        assert!(resources.boolean_output_triangle_limit() > 0);
     }
 }

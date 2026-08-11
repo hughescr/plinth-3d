@@ -1499,10 +1499,28 @@ mod tests {
             ]
         );
 
-        // What the engine produces now. The drain rises from 0.5 mm to 2.5 mm
-        // -- exactly onto the stated wall -- and the vent drops symmetrically.
-        assert_eq!(holes[0].center_mm[2].get(), 2.5);
-        assert_eq!(holes[1].center_mm[2].get(), 16.0);
+        // What the engine produces now, pinned **whole**. Only `z` moved when
+        // the exterior margin landed, but pinning `z` alone would leave the
+        // engine free to slide either hole sideways unobserved, which is a
+        // moved drill site and a moved keepout volume. The drain's tiny `-y`
+        // offset is its lobe's centroid, not the axis of revolution; it is a
+        // fact about the engine and is pinned as one.
+        assert_eq!(
+            holes[0].center_mm,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(2.5).expect("finite"),
+            ]
+        );
+        assert_eq!(
+            holes[1].center_mm,
+            [
+                Finite::new(-2.5).expect("finite"),
+                Finite::new(-4.5).expect("finite"),
+                Finite::new(16.0).expect("finite"),
+            ]
+        );
         assert!(
             holes[0].center_mm[2].get() > xyz(&baseline["drains"][0]["xyz"])[2].get(),
             "the drain must not sit inside the wall it is drilled through"
@@ -1510,6 +1528,27 @@ mod tests {
         assert!(
             holes[1].center_mm[2].get() < xyz(&baseline["vent"]["xyz"])[2].get(),
             "the vent must not sit inside the wall it is drilled through"
+        );
+
+        // **The realised exit wall — the quantity FU-47 is about.** The frozen
+        // artifact records 1.0 mm for the drain against a stated 2.5 mm wall.
+        // The engine now samples 3.0 mm along the same downward ray, so the
+        // divergence is pinned on both sides and in the right direction: a
+        // regression that walked this back toward the frozen number would be a
+        // thinner wall, and this is the only test that would say so.
+        assert_eq!(holes[0].sampled_exit_mm.get(), 3.0);
+        assert_eq!(holes[1].sampled_exit_mm.get(), 4.0);
+        assert!(
+            holes[0].sampled_exit_mm.get()
+                > baseline["drains"][0]["wall_mm"]
+                    .as_f64()
+                    .expect("drain wall_mm"),
+            "the drain's realised exit wall regressed toward the frozen 1.0 mm"
+        );
+        assert_eq!(
+            holes[1].sampled_exit_mm.get(),
+            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm"),
+            "the vent's exit wall is the one number that did not move"
         );
 
         let keepouts = baseline["cavity_descriptor"]["drain_keepouts"]
@@ -1540,6 +1579,90 @@ mod tests {
             ]
         );
         assert_eq!(holes[1].radius_mm.get().to_bits(), 1.25_f64.to_bits());
+
+        // **The keepout volumes support planning is handed.** The frozen
+        // artifact's endpoints are pinned above through its axes; these are the
+        // engine's own, and they are pinned twice over. First as values, so a
+        // moved keepout cannot pass silently:
+        assert_eq!(
+            holes[0].keepout_start_mm,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(6.5).expect("finite"),
+            ]
+        );
+        assert_eq!(
+            holes[0].keepout_end_mm,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(-4.5).expect("finite"),
+            ]
+        );
+        assert_eq!(
+            holes[1].keepout_start_mm,
+            [
+                Finite::new(-2.5).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
+                Finite::new(16.0).expect("finite"),
+            ]
+        );
+        assert_eq!(
+            holes[1].keepout_end_mm,
+            [
+                Finite::new(-2.5).expect("finite"),
+                Finite::new(-13.5).expect("finite"),
+                Finite::new(16.0).expect("finite"),
+            ]
+        );
+        // And then as the relation those values are supposed to satisfy, which
+        // is what makes them more than four transcribed triples: a keepout runs
+        // from `keepout_before` behind the hole centre to `keepout_after`
+        // beyond its **sampled exit**, along the hole's own direction. Both
+        // clearances are the registered pair, so this catches a centre, a
+        // direction or an exit that moved without its keepout moving with it —
+        // the frozen artifact satisfies the same relation with its own numbers.
+        let along = |centre: [Finite; 3], direction: [Finite; 3], distance: f64| {
+            [
+                centre[0].get() + direction[0].get() * distance,
+                centre[1].get() + direction[1].get() * distance,
+                centre[2].get() + direction[2].get() * distance,
+            ]
+        };
+        let as_f64 = |point: [Finite; 3]| point.map(|value| value.get());
+        for (hole, before_mm, after_mm) in [(&holes[0], 4.0, 4.0), (&holes[1], 4.0, 5.0)] {
+            assert_eq!(
+                as_f64(hole.keepout_start_mm),
+                along(hole.center_mm, hole.direction, -before_mm),
+                "{:?} keepout start is not {before_mm} mm behind its own centre",
+                hole.role
+            );
+            assert_eq!(
+                as_f64(hole.keepout_end_mm),
+                along(
+                    hole.center_mm,
+                    hole.direction,
+                    hole.sampled_exit_mm.get() + after_mm
+                ),
+                "{:?} keepout end is not {after_mm} mm beyond its own sampled exit",
+                hole.role
+            );
+        }
+        // The same relation holds of the frozen artifact, which is what lets
+        // the two records be compared at all rather than merely both recorded.
+        assert_eq!(
+            xyz(&keepouts[0]["p1"]).map(|value| value.get()),
+            along(
+                xyz(&baseline["drains"][0]["xyz"]),
+                xyz(&keepouts[0]["axis"]),
+                baseline["drains"][0]["wall_mm"]
+                    .as_f64()
+                    .expect("drain wall_mm")
+                    + 4.0
+            )
+        );
+
         assert!(holes.iter().all(|hole| {
             hole.inner_crossing_mm.get() > 0.0
                 && hole.length_mm.get() > hole.inner_crossing_mm.get()
@@ -1563,6 +1686,12 @@ mod tests {
             boolean_marshaled_input_bytes: 0,
             boolean_output_vertex_limit: 0,
             boolean_output_triangle_limit: 0,
+            cavity_repair: crate::CavityRepairEvidence {
+                critical_cells: 0,
+                repaired_voxels: 0,
+                cell_visits: 0,
+                full_grid_passes: 0,
+            },
         };
         let candidate = ShellCandidate {
             mesh,

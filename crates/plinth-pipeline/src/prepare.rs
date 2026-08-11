@@ -214,17 +214,30 @@ pub enum SupportedGeometry {
     /// This is the case OQ-1 actually anticipated ("a corpus model might
     /// *refuse* to hollow") and which the Sphere never exercised, so the
     /// typed solid-decision fallback OQ-1 recommended for it was never built
-    /// until the Weeping Treant hit it. `plinth_hollow::run` converts only
-    /// `IneligibleNoCavity`, `IneligibleBelowBulk` and `IneligibleSavings`
-    /// into a typed `HollowStageOutput::Solid`; every other `HollowError`
-    /// propagates, and the treant's propagates as `InvalidShellTopology` --
-    /// its post-Boolean shell is not one negative cavity enclosed by positive
-    /// outer material. That refusal is FU-34.
+    /// until the Weeping Treant hit it. `plinth_hollow::run` converts only the
+    /// five ineligibility codes into a typed `HollowStageOutput::Solid`; every
+    /// other `HollowError` propagates and arrives here.
+    ///
+    /// **History, not current behaviour:** the model that first reached this
+    /// variant was the Weeping Treant, whose `InvalidShellTopology` was FU-34
+    /// and then FU-43. It no longer takes this path — the 2026-08-11
+    /// well-composedness repair made its cavity extractable and it hollows —
+    /// and no corpus model is known to take it today. The branch is kept and
+    /// gated on a *pre-hollowed* fixture instead, whose refusal is designed and
+    /// permanent rather than a defect waiting to be fixed; see the test in
+    /// `tests/first_artifact.rs`.
     ///
     /// **The provenance caveat, stated rather than hidden (the F14 pattern).**
-    /// The reserve is taken through `HollowedModel::solid_decision`, whose
-    /// `SolidDecisionReason` has exactly two values, `NoCavity` and
-    /// `BelowThreshold`. **Neither one means "the hollow stage errored."** So
+    /// The reserve is taken through
+    /// `HollowedModel::solid_decision_recording_repair`, whose
+    /// `SolidDecisionReason` names why a *decision* was made and has no value
+    /// meaning "the hollow stage errored" — `NoCavityAfterRepair` and
+    /// `BelowThresholdAfterRepair`, added with the repair, distinguish a
+    /// repair-caused decision from a property of the geometry, but none of the
+    /// five covers an error. (What the constructor *does* carry across the
+    /// error is the repair's own measurement, taken off the
+    /// `HollowStageFailure`, so this record cannot claim a repair never ran.)
+    /// So
     /// the model handed to support planning is stamped `BelowThreshold` by a
     /// stage that never reached a threshold test, and that stamp is an
     /// imprecision this seam knowingly inherits -- the same one the
@@ -404,6 +417,10 @@ pub struct ChainOutcome {
     pub source_faces: usize,
     pub prepared_faces: usize,
     pub hollow_disposition: HollowDisposition,
+    /// What the well-composedness repair did to this model's cavity, when one
+    /// ran. Carried out of the chain rather than left inside `plinth-hollow`,
+    /// where nothing outside the crate could read it.
+    pub cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
     pub supported_geometry: SupportedGeometry,
     pub routed_contacts: usize,
     pub final_live_members: usize,
@@ -695,6 +712,7 @@ fn prepare_one(
                 emit: outcome.emit,
                 geometry: outcome.supported_geometry,
                 hollow_disposition: outcome.hollow_disposition,
+                cavity_repair: outcome.cavity_repair,
             },
         ),
         Ok(None) => report(
@@ -822,10 +840,13 @@ fn orient_model(
 /// oriented solid. The refusal lands one stage later. The sealed support run
 /// rejects that drilled shell during Preparation, so the drilled hollow is not
 /// supportable by today's engine even though it is producible. **The Weeping
-/// Treant then did exactly what OQ-1 guessed** (2026-08-09): it errors out of
+/// Treant then did exactly what OQ-1 guessed** (2026-08-09): it errored out of
 /// `plinth_hollow::run` itself with `InvalidShellTopology`, and none of the
-/// three ineligibility codes that would have made that a typed `Solid`. So
-/// case 0 below is OQ-1's own recommendation, built at last.
+/// ineligibility codes that would have made that a typed `Solid`. So case 0
+/// below is OQ-1's own recommendation, built at last. **That is history as of
+/// 2026-08-11:** the well-composedness repair closed the treant's refusal and
+/// it hollows. Case 0 stays, because the error class it answers has not gone
+/// anywhere; what has gone is the corpus model that used to demonstrate it.
 ///
 /// So this seam tries the real thing and records what happened:
 ///
@@ -840,10 +861,12 @@ fn orient_model(
 ///    verdict nobody reached). Note that A5 internal-support planning does not
 ///    exist in this workspace, so this shell carries no internal supports.
 /// 3. If the sealed run refuses that shell, fall back to the oriented-solid
-///    reserve through the same `solid_decision(BelowThreshold)` handoff that
+///    reserve through the same `solid_decision…(BelowThreshold)` handoff that
 ///    every sealed-run gate and the whole OD-8 census already use — the
 ///    design record's F14 caveat, inherited deliberately and reported in
-///    [`SupportedGeometry`], not hidden.
+///    [`SupportedGeometry`], not hidden. The **shell's** repair measurement
+///    travels onto that reserve: the shell is discarded here and it held the
+///    only other copy.
 ///
 /// **Cases 0 and 3 are fallbacks and say so.** Neither is the path the pipeline
 /// is meant to take; both exist so that a model the engine cannot yet hollow or
@@ -880,7 +903,10 @@ pub fn run_from_oriented(
     let output = match hollow_stage(oriented, &policy.hollow) {
         Ok(output) => output,
         // OQ-1's anticipated case, reached for the first time by the Weeping
-        // Treant (FU-34). Carry the oriented solid through the same
+        // Treant (FU-34, then FU-43 -- which is fixed, and the treant now
+        // hollows, so this arm currently has no corpus model behind it and is
+        // gated on a pre-hollowed fixture instead). Carry the oriented solid
+        // through the same
         // `solid_decision(BelowThreshold)` handoff the support-refusal path
         // below, `embed_incidence_census` and every sealed-run gate already
         // use, and record the typed refusal verbatim in `SupportedGeometry`
@@ -891,18 +917,24 @@ pub fn run_from_oriented(
         // the stage will not cut" or "the constants registry would not read",
         // and emitting a solid for either would answer a bad request with a
         // plausible artifact instead of the error that names it.
-        Err(error) if !hollow_error_refuses_this_geometry(&error) => {
+        Err(failure) if !hollow_error_refuses_this_geometry(failure.error()) => {
             return Err(ChainStop::new(PipelineError::Hollow {
                 model: model.clone(),
-                source: error,
+                source: failure.into_error(),
             }))
         }
-        Err(error) => {
-            let refusal = error.to_string();
-            let solid = HollowedModel::solid_decision(
+        Err(failure) => {
+            let refusal = failure.error().to_string();
+            // The repair's measurement, when a repair had already run before
+            // the refusal. Without it this record — the one that decides how
+            // the model was treated — would say a repair never happened on
+            // every refusal class except the two that name themselves.
+            let cavity_repair = failure.cavity_repair();
+            let solid = HollowedModel::solid_decision_recording_repair(
                 hollow_error_reserve_mesh,
                 hollow_error_reserve_history,
                 SolidDecisionReason::BelowThreshold,
+                cavity_repair,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
@@ -947,9 +979,13 @@ pub fn run_from_oriented(
     }
 
     // Keep the reserve before consuming the pair, so a support refusal on the
-    // drilled shell still has the oriented solid to fall back to.
+    // drilled shell still has the oriented solid to fall back to. The repair's
+    // measurement comes with it: `create_shell` succeeded on this model, so a
+    // repair may well have run, and the substituted record is the one a reader
+    // uses to decide how the model was treated.
     let reserve_mesh = candidate.reserve_mesh().clone();
     let reserve_history = candidate.reserve_history().clone();
+    let reserve_cavity_repair = candidate.hollowed().history().hollow().cavity_repair();
     let drilled = (*candidate).approve_hollow();
     let drilled_faces = drilled.mesh().tris().len();
 
@@ -972,10 +1008,11 @@ pub fn run_from_oriented(
         // planner refusal is this model's `Failed` disposition, unchanged.
         Err(stop) if !stop.is_support_refusal() => Err(stop),
         Err(stop) => {
-            let solid = HollowedModel::solid_decision(
+            let solid = HollowedModel::solid_decision_recording_repair(
                 reserve_mesh,
                 reserve_history,
                 SolidDecisionReason::BelowThreshold,
+                reserve_cavity_repair,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
@@ -1004,7 +1041,11 @@ pub fn run_from_oriented(
 ///
 /// OQ-1/FU-34 authorized the reserve for exactly one thing: a model whose shape
 /// the hollow stage cannot turn into a shell (`InvalidShellTopology` and its
-/// relatives). It did not authorize laundering a *bad request* or a *broken
+/// relatives). No corpus model reaches it today — the Weeping Treant, the one
+/// that used to, hollows since the 2026-08-11 well-composedness repair — but
+/// the classification below is about what an error *means*, not about which
+/// model happens to raise it. It did not authorize laundering a *bad request*
+/// or a *broken
 /// environment* into a successful solid emission — an operator who passes a
 /// parse-valid but inadmissible `--wall-mm`, or whose constants registry will
 /// not publish, must get the error that names what they did, not an artifact
@@ -1054,13 +1095,19 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::CavityExtractionFailed
         | HollowError::DrainGeometryFailed
         | HollowError::InvalidProductionMesh => true,
-        // Unreachable through `plinth_hollow::run`, which converts all three
+        // Unreachable through `plinth_hollow::run`, which converts all five
         // into a typed `HollowStageOutput::Solid` rather than propagating them.
         // Listed as geometry anyway, because if one ever did propagate, "keep
-        // the solid" is precisely what it means.
+        // the solid" is precisely what it means. The last two are the
+        // well-composedness repair's own outcomes and reach the record as
+        // `NoCavityAfterRepair` / `BelowThresholdAfterRepair`, which is how a
+        // repair-caused solid stays distinguishable from a shape that never
+        // had a cavity.
         HollowError::IneligibleBelowBulk
         | HollowError::IneligibleNoCavity
-        | HollowError::IneligibleSavings => true,
+        | HollowError::IneligibleSavings
+        | HollowError::CavityRepairRemovedCavity { .. }
+        | HollowError::IneligibleSavingsAfterCavityRepair { .. } => true,
     }
 }
 
@@ -1083,6 +1130,9 @@ pub fn seal_and_emit(
 ) -> Result<Option<ChainOutcome>, ChainStop> {
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
+    // Read here, beside the disposition, because the hollowed model is the
+    // last place the hollow stage's own report is in hand.
+    let cavity_repair = hollowed.history().hollow().cavity_repair();
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -1177,6 +1227,7 @@ pub fn seal_and_emit(
         model: model.clone(),
         source_faces,
         prepared_faces,
+        cavity_repair,
         hollow_disposition,
         supported_geometry,
         routed_contacts: gated.routed_contacts,
@@ -1256,6 +1307,27 @@ mod tests {
         ));
         assert!(hollow_error_refuses_this_geometry(
             &HollowError::CavityExtractionFailed
+        ));
+        // The well-composedness repair's own outcomes. `run` converts both into
+        // typed solid decisions before they reach here, so this arm is
+        // unreachable in practice — but if either ever did propagate, "keep the
+        // solid" is exactly what it means, and the alternative classification
+        // would turn a repaired-away cavity into a hard failure of the model.
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::CavityRepairRemovedCavity {
+                critical_cells: 1,
+                repaired_voxels: 2,
+                cell_visits: 27,
+                full_grid_passes: 2,
+            }
+        ));
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::IneligibleSavingsAfterCavityRepair {
+                critical_cells: 1,
+                repaired_voxels: 2,
+                cell_visits: 27,
+                full_grid_passes: 2,
+            }
         ));
     }
 

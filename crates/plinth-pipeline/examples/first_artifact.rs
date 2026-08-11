@@ -54,10 +54,15 @@ use std::process::ExitCode;
 ///    emit, which would turn a quick sweep into a long one for every caller.
 ///
 /// It is reachable by name and that is how its checkpoint artifact is made:
-/// `-- "Weeping Treant v1.2"`. Note that it reaches the artifact through the
-/// hollow-stage fallback (`SupportedGeometry::HollowStageRefused`), because
-/// `plinth_hollow::run` refuses its shell — that refusal is FU-34 and is a
-/// property of the model, not of this sweep.
+/// `-- "Weeping Treant v1.2"`. **Its provenance changed on 2026-08-11 and this
+/// note is corrected with it.** It used to reach the artifact through the
+/// hollow-stage fallback (`SupportedGeometry::HollowStageRefused`) because
+/// `plinth_hollow::run` refused its shell — FU-34, then FU-43. The
+/// well-composedness repair closed that refusal, so the treant now hollows,
+/// drains and drills, and a checkpoint artifact made today is built from a
+/// **drilled shell**, not from the oriented-solid reserve. Anyone comparing a
+/// checkpoint artifact against one made before that date is comparing two
+/// different geometries.
 const CORPUS_MODELS: [&str; 7] = [
     "Sphere",
     "Cylinder",

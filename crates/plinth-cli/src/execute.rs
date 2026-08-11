@@ -222,6 +222,7 @@ fn print_model(model: &ModelPreparationReport) {
             emit,
             geometry,
             hollow_disposition,
+            cavity_repair,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -236,6 +237,20 @@ fn print_model(model: &ModelPreparationReport) {
             // exactly like the intended one.
             println!("  geometry  {}", describe(geometry));
             println!("  hollow disposition  {hollow_disposition:?}");
+            // What the well-composedness repair took out of the cavity. Silent
+            // when it took nothing, because a line of zeros on every simple
+            // model would train the reader to skip it -- and this is the line
+            // that says a shell's saving is smaller than its wall implies.
+            if let Some(repair) = cavity_repair.filter(|repair| repair.repaired_voxels > 0) {
+                println!(
+                    "  cavity repair  {} critical cells, {} voxels returned to material \
+                     ({} cell visits, {} whole-grid passes)",
+                    repair.critical_cells,
+                    repair.repaired_voxels,
+                    repair.cell_visits,
+                    repair.full_grid_passes
+                );
+            }
         }
         ModelPreparationOutcome::Refused {
             gate,

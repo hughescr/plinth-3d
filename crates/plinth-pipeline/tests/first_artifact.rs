@@ -356,9 +356,11 @@ fn make_prehollowed_box() -> plinth_mesh::Mesh {
 /// fixed the defect that made every bounding-box-filling solid refuse its own
 /// shell, and `make_box` now reaches a *typed* `IneligibleSavings` — its true
 /// 166 mm³ cavity is not worth cutting — which is `HollowStageDecidedSolid`,
-/// not this branch. The `Cylinder` likewise hollows now. The only corpus model
-/// still on this branch is the Weeping Treant, whose refusal is FU-43 and whose
-/// sealed run costs minutes, which is not a test's budget.
+/// not this branch. The `Cylinder` likewise hollows now. The last corpus model
+/// on this branch was the Weeping Treant, and as of 2026-08-11 it is not on it
+/// either: the well-composedness repair closed FU-43 and the treant hollows.
+/// **No corpus model reaches this branch today**, which is precisely why the
+/// gate below cannot be a corpus model.
 ///
 /// A pre-hollowed input is the right permanent gate for it: `TriageError::
 /// PreHollowed` is a **designed, stable** refusal — the engine declines to

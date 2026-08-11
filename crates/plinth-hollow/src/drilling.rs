@@ -434,6 +434,11 @@ impl HollowedAndDrilled {
             drains,
             drilling_evidence: Some(evidence),
             drain_plan: Some(drain_plan),
+            // The repair that made this cavity extractable, carried into the
+            // record of the shell it produced. Nothing downstream could see it
+            // before: it lived only in `H0ResourceDiagnostics`, which no
+            // emitted artifact reads.
+            cavity_repair: Some(cavity.resources().cavity_repair()),
         };
         HollowedModel::from_verified_hollow(
             mesh,
@@ -1850,6 +1855,7 @@ mod tests {
             .with_test_diagnostics(8_192);
         let expected = drilled.evidence().clone();
         let expected_plan = drilled.drain_plan().clone();
+        let candidate_resources = drilled.cavity().resources();
         let holes_allocation = drilled.evidence().holes().as_ptr();
         let diagnostic_allocation = drilled.drain_plan().unavailable_candidates().as_ptr();
         assert_eq!(drilled.drain_plan().unavailable_candidates().len(), 8_192);
@@ -1869,6 +1875,15 @@ mod tests {
             Some(&expected)
         );
         assert_eq!(model.history().hollow().drain_plan(), Some(&expected_plan));
+        // The repair measurement reaches the report on the drilled path. It was
+        // reachable only from `H0ResourceDiagnostics` before, which no report,
+        // artifact or CLI reads -- so a repair could shrink a model's cavity and
+        // leave no trace anywhere a caller could look. The `Sphere` needs no
+        // repair, and that is a recorded zero rather than an absence.
+        assert_eq!(
+            model.history().hollow().cavity_repair(),
+            Some(candidate_resources.cavity_repair())
+        );
         assert_eq!(
             model
                 .history()
