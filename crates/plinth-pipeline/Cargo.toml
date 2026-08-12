@@ -15,6 +15,13 @@ plinth-orient = { path = "../plinth-orient" }
 plinth-support = { path = "../plinth-support" }
 plinth-verify = { path = "../plinth-verify" }
 serde = { workspace = true }
+# FU-57: the coverage-refusal sidecar is production output, written on the
+# refusal path of every `plinth prepare` run -- not a test/example-only
+# concern -- so this moves out of dev-dependencies. The embedded `report`/
+# `closure` field is the refusing `CoverageReport` or `CoverageClosureRefusal`
+# serialized verbatim via `serde_json::to_value`, which is how the sidecar can
+# promise a lossless round trip without a second, hand-maintained format.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -24,4 +31,3 @@ thiserror = { workspace = true }
 # consults plinth-verify's coverage verdict before the library ever calls
 # plinth-emit, and `prepare` loads every source model through plinth-mesh.
 chitubox_io = { path = "../../rust/chitubox_io" }
-serde_json = { workspace = true }

@@ -15,9 +15,18 @@
 //! than a faked one (design record OQ-5).
 #![forbid(unsafe_code)]
 
+pub mod coverage_evidence;
 pub mod gates;
 pub mod prepare;
 
+pub use coverage_evidence::{
+    CoverageRefusalEvidence, EvidenceSource, UncoveredIslandSummary, COVERAGE_RENDER_MAX_FACES,
+    COVERAGE_RENDER_MAX_ISLANDS,
+};
+// Re-exported so a caller of `UncoveredIslandSummary::worst_gap` (the CLI
+// card is the one today) can match on it without taking a direct
+// `plinth-support` dependency of its own for one field's type.
+pub use plinth_support::CoverageClosureGap;
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -353,9 +362,12 @@ pub struct PrepareRequest {
     pub stop_after: Option<StageStop>,
 }
 
-// `Eq` is gone with the wall fields: `Finite` wraps an `f64` and is `PartialEq`
-// only. Nothing keys a map or a set on an outcome — the derive was reachable
-// only because every field happened to be integral.
+// `Eq` is gone, for two independent reasons that both land here: the wall
+// fields (`Finite` wraps an `f64`, `PartialEq` only) and, as of FU-57,
+// `Refused`/`Failed`'s `CoverageRefusalEvidence`, whose islands hold `f64`
+// uncovered-area and gap measurements. Nothing keys a map or a set on an
+// outcome — the derive was reachable only because every field happened to be
+// integral — and a report is compared for equality in tests, never keyed on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
@@ -436,13 +448,65 @@ pub enum ModelPreparationOutcome {
         gate: Option<PreWriteGate>,
         geometry: Option<prepare::SupportedGeometry>,
         violation: String,
+        /// FU-57: the sidecar/card/render evidence for a coverage refusal,
+        /// when `gate` is [`PreWriteGate::UncoveredIslands`]. `#[serde(default)]`
+        /// keeps every report serialized before this field existed readable.
+        /// `None` either because the refusal was not a coverage refusal or
+        /// because evidence persistence itself found nothing to write --
+        /// never because writing it failed silently: a write failure is
+        /// recorded inside `CoverageRefusalEvidence::write_error` instead, so
+        /// this stays `Some` with the failure named.
+        /// Boxed: `CoverageRefusalEvidence` carries the full ranked island
+        /// list, and an unboxed field would put that weight on every
+        /// `Refused` value, including a non-coverage gate refusal.
+        #[serde(default)]
+        evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
     },
     /// The model did not reach the gates at all. `exit_code` is the frozen
     /// per-stage projection of the typed error behind `detail`.
     Failed {
         exit_code: PipelineExitCode,
         detail: String,
+        /// FU-57: populated only when this failure is the FU-56
+        /// coverage-closure controller's refusal (`SupportRunError::
+        /// CoverageClosure`) -- the one `Failed` disposition that is also
+        /// "a coverage refusal" in the ruling's sense. Every other `Failed`
+        /// disposition carries `None`. `#[serde(default)]` for the same
+        /// reason as `Refused::evidence`; boxed for the same reason too.
+        #[serde(default)]
+        evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
     },
+}
+
+impl ModelPreparationOutcome {
+    /// The FU-57 coverage-refusal evidence, when this outcome carries any --
+    /// from either refusal source, without the caller needing to match on
+    /// which variant it landed in.
+    #[must_use]
+    pub fn coverage_evidence(&self) -> Option<&coverage_evidence::CoverageRefusalEvidence> {
+        match self {
+            Self::Refused { evidence, .. } | Self::Failed { evidence, .. } => evidence.as_deref(),
+            Self::Artifact { .. } | Self::Stopped { .. } => None,
+        }
+    }
+
+    /// Whether this model's disposition is a **coverage refusal** — the
+    /// pre-write coverage gate refusing it, or the FU-56 closure controller
+    /// refusing to emit an under-covered plan.
+    ///
+    /// Both are the same safety verdict wearing two dispositions, and this is
+    /// the predicate the run-level signal keys on. See
+    /// [`PrepareReport::exit_code`] for why that matters.
+    #[must_use]
+    pub fn is_coverage_refusal(&self) -> bool {
+        match self {
+            Self::Refused { gate, evidence, .. } => {
+                *gate == Some(PreWriteGate::UncoveredIslands) || evidence.is_some()
+            }
+            Self::Failed { evidence, .. } => evidence.is_some(),
+            Self::Artifact { .. } | Self::Stopped { .. } => false,
+        }
+    }
 }
 
 impl ModelPreparationOutcome {
@@ -537,19 +601,41 @@ impl PrepareReport {
     /// first-in-order, because there is no total severity ranking over them
     /// (`Hollow = 2` is not "worse" than `Input = 1`, it is a different
     /// verdict) and inventing one would be a second contract.
+    ///
+    /// **A coverage refusal is sticky too, at second priority (2026-08-12).**
+    /// FU-56 created a second disposition for the same safety verdict: the
+    /// closure controller refusing to emit an under-covered plan lands as
+    /// `Failed` with [`PipelineExitCode::Supports`], not as `Refused` with
+    /// `Gates`. Before this rule that verdict was first-in-order and could be
+    /// masked by an unrelated earlier `Input` failure — the exact masking the
+    /// `Gates` rule above exists to prevent, reintroduced through a new door
+    /// for the very refusal class FU-57 exists to make visible. So a run
+    /// containing a coverage refusal exits with that refusal's code unless a
+    /// gate refusal outranks it. This **adds** a bound on which signal may be
+    /// masked; it loosens nothing, moves no threshold, and does not invent a
+    /// severity ranking over the remaining codes, which stay first-in-order
+    /// exactly as before.
     #[must_use]
     pub fn exit_code(&self) -> PipelineExitCode {
         let mut first_non_ok = None;
+        let mut coverage = None;
         for model in &self.models {
             let code = model.outcome.exit_code();
             if code == PipelineExitCode::Gates {
                 return PipelineExitCode::Gates;
             }
-            if code != PipelineExitCode::Ok && first_non_ok.is_none() {
-                first_non_ok = Some(code);
+            if code != PipelineExitCode::Ok {
+                if model.outcome.is_coverage_refusal() && coverage.is_none() {
+                    coverage = Some(code);
+                }
+                if first_non_ok.is_none() {
+                    first_non_ok = Some(code);
+                }
             }
         }
-        first_non_ok.unwrap_or(PipelineExitCode::Ok)
+        coverage
+            .or(first_non_ok)
+            .unwrap_or(PipelineExitCode::Ok)
     }
 
     /// Whether the pre-write physics gates refused any model in this run.
@@ -558,6 +644,19 @@ impl PrepareReport {
         self.models
             .iter()
             .any(|model| matches!(model.outcome, ModelPreparationOutcome::Refused { .. }))
+    }
+
+    /// Whether **any** model in this run was refused on coverage, by either
+    /// the pre-write coverage gate or the FU-56 closure controller.
+    ///
+    /// [`Self::has_gate_refusal`] answers only the first of those, because it
+    /// is about the `Refused` disposition rather than about coverage; a
+    /// caller counting the run's coverage refusals wants this one.
+    #[must_use]
+    pub fn has_coverage_refusal(&self) -> bool {
+        self.models
+            .iter()
+            .any(|model| model.outcome.is_coverage_refusal())
     }
 }
 
@@ -627,6 +726,24 @@ pub enum PipelineError {
     /// fails the model by name instead.
     #[error("model {model} could not have an earlier run's artifact at {path} cleared")]
     StaleArtifact {
+        model: ModelId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// FU-57: an earlier run's coverage-refusal evidence (the
+    /// `<model>.coverage.json` sidecar or a `<model>.coverage.island-*.svg`
+    /// render) sitting at this model's target could not be removed before
+    /// this run started.
+    ///
+    /// Reported rather than ignored, for exactly [`Self::StaleArtifact`]'s
+    /// reason: stale evidence beside a fresh disposition is read as this
+    /// run's answer, so a failed removal fails the model by name instead of
+    /// proceeding with an evidence trail that may no longer be true.
+    #[error(
+        "model {model} could not have an earlier run's coverage-refusal evidence at {path} cleared"
+    )]
+    StaleCoverageEvidence {
         model: ModelId,
         path: PathBuf,
         #[source]
@@ -753,8 +870,12 @@ impl PipelineError {
                 PipelineExitCode::Supports
             }
             // A stale artifact that will not clear is a failure of this model's
-            // emission path: the one place the run owns the target file.
-            Self::Emit { .. } | Self::StaleArtifact { .. } => PipelineExitCode::Emit,
+            // emission path: the one place the run owns the target file. FU-57's
+            // coverage evidence lives beside the same target and is cleared under
+            // the same discipline, so it projects to the same code.
+            Self::Emit { .. } | Self::StaleArtifact { .. } | Self::StaleCoverageEvidence { .. } => {
+                PipelineExitCode::Emit
+            }
         }
     }
 }
@@ -1268,11 +1389,13 @@ mod tests {
             gate: Some(PreWriteGate::UncoveredIslands),
             geometry: Some(SupportedGeometry::DrilledShellSealed),
             violation: "nine uncovered islands".to_owned(),
+            evidence: None,
         };
         assert_eq!(refused.exit_code(), PipelineExitCode::Gates);
         let failed = ModelPreparationOutcome::Failed {
             exit_code: PipelineExitCode::Input,
             detail: "unreadable".to_owned(),
+            evidence: None,
         };
         assert_eq!(failed.exit_code(), PipelineExitCode::Input);
 
@@ -1351,6 +1474,7 @@ mod tests {
             ModelPreparationOutcome::Failed {
                 exit_code: PipelineExitCode::Input,
                 detail: "not a binary STL".to_owned(),
+                evidence: None,
             },
         );
         let refused = model(
@@ -1359,6 +1483,7 @@ mod tests {
                 gate: Some(PreWriteGate::UncoveredIslands),
                 geometry: Some(SupportedGeometry::DrilledShellSealed),
                 violation: "nine uncovered islands".to_owned(),
+                evidence: None,
             },
         );
 
@@ -1392,6 +1517,7 @@ mod tests {
                     ModelPreparationOutcome::Failed {
                         exit_code: PipelineExitCode::Supports,
                         detail: "sealed run refused".to_owned(),
+                        evidence: None,
                     },
                 ),
             ],
@@ -1442,6 +1568,14 @@ mod tests {
                 PipelineError::StaleArtifact {
                     model: model(),
                     path: PathBuf::from("out/fixture.chitubox"),
+                    source: std::io::Error::other("denied"),
+                },
+                PipelineExitCode::Emit,
+            ),
+            (
+                PipelineError::StaleCoverageEvidence {
+                    model: model(),
+                    path: PathBuf::from("out/fixture.coverage.json"),
                     source: std::io::Error::other("denied"),
                 },
                 PipelineExitCode::Emit,
@@ -1718,11 +1852,111 @@ mod tests {
                 // This does not change FU-38's substance: the divergence it
                 // records is the same contact-selection tie-break, and no
                 // pinned digest anywhere is re-frozen by this line.
+                //
+                // Re-recorded a THIRD time, 2026-08-12, by FU-56 (the
+                // coverage-closure controller), false -> true, with this
+                // attribution rather than an edited expectation, exactly as
+                // this row's own protocol requires. `run_support` is now the
+                // coverage-closure controller: it measures ROUTED coverage
+                // and, when blocking, appends immutable repair-pool contacts
+                // for up to 8 attempts before refusing. Measured on THIS
+                // fixture under BOTH fields: the baseline is coverage-blocked
+                // (as it always secretly was — nothing checked before FU-56),
+                // four repair rounds are appended identically under either
+                // field, and by the fifth routing attempt the repair-extended
+                // plan is geometry CCO refuses (`SupportRoutingError::Cco(InvalidGeometry)`)
+                // — under BOTH fields, at the SAME attempt, with the
+                // byte-identical error string "sealed support run failed
+                // during Routing". That is a real, deterministic new fact
+                // about this fixture, not noise: a highly symmetric sphere's
+                // repair-pool nomination converges to the same geometric wall
+                // regardless of which field ordered the tie-break, so the two
+                // runs now agree for a reason FU-38's original tie-break
+                // finding never covered. This is FU-56's territory, not
+                // FU-38's substance being edited — the contact-selection
+                // tie-break this row records is still real and still moves
+                // both digests during the four successful repair rounds; it
+                // is simply no longer the LAST word for this one fixture. No
+                // pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, or the zero-tolerance verdict.
+                //
+                // Re-recorded a FOURTH time, 2026-08-12, by the FU-56 review
+                // fixes, true -> false, with this attribution rather than an
+                // edited expectation. Two changes land together and both are
+                // measured on this fixture:
+                //
+                //  1. Nomination now scores candidate repair rows against the
+                //     samples the measurement found UNCOVERED, not against
+                //     every sample on a blocking patch's faces. On this
+                //     fixture that is the difference between repairs doing
+                //     nothing and repairs working: the blocking patch count
+                //     now measures 174, 174, **109**, 109 across attempts
+                //     0..3 under both fields — the first time in this
+                //     project's record that an appended repair-pool contact
+                //     has been observed to reduce measured uncovered area at
+                //     all.
+                //  2. A stage failure on a plan this controller had already
+                //     extended is now the coverage refusal it actually is
+                //     (`CoverageClosureReason::RepairPlanRefused`), not a
+                //     bare `Failed(Routing)`. The Sphere's fifth routing
+                //     attempt still hits `Cco(InvalidGeometry)` under both
+                //     fields, so the shape of the ending is unchanged; what
+                //     changed is that it now carries its islands, its
+                //     per-attempt history and its evidence.
+                //
+                // The divergence itself is real and is FU-38's own tie-break,
+                // still visible: under the measured field island 1 ends with
+                // 477 nominated repair rows and 26 still eligible, under the
+                // zero field 478 and 27. The delicacy field orders the
+                // candidate pool, so the two runs drain it by one row
+                // differently — the same contact-selection tie-break this row
+                // has always measured, now observable through the refusal's
+                // own per-island evidence rather than through a sealed
+                // digest. No pinned digest anywhere is re-frozen by this
+                // line, and nothing here touches the coverage radius, the
+                // patch-area floor, or the zero-tolerance verdict.
                 "Sphere.prepped.stl" => false,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
-                "make_toed_slab.prepped.stl" | "make_overhang_table (procedural)" => false,
+                "make_toed_slab.prepped.stl" => false,
+                // Re-recorded 2026-08-12, by FU-56, false -> true, with this
+                // attribution: `make_overhang_table`'s island 0 (component 4,
+                // face 51) has no repair-pool candidate the CCO transcript
+                // ever admits at the registered coverage radius
+                // (`plinth-support/tests/support_runner_integration.rs`,
+                // `public_runner_refuses_overhang_table_with_a_genuinely_unclosable_island`),
+                // under EITHER field: both runs exhaust the registered
+                // 8-attempt bound and refuse
+                // `SupportRunError::CoverageClosure(AttemptsExhausted)` with
+                // the same one blocking island, because the nomination
+                // scoring for this fixture's single blocking key is dominated
+                // by geometric distance to the uncovered samples, not by the
+                // delicacy tie-break this row otherwise measures. FU-38's
+                // tie-break finding is unaffected on every fixture that
+                // reaches a sealed run at all; this fixture no longer does.
+                // No pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, or the zero-tolerance verdict.
+                //
+                // Re-recorded again, 2026-08-12, by the FU-56 review fixes,
+                // true -> false, with this attribution rather than an edited
+                // expectation. The refusal above is GONE: with nomination
+                // scored against the measurement's uncovered samples instead
+                // of against every sample on the blocking patch's faces, this
+                // fixture's island 0 closes from its own repair pool and the
+                // run seals under both fields
+                // (`plinth-support/tests/support_runner_integration.rs`,
+                // `public_runner_closes_overhang_table_only_after_appending_repair_contacts`).
+                // Two sealed runs mean two sealed digests, and they differ —
+                // which is exactly FU-38's original contact-selection
+                // tie-break finding for this fixture, restored to visibility
+                // rather than newly discovered. No pinned digest anywhere is
+                // re-frozen by this line, and nothing here touches the
+                // coverage radius, the patch-area floor, or the
+                // zero-tolerance verdict.
+                "make_overhang_table (procedural)" => false,
                 other => panic!("unrecorded fixture {other}"),
             };
             assert_eq!(

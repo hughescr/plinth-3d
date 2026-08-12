@@ -56,8 +56,9 @@ use plinth_hollow::{
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
-use plinth_support::{run_support, SupportRequest};
+use plinth_support::{run_support, SupportRequest, SupportRunError};
 
+use crate::coverage_evidence::{self, RenderMesh};
 use crate::{
     hollow_stage, AssumedPrintSize, ModelPreparationOutcome, ModelPreparationReport,
     OrientationPolicy, OutputProfile, PipelineError, PipelineExitCode, PreWriteGate, PrepareReport,
@@ -294,6 +295,14 @@ pub struct ChainStop {
     /// The bounds the refused stage was measured against, when it has any.
     /// A refusal without its bound is not a measurement.
     measured_against: Option<String>,
+    /// FU-57: the sidecar/card/render evidence, when this stop is a coverage
+    /// refusal from either source. Attached by [`Self::with_evidence`] at the
+    /// point in `seal_and_emit` where the refusal is first known, and
+    /// projected into the report by [`failure`]. Boxed: `CoverageRefusalEvidence`
+    /// carries the full ranked island list, so an unboxed field would put
+    /// that weight on every `ChainStop`, including the overwhelming majority
+    /// that never carry one.
+    evidence: Option<Box<crate::coverage_evidence::CoverageRefusalEvidence>>,
 }
 
 impl ChainStop {
@@ -303,6 +312,7 @@ impl ChainStop {
             error: Box::new(error),
             gate: None,
             measured_against: None,
+            evidence: None,
         }
     }
 
@@ -312,6 +322,7 @@ impl ChainStop {
             error: Box::new(error),
             gate: Some(gate),
             measured_against: None,
+            evidence: None,
         }
     }
 
@@ -320,6 +331,22 @@ impl ChainStop {
     pub fn measured_against(mut self, bounds: String) -> Self {
         self.measured_against = Some(bounds);
         self
+    }
+
+    /// Attach the FU-57 coverage-refusal evidence this stop carries.
+    #[must_use]
+    pub fn with_evidence(
+        mut self,
+        evidence: crate::coverage_evidence::CoverageRefusalEvidence,
+    ) -> Self {
+        self.evidence = Some(Box::new(evidence));
+        self
+    }
+
+    /// The coverage-refusal evidence attached to this stop, when any.
+    #[must_use]
+    pub fn evidence(&self) -> Option<&crate::coverage_evidence::CoverageRefusalEvidence> {
+        self.evidence.as_deref()
     }
 
     /// The typed stage error behind this stop.
@@ -349,11 +376,39 @@ impl ChainStop {
     /// a `DegenerateExtent` says nothing about whether the geometry is
     /// supportable, and re-planning a different geometry after one of those
     /// would write a *substitute* artifact and label it a support refusal.
+    ///
+    /// **A [`Self::is_coverage_closure_refusal`] stop is excluded (FU-56).**
+    /// That refusal means the sealed run built, routed and lowered a real
+    /// plan for *this* geometry and could not close its own coverage promise
+    /// from the immutable repair pool within the registered attempt bound —
+    /// it is a physics verdict on a plan that sealed perfectly well, exactly
+    /// like a pre-write gate refusal, not a claim that the geometry itself
+    /// could not be sealed. Re-planning the oriented solid after it would be
+    /// the same substitution the gate case above already refuses to allow.
     #[must_use]
     pub fn is_support_refusal(&self) -> bool {
+        match &*self.error {
+            PipelineError::Support { .. } => true,
+            PipelineError::SealedRun { source, .. } => !matches!(
+                source,
+                plinth_support::SupportRunError::CoverageClosure(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether this stop is specifically a coverage-closure refusal (FU-56):
+    /// the sealed run's own coverage-closure controller could not admit every
+    /// measured island within the registered attempt bound. See
+    /// [`Self::is_support_refusal`] for why this is excluded from that check.
+    #[must_use]
+    pub fn is_coverage_closure_refusal(&self) -> bool {
         matches!(
-            *self.error,
-            PipelineError::SealedRun { .. } | PipelineError::Support { .. }
+            &*self.error,
+            PipelineError::SealedRun {
+                source: plinth_support::SupportRunError::CoverageClosure(_),
+                ..
+            }
         )
     }
 
@@ -548,6 +603,7 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
                         "two source models in this folder claim the artifact path {}",
                         target.display()
                     ),
+                    evidence: None,
                 },
             });
             continue;
@@ -642,6 +698,26 @@ fn prepare_one(
             &repair,
             None,
             failure(&ChainStop::new(PipelineError::StaleArtifact {
+                model: model.clone(),
+                path: target.to_path_buf(),
+                source,
+            })),
+        );
+    }
+
+    // **FU-57: the same discipline extended to coverage-refusal evidence.**
+    // A `<model>.coverage.json` and its renders from a run that refused this
+    // model are read by the next reader as *this* run's answer the moment
+    // this run's own disposition sits beside them without touching them --
+    // the exact misleading hand-off `clear_stale_artifact` above exists to
+    // prevent, and evidence that a model now emits cleanly must not survive
+    // to sit beside its fresh artifact. A removal that fails fails the model
+    // by name, the same as a stale artifact does.
+    if let Err(source) = clear_stale_coverage_evidence(target) {
+        return report(
+            &repair,
+            None,
+            failure(&ChainStop::new(PipelineError::StaleCoverageEvidence {
                 model: model.clone(),
                 path: target.to_path_buf(),
                 source,
@@ -797,6 +873,56 @@ fn clear_stale_artifact(target: &Path) -> Result<(), std::io::Error> {
     }
 }
 
+/// Remove any FU-57 coverage-refusal evidence left at one model's target from
+/// an earlier run: the sidecar `<model>.coverage.json` and every
+/// `<model>.coverage.island-*.svg`.
+///
+/// **Matched by prefix/suffix on the directory listing, not shell-style
+/// globbing** -- a model name may itself contain glob metacharacters (`*`,
+/// `[`, `]`), and this must still match exactly the files
+/// [`coverage_evidence::render_path`] can have written for this target and
+/// nothing else.
+///
+/// `NotFound` is the ordinary case (no earlier refusal, or an output
+/// directory that does not exist yet) and is not an error; any other io
+/// error is, for the same reason `clear_stale_artifact` treats one as fatal
+/// to the model: evidence from a run this model's own disposition is about
+/// to sit beside is read as this run's answer.
+fn clear_stale_coverage_evidence(target: &Path) -> Result<(), std::io::Error> {
+    let sidecar = coverage_evidence::sidecar_path(target);
+    match std::fs::remove_file(&sidecar) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let Some(parent) = target.parent() else {
+        return Ok(());
+    };
+    let Some(prefix) = coverage_evidence::render_file_prefix(target) else {
+        return Ok(());
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".svg") {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Project a stop into the report's serializable disposition.
 fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
     if stop.is_gates() {
@@ -804,11 +930,13 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
             gate: stop.gate(),
             geometry: stop.refused_geometry().cloned(),
             violation: stop.detail(),
+            evidence: stop.evidence().cloned().map(Box::new),
         }
     } else {
         ModelPreparationOutcome::Failed {
             exit_code: stop.exit_code(),
             detail: stop.detail(),
+            evidence: stop.evidence().cloned().map(Box::new),
         }
     }
 }
@@ -1271,12 +1399,49 @@ pub fn seal_and_emit(
         input.minima_knn_max_work(),
     );
 
+    // FU-57: a coverage-closure refusal (FU-56) is only knowable from
+    // `run_support`'s `Err`, by which point the consumed `HollowedModel` and
+    // its mesh are gone. The render evidence needs the mesh, so this is the
+    // last point it can be captured -- see [`RenderMesh`]'s own doc for why
+    // this is a real, documented per-model cost rather than a lazy one.
+    let render_mesh = RenderMesh::from_mesh(hollowed.mesh());
+
     let authority = run_support(hollowed, policy.support.clone(), input).map_err(|source| {
-        ChainStop::new(PipelineError::SealedRun {
+        // FU-57: only the coverage-closure refusal carries evidence this row
+        // persists. Every other `SupportRunError` is a stage failure with
+        // nothing coverage-shaped to rank.
+        let evidence = if let SupportRunError::CoverageClosure(refusal) = &source {
+            // **"A refused model leaves no path on disk" is a claim about the
+            // path, and this refusal now owns it.** The coverage verdict used
+            // to be spoken only by the pre-write gate, and `judge_then_emit`
+            // cleared an earlier run's artifact on its way out. FU-56 moved
+            // the verdict one stage earlier, to a stage that never reaches
+            // `judge_then_emit` — so without this, a model that emitted
+            // yesterday and is coverage-refused today would leave yesterday's
+            // `.chitubox` sitting at the target beside today's refusal, where
+            // the next reader takes it for this run's answer. Best-effort for
+            // the same reason the gate's own clearing is: this is cleanup on a
+            // path that has already decided to refuse.
+            let _ = std::fs::remove_file(target);
+            Some(coverage_evidence::persist_closure_refusal(
+                model,
+                target,
+                &render_mesh,
+                Some(&supported_geometry),
+                refusal,
+            ))
+        } else {
+            None
+        };
+        let stop = ChainStop::new(PipelineError::SealedRun {
             model: model.clone(),
             source,
         })
-        .measured_against(scaled_caps)
+        .measured_against(scaled_caps);
+        match evidence {
+            Some(evidence) => stop.with_evidence(evidence),
+            None => stop,
+        }
     })?;
     if stop_after == Some(StageStop::Support) {
         return Ok(None);
@@ -1302,13 +1467,53 @@ pub fn seal_and_emit(
         // cannot be told apart from a verdict on the fallback.
         PipelineError::Gates { source, .. } => {
             let gate = source.gate();
-            ChainStop::refused(
+            // FU-57: a blocking coverage verdict carries the full
+            // `CoverageReport` on `GateRefusal::Refused`, and an UNMEASURABLE
+            // coverage gate is still a coverage refusal — fail-closed, the
+            // model `Refused`, the coverage gate named — so it keeps evidence
+            // too, as a reason-only sidecar naming the measurement failure.
+            // That is exactly what the controller's own equivalent failure
+            // (`CoverageClosureReason::MeasurementRefused`) has always
+            // written; before this the identical error produced a sidecar one
+            // stage earlier and complete silence here. Gate outcomes that are
+            // not about coverage at all (unauthorized emission, an
+            // unavailable registry, a pending-but-unported gate) persist
+            // nothing, because there is no coverage refusal to explain.
+            let evidence = source.report().map_or_else(
+                || {
+                    source.unmeasurable_coverage_reason().map(|reason| {
+                        coverage_evidence::persist_unmeasurable_gate(
+                            model,
+                            target,
+                            &render_mesh,
+                            gate,
+                            Some(&supported_geometry),
+                            &reason,
+                        )
+                    })
+                },
+                |report| {
+                    Some(coverage_evidence::persist_gate_refusal(
+                        model,
+                        target,
+                        &render_mesh,
+                        gate,
+                        Some(&supported_geometry),
+                        report,
+                    ))
+                },
+            );
+            let stop = ChainStop::refused(
                 error,
                 GateStop {
                     gate,
                     geometry: supported_geometry.clone(),
                 },
-            )
+            );
+            match evidence {
+                Some(evidence) => stop.with_evidence(evidence),
+                None => stop,
+            }
         }
         _ => ChainStop::new(error),
     })?;
@@ -1483,6 +1688,35 @@ mod tests {
                 stop.detail()
             );
         }
+    }
+
+    /// **A coverage-closure refusal (FU-56) is excluded from
+    /// `is_support_refusal`, and is its own named class.**
+    ///
+    /// The sealed run built and routed a real plan for the drilled shell and
+    /// could not close its own coverage promise within the registered attempt
+    /// bound; re-planning the oriented solid after it would substitute a
+    /// different artifact for a refusal that is about the plan, not the
+    /// geometry — the same reasoning `only_a_sealed_run_or_planner_refusal_is_a_support_refusal`
+    /// already documents for a pre-write gate stop.
+    #[test]
+    fn a_coverage_closure_refusal_is_named_and_excluded_from_support_refusal() {
+        let model = ModelId::new("fixture");
+        let refusal = plinth_support::CoverageClosureRefusal {
+            attempts: 8,
+            reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+            islands: Vec::new(),
+            history: Vec::new(),
+        };
+        let stop = ChainStop::new(PipelineError::SealedRun {
+            model,
+            source: plinth_support::SupportRunError::CoverageClosure(Box::new(refusal)),
+        });
+        assert!(stop.is_coverage_closure_refusal());
+        assert!(
+            !stop.is_support_refusal(),
+            "a coverage-closure refusal must not be answered with a substitute geometry"
+        );
     }
 
     /// The target is cleared idempotently, and a target that cannot be cleared

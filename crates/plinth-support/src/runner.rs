@@ -95,8 +95,8 @@ use crate::{
     select_contacts_baseline,
     specialized::{
         fill_route_points_nearest, plan_route_points_nearest, prepare_specialized_contacts,
-        CoverageRoutePoint, NearestWitnessRetention, SpecializedBatchWork, SpecializedContactPlan,
-        SpecializedError, SpecializedLimits,
+        CoverageRoutePoint, NearestWitnessRetention, RepairRowId, SpecializedBatchWork,
+        SpecializedContactPlan, SpecializedError, SpecializedLimits,
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
@@ -444,9 +444,24 @@ pub enum SupportRunError {
     InvalidResourceCaps,
     #[error("sealed support run failed during {0:?}")]
     Failed(SupportRunPhase),
+    /// FU-56: the coverage-closure controller could not admit every measured
+    /// island within the registered attempt bound. Boxed because
+    /// [`crate::coverage_closure::CoverageClosureRefusal`] carries the whole
+    /// per-attempt history and every still-uncovered island's evidence, and
+    /// an unboxed variant would put that weight on every `Result` in this
+    /// crate's error path. Distinct from [`Self::Failed`]: a `Failed` phase
+    /// means the sealed run itself could not be built at all, where this
+    /// means the run built and routed fine but the planner's own coverage
+    /// promise was not kept and could not be repaired from the immutable
+    /// repair pool within the bound.
+    #[error("coverage closure refused: {0:?}")]
+    CoverageClosure(Box<crate::coverage_closure::CoverageClosureRefusal>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// `Serialize`/`Deserialize` because FU-57 persists
+// `CoverageClosureReason::RepairPlanRefused`, which names the stage that
+// refused a repair-extended plan, into the coverage sidecar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SupportRunPhase {
     Preparation,
     Routing,
@@ -454,23 +469,54 @@ pub enum SupportRunPhase {
     Brace,
     Structure,
     Lowering,
+    /// FU-56: the routed-contact coverage re-measurement the closure
+    /// controller runs after `Lowering` succeeds. Distinct from `Lowering`
+    /// itself so a measurement failure is never misreported as a lowering
+    /// failure.
+    CoverageMeasurement,
 }
 
 /// Opaque, move-only final support authority. It admits only borrowed
 /// verification evidence or final consuming scene conversion.
-pub struct FinalSupportAuthority<'a>(LoweredSupportRun<'a>);
+pub struct FinalSupportAuthority<'a> {
+    lowered: LoweredSupportRun<'a>,
+    closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+}
 
 impl FinalSupportAuthority<'_> {
     pub fn verification_snapshot(
         &self,
     ) -> Result<SupportVerificationSnapshot<'_>, SupportVerificationError> {
-        self.0
+        self.lowered
             .verification_snapshot()
             .map_err(|_| SupportVerificationError::AuthorityMismatch)
     }
 
+    /// Every coverage-closure attempt this run measured, in order, ending
+    /// with the attempt that measured clean.
+    ///
+    /// **This is what makes closure-after-repair observable.** A run that
+    /// covered on its baseline layout has exactly one entry with
+    /// `nominated_rows == 0`; a run that closed only after the controller
+    /// appended repair-pool contacts has more, and the earlier entries say
+    /// how many rows each round added and how the blocking patch count fell.
+    /// Without it a successful run cannot be told apart from a run in which
+    /// the controller did nothing, which is precisely the question FU-56's
+    /// outcome claim turns on.
+    #[must_use]
+    pub fn coverage_closure_history(&self) -> &[crate::coverage_closure::CoverageClosureAttempt] {
+        &self.closure_history
+    }
+
+    /// How many repair rounds this run needed: zero when the baseline layout
+    /// already covered every island.
+    #[must_use]
+    pub fn coverage_repair_rounds(&self) -> usize {
+        self.closure_history.len().saturating_sub(1)
+    }
+
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
-        self.0
+        self.lowered
             .into_supported_model()
             .map_err(|_| SupportRunError::Failed(SupportRunPhase::Lowering))
     }
@@ -487,7 +533,25 @@ fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
     let _ = (stage, error);
 }
 
-/// Run the existing sealed preparation pipeline once and return only its final authority.
+/// Run the sealed preparation pipeline through the coverage-closure
+/// controller (FU-56) and return only its final authority.
+///
+/// **The controller.** `prepare_support_context` builds the mesh/topology/
+/// `NativeSurface`/generic/baseline-regular authority ONCE. Each attempt then
+/// binds the current specialized plan (`prepared_run_for_plan`), routes,
+/// rewires, braces, structures and lowers it, and re-measures ROUTED coverage
+/// under [`crate::coverage_closure::registered_coverage_request`] — the SAME
+/// request the pre-write gate will use, so closing here means the gate will
+/// agree. A model whose baseline layout already covers costs exactly one
+/// pass through this loop, identically to the pre-FU-56 single-shot runner.
+/// A model that does not close within the registered
+/// `coverage_repair_max_attempts` bound (registered value 8) refuses with
+/// [`SupportRunError::CoverageClosure`] rather than silently emitting an
+/// under-covered plan — closure is achieved ONLY by appending immutable
+/// repair-pool contacts ([`crate::specialized::SpecializedContactPlanEdit::append_regular_repair_rows`]),
+/// never by relaxing the radius, the floor, or the tolerance, all three of
+/// which this function reads from the same registry the gate reads and never
+/// restates.
 pub fn run_support<'a>(
     hollowed: HollowedModel,
     request: SupportRequest,
@@ -520,6 +584,8 @@ pub fn run_support<'a>(
         input.max_grid_bytes,
     )
     .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let max_attempts = selection_config.coverage_repair_max_attempts();
+    let matrix_budget = selection_config.coverage_score_matrix_max_entries;
     let authority = SupportPreparationAuthority::new(
         input.layers,
         perception_config,
@@ -534,32 +600,259 @@ pub fn run_support<'a>(
         input.max_primitives,
         input.max_primitive_bytes,
     );
-    let prepared = prepare_support_run(hollowed, request, authority).map_err(|error| {
-        note_stage_failure("Preparation", &error);
-        SupportRunError::Failed(SupportRunPhase::Preparation)
-    })?;
-    let routed = prepared.route_initial_cco().map_err(|error| {
-        note_stage_failure("Routing", &error);
-        SupportRunError::Failed(SupportRunPhase::Routing)
-    })?;
-    let rewired = routed.rewire().map_err(|error| {
-        note_stage_failure("Rewire", &error);
-        SupportRunError::Failed(SupportRunPhase::Rewire)
-    })?;
-    let braced = rewired.brace().map_err(|error| {
-        note_stage_failure("Brace", &error);
-        SupportRunError::Failed(SupportRunPhase::Brace)
-    })?;
-    let structured = braced.structure().map_err(|error| {
-        note_stage_failure("Structure", &error);
-        SupportRunError::Failed(SupportRunPhase::Structure)
-    })?;
-    Ok(FinalSupportAuthority(structured.lower().map_err(
-        |error| {
-            note_stage_failure("Lowering", &error);
-            SupportRunError::Failed(SupportRunPhase::Lowering)
+
+    let coverage_request = crate::coverage_closure::registered_coverage_request()
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let radius_mm = coverage_request.radius_mm().get();
+
+    let (mut context, mut plan) =
+        prepare_support_context(hollowed, request, authority).map_err(|error| {
+            note_stage_failure("Preparation", &error);
+            SupportRunError::Failed(SupportRunPhase::Preparation)
+        })?;
+
+    let mut failed: BTreeSet<RepairRowId> = BTreeSet::new();
+    let mut history: Vec<crate::coverage_closure::CoverageClosureAttempt> = Vec::new();
+    // Per-`(island_id, component_id)` nomination accounting, accumulated
+    // across attempts so a refusal can say, per island, whether it was ever
+    // attempted at all — see `CoverageClosureIsland::nominated_repair_rows`.
+    let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
+    // The last attempt's blocking set, kept so a refusal raised by a stage
+    // that runs BEFORE the next measurement (the repair-extended plan failing
+    // to route, rewire, brace, structure or lower) still names the islands
+    // the controller was trying to close.
+    let mut last_blocking: Vec<crate::coverage_closure::BlockingPatchKey> = Vec::new();
+
+    for attempt in 0..=max_attempts {
+        // Every stage below is fallible, and what a failure MEANS depends on
+        // whether this controller had already extended the plan. On attempt 0
+        // the plan is the model's own and a stage failure is exactly the
+        // pre-FU-56 `Failed(phase)`. On attempt > 0 the plan carries contacts
+        // this controller appended, so the failure is the controller's own
+        // and is a coverage refusal — with the evidence FU-57 requires, and
+        // ineligible for the oriented-solid reserve, because attempt 0 proved
+        // this geometry seals.
+        macro_rules! stage {
+            ($expr:expr, $stage:literal, $phase:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => {
+                        note_stage_failure($stage, &error);
+                        return Err(repair_plan_or_stage_failure(
+                            attempt,
+                            $phase,
+                            &error,
+                            &last_blocking,
+                            &tally,
+                            history,
+                        ));
+                    }
+                }
+            };
+        }
+
+        let prepared = stage!(
+            prepared_run_for_plan(context, plan.clone()),
+            "Preparation",
+            SupportRunPhase::Preparation
+        );
+        let routed = stage!(
+            prepared.route_initial_cco(),
+            "Routing",
+            SupportRunPhase::Routing
+        );
+        let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
+        let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
+        let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
+        let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
+
+        let (blocking, uncovered_samples) = {
+            let snapshot = stage!(
+                lowered.verification_snapshot(),
+                "CoverageMeasurement",
+                SupportRunPhase::CoverageMeasurement
+            );
+            match snapshot.measure_coverage(coverage_request) {
+                Ok(measurement) => {
+                    let blocking = measurement
+                        .evidence()
+                        .patches()
+                        .iter()
+                        .filter(|patch| {
+                            crate::coverage_closure::coverage_patch_is_blocking(
+                                patch.uncovered_area_mm2().get(),
+                                patch.cut_ambiguous(),
+                                patch.assessment_failed(),
+                            )
+                        })
+                        .map(|patch| crate::coverage_closure::BlockingPatchKey {
+                            island_id: patch.island_id(),
+                            component_id: patch.component_id(),
+                            representative_face_id: patch.representative_face_id(),
+                            sorted_face_ids: patch.sorted_face_ids().to_vec(),
+                            uncovered_area_mm2_bits: patch.uncovered_area_mm2().get().to_bits(),
+                            worst_gap: patch.worst_gap().into(),
+                        })
+                        .collect::<Vec<_>>();
+                    // The measurement's own uncovered rows, indexed into the
+                    // same `coverage_samples()` slice this plan owns. Moved
+                    // out here so nomination can score against what still
+                    // needs covering rather than re-deriving coverage beside
+                    // the one measurement.
+                    let uncovered = measurement.uncovered_sample_indices().to_vec();
+                    (blocking, uncovered)
+                }
+                Err(error) => {
+                    note_stage_failure("CoverageMeasurement", &error);
+                    return Err(SupportRunError::CoverageClosure(Box::new(
+                        crate::coverage_closure::CoverageClosureRefusal {
+                            attempts: attempt,
+                            reason: crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
+                                error.to_string(),
+                            ),
+                            islands: crate::coverage_closure::islands_from_blocking(
+                                &last_blocking,
+                                &tally,
+                            ),
+                            history,
+                        },
+                    )));
+                }
+            }
+        };
+
+        history.push(crate::coverage_closure::CoverageClosureAttempt {
+            attempt,
+            blocking_patch_count: blocking.len(),
+            nominated_rows: 0,
+        });
+
+        if blocking.is_empty() {
+            return Ok(FinalSupportAuthority {
+                lowered,
+                closure_history: history,
+            });
+        }
+        last_blocking = blocking;
+
+        if attempt == max_attempts {
+            let islands =
+                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
+            return Err(SupportRunError::CoverageClosure(Box::new(
+                crate::coverage_closure::CoverageClosureRefusal {
+                    attempts: attempt,
+                    reason: crate::coverage_closure::CoverageClosureReason::AttemptsExhausted,
+                    islands,
+                    history,
+                },
+            )));
+        }
+
+        let nominations = match crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &last_blocking,
+            &uncovered_samples,
+            radius_mm,
+            matrix_budget,
+            &failed,
+        ) {
+            Ok(nominations) => nominations,
+            Err(error) => {
+                note_stage_failure("Preparation", &error);
+                return Err(repair_plan_or_stage_failure(
+                    attempt,
+                    SupportRunPhase::Preparation,
+                    &error,
+                    &last_blocking,
+                    &tally,
+                    history,
+                ));
+            }
+        };
+        for (key, counts) in &nominations.per_key {
+            let entry = tally.entry(*key).or_default();
+            entry.nominated_rows += counts.nominated_rows;
+            entry.eligible_rows = counts.eligible_rows;
+        }
+
+        if nominations.rows.is_empty() {
+            let islands =
+                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
+            return Err(SupportRunError::CoverageClosure(Box::new(
+                crate::coverage_closure::CoverageClosureRefusal {
+                    attempts: attempt,
+                    reason: crate::coverage_closure::CoverageClosureReason::NoEligibleRepairRows,
+                    islands,
+                    history,
+                },
+            )));
+        }
+        if let Some(last) = history.last_mut() {
+            last.nominated_rows = nominations.rows.len();
+        }
+
+        // A row this attempt appended is `occupied` in the next plan
+        // regardless of whether the CCO transcript ends up admitting it
+        // (`occupied_repair_rows` reads the plan's own contact list, not the
+        // transcript), so it can never be re-nominated; `failed` is retained
+        // for a future controller that can also retract an unproductive
+        // addition, which this one does not yet do.
+        failed.extend(nominations.rows.iter().copied());
+
+        plan = match plan
+            .begin_regular_edit()
+            .and_then(|edit| edit.append_regular_repair_rows(&nominations.rows))
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                note_stage_failure("Preparation", &error);
+                return Err(repair_plan_or_stage_failure(
+                    attempt,
+                    SupportRunPhase::Preparation,
+                    &error,
+                    &last_blocking,
+                    &tally,
+                    history,
+                ));
+            }
+        };
+        context = lowered.into_context();
+    }
+    unreachable!("bounded coverage-closure loop returns before exhausting its own bound check")
+}
+
+/// Classify one closure-loop stage failure.
+///
+/// Attempt 0 runs the model's own plan and its failures are the pre-FU-56
+/// `Failed(phase)` verdicts, unchanged. From attempt 1 the plan carries
+/// contacts THIS controller appended, so a stage refusal is the controller's
+/// own doing: it becomes a
+/// [`crate::coverage_closure::CoverageClosureReason::RepairPlanRefused`]
+/// coverage refusal, which keeps the coverage evidence FU-57 requires and
+/// keeps the oriented-solid reserve out of a path where the geometry already
+/// proved it seals.
+fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
+    attempt: usize,
+    phase: SupportRunPhase,
+    error: &E,
+    last_blocking: &[crate::coverage_closure::BlockingPatchKey],
+    tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
+    history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+) -> SupportRunError {
+    if attempt == 0 {
+        return SupportRunError::Failed(phase);
+    }
+    SupportRunError::CoverageClosure(Box::new(
+        crate::coverage_closure::CoverageClosureRefusal {
+            attempts: attempt,
+            reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
+                phase,
+                detail: format!("{error:?}"),
+            },
+            islands: crate::coverage_closure::islands_from_blocking(last_blocking, tally),
+            history,
         },
-    )?))
+    ))
 }
 
 /// One physical contact admitted by the finalized CCO transcript for future
@@ -1162,7 +1455,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             })?;
         #[cfg(test)]
         record_measurement_call(|counts| counts.coverage_assessment_traversals += 1);
-        let assessment = assess_coverage_with_mode(
+        let mut assessment = assess_coverage_with_mode(
             self.coverage_samples,
             self.topology,
             &nearest,
@@ -1217,6 +1510,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 island.representative_face_id(),
             )
         });
+        let uncovered_sample_indices = std::mem::take(&mut assessment.uncovered_sample_indices);
         let mut patches = assessment
             .patches
             .into_iter()
@@ -1273,6 +1567,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 islands.into_boxed_slice(),
                 patches.into_boxed_slice(),
             ),
+            uncovered_sample_indices,
         ))
     }
     #[must_use]
@@ -1554,7 +1849,7 @@ impl PreparedSupportDigests {
 /// This intentionally owns the one retained mesh/topology/native-surface trio and all generic
 /// and regular planning authority.  Later route state borrows nothing from a replacement geometry
 /// or a rerun preparation pass.
-struct SupportRunContext<'a> {
+pub(crate) struct SupportRunContext<'a> {
     mesh: Mesh,
     hollow_history: HollowHistory,
     request: SupportRequest,
@@ -2527,7 +2822,22 @@ impl<'a> StructuredSupportRun<'a> {
     }
 }
 
-impl LoweredSupportRun<'_> {
+impl<'a> LoweredSupportRun<'a> {
+    /// Recycle the retained mesh/topology/`NativeSurface`/geometry context out
+    /// of a fully lowered (but coverage-blocked) run, for the coverage-closure
+    /// controller's next attempt.
+    ///
+    /// This is the memory-critical seam (FU-56): the controller re-runs
+    /// `prepared_run_for_plan` against a repair-extended plan up to
+    /// `COVERAGE_REPAIR_MAX_ATTEMPTS` times, and the context this returns is
+    /// MOVED, never cloned, between attempts — cloning it would put one
+    /// `NativeSurface` grid per attempt on the machine at once. It discards
+    /// the routed/rewired/braced/structured/lowered planning state, which the
+    /// next attempt rebuilds from the (now repair-extended) plan.
+    pub(crate) fn into_context(self) -> SupportRunContext<'a> {
+        self.structured.context
+    }
+
     #[must_use]
     pub(crate) const fn digest(&self) -> plinth_core::ContentDigest {
         self.lowered.digest()
@@ -3330,6 +3640,28 @@ pub(crate) fn prepare_support_run<'a>(
     request: SupportRequest,
     authority: SupportPreparationAuthority<'a>,
 ) -> Result<PreparedSupportRun<'a>, SupportPreparationError> {
+    let (context, plan) = prepare_support_context(hollowed, request, authority)?;
+    prepared_run_for_plan(context, plan)
+}
+
+/// Part (a) of the sealed-preparation split (FU-56): everything that does NOT
+/// change when the coverage-closure controller appends repair rows to the
+/// specialized plan. Validation, the generic/baseline-regular/specialized
+/// contact plan, and the retained mesh/topology/`NativeSurface`/geometry
+/// trio are all built exactly once per model, here — never once per closure
+/// attempt, which is the memory-critical property `into_context` (below)
+/// preserves: cloning this instead of recycling it would put one
+/// `NativeSurface` grid on the machine per attempt.
+///
+/// The returned plan is the FIRST specialized plan for this model, with no
+/// repair rows appended yet; [`prepared_run_for_plan`] is what turns a
+/// context and a (possibly repair-extended) plan into a runnable
+/// [`PreparedSupportRun`].
+pub(crate) fn prepare_support_context<'a>(
+    hollowed: HollowedModel,
+    request: SupportRequest,
+    authority: SupportPreparationAuthority<'a>,
+) -> Result<(SupportRunContext<'a>, SpecializedContactPlan), SupportPreparationError> {
     let (mesh, hollow_history) = hollowed.into_parts();
 
     // Validate every independently stale-able caller input before the first native query. The
@@ -3385,42 +3717,25 @@ pub(crate) fn prepare_support_run<'a>(
     )?;
     let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface)?;
     let geometry_digest = geometry.digest();
-    let initial = build_initial_contacts(
-        &plan,
-        plan.finalized_loads()?,
-        &mesh,
-        &authority.perception_config,
-        frame,
-        authority.layers,
-        &authority.candidate_config,
-        authority.reservations,
-        authority.perception_limits,
-        &generic,
-        &regular,
-        &authority.selection_config,
-        authority.specialized_limits,
-        &geometry,
-        authority.construction_limits,
-    )?;
-
     let mesh_digest = mesh_fingerprint(&mesh)
         .map_err(|error| SupportPreparationError::MeshFingerprint(error.to_string()))?;
-    let loads_digest = plan.finalized_loads()?.digest();
-    let mut digests = PreparedSupportDigests {
+
+    let digests = PreparedSupportDigests {
         mesh: mesh_digest,
         generic: generic.digest(),
         regular: regular.digest(),
-        plan: plan.digest(),
-        loads: loads_digest,
+        // Plan-dependent digests are not known until a plan is bound by
+        // `prepared_run_for_plan`; they are filled in there, every attempt.
+        plan: 0,
+        loads: 0,
         geometry: geometry_digest,
-        initial_forest: initial.post_quarantine_forest_digest(),
-        contact_attestation: initial.contact_attestation_digest(),
+        initial_forest: 0,
+        contact_attestation: 0,
         prepared: 0,
     };
-    digests.prepared = prepared_digest(&digests, frame, authority);
 
-    Ok(PreparedSupportRun {
-        context: SupportRunContext {
+    Ok((
+        SupportRunContext {
             mesh,
             hollow_history,
             request,
@@ -3434,6 +3749,48 @@ pub(crate) fn prepare_support_run<'a>(
             raft_limits: authority.raft_limits,
             digests,
         },
+        plan,
+    ))
+}
+
+/// Part (b) of the sealed-preparation split (FU-56): bind one specialized
+/// plan (the baseline, or a closure attempt's repair-extended child) to a
+/// retained context, building the initial-contact construction and every
+/// plan-dependent digest fresh. Every existing single-attempt caller is
+/// `prepare_support_context` then this, which is exactly what
+/// [`prepare_support_run`] does, so no first-attempt-closes digest moves.
+pub(crate) fn prepared_run_for_plan<'a>(
+    mut context: SupportRunContext<'a>,
+    plan: SpecializedContactPlan,
+) -> Result<PreparedSupportRun<'a>, SupportPreparationError> {
+    let geometry = context.geometry()?;
+    let initial = build_initial_contacts(
+        &plan,
+        plan.finalized_loads()?,
+        &context.mesh,
+        &context.authority.perception_config,
+        context.frame,
+        context.authority.layers,
+        &context.authority.candidate_config,
+        context.authority.reservations,
+        context.authority.perception_limits,
+        &context.generic,
+        &context.regular,
+        &context.authority.selection_config,
+        context.authority.specialized_limits,
+        &geometry,
+        context.authority.construction_limits,
+    )?;
+
+    let loads_digest = plan.finalized_loads()?.digest();
+    context.digests.plan = plan.digest();
+    context.digests.loads = loads_digest;
+    context.digests.initial_forest = initial.post_quarantine_forest_digest();
+    context.digests.contact_attestation = initial.contact_attestation_digest();
+    context.digests.prepared = prepared_digest(&context.digests, context.frame, context.authority);
+
+    Ok(PreparedSupportRun {
+        context,
         plan,
         initial,
     })

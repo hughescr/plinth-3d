@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Command};
 use plinth_core::{ArtifactId, LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::make_overhang_table;
+use plinth_mesh::make_toed_slab;
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
     run_support, CoverageMeasurementLimits, CoverageMeasurementRequest, SupportPreparationLimits,
@@ -60,10 +60,29 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // did not widen — only one input's value moved. See
 // `docs/engineering-journal/CURRENT-STATUS.md` sections `#fu32-j3-2026-08-09` and
 // `#fu32-j4-2026-08-09`.
-const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
+// **Re-pinned off `make_overhang_table` onto `make_toed_slab` (FU-56,
+// 2026-08-12).** `run_support` is now the coverage-closure controller: it
+// measures ROUTED coverage at the REGISTERED gate radius
+// (`COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm) and only returns a
+// sealed authority once every island closes or the registered 8-attempt bound
+// is exhausted. `make_overhang_table` has a genuinely unclosable island at
+// that radius (`plinth-support/tests/support_runner_integration.rs`,
+// `public_runner_refuses_overhang_table_with_a_genuinely_unclosable_island`),
+// so `run_support` on it now refuses before this file's OWN, independently
+// chosen small-radius probe (1.0 mm) could ever run — there is no sealed
+// authority left to hand `verify_coverage`. `make_toed_slab` closes at the
+// registered radius on its first attempt (zero repair rounds; its own
+// `run_support` digest is unchanged, 2_198_459_883_570_957_390) while STILL
+// carrying real blocking patches at this test's small radius (9 of 9 islands
+// have positive uncovered area there), so it is the fixture that can still
+// exercise this refused-report path. The golden below was regenerated through
+// THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm of
+// `public_coverage_report_is_frozen_without_evidence_loss`), never
+// hand-edited, exactly as every prior refresh recorded above was.
+const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
-    let mesh = make_overhang_table().expect("procedural overhang table");
+    let mesh = make_toed_slab().expect("procedural toed slab");
     let budget =
         DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
             .expect("ratified decimation budget");
@@ -76,7 +95,7 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
         &OrientRequest {
             pinned: PinnedBaseline {
                 pipeline_report: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../corpus/baseline/make_overhang_table.pipeline.json"),
+                    .join("../../corpus/baseline/make_toed_slab.pipeline.json"),
             },
         },
     )
@@ -99,7 +118,7 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
     .expect("explicit support run");
     let snapshot = authority.verification_snapshot().expect("sealed snapshot");
     let report = verify_coverage(
-        ArtifactId::from("coverage-gate-overhang-table"),
+        ArtifactId::from("coverage-gate-toed-slab"),
         &snapshot,
         request(max_distance_work),
     )?;
@@ -112,14 +131,14 @@ fn request(max_distance_work: usize) -> CoverageMeasurementRequest {
     CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(81, 77, 50_176, max_distance_work, 12_497_064, 5_820_416)
+        CoverageMeasurementLimits::new(71, 69, 50_688, max_distance_work, 12_624_152, 5_879_808)
             .expect("nonzero frozen limits"),
     )
     .expect("finite request")
 }
 
 fn report_json() -> String {
-    verify_json(1_574_912).expect("coverage report")
+    verify_json(1_033_728).expect("coverage report")
 }
 
 #[test]
@@ -141,11 +160,78 @@ fn public_coverage_report_is_frozen_without_evidence_loss() {
 #[test]
 fn cap_minus_one_returns_a_typed_error_without_a_report() {
     assert_eq!(
-        verify_json(1_574_911),
+        verify_json(1_033_727),
         Err(CoverageVerificationError::ResourceLimit {
             resource: "distance work".to_owned()
         })
     );
+}
+
+/// FU-56 guard (design test #12): the same predicate, on a real measurement.
+///
+/// **Scope, stated honestly (2026-08-12).** `defects_for_patches` now CALLS
+/// `plinth_support::coverage_patch_is_blocking` rather than restating it, so
+/// this is no longer the thing standing between the two definitions — the
+/// per-axis rule is pinned by `defects_for_patches`'s own unit test
+/// (`a_patch_blocks_on_each_axis_independently_and_only_blocking_area_is_summed`),
+/// which can set the three axes independently. This test's remaining, real
+/// value is that it walks a FROZEN REAL MEASUREMENT end to end through this
+/// crate's public `Serialize` output and shows the shared predicate names
+/// exactly the islands the report's own defects name.
+///
+/// It cannot do more than that, and the earlier version of this comment
+/// claimed it could: all 9 patches in the frozen fixture are blocking on
+/// positive area, and every one has `cut_ambiguous = false`, so a predicate
+/// that dropped either of the other two terms would still pass here.
+#[test]
+fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
+    let parsed: serde_json::Value =
+        serde_json::from_str(FROZEN_REPORT_JSON.trim_end()).expect("frozen report parses");
+    let patches = parsed["evidence"]["patches"]
+        .as_array()
+        .expect("frozen report has a patches array");
+    assert_eq!(patches.len(), 9, "frozen fixture has nine real patches");
+
+    let mut expected_islands: Vec<u32> = Vec::new();
+    let mut expected_measure = std::collections::BTreeMap::<u32, f64>::new();
+    for patch in patches {
+        let island_id = patch["island_id"].as_u64().unwrap() as u32;
+        let area = patch["uncovered_area_mm2"].as_f64().unwrap();
+        let cut_ambiguous = patch["cut_ambiguous"].as_bool().unwrap();
+        let assessment_failed = patch["assessment_failed"].as_bool().unwrap();
+        if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
+            expected_islands.push(island_id);
+        }
+        // `defects_for_patches` sums area over an island's BLOCKING patches
+        // only (a non-blocking patch contributes nothing), so the
+        // reconstruction mirrors that. On this fixture every patch is
+        // blocking, which is why the difference is invisible here and is
+        // pinned by the unit test named in this function's doc instead.
+        if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
+            *expected_measure.entry(island_id).or_insert(0.0) += area;
+        }
+    }
+    expected_islands.sort_unstable();
+    expected_islands.dedup();
+
+    let defects = parsed["defects"].as_array().expect("frozen report has defects");
+    let mut actual_islands: Vec<u32> = defects
+        .iter()
+        .map(|defect| defect["site"]["id"].as_u64().unwrap() as u32)
+        .collect();
+    actual_islands.sort_unstable();
+    assert_eq!(
+        actual_islands, expected_islands,
+        "the shared predicate must name exactly the islands the frozen report's own defects name"
+    );
+    for defect in defects {
+        let island_id = defect["site"]["id"].as_u64().unwrap() as u32;
+        let measure = defect["measure"].as_f64().unwrap();
+        assert_eq!(
+            measure, expected_measure[&island_id],
+            "island {island_id}'s defect measure must match the shared predicate's area sum"
+        );
+    }
 }
 
 #[test]

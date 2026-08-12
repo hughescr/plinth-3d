@@ -420,6 +420,7 @@ pub struct CoverageMeasurement {
     request: CoverageMeasurementRequest,
     resource_plan: CoverageMeasurementResourcePlan,
     evidence: CoverageMeasurementEvidence,
+    uncovered_sample_indices: Vec<usize>,
 }
 
 impl CoverageMeasurement {
@@ -440,18 +441,40 @@ impl CoverageMeasurement {
         &self.evidence
     }
 
+    /// Every coverage sample this measurement found uncovered — nearest
+    /// routed contact farther than the request radius — as ascending indices
+    /// into the measured snapshot's own `coverage_samples()` slice.
+    ///
+    /// This is the measurement's answer to "which samples still need
+    /// covering", and it is the ONLY admissible source for that question:
+    /// re-deriving it beside the measurement would be a second, independently
+    /// drifting definition of coverage. The coverage-closure controller
+    /// (FU-56) scores its repair-row candidates against exactly these rows,
+    /// never against every sample on a blocking patch's faces — a face can be
+    /// partially covered, and counting its covered area would rank a row
+    /// beside the covered region above the row that closes the residual gap.
+    ///
+    /// It costs no new allocation and no new charge: see
+    /// `CoverageAssessment::uncovered_sample_indices`.
+    #[must_use]
+    pub fn uncovered_sample_indices(&self) -> &[usize] {
+        &self.uncovered_sample_indices
+    }
+
     #[allow(dead_code, reason = "reserved for the future verifier implementation")]
     pub(crate) const fn new(
         snapshot_digest: u64,
         request: CoverageMeasurementRequest,
         resource_plan: CoverageMeasurementResourcePlan,
         evidence: CoverageMeasurementEvidence,
+        uncovered_sample_indices: Vec<usize>,
     ) -> Self {
         Self {
             snapshot_digest,
             request,
             resource_plan,
             evidence,
+            uncovered_sample_indices,
         }
     }
 }

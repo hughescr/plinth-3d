@@ -5,42 +5,43 @@
 //! `.chitubox` per model that passes the pre-write gates out, and one typed
 //! disposition per model either way.
 //!
-//! Every fixture here is either a **committed** file under `corpus/baseline/`
-//! or an in-repo procedural mesh written out as a binary STL, never a
-//! provisioned corpus model — so this test runs in a fresh clone with nothing
-//! symlinked. `corpus/baseline/*.prepped.stl` are checked in; `corpus/models/`
-//! is not.
+//! Every fixture here is a **committed** file under `corpus/baseline/`, never
+//! a provisioned corpus model — so this test runs in a fresh clone with
+//! nothing symlinked. `corpus/baseline/*.prepped.stl` are checked in;
+//! `corpus/models/` is not.
 //!
 //! **A finding this test surfaced, recorded rather than papered over — and
-//! half of it expired on 2026-08-10.** It used to read: no checked-in
-//! `.prepped.stl` is refused by the pre-write gates, because both
+//! rewritten twice since.** It used to read: no checked-in `.prepped.stl` is
+//! refused by the pre-write gates, because both
 //! `make_overhang_table.prepped.stl` and `Sphere.prepped.stl` seal and emit
 //! when run through the whole chain, while the *procedural*
 //! `make_overhang_table()` and the provisioned `corpus/models/Sphere.stl` are
-//! refused for uncovered islands (`tests/first_artifact.rs`). That is still
-//! true of `make_overhang_table.prepped.stl`, and the reasoning still holds —
-//! a `.prepped.stl` is the legacy prep's *output*, already oriented and
-//! cleaned, so it seals well when run again. It is **no longer true of
-//! `Sphere.prepped.stl`**: the cavity-field exterior fix stopped its hollow
-//! cavity from breaching the wall at its poles, so its drilled shell sealed
-//! instead of being refused by the support run, reached the gate on its own
-//! merits, and was refused there for uncovered islands like every other
-//! `Sphere`. The refusal case here was therefore driven by the procedural mesh
-//! *and* by that one committed fixture, from 2026-08-10 to 2026-08-12.
-//!
-//! **2026-08-12, FU-53 landed, and `Sphere.prepped.stl`'s route moved a
-//! second time — but not back to the pre-2026-08-10 shape.** The exact
-//! nearest-surface cavity selection plus `HOLLOW_CAVITY_MARCH_MARGIN_MM`
-//! shrinks the sphere's cavity honestly, and on this doubly-decimated,
-//! doubly-oriented fixture (unlike the raw `corpus/models/Sphere.stl`
-//! `tests/first_artifact.rs` still runs fresh) the resulting support demand
-//! now exceeds the sealed run's registered routing capacity before the gate
-//! is ever reached. `DrilledShellRefusedBySupport` fires again — the same
-//! *named* pre-2026-08-10 outcome, on a different underlying cause — and the
-//! existing OQ-1/FU-34 reserve substitution converts it to an emitted solid
-//! artifact rather than a terminal gate refusal. See
+//! refused for uncovered islands (`tests/first_artifact.rs`). That stopped
+//! being true of `Sphere.prepped.stl` on 2026-08-10 (the cavity-field
+//! exterior fix stopped its cavity breaching the wall at its poles, so its
+//! drilled shell seals and then fails coverage on its own merits), and moved
+//! a second time on 2026-08-12 when FU-53 landed (the exact nearest-surface
+//! cavity selection plus `HOLLOW_CAVITY_MARCH_MARGIN_MM` shrinks the cavity
+//! honestly, and on this doubly-decimated, doubly-oriented fixture the
+//! resulting support demand exceeds the sealed run's registered routing
+//! capacity before the gate is ever reached — `DrilledShellRefusedBySupport`
+//! fires and the existing OQ-1/FU-34 reserve substitution converts it to an
+//! emitted solid). **`feature/coverage-closure` (FU-56/FU-57) landed the same
+//! day and does not move this fixture a third time:** measured directly
+//! against the merged tree, `Sphere.prepped.stl`'s attempt 0 still fails
+//! during `Routing`, which precedes `CoverageMeasurement` in the stage order
+//! and keeps the pre-FU-56 `Failed(phase)` semantics by the controller's own
+//! design (attempt 0's plan is the model's own, not the controller's
+//! extension of it) — so the coverage-closure controller never gets a look
+//! at this fixture and the FU-53-only route stands. `make_raking_blade.prepped.stl`
+//! DID move on 2026-08-12 (FU-56 measures routed coverage inside
+//! `run_support`, and that fixture's two residual islands have no
+//! repair-pool candidate the CCO transcript ever admits, so it is now a
+//! genuine coverage-closure refusal). See
 //! `a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours`
-//! for the full attribution. No cap, gate or bound moved to produce this.
+//! for the full attribution. No cap, gate or bound moved to produce any of
+//! this — each move is the geometry, or the measurement, changing under an
+//! unmoved rule.
 //!
 //! Deliberately absent: any new frozen digest (design record OQ-3). Everything
 //! asserted is a completion, disposition or path property that a changed
@@ -50,8 +51,8 @@ use std::path::{Path, PathBuf};
 
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    OrientationPolicy, OutputProfile, PipelineExitCode, PreWriteGate, PrepareReport,
-    PrepareRequest, StageStop, SupportedGeometry,
+    OrientationPolicy, OutputProfile, PipelineExitCode, PrepareReport, PrepareRequest, StageStop,
+    SupportedGeometry,
 };
 
 #[path = "../examples/shared/first_artifact_chain.rs"]
@@ -110,18 +111,6 @@ impl Scratch {
         std::fs::write(self.input().join(name), bytes).expect("write scratch input");
     }
 
-    /// Put an in-repo procedural mesh into the input folder as a real binary
-    /// STL, because `prepare` takes a folder of files, not meshes.
-    ///
-    /// Needed because no checked-in `corpus/baseline/*.prepped.stl` is refused
-    /// by the pre-write gates — and that is not an accident. A `.prepped.stl`
-    /// is the *output* of the legacy prep, already oriented and cleaned, so it
-    /// seals well when run through the chain again. The procedural fixtures
-    /// are the raw geometry the gates were characterised on.
-    fn write_mesh(&self, stem: &str, mesh: &plinth_mesh::Mesh) {
-        plinth_mesh::write_binary_stl(self.input().join(format!("{stem}.stl")), mesh)
-            .expect("write procedural fixture as binary STL");
-    }
 }
 
 impl Drop for Scratch {
@@ -309,7 +298,10 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // Both bad models failed individually, named, with no artifact and no
     // assumed size, because neither was ever measured.
     for bad in ["aa-not-a-model", "zz-not-a-model"] {
-        let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, bad) else {
+        let ModelPreparationOutcome::Failed {
+            exit_code, detail, ..
+        } = outcome(&report, bad)
+        else {
             panic!("{bad} must fail, not emit");
         };
         assert_eq!(*exit_code, PipelineExitCode::Input);
@@ -361,62 +353,167 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     assert_eq!(report.exit_code(), PipelineExitCode::Input);
 }
 
-/// A gate-refused model writes nothing and projects to exit code 3.
+/// A coverage-refused model writes nothing, keeps its evidence, and projects
+/// to exit code 5.
 ///
-/// `make_overhang_table` is the model `plinth-verify`'s own frozen coverage
-/// golden is built from: its sealed plan leaves uncovered islands. That is a
-/// support-planning finding, not this executor's to fix. What this executor
-/// owes is that the refusal stops the file.
+/// **Re-pinned onto `make_raking_blade` (2026-08-12).** This test used to run
+/// `make_overhang_table`, which was the coverage-refusing fixture; with
+/// nomination scored against the measurement's uncovered samples that model
+/// now CLOSES and emits
+/// (`plinth-support/tests/support_runner_integration.rs`,
+/// `public_runner_closes_overhang_table_only_after_appending_repair_contacts`),
+/// so it can no longer stand for a refusal. `make_raking_blade` can: two of
+/// its islands have `NoRoutedContact` on every one of the 8 attempts — the
+/// CCO transcript never admits any repair-pool candidate for either of them —
+/// so it exhausts the registered bound and refuses. That refusal is measured,
+/// not forced: nothing here touches the radius, the floor or the tolerance.
+///
+/// `run_support` is the coverage-closure controller: it measures ROUTED
+/// coverage under the SAME registered radius the pre-write gate measures, so
+/// a model that cannot close is refused by [`PipelineError::SealedRun`] —
+/// `PipelineExitCode::Supports` (5) — before the pre-write gate is ever
+/// reached. It reports through [`ModelPreparationOutcome::Failed`] rather
+/// than [`ModelPreparationOutcome::Refused`] because `Refused` is reserved
+/// for a verdict the gate itself spoke.
 #[test]
-fn a_gate_refused_model_writes_no_artifact_and_exits_three() {
+fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     let scratch = Scratch::new("refusal");
-    scratch.write_mesh(
-        "overhang",
-        &plinth_mesh::make_overhang_table().expect("procedural overhang table"),
-    );
+    scratch.place("make_raking_blade.prepped.stl", "blade");
 
     let report = prepare(pinned(
         &scratch,
-        "overhang",
-        "make_overhang_table.pipeline.json",
+        "blade",
+        "make_raking_blade.pipeline.json",
     ))
     .expect("a refused model is a disposition, not a run failure");
 
-    let ModelPreparationOutcome::Refused {
-        gate,
-        geometry,
-        violation,
-    } = outcome(&report, "overhang")
+    let ModelPreparationOutcome::Failed {
+        exit_code,
+        detail,
+        evidence,
+    } = outcome(&report, "blade")
     else {
         panic!(
-            "the overhang table's plan must be refused; it reported {:?}",
-            outcome(&report, "overhang")
+            "the raking blade plan must be refused; it reported {:?}",
+            outcome(&report, "blade")
         );
     };
-    // The gate as a value, so a renamed variant is a compile error rather than
-    // an assertion that silently becomes permanently false.
-    assert_eq!(*gate, Some(PreWriteGate::UncoveredIslands));
-    // *What* was refused. Without this the same assertions pass just as
-    // happily on "support refused the shell, the chain fell back to the
-    // oriented solid, and the gate refused that instead" -- the exact
-    // substitution the terminal-refusal design exists to prevent.
-    assert_eq!(
-        geometry.as_ref(),
-        Some(&SupportedGeometry::HollowStageDecidedSolid),
-        "the overhang table reached the gate on a different geometry"
-    );
+    assert_eq!(*exit_code, PipelineExitCode::Supports);
     assert!(
-        violation.contains("pre-write physics gates"),
-        "the violation must name the refusal: {violation}"
+        detail.contains("coverage closure refused"),
+        "the detail must name the refusal: {detail}"
     );
 
     assert!(
-        !scratch.output().join("overhang.chitubox").exists(),
-        "a gate-refused model wrote an artifact"
+        !scratch.output().join("blade.chitubox").exists(),
+        "a coverage-closure-refused model wrote an artifact"
     );
     assert_eq!(report.artifacts().count(), 0);
-    assert_eq!(report.exit_code(), PipelineExitCode::Gates);
-    assert_eq!(PipelineExitCode::Gates as i32, 3);
+    assert_eq!(report.exit_code(), PipelineExitCode::Supports);
+    assert_eq!(PipelineExitCode::Supports as i32, 5);
+    assert!(!report.has_gate_refusal());
+
+    // **FU-57, real fixture.** The coverage-closure controller's refusal on
+    // this exact geometry carries its own island evidence -- this proves the
+    // sidecar/render writer against a genuinely unclosable island, not only
+    // against a hand-built fixture.
+    let evidence = evidence
+        .as_ref()
+        .expect("a coverage-closure refusal must carry FU-57 evidence");
+    assert_eq!(
+        evidence.source,
+        plinth_pipeline::EvidenceSource::CoverageClosureController
+    );
+    assert_eq!(evidence.attempts, Some(5));
+    assert!(!evidence.islands.is_empty(), "the unclosable island must be named");
+    // FU-56 (2026-08-12 fix): per-island nomination accounting, so the card
+    // says whether an island was ever attempted at all.
+    assert!(
+        evidence.islands.iter().any(|island| island.face_count() > 0),
+        "the refused islands must name their faces"
+    );
+    assert!(
+        evidence.write_error.is_none(),
+        "the sidecar must write cleanly: {:?}",
+        evidence.write_error
+    );
+    let sidecar_path = scratch.output().join("blade.coverage.json");
+    assert_eq!(evidence.sidecar_path, sidecar_path);
+    assert!(sidecar_path.exists(), "the sidecar must actually be on disk");
+    let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
+    let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
+    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v1");
+    assert_eq!(sidecar["source"], "coverage_closure_controller");
+    assert_eq!(sidecar["attempts"], 5);
+    assert!(
+        sidecar["closure"].is_object(),
+        "the sidecar must embed the typed closure refusal verbatim"
+    );
+    assert!(
+        sidecar["report"].is_null(),
+        "a controller refusal must not carry a gate report"
+    );
+
+    assert!(
+        !evidence.render_paths.is_empty(),
+        "the worst island(s) must be rendered"
+    );
+    for render_path in &evidence.render_paths {
+        assert!(render_path.exists(), "{} must exist", render_path.display());
+        let bytes = std::fs::read(render_path).expect("read render");
+        let svg = String::from_utf8(bytes).expect("utf8 svg");
+        assert!(svg.starts_with("<svg"), "must be a well-formed svg: {svg}");
+    }
+
+    // No file was ever written at the `.chitubox` target -- evidence is a
+    // different file class beside it, never at it.
+    assert!(!scratch.output().join("blade.chitubox").exists());
+}
+
+/// FU-57: a model that starts passing does not leave yesterday's
+/// coverage-refusal evidence sitting beside today's fresh artifact.
+///
+/// A `.coverage.json` (or a stray render) from an earlier refused run, left
+/// beside a model that now emits cleanly, is read by the next thing down the
+/// line as *this* run's answer -- the exact misleading hand-off
+/// `clear_stale_artifact` already guards the `.chitubox` target against. The
+/// extension in `prepare_one` owes the same guarantee to the evidence class.
+#[test]
+fn a_model_that_starts_passing_clears_its_own_stale_coverage_evidence() {
+    let scratch = Scratch::new("stale-coverage-evidence");
+    scratch.place("make_toed_slab.prepped.stl", "mini");
+
+    std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
+    let stale_sidecar = scratch.output().join("mini.coverage.json");
+    std::fs::write(&stale_sidecar, b"{\"schema\":\"stale\"}").expect("plant a stale sidecar");
+    let stale_render = scratch.output().join("mini.coverage.island-3.svg");
+    std::fs::write(&stale_render, b"<svg></svg>").expect("plant a stale render");
+    // A render for a DIFFERENT model must never be touched by mini's own
+    // clearing pass -- proves the match is by this model's own prefix, not by
+    // extension alone.
+    let unrelated_render = scratch.output().join("other.coverage.island-1.svg");
+    std::fs::write(&unrelated_render, b"<svg></svg>").expect("plant an unrelated render");
+
+    let report = prepare(pinned(&scratch, "mini", "make_toed_slab.pipeline.json"))
+        .expect("a model that now passes is a disposition, not a run failure");
+
+    assert!(
+        matches!(outcome(&report, "mini"), ModelPreparationOutcome::Artifact { .. }),
+        "mini must still emit; it reported {:?}",
+        outcome(&report, "mini")
+    );
+    assert!(
+        !stale_sidecar.exists(),
+        "a stale coverage sidecar survived a model that now emits cleanly"
+    );
+    assert!(
+        !stale_render.exists(),
+        "a stale coverage render survived a model that now emits cleanly"
+    );
+    assert!(
+        unrelated_render.exists(),
+        "clearing mini's stale evidence must not touch another model's render"
+    );
 }
 
 /// A refusal removes a *stale* artifact at the target too.
@@ -428,27 +525,33 @@ fn a_gate_refused_model_writes_no_artifact_and_exits_three() {
 #[test]
 fn a_refusal_removes_an_earlier_runs_artifact_at_the_same_target() {
     let scratch = Scratch::new("stale");
-    scratch.write_mesh(
-        "overhang",
-        &plinth_mesh::make_overhang_table().expect("procedural overhang table"),
-    );
+    scratch.place("make_raking_blade.prepped.stl", "blade");
     std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
-    let target = scratch.output().join("overhang.chitubox");
+    let target = scratch.output().join("blade.chitubox");
     std::fs::write(&target, b"an artifact from an earlier run").expect("plant a stale artifact");
 
     let report = prepare(pinned(
         &scratch,
-        "overhang",
-        "make_overhang_table.pipeline.json",
+        "blade",
+        "make_raking_blade.pipeline.json",
     ))
     .expect("run");
+    // FU-56, 2026-08-12: `overhang` now refuses at the sealed run (coverage
+    // closure), not at the gate — see
+    // `a_sealed_run_refused_model_writes_no_artifact_and_exits_five` for the
+    // full attribution. The claim under test here — a stale artifact does not
+    // survive ANY refusal at this target — is unaffected by which stage spoke
+    // it.
     assert!(matches!(
-        outcome(&report, "overhang"),
-        ModelPreparationOutcome::Refused { .. }
+        outcome(&report, "blade"),
+        ModelPreparationOutcome::Failed {
+            exit_code: PipelineExitCode::Supports,
+            ..
+        }
     ));
     assert!(
         !target.exists(),
-        "a gate refusal left the previous run's artifact at {}",
+        "a refusal left the previous run's artifact at {}",
         target.display()
     );
 }
@@ -584,25 +687,22 @@ fn every_failure_disposition_clears_an_earlier_runs_artifact_at_its_target() {
     let scratch = Scratch::new("stale-pre-gate");
     scratch.place("make_toed_slab.prepped.stl", "unpinned");
     scratch.write("broken.stl", b"not an STL at all");
-    scratch.write_mesh(
-        "overhang",
-        &plinth_mesh::make_overhang_table().expect("procedural overhang table"),
-    );
+    scratch.place("make_raking_blade.prepped.stl", "blade");
 
     std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
-    let planted = ["broken", "overhang", "unpinned"].map(|stem| {
+    let planted = ["blade", "broken", "unpinned"].map(|stem| {
         let target = scratch.output().join(format!("{stem}.chitubox"));
         std::fs::write(&target, b"an artifact from an earlier, luckier run")
             .expect("plant a stale artifact");
         (stem, target)
     });
 
-    // Only `overhang` is pinned, so `unpinned` reaches the missing-baseline
+    // Only `blade` is pinned, so `unpinned` reaches the missing-baseline
     // refusal and `broken` never loads: three different pre-gate stops.
     let report = prepare(pinned(
         &scratch,
-        "overhang",
-        "make_overhang_table.pipeline.json",
+        "blade",
+        "make_raking_blade.pipeline.json",
     ))
     .expect("a folder of failures is still a successful run");
 
@@ -645,7 +745,10 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
         ModelPreparationOutcome::Artifact { .. }
     ));
     // The unnamed one did not, and said why.
-    let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, "sphere") else {
+    let ModelPreparationOutcome::Failed {
+        exit_code, detail, ..
+    } = outcome(&report, "sphere")
+    else {
         panic!("an unpinned model must be refused, not silently given mini's rotation");
     };
     assert_eq!(*exit_code, PipelineExitCode::Input);
@@ -698,6 +801,20 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     // existing OQ-1/FU-34 reserve substitution into an emitted solid artifact
     // rather than a terminal gate refusal. Both models now reach an artifact.
     //
+    // **The same day, `feature/coverage-closure` (FU-56/FU-57) landed on
+    // top and, on THIS fixture, changes nothing measured here.** `run_support`
+    // is now the coverage-closure controller, but the controller only gets a
+    // look at attempt 1 onward — attempt 0 keeps the pre-FU-56
+    // `Failed(phase)` semantics exactly, because attempt 0's plan is the
+    // model's own, not the controller's extension of it. The sphere's attempt
+    // 0 fails during `Routing`, before coverage is ever measured (Routing
+    // precedes `CoverageMeasurement` in the stage order), so this remains a
+    // plain support failure — `is_support_refusal` still claims it, and the
+    // OQ-1/FU-34 reserve still substitutes the oriented solid. Measured
+    // directly against this merged tree: `outcome(&report, "sphere")` is
+    // `Artifact { geometry: DrilledShellRefusedBySupport { .. }, .. }`,
+    // exit `Ok`, unchanged from the FU-53-only shape.
+    //
     // `first_artifact.rs`'s single-model run does NOT diverge the same way,
     // and it is not a folder-sharing effect (`PrepareResourcePolicy`'s own
     // doc: caps are absolute, fixed once from the largest model this
@@ -741,25 +858,31 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     );
 }
 
-/// **A gate refusal is not masked by an earlier unrelated failure.**
+/// **A coverage refusal is not masked by an earlier unrelated failure.**
 ///
-/// `aa-not-a-model.stl` sorts before `overhang.stl` and fails to load, exactly
+/// `aa-not-a-model.stl` sorts before `blade.stl` and fails to load, exactly
 /// as a macOS `._sidecar` would. First-in-order alone would report exit 1 for
 /// this folder — "one file was unreadable" — and the physics refusal, the one
 /// verdict a calling script acts on, would be invisible.
+///
+/// **2026-08-12: this is now a REGRESSION guard, not a parked finding.** FU-56
+/// gave the same safety verdict a second disposition — the closure controller
+/// refuses as `Failed`/`Supports`, not as `Refused`/`Gates` — and the sticky
+/// rule protecting the run-level signal only knew about `Gates`, so the
+/// refusal class FU-57 exists to make visible became maskable by an unrelated
+/// `Input` failure. `PrepareReport::exit_code` now makes a coverage refusal
+/// sticky at second priority, behind `Gates`: a bound ADDED, no threshold
+/// moved, and the remaining codes still first-in-order.
 #[test]
-fn a_gate_refusal_behind_an_earlier_load_failure_still_exits_three() {
+fn a_coverage_closure_refusal_is_not_masked_by_an_earlier_load_failure() {
     let scratch = Scratch::new("sticky-gates");
     scratch.write("aa-not-a-model.stl", b"a sidecar, or a truncated download");
-    scratch.write_mesh(
-        "overhang",
-        &plinth_mesh::make_overhang_table().expect("procedural overhang table"),
-    );
+    scratch.place("make_raking_blade.prepped.stl", "blade");
 
     let report = prepare(pinned(
         &scratch,
-        "overhang",
-        "make_overhang_table.pipeline.json",
+        "blade",
+        "make_raking_blade.pipeline.json",
     ))
     .expect("run");
 
@@ -769,7 +892,7 @@ fn a_gate_refusal_behind_an_earlier_load_failure_still_exits_three() {
             .iter()
             .map(|entry| entry.model.as_str())
             .collect::<Vec<_>>(),
-        ["aa-not-a-model", "overhang"],
+        ["aa-not-a-model", "blade"],
         "the load failure must sort first for this test to mean anything"
     );
     assert!(matches!(
@@ -780,14 +903,22 @@ fn a_gate_refusal_behind_an_earlier_load_failure_still_exits_three() {
         }
     ));
     assert!(matches!(
-        outcome(&report, "overhang"),
-        ModelPreparationOutcome::Refused { .. }
+        outcome(&report, "blade"),
+        ModelPreparationOutcome::Failed {
+            exit_code: PipelineExitCode::Supports,
+            ..
+        }
     ));
-    assert!(report.has_gate_refusal());
+    assert!(!report.has_gate_refusal());
+    assert!(
+        report.has_coverage_refusal(),
+        "the closure controller's refusal is a coverage refusal and the run must say so"
+    );
     assert_eq!(
         report.exit_code(),
-        PipelineExitCode::Gates,
-        "the run contains a gate refusal and must exit 3 whatever else it hit"
+        PipelineExitCode::Supports,
+        "a coverage refusal is sticky behind `Gates`: an unrelated earlier load failure must \
+         not hide a safety verdict at the run level"
     );
 }
 
@@ -825,6 +956,17 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 
             let report =
                 prepare(request).expect("a stage stop is a disposition, not a run failure");
+            // **A refusal that happens BEFORE the stop still wins, and must —
+            // but this fixture, run alone, never hits one.** The `Support`
+            // stop is checked after `run_support` returns, so a model whose
+            // support run refuses never reaches it. The coverage-closure
+            // controller (FU-56) only gets a look on `sphere` from attempt 1
+            // onward and in this per-model-baseline batch (see the
+            // per-model-baseline test above) it never does, because attempt 0
+            // fails during `Routing` — a two-model-batch resource-demand
+            // effect, not present when `sphere` is prepared alone as it is
+            // here. Measured directly: every fixture stops cleanly at every
+            // stage, `sphere` included, so no special case is needed.
             assert_eq!(
                 outcome(&report, stem),
                 &ModelPreparationOutcome::Stopped { after },
@@ -846,14 +988,13 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 
     // Without a stop, the same models run to their own end — so the assertions
     // above are about `stop_after` and not about models that never get there.
-    // `mini` emits. `sphere`'s drilled shell sealed and was refused by the
-    // `UncoveredIslands` gate from 2026-08-10 to 2026-08-12; FU-53 moved it a
-    // second time, onto the `DrilledShellRefusedBySupport` reserve
-    // substitution (see the per-model-baseline test above for the full
-    // attribution and why this doubly-processed `.prepped.stl` fixture
-    // diverges from `first_artifact.rs`'s raw-corpus run). Either way this is
-    // still a stage `stop_after` never reached and therefore still
-    // discriminates.
+    // This is the same two-model batch as the per-model-baseline test above
+    // (both fixtures together): `mini` emits, and `sphere`'s attempt 0 fails
+    // during `Routing` before the coverage-closure controller ever gets a
+    // look, so it reaches its artifact through the existing
+    // `DrilledShellRefusedBySupport` reserve substitution — unmoved by
+    // FU-56/FU-57. Both endings are ones a stage `stop_after` never reached,
+    // which is what this block discriminates.
     let scratch = Scratch::new("stop-none");
     for (stem, fixture, _) in fixtures {
         scratch.place(fixture, stem);
@@ -868,6 +1009,7 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
     .expect("run");
     assert_eq!(report.artifacts().count(), 2);
     assert!(!report.has_gate_refusal());
+    assert!(!report.has_coverage_refusal());
 }
 
 /// **FU-37, end to end: two runs at different walls are distinguishable in

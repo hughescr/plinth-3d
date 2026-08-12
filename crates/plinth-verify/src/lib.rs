@@ -298,10 +298,20 @@ fn defects_for_patches(
         let mut area = 0.0_f64;
         while end < patches.len() && patches[end].island_id == island_id {
             let patch = &patches[end];
-            if patch.assessment_failed
-                || patch.cut_ambiguous
-                || patch.uncovered_area_mm2.get() > 0.0
-            {
+            // **One implementation, called — not a second statement of the
+            // same rule.** The coverage-closure controller (FU-56) decides
+            // which patches it must close with exactly this predicate, and if
+            // the two ever drifted the controller would close plans this gate
+            // still refuses. It used to be restated here and guarded only by
+            // a frozen fixture on which all nine patches were blocking for
+            // the SAME reason, so two of the predicate's three axes were
+            // unguarded; calling the shared function removes the drift rather
+            // than watching for it.
+            if plinth_support::coverage_patch_is_blocking(
+                patch.uncovered_area_mm2.get(),
+                patch.cut_ambiguous,
+                patch.assessment_failed,
+            ) {
                 let next = area + patch.uncovered_area_mm2.get();
                 if !next.is_finite() {
                     return Err(CoverageVerificationError::DefectMeasureOverflow);
@@ -600,6 +610,23 @@ mod tests {
         cut_ambiguous: bool,
         no_route: bool,
     ) -> CoveragePatchEvidenceRecord {
+        let assessment_failed = area > 0.0 || cut_ambiguous;
+        patch_exact(island_id, area, cut_ambiguous, assessment_failed, no_route)
+    }
+
+    /// The same fixture with each predicate axis set INDEPENDENTLY.
+    ///
+    /// `patch` couples `assessment_failed` to the other two, which is what a
+    /// real measurement does — and is exactly why it cannot exercise the
+    /// predicate's axes separately. Anything testing the blocking rule itself
+    /// must be able to set them apart.
+    fn patch_exact(
+        island_id: u32,
+        area: f64,
+        cut_ambiguous: bool,
+        assessment_failed: bool,
+        no_route: bool,
+    ) -> CoveragePatchEvidenceRecord {
         CoveragePatchEvidenceRecord {
             island_id,
             component_id: 0,
@@ -607,13 +634,69 @@ mod tests {
             sorted_face_ids: vec![island_id],
             uncovered_area_mm2: Finite::new(area).expect("finite fixture area"),
             cut_ambiguous,
-            assessment_failed: area > 0.0 || cut_ambiguous,
+            assessment_failed,
             worst_gap: if no_route {
                 CoverageGapRecord::NoRoutedContact
             } else {
                 CoverageGapRecord::Finite(Finite::new(0.5).expect("finite fixture gap"))
             },
         }
+    }
+
+    /// **The blocking predicate's three axes, exercised separately.**
+    ///
+    /// `defects_for_patches` calls `plinth_support::coverage_patch_is_blocking`,
+    /// and the FU-56 controller decides what it must close with the same
+    /// call — so a drift is now impossible by construction. What is still
+    /// worth pinning is the RULE, on each axis independently, because the
+    /// frozen fixture this crate's integration test walks has all nine
+    /// patches blocking on positive area with `cut_ambiguous` false
+    /// everywhere: a predicate that dropped the `cut_ambiguous` term, dropped
+    /// the `assessment_failed` term, or replaced `> 0.0` with `>= epsilon`
+    /// would leave that fixture completely unchanged.
+    #[test]
+    fn a_patch_blocks_on_each_axis_independently_and_only_blocking_area_is_summed() {
+        // Axis 1: cut_ambiguous alone, zero area, assessment NOT failed.
+        let ambiguous_only = vec![patch_exact(1, 0.0, true, false, false)];
+        assert_eq!(
+            defects_for_patches(&ambiguous_only).expect("defects").len(),
+            1,
+            "a zero-area, assessment-passed, CUT-AMBIGUOUS patch must still block"
+        );
+
+        // Axis 2: assessment_failed alone, zero area, not ambiguous.
+        let failed_only = vec![patch_exact(1, 0.0, false, true, false)];
+        assert_eq!(
+            defects_for_patches(&failed_only).expect("defects").len(),
+            1,
+            "a zero-area, unambiguous, ASSESSMENT-FAILED patch must still block"
+        );
+
+        // Axis 3: area alone, far below any plausible epsilon. The floor lives
+        // in the measurement, never in this predicate.
+        let tiny_area_only = vec![patch_exact(1, 1e-12, false, false, false)];
+        let tiny = defects_for_patches(&tiny_area_only).expect("defects");
+        assert_eq!(
+            tiny.len(),
+            1,
+            "the predicate is `> 0.0`, not `>= epsilon`: any positive uncovered area blocks"
+        );
+        assert!((tiny[0].measure.get() - 1e-12).abs() < f64::EPSILON);
+
+        // Nothing on any axis: not a defect at all.
+        assert!(defects_for_patches(&[patch_exact(1, 0.0, false, false, false)])
+            .expect("defects")
+            .is_empty());
+
+        // And the aggregation rule: on an island holding one blocking and one
+        // NON-blocking patch, only the blocking patch's area is summed.
+        let mixed = vec![
+            patch_exact(4, 2.5, false, true, false),
+            patch_exact(4, 0.0, false, false, false),
+        ];
+        let defects = defects_for_patches(&mixed).expect("defects");
+        assert_eq!(defects.len(), 1);
+        assert!((defects[0].measure.get() - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]

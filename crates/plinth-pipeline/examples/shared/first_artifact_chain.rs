@@ -227,6 +227,27 @@ impl FixtureStop {
         }
     }
 
+    /// Whether **support planning** is what stopped this model. See
+    /// `ChainStop::is_support_refusal` (FU-56: a coverage-closure refusal is
+    /// excluded).
+    #[must_use]
+    pub fn is_support_refusal(&self) -> bool {
+        match self {
+            Self::Chain(stop) => stop.is_support_refusal(),
+            Self::Setup(_) => false,
+        }
+    }
+
+    /// Whether this stop is specifically a coverage-closure refusal (FU-56).
+    /// See `ChainStop::is_coverage_closure_refusal`.
+    #[must_use]
+    pub fn is_coverage_closure_refusal(&self) -> bool {
+        match self {
+            Self::Chain(stop) => stop.is_coverage_closure_refusal(),
+            Self::Setup(_) => false,
+        }
+    }
+
     #[must_use]
     pub fn refused_geometry(&self) -> Option<&SupportedGeometry> {
         match self {

@@ -39,7 +39,7 @@ use plinth_core::{m0_constants, ArtifactId, ModelId};
 use plinth_emit::{write as emit_write, EmitReport, EmitRequest};
 use plinth_support::{
     CoverageMeasurementError, CoverageMeasurementRequest, FinalSupportAuthority,
-    SupportPreparationLimits, SupportVerificationError, SupportVerificationSnapshot,
+    SupportVerificationError, SupportVerificationSnapshot,
 };
 use plinth_verify::{verify_coverage, CoverageReport, CoverageVerificationError};
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,33 @@ impl GateRefusal {
         }
     }
 
+    /// The measurement error behind an UNMEASURABLE **coverage** gate, when
+    /// that is what this refusal is.
+    ///
+    /// FU-57 keeps evidence on every remaining coverage refusal, and an
+    /// unmeasurable coverage gate is one: fail-closed, model refused, the
+    /// coverage gate named, no artifact. There is no [`CoverageReport`] to
+    /// persist — that is what unmeasurable means — but there is a reason, and
+    /// the reason is the evidence. Scoped to gates that actually measure
+    /// coverage, so a future non-coverage gate's measurement failure does not
+    /// silently start writing a coverage sidecar.
+    #[must_use]
+    pub fn unmeasurable_coverage_reason(&self) -> Option<String> {
+        match self {
+            Self::Unmeasurable {
+                gate: PreWriteGate::UncoveredIslands,
+                source,
+            } => Some(source.to_string()),
+            Self::Unmeasurable { .. }
+            | Self::Refused { .. }
+            | Self::EmissionAuthorizationNotEnabled
+            | Self::ConstantsUnavailable
+            | Self::ResourcePolicyUnavailable(_)
+            | Self::InvalidCoverageRequest(_)
+            | Self::SnapshotIntegrity(_) => None,
+        }
+    }
+
     /// The full evidence behind a blocking verdict, when there is one.
     #[must_use]
     pub fn report(&self) -> Option<&CoverageReport> {
@@ -215,24 +242,32 @@ impl GateRefusal {
 /// same production support policy, through
 /// [`SupportPreparationLimits::coverage_measurement_limits`].
 ///
+/// **A thin delegation to `plinth_support::registered_coverage_request`
+/// (FU-56).** That is now the one implementation: the coverage-closure
+/// controller and this gate must measure under the identical request, or
+/// closing coverage in the controller would not guarantee the gate agrees.
+/// This wrapper exists only to keep this crate's own [`GateRefusal`] mapping
+/// at the door, rather than leaking `plinth-support`'s setup error type into
+/// the gate's public error surface.
+///
 /// # Errors
 ///
-/// Returns [`GateRefusal::ConstantsUnavailable`] if the registry cannot be read
+/// Returns [`GateRefusal::ConstantsUnavailable`] /
+/// [`GateRefusal::ResourcePolicyUnavailable`] if the registry cannot be read
 /// and [`GateRefusal::InvalidCoverageRequest`] if the registered values do not
 /// form a valid request.
 pub fn registered_coverage_request() -> Result<CoverageMeasurementRequest, GateRefusal> {
-    let limits = SupportPreparationLimits::production()
-        .map_err(|error| GateRefusal::ResourcePolicyUnavailable(error.to_string()))?;
-    let constants = m0_constants().map_err(|_| GateRefusal::ConstantsUnavailable)?;
-    let policy = constants.placeholders();
-    let radius_mm = policy.coverage_radius_factor().diagnostic().get()
-        * policy.target_spacing_mm().diagnostic().get();
-    let patch_area_floor_mm2 = policy.voxel_pitch_mm().diagnostic().get().powi(2);
-    let limits = limits
-        .coverage_measurement_limits()
-        .map_err(GateRefusal::InvalidCoverageRequest)?;
-    CoverageMeasurementRequest::from_f64(radius_mm, patch_area_floor_mm2, limits)
-        .map_err(GateRefusal::InvalidCoverageRequest)
+    plinth_support::registered_coverage_request().map_err(|error| match error {
+        plinth_support::CoverageClosureSetupError::RegisteredConstantsUnavailable(_) => {
+            GateRefusal::ConstantsUnavailable
+        }
+        plinth_support::CoverageClosureSetupError::ResourcePolicyUnavailable(detail) => {
+            GateRefusal::ResourcePolicyUnavailable(detail)
+        }
+        plinth_support::CoverageClosureSetupError::InvalidCoverageRequest(source) => {
+            GateRefusal::InvalidCoverageRequest(source)
+        }
+    })
 }
 
 /// Judge one gate against the sealed snapshot.
@@ -455,6 +490,7 @@ fn judged_emission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_support::SupportPreparationLimits;
 
     #[test]
     fn every_named_gate_appears_exactly_once_in_the_consulted_set() {
@@ -480,6 +516,30 @@ mod tests {
                 .emit_require_passed_gates_default()
                 .diagnostic(),
             "EMIT_REQUIRE_PASSED_GATES_DEFAULT is the sole emission gate and must be true"
+        );
+    }
+
+    /// **FU-57 guard: evidence is never a gate input.** The sidecar/card/
+    /// render writer lives in `prepare.rs`, at the two call sites that
+    /// already hold a refusal; this module must not import that module, or
+    /// "evidence, never an input" stops being true by construction and
+    /// starts being true only by convention. `include_str!` embeds this
+    /// file's own source at compile time, so the guard cannot go stale by
+    /// reading the wrong copy.
+    ///
+    /// The forbidden module name is assembled at runtime, deliberately never
+    /// spelled out as one literal anywhere in this file -- spelling it out
+    /// would make this very doc comment trip its own guard the moment
+    /// `include_str!` embeds it.
+    #[test]
+    fn gates_module_source_never_imports_the_evidence_module() {
+        let forbidden = ["coverage", "_", "evidence"].concat();
+        let source = include_str!("gates.rs");
+        assert!(
+            !source.contains(&forbidden),
+            "gates.rs must never import the FU-57 evidence writer -- judge_pre_write_gates \
+             stays private and unchanged, and the verdict must be decided before it is \
+             explained, never the other way round"
         );
     }
 
