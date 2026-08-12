@@ -492,6 +492,30 @@ mod tests {
         );
     }
 
+    /// **FU-57 guard: evidence is never a gate input.** The sidecar/card/
+    /// render writer lives in `prepare.rs`, at the two call sites that
+    /// already hold a refusal; this module must not import that module, or
+    /// "evidence, never an input" stops being true by construction and
+    /// starts being true only by convention. `include_str!` embeds this
+    /// file's own source at compile time, so the guard cannot go stale by
+    /// reading the wrong copy.
+    ///
+    /// The forbidden module name is assembled at runtime, deliberately never
+    /// spelled out as one literal anywhere in this file -- spelling it out
+    /// would make this very doc comment trip its own guard the moment
+    /// `include_str!` embeds it.
+    #[test]
+    fn gates_module_source_never_imports_the_evidence_module() {
+        let forbidden = ["coverage", "_", "evidence"].concat();
+        let source = include_str!("gates.rs");
+        assert!(
+            !source.contains(&forbidden),
+            "gates.rs must never import the FU-57 evidence writer -- judge_pre_write_gates \
+             stays private and unchanged, and the verdict must be decided before it is \
+             explained, never the other way round"
+        );
+    }
+
     #[test]
     fn the_registered_coverage_request_is_the_planners_own_radius_and_floor() {
         let limits = SupportPreparationLimits::production().expect("production limits");

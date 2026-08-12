@@ -280,7 +280,10 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // Both bad models failed individually, named, with no artifact and no
     // assumed size, because neither was ever measured.
     for bad in ["aa-not-a-model", "zz-not-a-model"] {
-        let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, bad) else {
+        let ModelPreparationOutcome::Failed {
+            exit_code, detail, ..
+        } = outcome(&report, bad)
+        else {
             panic!("{bad} must fail, not emit");
         };
         assert_eq!(*exit_code, PipelineExitCode::Input);
@@ -369,7 +372,11 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     ))
     .expect("a refused model is a disposition, not a run failure");
 
-    let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, "overhang")
+    let ModelPreparationOutcome::Failed {
+        exit_code,
+        detail,
+        evidence,
+    } = outcome(&report, "overhang")
     else {
         panic!(
             "the overhang table's plan must be refused; it reported {:?}",
@@ -390,6 +397,102 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     assert_eq!(report.exit_code(), PipelineExitCode::Supports);
     assert_eq!(PipelineExitCode::Supports as i32, 5);
     assert!(!report.has_gate_refusal());
+
+    // **FU-57, real fixture.** The coverage-closure controller's refusal on
+    // this exact geometry carries its own island evidence -- this proves the
+    // sidecar/render writer against a genuinely unclosable island, not only
+    // against a hand-built fixture.
+    let evidence = evidence
+        .as_ref()
+        .expect("a coverage-closure refusal must carry FU-57 evidence");
+    assert_eq!(
+        evidence.source,
+        plinth_pipeline::EvidenceSource::CoverageClosureController
+    );
+    assert_eq!(evidence.attempts, Some(8));
+    assert!(!evidence.islands.is_empty(), "the unclosable island must be named");
+    assert!(
+        evidence.write_error.is_none(),
+        "the sidecar must write cleanly: {:?}",
+        evidence.write_error
+    );
+    let sidecar_path = scratch.output().join("overhang.coverage.json");
+    assert_eq!(evidence.sidecar_path, sidecar_path);
+    assert!(sidecar_path.exists(), "the sidecar must actually be on disk");
+    let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
+    let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
+    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v1");
+    assert_eq!(sidecar["source"], "coverage_closure_controller");
+    assert_eq!(sidecar["attempts"], 8);
+    assert!(
+        sidecar["closure"].is_object(),
+        "the sidecar must embed the typed closure refusal verbatim"
+    );
+    assert!(
+        sidecar["report"].is_null(),
+        "a controller refusal must not carry a gate report"
+    );
+
+    assert!(
+        !evidence.render_paths.is_empty(),
+        "the worst island(s) must be rendered"
+    );
+    for render_path in &evidence.render_paths {
+        assert!(render_path.exists(), "{} must exist", render_path.display());
+        let bytes = std::fs::read(render_path).expect("read render");
+        let svg = String::from_utf8(bytes).expect("utf8 svg");
+        assert!(svg.starts_with("<svg"), "must be a well-formed svg: {svg}");
+    }
+
+    // No file was ever written at the `.chitubox` target -- evidence is a
+    // different file class beside it, never at it.
+    assert!(!scratch.output().join("overhang.chitubox").exists());
+}
+
+/// FU-57: a model that starts passing does not leave yesterday's
+/// coverage-refusal evidence sitting beside today's fresh artifact.
+///
+/// A `.coverage.json` (or a stray render) from an earlier refused run, left
+/// beside a model that now emits cleanly, is read by the next thing down the
+/// line as *this* run's answer -- the exact misleading hand-off
+/// `clear_stale_artifact` already guards the `.chitubox` target against. The
+/// extension in `prepare_one` owes the same guarantee to the evidence class.
+#[test]
+fn a_model_that_starts_passing_clears_its_own_stale_coverage_evidence() {
+    let scratch = Scratch::new("stale-coverage-evidence");
+    scratch.place("make_toed_slab.prepped.stl", "mini");
+
+    std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
+    let stale_sidecar = scratch.output().join("mini.coverage.json");
+    std::fs::write(&stale_sidecar, b"{\"schema\":\"stale\"}").expect("plant a stale sidecar");
+    let stale_render = scratch.output().join("mini.coverage.island-3.svg");
+    std::fs::write(&stale_render, b"<svg></svg>").expect("plant a stale render");
+    // A render for a DIFFERENT model must never be touched by mini's own
+    // clearing pass -- proves the match is by this model's own prefix, not by
+    // extension alone.
+    let unrelated_render = scratch.output().join("other.coverage.island-1.svg");
+    std::fs::write(&unrelated_render, b"<svg></svg>").expect("plant an unrelated render");
+
+    let report = prepare(pinned(&scratch, "mini", "make_toed_slab.pipeline.json"))
+        .expect("a model that now passes is a disposition, not a run failure");
+
+    assert!(
+        matches!(outcome(&report, "mini"), ModelPreparationOutcome::Artifact { .. }),
+        "mini must still emit; it reported {:?}",
+        outcome(&report, "mini")
+    );
+    assert!(
+        !stale_sidecar.exists(),
+        "a stale coverage sidecar survived a model that now emits cleanly"
+    );
+    assert!(
+        !stale_render.exists(),
+        "a stale coverage render survived a model that now emits cleanly"
+    );
+    assert!(
+        unrelated_render.exists(),
+        "clearing mini's stale evidence must not touch another model's render"
+    );
 }
 
 /// A refusal removes a *stale* artifact at the target too.
@@ -627,7 +730,10 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
         ModelPreparationOutcome::Artifact { .. }
     ));
     // The unnamed one did not, and said why.
-    let ModelPreparationOutcome::Failed { exit_code, detail } = outcome(&report, "sphere") else {
+    let ModelPreparationOutcome::Failed {
+        exit_code, detail, ..
+    } = outcome(&report, "sphere")
+    else {
         panic!("an unpinned model must be refused, not silently given mini's rotation");
     };
     assert_eq!(*exit_code, PipelineExitCode::Input);

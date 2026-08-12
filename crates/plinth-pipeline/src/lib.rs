@@ -15,9 +15,18 @@
 //! than a faked one (design record OQ-5).
 #![forbid(unsafe_code)]
 
+pub mod coverage_evidence;
 pub mod gates;
 pub mod prepare;
 
+pub use coverage_evidence::{
+    CoverageRefusalEvidence, EvidenceSource, UncoveredIslandSummary, COVERAGE_RENDER_MAX_FACES,
+    COVERAGE_RENDER_MAX_ISLANDS,
+};
+// Re-exported so a caller of `UncoveredIslandSummary::worst_gap` (the CLI
+// card is the one today) can match on it without taking a direct
+// `plinth-support` dependency of its own for one field's type.
+pub use plinth_support::CoverageClosureGap;
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -353,7 +362,12 @@ pub struct PrepareRequest {
     pub stop_after: Option<StageStop>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is deliberately absent as of FU-57, matching the rationale
+// `ModelPreparationReport`'s own doc already states for `AssumedPrintSize`:
+// `Refused`/`Failed` now carry `CoverageRefusalEvidence`, whose islands hold
+// `f64` uncovered-area and gap measurements, and a report is compared for
+// equality in tests, never keyed on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
     /// A `.chitubox` was written, and **what was written is stated rather than
@@ -408,13 +422,47 @@ pub enum ModelPreparationOutcome {
         gate: Option<PreWriteGate>,
         geometry: Option<prepare::SupportedGeometry>,
         violation: String,
+        /// FU-57: the sidecar/card/render evidence for a coverage refusal,
+        /// when `gate` is [`PreWriteGate::UncoveredIslands`]. `#[serde(default)]`
+        /// keeps every report serialized before this field existed readable.
+        /// `None` either because the refusal was not a coverage refusal or
+        /// because evidence persistence itself found nothing to write --
+        /// never because writing it failed silently: a write failure is
+        /// recorded inside `CoverageRefusalEvidence::write_error` instead, so
+        /// this stays `Some` with the failure named.
+        /// Boxed: `CoverageRefusalEvidence` carries the full ranked island
+        /// list, and an unboxed field would put that weight on every
+        /// `Refused` value, including a non-coverage gate refusal.
+        #[serde(default)]
+        evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
     },
     /// The model did not reach the gates at all. `exit_code` is the frozen
     /// per-stage projection of the typed error behind `detail`.
     Failed {
         exit_code: PipelineExitCode,
         detail: String,
+        /// FU-57: populated only when this failure is the FU-56
+        /// coverage-closure controller's refusal (`SupportRunError::
+        /// CoverageClosure`) -- the one `Failed` disposition that is also
+        /// "a coverage refusal" in the ruling's sense. Every other `Failed`
+        /// disposition carries `None`. `#[serde(default)]` for the same
+        /// reason as `Refused::evidence`; boxed for the same reason too.
+        #[serde(default)]
+        evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
     },
+}
+
+impl ModelPreparationOutcome {
+    /// The FU-57 coverage-refusal evidence, when this outcome carries any --
+    /// from either refusal source, without the caller needing to match on
+    /// which variant it landed in.
+    #[must_use]
+    pub fn coverage_evidence(&self) -> Option<&coverage_evidence::CoverageRefusalEvidence> {
+        match self {
+            Self::Refused { evidence, .. } | Self::Failed { evidence, .. } => evidence.as_deref(),
+            Self::Artifact { .. } | Self::Stopped { .. } => None,
+        }
+    }
 }
 
 impl ModelPreparationOutcome {
@@ -604,6 +652,24 @@ pub enum PipelineError {
         #[source]
         source: std::io::Error,
     },
+    /// FU-57: an earlier run's coverage-refusal evidence (the
+    /// `<model>.coverage.json` sidecar or a `<model>.coverage.island-*.svg`
+    /// render) sitting at this model's target could not be removed before
+    /// this run started.
+    ///
+    /// Reported rather than ignored, for exactly [`Self::StaleArtifact`]'s
+    /// reason: stale evidence beside a fresh disposition is read as this
+    /// run's answer, so a failed removal fails the model by name instead of
+    /// proceeding with an evidence trail that may no longer be true.
+    #[error(
+        "model {model} could not have an earlier run's coverage-refusal evidence at {path} cleared"
+    )]
+    StaleCoverageEvidence {
+        model: ModelId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// The prepared mesh has no finite Z extent, so no layer plan spans it.
     #[error("model {model} has no finite z extent to plan layers over")]
     DegenerateExtent { model: ModelId },
@@ -725,8 +791,12 @@ impl PipelineError {
                 PipelineExitCode::Supports
             }
             // A stale artifact that will not clear is a failure of this model's
-            // emission path: the one place the run owns the target file.
-            Self::Emit { .. } | Self::StaleArtifact { .. } => PipelineExitCode::Emit,
+            // emission path: the one place the run owns the target file. FU-57's
+            // coverage evidence lives beside the same target and is cleared under
+            // the same discipline, so it projects to the same code.
+            Self::Emit { .. } | Self::StaleArtifact { .. } | Self::StaleCoverageEvidence { .. } => {
+                PipelineExitCode::Emit
+            }
         }
     }
 }
@@ -1238,11 +1308,13 @@ mod tests {
             gate: Some(PreWriteGate::UncoveredIslands),
             geometry: Some(SupportedGeometry::DrilledShellSealed),
             violation: "nine uncovered islands".to_owned(),
+            evidence: None,
         };
         assert_eq!(refused.exit_code(), PipelineExitCode::Gates);
         let failed = ModelPreparationOutcome::Failed {
             exit_code: PipelineExitCode::Input,
             detail: "unreadable".to_owned(),
+            evidence: None,
         };
         assert_eq!(failed.exit_code(), PipelineExitCode::Input);
 
@@ -1319,6 +1391,7 @@ mod tests {
             ModelPreparationOutcome::Failed {
                 exit_code: PipelineExitCode::Input,
                 detail: "not a binary STL".to_owned(),
+                evidence: None,
             },
         );
         let refused = model(
@@ -1327,6 +1400,7 @@ mod tests {
                 gate: Some(PreWriteGate::UncoveredIslands),
                 geometry: Some(SupportedGeometry::DrilledShellSealed),
                 violation: "nine uncovered islands".to_owned(),
+                evidence: None,
             },
         );
 
@@ -1360,6 +1434,7 @@ mod tests {
                     ModelPreparationOutcome::Failed {
                         exit_code: PipelineExitCode::Supports,
                         detail: "sealed run refused".to_owned(),
+                        evidence: None,
                     },
                 ),
             ],
@@ -1410,6 +1485,14 @@ mod tests {
                 PipelineError::StaleArtifact {
                     model: model(),
                     path: PathBuf::from("out/fixture.chitubox"),
+                    source: std::io::Error::other("denied"),
+                },
+                PipelineExitCode::Emit,
+            ),
+            (
+                PipelineError::StaleCoverageEvidence {
+                    model: model(),
+                    path: PathBuf::from("out/fixture.coverage.json"),
                     source: std::io::Error::other("denied"),
                 },
                 PipelineExitCode::Emit,

@@ -257,6 +257,7 @@ fn print_model(model: &ModelPreparationReport) {
             gate,
             geometry,
             violation,
+            ..
         } => {
             println!(
                 "  result  GATE-REFUSED  {}  (exit {})",
@@ -271,7 +272,9 @@ fn print_model(model: &ModelPreparationReport) {
             }
             println!("  violation  {violation}");
         }
-        ModelPreparationOutcome::Failed { exit_code, detail } => {
+        ModelPreparationOutcome::Failed {
+            exit_code, detail, ..
+        } => {
             println!("  result  ERROR  (exit {})", *exit_code as u8);
             println!("  detail  {detail}");
         }
@@ -279,6 +282,77 @@ fn print_model(model: &ModelPreparationReport) {
             println!("  result  STOPPED after {after:?}");
         }
     }
+    print_coverage_evidence(model);
+}
+
+/// **FU-57.** A coverage refusal -- from either the pre-write gate or the
+/// FU-56 coverage-closure controller -- keeps its evidence: the worst
+/// islands with their uncovered mm², where the full sidecar and the renders
+/// landed, and any write failure along the way. Empty for a model that
+/// emitted, stopped, or was refused/failed for a reason that carries no
+/// coverage evidence, which is what makes 21 refusals rankable without a
+/// rebuild the ruling asks for.
+fn print_coverage_evidence(model: &ModelPreparationReport) {
+    for line in coverage_lines(model) {
+        println!("{line}");
+    }
+}
+
+/// How many of a refusal's worst islands the card prints before pointing the
+/// reader at the sidecar for the rest.
+const COVERAGE_CARD_MAX_ISLANDS_SHOWN: usize = 3;
+
+/// The coverage-evidence block's lines, built rather than printed -- the
+/// `repair_lines` pattern (see its own doc), so what gets reported is
+/// testable without capturing stdout.
+fn coverage_lines(model: &ModelPreparationReport) -> Vec<String> {
+    let Some(evidence) = model.outcome.coverage_evidence() else {
+        return Vec::new();
+    };
+    let total = evidence.islands.len();
+    let shown = total.min(COVERAGE_CARD_MAX_ISLANDS_SHOWN);
+    let mut lines = vec![format!(
+        "  uncovered islands  {total} island(s), {shown} shown worst-first"
+    )];
+    for island in evidence.islands.iter().take(COVERAGE_CARD_MAX_ISLANDS_SHOWN) {
+        let gap = match island.worst_gap {
+            plinth_pipeline::CoverageClosureGap::Finite(value) => {
+                format!("worst gap {value:.2} mm")
+            }
+            plinth_pipeline::CoverageClosureGap::NoRoutedContact => "NO ROUTED CONTACT".to_owned(),
+        };
+        lines.push(format!(
+            "    island {}   {:.3} mm2 uncovered   {gap}   {} faces",
+            island.island_id,
+            island.uncovered_area_mm2,
+            island.face_count()
+        ));
+    }
+    if total > shown {
+        lines.push(format!("    ... ({} more in the sidecar)", total - shown));
+    }
+    lines.push(format!("  evidence  {}", evidence.sidecar_path.display()));
+    if evidence.render_paths.is_empty() {
+        lines.push("  renders   0 image(s)".to_owned());
+    } else {
+        let paths = evidence
+            .render_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "  renders   {} image(s): {paths}",
+            evidence.render_paths.len()
+        ));
+    }
+    if let Some(skipped) = &evidence.render_skipped {
+        lines.push(format!("  render note  {skipped}"));
+    }
+    if let Some(error) = &evidence.write_error {
+        lines.push(format!("  evidence write error  {error}"));
+    }
+    lines
 }
 
 /// What the automatic repair pre-pass did to this model, printed whenever it
@@ -409,9 +483,12 @@ fn print_size(size: Option<AssumedPrintSize>) -> String {
 mod tests {
     use plinth_core::ModelId;
     use plinth_mesh::{RepairEvidence, UnrepairedPinch};
-    use plinth_pipeline::{ModelPreparationOutcome, ModelPreparationReport};
+    use plinth_pipeline::{
+        CoverageClosureGap, CoverageRefusalEvidence, EvidenceSource, ModelPreparationOutcome,
+        ModelPreparationReport, UncoveredIslandSummary,
+    };
 
-    use super::repair_lines;
+    use super::{coverage_lines, repair_lines};
 
     fn report(repair: Option<RepairEvidence>) -> ModelPreparationReport {
         ModelPreparationReport {
@@ -496,6 +573,163 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("would have removed all 2 face(s)")),
+            "{lines:?}"
+        );
+    }
+
+    fn island(id: u32, area: f64, gap: CoverageClosureGap, faces: usize) -> UncoveredIslandSummary {
+        UncoveredIslandSummary {
+            island_id: id,
+            uncovered_area_mm2: area,
+            worst_gap: gap,
+            face_ids: (0..faces as u32).collect(),
+        }
+    }
+
+    fn with_outcome(outcome: ModelPreparationOutcome) -> ModelPreparationReport {
+        ModelPreparationReport {
+            model: ModelId::new("fixture"),
+            source_path: std::path::PathBuf::from("fixture.stl"),
+            assumed_print_size: None,
+            repair: None,
+            outcome,
+        }
+    }
+
+    /// **FU-57.** An emitted or non-coverage outcome prints nothing: the
+    /// block is evidence for a coverage refusal, not a generic footer.
+    #[test]
+    fn coverage_lines_is_empty_without_coverage_evidence() {
+        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Stopped {
+            after: plinth_pipeline::StageStop::Decimate,
+        }))
+        .is_empty());
+        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
+            gate: Some(plinth_pipeline::PreWriteGate::Clearance),
+            geometry: None,
+            violation: "unrelated".to_owned(),
+            evidence: None,
+        }))
+        .is_empty());
+        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
+            exit_code: plinth_pipeline::PipelineExitCode::Supports,
+            detail: "unrelated stage failure".to_owned(),
+            evidence: None,
+        }))
+        .is_empty());
+    }
+
+    /// **FU-57.** Worst-first, truncated at the shown count with an explicit
+    /// "more in the sidecar" line, a finite gap and `NO ROUTED CONTACT`
+    /// rendered distinctly, and the sidecar/render paths always printed.
+    #[test]
+    fn coverage_lines_ranks_worst_first_and_truncates_with_a_named_remainder() {
+        let evidence = CoverageRefusalEvidence {
+            source: EvidenceSource::PreWriteGate,
+            gate: Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
+            geometry: None,
+            attempts: None,
+            islands: vec![
+                island(12, 3.418, CoverageClosureGap::Finite(7.94), 431),
+                island(7, 1.002, CoverageClosureGap::NoRoutedContact, 88),
+                island(3, 0.5, CoverageClosureGap::Finite(1.0), 4),
+                island(9, 0.1, CoverageClosureGap::Finite(0.2), 1),
+            ],
+            sidecar_path: std::path::PathBuf::from("out/Giant Toad.coverage.json"),
+            render_paths: vec![
+                std::path::PathBuf::from("out/Giant Toad.coverage.island-12.svg"),
+                std::path::PathBuf::from("out/Giant Toad.coverage.island-7.svg"),
+                std::path::PathBuf::from("out/Giant Toad.coverage.island-3.svg"),
+            ],
+            render_skipped: None,
+            write_error: None,
+        };
+        let lines = coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
+            gate: Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
+            geometry: None,
+            violation: "gate UncoveredIslands refused emission with 4 blocking defect(s)"
+                .to_owned(),
+            evidence: Some(Box::new(evidence)),
+        }));
+
+        assert!(
+            lines[0].contains("4 island(s), 3 shown worst-first"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("island 12")
+                && line.contains("3.418 mm2 uncovered")
+                && line.contains("worst gap 7.94 mm")
+                && line.contains("431 faces")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("island 7") && line.contains("NO ROUTED CONTACT")),
+            "{lines:?}"
+        );
+        // The 4th island is not shown, and the remainder is named rather than
+        // silently dropped.
+        assert!(
+            !lines.iter().any(|line| line.contains("island 9")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("(1 more in the sidecar)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("evidence") && line.contains("Giant Toad.coverage.json")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("renders") && line.contains("3 image(s)")),
+            "{lines:?}"
+        );
+    }
+
+    /// **FU-57.** A `Failed` disposition (the coverage-closure controller's
+    /// refusal today, per `ModelPreparationOutcome::coverage_evidence`) is
+    /// read exactly like a gate refusal's evidence, and a write failure is
+    /// surfaced rather than silently dropped.
+    #[test]
+    fn coverage_lines_reads_a_failed_dispositions_closure_evidence_and_names_write_errors() {
+        let evidence = CoverageRefusalEvidence {
+            source: EvidenceSource::CoverageClosureController,
+            gate: None,
+            geometry: None,
+            attempts: Some(8),
+            islands: vec![island(0, 2.0, CoverageClosureGap::NoRoutedContact, 12)],
+            sidecar_path: std::path::PathBuf::from("out/overhang.coverage.json"),
+            render_paths: Vec::new(),
+            render_skipped: Some("mesh over COVERAGE_RENDER_MAX_FACES".to_owned()),
+            write_error: Some("permission denied".to_owned()),
+        };
+        let lines = coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
+            exit_code: plinth_pipeline::PipelineExitCode::Supports,
+            detail: "coverage closure refused".to_owned(),
+            evidence: Some(Box::new(evidence)),
+        }));
+        assert!(lines[0].contains("1 island(s), 1 shown worst-first"), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("renders") && line.contains("0 image(s)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("render note") && line.contains("COVERAGE_RENDER_MAX_FACES")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("evidence write error") && line.contains("permission denied")),
             "{lines:?}"
         );
     }
