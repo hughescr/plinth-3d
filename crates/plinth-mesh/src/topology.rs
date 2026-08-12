@@ -785,6 +785,20 @@ fn validate_point_only_vertices(
 /// origin, so translating the complete mesh does not inject a large global
 /// coordinate into every volume term. This function never repairs, rewinds,
 /// welds, or performs containment classification.
+///
+/// **What "closed" means here is [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`], the same
+/// definition the closed-solid gate uses.** Per the owner ruling of
+/// 2026-08-12 (FU-47,
+/// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+/// §4) a point-touch is not a defect, and a certificate is where that ruling
+/// has to hold or it does not hold at all: `plinth_hollow`'s
+/// `validate_oriented_solid` passes the gate and then immediately certifies,
+/// so a certificate refusing what the gate admits refuses the model anyway,
+/// one line later and under a less accurate name. Nothing about closure or
+/// orientation is relaxed — a point-touch mesh is closed and consistently
+/// oriented, it simply has more face components than it has solids, and each
+/// of those components is closed, which is exactly what this function
+/// integrates over.
 pub fn certify_closed_components(
     mesh: &Mesh,
     topology: &FaceTopology,
@@ -795,7 +809,11 @@ pub fn certify_closed_components(
     {
         return Err(TopologyError::CertificateMeshMismatch);
     }
-    if topology.cut_flags.iter().any(|flags| *flags != 0) {
+    if topology
+        .cut_flags
+        .iter()
+        .any(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
+    {
         return Err(TopologyError::CertificateNotClosedOrOriented);
     }
     let component_count = topology

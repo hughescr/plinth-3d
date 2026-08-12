@@ -24,7 +24,7 @@
 //! pre-pass strips the shard regardless of whether the gate would have
 //! refused it. That is proven separately below, against the real gate.
 
-use plinth_hollow::{validate_closed_mesh, HollowError};
+use plinth_hollow::{create_shell, validate_closed_mesh, HollowError, HollowSettings};
 use plinth_mesh::{
     make_box_default, make_duplicated_face_box, make_dust_shard_box, make_edge_shared_boxes,
     make_pinched_boxes, repair_mesh,
@@ -117,4 +117,39 @@ fn a_model_the_gate_already_accepts_is_untouched() {
     validate_closed_mesh(repaired.mesh()).expect("and still passes it");
     assert_eq!(repaired.mesh().verts(), mesh.verts());
     assert_eq!(repaired.mesh().tris(), mesh.tris());
+}
+
+/// **The ruling's outcome, at the production entry point rather than at the
+/// helper.**
+///
+/// Passing [`validate_closed_mesh`] is not the same thing as being accepted:
+/// `create_shell` calls it and then immediately certifies the same mesh's
+/// closed components, and the certificate used to refuse **any** nonzero cut
+/// flag. A point-touch model therefore passed the relaxed gate and was
+/// refused one line later as `Topology(CertificateNotClosedOrOriented)` —
+/// FU-47's outcome (models like this print) undelivered, under an error less
+/// accurate than the one the ruling retired. The certificate now uses the
+/// same `TOPOLOGY_CUT_CLOSED_SOLID_MASK` the gate does.
+///
+/// This also covers the solid reserve: `HollowedModel::solid` validates its
+/// fallback mesh through the very same `validate_oriented_solid` this call
+/// exercises, so a model refused here would have had no solid path either.
+///
+/// The two 10 mm cubes hollow to two ~166 mm³ cavities, and only the larger
+/// of the two is a resin-flow interior (FU-47: a point never connects two
+/// interiors), which is under the registered savings threshold — so the
+/// expected verdict is a *savings* verdict. What must never come back is a
+/// topology or closure refusal.
+#[test]
+fn a_point_touch_model_is_judged_on_savings_not_refused_on_topology() {
+    let mesh = make_pinched_boxes().expect("pinch fixture");
+    let settings = HollowSettings::from_registered_constants().expect("registered M0 settings");
+    match create_shell(mesh, settings) {
+        Err(HollowError::IneligibleSavings) => {}
+        Ok(_) => panic!("the fixture's cavities are below the savings threshold; it must not hollow"),
+        Err(error @ (HollowError::Topology(_) | HollowError::NotClosedOrOriented)) => panic!(
+            "a point-touch is not a closed-solid defect (FU-47), yet H0 refused it as {error}"
+        ),
+        Err(other) => panic!("unexpected refusal {other}"),
+    }
 }
