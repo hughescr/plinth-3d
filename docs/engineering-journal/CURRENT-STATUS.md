@@ -5,6 +5,34 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## State of the system (2026-08-12)
+
+*Summary added 2026-08-12 (orchestrator-sanctioned addition; see decisions journal).*
+
+Slimmed 2026-08-12. Full dated history on and before 2026-08-09 (and the closed FU-8/8c-8g,
+FU-10, FU-25/26, FU-31, FU-32 chains) moved verbatim to docs/engineering-journal/archive/.
+Reviewed != merged still applies; see the preamble above.
+
+**Where things stand:** the pipeline runs end to end (`plinth prepare`) with dense
+orientation search, an automatic mesh-repair pre-pass, and a hollow stage that as of
+2026-08-12 ships walls that are provably >= the requested wall (FU-53/FU-55 landed) with
+a bounded repair pass (FU-54) and the requested/realized wall persisted to the report
+(FU-37 landed). Ten owner rulings from the 2026-08-12 batch are recorded in
+`decisions/2026-08-12-owner-rulings-fu-batch.md`; five are LANDED (FU-36, FU-37, FU-50,
+FU-54, FU-55), five are ruled but implementation is still owed (FU-38, FU-46,
+FU-47, FU-51, FU-57).
+
+**The live blocker set**, from the 37-mini residual-refusal analysis (2026-08-12):
+no coverage-closure step exists in support planning (FU-56), failure causes are discarded
+at the error boundary (FU-58), the drain planner can blow its byte cap on dense minis
+(FU-59), folder runs are all-or-nothing with no resume (FU-60), and drain/vent bore
+penetration is unproven (FU-61, opened by the FU-51 ruling).
+
+**Standing doctrine still in force:** FU-8b's lesson (never raise a cap to admit a
+defect — fix the defect), the git-flow convention (main+develop, feature/* branches,
+never push without instruction), and the owner's 2026-08-03 clearance-mask architecture
+decision. See the Follow-ups ledger below for the full open-row list.
+
 ## 2026-08-12 — the wall a run asked for and the wall it got reach the run's own output, and a bound stops reading as a measurement {#hollow-wall-reaches-run-output-2026-08-12}
 
 <a id="hollow-wall-reaches-run-output-2026-08-12"></a>
