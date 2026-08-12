@@ -218,11 +218,14 @@ impl RepairEvidence {
 /// the first member of every group — so every action leaves at least one face
 /// by construction. The check stays because "by construction" is an argument
 /// about today's two actions and the consequence of being wrong about it is a
-/// stage-internal error wearing the operator's filename. FU-46's open
-/// question is precisely whether an action that deletes a group with **no
-/// survivor** should exist; the day it is ruled in, this guard is what stops
-/// it emptying a model, and it is far easier to keep than to remember to add
-/// back.
+/// stage-internal error wearing the operator's filename. FU-46 asked whether
+/// an action that deletes a group with **no survivor** should exist and the
+/// owner answered NO on 2026-08-12
+/// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+/// §6), so no such action is coming and this guard is not waiting on one. It
+/// stays because the thickening repair the ruling names as the future
+/// candidate still changes the face set, and because a guard is far easier to
+/// keep than to remember to add back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyResultRefusal {
@@ -324,10 +327,19 @@ pub enum DuplicateDisposition {
     /// examined — deleting an edge-isolated coincident stack outright with no
     /// survivor, and keeping a *later*, opposite-wound member instead of the
     /// first — both delete or re-orient geometry on rules the spec did not
-    /// authorize and the census found zero corpus incidence for. They are the
-    /// open scope question on FU-46, **owner ruling requested**; until it lands
-    /// the pass keeps the first, records the shape here, and the refusal is the
-    /// work item.
+    /// authorize and the census found zero corpus incidence for.
+    ///
+    /// **RULED 2026-08-12 by the owner**
+    /// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+    /// §6): **deletion is OUT OF SCOPE for automatic repair.** The scope
+    /// question this comment used to call open is closed — a model carrying
+    /// zero-volume doubled geometry **stays refused until a real fix exists**,
+    /// keep-none stays forbidden in every form, and the conservative
+    /// keep-first rule stands exactly as landed. **Thickening** is the named
+    /// future candidate: give a zero-volume double-sided sheet a printable
+    /// thickness rather than silently delete the owner's geometry. So the pass
+    /// keeps the first, records the shape here, and the refusal is the resting
+    /// state by ruling rather than by default.
     KeptFirstUnresolved,
 }
 
@@ -722,7 +734,10 @@ fn welded_triple(triangle: [u32; 3], weld_map: &[u32]) -> [u32; 3] {
 /// order", and that is the whole action: the survivor is always the earliest
 /// member, whatever its winding and whatever the neighbourhood looks like. Two
 /// wider rules were tried and are *not* here, both filed on FU-46 rather than
-/// landed:
+/// landed — and the first of them is now **refused by name** by the owner's
+/// 2026-08-12 ruling
+/// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+/// §6), not merely deferred:
 ///
 /// * *Delete the group outright when it is edge-isolated.* This removes
 ///   geometry with nothing left in its place — a 60 mm free-floating doubled
@@ -735,11 +750,19 @@ fn welded_triple(triangle: [u32; 3], weld_map: &[u32]) -> [u32; 3] {
 ///   defect class the census counted **zero** of (0 same-direction edges across
 ///   all 21 models).
 ///
-/// Neither is a thing to decide inside an implementation. Until the owner rules
-/// on FU-46 the conservative rule stands, and the shapes it cannot finish —
-/// a free-floating coincident stack, a doubled sheet — reach the unchanged gate
-/// and are refused there. Under the standing doctrine of the 2026-08-10 ruling
-/// that refusal *is* the correct outcome: it becomes the work item.
+/// Neither was a thing to decide inside an implementation, and the owner has
+/// now decided the one that mattered. **RULED 2026-08-12 (§6): deletion is out
+/// of scope for automatic repair.** The conservative rule stands as landed, and
+/// the shapes it cannot finish — a free-floating coincident stack, a doubled
+/// sheet — reach the unchanged gate and are refused there, permanently, until a
+/// repair exists that keeps the owner's geometry. **Thickening** is the named
+/// future candidate for building that repair; **keep-none is not, in any
+/// form.** Under the standing doctrine of the 2026-08-10 ruling the refusal
+/// *is* the correct outcome: it becomes the work item. The ruling also records,
+/// as fact, that **no real corpus model exhibits the doubled-sheet case** — the
+/// reproductions are synthetic and the raw corpus's three coincident-face
+/// groups are single-pair slips the shard strip removes before this action ever
+/// sees them — so the class refused here is, today, empty on real input.
 ///
 /// **What the local-edge check is still for.** Keeping the first member is not
 /// always enough to close the group's neighbourhood, and a face count cannot
@@ -825,14 +848,17 @@ fn plan_duplicate_removal(
 /// **This function chooses nothing.** `kept` is a fixed function of the group's
 /// source indices; only the [`DuplicateDisposition`] varies, and it is a
 /// measurement of the result rather than an input to it. Two earlier drafts did
-/// choose, and both are now FU-46's un-ruled scope question rather than landed
-/// behaviour: keeping a later opposite-wound member (an orientation repair for
-/// a defect class the census found zero of) and keeping **none** at all for an
-/// edge-isolated stack. The second is the one that mattered — it is the only
-/// rule in the pass that could delete geometry with no survivor, it had no size
-/// bound, and it could flip a gate refusal into a pass by deleting the geometry
-/// the gate was refusing. A pre-pass that can do that is not upstream of the
-/// gate, it is a hole in it.
+/// choose, and neither is landed behaviour: keeping a later opposite-wound
+/// member (an orientation repair for a defect class the census found zero of)
+/// and keeping **none** at all for an edge-isolated stack. The second is the
+/// one that mattered — it is the only rule in the pass that could delete
+/// geometry with no survivor, it had no size bound, and it could flip a gate
+/// refusal into a pass by deleting the geometry the gate was refusing. A
+/// pre-pass that can do that is not upstream of the gate, it is a hole in it —
+/// and that is the reasoning the owner adopted in the **2026-08-12 FU-46
+/// ruling** (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+/// §6), which puts deletion **out of scope for automatic repair** rather than
+/// leaving the question open. Nothing here is waiting on a ruling any more.
 fn choose_duplicate_disposition(
     key: [u32; 3],
     forward: &[usize],
@@ -951,9 +977,12 @@ mod tests {
 
     /// The empty-result guard, exercised directly because no action this pass
     /// performs can reach it any more — every one of the two leaves at least
-    /// one face by construction. It is kept for the rule FU-46 might rule in,
-    /// so what it *does* is pinned: roll everything back, hand the caller its
-    /// own mesh, and say so on the card.
+    /// one face by construction. FU-46's ruling (2026-08-12, §6) refused the
+    /// no-survivor rule outright, so the guard is not held open for that; it is
+    /// held open for the thickening repair the same ruling names as the future
+    /// candidate, and for the general principle that a face-set-changing action
+    /// must never empty a model. What it *does* is pinned either way: roll
+    /// everything back, hand the caller its own mesh, and say so on the card.
     #[test]
     fn the_empty_result_guard_rolls_back_whole_and_returns_the_input() {
         let mesh = crate::make_box_default().expect("box");
@@ -1057,8 +1086,11 @@ mod tests {
     /// survivor, it has no size bound (a 60 mm free-floating doubled triangle
     /// goes the same way as a 0.2 mm one), and it can take a mesh from gate
     /// `Err` to gate `Ok` by deleting the geometry being refused. The spec
-    /// authorized keep-the-first and nothing else; widening it is FU-46's
-    /// **owner ruling requested**, not an implementation's call.
+    /// authorized keep-the-first and nothing else, and the owner's **FU-46
+    /// ruling of 2026-08-12**
+    /// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+    /// §6) put deletion **out of scope for automatic repair**, so this test
+    /// pins a ruled outcome rather than an interim one.
     #[test]
     fn a_free_floating_coincident_group_keeps_the_first_and_goes_to_the_gate() {
         for tris in [
@@ -1081,8 +1113,10 @@ mod tests {
     /// earliest face here is reverse-wound against its neighbours, so keeping
     /// it leaves the local edges dirty and keeping face 12 instead would leave
     /// them clean. That preference is an orientation repair for a defect class
-    /// the census counted zero of, so it is not made: the first is kept, the
-    /// group is recorded as unresolved, and FU-46 carries the question.
+    /// the census counted zero of, so it is not made: the first is kept and the
+    /// group is recorded as unresolved. FU-46's 2026-08-12 ruling (§6) closed
+    /// the scope question against widening — the conservative keep-first rule
+    /// stands as landed — so this is pinned behaviour, not a placeholder.
     #[test]
     fn a_later_member_is_not_promoted_for_having_the_better_winding() {
         let mesh = crate::make_box_default().expect("box");
