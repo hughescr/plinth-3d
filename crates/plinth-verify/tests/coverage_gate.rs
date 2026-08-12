@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Command};
 use plinth_core::{ArtifactId, LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::make_toed_slab;
+use plinth_mesh::{evaluate_delicacy, make_toed_slab, DelicacyBuildConfig, DelicacySettings};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
     run_support, CoverageMeasurementLimits, CoverageMeasurementRequest, SupportPreparationLimits,
@@ -72,13 +72,40 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // chosen small-radius probe (1.0 mm) could ever run — there is no sealed
 // authority left to hand `verify_coverage`. `make_toed_slab` closes at the
 // registered radius on its first attempt (zero repair rounds; its own
-// `run_support` digest is unchanged, 2_198_459_883_570_957_390) while STILL
-// carrying real blocking patches at this test's small radius (9 of 9 islands
-// have positive uncovered area there), so it is the fixture that can still
-// exercise this refused-report path. The golden below was regenerated through
-// THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm of
+// `run_support` digest was, at that rename, 2_198_459_883_570_957_390 — see
+// the FU-38 refresh below, which moved it) while STILL carrying real blocking
+// patches at this test's small radius (9 of 9 islands have positive uncovered
+// area there), so it is the fixture that can still exercise this
+// refused-report path. The golden below was regenerated through THIS FILE'S
+// OWN PRODUCER PATH (the `THREAD_CHILD` arm of
 // `public_coverage_report_is_frozen_without_evidence_loss`), never
 // hand-edited, exactly as every prior refresh recorded above was.
+//
+// **Refreshed a fifth time on 2026-08-12, by owner ruling, for FU-38** — the
+// ruling that moved all four decision-relevant instruments off the all-zeros
+// delicacy feed and onto the real producer-side field
+// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+// §5). `snapshot_digest` **2198459883570957390 -> 15556275517430246244**.
+// The from->to spans the coverage lane's own rename of this golden
+// (`coverage_gate_overhang_table.json` -> `coverage_gate_toed_slab.json`,
+// merged in `b9decd5`): the retired overhang-table file is NOT what moved —
+// the value above is the toed-slab golden's zero-field digest moving to its
+// real-field one, and it is the same number this file's own producer path now
+// emits. The golden was REGENERATED THROUGH THAT PRODUCER PATH, never
+// hand-edited, exactly as every refresh above was. The two JSON documents were
+// then diffed leaf by leaf: **181 scalar leaves, EXACTLY 1 moved**
+// (`snapshot_digest`). Every `request` bound, all 11 `resources` counters, all
+// 9 islands with their face ids, all 9 patches
+// (`uncovered_area_mm2`, `cut_ambiguous`, `assessment_failed`, `worst_gap`)
+// and all 9 defects are byte-identical, so **no evidence was lost and no
+// blocking verdict changed** — the report still refuses with 9 defects. No cap,
+// gate, floor, radius or tolerance was touched: this test's own 1.0 mm probe
+// radius and 1.0 mm² patch-area floor are unchanged, and so are the registered
+// gate values it deliberately does not use. The from->to septet for the OD-8
+// census, and the sibling `run_support` digest pin in
+// `plinth-support/tests/support_runner_integration.rs`, are recorded together
+// with this one in `docs/engineering-journal/CURRENT-STATUS.md` under the
+// FU-38 row and its dated section.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
@@ -104,7 +131,26 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
     let hollowed =
         HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
             .expect("solid decision");
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): re-pinned from the all-zeros feed to the real
+    // producer-side delicacy field, computed exactly as
+    // `plinth_pipeline::prepare::prepared_delicacy_field` computes it in
+    // production (same LOD name, registered `DelicacySettings`, scaled
+    // `DelicacyBuildConfig`); inlined because `plinth-verify` cannot depend
+    // on `plinth-pipeline`. See
+    // `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+    // §5 and the frozen golden's own from->to comment above.
+    let delicacy_field = evaluate_delicacy(
+        hollowed.mesh(),
+        "prepared",
+        DelicacySettings::production().expect("production delicacy settings"),
+        DelicacyBuildConfig::production(hollowed.mesh().tris().len()),
+    )
+    .expect("delicacy field");
+    let delicacy = delicacy_field
+        .face_values()
+        .iter()
+        .map(|value| value.weight())
+        .collect::<Vec<_>>();
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
     let authority = run_support(
         hollowed,

@@ -3,7 +3,10 @@ use std::{collections::BTreeSet, path::PathBuf};
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::{make_overhang_table, make_raking_blade, make_toed_slab, Mesh};
+use plinth_mesh::{
+    evaluate_delicacy, make_overhang_table, make_raking_blade, make_toed_slab, DelicacyBuildConfig,
+    DelicacySettings, Mesh,
+};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
     run_support, CoverageGap, CoverageMeasurementLimits, CoverageMeasurementRequest,
@@ -59,6 +62,31 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
     let (mesh, orientation) = oriented.into_parts();
     HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
         .expect("solid decision handoff")
+}
+
+/// FU-38 (2026-08-12): the real producer-side delicacy field, computed
+/// exactly as `plinth_pipeline::prepare::prepared_delicacy_field` computes it
+/// in production -- same LOD name, same registered `DelicacySettings`, same
+/// scaled `DelicacyBuildConfig`. Inlined rather than imported because
+/// `plinth-support` cannot depend on `plinth-pipeline` (the dependency runs
+/// the other way). Every call site below fed `vec![0.0; faces]` until this
+/// row; see
+/// `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md` and
+/// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+/// §5 for why the all-zeros feed was not a neutral default.
+fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
+    let field = evaluate_delicacy(
+        hollowed.mesh(),
+        "prepared",
+        DelicacySettings::production().expect("production delicacy settings"),
+        DelicacyBuildConfig::production(hollowed.mesh().tris().len()),
+    )
+    .expect("delicacy field");
+    field
+        .face_values()
+        .iter()
+        .map(|value| value.weight())
+        .collect()
 }
 
 /// Both models nominate one dyadic cell vertex from two different islands
@@ -165,13 +193,64 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// "not one of the 21 [minis] has been shown to be closable ... the first
 /// action is what would show it," and this fixture's answer is "not
 /// closable from this pool," recorded rather than forced.
+///
+/// **The digests were re-pinned a fourth time on 2026-08-12, by owner ruling,
+/// for FU-38** — the ruling that moves all four decision-relevant instruments
+/// off the all-zeros delicacy feed and onto the real producer-side field
+/// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+/// §5). Every paragraph above stands unamended as the record of its own date;
+/// the sentence in the FU-56 addendum saying `make_toed_slab`'s digest is
+/// "UNCHANGED from every prior re-pin recorded above" was true on its date and
+/// is superseded HERE, by this movement, and not by anything FU-56 did.
+///
+/// - `make_toed_slab`: `2_198_459_883_570_957_390 -> 15_556_275_517_430_246_244`.
+///   **The counts did not move and must not**: 64 physical contact identities,
+///   170 final live members, 69 distinct seats — the same discriminator the
+///   third re-pin used, and it separates an input change that reorders exact-Z
+///   ties from a behavioural one. `coverage_repair_rounds()` is still **0**, so
+///   the model still closes on its baseline layout and the controller still
+///   costs it nothing.
+/// - `make_raking_blade`: **the deferred measurement, landed as part of this
+///   re-pin rather than ahead of it, exactly as the ruling requires — and it
+///   moved NOTHING.** Under the real field the blade still refuses, with a
+///   byte-identical typed refusal: `attempts` 8, reason `AttemptsExhausted`,
+///   `history.len()` 9, and the same two islands (3 → component 1, face 15;
+///   5 → component 1, face 14) each with `worst_gap = NoRoutedContact` and a
+///   non-zero `nominated_repair_rows`. There is therefore **no J4 snapshot
+///   digest left to re-pin on this fixture**: `74_030_269_957_898_085` was
+///   retired by the FU-56 coverage-closure landing (a refusal has no sealed
+///   authority and so no digest), not by FU-38, and the row's "measure it, then
+///   re-pin" is discharged by the measurement above.
+/// - **Item 4 of the ruling — this same geometry's structural asserts and
+///   hand-counted coverage resource plan
+///   (`public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`)
+///   — was re-derived under the real field and is UNCHANGED**, every number of
+///   it: the 11-tuple resource plan, all 9 frozen islands, all 9 frozen patches
+///   with their `uncovered_area_mm2`/`cut_ambiguous`/`assessment_failed`/
+///   `worst_gap` bits. Only the `snapshot_digest` assertion in that test moved,
+///   to the same value pinned here. That is recorded as a measured result, not
+///   assumed: re-deriving it was the work, and finding it still true is the
+///   finding.
+///
+/// **Nothing else moved.** No cap, gate, floor, radius or tolerance is touched
+/// by this re-pin — the coverage radius is still the registered
+/// `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm, the patch-area floor
+/// is still `VOXEL_PITCH_MM²`, the uncovered-area tolerance is still zero, and
+/// the 8-attempt closure bound is still 8. **No digest is claimed wrong:** each
+/// value on the left of an arrow above remains exactly reproducible by the
+/// harness that produced it, against the zero-field engine that was the engine
+/// at the time. See `docs/engineering-journal/CURRENT-STATUS.md`'s FU-38 row
+/// and its dated section for the full from→to record, including the OD-8
+/// census septet and the coverage-gate golden.
 #[test]
 fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
     );
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
+    // `real_delicacy`'s doc comment for what production this now matches.
+    let delicacy = real_delicacy(&hollowed);
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
     let authority = run_support(
         hollowed,
@@ -203,7 +282,7 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 2_198_459_883_570_957_390_u64),
+        (64_usize, 170_usize, 15_556_275_517_430_246_244_u64),
         "make_toed_slab's digest must not move: it takes zero repair rounds"
     );
     assert_eq!(seats.len(), identities.len());
@@ -215,15 +294,16 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
         make_raking_blade().expect("procedural raking blade"),
         "make_raking_blade",
     );
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
+    // `real_delicacy`'s doc comment for what production this now matches.
+    let delicacy = real_delicacy(&hollowed);
     let error = run_support(
         hollowed,
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
         },
         support_input(&delicacy, &layers),
-    )
-    ;
+    );
     let error = match error {
         Err(error) => error,
         Ok(_) => panic!(
@@ -318,7 +398,9 @@ fn support_input<'a>(
 #[test]
 fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
     let hollowed = hollowed_overhang_table();
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
+    // `real_delicacy`'s doc comment for what production this now matches.
+    let delicacy = real_delicacy(&hollowed);
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
     let authority = run_support(
         hollowed,
@@ -387,7 +469,7 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// THIS test's own, independently-chosen small-radius probe (radius 1.0 mm)
 /// at all — there is no `FinalSupportAuthority` to call `measure_coverage`
 /// on. `make_toed_slab` closes coverage on its first attempt (zero repair
-/// rounds; digest unchanged from every prior re-pin, see the sibling test
+/// rounds; its digest is re-pinned by FU-38 in lockstep with the sibling test
 /// above), so it is the fixture that can still exercise this independent
 /// measurement path, which is unrelated to closure and is testing
 /// `measure_coverage`'s own resource-charging and evidence-projection
@@ -396,13 +478,29 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// the SAME explicit request the predecessor test pinned
 /// (radius = 1.0 mm, patch-area floor = 1.0 mm²) — not carried over from the
 /// old fixture's numbers, and not assembled from the measurement under test.
+///
+/// **FU-38, 2026-08-12 — this test IS item 4 of the ruling** (the toed-slab
+/// geometry's structural asserts and hand-counted coverage resource plan), and
+/// it was re-derived under the real producer-side delicacy field. **Exactly one
+/// number below moved: `snapshot_digest`
+/// `2_198_459_883_570_957_390 -> 15_556_275_517_430_246_244`**, the same value
+/// the sibling test pins and the same value the frozen coverage-gate golden in
+/// `plinth-verify` now carries. The 11-tuple resource plan, all 9 frozen
+/// islands and all 9 frozen patches are UNCHANGED — measured, not assumed —
+/// which is what says the delicacy field reordered exact-Z tie-breaks inside
+/// routing without moving a single seat, sample, island or square millimetre
+/// this measurement can see. No cap, ceiling, radius or floor in this test was
+/// touched: the explicit request is still (1.0 mm, 1.0 mm²) against the same
+/// six frozen ceilings.
 #[test]
 fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
     );
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
+    // `real_delicacy`'s doc comment for what production this now matches.
+    let delicacy = real_delicacy(&hollowed);
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
     let authority = run_support(
         hollowed,
@@ -430,7 +528,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .measure_coverage(request)
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
-    assert_eq!(snapshot.digest(), 2_198_459_883_570_957_390);
+    assert_eq!(snapshot.digest(), 15_556_275_517_430_246_244);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(

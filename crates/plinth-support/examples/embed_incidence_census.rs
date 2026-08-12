@@ -18,7 +18,9 @@ use std::process::ExitCode;
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::{load_binary_stl, WeldPolicy};
+use plinth_mesh::{
+    evaluate_delicacy, load_binary_stl, DelicacyBuildConfig, DelicacySettings, WeldPolicy,
+};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{run_support, SupportPreparationLimits, SupportRequest};
 
@@ -168,7 +170,54 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     let layer_count = ((span_mm / pitch_mm).ceil() as usize).max(1_000);
     let layers = LayerPlan::new(0.0, vec![pitch_mm; layer_count])
         .map_err(|error| format!("layers: {error}"))?;
-    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    // FU-38 (2026-08-12): re-pinned from the `vec![0.0; faces]` all-zeros
+    // feed to the real producer-side delicacy field. Computed exactly as
+    // `plinth_pipeline::prepare::prepared_delicacy_field` computes it in
+    // production -- same LOD name, same registered `DelicacySettings`, same
+    // scaled `DelicacyBuildConfig` -- inlined rather than imported because
+    // this crate cannot depend on `plinth-pipeline` (the dependency runs the
+    // other way: `plinth-pipeline` depends on `plinth-support`). See
+    // `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md`
+    // and `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
+    // §5.
+    //
+    // The OD-8 census digests this harness prints move with this change, and
+    // the FULL from->to table -- both columns re-measured at this tip by
+    // building this harness twice, once with the `vec![0.0; faces]` feed
+    // restored verbatim from `44b8df1` and once with the real field -- is
+    // recorded in `docs/engineering-journal/CURRENT-STATUS.md` under the FU-38
+    // row and its dated section
+    // (`#fu38-real-delicacy-repin-2026-08-12`). In summary: SIX models seal and
+    // all six digests move (`Sphere` 2297157889062365577 -> 686822247060573262,
+    // `Cylinder` 6853793710942395608 -> 12410021645461158056, `make_box`
+    // 8709076999423814412 -> 5356317665317762409, `make_overhang_table`
+    // 11652461737312715963 -> 14600685200423759332, `make_toed_slab`
+    // 133000971864625681 -> 16855162491340010017, `make_thin_fin`
+    // 14656364680512457190 -> 14718557305548010128); `make_raking_blade`
+    // refuses coverage closure BYTE-IDENTICALLY under both fields, and
+    // `Weeping Treant v1.2` fails `Failed(Preparation)` under both, so neither
+    // is attributable to this change. Unlike the FU-32 J4 movement, counts DO
+    // move here -- `Sphere` 7/15 -> 9/21 and `Cylinder` 54/119 -> 45/101 --
+    // because delicacy breaks exact-Z ties in contact selection, which is the
+    // divergence FU-38 was opened against.
+    //
+    // The "from" column is deliberately NOT the J4 septet: the coverage-closure
+    // lane (`1d407a0`/`6ddf051`, merged `b9decd5`) had already moved
+    // `make_overhang_table` and taken `make_raking_blade` off the sealed list
+    // before this change touched anything, and charging FU-38 for another
+    // lane's movement would be a false attribution.
+    let delicacy_field = evaluate_delicacy(
+        hollowed.mesh(),
+        "prepared",
+        DelicacySettings::production().map_err(|error| format!("delicacy settings: {error}"))?,
+        DelicacyBuildConfig::production(hollowed.mesh().tris().len()),
+    )
+    .map_err(|error| format!("delicacy: {error}"))?;
+    let delicacy = delicacy_field
+        .face_values()
+        .iter()
+        .map(|value| value.weight())
+        .collect::<Vec<_>>();
     let faces = hollowed.mesh().tris().len();
 
     let input = SupportPreparationLimits::production()
