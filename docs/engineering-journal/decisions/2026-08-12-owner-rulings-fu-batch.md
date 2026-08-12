@@ -1,7 +1,7 @@
 # Decision — ten follow-up rows ruled in one batch
 
 **Rulings given 2026-08-12 by the owner (Craig Hughes)** on ten rows of the
-follow-ups ledger ([`CURRENT-STATUS.md#follow-ups-2026-08-04`](../CURRENT-STATUS.md)):
+follow-ups ledger ([`CURRENT-STATUS.md#follow-ups-2026-08-04`](../CURRENT-STATUS.md#follow-ups-2026-08-04)):
 **FU-55, FU-57, FU-50, FU-47, FU-38, FU-46, FU-54, FU-37, FU-51, FU-36**, in the
 order the owner gave them. Each ruled row is annotated in place in the ledger and
 points back here; this record carries the reasoning as it stood on this date.

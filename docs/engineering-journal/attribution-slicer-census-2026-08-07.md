@@ -247,7 +247,7 @@ outers. Zero violations.
 
 # YES — it reproduces the parked number exactly.
 
-FU-7's record (`CURRENT-STATUS.md:3138`, `:3414`, and *Provisional freeze: make_toed_slab*)
+FU-7's record (`archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md:424-429`, and *Provisional freeze: make_toed_slab*)
 says containment-probe hardening was deferred mid-implementation *"because it moves the
 `make_toed_slab` digest (member count **72 → 42**)"*, and that the freeze is PROVISIONAL
 until it lands.

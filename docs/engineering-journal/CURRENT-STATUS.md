@@ -2021,6 +2021,11 @@ future verifiers should stop re-deriving this from scratch.
 
 ### Longer-horizon milestones
 
+(Items 1-9 of this list's original "Ordered resumption checklist" — the 2026-08-05 critical
+path, including the execution runner referenced as "item 9 above" below — moved to
+[archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md](archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md)
+with the rest of that section.)
+
 10. Complete former M7 in its documented gate order:
 
    ```text
@@ -2110,3 +2115,11 @@ existing links still resolve; the full section is at the linked archive location
 ### CHECKPOINT 2026-08-09 — THE WEEPING TREANT'S FIRST `.chitubox`, TWICE, BYTE-IDENTICAL {#checkpoint-treant-artifact-2026-08-09}
 
 `checkpoint-treant-artifact-2026-08-09` moved to [archive/STATUS-ARCHIVE-2026-08-09.md#checkpoint-treant-artifact-2026-08-09](archive/STATUS-ARCHIVE-2026-08-09.md#checkpoint-treant-artifact-2026-08-09).
+
+Two sections named (not anchor-linked) by kept rows on this page also moved whole:
+
+- *Post-merge interaction delta — ATTRIBUTED and re-pinned (2026-08-05, late)*, named by the
+  ledger preamble and the FU-7 row, moved to
+  [archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md#post-merge-delta-2026-08-05](archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md#post-merge-delta-2026-08-05).
+- *Corpus defect fixes landed (2026-08-04, late)*, named by the FU-7 row, moved to
+  [archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md#corpus-fixes-2026-08-04](archive/STATUS-ARCHIVE-2026-08-04-2026-08-05.md#corpus-fixes-2026-08-04).
