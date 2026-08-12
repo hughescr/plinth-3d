@@ -214,6 +214,176 @@ because the docstring's warning turned out to be about a real precondition:
   2026-08-09 — a deferred ruling recorded only in a topic journal is a ruling
   nobody is ever prompted for, and the `1e-12` bound needs an item to trace to.
 
+**FU-36 EXECUTED (2026-08-12, `feature/sphere-generator`).** The seam is
+repaired in `crates/plinth-emit/src/lib.rs`: `sphere_triangles`/`sphere_point`
+now read two small `LazyLock` tables (`LATITUDE_TABLE`, `LONGITUDE_TABLE`)
+built once per process instead of calling `sin`/`cos` per vertex. The latitude
+table pins the poles (`sin=0.0, cos=±1.0` exactly) and the equator
+(`sin=1.0, cos=0.0` exactly, `SPHERE_LATITUDES=8` is even) rather than reading
+them off `f64::sin`/`f64::cos`, and fills every southern entry as the EXACT
+mirror of the already-computed northern entry (`(sin, cos) -> (sin, -cos)`)
+rather than a second, independently-rounded `sin_cos()` call — so the table is
+closed under negation by construction, not by luck of rounding. The triangle
+emission loop, its two skip conditions, and the 224-triangle-per-sphere count
+are untouched.
+
+**Exactly which table entries move, measured entry by entry (added 2026-08-12
+on review).** `sphere_point` keeps the original multiply associativity
+(`center + (radius*sin)*cos`), so it introduces no movement of its own and
+*all* movement versus `develop` comes from `LATITUDE_TABLE`. That movement is
+**not** confined to the poles and the equator, and an earlier in-code comment
+that said it was has been corrected. Comparing each entry against the pre-fix
+rule (`theta.sin()`, `theta.cos()` at `theta = PI*k/8`):
+
+| `k` | latitude | `sin` bits | `cos` bits | why |
+| --- | --- | --- | --- | --- |
+| 0 | north pole | same | same | `sin(0)`/`cos(0)` are already exact |
+| 1–3 | northern rings | same | same | `sin_cos()` agrees bitwise with separate `sin()`/`cos()` here |
+| 4 | equator | same | **MOVED** | pinned `0.0` vs `6.1232e-17` |
+| 5 | southern ring | same | **MOVED** | 1 ulp: exact mirror vs independent rounding |
+| 6 | southern ring | **MOVED** | **MOVED** | 1 ulp each, same cause |
+| 7 | southern ring | **MOVED** | same | 1 ulp, same cause |
+| 8 | south pole | **MOVED** | same | pinned `0.0` vs `1.2246e-16` — the seam itself |
+
+So every ring vertex at latitudes 5–7, not just the pole and equator rings,
+can move on the wire. This does not change any measurement below — the A/B
+pass measured per-record byte movement directly and is unaffected — but it is
+the statement **FU-51's baseline re-record must lean on**, so it is recorded
+as measured rather than as the narrower claim first written.
+
+Five new invariant tests land in the crate's existing `#[cfg(test)] mod
+tests`, called directly against `sphere_triangles` (crate-private) over a
+batch of 6 centres — including the origin, which the design note above
+warns is load-bearing: the pre-fix seam is bit-invisible at an off-axis
+centre, since `r * 1.2246e-16` is absorbed by f64 rounding once the centre
+carries real magnitude — × 3 fixture radii:
+
+- `every_emitted_sphere_is_a_closed_two_manifold` — every directed edge
+  pairs exactly once with its reverse, `V - E + F == 2`, no degenerate face.
+- `both_pole_caps_are_exact_single_apex_fans` — `center ± [0,0,r]` appears
+  bitwise-identically in exactly `SPHERE_LONGITUDES` triangles per pole, no
+  stray vertex within `r * 1e-12`.
+- `the_generated_sphere_is_exactly_north_south_symmetric` — at the origin,
+  the mesh's full vertex set is exactly closed under negating z alone, and
+  the two pole-cap triangle fans (32 of 224 triangles) are exactly closed
+  under "negate z, reverse winding"; at every centre, `LATITUDE_TABLE` itself
+  is proven exactly mirrored (`sin` equal, `cos` exact negation), which by
+  determinism of floating-point evaluation implies every north/south ring
+  pair is congruent everywhere, not only at the origin. **The full
+  224-triangle multiset is deliberately NOT asserted mirror-closed**: every
+  band away from the poles is split on a fixed diagonal regardless of
+  hemisphere (measured: only the 32 pole-cap triangles survive that check;
+  the other 192 do not), so mirroring a mid-band triangle lands on the
+  OTHER, un-emitted diagonal of its mirror quad. That is a property of the
+  pre-existing, out-of-scope tessellation convention, not a symmetry defect
+  — discovered by writing the stronger assertion first, measuring that it
+  failed on the FIXED generator too, and weakening it to what is actually
+  true rather than silently narrowing scope.
+- `the_sphere_triangle_count_and_soup_length_are_unchanged` — 224 triangles,
+  every centre and radius.
+- `sphere_triangles_still_refuses_a_non_positive_or_non_finite_radius`.
+
+**THREE of the five tests were verified to FAIL on the pre-fix generator; the
+other two pass on both sides by construction.** *Corrected 2026-08-12 on
+review.* This paragraph first read "**Each** new test was verified to FAIL on
+the pre-fix generator" — a claim over all five, which is **false for two of
+them** and is retracted here rather than quietly reworded. The two regression
+pins cover behaviour this fix does not touch, so they *cannot* fail on the
+pre-fix generator; claiming they did overstated the evidence.
+
+*Procedure, re-run 2026-08-12.* A whole-fix stash cannot be used, and the
+originally-recorded "stash/test/unstash" therefore could not have run all five
+tests as committed: `the_generated_sphere_is_exactly_north_south_symmetric`
+dereferences `LATITUDE_TABLE`, a static this fix introduces, so the committed
+test module does not compile against a fully stashed fix. Instead
+`build_latitude_table` **alone** is reverted to the pre-fix rule — plain
+`theta.sin()`, `theta.cos()` at `theta = PI*k/SPHERE_LATITUDES`, no pinning and
+no mirroring — which reproduces `develop`'s per-vertex latitude values
+bit-for-bit (`sphere_point`'s multiply associativity is unchanged by the fix,
+so the geometry emitted under that revert is identical to `develop`'s), then
+`cargo test -p plinth-emit --lib`, then restore. Measured outcome:
+
+- `both_pole_caps_are_exact_single_apex_fans` — **FAILED**: the south apex
+  reads `[3.96e-17, 1.64e-17, -r]` instead of `[0, 0, -r]`.
+- `every_emitted_sphere_is_a_closed_two_manifold` — **FAILED**: unmatched
+  directed edges around the south seam.
+- `the_generated_sphere_is_exactly_north_south_symmetric` — **FAILED**:
+  `(0, 0, -r)` has no exact z-mirror in the pre-fix vertex set.
+- `the_sphere_triangle_count_and_soup_length_are_unchanged` — **PASSED, and
+  necessarily so.** The fix moves vertex coordinates only; the capacity
+  formula `2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1)` and both skip
+  conditions are byte-identical to `develop`, so 224 was never in question —
+  as this section already says two paragraphs up ("the 224-triangle-per-sphere
+  count are untouched").
+- `sphere_triangles_still_refuses_a_non_positive_or_non_finite_radius` —
+  **PASSED, and necessarily so**: the `!radius.is_finite() || radius <= 0.0`
+  guard is byte-identical to `develop`.
+
+The last two are **regression pins, not defect-catching tests** — their own
+doc comments say as much ("guards against a future fix", "Keeps the existing
+radius rejection covered") — and they exist so a later change cannot move the
+triangle count or drop the radius guard unnoticed. The **three** that exercise
+the repair do demonstrably catch the defect they are named for, which is what
+the ruling asked for.
+
+**In-tree closure-defect measurement supersedes the docstring's old claim**
+that the `1e-12` bound exists "solely" to accommodate the seam. Measured in
+this crate's own fixture (`every_emitted_soup_is_closed_which_the_winding_decision_requires`,
+`eprintln!` instrumentation, reverted before commit): the seam's actual
+contribution to the wire-level closure defect (read back through
+`wire_triangles`, f32) was at most **1.52e-17** across the seven fixture
+records in both the origin and a displaced frame, BEFORE this fix — five
+orders below the `1e-12` bound the seam was blamed for. AFTER the fix the
+same maximum, **1.5200e-17** (record 2, the JointSphere, origin frame; every
+record in the displaced frame reads exactly `0`), reproduces almost exactly,
+because the residual was never the seam — it is f32 wire-quantization noise,
+present before and after. **The bound is tightened to `1e-15`** (~65x
+headroom over the measured maximum, three orders tighter than `1e-12`), and
+the docstring is rewritten to name the real residual and the measured
+maximum with its date, rather than restate the retired seam rationale. **The
+bound is never widened**, per FU-8b and this ruling.
+
+**A/B pass, byte movement measured not assumed**, per the process this
+section's *Bit-identity discharged by measurement* block established:
+`cargo build --release --offline --example first_artifact -p plinth-pipeline`,
+then `./target/release/examples/first_artifact --all` plus `-- "Weeping
+Treant v1.2"` by name — BEFORE = this lane's parent commit (`git stash` of
+the fix), AFTER = the fix, both built and run in `plinth-wt-sphere`. Of the
+seven sweep models, **`Sphere`, `make_overhang_table` and
+`make_raking_blade` gate-refuse on `UncoveredIslands` identically on both
+sides** (no artifact written, either side — a pre-existing coverage-gate
+finding unrelated to this fix). **The Weeping Treant also refuses
+identically on both sides**, on an unrelated, pre-existing cause:
+`HollowStageRefused { "drain planning refused: H1a planning memory
+10493918112 exceeds retained H0 cap 1073741824" }` — a drain-planning memory
+cap, not a sphere or winding defect. That leaves four models with a
+byte-comparable artifact:
+
+| Model | Records (before/after) | Bytes (before/after) | SHA-256 before | SHA-256 after | Scalars moved (by SegmentType) |
+|---|---|---|---|---|---|
+| `Cylinder` | 298/298 | 1,324,536/1,324,536 | `50c13016a480389bb17672a36e2dbec6fee3ffc069004058f69f108f77e002de` | `b8cb256a336de56bc79d2a11bf0939ed0b0d32a63dcc27dff085baaf16669543` | TIP(7): 19/90,720 across 3 records; SHAFT(9): 12/72,576 across 2 records |
+| `make_box` | 69/69 | 343,392/343,392 | `70bfec4e105b022cfabfd2fcba5b8bb9f57323dfd2604a6219a74926f93e2f03` | `ad7886cb409c8c750c8af6c89d247721e7fad7a0db86cd5fb5e954cc1a89d3eb` | TIP(7): 30/22,176 across 2 records; SHAFT(9): 15/20,160 across 1 record |
+| `make_toed_slab` | 402/402 | 2,110,344/2,110,344 | `12ebdcdee51ece68bfddad741998746d9dbc9eb89a08d055fb7e67f1be751a0d` | `0bb7a441c600568523706856d9a060652eeabc843f79c74305648b16f97a7058` | TIP(7): 59/129,024 across 4 records; SHAFT(9): 45/195,552 across 3 records |
+| `make_thin_fin` | 109/109 | 560,688/560,688 | `b73377981c3ecebb421f75702912cf4741bffba224a37cfea969f81675f94c1a` | `56f652c29d535a9ef764883af9260b3f8b7a48d59e056821d4cd417f3138ada3` | TIP(7): 45/34,272 across 3 records; SHAFT(9): 45/44,352 across 3 records |
+
+**Movement is confined to TIP(7) and SHAFT(9) records on every comparable
+model** — exactly the two segment kinds `sphere_triangles` feeds
+(`ContactSphere`, `JointSphere`) — **zero** movement measured on TAPER(1),
+JOINER(3), FLARE(4) or PAD_OR_BRIDGE(6). Record count and byte length are
+unchanged on every model, confirming the triangle-count invariant held in
+production, not only in the unit test. This matches the design's stated
+expectation exactly, including the direction: the four sweep models that DO
+move are the smaller synthetic fixtures, not the frustum/raft-heavy ones,
+because a fixture-scale sphere is more likely to land a contact or joint
+exactly at a coordinate a pole snap changes.
+
+Full `cargo test --workspace` and `cargo clippy --workspace --all-targets`
+were re-run clean after this fix landed; `exports/` was left clean and
+nothing from the A/B pass is committed. The per-record scalar-diff tool used
+for the table above was a throwaway (`rust/chitubox_io/examples/diff_artifacts.rs`,
+built on `chitubox_io`'s existing `sha2` dev-dependency) and is not part of
+the commit.
+
 **Batch-first shape to preserve:** `member_chain_specs`/`bottom_connected_specs`
 already batch at the whole-forest level (one call builds every `SegmentSpec`
 for a model), and `scripts/support_placement/emit.py::support_arrays()`

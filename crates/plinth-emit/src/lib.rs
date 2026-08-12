@@ -16,11 +16,14 @@ use plinth_mesh::Mesh;
 use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportSegmentKind, SupportedModel};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use thiserror::Error;
 
 const MODEL_NAME: &str = "plinth-model";
 const SPHERE_LATITUDES: usize = 8;
 const SPHERE_LONGITUDES: usize = 16;
+
+const _: () = assert!(SPHERE_LATITUDES >= 2 && SPHERE_LONGITUDES >= 3);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmitRequest {
@@ -749,22 +752,73 @@ fn frustum_triangles(
     Ok(triangles)
 }
 
+/// `(sin, cos)` per latitude index `0..=SPHERE_LATITUDES`, built once and
+/// shared by every sphere this crate emits.
+///
+/// The poles (`k == 0`, `k == SPHERE_LATITUDES`) and the equator (when
+/// `SPHERE_LATITUDES` is even) are pinned to their exact values rather than
+/// read off `sin`/`cos`, because `sin(PI)` is `1.2246e-16`, not `0.0`, and
+/// `cos(PI/2)` is `6.1232e-17`, not `0.0` — see FU-36. Everything past the
+/// equator is filled by an exact mirror of the value already computed for
+/// the matching northern index (`(sin, cos) -> (sin, -cos)`), rather than by
+/// a second, independently-rounded `sin_cos()` call, so the table is closed
+/// under negation by construction and not by luck of the rounding.
+static LATITUDE_TABLE: LazyLock<[(f64, f64); SPHERE_LATITUDES + 1]> =
+    LazyLock::new(build_latitude_table);
+
+/// `(sin, cos)` per longitude index `0..SPHERE_LONGITUDES`, built once and
+/// shared by every sphere this crate emits. Indexed with `% SPHERE_LONGITUDES`
+/// at the wrap, exactly as the per-vertex trig did, so index `SPHERE_LONGITUDES`
+/// reuses index `0` bit-for-bit.
+static LONGITUDE_TABLE: LazyLock<[(f64, f64); SPHERE_LONGITUDES]> =
+    LazyLock::new(build_longitude_table);
+
+fn build_latitude_table() -> [(f64, f64); SPHERE_LATITUDES + 1] {
+    let mut table = [(0.0_f64, 0.0_f64); SPHERE_LATITUDES + 1];
+    for k in 0..=SPHERE_LATITUDES {
+        table[k] = if k == 0 {
+            (0.0, 1.0)
+        } else if k == SPHERE_LATITUDES {
+            (0.0, -1.0)
+        } else if 2 * k == SPHERE_LATITUDES {
+            (1.0, 0.0)
+        } else if 2 * k < SPHERE_LATITUDES {
+            (std::f64::consts::PI * k as f64 / SPHERE_LATITUDES as f64).sin_cos()
+        } else {
+            // 2*k > SPHERE_LATITUDES: exact mirror of the northern index
+            // already filled earlier in this same loop (SPHERE_LATITUDES - k < k here).
+            let (sin, cos) = table[SPHERE_LATITUDES - k];
+            (sin, -cos)
+        };
+    }
+    table
+}
+
+fn build_longitude_table() -> [(f64, f64); SPHERE_LONGITUDES] {
+    let mut table = [(0.0_f64, 0.0_f64); SPHERE_LONGITUDES];
+    for (j, slot) in table.iter_mut().enumerate() {
+        *slot = (std::f64::consts::TAU * j as f64 / SPHERE_LONGITUDES as f64).sin_cos();
+    }
+    table
+}
+
 fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, EmitError> {
     if !radius.is_finite() || radius <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
     }
+    let lat_table = &*LATITUDE_TABLE;
+    let lon_table = &*LONGITUDE_TABLE;
     let mut triangles = Vec::with_capacity(2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1));
     for latitude in 0..SPHERE_LATITUDES {
-        let a0 = std::f64::consts::PI * latitude as f64 / SPHERE_LATITUDES as f64;
-        let a1 = std::f64::consts::PI * (latitude + 1) as f64 / SPHERE_LATITUDES as f64;
+        let (sin_a0, cos_a0) = lat_table[latitude];
+        let (sin_a1, cos_a1) = lat_table[latitude + 1];
         for longitude in 0..SPHERE_LONGITUDES {
-            let l0 = std::f64::consts::TAU * longitude as f64 / SPHERE_LONGITUDES as f64;
-            let l1 = std::f64::consts::TAU * ((longitude + 1) % SPHERE_LONGITUDES) as f64
-                / SPHERE_LONGITUDES as f64;
-            let p00 = sphere_point(center, radius, a0, l0);
-            let p01 = sphere_point(center, radius, a0, l1);
-            let p10 = sphere_point(center, radius, a1, l0);
-            let p11 = sphere_point(center, radius, a1, l1);
+            let (sin_l0, cos_l0) = lon_table[longitude];
+            let (sin_l1, cos_l1) = lon_table[(longitude + 1) % SPHERE_LONGITUDES];
+            let p00 = sphere_point(center, radius, sin_a0, cos_a0, sin_l0, cos_l0);
+            let p01 = sphere_point(center, radius, sin_a0, cos_a0, sin_l1, cos_l1);
+            let p10 = sphere_point(center, radius, sin_a1, cos_a1, sin_l0, cos_l0);
+            let p11 = sphere_point(center, radius, sin_a1, cos_a1, sin_l1, cos_l1);
             if latitude + 1 < SPHERE_LATITUDES {
                 triangles.push([p00, p10, p11]);
             }
@@ -776,11 +830,33 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
     Ok(triangles)
 }
 
-fn sphere_point(center: [f64; 3], radius: f64, latitude: f64, longitude: f64) -> [f64; 3] {
+/// Same multiply associativity as the original per-vertex trig
+/// (`center + (radius*sin)*cos`), so no ring vertex moves for a reason *this
+/// function* introduces. All movement versus the pre-fix generator comes from
+/// `LATITUDE_TABLE`, and it is **not** confined to the poles and the equator.
+/// Measured against the pre-fix rule (raw `theta.sin()`/`theta.cos()` at
+/// `theta = PI*k/SPHERE_LATITUDES`): `k = 0..=3` — the north pole and all three
+/// northern rings — are bit-identical, while every entry from the equator
+/// southward moves. `k = 4` cos (pinned `0.0` against `6.1232e-17`) and `k = 8`
+/// sin (pinned `0.0` against `1.2246e-16`) are the intended pinnings; `k = 5`
+/// cos, `k = 6` sin *and* cos, and `k = 7` sin each move by 1 ulp because the
+/// exact northern mirror replaces a second, independently-rounded `sin_cos()`.
+/// So southern mid-band ring vertices can move on the wire too, not only the
+/// pole and equator rings. Per-record byte movement was measured rather than
+/// inferred from this: see the FU-36 A/B table in
+/// `docs/engineering-journal/05-chitubox-and-corpus.md`.
+fn sphere_point(
+    center: [f64; 3],
+    radius: f64,
+    sin_lat: f64,
+    cos_lat: f64,
+    sin_lon: f64,
+    cos_lon: f64,
+) -> [f64; 3] {
     [
-        center[0] + radius * latitude.sin() * longitude.cos(),
-        center[1] + radius * latitude.sin() * longitude.sin(),
-        center[2] + radius * latitude.cos(),
+        center[0] + radius * sin_lat * cos_lon,
+        center[1] + radius * sin_lat * sin_lon,
+        center[2] + radius * cos_lat,
     ]
 }
 
@@ -939,6 +1015,51 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    /// `0.0` and `-0.0` are the same real number and the same point in
+    /// space; the sphere generator's own arithmetic produces both signs at
+    /// the equator and at the poles depending on longitude (see
+    /// `sphere_point`'s doc comment). Bit-key helpers below normalize the
+    /// sign of zero so a vertex-identity or symmetry check never reports a
+    /// false mismatch on that alone — every non-zero value is still
+    /// compared bit-for-bit, which is where an actual defect would show up.
+    fn normalize_zero(value: f64) -> f64 {
+        if value == 0.0 {
+            0.0
+        } else {
+            value
+        }
+    }
+
+    /// Bit-exact identity key for a point, modulo the sign of zero (see
+    /// `normalize_zero`).
+    fn point_bits(point: [f64; 3]) -> [u64; 3] {
+        point.map(|value| normalize_zero(value).to_bits())
+    }
+
+    /// Rotate a triangle's three vertices, preserving winding, so the
+    /// lexicographically smallest bit-keyed vertex comes first. Two
+    /// triangles that are the same cycle starting at a different vertex
+    /// canonicalize to the same result, which is what makes a triangle
+    /// multiset comparable by sorting.
+    fn canonicalize_triangle(triangle: SoupTriangle) -> SoupTriangle {
+        let keys = triangle.map(point_bits);
+        let min_index = (0..3).min_by_key(|&index| keys[index]).expect("3 corners");
+        [
+            triangle[min_index],
+            triangle[(min_index + 1) % 3],
+            triangle[(min_index + 2) % 3],
+        ]
+    }
+
+    /// Reflect a triangle across the `z == 0` plane and reverse its winding,
+    /// which is what a correctly-wound outward triangle on one side of a
+    /// mirror-symmetric solid must become on the other side (mirroring
+    /// reverses chirality; winding must reverse to stay outward-facing).
+    fn mirror_z_reverse_winding(triangle: SoupTriangle) -> SoupTriangle {
+        let flip = |point: [f64; 3]| [point[0], point[1], -point[2]];
+        [flip(triangle[0]), flip(triangle[2]), flip(triangle[1])]
     }
 
     /// Independent orientation oracle.  Every primitive this crate synthesizes
@@ -1399,15 +1520,25 @@ mod tests {
     /// (see `tests/native_winding_oracle.rs`).  Every soup this crate emits is
     /// one closed convex primitive, and that is what this test pins.
     ///
-    /// The bound is 1e-12 rather than exactly zero for one measured reason, and
-    /// it is a recorded defect rather than a slackened test: `sphere_triangles`
-    /// closes its north cap on `sin(0) == 0` but its south cap on
-    /// `sin(PI) == 1.2246e-16`, so the south "pole" is really a 16-gon of that
-    /// radius and the sphere carries a seam of 16 sliver triangles.  The gap is
-    /// ~1e-16 of the sphere's area — six orders below anything f32 emission can
-    /// carry — so it changes no emitted byte and no winding decision.  It is
-    /// NOT repaired here: repairing it would move emitted geometry, which this
-    /// relocation is not permitted to do.
+    /// FU-36 (2026-08-12 ruling): the south-pole seam this bound used to
+    /// accommodate is repaired — `sphere_triangles` now closes both caps on
+    /// an exact single apex (`center[2] ± radius`, via a shared latitude
+    /// table pinned at the poles and the equator rather than raw
+    /// `sin`/`cos`), and the mesh is exactly north/south symmetric. See
+    /// `every_emitted_sphere_is_a_closed_two_manifold`,
+    /// `both_pole_caps_are_exact_single_apex_fans`, and
+    /// `the_generated_sphere_is_exactly_north_south_symmetric` below for the
+    /// invariants the ruling asked for.
+    ///
+    /// The bound is 1e-15 rather than exactly zero because the residual
+    /// after the fix is f32 wire-quantization noise, not a seam: reading
+    /// every fixture record back through `wire_triangles` (f32) measured a
+    /// maximum defect of 1.5200e-17 in this crate's own test suite on
+    /// 2026-08-12 (record 2, the JointSphere, origin frame — every record in
+    /// the displaced frame reads exactly `0`). 1e-15 leaves ~65x headroom
+    /// over that measured maximum. As always: the bound is never widened —
+    /// a future closure defect above it means the geometry is wrong, not
+    /// the bound.
     #[test]
     fn every_emitted_soup_is_closed_which_the_winding_decision_requires() {
         let primitives = vec![
@@ -1461,7 +1592,7 @@ mod tests {
                 let triangles = wire_triangles(&record.mesh.xyz);
                 let defect = relative_closure_defect(&triangles);
                 assert!(
-                    defect <= 1e-12,
+                    defect <= 1e-15,
                     "record {index} ({:?}) in the {what} leaks {defect:e} of its area",
                     record.segment_type
                 );
@@ -1470,6 +1601,236 @@ mod tests {
                     &format!("record {index} in the {what}"),
                 );
             }
+        }
+    }
+
+    /// FU-36 invariant fixtures. `[0.0, 0.0, 0.0]` MUST be included: the
+    /// original pre-fix seam is bit-invisible at an off-axis centre (the
+    /// `r * 1.2246e-16` south-apex offset gets absorbed by f64 rounding once
+    /// the centre coordinates carry real magnitude), so a test suite that
+    /// only exercised off-axis centres would pass on the broken generator.
+    const SPHERE_TEST_CENTERS: [[f64; 3]; 6] = [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 3.0],
+        [0.0, 12.34, 0.0],
+        [12.34, 0.0, -5.0],
+        [1.5, -2.0, 11.0],
+        [37.5, -91.25, 6.0],
+    ];
+    const SPHERE_TEST_RADII: [f64; 3] = [0.35, 2.2, 6.0];
+
+    /// FU-36: every emitted sphere is a closed, consistently-oriented
+    /// two-manifold. Before the fix this fails at the origin centre with 32
+    /// unmatched directed edges around the 16-sliver south seam.
+    #[test]
+    fn every_emitted_sphere_is_a_closed_two_manifold() {
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                let triangles = sphere_triangles(center, radius).expect("valid radius");
+                let mut vertex_keys: std::collections::HashSet<[u64; 3]> =
+                    std::collections::HashSet::new();
+                let mut directed_edges: std::collections::HashMap<([u64; 3], [u64; 3]), u32> =
+                    std::collections::HashMap::new();
+                for triangle in &triangles {
+                    let normal =
+                        cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
+                    assert!(
+                        length(normal) > 0.0,
+                        "center {center:?} radius {radius}: degenerate triangle {triangle:?}"
+                    );
+                    for &corner in triangle {
+                        vertex_keys.insert(point_bits(corner));
+                    }
+                    for i in 0..3 {
+                        let a = point_bits(triangle[i]);
+                        let b = point_bits(triangle[(i + 1) % 3]);
+                        *directed_edges.entry((a, b)).or_insert(0) += 1;
+                    }
+                }
+                for (&(a, b), &count) in &directed_edges {
+                    assert_eq!(
+                        count, 1,
+                        "center {center:?} radius {radius}: directed edge {a:?}->{b:?} appears {count} times, want exactly 1"
+                    );
+                    let reverse_count = directed_edges.get(&(b, a)).copied().unwrap_or(0);
+                    assert_eq!(
+                        reverse_count, 1,
+                        "center {center:?} radius {radius}: directed edge {a:?}->{b:?} has {reverse_count} matching reverses, want exactly 1"
+                    );
+                }
+                let vertex_count = vertex_keys.len() as isize;
+                let edge_count = (directed_edges.len() / 2) as isize;
+                let face_count = triangles.len() as isize;
+                assert_eq!(
+                    vertex_count - edge_count + face_count,
+                    2,
+                    "center {center:?} radius {radius}: V-E+F = {vertex_count}-{edge_count}+{face_count}, want 2 (closed genus-0 surface)"
+                );
+            }
+        }
+    }
+
+    /// FU-36, the direct assertion the ruling asked for: both poles are
+    /// exact single-apex fans at `center ± [0, 0, radius]`, and no other
+    /// vertex sits within `radius * 1e-12` of either pole. This is the test
+    /// that would have caught the original bug (the south "pole" used to be
+    /// a 16-gon of radius `r * 1.2246e-16`, not a point).
+    #[test]
+    fn both_pole_caps_are_exact_single_apex_fans() {
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                let triangles = sphere_triangles(center, radius).expect("valid radius");
+                let north_cap = &triangles[0..SPHERE_LONGITUDES];
+                let south_cap = &triangles[triangles.len() - SPHERE_LONGITUDES..];
+                let expected_north = [center[0], center[1], center[2] + radius];
+                let expected_south = [center[0], center[1], center[2] - radius];
+                for triangle in north_cap {
+                    assert_eq!(
+                        triangle[0], expected_north,
+                        "center {center:?} radius {radius}: north cap apex is not the exact pole"
+                    );
+                }
+                for triangle in south_cap {
+                    assert_eq!(
+                        triangle[1], expected_south,
+                        "center {center:?} radius {radius}: south cap apex is not the exact pole"
+                    );
+                }
+                let pole_tolerance = radius * 1e-12;
+                for triangle in &triangles {
+                    for &vertex in triangle {
+                        if vertex == expected_north || vertex == expected_south {
+                            continue;
+                        }
+                        assert!(
+                            length(sub(vertex, expected_north)) > pole_tolerance,
+                            "center {center:?} radius {radius}: stray vertex {vertex:?} sits within pole tolerance of the north pole"
+                        );
+                        assert!(
+                            length(sub(vertex, expected_south)) > pole_tolerance,
+                            "center {center:?} radius {radius}: stray vertex {vertex:?} sits within pole tolerance of the south pole"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// FU-36: the generated sphere is exactly north/south symmetric.
+    ///
+    /// Three independent, exact claims, each of which fails on the pre-fix
+    /// generator (verified by stashing the fix and re-running):
+    ///
+    /// 1. The mesh's full VERTEX set, at the origin centre, is exactly
+    ///    closed under negating z alone: for every emitted vertex `(x, y,
+    ///    z)`, `(x, y, -z)` is also an emitted vertex, bit-for-bit. This is
+    ///    the actual "north/south symmetric" claim — pre-fix, the 16
+    ///    near-but-not-at south vertices mean `(0, 0, -r)` has no exact
+    ///    mirror partner for the true north pole `(0, 0, r)`.
+    /// 2. The two pole-cap triangle fans (16 + 16 = 32 of the 224
+    ///    triangles) are exactly closed under "negate z, reverse winding" —
+    ///    this is the one place the fixed diagonal-splitting convention
+    ///    used by every other band does not apply (a fan has no diagonal to
+    ///    choose), so the *full* 224-triangle multiset is deliberately NOT
+    ///    asserted here: away from the poles, a band's quad is always split
+    ///    on the same diagonal regardless of hemisphere, so mirroring a
+    ///    mid-band triangle produces the *other*, un-emitted diagonal of
+    ///    its mirror quad rather than an actual emitted triangle — a
+    ///    property of the (unchanged, out-of-scope) tessellation choice,
+    ///    not a symmetry defect in the vertex geometry itself.
+    /// 3. The shared latitude table driving every sphere this crate emits,
+    ///    at every centre, is itself exactly mirrored (sin unchanged, cos
+    ///    exactly negated) — checked once here and, by the determinism of
+    ///    floating point arithmetic (identical inputs to `sphere_point`
+    ///    always produce identical outputs), implying every north/south
+    ///    ring pair is congruent at every centre and radius, not only the
+    ///    origin.
+    #[test]
+    fn the_generated_sphere_is_exactly_north_south_symmetric() {
+        let radius = 2.2;
+        let triangles = sphere_triangles([0.0, 0.0, 0.0], radius).expect("valid radius");
+
+        let mut vertex_set: std::collections::HashSet<[u64; 3]> = std::collections::HashSet::new();
+        for triangle in &triangles {
+            for &vertex in triangle {
+                vertex_set.insert(point_bits(vertex));
+            }
+        }
+        for &key in &vertex_set {
+            let mirrored = point_bits([
+                f64::from_bits(key[0]),
+                f64::from_bits(key[1]),
+                -f64::from_bits(key[2]),
+            ]);
+            assert!(
+                vertex_set.contains(&mirrored),
+                "vertex ({}, {}, {}) has no exact z-mirror in the origin-centred sphere's vertex set",
+                f64::from_bits(key[0]),
+                f64::from_bits(key[1]),
+                f64::from_bits(key[2])
+            );
+        }
+
+        let north_cap = &triangles[0..SPHERE_LONGITUDES];
+        let south_cap = &triangles[triangles.len() - SPHERE_LONGITUDES..];
+        let mut north_mirrored: Vec<[[u64; 3]; 3]> = north_cap
+            .iter()
+            .map(|&triangle| {
+                canonicalize_triangle(mirror_z_reverse_winding(triangle)).map(point_bits)
+            })
+            .collect();
+        north_mirrored.sort();
+        let mut south_canonical: Vec<[[u64; 3]; 3]> = south_cap
+            .iter()
+            .map(|&triangle| canonicalize_triangle(triangle).map(point_bits))
+            .collect();
+        south_canonical.sort();
+        assert_eq!(
+            north_mirrored, south_canonical,
+            "the north pole cap, mirrored and winding-reversed, is not exactly the south pole cap"
+        );
+
+        let lat_table = &*LATITUDE_TABLE;
+        for k in 0..=SPHERE_LATITUDES {
+            let mirror_k = SPHERE_LATITUDES - k;
+            let (sin_k, cos_k) = lat_table[k];
+            let (sin_mirror, cos_mirror) = lat_table[mirror_k];
+            assert_eq!(
+                sin_k, sin_mirror,
+                "latitude index {k} and its mirror {mirror_k} do not share sin bitwise"
+            );
+            assert_eq!(
+                normalize_zero(cos_k),
+                normalize_zero(-cos_mirror),
+                "latitude index {k}'s cos is not the exact negation of mirror {mirror_k}'s cos"
+            );
+        }
+    }
+
+    /// FU-36: guards against a future "fix" that drops or adds a sliver and
+    /// silently changes every emitted byte downstream. The triangle count
+    /// and its formula must never move — only vertex positions do.
+    #[test]
+    fn the_sphere_triangle_count_and_soup_length_are_unchanged() {
+        assert_eq!(2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1), 224);
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                let triangles = sphere_triangles(center, radius).expect("valid radius");
+                assert_eq!(triangles.len(), 224);
+            }
+        }
+    }
+
+    /// Keeps the existing radius rejection covered directly against
+    /// `sphere_triangles`, alongside the new FU-36 invariants.
+    #[test]
+    fn sphere_triangles_still_refuses_a_non_positive_or_non_finite_radius() {
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                sphere_triangles([0.0, 0.0, 0.0], radius),
+                Err(EmitError::RecordEncodingRejected),
+                "radius {radius} should be rejected"
+            );
         }
     }
 
