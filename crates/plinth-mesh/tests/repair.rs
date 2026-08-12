@@ -1,21 +1,30 @@
 //! The repair pre-pass, one census defect class at a time.
 //!
-//! Each of the three classes gets the same two questions asked of it: did the
+//! **Two classes, not three.** Per the owner ruling of 2026-08-12
+//! (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+//! §4, FU-47), a point-touch is not a closed-solid defect — resin cannot flow
+//! through a point — so the pinch-split action is retired and the pinch
+//! fixtures are now doctrine fixtures for *that*: `make_pinched_boxes()`
+//! proves a point-touch passes the gate untouched, and
+//! `make_edge_shared_boxes()` proves a non-manifold edge is still refused even
+//! though it also carries point-only pinches at its endpoints.
+//!
+//! The two remaining classes get the same two questions asked of them: did the
 //! pass remove the defect the census named, and does the repaired mesh carry
-//! **no** cut flag at all afterwards? The second question is asked with
-//! `build_face_topology(mesh, WeldPolicy::ExactBits)` and a
-//! `cut_flags().iter().all(|f| *f == 0)` — which is not a paraphrase of the
-//! closed-solid gate, it is the same two lines
+//! **no** closed-solid-gate cut flag afterwards? The second question is asked
+//! with `build_face_topology(mesh, WeldPolicy::ExactBits)` and a
+//! `cut_flags().iter().all(|f| *f & TOPOLOGY_CUT_CLOSED_SOLID_MASK == 0)` —
+//! which is not a paraphrase of the closed-solid gate, it is the same mask
 //! `plinth_hollow::validate_closed_mesh` runs. `plinth-hollow`'s own
-//! `repair_prepass_rescues_each_census_defect_class` then puts the identical
-//! fixtures through the real gate function, so the claim does not rest on this
-//! file agreeing with production by inspection.
+//! `repair_gate` tests then put the identical fixtures through the real gate
+//! function, so the claim does not rest on this file agreeing with production
+//! by inspection.
 
 use plinth_mesh::{
     build_face_topology, make_box_default, make_doubled_sheet_box, make_duplicated_face_box,
     make_dust_shard_box, make_edge_shared_boxes, make_overhang_table, make_pinched_boxes,
     make_thin_fin, make_toed_slab, make_triply_wound_face_box, repair_mesh, write_binary_stl,
-    DuplicateDisposition, Mesh, UnrepairedPinch, WeldPolicy, TOPOLOGY_CUT_DUPLICATE,
+    DuplicateDisposition, Mesh, WeldPolicy, TOPOLOGY_CUT_CLOSED_SOLID_MASK, TOPOLOGY_CUT_DUPLICATE,
     TOPOLOGY_CUT_POINT_ONLY,
 };
 
@@ -27,7 +36,7 @@ fn gate_clean(mesh: &Mesh) -> bool {
             .expect("fixture topology")
             .cut_flags()
             .iter()
-            .all(|flags| *flags == 0)
+            .all(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK == 0)
 }
 
 fn cut_faces(mesh: &Mesh, mask: u8) -> usize {
@@ -49,13 +58,12 @@ fn stl_bytes(mesh: &Mesh, name: &str) -> Vec<u8> {
 }
 
 /// **The contract that keeps this stage from being a liability.** A model with
-/// none of the three census defects is returned as it arrived — same arrays,
+/// neither remaining census defect is returned as it arrived — same arrays,
 /// same order, and the same bytes on disk after the f32 STL round trip that
 /// every downstream consumer will perform on it.
 ///
 /// Proved through the round trip rather than through `Mesh` equality alone,
-/// because "equal in f64" and "equal on the wire" are different claims and the
-/// pinch nudge lives precisely in the gap between them.
+/// because "equal in f64" and "equal on the wire" are different claims.
 #[test]
 fn a_clean_mesh_passes_through_byte_identical() {
     // `write_binary_stl` refuses any coordinate that is not exactly f32, so
@@ -90,16 +98,23 @@ fn a_clean_mesh_passes_through_byte_identical() {
     }
 }
 
-/// Class 1. The shard fixture is refused before repair — it kisses the body at
-/// one vertex, which is a pinch — and is a plain box afterwards.
+/// Class 1. The shard fixture kisses the body at one vertex, which is a
+/// point-touch and, per FU-47, not a closed-solid defect — the raw fixture
+/// already passes the gate. The shard-strip action does not read the gate: it
+/// classifies dust by its own six triage criteria, independent of any cut
+/// flag, so the pre-pass strips the shard anyway and the mesh is a plain box
+/// afterwards.
 #[test]
-fn a_dust_shard_is_stripped_and_the_result_passes_the_gate() {
+fn a_dust_shard_already_passes_the_gate_and_is_stripped_anyway() {
     let mesh = make_dust_shard_box().expect("shard fixture");
     assert!(
-        !gate_clean(&mesh),
-        "the fixture must actually be refused, or it proves nothing"
+        gate_clean(&mesh),
+        "a point-touch is not a closed-solid defect (FU-47)"
     );
-    assert!(cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY) > 0);
+    assert!(
+        cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY) > 0,
+        "the flag is still measured, only its gate verdict changed"
+    );
 
     let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
@@ -112,10 +127,6 @@ fn a_dust_shard_is_stripped_and_the_result_passes_the_gate() {
     assert_eq!(evidence.shards.components_seen, 2);
     assert!(evidence.shards.skipped.is_none());
     assert!(evidence.duplicates.groups.is_empty());
-    assert!(
-        evidence.pinches.splits.is_empty(),
-        "removing the shard removes the pinch; nothing should need splitting"
-    );
     assert_eq!(repaired.mesh().tris().len(), 12);
     assert!(gate_clean(repaired.mesh()));
     assert!(evidence
@@ -141,7 +152,6 @@ fn a_duplicate_face_is_dropped_and_the_result_passes_the_gate() {
     assert_eq!(group.kept, vec![0], "the first by source order survives");
     assert_eq!(group.removed, vec![12]);
     assert!(evidence.shards.faces_removed.is_empty());
-    assert!(evidence.pinches.splits.is_empty());
     assert_eq!(repaired.mesh().tris().len(), 12);
     assert!(gate_clean(repaired.mesh()));
 }
@@ -315,17 +325,54 @@ fn a_model_that_is_only_a_coincident_flap_keeps_a_face_and_is_left_to_the_gate()
     );
 }
 
+/// **A point-touch is not a defect (FU-47): the pass leaves it alone, and the
+/// gate agrees.**
+///
+/// Two boxes joined at a single shared corner vertex — five triangles of one
+/// box and four of the other meeting in two locally disconnected fans. Under
+/// the pre-ruling doctrine this was split into two points a few nanometres
+/// apart to satisfy the closed-solid gate; under the ruling, resin cannot flow
+/// through a point either way, so the two shells legitimately touch and
+/// nothing needs opening. The mesh passes the gate as-is and the pre-pass has
+/// nothing to do.
+#[test]
+fn a_pinch_vertex_is_left_alone_because_it_is_not_a_defect() {
+    let mesh = make_pinched_boxes().expect("pinch fixture");
+    assert!(
+        gate_clean(&mesh),
+        "a point-touch is not a closed-solid defect (FU-47)"
+    );
+    assert_eq!(
+        cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY),
+        9,
+        "the flag is still measured, only its gate verdict changed"
+    );
+
+    let repaired = repair_mesh(&mesh);
+    let evidence = repaired.evidence();
+    assert!(
+        !evidence.changed(),
+        "nothing needed repairing: {}",
+        evidence.summary_line()
+    );
+    assert_eq!(repaired.mesh().verts(), mesh.verts());
+    assert_eq!(repaired.mesh().tris(), mesh.tris());
+    assert!(gate_clean(repaired.mesh()));
+}
+
 /// **A defect class this pass does not own, refused instead of performed.**
 ///
 /// Two boxes sharing one whole edge have a non-manifold edge, which fan
-/// connectivity cannot cross — so both of its endpoints present as pinches
-/// even though the sheets meet along a line. Splitting one would take
-/// `nonmanifold_edges` 1 -> 0 and `boundary_edges` 2 -> 3 and call it a
-/// repair. The census found zero non-manifold edges and this module
-/// implements no speculative fourth class, so the pass names the shape, leaves
-/// the mesh exactly as it arrived, and lets the unchanged gate refuse it.
+/// connectivity cannot cross — so both of its endpoints present as
+/// `TOPOLOGY_CUT_POINT_ONLY` pinches even though the sheets meet along a line,
+/// not at a point. FU-47 took the pinch flag out of the closed-solid gate, but
+/// the non-manifold edge is untouched by that ruling and still refuses the
+/// mesh on its own. The pre-pass has no action that could open this junction
+/// — the pinch-split action that used to refuse it explicitly is gone
+/// entirely — so the mesh reaches the gate exactly as it arrived, and the gate
+/// is what refuses it.
 #[test]
-fn fans_severed_by_a_non_manifold_edge_are_refused_not_torn() {
+fn a_pinch_held_apart_by_a_non_manifold_edge_is_still_refused_by_the_gate() {
     let mesh = make_edge_shared_boxes().expect("edge-shared fixture");
     let before = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("fixture topology");
     assert_eq!(
@@ -334,29 +381,17 @@ fn fans_severed_by_a_non_manifold_edge_are_refused_not_torn() {
         "the fixture must actually carry the defect it is named for"
     );
     assert!(cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY) > 0);
+    assert!(
+        !gate_clean(&mesh),
+        "a non-manifold edge is still a closed-solid defect after FU-47"
+    );
 
     let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert!(
-        evidence.pinches.splits.is_empty(),
-        "no split may be performed here: {}",
-        evidence.summary_line()
-    );
-    assert_eq!(
-        evidence.pinches.unrepaired.len(),
-        2,
-        "both endpoints of the shared edge are refused: {:?}",
-        evidence.pinches.unrepaired
-    );
-    for refusal in &evidence.pinches.unrepaired {
-        assert!(
-            matches!(refusal, UnrepairedPinch::FanSeveredByEdge { .. }),
-            "{refusal:?}"
-        );
-    }
-    assert!(
         !evidence.changed(),
-        "a pass that repaired nothing must not have changed anything"
+        "no action in this pass touches a non-manifold edge: {}",
+        evidence.summary_line()
     );
     assert_eq!(repaired.mesh().verts(), mesh.verts());
     assert_eq!(repaired.mesh().tris(), mesh.tris());
@@ -372,91 +407,7 @@ fn fans_severed_by_a_non_manifold_edge_are_refused_not_torn() {
         0,
         "and no crack was opened in it"
     );
-}
-
-/// Class 3. Two boxes joined at a point become two boxes joined at nothing,
-/// and the displacement that separates them is smaller than a printed voxel by
-/// four orders of magnitude.
-#[test]
-fn a_pinch_vertex_is_split_and_the_result_passes_the_gate() {
-    let mesh = make_pinched_boxes().expect("pinch fixture");
-    assert!(!gate_clean(&mesh));
-    assert_eq!(
-        cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY),
-        9,
-        "five triangles of one box and four of the other meet at the shared corner"
-    );
-
-    let repaired = repair_mesh(&mesh);
-    let evidence = repaired.evidence();
-    assert!(evidence.shards.faces_removed.is_empty());
-    assert!(evidence.duplicates.groups.is_empty());
-    assert_eq!(evidence.pinches.splits.len(), 1);
-    assert!(evidence.pinches.unrepaired.is_empty());
-
-    let split = &evidence.pinches.splits[0];
-    assert_eq!(split.position_mm, [5.0, 5.0, 10.0]);
-    assert_eq!(
-        split.anchored_faces, 5,
-        "the fan holding the lowest face id never moves"
-    );
-    assert_eq!(split.fans.len(), 1);
-    let moved = &split.fans[0];
-    assert_eq!(moved.faces, 4);
-    assert!(
-        moved.ulp_steps.is_power_of_two(),
-        "the escalation doubles: {moved:?}"
-    );
-    // Bounded by REPAIR_PINCH_SPLIT_MAX_MM (5e-5 mm) and, in fact, far below
-    // it: at 10 mm coordinates two f32 ULPs is about 2 nanometres, roughly
-    // 1/7000 of the printer's 14 um narrow pixel.
-    assert!(
-        moved.displacement_mm > 0.0 && moved.displacement_mm < 1.0e-5,
-        "{moved:?}"
-    );
-
-    // No face is lost, and the vertex count is unchanged: the fan that moved
-    // released its old copy of the shared corner and took a new one, and the
-    // released copy is compacted away. What used to be one welded point is now
-    // two points a couple of nanometres apart.
-    assert_eq!(repaired.mesh().tris().len(), mesh.tris().len());
-    assert_eq!(repaired.mesh().verts().len(), mesh.verts().len());
-    let corner = [5.0, 5.0, 10.0];
-    let near = |vertex: &[f64; 3]| (0..3).all(|axis| (vertex[axis] - corner[axis]).abs() < 1.0e-4);
-    assert_eq!(
-        repaired
-            .mesh()
-            .verts()
-            .iter()
-            .filter(|vertex| **vertex == corner)
-            .count(),
-        1,
-        "the anchored fan keeps the original position exactly"
-    );
-    assert_eq!(
-        repaired.mesh().verts().iter().filter(|v| near(v)).count(),
-        2,
-        "and the moved fan sits beside it, not on it"
-    );
-    assert!(gate_clean(repaired.mesh()));
-}
-
-/// The split has to survive the *two* erasures that can undo it: the exact-bit
-/// weld, which keys on `to_bits()`, and the f32 binary-STL round trip. Proving
-/// the second means reading the mesh back off disk and re-running the gate on
-/// what was actually written — the audit-the-file-as-written rule applied to a
-/// repair.
-#[test]
-fn a_split_pinch_survives_the_f32_stl_round_trip() {
-    let repaired = repair_mesh(&make_pinched_boxes().expect("pinch fixture"));
-    let path = std::env::temp_dir().join(format!("plinth-repair-pinch-{}.stl", std::process::id()));
-    write_binary_stl(&path, repaired.mesh()).expect("write");
-    let reloaded = plinth_mesh::load_binary_stl(&path, WeldPolicy::None).expect("reload");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        gate_clean(&reloaded),
-        "a split that only exists in f64 is not a split"
-    );
+    assert!(!gate_clean(repaired.mesh()));
 }
 
 /// Nothing here reads a clock, an environment variable, or an RNG, and nothing
@@ -498,23 +449,4 @@ fn repairing_a_repaired_mesh_is_a_no_op() {
         assert_eq!(twice.mesh().verts(), once.verts());
         assert_eq!(twice.mesh().tris(), once.tris());
     }
-}
-
-/// A cap is a boundary, not a knob. With the registered ceiling in force there
-/// is no fixture in this workspace that reaches it, so the reporting path is
-/// exercised through the type: an unrepairable pinch is *evidence*, never an
-/// error and never a reason to displace further.
-#[test]
-fn an_unrepairable_pinch_is_reported_rather_than_forced() {
-    let capped = UnrepairedPinch::DisplacementCapped {
-        welded_vertex: 7,
-        cap_mm: 5.0e-5,
-        largest_attempt_mm: 5.0e-5,
-    };
-    let rendered = serde_json::to_string(&capped).expect("evidence serializes");
-    assert!(rendered.contains("displacement_capped"), "{rendered}");
-    assert_eq!(
-        serde_json::from_str::<UnrepairedPinch>(&rendered).expect("round trip"),
-        capped
-    );
 }

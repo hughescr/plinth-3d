@@ -13,24 +13,32 @@
 //! pipeline gate on all 21 refused/suspect models and found exactly three
 //! defect classes across the whole corpus: 113 pinch vertices, 3
 //! duplicate-face groups, and ~10 dust shards. Every model is watertight, every
-//! model is consistently oriented, none has a non-manifold edge. So this module
-//! repairs those three things and deliberately implements no speculative
-//! fourth: hole filling, re-winding and degenerate collapse have no corpus
-//! evidence behind them, and the edge-collapse-never-dissolve doctrine binds
-//! any future degenerate work.
+//! model is consistently oriented, none has a non-manifold edge.
 //!
-//! **The three actions, in the one order that is safe.**
+//! **The 113 pinch vertices are no longer a defect class.** Per the owner
+//! ruling of 2026-08-12
+//! (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+//! §4, FU-47): a point-touch is not a modelling defect — resin cannot flow
+//! through a point, so two shells meeting at one vertex in two locally
+//! disconnected fans is a legitimate fingertip touch, not a hole. The
+//! closed-solid gate (`plinth_hollow::validate_closed_mesh`) no longer refuses
+//! on it, so a repair action that existed only to make a pinched mesh pass
+//! that gate is unnecessary — splitting the vertex would be an unjustified
+//! mutation of the owner's geometry to satisfy a check that no longer runs.
+//! **So this module repairs the two remaining census classes** and
+//! deliberately implements no speculative third: hole filling, re-winding and
+//! degenerate collapse have no corpus evidence behind them, and the
+//! edge-collapse-never-dissolve doctrine binds any future degenerate work.
+//!
+//! **The two actions, in the one order that is safe.**
 //!
 //! 1. **Dust-shard strip**, delegated whole to [`crate::triage_components`] —
 //!    the same six-criteria conjunction the hollow stage already runs, applied
 //!    to raw input instead of only to a post-gate shell. Keep-largest stays
 //!    forbidden and no criterion moves; the only new thing is *when* it runs.
-//! 2. **Exact-duplicate-face removal**, because a duplicate severs the
-//!    adjacency the pinch analysis is computed from. Running the split first
-//!    would split fans that only look separate because a duplicate is standing
-//!    between them.
-//! 3. **Pinch-vertex split**, re-derived from a fresh topology whenever step 1
-//!    or 2 changed a face, for the same reason.
+//! 2. **Exact-duplicate-face removal**, re-derived from a fresh topology
+//!    whenever step 1 changed a face, so a stripped shard cannot leave a
+//!    duplicate-group decision looking at adjacency that no longer exists.
 //!
 //! **The pass may decline; it may never refuse.** [`repair_mesh`] returns a
 //! [`RepairedMesh`] and not a `Result`, and that signature is the invariant
@@ -40,29 +48,29 @@
 //! failure it could raise — a resource bound, a topology build, a triage
 //! arithmetic path, the constants registry — would be a **new refusal class
 //! invented by a repair**, which is the exact inversion of the ruling. So the
-//! whole pass, all three actions, is gated on one admission check up front, and
+//! whole pass, both actions, is gated on one admission check up front, and
 //! every internal failure below it lands in
 //! [`RepairEvidence::actions_skipped`]: the caller gets its own mesh back, bit
 //! for bit, and the unchanged gates downstream judge exactly what they judged
 //! before this stage existed.
 //!
-//! **Byte-identity is a contract, not an optimization.** A mesh with none of
-//! the three defects is returned exactly as it arrived — same vertex order,
-//! same triangle order, same bits — so a clean model cannot be perturbed by a
-//! stage that had nothing to do. `repaired_clean_mesh_is_byte_identical` proves
-//! it through a binary-STL round trip, not by inspection.
+//! **Byte-identity is a contract, not an optimization.** A mesh with neither
+//! defect is returned exactly as it arrived — same vertex order, same
+//! triangle order, same bits — so a clean model cannot be perturbed by a stage
+//! that had nothing to do. `repaired_clean_mesh_is_byte_identical` proves it
+//! through a binary-STL round trip, not by inspection. A mesh whose only
+//! defect is a point-touch is byte-identical too, for the same reason: FU-47
+//! made the pinch not a defect this module has anything to do with.
 //!
 //! **Determinism.** Nothing here reads a clock, an environment variable, or an
 //! unseeded RNG, and nothing here is parallel: every collection is a `BTree*`
-//! or an explicitly sorted `Vec`, and the fan order comes from
-//! [`crate::FaceTopology::point_only_vertices`], which is totally ordered by
-//! construction. There is therefore no thread-count sweep to run on this stage
-//! — `repairing_twice_is_bit_identical` pins the property the sweep would be
-//! testing for.
+//! or an explicitly sorted `Vec`. There is therefore no thread-count sweep to
+//! run on this stage — `repairing_twice_is_bit_identical` pins the property
+//! the sweep would be testing for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plinth_core::{m0_constants, M0ConstantsError};
+use plinth_core::M0ConstantsError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -120,7 +128,6 @@ pub struct RepairEvidence {
     pub repaired_vertices: usize,
     pub shards: ShardStripEvidence,
     pub duplicates: DuplicateFaceEvidence,
-    pub pinches: PinchSplitEvidence,
     /// The cut-flag census of the repaired mesh, measured only when something
     /// was repaired. `Some(x)` with a nonzero field is the honest statement
     /// that the pre-pass did not finish the job and the gate is about to say
@@ -160,9 +167,7 @@ impl RepairEvidence {
     pub fn changed(&self) -> bool {
         self.refused_to_empty.is_none()
             && self.actions_skipped.is_none()
-            && (!self.shards.faces_removed.is_empty()
-                || !self.duplicates.groups.is_empty()
-                || !self.pinches.splits.is_empty())
+            && (!self.shards.faces_removed.is_empty() || !self.duplicates.groups.is_empty())
     }
 
     /// A one-line rendering for a run report.
@@ -179,16 +184,13 @@ impl RepairEvidence {
     #[must_use]
     pub fn summary_line(&self) -> String {
         let mut line = format!(
-            "shard-faces={} dup-groups={} dup-faces={} dup-keep-one={} dup-unresolved={} pinch-vertices={} pinch-copies={} unrepaired-pinches={}",
+            "shard-faces={} dup-groups={} dup-faces={} dup-keep-one={} dup-unresolved={}",
             self.shards.faces_removed.len(),
             self.duplicates.groups.len(),
             self.duplicates.faces_removed(),
             self.duplicates.groups_with(DuplicateDisposition::KeepOne),
             self.duplicates
                 .groups_with(DuplicateDisposition::KeptFirstUnresolved),
-            self.pinches.splits.len(),
-            self.pinches.copies_added(),
-            self.pinches.unrepaired.len(),
         );
         if self.refused_to_empty.is_some() {
             line.push_str(" APPLIED=none (refused: the plan would have emptied the mesh)");
@@ -212,15 +214,15 @@ impl RepairEvidence {
 /// unchanged gate refuses the model with this evidence attached.
 ///
 /// **Under the rules as landed this cannot fire, and it is still checked.** The
-/// shard strip never strips the main component, the duplicate rule keeps the
-/// first member of every group, and the pinch split only ever appends — so
-/// every action leaves at least one face by construction. The check stays
-/// because "by construction" is an argument about today's three actions and the
-/// consequence of being wrong about it is a stage-internal error wearing the
-/// operator's filename. FU-46's open question is precisely whether an action
-/// that deletes a group with **no survivor** should exist; the day it is ruled
-/// in, this guard is what stops it emptying a model, and it is far easier to
-/// keep than to remember to add back.
+/// shard strip never strips the main component, and the duplicate rule keeps
+/// the first member of every group — so every action leaves at least one face
+/// by construction. The check stays because "by construction" is an argument
+/// about today's two actions and the consequence of being wrong about it is a
+/// stage-internal error wearing the operator's filename. FU-46's open
+/// question is precisely whether an action that deletes a group with **no
+/// survivor** should exist; the day it is ruled in, this guard is what stops
+/// it emptying a model, and it is far easier to keep than to remember to add
+/// back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyResultRefusal {
@@ -329,119 +331,6 @@ pub enum DuplicateDisposition {
     KeptFirstUnresolved,
 }
 
-/// Action 3: pinch-vertex splitting.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinchSplitEvidence {
-    pub splits: Vec<PinchSplit>,
-    /// Pinches this pass could not open, with the reason. These are not
-    /// errors: the gate will refuse the model and the refusal is the work item
-    /// (the standing doctrine of the 2026-08-10 ruling).
-    pub unrepaired: Vec<UnrepairedPinch>,
-}
-
-impl PinchSplitEvidence {
-    /// New vertices introduced. One per fan beyond the first, per pinch.
-    #[must_use]
-    pub fn copies_added(&self) -> usize {
-        self.splits
-            .iter()
-            .map(|split| split.fans.len())
-            .sum::<usize>()
-    }
-}
-
-/// One pinch vertex opened into per-fan copies.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinchSplit {
-    pub welded_vertex: u32,
-    /// The position every fan shared before the split.
-    pub position_mm: [f64; 3],
-    /// Faces left at the original position — fan 0, which never moves, so the
-    /// repair is a strict addition to the vertex array.
-    pub anchored_faces: usize,
-    /// One row per moved fan, in fan order.
-    pub fans: Vec<PinchFanMove>,
-}
-
-/// One moved fan: where it went, how far, and by how many ULP steps.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinchFanMove {
-    pub faces: usize,
-    /// The fan's mean unit normal, the direction the copy moved along.
-    pub direction: [f64; 3],
-    /// How many f32-ULP steps the escalation needed. Always a power of two.
-    pub ulp_steps: u32,
-    /// The realized displacement. Bounded by `REPAIR_PINCH_SPLIT_MAX_MM`.
-    pub displacement_mm: f64,
-}
-
-/// A pinch the pass declined to open, and why.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
-pub enum UnrepairedPinch {
-    /// No displacement at or below the registered cap separated this fan under
-    /// both the exact-bit weld and the f32 STL round trip. The cap is a
-    /// boundary, not a knob: this is reported, never widened.
-    ///
-    /// `largest_attempt_mm` is the largest displacement actually *tried*, so
-    /// it is nonzero whenever this variant is used: a refusal that reported
-    /// `0.0` for a candidate it never tested would be misleading provenance on
-    /// exactly the path the standing doctrine turns into work items. The
-    /// "nothing could be tried at all" case has its own variant,
-    /// [`Self::OneUlpExceedsCap`].
-    DisplacementCapped {
-        welded_vertex: u32,
-        cap_mm: f64,
-        largest_attempt_mm: f64,
-    },
-    /// One f32 ULP at this vertex's own coordinate magnitude is already larger
-    /// than the registered cap, so **no candidate displacement exists** below
-    /// the cap and none was tried.
-    ///
-    /// This is a structural statement about the coordinate scale, not a near
-    /// miss: the minimum step that survives the exact-bit weld grows with the
-    /// magnitude of the coordinate it is applied to (about 6.1e-5 mm for a
-    /// coordinate in [512, 1024) mm), while the cap is absolute. A raw STL at
-    /// that scale — repair runs before any scale sanity check — makes the
-    /// pinch split a structural no-op, and it is named here rather than
-    /// disguised as an ordinary capped attempt. The answer is a ruling about
-    /// the input's units or about the cap's provenance, never a wider cap
-    /// applied quietly.
-    OneUlpExceedsCap {
-        welded_vertex: u32,
-        cap_mm: f64,
-        ulp_mm: f64,
-    },
-    /// The fans at this vertex are held apart by an edge the topology could not
-    /// accept — a non-manifold junction, a boundary, a duplicate — and not by a
-    /// point contact.
-    ///
-    /// Splitting one of those apart does not open a pinch, it tears a junction
-    /// into a crack: measured, a box with a fin sharing one edge goes
-    /// `nonmanifold_edges` 1 -> 0 and `boundary_edges` 2 -> 3 while the
-    /// evidence calls it an ordinary pinch split. The census found zero
-    /// non-manifold edges in the corpus and the module's scope is the three
-    /// classes it *did* find, so this is refused and reported: an
-    /// edge-severed fan is a work item for whoever owns that defect class, not
-    /// a fourth repair invented here. It becomes reachable the moment this
-    /// pass is run post-decimation, where decimation is already recorded as
-    /// manufacturing non-manifold edges.
-    FanSeveredByEdge { welded_vertex: u32, edge: [u32; 2] },
-    /// The fan's face normals sum to zero length, so it has no mean direction
-    /// to move along.
-    NoFanDirection { welded_vertex: u32 },
-    /// A face reaches this vertex through more than one of its own corners, so
-    /// the face is degenerate and belongs to a class this pass does not touch.
-    DegenerateIncidence { welded_vertex: u32, face: u32 },
-    /// Splitting this pinch would need a vertex index past `u32::MAX`. The
-    /// pinch is left whole rather than split partway, because a vertex with
-    /// some fans moved and some not is worse than the pinch was.
-    VertexIndexExhausted { welded_vertex: u32 },
-}
-
 /// The repaired mesh's own cut-flag census, measured after the fact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -534,15 +423,13 @@ fn run_repair(mesh: &Mesh, limits: TriageTopologyLimits) -> Result<RepairedMesh,
     //
     // It used to guard only the shard strip, and the line after it built the
     // welded face topology unconditionally on the same unbounded mesh -- a
-    // `BTreeMap` edge index over ~3x the face count plus a per-welded-vertex
-    // incidence map plus materialized pinch fans, which is *heavier* than the
-    // triage it was standing in for. A raw STL over the ceiling therefore
+    // `BTreeMap` edge index over ~3x the face count, which is *heavier* than
+    // the triage it was standing in for. A raw STL over the ceiling therefore
     // skipped the cheap action and performed the expensive one anyway, and the
     // bound's own ledger row (FU-45) claimed a protection it did not provide.
     // So admission is proven once, here, before any input-proportional work at
     // all, and the capability it returns is what action 1 consumes.
     let admission = TriageTopologyAdmission::from_raw_mesh(mesh, limits)?;
-    let cap_mm = pinch_split_cap_mm()?;
 
     let mut evidence = RepairEvidence {
         source_faces: mesh.tris().len(),
@@ -580,7 +467,7 @@ fn run_repair(mesh: &Mesh, limits: TriageTopologyLimits) -> Result<RepairedMesh,
         }
         Some(Mesh::new(mesh.verts().to_vec(), tris)?)
     };
-    let mut topology = build_face_topology(stage.as_ref().unwrap_or(mesh), WeldPolicy::ExactBits)?;
+    let topology = build_face_topology(stage.as_ref().unwrap_or(mesh), WeldPolicy::ExactBits)?;
 
     // 2 -- duplicates, against a topology built on the post-strip mesh.
     //
@@ -617,35 +504,7 @@ fn run_repair(mesh: &Mesh, limits: TriageTopologyLimits) -> Result<RepairedMesh,
                 return Ok(refuse_to_empty(mesh, evidence));
             }
             let reduced = Mesh::new(current.verts().to_vec(), tris)?;
-            // A removal merges fans that the duplicate was severing, so the
-            // pinch analysis is re-derived rather than reused. Reusing it
-            // would split vertices that are no longer pinched and open a
-            // boundary.
-            topology = build_face_topology(&reduced, WeldPolicy::ExactBits)?;
             stage = Some(reduced);
-        }
-    }
-
-    // 3 -- pinches.
-    //
-    // Same argument as above, from the other flag: `point_only_vertices` is
-    // empty exactly when no face carries `TOPOLOGY_CUT_POINT_ONLY`, so an
-    // empty list means there is no pinch to split and no fan whose severance
-    // needs checking. The edge index is not built to find that out.
-    let mut split = None;
-    if !topology.point_only_vertices().is_empty() {
-        let current = stage.as_ref().unwrap_or(mesh);
-        let edges = WeldedEdges::build(current.tris(), topology.source_vertex_to_welded());
-        let plan = split_pinch_vertices(&topology, &edges, current.verts(), current.tris(), cap_mm);
-        evidence.pinches = plan.evidence;
-        if !plan.appended.is_empty() {
-            let mut verts = current.verts().to_vec();
-            let mut tris = current.tris().to_vec();
-            verts.extend(plan.appended);
-            for (face, corner, vertex) in plan.rewrites {
-                tris[face][corner] = vertex;
-            }
-            split = Some((verts, tris));
         }
     }
 
@@ -665,17 +524,17 @@ fn run_repair(mesh: &Mesh, limits: TriageTopologyLimits) -> Result<RepairedMesh,
     // ends in one compaction into first-use order. The unchanged path never
     // reaches here, which is what keeps byte-identity a contract rather than a
     // near miss.
-    let (verts, tris) = match (&split, &stage) {
-        (Some((verts, tris)), _) => compact(verts, tris),
-        (None, Some(stage)) => compact(stage.verts(), stage.tris()),
-        // `changed()` is true exactly when one of the three actions edited a
-        // face, and each of them writes `split` or `stage` when it does.
-        (None, None) => unreachable!("a recorded change wrote no geometry"),
+    //
+    // `changed()` is true exactly when one of the two actions edited a face,
+    // and each of them writes `stage` when it does.
+    let (verts, tris) = match &stage {
+        Some(stage) => compact(stage.verts(), stage.tris()),
+        None => unreachable!("a recorded change wrote no geometry"),
     };
-    // Both removing actions already refused to take the last face, and the
-    // pinch split only ever appends -- so this is a net under the two of them
-    // and under any action added later, checked before the mesh is built
-    // rather than discovered as `MeshError::NoTriangles` two stages downstream.
+    // Both removing actions already refused to take the last face -- so this
+    // is a net under the two of them and under any action added later,
+    // checked before the mesh is built rather than discovered as
+    // `MeshError::NoTriangles` two stages downstream.
     if tris.is_empty() {
         return Ok(refuse_to_empty(mesh, evidence));
     }
@@ -712,16 +571,6 @@ fn refuse_to_empty(mesh: &Mesh, mut evidence: RepairEvidence) -> RepairedMesh {
         mesh: mesh.clone(),
         evidence,
     }
-}
-
-/// The registered ceiling on one pinch-split displacement.
-fn pinch_split_cap_mm() -> Result<f64, RepairSkipped> {
-    Ok(m0_constants()
-        .map_err(RepairSkipped::Constants)?
-        .placeholders()
-        .repair_pinch_split_max_mm()
-        .diagnostic()
-        .get())
 }
 
 /// Action 1, delegated in full to the existing triage machinery.
@@ -798,8 +647,7 @@ fn map_triage_error(error: TriageError) -> RepairSkipped {
 /// incident face traverses it in.
 ///
 /// Built once per stage from `tris` and the weld map — one gather, one pass,
-/// no per-item topology rebuild — and then read by both the duplicate
-/// disposition and the pinch severance check.
+/// no per-item topology rebuild — and then read by the duplicate disposition.
 struct WeldedEdges {
     occurrences: BTreeMap<(u32, u32), Vec<EdgeUse>>,
 }
@@ -1055,474 +903,6 @@ fn is_forward(triple: [u32; 3], ascending: [u32; 3]) -> bool {
     .contains(&triple)
 }
 
-/// Action 3: open every pinch into one copy of the vertex per fan.
-///
-/// Fan 0 never moves, so the source arrays are only ever appended to and every
-/// untouched corner keeps its original index. Each later fan gets a fresh
-/// vertex displaced along that fan's own mean unit normal by the smallest
-/// power-of-two multiple of one f32 ULP that is *proved* — not assumed — to
-/// survive both gates it has to survive: the exact-bit weld, which keys on
-/// `to_bits()` and would re-fuse a displacement that rounds away, and the f32
-/// binary-STL round trip, which would undo one that survives in f64 alone.
-///
-/// **A pinch is only split when the fans are genuinely held apart by a point.**
-/// Fan connectivity is computed across *accepted* edges, and an edge is not
-/// accepted when it is non-manifold, a boundary, degenerate, or duplicated —
-/// so a vertex sitting on such an edge appears in `point_only_vertices` even
-/// though its sheets meet along a line, not at a point. Splitting one of those
-/// tears the junction into a crack under the pinch label. Every incident edge
-/// at the vertex is therefore checked first, and a vertex with any unaccepted
-/// one is refused as [`UnrepairedPinch::FanSeveredByEdge`] and left to the
-/// gate.
-///
-/// **A copy has to land somewhere nothing already is — anywhere in the mesh,
-/// not just at this pinch.** The distinguishability test used to run against
-/// the pinch's own position and its own already-moved copies alone, which is a
-/// test of the wrong set: a copy nudged onto a bit-exact match with some
-/// *unrelated* vertex re-fuses under `WeldPolicy::ExactBits` and creates a
-/// fresh point contact at the destination, while [`PinchSplitEvidence`] records
-/// an unqualified success. Reproduced: `pinch-vertices=1 unrepaired-pinches=0`
-/// on a mesh whose residual still carried seven point-only faces. The residual
-/// and the gate stayed honest, but the split's own provenance did not — and
-/// false provenance sits on exactly the path the standing doctrine turns into
-/// work items. So one [`PositionRegistry`] of every position in the mesh is
-/// gathered up front (D-37: one batched pass, not a scan per candidate) and
-/// every candidate is tested against it, with each committed copy joining the
-/// registry so later pinches cannot land on earlier ones either.
-fn split_pinch_vertices(
-    topology: &crate::FaceTopology,
-    edges: &WeldedEdges,
-    verts: &[[f64; 3]],
-    tris: &[[u32; 3]],
-    cap_mm: f64,
-) -> PinchPlan {
-    let mut plan = PinchPlan::default();
-    // Everything below reads the *pre-split* arrays and writes only into the
-    // plan. A face can be incident to two different pinches, so mutating in
-    // place would let the second pinch read a corner the first one already
-    // repointed -- an index past the end of this topology's weld map.
-    let mut evidence = PinchSplitEvidence::default();
-    // One gather over the whole vertex array, read by every candidate of every
-    // pinch. The alternative -- re-scanning `verts` per candidate -- is the
-    // per-item hot-path call D-37 forbids, and at 459k vertices times 113
-    // pinches it is not a micro-optimization.
-    let mut registry = PositionRegistry::build(verts);
-    for pinch in topology.point_only_vertices() {
-        let welded_vertex = pinch.welded_vertex();
-        // Gather each fan's corner sites once, and refuse the whole pinch if
-        // any face reaches the vertex twice: that face is degenerate, which is
-        // a class this pass does not touch, and half-splitting around it would
-        // be a guess.
-        let mut fan_sites: Vec<Vec<(usize, usize)>> = Vec::with_capacity(pinch.fans().len());
-        let mut degenerate = None;
-        for fan in pinch.fans() {
-            let mut sites = Vec::new();
-            for &face in fan {
-                let triangle = tris[face as usize];
-                let mut corners = (0..3).filter(|corner| {
-                    topology.source_vertex_to_welded()[triangle[*corner] as usize] == welded_vertex
-                });
-                let Some(corner) = corners.next() else {
-                    continue;
-                };
-                if corners.next().is_some() {
-                    degenerate = Some(face);
-                    break;
-                }
-                sites.push((face as usize, corner));
-            }
-            if degenerate.is_some() {
-                break;
-            }
-            fan_sites.push(sites);
-        }
-        if let Some(face) = degenerate {
-            evidence
-                .unrepaired
-                .push(UnrepairedPinch::DegenerateIncidence {
-                    welded_vertex,
-                    face,
-                });
-            continue;
-        }
-
-        // Is this a point contact at all? An edge at this vertex that the
-        // topology could not accept is a different defect wearing the pinch's
-        // label, and splitting it would tear a junction rather than open one.
-        if let Some(edge) = severing_edge(topology, edges, tris, &fan_sites, welded_vertex) {
-            evidence.unrepaired.push(UnrepairedPinch::FanSeveredByEdge {
-                welded_vertex,
-                edge,
-            });
-            continue;
-        }
-
-        let Some(&(anchor_face, anchor_corner)) = fan_sites.first().and_then(|sites| sites.first())
-        else {
-            continue;
-        };
-        let position = verts[tris[anchor_face][anchor_corner] as usize];
-        let next_vertex_id = |plan: &PinchPlan| verts.len() + plan.appended.len();
-
-        // Plan every fan before touching the arrays: a pinch is repaired whole
-        // or not at all, so a fan that cannot be separated cannot leave the
-        // vertex half-split.
-        // `tentative` holds this pinch's own copies until the pinch is applied
-        // whole. They cannot go straight into the registry, because a pinch
-        // that fails on a later fan is abandoned entirely -- and a registry
-        // holding positions no vertex ever took would make a later pinch step
-        // around geometry that is not there.
-        let mut planned: Vec<(usize, [f64; 3], PinchFanMove)> = Vec::new();
-        let mut tentative: Vec<[f64; 3]> = Vec::new();
-        let mut failure = None;
-        for (index, sites) in fan_sites.iter().enumerate().skip(1) {
-            let Some(direction) = fan_mean_normal(verts, tris, sites) else {
-                failure = Some(UnrepairedPinch::NoFanDirection { welded_vertex });
-                break;
-            };
-            match separate(position, direction, &tentative, &registry, cap_mm) {
-                Ok((moved, steps, displacement)) => {
-                    tentative.push(moved);
-                    planned.push((
-                        index,
-                        moved,
-                        PinchFanMove {
-                            faces: sites.len(),
-                            direction,
-                            ulp_steps: steps,
-                            displacement_mm: displacement,
-                        },
-                    ));
-                }
-                Err(SeparationRefusal::OneUlpExceedsCap { ulp_mm }) => {
-                    failure = Some(UnrepairedPinch::OneUlpExceedsCap {
-                        welded_vertex,
-                        cap_mm,
-                        ulp_mm,
-                    });
-                    break;
-                }
-                Err(SeparationRefusal::Capped { largest_attempt_mm }) => {
-                    failure = Some(UnrepairedPinch::DisplacementCapped {
-                        welded_vertex,
-                        cap_mm,
-                        largest_attempt_mm,
-                    });
-                    break;
-                }
-            }
-        }
-        if let Some(reason) = failure {
-            evidence.unrepaired.push(reason);
-            continue;
-        }
-
-        // A pinch is applied whole or not at all, so the index headroom for
-        // *every* copy this pinch needs is checked before the first one is
-        // written. Checking inside the loop could leave a vertex half-split
-        // between two positions, which is worse than the pinch.
-        if u32::try_from(next_vertex_id(&plan) + planned.len()).is_err() {
-            evidence
-                .unrepaired
-                .push(UnrepairedPinch::VertexIndexExhausted { welded_vertex });
-            continue;
-        }
-        let mut fans = Vec::with_capacity(planned.len());
-        for (index, moved, record) in planned {
-            let new_vertex =
-                u32::try_from(next_vertex_id(&plan)).expect("headroom checked for this pinch");
-            // Committed now, and only now: this position is real geometry from
-            // here on, so no later pinch may land a copy on it.
-            registry.insert(moved);
-            plan.appended.push(moved);
-            for &(face, corner) in &fan_sites[index] {
-                plan.rewrites.push((face, corner, new_vertex));
-            }
-            fans.push(record);
-        }
-        evidence.splits.push(PinchSplit {
-            welded_vertex,
-            position_mm: position,
-            anchored_faces: fan_sites[0].len(),
-            fans,
-        });
-    }
-    plan.evidence = evidence;
-    plan
-}
-
-/// The pinch splits decided against the pre-split arrays, ready to apply.
-///
-/// `rewrites` are `(face, corner, new vertex id)`, and every id is an index
-/// into `verts` extended by `appended` in order — so applying the plan is one
-/// extend plus one scatter, with no aliasing between what is read and what is
-/// written.
-#[derive(Clone, Debug, Default)]
-struct PinchPlan {
-    appended: Vec<[f64; 3]>,
-    rewrites: Vec<(usize, usize, u32)>,
-    evidence: PinchSplitEvidence,
-}
-
-/// The unit mean of a fan's face normals, or `None` when they cancel.
-///
-/// Unnormalized face normals are summed, so a fan's larger faces weigh more —
-/// the direction that opens the widest part of the pinch first.
-fn fan_mean_normal(
-    verts: &[[f64; 3]],
-    tris: &[[u32; 3]],
-    sites: &[(usize, usize)],
-) -> Option<[f64; 3]> {
-    let mut sum = [0.0_f64; 3];
-    for &(face, _) in sites {
-        let [ia, ib, ic] = tris[face];
-        let a = verts[ia as usize];
-        let b = verts[ib as usize];
-        let c = verts[ic as usize];
-        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        sum[0] += ab[1] * ac[2] - ab[2] * ac[1];
-        sum[1] += ab[2] * ac[0] - ab[0] * ac[2];
-        sum[2] += ab[0] * ac[1] - ab[1] * ac[0];
-    }
-    let length = sum[0].hypot(sum[1]).hypot(sum[2]);
-    if !length.is_finite() || length == 0.0 {
-        return None;
-    }
-    let unit = [sum[0] / length, sum[1] / length, sum[2] / length];
-    unit.iter().all(|value| value.is_finite()).then_some(unit)
-}
-
-/// The smallest power-of-two ULP multiple that moves `position` along
-/// `direction` to a point distinguishable from **every position the mesh
-/// already has** — those in `registry` plus this pinch's own not-yet-committed
-/// `tentative` copies — with a realized displacement at or below `cap_mm`.
-///
-/// **Both sets are load-bearing.** Testing only against the pinch's own copies
-/// lets a candidate land bit-exactly on an unrelated vertex, where the
-/// exact-bit weld re-fuses it and the evidence reports a split that did not
-/// happen; testing only against the registry lets two fans of the same pinch
-/// stack, since neither is committed until the pinch is applied whole.
-///
-/// **The moved copy lands on an exact f32 grid point.** `write_binary_stl`
-/// refuses outright to encode a coordinate that is not exactly representable
-/// as f32 (`MeshIoError::LossyF32Encoding`), so a split that produced an
-/// arbitrary f64 would make the repaired mesh unwritable — and a split that
-/// merely *survives* narrowing is not the same claim as one that is already
-/// narrow. Snapping first makes the round trip a no-op by construction rather
-/// than a hope, and the displacement reported is the realized one, measured
-/// after the snap.
-fn separate(
-    position: [f64; 3],
-    direction: [f64; 3],
-    tentative: &[[f64; 3]],
-    registry: &PositionRegistry,
-    cap_mm: f64,
-) -> Result<([f64; 3], u32, f64), SeparationRefusal> {
-    let step = f32_ulp_at(position);
-    // The floor and the ceiling are set by different things: the floor is one
-    // f32 ULP *of this vertex's own coordinate magnitude*, the ceiling is an
-    // absolute registered millimetre. Above roughly 512 mm the floor overtakes
-    // the ceiling and there is no candidate to test at all -- said outright
-    // here rather than reported as an attempt that was never made.
-    if !step.is_finite() || step > cap_mm {
-        return Err(SeparationRefusal::OneUlpExceedsCap { ulp_mm: step });
-    }
-    let mut steps = 1_u32;
-    let mut largest = 0.0_f64;
-    loop {
-        let requested = step * f64::from(steps);
-        if !requested.is_finite() || requested > cap_mm {
-            return Err(SeparationRefusal::Capped {
-                largest_attempt_mm: largest,
-            });
-        }
-        let candidate = snap_to_f32([
-            position[0] + requested * direction[0],
-            position[1] + requested * direction[1],
-            position[2] + requested * direction[2],
-        ]);
-        let realized = ((candidate[0] - position[0]).powi(2)
-            + (candidate[1] - position[1]).powi(2)
-            + (candidate[2] - position[2]).powi(2))
-        .sqrt();
-        // The attempt is recorded before it is judged, so a refusal reports
-        // the displacement that overshot rather than the last one that fit.
-        if realized.is_finite() {
-            largest = largest.max(realized);
-        }
-        if !realized.is_finite() || realized > cap_mm {
-            return Err(SeparationRefusal::Capped {
-                largest_attempt_mm: largest,
-            });
-        }
-        if candidate.iter().all(|value| value.is_finite())
-            && !registry.occupied(candidate)
-            && tentative
-                .iter()
-                .all(|other| distinguishable(candidate, *other))
-        {
-            return Ok((candidate, steps, realized));
-        }
-        let Some(next) = steps.checked_mul(2) else {
-            return Err(SeparationRefusal::Capped {
-                largest_attempt_mm: largest,
-            });
-        };
-        steps = next;
-    }
-}
-
-/// Why no displacement was accepted, told apart by whether anything could be
-/// tried in the first place.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum SeparationRefusal {
-    /// The minimum step -- one f32 ULP at this coordinate magnitude -- is
-    /// already above the cap. Nothing was attempted, and the reported number is
-    /// the step, not an attempt.
-    OneUlpExceedsCap { ulp_mm: f64 },
-    /// Candidates were tried and none separated at or below the cap.
-    /// `largest_attempt_mm` is the largest displacement actually realized by an
-    /// attempt, including the one that overshot.
-    Capped { largest_attempt_mm: f64 },
-}
-
-/// The first edge at `welded_vertex` that the topology did **not** accept as a
-/// manifold pair, if any.
-///
-/// An accepted edge has exactly two occurrences, on two distinct faces, walked
-/// in opposite directions — *and* those two faces are neighbours in the built
-/// topology, which is the part a recount alone would miss: the topology also
-/// refuses an edge whose faces are duplicate-flagged, and a fan separation
-/// caused by that is not a point contact either.
-fn severing_edge(
-    topology: &crate::FaceTopology,
-    edges: &WeldedEdges,
-    tris: &[[u32; 3]],
-    fan_sites: &[Vec<(usize, usize)>],
-    welded_vertex: u32,
-) -> Option<[u32; 2]> {
-    let weld_map = topology.source_vertex_to_welded();
-    for sites in fan_sites {
-        for &(face, corner) in sites {
-            let triple = welded_triple(tris[face], weld_map);
-            // The two edges of this face that touch the pinch vertex.
-            for other in [triple[(corner + 1) % 3], triple[(corner + 2) % 3]] {
-                let edge = (welded_vertex.min(other), welded_vertex.max(other));
-                let uses = edges.uses(edge);
-                let accepted = welded_vertex != other
-                    && uses.len() == 2
-                    && uses[0].face != uses[1].face
-                    && uses[0].forward != uses[1].forward
-                    && topology
-                        .neighbors(uses[0].face)
-                        .is_some_and(|neighbors| neighbors.contains(&(uses[1].face as u32)));
-                if !accepted {
-                    return Some([edge.0, edge.1]);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// The nearest exactly-f32-representable point, which is the only kind of
-/// point a binary STL will accept.
-fn snap_to_f32(point: [f64; 3]) -> [f64; 3] {
-    point.map(|coordinate| f64::from(coordinate as f32))
-}
-
-/// Whether two positions survive as two positions: distinct under the
-/// exact-bit weld's own key — which canonicalizes signed zero, so a sign flip
-/// is not a separation — and still distinct after the f32 round trip a binary
-/// STL will perform on them.
-fn distinguishable(left: [f64; 3], right: [f64; 3]) -> bool {
-    exact_key(left) != exact_key(right) && narrowed_key(left) != narrowed_key(right)
-}
-
-/// The exact-bit weld's own key, with signed zero canonicalized the way
-/// `WeldPolicy::ExactBits` canonicalizes it.
-fn exact_key(point: [f64; 3]) -> [u64; 3] {
-    point.map(|coordinate| {
-        if coordinate == 0.0 {
-            0.0_f64.to_bits()
-        } else {
-            coordinate.to_bits()
-        }
-    })
-}
-
-/// The same key after the f32 narrowing a binary STL performs, which is the
-/// second way a split can be undone.
-fn narrowed_key(point: [f64; 3]) -> [u32; 3] {
-    point.map(|coordinate| {
-        if coordinate == 0.0 {
-            0.0_f32.to_bits()
-        } else {
-            (coordinate as f32).to_bits()
-        }
-    })
-}
-
-/// Every position the mesh already holds, keyed both ways a split can be
-/// undone, so a candidate can be tested in a lookup instead of a scan.
-///
-/// **Why a set and not a slice.** The question a candidate has to answer is
-/// "does *anything* in this mesh already sit here", and answering it by walking
-/// the vertex array once per candidate is the per-item hot-path call D-37
-/// forbids: 459k vertices × 113 pinches × the ULP escalation. One gather up
-/// front, `O(log n)` per candidate, and the two keys are exactly the two
-/// equalities [`distinguishable`] tests — no third notion of "same point"
-/// exists here to drift.
-struct PositionRegistry {
-    exact: BTreeSet<[u64; 3]>,
-    narrowed: BTreeSet<[u32; 3]>,
-}
-
-impl PositionRegistry {
-    /// One batched pass over the vertex array.
-    fn build(verts: &[[f64; 3]]) -> Self {
-        let mut exact = BTreeSet::new();
-        let mut narrowed = BTreeSet::new();
-        for vertex in verts {
-            exact.insert(exact_key(*vertex));
-            narrowed.insert(narrowed_key(*vertex));
-        }
-        Self { exact, narrowed }
-    }
-
-    fn insert(&mut self, position: [f64; 3]) {
-        self.exact.insert(exact_key(position));
-        self.narrowed.insert(narrowed_key(position));
-    }
-
-    /// Whether `candidate` would collide with something already here — under
-    /// the exact-bit weld, or after the STL round trip. Either one re-fuses it.
-    fn occupied(&self, candidate: [f64; 3]) -> bool {
-        self.exact.contains(&exact_key(candidate))
-            || self.narrowed.contains(&narrowed_key(candidate))
-    }
-}
-
-/// One f32 ULP at this position's largest coordinate magnitude — the finest
-/// step a binary STL can still represent there.
-fn f32_ulp_at(position: [f64; 3]) -> f64 {
-    let magnitude = position
-        .iter()
-        .fold(0.0_f64, |largest, coordinate| largest.max(coordinate.abs()))
-        as f32;
-    if magnitude == 0.0 || !magnitude.is_finite() {
-        return f64::from(f32::MIN_POSITIVE);
-    }
-    let next = f32::from_bits(magnitude.to_bits() + 1);
-    let ulp = f64::from(next) - f64::from(magnitude);
-    if ulp > 0.0 && ulp.is_finite() {
-        ulp
-    } else {
-        f64::from(f32::MIN_POSITIVE)
-    }
-}
-
 /// Drop unreferenced vertices, renumbering in first-use order.
 fn compact(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let mut renumbered = vec![u32::MAX; verts.len()];
@@ -1569,23 +949,8 @@ fn measure_residual(topology: &crate::FaceTopology) -> ResidualTopology {
 mod tests {
     use super::*;
 
-    #[test]
-    fn one_ulp_is_the_finest_step_a_binary_stl_can_still_carry() {
-        // At mini scale the step is nanometres, which is the whole point: the
-        // separation is four orders below one printer pixel.
-        let step = f32_ulp_at([30.0, 0.0, 0.0]);
-        assert!(step > 0.0 && step < 1.0e-5, "{step}");
-        assert!(distinguishable([0.0; 3], [step * 2.0, 0.0, 0.0]));
-        // A displacement below one f32 ULP survives in f64 and is erased by
-        // the STL round trip, which is exactly the trap this guards.
-        assert!(!distinguishable(
-            [30.0, 0.0, 0.0],
-            [30.0 + step / 8.0, 0.0, 0.0]
-        ));
-    }
-
     /// The empty-result guard, exercised directly because no action this pass
-    /// performs can reach it any more — every one of the three leaves at least
+    /// performs can reach it any more — every one of the two leaves at least
     /// one face by construction. It is kept for the rule FU-46 might rule in,
     /// so what it *does* is pinned: roll everything back, hand the caller its
     /// own mesh, and say so on the card.
@@ -1612,13 +977,6 @@ mod tests {
         assert_eq!(refused.mesh().verts(), mesh.verts());
         assert_eq!(refused.mesh().tris(), mesh.tris());
         assert!(refused.evidence().summary_line().contains("APPLIED=none"));
-    }
-
-    #[test]
-    fn signed_zero_is_not_a_separation() {
-        // The exact-bit weld canonicalizes signed zero, so a "move" that only
-        // flips a sign bit must not be accepted as having split anything.
-        assert!(!distinguishable([0.0, 1.0, 2.0], [-0.0, 1.0, 2.0]));
     }
 
     fn plan(tris: &[[u32; 3]], weld_map: &[u32]) -> DuplicateFaceEvidence {
@@ -1823,7 +1181,7 @@ mod tests {
     /// below built the welded face topology on the same unbounded mesh, which
     /// is the heavier of the two, so an over-large input skipped the cheap work
     /// and did the expensive work anyway. Nothing runs now — no strip, no
-    /// topology, no duplicate index, no pinch fan.
+    /// topology, no duplicate index.
     ///
     /// The production ceilings are far too large to build a fixture for, so the
     /// boundary is exercised through the parameter production passes: nothing
@@ -1851,8 +1209,6 @@ mod tests {
         assert!(evidence.shards.faces_removed.is_empty());
         assert!(evidence.shards.skipped.is_none());
         assert!(evidence.duplicates.groups.is_empty());
-        assert!(evidence.pinches.splits.is_empty());
-        assert!(evidence.pinches.unrepaired.is_empty());
         assert!(evidence.residual.is_none());
         assert_eq!(repaired.mesh().verts(), mesh.verts());
         assert_eq!(repaired.mesh().tris(), mesh.tris());
@@ -1865,79 +1221,4 @@ mod tests {
         // so a second in-process triage call here would race it.
     }
 
-    /// The floor is one f32 ULP of the vertex's own magnitude and the ceiling
-    /// is an absolute millimetre, so far enough from the origin the floor
-    /// overtakes the ceiling and *nothing can be attempted*. That is a
-    /// different finding from "everything attempted was too big", and it is
-    /// reported as one rather than as a capped attempt of 0.0 mm.
-    #[test]
-    fn a_cap_below_one_ulp_is_named_rather_than_reported_as_a_zero_attempt() {
-        let cap_mm = pinch_split_cap_mm().expect("registered cap");
-        let far = [600.0, 0.0, 0.0];
-        let refusal = separate(
-            far,
-            [1.0, 0.0, 0.0],
-            &[],
-            &PositionRegistry::build(&[far]),
-            cap_mm,
-        )
-        .expect_err("one ULP at 600 mm is above the registered cap");
-        let SeparationRefusal::OneUlpExceedsCap { ulp_mm } = refusal else {
-            panic!("expected the structural refusal, got {refusal:?}")
-        };
-        assert!(ulp_mm > cap_mm, "ulp {ulp_mm} cap {cap_mm}");
-
-        // And where candidates *are* tried, the reported attempt is a
-        // displacement that actually happened, never 0.0. One ULP is already
-        // taken here, so the escalation doubles into a cap that admits only
-        // the first step.
-        let near = [10.0, 0.0, 0.0];
-        let step = f32_ulp_at(near);
-        let taken = [near[0] + step, 0.0, 0.0];
-        let refusal = separate(
-            near,
-            [1.0, 0.0, 0.0],
-            &[],
-            &PositionRegistry::build(&[near, taken]),
-            step * 1.5,
-        )
-        .expect_err("a cap between one and two ULP admits one attempt and refuses it");
-        let SeparationRefusal::Capped { largest_attempt_mm } = refusal else {
-            panic!("expected a capped attempt, got {refusal:?}")
-        };
-        assert!(largest_attempt_mm > 0.0, "{largest_attempt_mm}");
-    }
-
-    /// **A moved copy may not land on somebody else's vertex.** The first
-    /// candidate here is bit-identical to a vertex belonging to unrelated
-    /// geometry: accepting it re-fuses under `WeldPolicy::ExactBits` and
-    /// creates a *new* point contact at the destination while the evidence
-    /// reports an unqualified split. The escalation has to step past it, under
-    /// the same registered cap — the cap is never what gives way.
-    #[test]
-    fn a_split_steps_past_a_vertex_that_is_not_part_of_the_pinch() {
-        let cap_mm = pinch_split_cap_mm().expect("registered cap");
-        let position = [10.0, 0.0, 0.0];
-        let step = f32_ulp_at(position);
-        let unrelated = [position[0] + step, 0.0, 0.0];
-        let registry = PositionRegistry::build(&[position, unrelated, [0.0, 0.0, 30.0]]);
-
-        let (moved, steps, displacement) =
-            separate(position, [1.0, 0.0, 0.0], &[], &registry, cap_mm)
-                .expect("two ULP is still far below the registered cap");
-        assert_eq!(steps, 2, "one ULP was taken by an unrelated vertex");
-        assert!(
-            distinguishable(moved, unrelated),
-            "{moved:?} landed on {unrelated:?}"
-        );
-        assert!(!registry.occupied(moved), "{moved:?}");
-        assert!(
-            displacement > 0.0 && displacement <= cap_mm,
-            "{displacement}"
-        );
-
-        // Without the registry the very first candidate would have been taken,
-        // which is the bug this test exists for.
-        assert!(!distinguishable([position[0] + step, 0.0, 0.0], unrelated));
-    }
 }

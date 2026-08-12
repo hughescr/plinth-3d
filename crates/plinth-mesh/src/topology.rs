@@ -102,6 +102,29 @@ const TOPOLOGY_KNOWN_CUT_MASK: u8 = TOPOLOGY_CUT_BOUNDARY
     | TOPOLOGY_CUT_POINT_ONLY
     | TOPOLOGY_CUT_DEGENERATE;
 
+/// The cut classes that refuse a mesh at the closed-solid gate
+/// (`plinth_hollow::validate_closed_mesh`).
+///
+/// This is **not** [`TOPOLOGY_KNOWN_CUT_MASK`] with a bit subtracted: each
+/// class is written out so that a new cut class added to the topology in the
+/// future is a deliberate decision made here, not one silently inherited from
+/// the "every known flag" mask.
+///
+/// `TOPOLOGY_CUT_POINT_ONLY` is deliberately absent. Per the owner ruling of
+/// 2026-08-12 (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+/// §4, FU-47): a point-touch is not a modelling defect — resin cannot flow
+/// through a point, so a vertex fan that falls into more than one component
+/// there is a legitimate fingertip touch, not a hole in the solid. The flag
+/// is still measured (`TopologyCounts::point_only_cut_faces` is untouched)
+/// and still gates decimation's no-regression check; it simply no longer
+/// refuses the closed-solid gate. Closure and orientation are not relaxed by
+/// this mask, and no threshold moves.
+pub const TOPOLOGY_CUT_CLOSED_SOLID_MASK: u8 = TOPOLOGY_CUT_BOUNDARY
+    | TOPOLOGY_CUT_NONMANIFOLD
+    | TOPOLOGY_CUT_SAME_DIRECTION
+    | TOPOLOGY_CUT_DUPLICATE
+    | TOPOLOGY_CUT_DEGENERATE;
+
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum TopologyError {
     #[error("topology coordinate at vertex {vertex} axis {axis} is not finite")]

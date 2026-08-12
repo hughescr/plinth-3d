@@ -28,7 +28,8 @@ use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, Printe
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
     StrictMeshAuditError, TopologyError, TopologyValidationError, TriageAdmissionError,
-    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
+    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh,
+    TOPOLOGY_CUT_CLOSED_SOLID_MASK, WeldPolicy,
 };
 use plinth_orient::OrientationHistory;
 use plinth_solid::{
@@ -1376,18 +1377,30 @@ const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
 /// living in a diagnostic is exactly how a diagnostic starts reporting that
 /// models pass a gate they do not pass.
 ///
+/// Per the owner ruling of 2026-08-12 (FU-47, §4 of
+/// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`):
+/// a point-touch (`TOPOLOGY_CUT_POINT_ONLY`) is not a closed-solid defect, so
+/// this gate refuses on [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`] rather than on any
+/// nonzero cut flag. Closure and orientation are not relaxed by that mask,
+/// and no threshold moves.
+///
 /// # Errors
 ///
 /// [`HollowError::StrictAudit`] for a repeated index or a zero-area face,
 /// [`HollowError::Topology`] / [`HollowError::TopologyValidation`] when the
 /// topology cannot be built or does not validate, and
-/// [`HollowError::NotClosedOrOriented`] when any face carries any cut flag.
+/// [`HollowError::NotClosedOrOriented`] when any face carries a cut flag in
+/// [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`].
 pub fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
     mesh.audit_strict().map_err(HollowError::StrictAudit)?;
     let topology =
         build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
     validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
-    if topology.cut_flags().iter().any(|flags| *flags != 0) {
+    if topology
+        .cut_flags()
+        .iter()
+        .any(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
+    {
         return Err(HollowError::NotClosedOrOriented);
     }
     Ok(())

@@ -294,12 +294,10 @@ fn print_model(model: &ModelPreparationReport) {
 ///
 /// **A refusal is not nothing.** A model whose only findings are
 /// refusal-shaped — the shard strip skipped because the raw input triages as
-/// pre-hollowed, or every pinch left unrepaired — changed no face, so gating
-/// this block on "did the pass change anything" would print a blank card and
-/// then let the model be refused with no stated reason. Those unrepaired
-/// entries are precisely the automation work items the standing doctrine of
-/// the same ruling says every remaining refusal must become; they were already
-/// in the serialized evidence and are now in the human-readable report too.
+/// pre-hollowed, say — changed no face, so gating this block on "did the pass
+/// change anything" would print a blank card and then let the model be
+/// refused with no stated reason. Those entries were already in the
+/// serialized evidence and are now in the human-readable report too.
 fn print_repair(model: &ModelPreparationReport) {
     for line in repair_lines(model) {
         println!("{line}");
@@ -316,7 +314,6 @@ fn repair_lines(model: &ModelPreparationReport) -> Vec<String> {
         || repair.actions_skipped.is_some()
         || repair.shards.skipped.is_some()
         || repair.refused_to_empty.is_some()
-        || !repair.pinches.unrepaired.is_empty()
         || repair.duplicates.degenerate_groups_skipped > 0;
     if !has_finding {
         return Vec::new();
@@ -346,11 +343,6 @@ fn repair_lines(model: &ModelPreparationReport) -> Vec<String> {
             "  repair left in place  {} degenerate duplicate group(s), which belong to the edge-collapse doctrine and not to this pass",
             repair.duplicates.degenerate_groups_skipped
         ));
-    }
-    for pinch in &repair.pinches.unrepaired {
-        // A defect the pre-pass could not fix is named here and left to the
-        // gate. It is never a reason to move the cap it hit.
-        lines.push(format!("  repair left in place  {pinch:?}"));
     }
     if let Some(residual) = repair.residual {
         if !residual.is_clean() {
@@ -408,7 +400,7 @@ fn print_size(size: Option<AssumedPrintSize>) -> String {
 #[cfg(test)]
 mod tests {
     use plinth_core::ModelId;
-    use plinth_mesh::{RepairEvidence, UnrepairedPinch};
+    use plinth_mesh::RepairEvidence;
     use plinth_pipeline::{ModelPreparationOutcome, ModelPreparationReport};
 
     use super::repair_lines;
@@ -433,21 +425,10 @@ mod tests {
 
     /// **The refusal-shaped model.** Nothing was changed, so a `changed()`
     /// gate would print an empty card and leave the reader with a gate refusal
-    /// and no stated cause. Each of the three refusal shapes has to reach the
-    /// report on its own.
+    /// and no stated cause. Each of the remaining refusal shapes has to reach
+    /// the report on its own.
     #[test]
     fn a_pre_pass_that_only_refused_still_reports_what_it_refused() {
-        let mut unrepaired = RepairEvidence::default();
-        unrepaired
-            .pinches
-            .unrepaired
-            .push(UnrepairedPinch::NoFanDirection { welded_vertex: 4 });
-        let lines = repair_lines(&report(Some(unrepaired)));
-        assert!(
-            lines.iter().any(|line| line.contains("NoFanDirection")),
-            "{lines:?}"
-        );
-
         let mut skipped = RepairEvidence::default();
         skipped.shards.skipped = Some("raw input triages as pre-hollowed".to_owned());
         let lines = repair_lines(&report(Some(skipped)));

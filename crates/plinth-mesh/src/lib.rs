@@ -28,16 +28,15 @@ pub use fixtures::{
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use repair::{
     repair_mesh, DuplicateDisposition, DuplicateFaceEvidence, DuplicateFaceGroup,
-    EmptyResultRefusal, PinchFanMove, PinchSplit, PinchSplitEvidence, RepairEvidence, RepairedMesh,
-    ResidualTopology, ShardStripEvidence, UnrepairedPinch,
+    EmptyResultRefusal, RepairEvidence, RepairedMesh, ResidualTopology, ShardStripEvidence,
 };
 pub use topology::{
     build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,
     ClosedComponent, ClosedComponentCertificate, FaceTopology, PointOnlyVertex, TopologyCounts,
     TopologyDigest, TopologyError, TopologySchema, TopologyValidationError, WeldedView,
     FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
-    TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
-    TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+    TOPOLOGY_CUT_CLOSED_SOLID_MASK, TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE,
+    TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
     triage_components, triage_settings, ComponentDescription, PreHollowed, TriageAdmissionError,
