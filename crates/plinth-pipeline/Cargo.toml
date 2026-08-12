@@ -31,3 +31,9 @@ thiserror = { workspace = true }
 # consults plinth-verify's coverage verdict before the library ever calls
 # plinth-emit, and `prepare` loads every source model through plinth-mesh.
 chitubox_io = { path = "../../rust/chitubox_io" }
+# The E1 dual-cavity real-pipeline witness example builds its own
+# caller-owned, raised-drain-budget `H0AdmissionLimits` (the same documented
+# knob `plinth-hollow/examples/dual_cavity_article.rs` uses), which needs
+# `plinth_solid::BooleanLimits` -- not re-exported by `plinth-hollow`.
+# Example/test-only, so this is a dev-dependency like `chitubox_io` above.
+plinth-solid = { path = "../plinth-solid" }
