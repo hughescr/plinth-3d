@@ -831,8 +831,20 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
 }
 
 /// Same multiply associativity as the original per-vertex trig
-/// (`center + (radius*sin)*cos`) so no ring vertex moves for a numerically
-/// irrelevant reason — only the pole/equator table entries above move bytes.
+/// (`center + (radius*sin)*cos`), so no ring vertex moves for a reason *this
+/// function* introduces. All movement versus the pre-fix generator comes from
+/// `LATITUDE_TABLE`, and it is **not** confined to the poles and the equator.
+/// Measured against the pre-fix rule (raw `theta.sin()`/`theta.cos()` at
+/// `theta = PI*k/SPHERE_LATITUDES`): `k = 0..=3` — the north pole and all three
+/// northern rings — are bit-identical, while every entry from the equator
+/// southward moves. `k = 4` cos (pinned `0.0` against `6.1232e-17`) and `k = 8`
+/// sin (pinned `0.0` against `1.2246e-16`) are the intended pinnings; `k = 5`
+/// cos, `k = 6` sin *and* cos, and `k = 7` sin each move by 1 ulp because the
+/// exact northern mirror replaces a second, independently-rounded `sin_cos()`.
+/// So southern mid-band ring vertices can move on the wire too, not only the
+/// pole and equator rings. Per-record byte movement was measured rather than
+/// inferred from this: see the FU-36 A/B table in
+/// `docs/engineering-journal/05-chitubox-and-corpus.md`.
 fn sphere_point(
     center: [f64; 3],
     radius: f64,

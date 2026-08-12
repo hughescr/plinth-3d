@@ -227,6 +227,30 @@ closed under negation by construction, not by luck of rounding. The triangle
 emission loop, its two skip conditions, and the 224-triangle-per-sphere count
 are untouched.
 
+**Exactly which table entries move, measured entry by entry (added 2026-08-12
+on review).** `sphere_point` keeps the original multiply associativity
+(`center + (radius*sin)*cos`), so it introduces no movement of its own and
+*all* movement versus `develop` comes from `LATITUDE_TABLE`. That movement is
+**not** confined to the poles and the equator, and an earlier in-code comment
+that said it was has been corrected. Comparing each entry against the pre-fix
+rule (`theta.sin()`, `theta.cos()` at `theta = PI*k/8`):
+
+| `k` | latitude | `sin` bits | `cos` bits | why |
+| --- | --- | --- | --- | --- |
+| 0 | north pole | same | same | `sin(0)`/`cos(0)` are already exact |
+| 1–3 | northern rings | same | same | `sin_cos()` agrees bitwise with separate `sin()`/`cos()` here |
+| 4 | equator | same | **MOVED** | pinned `0.0` vs `6.1232e-17` |
+| 5 | southern ring | same | **MOVED** | 1 ulp: exact mirror vs independent rounding |
+| 6 | southern ring | **MOVED** | **MOVED** | 1 ulp each, same cause |
+| 7 | southern ring | **MOVED** | same | 1 ulp, same cause |
+| 8 | south pole | **MOVED** | same | pinned `0.0` vs `1.2246e-16` — the seam itself |
+
+So every ring vertex at latitudes 5–7, not just the pole and equator rings,
+can move on the wire. This does not change any measurement below — the A/B
+pass measured per-record byte movement directly and is unaffected — but it is
+the statement **FU-51's baseline re-record must lean on**, so it is recorded
+as measured rather than as the narrower claim first written.
+
 Five new invariant tests land in the crate's existing `#[cfg(test)] mod
 tests`, called directly against `sphere_triangles` (crate-private) over a
 batch of 6 centres — including the origin, which the design note above
@@ -259,13 +283,48 @@ carries real magnitude — × 3 fixture radii:
   every centre and radius.
 - `sphere_triangles_still_refuses_a_non_positive_or_non_finite_radius`.
 
-**Each new test was verified to FAIL on the pre-fix generator** (stash the
-fix, `cargo test -p plinth-emit --lib`, unstash): `both_pole_caps_...` fails
-because the south apex reads `[3.96e-17, 1.64e-17, -r]` instead of
-`[0, 0, -r]`; the manifold test fails with unmatched directed edges around
-the south seam; the symmetry test fails because `(0, 0, -r)` has no exact
-z-mirror in the pre-fix vertex set. The invariant tests the ruling asked for
-do demonstrably catch the defect they are named for.
+**THREE of the five tests were verified to FAIL on the pre-fix generator; the
+other two pass on both sides by construction.** *Corrected 2026-08-12 on
+review.* This paragraph first read "**Each** new test was verified to FAIL on
+the pre-fix generator" — a claim over all five, which is **false for two of
+them** and is retracted here rather than quietly reworded. The two regression
+pins cover behaviour this fix does not touch, so they *cannot* fail on the
+pre-fix generator; claiming they did overstated the evidence.
+
+*Procedure, re-run 2026-08-12.* A whole-fix stash cannot be used, and the
+originally-recorded "stash/test/unstash" therefore could not have run all five
+tests as committed: `the_generated_sphere_is_exactly_north_south_symmetric`
+dereferences `LATITUDE_TABLE`, a static this fix introduces, so the committed
+test module does not compile against a fully stashed fix. Instead
+`build_latitude_table` **alone** is reverted to the pre-fix rule — plain
+`theta.sin()`, `theta.cos()` at `theta = PI*k/SPHERE_LATITUDES`, no pinning and
+no mirroring — which reproduces `develop`'s per-vertex latitude values
+bit-for-bit (`sphere_point`'s multiply associativity is unchanged by the fix,
+so the geometry emitted under that revert is identical to `develop`'s), then
+`cargo test -p plinth-emit --lib`, then restore. Measured outcome:
+
+- `both_pole_caps_are_exact_single_apex_fans` — **FAILED**: the south apex
+  reads `[3.96e-17, 1.64e-17, -r]` instead of `[0, 0, -r]`.
+- `every_emitted_sphere_is_a_closed_two_manifold` — **FAILED**: unmatched
+  directed edges around the south seam.
+- `the_generated_sphere_is_exactly_north_south_symmetric` — **FAILED**:
+  `(0, 0, -r)` has no exact z-mirror in the pre-fix vertex set.
+- `the_sphere_triangle_count_and_soup_length_are_unchanged` — **PASSED, and
+  necessarily so.** The fix moves vertex coordinates only; the capacity
+  formula `2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1)` and both skip
+  conditions are byte-identical to `develop`, so 224 was never in question —
+  as this section already says two paragraphs up ("the 224-triangle-per-sphere
+  count are untouched").
+- `sphere_triangles_still_refuses_a_non_positive_or_non_finite_radius` —
+  **PASSED, and necessarily so**: the `!radius.is_finite() || radius <= 0.0`
+  guard is byte-identical to `develop`.
+
+The last two are **regression pins, not defect-catching tests** — their own
+doc comments say as much ("guards against a future fix", "Keeps the existing
+radius rejection covered") — and they exist so a later change cannot move the
+triangle count or drop the radius guard unnoticed. The **three** that exercise
+the repair do demonstrably catch the defect they are named for, which is what
+the ruling asked for.
 
 **In-tree closure-defect measurement supersedes the docstring's old claim**
 that the `1e-12` bound exists "solely" to accommodate the seam. Measured in
