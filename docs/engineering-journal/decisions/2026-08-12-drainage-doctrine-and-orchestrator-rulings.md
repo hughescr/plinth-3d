@@ -266,6 +266,24 @@ unregistered named constants are correct here.
 The spawn brief's *"3.0 mm radius"* was **the orchestrator's transcription error**;
 the lane correctly followed the recorded ruling.
 
+> **CORRECTION 2026-08-12 — this ruling quotes 1.5 mm; the shipped threshold is 1.75 mm,
+> and the ruling was therefore made against a description of the code that was already out
+> of date.** Left standing rather than reworded, per this project's convention. Verified in
+> `crates/plinth-hollow/src/flow.rs:147-149` at `9e5dbb0`:
+> `core_clearance_threshold_mm(throat_r_mm, pitch_mm) = throat_r_mm + 0.5 * pitch_mm`,
+> applied as `clearance >= core_threshold_mm`. At the registered values
+> (`HOLLOW_DRAIN_R_MM` 1.5 mm, `HOLLOW_PITCH_MM` 0.5 mm) the engine requires **1.75 mm of
+> clearance radius — a 3.5 mm passage**, not 3.0 mm. The half-voxel correction is an
+> adversarial-review **tightening**: it is correct in itself, it moves no registered
+> constant, and it is documented in `flow.rs` and in the FU-47 ledger row. **The verdict
+> above — radius, not diameter — is unaffected and stands.** What is corrected is the
+> number the ruling states, and the fact that a ruling recorded against a stale description
+> is one a later reader will apply to the wrong threshold. The residue — *what "wide enough
+> for resin to flow" means in the shipped engine, given three different numbers for one
+> doctrine* — is escalated to the owner as a single decision and is **OPEN**; see
+> [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+> §4.2 and §6. **Nothing is loosened by this correction and no constant moves.**
+
 **9. `>=` vs `>` at the lattice-attainable boundary — STANDS (`>=`).** A throat
 **exactly** admitting the bore **physically drains**; the ruling's wording is the spec.
 

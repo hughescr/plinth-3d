@@ -291,11 +291,30 @@ owner question**. Nothing was guessed at.
 | FU-50: are the two flat bases fixed end to end? | **Yes** — `Round 50` and `Round 100` emit artifacts in the corpus rerun. |
 | FU-51: are the FU-38 WIP files in the shared tree finished? | **Yes, at `fbbc099`.** They were mid-edit when FU-51 landed and were left untouched then, correctly. |
 | FU-51/61: is the bore harness committed, and by whom? | **Committed at `44b8df1`** as `crates/plinth-pipeline/examples/fu61_bore_penetration.rs`, following the `repair_probe` precedent for a permanent diagnostic example. The journal cites its exact output, so it had to be in the tree. |
-| FU-51: are the Sphere baseline's `wall_mm` fields really walls? | **No — they are sampled exit distances**, and the re-record says so. The Python-era record's `drains[0].wall_mm = 1.0` / `vent.wall_mm = 4.0` carry the same quantity Rust's `HoleGeometry::sampled_exit_mm` carries. The naming question is still open below. |
+| FU-51: are the Sphere baseline's `wall_mm` fields really walls? | **No — they are sampled exit distances**, and the re-record says so. The Python-era record's `drains[0].wall_mm = 1.0` / `vent.wall_mm = 4.0` carry the same quantity Rust's `HoleGeometry::sampled_exit_mm` carries. The naming question is still open below. **CORRECTION 2026-08-12: those two figures are the PRE-FU-51 values and are not what the file holds.** Verified against `corpus/baseline/Sphere.pipeline.json` at `9e5dbb0`: `drains[0].wall_mm` = **4.0** and `vent.wall_mm` = **5.0** — the file was deliberately re-recorded once at `44b8df1` under the owner's FU-51 ruling. The answer above ("sampled exit distances, not walls") is unaffected and stands. **A second finding, which is why the naming question got a row rather than a shrug:** 4.0 and 5.0 are *exactly* the registered drain/vent `after` keepout-extension values (`HoleRole::Drain => 4.0`, `HoleRole::Vent => 5.0` in `crates/plinth-hollow/src/drilling.rs`), so on this one file three different quantities coincide numerically and a reader cannot tell which one the field means. Filed as [FU-85](../CURRENT-STATUS.md#follow-ups-2026-08-04); ruled in [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md) §3.10 — **add a reader's note, do not re-cut the file.** |
 | The intermittent 16-thread `plinth-support` failure. | **Already filed** — this is [FU-27](../CURRENT-STATUS.md#follow-ups-2026-08-04), sighted again on 2026-08-12. No new row; the sighting is appended to FU-27. |
 | FU-61's blocker: why do no minis reach drilling? | Two causes, both measured: `HOLLOW_SAVE_MIN_FRAC` = 0.25 sends thin-limbed minis solid at the registered wall, and at thinner walls the drain planner's own preflight refuses. The second is **not a new row** — it is [FU-59](../CURRENT-STATUS.md#follow-ups-2026-08-04)'s over-charge seen at a second site (`planner_preflight`'s `lobe_capacity = low_members / minimum_lobe_voxels`, a partition bound that ignores cavity connectivity), and FU-59's own numbers (Warhorse 4.06 GB, Giant Toad 8.92 GB) are the same refusal FU-61 re-measured at 4.20 GB and 9.12 GB under stress walls. Recorded against FU-59; **the cap was not touched.** |
 
 ### 5.2 Open owner questions
+
+> **RECONCILED 2026-08-12 — this list is stale as a list of *open* questions, and is kept
+> as the line of record rather than edited.** Reconciled against the orchestrator rulings
+> recorded at `87f07c3` and the code at `9e5dbb0`. **The split is 13 / 10 / 1:**
+> **13** of the twenty-three were **already answered** when this section was written at
+> `5cca1e5` — questions **1, 2, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17**; the record was never
+> reconciled after the drainage-doctrine pass landed at `87f07c3`. **10** are **ruled** in
+> [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md) —
+> questions **3, 10, 11, 12, 18, 19, 20, 21, 22, 23**, question 3 by the **owner** and the
+> other nine as orchestrator rulings under co-owner authority. **1** genuine owner decision
+> was extracted from the residue of questions **2, 3 and 16** — *what "wide enough for resin
+> to flow" means in the shipped engine* — and is **open, with Craig**. 13 + 10 = 23, no
+> question counted twice; questions 8 and 16 each left a **residue** that is also ruled there
+> (the dead `evidence` field, and `>=`'s justification), which adds nothing to the count.
+>
+> **Four questions below state a fact that does not hold.** Each carries its correction
+> inline, marked **CORRECTION**; the text as first written is left standing in every case.
+> Questions **3**, **2**, **16** and **20** are affected, and so is the FU-51 `wall_mm` row
+> in §5.1 above.
 
 Numbered for reference; each is also carried in the affected ledger row.
 
@@ -311,11 +330,48 @@ Numbered for reference; each is also carried in the affected ledger row.
    `HOLLOW_DRAIN_R_MM` = 1.5 mm — i.e. the passage admits the 3.0 mm bore — per the
    recorded ruling's wording. The spawn brief said "3.0 mm". Under the stricter reading
    every cavity splits far more aggressively and savings fall.
+
+   > **CORRECTION 2026-08-12 — the shipped threshold is 1.75 mm, not 1.5 mm.** Verified in
+   > `crates/plinth-hollow/src/flow.rs:147-149`:
+   > `core_clearance_threshold_mm(throat_r_mm, pitch_mm) = throat_r_mm + 0.5 * pitch_mm`,
+   > applied as `clearance >= core_threshold_mm`. At the registered values
+   > (`HOLLOW_DRAIN_R_MM` 1.5 mm, `HOLLOW_PITCH_MM` 0.5 mm) that is **1.75 mm of clearance
+   > radius — a 3.5 mm passage**. The half-voxel correction was an adversarial-review
+   > **tightening**, correct in itself, moving no registered constant, and documented both in
+   > `flow.rs` and in the FU-47 ledger row. **The orchestrator's ruling on this question
+   > (Part B §B.3 #8 of
+   > [`2026-08-12-drainage-doctrine-and-orchestrator-rulings.md`](2026-08-12-drainage-doctrine-and-orchestrator-rulings.md))
+   > quotes the same stale 1.5 mm — it ruled on a description of the code that was already
+   > out of date.** Its verdict (radius, not diameter) is unaffected and stands; its number is
+   > not the number that ships. The residue is the **open owner decision** in
+   > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+   > §6. Nothing here loosens anything.
+
 3. **The realized bore is 0.9914449 of nominal.** The 24-gon cutter is *inscribed*, so a
    registered 3.0 mm drain opens 2.9743 mm and a 2.5 mm vent opens 2.4786 mm. FU-47's
    throat doctrine cites the 3.0 mm bore as the minimum-throat rule, which the realized
    throat is 0.026 mm under. Circumscribing the cutter would fix it — and is exactly the
    widening FU-61 forbids. Not changed. Owner call.
+
+   > **RULED 2026-08-12 by the OWNER, and the framing above is CORRECTED.** Ruling:
+   > **the geometry does not change, the record does** — the cutter stays inscribed, no
+   > threshold/cap/gate/floor/tolerance moves in either direction, and every place that
+   > asserts a *nominal* figure where the *realized* figure is what the geometry produces
+   > says the realized figure with the 0.9914449 inscription factor named. Craig, verbatim:
+   > *"The difference between 2.974mm and 3.000mm is 'it doesn't fucking matter'. So leave it
+   > as is and update the docs/constants/recorded test values/rulings/etc as needed."*
+   > Reproduced in full, with its rationale and its standing consequence, in
+   > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+   > §2. **This is explicitly NOT an FU-8b event: nothing is loosened to make a measurement
+   > fit.**
+   >
+   > **CORRECTION — "0.026 mm under" is INVERTED.** The engine never compares against 3.0 mm.
+   > It requires **1.75 mm of clearance radius — a 3.5 mm passage** (see the correction on
+   > question 2 above). Against a 2.974335 mm realized bore that is **0.53 mm of margin on
+   > the SAFE side** (3.5 − 2.974335 = 0.525665), not a deficit: the engine demands *more*
+   > room than the drill needs. A reader of the original framing would reach for a widening;
+   > there is nothing to widen.
+
 4. **FU-54's registration route.** The pass limit of 8 landed as a private const plus a
    caller-owned `H0AdmissionLimits` field, matching every sibling H0 admission limit —
    **none** of which is a registered M0 constant. The ruling said "registered with a
@@ -342,6 +398,17 @@ Numbered for reference; each is also carried in the affected ledger row.
    refusal sources would be `Refused`; ground truth is that the closure refusal is
    `Failed`, so the evidence field was added to **both** variants under the ruling's plain
    text. Interpretation, not ruling.
+
+   > **RULED 2026-08-12 (orchestrator ruling, co-owner authority, per Craig): the
+   > `Failed`-side field is deleted in the SAME commit as
+   > [FU-76](../CURRENT-STATUS.md#follow-ups-2026-08-04), not in a row of its own.** Once
+   > FU-76 projects the closure refusal to `Refused { gate: Some(UncoveredIslands) }`, that
+   > field is **unreachable**, and a field advertising evidence a variant cannot carry is
+   > the misleading surface FU-58 condemns. Two commits would leave a window in which the
+   > type says something the code cannot make true. See
+   > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+   > §3.1.
+
 9. **FU-57 recovers island face ids by walking the serialized report** rather than through
    new `CoverageReport` accessors, so `plinth-verify/src` is untouched. Uglier than the
    accessor; reversible by ruling.
@@ -353,6 +420,19 @@ Numbered for reference; each is also carried in the affected ledger row.
 12. **`H0ResourceDiagnostics` was not extended** with FU-47's flow-selection transient-byte
     fields (EDT array, i32 label array), deliberately, to avoid a committed-golden blast
     radius colliding with FU-54/FU-55's concurrent edits to the same code.
+
+    > **RULED 2026-08-12 (orchestrator ruling, co-owner authority, per Craig): extend it,
+    > and treat it as a PREREQUISITE rather than a nicety.** Filed as
+    > [FU-83](../CURRENT-STATUS.md#follow-ups-2026-08-04). The blast-radius argument
+    > expired when FU-54/FU-55 merged. The decisive new reason:
+    > **[FU-82](../CURRENT-STATUS.md#follow-ups-2026-08-04)'s own first action — counting
+    > how many real cavity throats fall inside the pose-ambiguity band — cannot be produced
+    > by a pipeline that computes `FlowStats` and drops it**, which is what ships at
+    > `9e5dbb0` (`Some((selected, _stats))` in `plinth-hollow/src/lib.rs`, `_flow_stats` in
+    > `plinth-hollow/src/well_composed.rs`). **Build FU-83 before FU-82's census.** See
+    > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+    > §3.4 and §5.
+
 13. **The drilling-side floods remain plain 6-connectivity.** `drainability_map_admitted`
     and `trapped_components` are literally "can resin flow from here to a drain", so the
     most physically complete reading of FU-47's doctrine applies the throat rule there
@@ -371,6 +451,24 @@ Numbered for reference; each is also carried in the affected ledger row.
     while pre-existing cavity selection uses strict `>` (`edt > wall`). On a 0.5 mm lattice
     `>= 1.5` is exactly attainable, so the choice is not measure-zero. Unreconciled; no
     margin was invented either way.
+
+    > **CORRECTION 2026-08-12 — the justification is BACKWARDS; the ruling still stands.**
+    > `>=` **STANDS** (Part B §B.3 #9, and reaffirmed in
+    > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+    > §3.5). But the reason given here is wrong, because 1.5 mm is not the threshold the
+    > engine applies — 1.75 mm is (see the correction on question 2). `frozen_distance_transform`
+    > is an **exact** Euclidean transform over an isotropic 0.5 mm lattice, so every clearance
+    > it can report is `0.5·√n` for an integer `n` that is a sum of three integer squares.
+    > Exact equality with the threshold needs `1.75 = 0.5·√12.25`, i.e. `n = 12.25` — not an
+    > integer, so **lattice-UNattainable**. At production values the `>=` / `>` choice **is**
+    > measure-zero, the opposite of what is claimed above. (1.5 mm *is* attainable, `0.5·√9`,
+    > which is why `flow.rs`'s own boundary test
+    > `the_core_test_admits_clearance_exactly_equal_to_the_corrected_threshold` has to use a
+    > non-registered 1.25 mm throat to land the threshold on 1.5 and reach the boundary at
+    > all.) The same fact is derived independently in
+    > [`CURRENT-STATUS.md`'s dual-cavity fixture section](../CURRENT-STATUS.md#dual-cavity-fixture-2026-08-12).
+    > **Only the justification changes; no code, constant or comparison moves.**
+
 17. **FU-36 did not snap the longitude quadrants.** `cos(π/2)` = 6.12e-17 leaves the
     longitude ring slightly off-axis. Not needed for manifoldness or N/S symmetry and not
     mentioned by the ruling, so deliberately not done — but a reader of "properly manifold
@@ -393,6 +491,25 @@ Numbered for reference; each is also carried in the affected ledger row.
     under measured and zero fields, both refusing identically). Applied with full
     attribution under the file's own re-pin protocol rather than left red — but it is
     FU-38's row and the owner should look at it explicitly.
+
+    > **RULED 2026-08-12 (orchestrator ruling, co-owner authority, per Craig): correct as
+    > done; close it.** A cross-lane verdict flip applied with full attribution under the
+    > file's own re-pin protocol is the protocol working, not a breach of it. Recorded in
+    > [`2026-08-12-reconciliation-and-rulings.md`](2026-08-12-reconciliation-and-rulings.md)
+    > §3.8; the record-keeping is [FU-84](../CURRENT-STATUS.md#follow-ups-2026-08-04).
+    >
+    > **CORRECTION — the premise is stale at `9e5dbb0`.** The two `false → true` flips
+    > described above were **reverted `true → false` by the FU-56 review fixes**, in the same
+    > file, each with its own attribution — a **fourth** re-record on `Sphere.prepped.stl`
+    > and a **second** on `make_overhang_table (procedural)`. Verified in
+    > `crates/plinth-pipeline/src/lib.rs` at `9e5dbb0`: **all three recorded verdicts read
+    > `false`.** Neither fixture refuses identically any more — the Sphere's fifth routing
+    > attempt still ends in `Cco(InvalidGeometry)` under both fields but its per-island
+    > evidence diverges (477 nominated / 26 eligible against 478 / 27), and the overhang
+    > table now closes and seals under both fields with two differing sealed digests. The
+    > sub-question "is identical refusal acceptable?" is therefore **moot**, and the ruling
+    > rests on the protocol rather than on that argument.
+
 21. **FU-50's `raster_delta.rs` "approx min wall" column is a local proxy**, not FU-55's
     landed measurement primitive, because FU-55 was a parallel lane and parity could not be
     confirmed at implementation time. Labelled as an approximation in code and prose.
