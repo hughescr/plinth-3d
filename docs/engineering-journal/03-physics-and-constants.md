@@ -843,8 +843,20 @@ of **FU-37** (landed 2026-08-12, see
 the same requested wall also reaches the serialized `HollowReport`, as
 `HollowReport::wall: Option<Finite>`, populated on every production path
 (hollowed-and-drilled, every typed solid-decision reason, and the internal
-support-refusal substitution). Two artifacts prepared at 2.5 mm and 3.0 mm are
-therefore no longer indistinguishable in the files the pipeline writes.
+support-refusal substitution).
+
+**And, as of the pipeline plumbing that completed that row** (see
+[`CURRENT-STATUS.md#hollow-wall-reaches-run-output-2026-08-12`](CURRENT-STATUS.md#hollow-wall-reaches-run-output-2026-08-12)),
+it reaches **the run's own output**: `ChainOutcome` and
+`ModelPreparationOutcome::Artifact` carry `wall_mm` beside FU-55's
+`realized_wall`, and the CLI prints both. Stated precisely, because the
+distinction matters: **the `.chitubox` itself still carries no wall** —
+`plinth_emit::write` embeds geometry, placement and support records only — so
+what is now distinguishable between a 2.5 mm and a 3.0 mm run is the
+**prepare report**, printed and serialized, not the artifact's own bytes. The
+field landing on `HollowReport` alone was not enough: the report died inside
+`seal_and_emit` and no run output carried it, which is why this paragraph
+previously claimed more than the code delivered.
 `CavityRecord` and `DrillingEvidence` still carry no wall field — the ruling
 placed the field on the report's own top level, not on the drilling evidence,
 because the wall is the shell's defining parameter rather than a property of
