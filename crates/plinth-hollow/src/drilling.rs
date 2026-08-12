@@ -439,6 +439,9 @@ impl HollowedAndDrilled {
             // before: it lived only in `H0ResourceDiagnostics`, which no
             // emitted artifact reads.
             cavity_repair: Some(cavity.resources().cavity_repair()),
+            // FU-55: the realized minimum wall this shell measured before it
+            // was ever allowed to reach drain planning or drilling.
+            realized_wall_mm: Some(cavity.realized_wall_mm()),
         };
         HollowedModel::from_verified_hollow(
             mesh,

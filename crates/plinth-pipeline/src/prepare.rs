@@ -1139,19 +1139,23 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::CavityExtractionFailed
         | HollowError::DrainGeometryFailed
         | HollowError::InvalidProductionMesh => true,
-        // Unreachable through `plinth_hollow::run`, which converts all five
+        // Unreachable through `plinth_hollow::run`, which converts all six
         // into a typed `HollowStageOutput::Solid` rather than propagating them.
         // Listed as geometry anyway, because if one ever did propagate, "keep
-        // the solid" is precisely what it means. The last two are the
+        // the solid" is precisely what it means. The middle two are the
         // well-composedness repair's own outcomes and reach the record as
         // `NoCavityAfterRepair` / `BelowThresholdAfterRepair`, which is how a
         // repair-caused solid stays distinguishable from a shape that never
-        // had a cavity.
+        // had a cavity. `RealizedWallBelowSpec` is FU-55's own check: a shell
+        // was built and its realized wall measured under the requested one,
+        // and `run` converts it into `ShellUnderWalled` before it ever
+        // reaches here — "keep the solid" is exactly the ruled behaviour.
         HollowError::IneligibleBelowBulk
         | HollowError::IneligibleNoCavity
         | HollowError::IneligibleSavings
         | HollowError::CavityRepairRemovedCavity { .. }
-        | HollowError::IneligibleSavingsAfterCavityRepair { .. } => true,
+        | HollowError::IneligibleSavingsAfterCavityRepair { .. }
+        | HollowError::RealizedWallBelowSpec { .. } => true,
     }
 }
 
@@ -1371,6 +1375,16 @@ mod tests {
                 repaired_voxels: 2,
                 cell_visits: 27,
                 full_grid_passes: 2,
+            }
+        ));
+        // FU-55: the realized-wall check's own refusal. `run` converts this
+        // into `ShellUnderWalled` before it ever reaches here, but if it ever
+        // did propagate, "keep the solid" is what it means — a hollow
+        // refusal is not a model rejection.
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::RealizedWallBelowSpec {
+                realized_wall_mm: 0.27,
+                requested_wall_mm: 2.5,
             }
         ));
     }

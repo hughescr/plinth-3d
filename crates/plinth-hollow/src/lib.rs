@@ -152,6 +152,17 @@ pub enum SolidDecisionReason {
     /// above: the gate was judged *after* voxels were handed back to material,
     /// and the record has to say so.
     BelowThresholdAfterRepair,
+    /// FU-55. A shell was built and its cavity survived every other gate, but
+    /// its realized minimum wall — measured directly against the source
+    /// surface — came in strictly below the wall the caller stated. The
+    /// shell is discarded and the oriented solid ships instead: a hollow
+    /// refusal, never a model rejection (2026-08-12 owner ruling). Distinct
+    /// from [`Self::NoCavityAfterRepair`] / [`Self::BelowThresholdAfterRepair`]:
+    /// those are findings about the cavity's *volume*, this one is a finding
+    /// about the shell's own *geometry* — the wall it actually cut, not the
+    /// wall it was asked to leave. [`HollowReport::realized_wall_mm`] carries
+    /// the number.
+    ShellUnderWalled,
 }
 
 /// What the well-composedness repair did, carried into the record so that a
@@ -243,6 +254,21 @@ pub struct HollowReport {
     /// existed have to keep deserializing.
     #[serde(default)]
     cavity_repair: Option<CavityRepairEvidence>,
+    /// FU-55: the realized minimum wall this report's shell measured, when
+    /// one was measured. Populated on the hollowed path (by
+    /// [`drilling::into_hollowed_model`], from [`CavityEvidence::
+    /// realized_wall_mm`]) and on the [`SolidDecisionReason::
+    /// ShellUnderWalled`] fallback (by `run`, from the refusal's own
+    /// measurement). `None` on every other report: a hand-built
+    /// [`Self::solid_decision`], and every solid decision that never reached
+    /// cavity selection or whose shell was discarded for an unrelated
+    /// reason. Distinct from `wall` (FU-37, requested) — see that field's
+    /// own doc.
+    ///
+    /// `default` for the same reason `cavity_repair` is: a report frozen
+    /// before this field existed has to keep deserializing.
+    #[serde(default)]
+    realized_wall_mm: Option<Finite>,
 }
 
 impl HollowReport {
@@ -255,6 +281,7 @@ impl HollowReport {
             drilling_evidence: None,
             drain_plan: None,
             cavity_repair: None,
+            realized_wall_mm: None,
         }
     }
 
@@ -262,6 +289,14 @@ impl HollowReport {
     #[must_use]
     pub const fn cavity_repair(&self) -> Option<CavityRepairEvidence> {
         self.cavity_repair
+    }
+
+    /// FU-55: the realized minimum wall this report's shell measured, when
+    /// one was measured. See the field's own doc for exactly which reports
+    /// carry it.
+    #[must_use]
+    pub const fn realized_wall_mm(&self) -> Option<Finite> {
+        self.realized_wall_mm
     }
 
     #[must_use]
@@ -369,6 +404,11 @@ impl HollowedModel {
             drilling_evidence: None,
             drain_plan: None,
             cavity_repair,
+            // FU-55: `run`'s `ShellUnderWalled` arm attaches its measurement
+            // after this constructor returns, via `with_realized_wall_mm` —
+            // every other solid decision (including this function's other
+            // two callers) has no shell to have measured.
+            realized_wall_mm: None,
         };
         Ok(Self {
             mesh,
@@ -406,6 +446,18 @@ impl HollowedModel {
             cavity_repair,
         )
     }
+
+    /// FU-55: attaches the discarded shell's realized-wall measurement to a
+    /// just-built solid decision. Crate-private — the only caller is `run`'s
+    /// `ShellUnderWalled` arm, immediately after
+    /// [`Self::solid_decision_recording_repair`] returns; every other solid
+    /// decision has no shell measurement to attach.
+    #[must_use]
+    fn with_realized_wall_mm(mut self, realized_wall_mm: Option<Finite>) -> Self {
+        self.history.hollow.realized_wall_mm = realized_wall_mm;
+        self
+    }
+
     #[must_use]
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
@@ -619,47 +671,7 @@ pub fn run(
         H0AdmissionLimits::production(),
     ) {
         Ok(candidate) => candidate,
-        Err(failure) => {
-            // Read the measurement off the failure *before* the error is
-            // consumed, so every arm below — the typed decisions and the bare
-            // propagation alike — hands on the same evidence. This is the seam
-            // the first version of this change lost it at: five errors became
-            // typed outputs and everything else propagated naked, and the
-            // record a naked propagation produces is the one that decides how
-            // the model is treated.
-            let cavity_repair = failure.cavity_repair();
-            let decided = |reason| {
-                HollowedModel::solid_decision_recording_repair(
-                    solid,
-                    orientation,
-                    reason,
-                    cavity_repair,
-                )
-                .map(|model| HollowStageOutput::Solid(Box::new(model)))
-                .map_err(HollowStageFailure::from)
-            };
-            return match failure.into_error() {
-                HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity),
-                HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
-                    decided(SolidDecisionReason::BelowThreshold)
-                }
-                // The two repair-caused decisions. They travel as their own
-                // reasons because "the repair removed the cavity" and "this
-                // shape has no cavity" are different findings and the record
-                // has to be able to tell them apart; the numbers themselves
-                // come from the same `cavity_repair` every other arm uses.
-                HollowError::CavityRepairRemovedCavity { .. } => {
-                    decided(SolidDecisionReason::NoCavityAfterRepair)
-                }
-                HollowError::IneligibleSavingsAfterCavityRepair { .. } => {
-                    decided(SolidDecisionReason::BelowThresholdAfterRepair)
-                }
-                error => Err(HollowStageFailure {
-                    error,
-                    cavity_repair,
-                }),
-            };
-        }
+        Err(failure) => return convert_shell_failure_to_solid(solid, orientation, failure),
     };
     // Drain planning and drilling consume the candidate, and with it the only
     // other copy of the repair's measurement. Take it first.
@@ -685,6 +697,68 @@ pub fn run(
             reserve_history,
         },
     )))
+}
+
+/// `run`'s own failure-to-solid-decision seam, factored out so it is
+/// directly testable against a hand-built [`HollowStageFailure`] without
+/// needing geometry that actually reproduces the failure — most of these
+/// are cavity-selection defects that a correct engine (FU-53's own proof, for
+/// [`HollowError::RealizedWallBelowSpec`]) makes structurally rare or
+/// impossible to reach honestly through the full pipeline.
+///
+/// Read the measurement off the failure *before* the error is consumed, so
+/// every arm below — the typed decisions and the bare propagation alike —
+/// hands on the same evidence. This is the seam the first version of this
+/// change lost it at: five errors became typed outputs and everything else
+/// propagated naked, and the record a naked propagation produces is the one
+/// that decides how the model is treated.
+fn convert_shell_failure_to_solid(
+    solid: Mesh,
+    orientation: OrientationHistory,
+    failure: HollowStageFailure,
+) -> Result<HollowStageOutput, HollowStageFailure> {
+    let cavity_repair = failure.cavity_repair();
+    let decided = |reason: SolidDecisionReason, realized_wall_mm: Option<Finite>| {
+        HollowedModel::solid_decision_recording_repair(solid, orientation, reason, cavity_repair)
+            .map(|model| {
+                HollowStageOutput::Solid(Box::new(model.with_realized_wall_mm(realized_wall_mm)))
+            })
+            .map_err(HollowStageFailure::from)
+    };
+    match failure.into_error() {
+        HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity, None),
+        HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
+            decided(SolidDecisionReason::BelowThreshold, None)
+        }
+        // The two repair-caused decisions. They travel as their own
+        // reasons because "the repair removed the cavity" and "this
+        // shape has no cavity" are different findings and the record
+        // has to be able to tell them apart; the numbers themselves
+        // come from the same `cavity_repair` every other arm uses.
+        HollowError::CavityRepairRemovedCavity { .. } => {
+            decided(SolidDecisionReason::NoCavityAfterRepair, None)
+        }
+        HollowError::IneligibleSavingsAfterCavityRepair { .. } => {
+            decided(SolidDecisionReason::BelowThresholdAfterRepair, None)
+        }
+        // FU-55, the ruling this whole function exists to carry: a shell
+        // that measured under spec is discarded, never a model failure, and
+        // the measurement that condemned it travels onto the solid decision
+        // that replaces it.
+        HollowError::RealizedWallBelowSpec {
+            realized_wall_mm, ..
+        } => match finite(realized_wall_mm) {
+            Ok(value) => decided(SolidDecisionReason::ShellUnderWalled, Some(value)),
+            Err(error) => Err(HollowStageFailure {
+                error,
+                cavity_repair,
+            }),
+        },
+        error => Err(HollowStageFailure {
+            error,
+            cavity_repair,
+        }),
+    }
 }
 
 /// H0's explicit extraction settings. Every value originates in the one typed
@@ -1117,6 +1191,14 @@ pub struct CavityEvidence {
     source_volume_mm3: Finite,
     resources: H0ResourceDiagnostics,
     drain_planning_cap_bytes: usize,
+    /// FU-55: the realized minimum wall, measured directly against the
+    /// source surface before this shell was allowed to reach the Boolean
+    /// difference. Present only because this `CavityEvidence` exists at
+    /// all — a shell whose realized wall came in under spec is refused
+    /// before a `CavityEvidence` is ever built (see
+    /// [`HollowError::RealizedWallBelowSpec`]); the in-process authority
+    /// behind [`HollowReport::realized_wall_mm`] on the hollowed path.
+    realized_wall_mm: Finite,
 }
 
 impl CavityEvidence {
@@ -1152,6 +1234,14 @@ impl CavityEvidence {
     #[must_use]
     pub const fn drain_planning_cap_bytes(self) -> usize {
         self.drain_planning_cap_bytes
+    }
+
+    /// FU-55: the realized minimum wall this shell measured, `>=`
+    /// [`Self::wall_thickness_mm`] by construction — [`create_shell`] never
+    /// returns a `CavityEvidence` for which that would be false.
+    #[must_use]
+    pub const fn realized_wall_mm(self) -> Finite {
+        self.realized_wall_mm
     }
 }
 
@@ -1276,7 +1366,7 @@ pub fn create_shell_recording_repair(
     if !candidate_threshold_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic.into());
     }
-    let (edt, cavity_distance_index_bytes, cavity_distance_exact_query_points) =
+    let (edt, cavity_distance_index_bytes, cavity_distance_exact_query_points, distance_surface) =
         exact_cavity_distance(
             &source,
             edt,
@@ -1399,6 +1489,36 @@ pub fn create_shell_recording_repair(
         drop(material);
         let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
         drop(main);
+        // FU-55. Never ship an under-walled shell: measure the realized
+        // minimum wall against the SOURCE surface here, before this shell
+        // pays for a Boolean difference at all. `distance_surface` is the
+        // exact `NativeSurface` already built above for cavity selection —
+        // reused, not rebuilt, guaranteed `Some` because a selected cavity
+        // (checked already, above) can only exist if at least one candidate
+        // voxel entered `exact_cavity_distance`'s candidate set, which is
+        // exactly the condition that builds it.
+        //
+        // The query bound is `2 x (wall + margin)`: the extracted surface
+        // sits on the boundary of the mask selected at `wall + margin`, so
+        // its true distance is expected within about one voxel of that
+        // threshold; doubling it is headroom for what the well-composedness
+        // repair may have moved, not a tolerance on the check itself — the
+        // check below compares the raw measurement, never the clamped one.
+        let distance_surface = distance_surface.ok_or(HollowError::Kernel)?;
+        let realized_wall_query_bound_mm = 2.0 * wall_plus_margin_mm;
+        let realized_wall_query_batch_points =
+            (limits.query_working_bytes() / QUERY_BYTES_PER_POINT).max(1);
+        let raw_realized_wall_mm = measure_realized_wall_mm(
+            &distance_surface,
+            &inner,
+            realized_wall_query_bound_mm,
+            realized_wall_query_batch_points,
+        );
+        let realized_wall_mm = checked_realized_wall_mm(
+            raw_realized_wall_mm,
+            settings.wall_thickness_mm.get(),
+            realized_wall_query_bound_mm,
+        )?;
         let (marching_vertex_upper_bound, marching_triangle_upper_bound) =
             marching_surface_bounds(spec)?;
         let boolean_limits = boolean_limits_for_h0(
@@ -1454,6 +1574,7 @@ pub fn create_shell_recording_repair(
             source_volume_mm3: finite(source_volume_mm3)?,
             resources,
             drain_planning_cap_bytes: limits.drain_planning_bytes,
+            realized_wall_mm,
         };
         Ok(ShellCandidate {
             mesh,
@@ -2487,8 +2608,11 @@ fn crop_margin_in_place(
 /// out-of-bound sentinel.
 ///
 /// Returns the refined field, the measured `NativeSurface` peak-bytes
-/// estimate (0 when no candidate existed and no surface was built), and the
-/// exact-query point count, both for [`H0ResourceDiagnostics`].
+/// estimate (0 when no candidate existed and no surface was built), the
+/// exact-query point count (both for [`H0ResourceDiagnostics`]), and the
+/// `NativeSurface` itself (`None` under the same no-candidate condition) —
+/// FU-55's realized-wall check reuses this exact surface rather than
+/// building a second BVH over the same `source`.
 fn exact_cavity_distance(
     source: &Mesh,
     mut edt: Array3<f64>,
@@ -2496,7 +2620,7 @@ fn exact_cavity_distance(
     pitch: f64,
     candidate_threshold_mm: f64,
     limits: H0AdmissionLimits,
-) -> Result<(Array3<f64>, usize, usize), HollowError> {
+) -> Result<(Array3<f64>, usize, usize, Option<NativeSurface>), HollowError> {
     let candidates: Vec<([usize; 3], [f64; 3])> = edt
         .indexed_iter()
         .filter(|(_, distance)| **distance > candidate_threshold_mm)
@@ -2517,7 +2641,7 @@ fn exact_cavity_distance(
         // selection test against a strictly larger threshold either, so the
         // EDT prefilter alone already settles both decisions this field
         // feeds. No surface is built.
-        return Ok((edt, 0, 0));
+        return Ok((edt, 0, 0, None));
     }
     let estimate =
         NativeSurface::estimate_index_memory_from_indexed(source.verts(), source.tris(), pitch)
@@ -2551,7 +2675,72 @@ fn exact_cavity_distance(
             edt[*voxel] = edt[*voxel].min(distance);
         }
     }
-    Ok((edt, estimate.peak_bytes(), candidates.len()))
+    Ok((edt, estimate.peak_bytes(), candidates.len(), Some(surface)))
+}
+
+/// FU-55. The realized minimum wall of a cavity shell: the minimum, over
+/// every vertex of the marching-cavity surface `inner`, of the exact
+/// distance to `surface` (the SOURCE mesh's own `NativeSurface`, reused
+/// rather than rebuilt). One batched, index-parallel `NativeSurface::query`
+/// call per chunk of at most `batch_points` vertices; the reduction across
+/// chunks and across each chunk's results is a SERIAL min-fold — the repo
+/// forbids a float reduction across parallel work items.
+///
+/// **Vertex-sampled, not a continuous minimum.** A thin spot strictly
+/// between two vertices of the extracted surface could in principle be
+/// missed. This is the same methodology the engineering journal records for
+/// this measurement, and the surface is dense at the frozen `HOLLOW_PITCH_MM`
+/// voxel pitch; it is not a proof, and is documented as such rather than
+/// claimed as one.
+///
+/// A vertex whose true distance exceeds `upper_bound_mm` comes back as
+/// [`f64::INFINITY`] ([`NativeSurface::query`]'s own over-bound sentinel)
+/// and can therefore never become the minimum; see the call site for how
+/// `upper_bound_mm` is sized.
+fn measure_realized_wall_mm(
+    surface: &NativeSurface,
+    inner: &Mesh,
+    upper_bound_mm: f64,
+    batch_points: usize,
+) -> f64 {
+    let batch_size = batch_points.max(1);
+    let mut minimum = f64::INFINITY;
+    for chunk in inner.verts().chunks(batch_size) {
+        let (distances, _faces) = surface.query(chunk, upper_bound_mm);
+        for distance in distances {
+            if distance < minimum {
+                minimum = distance;
+            }
+        }
+    }
+    minimum
+}
+
+/// FU-55. The one refusal rule: a realized wall strictly below the wall the
+/// caller stated is never shipped. Strict `<`, **no epsilon** — an epsilon
+/// here would itself be a new tolerance, and FU-53's own margin
+/// (`HOLLOW_CAVITY_MARCH_MARGIN_MM`) already makes floating-point noise at
+/// the boundary irrelevant. `raw_realized_wall_mm == requested_wall_mm`
+/// passes.
+///
+/// On success, the value recorded as evidence is clamped to
+/// `clamp_upper_bound_mm` — the same bound the measurement was queried
+/// against — so that a minimum the query could only bound (an over-bound
+/// vertex reads as [`f64::INFINITY`], which [`Finite`] cannot represent) is
+/// still recorded as a truthful lower bound ("at least this much") rather
+/// than failing to construct evidence for a shell that comfortably passed.
+fn checked_realized_wall_mm(
+    raw_realized_wall_mm: f64,
+    requested_wall_mm: f64,
+    clamp_upper_bound_mm: f64,
+) -> Result<Finite, HollowError> {
+    if raw_realized_wall_mm < requested_wall_mm {
+        return Err(HollowError::RealizedWallBelowSpec {
+            realized_wall_mm: raw_realized_wall_mm,
+            requested_wall_mm,
+        });
+    }
+    finite(raw_realized_wall_mm.min(clamp_upper_bound_mm))
 }
 
 pub(crate) fn marching_cavity(
@@ -2795,6 +2984,22 @@ pub enum HollowError {
         repaired_voxels: usize,
         cell_visits: usize,
         full_grid_passes: usize,
+    },
+    /// FU-55. A shell was built, its cavity survived every other gate, and
+    /// its realized minimum wall — measured directly against the source
+    /// surface, on every vertex of the extracted cavity mesh — came in
+    /// strictly below the wall the caller stated. Never propagated as a
+    /// model failure: [`run`] converts this into
+    /// [`SolidDecisionReason::ShellUnderWalled`] and the oriented solid
+    /// ships instead, per the 2026-08-12 owner ruling on FU-55. The shell
+    /// itself is discarded here, before it ever reaches the Boolean
+    /// difference.
+    #[error(
+        "the realized minimum wall {realized_wall_mm} mm is below the requested {requested_wall_mm} mm"
+    )]
+    RealizedWallBelowSpec {
+        realized_wall_mm: f64,
+        requested_wall_mm: f64,
     },
     #[error("plinth-solid mesh conversion failed: {0}")]
     SolidMesh(plinth_solid::MeshValidationError),
@@ -5077,5 +5282,323 @@ mod corpus_cavity_repair {
         assert!(resources.boolean_marshaled_input_bytes() > 0);
         assert!(resources.boolean_output_vertex_limit() > 0);
         assert!(resources.boolean_output_triangle_limit() > 0);
+    }
+}
+
+/// FU-55: never ship an under-walled shell. The realized-wall measurement,
+/// its no-epsilon check, `run`'s conversion of a refusal into
+/// [`SolidDecisionReason::ShellUnderWalled`], and the evidence continuity
+/// the ruling asks for.
+#[cfg(test)]
+mod fu55_realized_wall_check {
+    use super::*;
+    use plinth_mesh::{load_binary_stl, make_box, mesh_fingerprint};
+    use plinth_orient::{BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform};
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn frozen_mesh(file: &str) -> Mesh {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(file);
+        load_binary_stl(path, WeldPolicy::None).expect("committed frozen STL")
+    }
+
+    fn orientation_history() -> OrientationHistory {
+        let mesh = make_box([10.0; 3], [0.0; 3]).expect("closed audit fixture");
+        let budget = plinth_decimate::DecimationBudget::ratified_default(
+            plinth_decimate::ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0),
+        )
+        .expect("registered fixture budget");
+        let outcome = plinth_decimate::run(&mesh, budget).expect("fixture decimation succeeds");
+        let (_, audit) = outcome
+            .into_decimated_model()
+            .expect("fixture scale is in contract")
+            .into_parts();
+        OrientationHistory::from_reports(
+            audit,
+            OrientationReport {
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                },
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        )
+    }
+
+    /// **No epsilon.** `raw_realized_wall_mm == requested_wall_mm` passes;
+    /// a hair under refuses with the refusal's own numbers, unrounded.
+    #[test]
+    fn the_check_has_no_epsilon() {
+        checked_realized_wall_mm(2.5, 2.5, 10.0).expect("exactly at the requested wall passes");
+        let error = checked_realized_wall_mm(2.5 - 1e-9, 2.5, 10.0)
+            .expect_err("a hair under the requested wall must refuse");
+        match error {
+            HollowError::RealizedWallBelowSpec {
+                realized_wall_mm,
+                requested_wall_mm,
+            } => {
+                assert_eq!(requested_wall_mm, 2.5);
+                assert_eq!(realized_wall_mm, 2.5 - 1e-9);
+            }
+            other => panic!("expected RealizedWallBelowSpec, got {other:?}"),
+        }
+    }
+
+    /// A measurement the query could only bound (`f64::INFINITY`, which
+    /// [`Finite`] cannot represent) is recorded as a truthful "at least this
+    /// much" — clamped to the bound it was queried against — rather than
+    /// failing to construct evidence for a shell that comfortably passed.
+    #[test]
+    fn an_over_bound_measurement_is_recorded_as_a_clamped_lower_bound() {
+        let recorded = checked_realized_wall_mm(f64::INFINITY, 2.5, 7.0)
+            .expect("an over-bound measurement still passes the check");
+        assert_eq!(recorded.get(), 7.0);
+    }
+
+    /// `measure_realized_wall_mm`'s own contract: a serial min-fold over
+    /// batched, index-parallel queries, invariant to how the vertices are
+    /// chunked, and an over-bound vertex reads as [`f64::INFINITY`] rather
+    /// than a false minimum below the true one.
+    #[test]
+    fn measure_realized_wall_mm_is_batch_invariant_and_over_bound_reads_as_infinity() {
+        // A 20mm cube centred on the origin (x, y in [-10, 10], z in
+        // [0, 20]).
+        let source = make_box([20.0, 20.0, 20.0], [0.0, 0.0, 0.0]).expect("source box");
+        let estimate =
+            NativeSurface::estimate_index_memory_from_indexed(source.verts(), source.tris(), 0.5)
+                .expect("estimate");
+        let surface = NativeSurface::from_indexed(
+            source.verts(),
+            source.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("surface");
+        // A 2mm cube centred at (0, 0, 10), well inside the source cube: by
+        // construction (hand-computed, not measured) every one of its 8
+        // corners sits exactly 9.0 mm from the nearest source face -- 9.0 mm
+        // in x, in y, and in z alike, at every corner.
+        let inner = make_box([2.0, 2.0, 2.0], [0.0, 0.0, 9.0]).expect("inner box");
+        assert_eq!(inner.verts().len(), 8);
+
+        for batch_points in [1, 3, 8, 64] {
+            let minimum = measure_realized_wall_mm(&surface, &inner, 20.0, batch_points);
+            assert_eq!(
+                minimum, 9.0,
+                "batch size {batch_points} changed the measured minimum"
+            );
+        }
+
+        // Below every vertex's true distance: every query comes back
+        // over-bound, which `NativeSurface::query` reports as
+        // `f64::INFINITY` -- never a false minimum below the true one.
+        let over_bound = measure_realized_wall_mm(&surface, &inner, 5.0, 8);
+        assert_eq!(over_bound, f64::INFINITY);
+    }
+
+    /// **Test 1 of the FU-55 ruling: the positive case.** The committed
+    /// Sphere hollows at the registered wall, and the realized minimum wall
+    /// this shell measured is `>=` the requested 2.5 mm -- the guarantee the
+    /// ruling exists to enforce, read off the field the implementation
+    /// actually populates rather than a parallel recomputation of it.
+    #[test]
+    fn the_committed_sphere_realizes_at_least_the_requested_wall() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let settings = registered_settings();
+        let candidate =
+            create_shell(source, settings).expect("the frozen Sphere is hollow-eligible");
+        let realized = candidate.cavity().realized_wall_mm().get();
+        assert!(
+            realized >= settings.wall_thickness_mm().get(),
+            "realized wall {realized} mm fell below the requested {} mm",
+            settings.wall_thickness_mm().get()
+        );
+    }
+
+    /// **Test 2 of the FU-55 ruling: the check fires on real geometry,
+    /// before the Boolean.** FU-53's own margin is what keeps a real
+    /// production shell's realized wall above the requested one; force it to
+    /// zero here -- a purely locally-built `HollowSettings`, never a change
+    /// to the registered `HOLLOW_CAVITY_MARCH_MARGIN_MM` -- to reproduce the
+    /// exact defect FU-53 fixed (the surface-nets extractor emitting the
+    /// cavity boundary up to one voxel diagonal outside the selected voxel,
+    /// on smooth curved primitives specifically -- FU-53's own diagnosis) and
+    /// confirm FU-55's independent measurement catches it. `create_shell`'s
+    /// own doc names a locally-built `HollowSettings` the sanctioned way to
+    /// exercise non-registry settings in tests.
+    ///
+    /// The Boolean stage's own admission limits are starved to zero
+    /// alongside it: if the realized-wall check ran *after* the Boolean
+    /// difference rather than before it, this would fail with a Boolean
+    /// resource refusal instead of `RealizedWallBelowSpec`, so a passing
+    /// assertion on the refusal's own variant is also a proof of ordering.
+    #[test]
+    fn a_zero_margin_shell_on_the_sphere_is_refused_before_the_starved_boolean_stage() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let registered = registered_settings();
+        let settings = finite_settings(
+            registered.wall_thickness_mm().get(),
+            registered.voxel_pitch_mm().get(),
+            registered.bulk_min_mm().get(),
+            registered.save_min_mm3().get(),
+            registered.save_min_fraction().get(),
+            registered.volume_balance_rel_tol().get(),
+            0.0,
+        )
+        .expect("locally built zero-margin settings");
+
+        let mut limits = H0AdmissionLimits::production();
+        limits.max_boolean_input_primitive_units = 0;
+        limits.max_boolean_marshaled_input_bytes = 0;
+        limits.max_boolean_output_vertices = 0;
+        limits.max_boolean_output_triangles = 0;
+
+        let error = create_shell_with_admission_limits(source, settings, limits)
+            .expect_err("a zero-margin shell on the sphere's smooth curvature must measure under wall");
+        match error {
+            HollowError::RealizedWallBelowSpec {
+                realized_wall_mm,
+                requested_wall_mm,
+            } => {
+                assert_eq!(requested_wall_mm, registered.wall_thickness_mm().get());
+                assert!(
+                    realized_wall_mm < requested_wall_mm,
+                    "the refusal's own numbers must be inconsistent with shipping: \
+                     {realized_wall_mm} mm >= {requested_wall_mm} mm"
+                );
+            }
+            other => panic!(
+                "expected FU-55's realized-wall refusal ahead of the starved Boolean stage, got {other:?}"
+            ),
+        }
+    }
+
+    /// **Test 3 of the FU-55 ruling: the fallback wiring, direct.** `run`'s
+    /// own failure-to-solid conversion, exercised against a hand-built
+    /// [`HollowStageFailure`] rather than geometry that reproduces it (the
+    /// previous test already proves the geometry side reliably reaches this
+    /// exact error). A refusal must never propagate as a model failure: the
+    /// output is `HollowStageOutput::Solid` with
+    /// [`SolidDecisionReason::ShellUnderWalled`], the mesh is the oriented
+    /// solid handed in, unchanged, and the report carries the refusal's own
+    /// measurement.
+    #[test]
+    fn run_converts_the_refusal_into_a_shell_under_walled_solid_decision() {
+        let mesh = make_box([10.0; 3], [0.0; 3]).expect("closed fixture");
+        let expected_digest = mesh_fingerprint(&mesh).expect("fixture fingerprint");
+        let history = orientation_history();
+        let failure = HollowStageFailure::before_cavity_repair(HollowError::RealizedWallBelowSpec {
+            realized_wall_mm: 1.9,
+            requested_wall_mm: 2.5,
+        });
+
+        let output = convert_shell_failure_to_solid(mesh, history, failure)
+            .expect("a realized-wall refusal must never propagate as a model failure");
+        let HollowStageOutput::Solid(model) = output else {
+            panic!("expected the oriented-solid fallback, got AwaitingInternalSupport");
+        };
+        assert_eq!(
+            model.history().hollow().disposition(),
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::ShellUnderWalled
+            }
+        );
+        assert_eq!(
+            mesh_fingerprint(model.mesh()).expect("solid fingerprint"),
+            expected_digest,
+            "the oriented solid must reach the record unchanged"
+        );
+        assert_eq!(
+            model.history().hollow().realized_wall_mm(),
+            Some(Finite::new(1.9).expect("finite"))
+        );
+    }
+
+    /// **Test 5 of the FU-55 ruling, half of it: evidence continuity.** A
+    /// hand-built [`HollowReport::solid_decision`] carries no shell
+    /// measurement -- there was no shell -- and `realized_wall_mm` says so.
+    #[test]
+    fn realized_wall_mm_is_none_on_a_hand_built_solid_decision() {
+        assert_eq!(
+            HollowReport::solid_decision(SolidDecisionReason::NoCavity).realized_wall_mm(),
+            None
+        );
+    }
+
+    /// **Test 5 of the FU-55 ruling, the other half: serde compatibility.**
+    /// A report frozen before this field existed has to keep deserializing,
+    /// exactly the pattern `cavity_repair` already established --
+    /// `#[serde(default)]` reads a missing key as `None` rather than
+    /// refusing the whole record.
+    #[test]
+    fn realized_wall_mm_round_trips_and_defaults_on_an_old_report() {
+        let with_wall = HollowReport::solid_decision(SolidDecisionReason::NoCavity);
+        let json = serde_json::to_string(&with_wall).expect("serialize");
+        let round_tripped: HollowReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_tripped.realized_wall_mm(), with_wall.realized_wall_mm());
+
+        let old_report_json = r#"{
+            "disposition": {"kind": "solid", "reason": "no_cavity"},
+            "cavities": [],
+            "drains": [],
+            "drilling_evidence": null,
+            "drain_plan": null
+        }"#;
+        let old_report: HollowReport =
+            serde_json::from_str(old_report_json).expect("a report predating this field must still parse");
+        assert_eq!(old_report.realized_wall_mm(), None);
+        assert_eq!(old_report.cavity_repair(), None);
+    }
+
+    fn thread_guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    struct RestoreThreads(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreThreads {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("PLINTH_THREADS", value);
+            } else {
+                std::env::remove_var("PLINTH_THREADS");
+            }
+        }
+    }
+
+    /// **Test 6 of the FU-55 ruling: thread sweep.** The measured minimum is
+    /// a SERIAL reduction over an index-parallel query batch (the repo
+    /// forbids a float reduction across parallel work items); this asserts
+    /// that discipline actually holds by measuring the same committed
+    /// Sphere shell's `realized_wall_mm` at 1, 4 and 16 `PLINTH_THREADS` and
+    /// requiring bit-identical results.
+    #[test]
+    fn realized_wall_mm_is_bit_identical_across_one_four_and_sixteen_kernel_workers() {
+        let _guard = thread_guard().lock().expect("thread environment lock");
+        let _restore = RestoreThreads(std::env::var_os("PLINTH_THREADS"));
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let settings = registered_settings();
+        let mut baseline: Option<f64> = None;
+        for workers in [1, 4, 16] {
+            std::env::set_var("PLINTH_THREADS", workers.to_string());
+            assert_eq!(geom_kernel::current_threads(), workers);
+            let candidate = create_shell(source.clone(), settings)
+                .expect("the frozen Sphere is hollow-eligible at every worker count");
+            let realized = candidate.cavity().realized_wall_mm().get();
+            if let Some(expected) = baseline {
+                assert_eq!(
+                    realized.to_bits(),
+                    expected.to_bits(),
+                    "worker count {workers} changed the measured realized wall"
+                );
+            } else {
+                baseline = Some(realized);
+            }
+        }
     }
 }

@@ -1736,6 +1736,7 @@ mod tests {
                 source_volume_mm3: Finite::new(27_000.0).expect("finite"),
                 resources: resource,
                 drain_planning_cap_bytes: usize::MAX,
+                realized_wall_mm: Finite::new(2.5).expect("finite"),
             },
             cavity_field: field(Array3::from_elem((10, 20, 20), true)),
         };
