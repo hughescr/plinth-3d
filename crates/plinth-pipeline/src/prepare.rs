@@ -1139,16 +1139,20 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::CavityExtractionFailed
         | HollowError::DrainGeometryFailed
         | HollowError::InvalidProductionMesh => true,
-        // Unreachable through `plinth_hollow::run`, which converts all five
+        // Unreachable through `plinth_hollow::run`, which converts all six
         // into a typed `HollowStageOutput::Solid` rather than propagating them.
         // Listed as geometry anyway, because if one ever did propagate, "keep
-        // the solid" is precisely what it means. The last two are the
-        // well-composedness repair's own outcomes and reach the record as
-        // `NoCavityAfterRepair` / `BelowThresholdAfterRepair`, which is how a
-        // repair-caused solid stays distinguishable from a shape that never
-        // had a cavity.
+        // the solid" is precisely what it means. `IneligibleCavityBelowDrainThroat`
+        // is FU-47's resin-flow connectivity rule (2026-08-12 ruling, §4): a
+        // cavity that nowhere admits the registered drain bore is left as
+        // solid material rather than cut into an undrainable trap. The last
+        // two are the well-composedness repair's own outcomes and reach the
+        // record as `NoCavityAfterRepair` / `BelowThresholdAfterRepair`, which
+        // is how a repair-caused solid stays distinguishable from a shape that
+        // never had a cavity.
         HollowError::IneligibleBelowBulk
         | HollowError::IneligibleNoCavity
+        | HollowError::IneligibleCavityBelowDrainThroat { .. }
         | HollowError::IneligibleSavings
         | HollowError::CavityRepairRemovedCavity { .. }
         | HollowError::IneligibleSavingsAfterCavityRepair { .. } => true,
@@ -1351,6 +1355,16 @@ mod tests {
         ));
         assert!(hollow_error_refuses_this_geometry(
             &HollowError::CavityExtractionFailed
+        ));
+        // FU-47's resin-flow connectivity rule (2026-08-12 ruling, §4): a
+        // cavity that nowhere admits the registered drain bore is a geometry
+        // finding, and the reserve is a legitimate answer to it -- `run`
+        // converts it into `SolidDecisionReason::CavityBelowDrainThroat`
+        // before it reaches here, same as the other four Ineligible* cases.
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::IneligibleCavityBelowDrainThroat {
+                throat_radius_mm: 1.5,
+            }
         ));
         // The well-composedness repair's own outcomes. `run` converts both into
         // typed solid decisions before they reach here, so this arm is

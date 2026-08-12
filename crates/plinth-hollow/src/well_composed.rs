@@ -57,14 +57,22 @@
 //!   separately** ([`WellComposedRepair::full_grid_passes`]) rather than folded
 //!   into the cell-visit bound, which it is not covered by.
 //!
-//!   **Each counted re-selection pass is two whole-grid traversals, not one**:
-//!   the `label3d` and the `indexed_iter` sweep that applies its verdict. So
-//!   with `p` counted passes the true total is
-//!   `cells × (2p − 1) + 8 × changed` — the opening cell scan, then two
-//!   traversals per re-selection. An earlier version of this doc wrote
-//!   `cells × p + 8 × changed`, which undercounts the re-selection domain by
-//!   about 2×. Measured corpus-wide `p` is 2, so the true figure is three
-//!   traversals rather than two.
+//!   **Each counted re-selection pass was two whole-grid traversals before
+//!   FU-47 and is four now**: `label3d` and the `indexed_iter` sweep that
+//!   applies its verdict, versus resin-flow re-selection's EDT, core
+//!   `label3d`, the wave-synchronous flood, and the `indexed_iter` sweep that
+//!   applies *its* verdict (`crate::flow::select_largest_flow_component`,
+//!   FU-47 §4: a re-selection that silently rejoined two interiors across a
+//!   sub-bore throat would undo the doctrine at the one call site that exists
+//!   to enforce it downstream of the initial selection). `full_grid_passes`
+//!   keeps counting **passes**, not traversals — the number on the record
+//!   moves with what a pass costs, and that cost is stated here rather than
+//!   left to be inferred from the count. An earlier version of this doc wrote
+//!   `cells × p + 8 × changed` for the two-traversal accounting, which
+//!   undercounted even that by about 2×; with today's four-traversal
+//!   accounting the true total is `cells × (4p − 3) + 8 × changed` — the
+//!   opening cell scan, then four traversals per re-selection. Measured
+//!   corpus-wide `p` is 2.
 //!
 //!   **The pass count has no admitted bound of its own**, which is the one
 //!   place this module departs from the stage's own habit: a re-selection pass
@@ -92,9 +100,8 @@
 //! it, and asserts no background corner is ever marked.
 
 use scirs2_core::ndarray::Array3;
-use scirs2_ndimage::morphology3d::label3d;
 
-use crate::{largest_label, HollowError};
+use crate::HollowError;
 
 /// What a repair did, for the resource record and for tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -164,8 +171,20 @@ impl WellComposedRepair {
 /// repair had done by then — when the fixpoint consumes the component entirely.
 /// That is a *repair* outcome, not a property of the geometry, and the caller
 /// must be able to tell it apart from a mask that never had a cavity.
+///
+/// **`pitch_mm` and `throat_r_mm` are taken as parameters, never read from the
+/// registry inside the loop.** Re-selection (FU-47, §4) is resin-flow
+/// connectivity, not plain 6-connectivity: removing voxels can strand part of
+/// the component behind a passage narrower than the registered drain bore, and
+/// re-selecting by flow rather than by bare connectivity is what stops the
+/// repair silently re-joining two interiors across a sub-bore throat. The
+/// caller already has both values in scope; reading the registry once per
+/// caller and threading it down keeps this loop's cost accounting honest (see
+/// below) rather than hiding a registry read inside a hot loop.
 pub(crate) fn well_composed_cavity_component(
     mut mask: Array3<bool>,
+    pitch_mm: f64,
+    throat_r_mm: f64,
 ) -> Result<(Array3<bool>, WellComposedRepair), HollowError> {
     let dims: [usize; 3] = mask
         .shape()
@@ -195,24 +214,28 @@ pub(crate) fn well_composed_cavity_component(
         if removed == 0 {
             return Ok((mask, stats));
         }
-        // Removal can strand part of the component. Re-select the largest, and
-        // re-verify only around what the re-selection dropped. This is the
-        // second whole-grid domain the module doc names and counts.
+        // Removal can strand part of the component, and can also leave what
+        // remains connected only by a passage narrower than the registered
+        // drain bore -- FU-47's doctrine applies here exactly as it does at
+        // the original selection, or a re-selection could silently re-join
+        // two interiors the ruling requires kept separate. Re-verify only
+        // around what the re-selection dropped. This is the second whole-grid
+        // domain the module doc names and counts.
         stats.full_grid_passes += 1;
-        let (labels, label_count) = label3d(mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
-        if label_count == 0 {
+        let Some((selected, _flow_stats)) =
+            crate::flow::select_largest_flow_component(&mask, pitch_mm, throat_r_mm)?
+        else {
             return Err(HollowError::CavityRepairRemovedCavity {
                 critical_cells: stats.critical_cells,
                 repaired_voxels: stats.removed_voxels + stats.reselection_dropped_voxels,
                 cell_visits: stats.cell_visits,
                 full_grid_passes: stats.full_grid_passes,
             });
-        }
-        let largest = largest_label(&labels, label_count)?;
+        };
         let mut dropped: Vec<u32> = Vec::new();
-        for (index, label) in labels.indexed_iter() {
+        for (index, selected_value) in selected.indexed_iter() {
             let voxel = [index.0, index.1, index.2];
-            if mask[voxel] && *label != largest {
+            if mask[voxel] && !*selected_value {
                 mask[voxel] = false;
                 dropped.push(linear_index(dims, voxel));
             }
@@ -520,6 +543,8 @@ pub(crate) fn critical_cell_count(mask: &Array3<bool>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use scirs2_ndimage::morphology3d::label3d;
+
     use super::*;
 
     /// A 4×4×4 body in a 6×6×6 grid, plus whatever extra voxels the caller
@@ -545,7 +570,7 @@ mod tests {
     fn a_solid_block_is_already_well_composed_and_is_not_touched() {
         let mask = Array3::from_elem((4, 4, 4), true);
         assert_eq!(critical_cell_count(&mask), 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone()).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 0.5, 0.0).expect("repair");
         assert_eq!(stats.removed_voxels(), 0);
         assert_eq!(stats.critical_cells(), 0);
         // Nothing was removed, so the component was never re-selected: one
@@ -560,7 +585,7 @@ mod tests {
         // and the shape a thin cavity branch makes where it turns a corner.
         let mask = body_with(&[[0, 4, 4]]);
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask, 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         assert!(stats.removed_voxels() > 0);
         assert!(repaired.iter().any(|value| *value), "body survived");
@@ -571,7 +596,7 @@ mod tests {
         // The 3-D C2: a voxel touching the body only at a body diagonal.
         let mask = body_with(&[[4, 4, 4]]);
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask, 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         assert!(stats.removed_voxels() > 0);
         assert!(repaired.iter().any(|value| *value), "body survived");
@@ -586,7 +611,7 @@ mod tests {
         // caller must be able to say "the repair ate the cavity" and not
         // "this geometry never had one", and the evidence must survive the
         // refusal rather than being discarded with the candidate.
-        let error = well_composed_cavity_component(mask).expect_err("repair removes everything");
+        let error = well_composed_cavity_component(mask, 0.5, 0.0).expect_err("repair removes everything");
         let HollowError::CavityRepairRemovedCavity {
             critical_cells,
             repaired_voxels,
@@ -610,7 +635,7 @@ mod tests {
         mask[[0, 0, 0]] = false;
         mask[[1, 1, 1]] = false;
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone()).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         assert!(stats.removed_voxels() > 0);
         // Removal only: no background voxel ever became foreground.
@@ -636,7 +661,7 @@ mod tests {
         // Bridge them through the shared corner only.
         mask[[3, 3, 3]] = true;
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone()).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         for (original, result) in mask.iter().zip(repaired.iter()) {
             assert!(*original || !*result, "repair added a cavity voxel");
@@ -652,7 +677,7 @@ mod tests {
     fn work_is_bounded_by_the_admitted_grid() {
         let mask = body_with(&[[0, 4, 4], [4, 4, 4], [4, 0, 4]]);
         let cells = 7 * 7 * 7;
-        let (_, stats) = well_composed_cavity_component(mask).expect("repair");
+        let (_, stats) = well_composed_cavity_component(mask, 0.5, 0.0).expect("repair");
         assert!(stats.removed_voxels() > 0, "the fixture is pinched");
         // One full scan, then only the eight cells around each voxel that
         // actually changed. Nothing here is a budget that can be exhausted —
@@ -686,7 +711,7 @@ mod tests {
             }
         }
         mask[[3, 3, 3]] = true;
-        let (_, stats) = well_composed_cavity_component(mask).expect("repair");
+        let (_, stats) = well_composed_cavity_component(mask, 0.5, 0.0).expect("repair");
         assert!(stats.full_grid_passes() >= 2, "a re-selection ran");
         // The opening scan, plus one re-selection per voxel it drops, plus the
         // final re-selection that drops nothing and ends the loop.
@@ -768,7 +793,7 @@ mod tests {
              the repair is solving a problem that does not exist"
         );
 
-        let (repaired, stats) = well_composed_cavity_component(mask).expect("repair");
+        let (repaired, stats) = well_composed_cavity_component(mask, 0.5, 0.0).expect("repair");
         assert!(stats.removed_voxels() > 0);
         assert_eq!(critical_cell_count(&repaired), 0);
         let clean = crate::marching_cavity(&repaired, [0.0, 0.0, 0.0], 0.5).expect("marching");

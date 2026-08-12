@@ -18,6 +18,7 @@
 mod cavity_field;
 pub mod drains;
 pub mod drilling;
+mod flow;
 mod well_composed;
 
 pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
@@ -36,7 +37,7 @@ use plinth_solid::{
     BooleanInputEstimate, BooleanLimits, ManifoldBackend, Mesh as SolidMesh, SolidError,
 };
 use scirs2_core::ndarray::Array3;
-use scirs2_ndimage::{distance_transform_edt, morphology3d::label3d};
+use scirs2_ndimage::distance_transform_edt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -141,6 +142,12 @@ pub fn checked_wall_mm(wall_mm: PositiveFinite) -> Result<PositiveFinite, Hollow
 #[serde(rename_all = "snake_case")]
 pub enum SolidDecisionReason {
     NoCavity,
+    /// The wall left cavity, but no passage through it admits the registered
+    /// drain bore anywhere (FU-47: resin-flow connectivity). Not `NoCavity`:
+    /// there genuinely is an interior, it just cannot be drained at the
+    /// registered throat, so it is left as solid material rather than cut
+    /// into an undrainable trap.
+    CavityBelowDrainThroat,
     BelowThreshold,
     /// The wall left a cavity and the well-composedness repair removed all of
     /// it. **Not `NoCavity`:** that reason is a statement about the model's
@@ -640,6 +647,9 @@ pub fn run(
             };
             return match failure.into_error() {
                 HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity),
+                HollowError::IneligibleCavityBelowDrainThroat { .. } => {
+                    decided(SolidDecisionReason::CavityBelowDrainThroat)
+                }
                 HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
                     decided(SolidDecisionReason::BelowThreshold)
                 }
@@ -1209,21 +1219,35 @@ pub fn create_shell_recording_repair(
     }
     let cavity_mask = edt.mapv(|distance_mm| distance_mm > settings.wall_thickness_mm.get());
     drop(edt);
-    let (labels, label_count) =
-        label3d(cavity_mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
-    drop(cavity_mask);
-    if label_count == 0 {
+    if !cavity_mask.iter().any(|value| *value) {
         return Err(HollowError::IneligibleNoCavity.into());
     }
-    let largest = largest_label(&labels, label_count)?;
-    let selected = labels.mapv(|label| label == largest);
+    // FU-47 (owner ruling, 2026-08-12, §4): two cavity voxels are part of the
+    // same drainable interior only if resin can flow between them -- a
+    // passage whose free radius admits the registered drain bore. Plain
+    // 6-connectivity would happily select a dumbbell through a needle-width
+    // neck; the flow rule is what refuses to.
+    let throat_r_mm = flow::registered_throat_radius_mm()?;
+    let selected = match flow::select_largest_flow_component(&cavity_mask, grid_pitch, throat_r_mm)? {
+        Some((selected, _stats)) => selected,
+        None => {
+            return Err(HollowError::IneligibleCavityBelowDrainThroat {
+                throat_radius_mm: throat_r_mm,
+            }
+            .into());
+        }
+    };
+    drop(cavity_mask);
     // The extractor emits one vertex per lattice cell, which is only enough
     // where the mask is well-composed. Repair it here, before anything measures
     // or marches it, so the cavity volume the savings gate weighs is the cavity
     // that is actually cut. The repair only ever removes cavity voxels, so the
     // wall can only get thicker (`well_composed`).
-    let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(selected)
-    {
+    let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(
+        selected,
+        grid_pitch,
+        throat_r_mm,
+    ) {
         Ok(repaired) => repaired,
         // The fixpoint consumed the component. The error names the measurement
         // itself, but lift it onto the failure as well so that a caller reading
@@ -2430,6 +2454,18 @@ pub enum HollowError {
     IneligibleBelowBulk,
     #[error("the wall offset leaves no cavity")]
     IneligibleNoCavity,
+    /// The wall offset leaves cavity, but no passage through it admits the
+    /// registered drain bore anywhere — a 6-connected region that nowhere
+    /// clears `HOLLOW_DRAIN_R_MM`. Distinct from [`Self::IneligibleNoCavity`]
+    /// on purpose: that one says there is no interior at all, this one says
+    /// the interior exists and cannot be drained. Per the owner ruling of
+    /// 2026-08-12 (FU-47): resin cannot flow through a passage narrower than
+    /// the bore, so cutting it would leave a trap, and leaving it uncut
+    /// leaves solid material, which is always safe.
+    #[error(
+        "no cavity passage admits the registered {throat_radius_mm} mm drain bore radius"
+    )]
+    IneligibleCavityBelowDrainThroat { throat_radius_mm: f64 },
     #[error("the largest cavity does not meet the registered resin-saving threshold")]
     IneligibleSavings,
     /// The well-composedness repair consumed the whole selected component.
@@ -2580,14 +2616,12 @@ mod tests {
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
-        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
-        let largest =
-            (label_count > 0).then(|| largest_label(&labels, label_count).expect("largest label"));
-        let cavity_voxels = largest.map_or(0, |label| {
-            labels
-                .iter()
-                .filter(|candidate| **candidate == label)
-                .count()
+        let label_count = if cavity.iter().any(|value| *value) { 1 } else { 0 };
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let selected = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+            .expect("flow selection");
+        let cavity_voxels = selected.map_or(0, |(mask, _stats)| {
+            mask.iter().filter(|value| **value).count()
         });
         (
             components,
@@ -3712,10 +3746,15 @@ mod corpus_cavity_repair {
         let grid = voxelize_filled(source, spec, work).expect("bounded voxelization");
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
-        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
-        assert!(label_count > 0, "the fixture must select a cavity");
-        let largest = largest_label(&labels, label_count).expect("largest label");
-        (labels.mapv(|label| label == largest), grid)
+        assert!(
+            cavity.iter().any(|value| *value),
+            "the fixture must select a cavity"
+        );
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let (selected, _stats) = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+            .expect("flow selection")
+            .expect("the fixture must admit the registered drain bore somewhere");
+        (selected, grid)
     }
 
     /// `(boundary edges, non-manifold faces, point-only faces)`.
@@ -3736,26 +3775,40 @@ mod corpus_cavity_repair {
         )
     }
 
-    /// **The default `cargo test`'s end-to-end gate on the repair.**
+    /// **The default `cargo test`'s end-to-end gate on the repair, re-pinned
+    /// for FU-47.**
     ///
-    /// It asserts the whole chain in the order the chain runs: the mask is not
-    /// well-composed; the extractor *provably cannot* represent that mask (the
-    /// unrepaired cavity surface is non-manifold, which is the refusal FU-49
-    /// filed); the repair removes exactly the voxels the record states; and the
-    /// shell that comes out of the marching, the Boolean and
-    /// `validate_shell_topology` carries no cut face of any kind.
+    /// Before FU-47 this fixture hollowed: the waist's cavity thread, though
+    /// sub-throat width along nearly its whole 40 mm length, was one
+    /// 6-connected component with the two end lobes, the well-composedness
+    /// repair opened its four Latecki-critical cells, and the shell that came
+    /// out carried no cut face. **The doctrine changes the verdict, not the
+    /// repair.** `HOLLOW_DRAIN_R_MM` = 1.5 mm never reaches into a rod-derived
+    /// thread whose cavity radius is ~0.875 mm, so the two end lobes are now
+    /// separate resin-flow interiors (FU-47, §4) and the largest one, alone,
+    /// falls under the registered savings threshold: from→to, this fixture
+    /// went from *hollows* to *stays solid*, correctly, because it was always
+    /// two small cavities joined by an undrainable neck.
     ///
-    /// The middle step is what makes this a regression test rather than a
-    /// tautology: without it, an extractor change that made the repair
-    /// unnecessary would leave this test passing while measuring nothing.
+    /// The repair itself is unaffected and still proven here: part 1 shows
+    /// the flow-selected but unrepaired mask is still non-manifold (the
+    /// selected side still carries its share of the diagonal thread), and the
+    /// `IneligibleSavingsAfterCavityRepair` this test now expects carries the
+    /// same measurement fields — `critical_cells`, `repaired_voxels`,
+    /// `cell_visits`, `full_grid_passes` — that the shell's own resources used
+    /// to report, so the repair ran and did the same work it always did; the
+    /// gate that now sees its output is what changed. `well_composed.rs`'s own
+    /// direct unit tests exercise the repair mechanism on synthetic masks
+    /// independent of this fixture and are unaffected by this re-pin.
     #[test]
-    fn a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it() {
+    fn a_synthetic_pinched_dumbbell_is_repaired_but_no_longer_hollows_under_flow_connectivity() {
         let source = pinched_dumbbell();
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
 
         // 1. The mask this fixture exists to produce, and the extractor's
-        //    failure on it. The cavity thread across the 45° waist is a chain
-        //    of lattice-diagonal voxels, so the one-vertex-per-cell surface has
+        //    failure on it, taken through the same flow selection production
+        //    uses. The cavity thread across the 45° waist is a chain of
+        //    lattice-diagonal voxels, so the one-vertex-per-cell surface has
         //    edges used by four faces instead of two.
         let (unrepaired, grid) = unrepaired_cavity_mask(&source, settings);
         let raw = marching_cavity(&unrepaired, grid.origin, grid.pitch)
@@ -3767,48 +3820,30 @@ mod corpus_cavity_repair {
              watertight but non-manifold is the whole premise"
         );
 
-        // 2. The repair, through the production entry point. Integer
+        // 2. The repair still runs, through the production entry point, and
+        //    the doctrine correctly refuses to cut what it repaired. Integer
         //    combinatorics over a deterministic voxel field, so these are
-        //    equalities.
-        let candidate = create_shell(source, settings).expect("the repaired dumbbell hollows");
-        let resources = candidate.cavity().resources();
-        assert_eq!(resources.cavity_critical_cells(), 4);
-        assert_eq!(resources.cavity_repaired_voxels(), 4);
-        // The opening cell scan plus exactly one whole-grid re-selection: the
-        // removal stranded part of the component, which is the second
-        // `O(cells)` domain the cell-visit bound does not cover.
-        assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
-        // The 98 x 98 x 41 grid's own `(n+1)³` opening scan plus eight cells per
-        // changed voxel, arrived at rather than remembered.
-        assert_eq!(resources.voxel_count(), 393_764);
+        //    equalities: from→to, unchanged by FU-47 (the repair fixes the
+        //    same four cells whichever side of the doctrine it is judged on)
+        //    to unchanged (the numbers travel inside the new error instead of
+        //    inside `H0ResourceDiagnostics`).
+        let error = create_shell(source, settings)
+            .expect_err("the two lobes are separate resin-flow interiors (FU-47); the larger one alone is below the registered savings threshold");
+        let HollowError::IneligibleSavingsAfterCavityRepair {
+            critical_cells,
+            repaired_voxels,
+            cell_visits,
+            full_grid_passes,
+        } = error
+        else {
+            panic!("expected IneligibleSavingsAfterCavityRepair, got {error}");
+        };
+        assert_eq!(critical_cells, 4);
+        assert_eq!(repaired_voxels, 4);
+        assert_eq!(full_grid_passes, 2);
         let cells = 99 * 99 * 42;
-        assert_eq!(
-            resources.cavity_repair_cell_visits(),
-            cells + 8 * resources.cavity_repaired_voxels()
-        );
-        assert_eq!(resources.cavity_repair_cell_visits(), 411_674);
-
-        // 3. The end of the chain. Not one face of the shell or its cavity is
-        //    cut, and the difference is one negative void inside positive
-        //    material — the two things the unrepaired mask could not deliver.
-        assert_eq!(
-            cut_census(candidate.mesh()),
-            (0, 0, 0),
-            "the repaired shell is cut; the repair no longer closes FU-49"
-        );
-        let topology =
-            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("shell topology");
-        let certificate =
-            certify_closed_components(candidate.mesh(), &topology).expect("shell certificate");
-        assert_eq!(
-            certificate
-                .components()
-                .iter()
-                .filter(|component| component.signed_volume_mm3() < 0.0)
-                .count(),
-            1,
-            "the shell must hold exactly one negative, contained cavity"
-        );
+        assert_eq!(cell_visits, cells + 8 * repaired_voxels);
+        assert_eq!(cell_visits, 411_674);
     }
 
     /// Release-gated: the fixture is 429,120 faces and the run is seconds
@@ -3844,18 +3879,29 @@ mod corpus_cavity_repair {
         // 2. The exact measurement, which is what the journal row states. These
         //    are integer combinatorics over a deterministic voxel field, so
         //    they are equalities, not tolerances.
-        assert_eq!(resources.cavity_critical_cells(), 70);
-        assert_eq!(resources.cavity_repaired_voxels(), 115);
-        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_880);
-        // The opening cell scan and exactly one whole-grid re-selection. This
-        // is the second `O(cells)` domain the cell-visit bound does not cover,
-        // and it is here so that a change which turned the fixpoint into many
-        // whole-grid passes would be caught by the count rather than by a
-        // stopwatch.
+        //
+        //    **Re-pinned for FU-47 (2026-08-12 ruling, §4), from→to, measured
+        //    on this branch rather than assumed:** the flow-connectivity
+        //    selection excludes a sub-throat pocket the plain 6-connected
+        //    selection used to include, so the well-composedness repair now
+        //    has slightly more to do. `critical_cells` 70 -> 78,
+        //    `repaired_voxels` 115 -> 123, `cell_visits` 5,405,880 ->
+        //    5,405,944. The model still hollows; nothing here is a refusal.
+        assert_eq!(resources.cavity_critical_cells(), 78);
+        assert_eq!(resources.cavity_repaired_voxels(), 123);
+        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_944);
+        // The opening cell scan and exactly one whole-grid re-selection.
+        // Unmoved by FU-47: the fixpoint still converges in one re-selection
+        // on this model. This is the second `O(cells)` domain the cell-visit
+        // bound does not cover, and it is here so that a change which turned
+        // the fixpoint into many whole-grid passes would be caught by the
+        // count rather than by a stopwatch.
         assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
 
         // 3. The work bound the module doc claims, checked against the grid the
-        //    caller admitted rather than against a remembered number.
+        //    caller admitted rather than against a remembered number. The grid
+        //    itself is unmoved by FU-47 -- only which voxels are selected on it
+        //    changed -- so `voxel_count` and `cells` are unchanged.
         assert_eq!(resources.voxel_count(), 5_313_000);
         let cells = 166 * 176 * 185;
         assert!(
@@ -3864,13 +3910,18 @@ mod corpus_cavity_repair {
             resources.cavity_repair_cell_visits()
         );
 
-        // 4. The cavity that survived, and the shell built from it. 8,043.875
-        //    mm3 is 64,351 voxels at the frozen 0.5 mm pitch — the 64,466 the
-        //    wall selected, less the 115 the repair handed back.
+        // 4. The cavity that survived, and the shell built from it.
+        //    **Re-pinned for FU-47, from→to:** 8,043.875 mm3 (64,351 voxels)
+        //    -> 7,997.125 mm3 (63,977 voxels) at the frozen 0.5 mm pitch --
+        //    the 64,100 voxels the flow-connectivity selection now admits
+        //    (down from the 64,466 plain 6-connectivity used to select),
+        //    less the 123 the repair hands back. The cavity is smaller, not
+        //    absent: FU-47 tightens the selection, it does not refuse the
+        //    model.
         let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
-        assert_eq!(cavity_mm3, 8_043.875);
+        assert_eq!(cavity_mm3, 7_997.125);
         let pitch = candidate.cavity().frozen_voxel_pitch_mm().get();
-        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 64_351);
+        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 63_977);
 
         // 5. **The end of the causal chain FU-49 filed.** The shell carries the
         //    outer surface and the cavity together, and not one face of either
