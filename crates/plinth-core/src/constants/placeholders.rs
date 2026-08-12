@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 272], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 273], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1142,6 +1142,8 @@ placeholder_declarations! {
     "HOLLOW_BREATHING_VOXEL_PITCH_MM", "mm", "scalar", "Registered but unread. Sized the final cavity-breathing verification voxelization in the deleted scripts/support_placement/hollow.py, removed with the Python migration; this crate's drilling stage proves drainability with exact ray casts against the frozen cavity field (see plinth-hollow::drilling), not a re-voxelized breathing check at this pitch, so no live reader was ported.";
     hollow_bulk_min_mm: PositiveFinite = PositiveFinite::new(10.0)?;
     "HOLLOW_BULK_MIN_MM", "mm", "scalar", "Hollowing bulk-size policy.";
+    hollow_cavity_march_margin_mm: PositiveFinite = PositiveFinite::new(0.5 * 1.732_050_807_568_877_2)?;
+    "HOLLOW_CAVITY_MARCH_MARGIN_MM", "mm", "scalar", "FU-53 cavity-selection margin: one HOLLOW_PITCH_MM (0.5 mm) voxel body diagonal, pitch x sqrt(3) = 0.5 x 1.7320508075688772 = 0.8660254037844386 mm. A surface-nets vertex for a boundary cavity cell lies inside the closed cell whose corners include at least one selected cavity voxel centre, so it is at most one cell body diagonal from that centre; adding this margin to the requested wall before cavity selection (crates/plinth-hollow/src/lib.rs create_shell_recording_repair) makes the realised wall >= the requested wall by construction, closing the FU-53 shortfall (the shipped wall measured 11-78% of the requested wall before this margin existed). Provenance: DERIVED from HOLLOW_PITCH_MM by an exact geometric identity, not independently chosen -- if HOLLOW_PITCH_MM ever moves this value must be re-derived alongside it (0.5 x sqrt(3)), never inherited unchanged. That obligation is ENFORCED, not merely written here: plinth-hollow's the_cavity_march_margin_is_one_body_diagonal_of_the_registered_pitch asserts margin == pitch x sqrt(3) exactly, off the same registry both values come from, so a pitch change that leaves this literal behind fails a test rather than silently reopening the FU-53 shortfall.";
     hollow_containment_min_fraction: UnitFraction = UnitFraction::new(0.9)?;
     "HOLLOW_CONTAINMENT_MIN_FRACTION", "1", "scalar", "Internal-component containment threshold.";
     hollow_containment_samples: NonZeroU64 = nonzero(32)?;

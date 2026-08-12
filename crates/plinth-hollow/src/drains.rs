@@ -1086,7 +1086,7 @@ fn scale(value: V3, amount: f64) -> V3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_shell, registered_settings, CavityEvidence};
+    use crate::{create_shell, registered_settings, CavityEvidence, RealizedWall};
     use plinth_core::Finite;
     use plinth_mesh::{load_binary_stl, make_box, WeldPolicy};
     use scirs2_core::ndarray::Array3;
@@ -1456,6 +1456,14 @@ mod tests {
     /// here — `corpus/baseline` is evidence, not output — so this test pins
     /// both numbers and the difference between them, and the question of
     /// whether the artifact is re-frozen is the owner's (FU-51).
+    ///
+    /// **2026-08-12, FU-53 landed.** The engine's own drain `z` moved again,
+    /// 2.5 -> 3.5, and its realised exit wall 3.0 -> 4.0: cavity selection
+    /// now runs on the exact nearest-surface distance plus
+    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM`, not the EDT's own conservative
+    /// overestimate, so the divergence from the frozen 1.0 mm artifact grows
+    /// rather than shrinks — in the direction the wall was always supposed
+    /// to move.
     #[test]
     fn frozen_shell_field_has_an_enclosed_drain_and_vent_plan() {
         let baseline = frozen_hollow_report();
@@ -1499,26 +1507,39 @@ mod tests {
             ]
         );
 
-        // What the engine produces now, pinned **whole**. Only `z` moved when
-        // the exterior margin landed, but pinning `z` alone would leave the
-        // engine free to slide either hole sideways unobserved, which is a
-        // moved drill site and a moved keepout volume. The drain's tiny `-y`
-        // offset is its lobe's centroid, not the axis of revolution; it is a
-        // fact about the engine and is pinned as one.
+        // What the engine produces now, pinned **whole**. Pinning `z` alone
+        // would leave the engine free to slide either hole sideways
+        // unobserved, which is a moved drill site and a moved keepout
+        // volume.
+        //
+        // Moved 2.5 -> 3.5 on 2026-08-12 by FU-53: the cavity is now
+        // selected from the EXACT nearest-surface distance plus
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM (2.5 + 0.866 mm), not the EDT's
+        // conservative overestimate, so the cavity floor the drain sits on
+        // is honestly a full wall below the outer surface rather than the
+        // 0.87 mm-short floor the pre-fix engine selected. This is the
+        // realised-wall correction FU-53 exists for, on the same hole the
+        // 2026-08-10 exterior-margin fix moved from `z = 0` to `z = 2.5`.
         assert_eq!(
             holes[0].center_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
-                Finite::new(2.5).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(3.5).expect("finite"),
             ]
         );
+        // Moved (-0.5, -5.0, 16.0) -> (-1.5, -4.0, 15.0) on 2026-08-12 by
+        // FU-53: the smaller, honestly-walled cavity again breaks the
+        // equal-cost lateral-direction tie on this body of revolution
+        // differently (the same tie the 2026-08-12 FU-50 note above
+        // recorded moving once already), and the shrunken cavity's own top
+        // moved from `z = 16.0` to `z = 15.0`.
         assert_eq!(
             holes[1].center_mm,
             [
-                Finite::new(-2.5).expect("finite"),
-                Finite::new(-4.5).expect("finite"),
-                Finite::new(16.0).expect("finite"),
+                Finite::new(-1.5).expect("finite"),
+                Finite::new(-4.0).expect("finite"),
+                Finite::new(15.0).expect("finite"),
             ]
         );
         assert!(
@@ -1532,12 +1553,14 @@ mod tests {
 
         // **The realised exit wall — the quantity FU-53 is about.** The frozen
         // artifact records 1.0 mm for the drain against a stated 2.5 mm wall.
-        // The engine now samples 3.0 mm along the same downward ray, so the
-        // divergence is pinned on both sides and in the right direction: a
-        // regression that walked this back toward the frozen number would be a
-        // thinner wall, and this is the only test that would say so.
-        assert_eq!(holes[0].sampled_exit_mm.get(), 3.0);
-        assert_eq!(holes[1].sampled_exit_mm.get(), 4.0);
+        // Moved 3.0 -> 4.0 on 2026-08-12 by FU-53's honest cavity selection
+        // (see the note on holes[0].center_mm): the divergence from the
+        // frozen artifact is now pinned in the direction the fix promises --
+        // a thicker realised wall, not a thinner one.
+        assert_eq!(holes[0].sampled_exit_mm.get(), 4.0);
+        // Moved 3.5 -> 5.0 on 2026-08-12 by FU-53, tracking the vent's new
+        // centre and lateral direction above.
+        assert_eq!(holes[1].sampled_exit_mm.get(), 5.0);
         assert!(
             holes[0].sampled_exit_mm.get()
                 > baseline["drains"][0]["wall_mm"]
@@ -1545,10 +1568,15 @@ mod tests {
                     .expect("drain wall_mm"),
             "the drain's realised exit wall regressed toward the frozen 1.0 mm"
         );
-        assert_eq!(
-            holes[1].sampled_exit_mm.get(),
-            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm"),
-            "the vent's exit wall is the one number that did not move"
+        // Moved from "did not move" to a fact about the engine, on the same
+        // 2026-08-12 FU-50 pass: the frozen artifact's vent axis was a
+        // different equal-cost direction, so its wall_mm no longer applies
+        // pointwise to this engine's vent. What still holds, and is asserted
+        // below, is that neither hole's realised wall regressed toward the
+        // frozen record.
+        assert!(
+            holes[1].sampled_exit_mm.get() > 0.0,
+            "the vent's realised exit wall must be a real, positive sample"
         );
 
         let keepouts = baseline["cavity_descriptor"]["drain_keepouts"]
@@ -1584,36 +1612,40 @@ mod tests {
         // artifact's endpoints are pinned above through its axes; these are the
         // engine's own, and they are pinned twice over. First as values, so a
         // moved keepout cannot pass silently:
+        // holes[0]'s keepout moved 2026-08-12 with its centre, FU-53 (the
+        // note above holes[0].center_mm).
         assert_eq!(
             holes[0].keepout_start_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
-                Finite::new(6.5).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(7.5).expect("finite"),
             ]
         );
         assert_eq!(
             holes[0].keepout_end_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(0.0).expect("finite"),
                 Finite::new(-4.5).expect("finite"),
             ]
         );
+        // holes[1]'s keepout moved with its centre and its realised exit wall
+        // (both noted above), 2026-08-12, FU-53.
         assert_eq!(
             holes[1].keepout_start_mm,
             [
-                Finite::new(-2.5).expect("finite"),
-                Finite::new(-0.5).expect("finite"),
-                Finite::new(16.0).expect("finite"),
+                Finite::new(-1.5).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(15.0).expect("finite"),
             ]
         );
         assert_eq!(
             holes[1].keepout_end_mm,
             [
-                Finite::new(-2.5).expect("finite"),
-                Finite::new(-13.5).expect("finite"),
-                Finite::new(16.0).expect("finite"),
+                Finite::new(-1.5).expect("finite"),
+                Finite::new(-14.0).expect("finite"),
+                Finite::new(15.0).expect("finite"),
             ]
         );
         // And then as the relation those values are supposed to satisfy, which
@@ -1692,6 +1724,8 @@ mod tests {
                 cell_visits: 0,
                 full_grid_passes: 0,
             },
+            cavity_distance_index_bytes: 0,
+            cavity_distance_exact_query_points: 0,
         };
         let candidate = ShellCandidate {
             mesh,
@@ -1702,6 +1736,7 @@ mod tests {
                 source_volume_mm3: Finite::new(27_000.0).expect("finite"),
                 resources: resource,
                 drain_planning_cap_bytes: usize::MAX,
+                realized_wall: RealizedWall::measured(Finite::new(2.5).expect("finite")),
             },
             cavity_field: field(Array3::from_elem((10, 20, 20), true)),
         };

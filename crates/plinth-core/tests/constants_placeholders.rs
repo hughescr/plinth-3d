@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 272] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -87,6 +87,7 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 272] = [
     "HOLLOW_ALLOW_OUTPUT_DEFAULT",
     "HOLLOW_BREATHING_VOXEL_PITCH_MM",
     "HOLLOW_BULK_MIN_MM",
+    "HOLLOW_CAVITY_MARCH_MARGIN_MM",
     "HOLLOW_CONTAINMENT_MIN_FRACTION",
     "HOLLOW_CONTAINMENT_SAMPLES",
     "HOLLOW_DRAIN_DIRECTIONS",
@@ -296,7 +297,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 272] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -375,6 +376,7 @@ static EXPECTED_ROWS: [ExpectedRow; 272] = rows! {
     "HOLLOW_ALLOW_OUTPUT_DEFAULT", "false", "1", "scalar";
     "HOLLOW_BREATHING_VOXEL_PITCH_MM", "0.4", "mm", "scalar";
     "HOLLOW_BULK_MIN_MM", "10.0", "mm", "scalar";
+    "HOLLOW_CAVITY_MARCH_MARGIN_MM", "0.8660254037844386", "mm", "scalar";
     "HOLLOW_CONTAINMENT_MIN_FRACTION", "0.9", "1", "scalar";
     "HOLLOW_CONTAINMENT_SAMPLES", "32", "count", "scalar";
     "HOLLOW_DRAIN_DIRECTIONS", "[{x:0.0,y:0.0,z:-1.0},{x:0.5,y:0.0,z:-1.0},{x:-0.5,y:0.0,z:-1.0},{x:0.0,y:0.5,z:-1.0},{x:0.0,y:-0.5,z:-1.0}]", "1", "list[5]<record{x,y,z}>";
@@ -572,7 +574,7 @@ static EXPECTED_ROWS: [ExpectedRow; 272] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 272 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 273 placeholder declarations must construct")
 }
 
 #[test]
@@ -583,7 +585,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 272);
+    assert_eq!(descriptors.len(), 273);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -674,7 +676,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_303_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -682,14 +684,14 @@ fn evidence_and_placeholder_fixture_builds_one_303_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 303);
+    assert_eq!(registry.len(), 304);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        303
+        304
     );
 }
 

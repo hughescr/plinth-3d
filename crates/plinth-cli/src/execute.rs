@@ -224,6 +224,8 @@ fn print_model(model: &ModelPreparationReport) {
             geometry,
             hollow_disposition,
             cavity_repair,
+            wall_mm,
+            realized_wall,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -238,6 +240,21 @@ fn print_model(model: &ModelPreparationReport) {
             // exactly like the intended one.
             println!("  geometry  {}", describe(geometry));
             println!("  hollow disposition  {hollow_disposition:?}");
+            // FU-37 and FU-55, on the same line: what the run asked the shell
+            // to leave, and what the engine measured it actually left. Two
+            // runs at different `--wall-mm` used to print identically; this
+            // is the line that tells them apart. The realized figure states
+            // its own claim ("2.71 mm" vs "at least 6.73 mm") rather than
+            // presenting a query bound as a measurement.
+            if let Some(wall) = wall_mm {
+                match realized_wall {
+                    Some(realized) => println!(
+                        "  wall  requested {} mm, realized {realized}",
+                        wall.get()
+                    ),
+                    None => println!("  wall  requested {} mm, no shell measured", wall.get()),
+                }
+            }
             // What the well-composedness repair took out of the cavity. Silent
             // when it took nothing, because a line of zeros on every simple
             // model would train the reader to skip it -- and this is the line

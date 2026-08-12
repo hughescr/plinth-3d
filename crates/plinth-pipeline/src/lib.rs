@@ -31,7 +31,7 @@ pub use gates::{
     PreWriteGateReport,
 };
 
-use plinth_core::{m0_constants, ModelId, PrinterProfile};
+use plinth_core::{m0_constants, Finite, ModelId, PrinterProfile};
 use plinth_decimate::{BudgetConfigError, DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
 use plinth_hollow::{
@@ -353,7 +353,10 @@ pub struct PrepareRequest {
     pub stop_after: Option<StageStop>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is gone with the wall fields: `Finite` wraps an `f64` and is `PartialEq`
+// only. Nothing keys a map or a set on an outcome — the derive was reachable
+// only because every field happened to be integral.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
     /// A `.chitubox` was written, and **what was written is stated rather than
@@ -383,12 +386,37 @@ pub enum ModelPreparationOutcome {
     /// substitution paths (a hollow-stage refusal, and a support refusal on a
     /// shell that was built) carry the repair's measurement onto the record
     /// they produce, which is what makes `None` a claim rather than a silence.
+    ///
+    /// `wall_mm` (FU-37) and `realized_wall` (FU-55) are the shell's defining
+    /// parameter and what the engine actually delivered against it. They are
+    /// here because otherwise they are not anywhere: `HollowReport` carries
+    /// both, but the report dies inside `seal_and_emit` and nothing on disk
+    /// serializes one, so `plinth prepare --wall-mm 3.0` and `--wall-mm 2.5`
+    /// produced runs whose printed report, serialized report and `.chitubox`
+    /// artifact were all metadata-indistinguishable — the exact
+    /// indistinguishability FU-37 was filed to fix. What these two fields
+    /// close is **this report**, printed and serialized; the `.chitubox` wire
+    /// format still carries no wall (`plinth_emit::write` embeds geometry,
+    /// placement and support records only), which is recorded as a remaining
+    /// gap rather than claimed closed.
+    ///
+    /// `wall_mm` is `None` only where no hollow request stood behind the
+    /// model; `realized_wall` is `None` on every path that never built a
+    /// shell to measure — including the two solid-reserve substitutions,
+    /// whose artifact is the oriented solid and for which a realized wall
+    /// would describe a shell that is not in the file — and it carries its
+    /// own [`plinth_hollow::RealizedWallClaim`] so a query bound is never
+    /// read as a measurement.
     Artifact {
         emit: EmitReport,
         geometry: prepare::SupportedGeometry,
         hollow_disposition: HollowDisposition,
         #[serde(default)]
         cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+        #[serde(default)]
+        wall_mm: Option<Finite>,
+        #[serde(default)]
+        realized_wall: Option<plinth_hollow::RealizedWall>,
     },
     Stopped {
         after: StageStop,
@@ -1201,6 +1229,8 @@ mod tests {
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
                         cavity_repair: None,
+                        wall_mm: None,
+                        realized_wall: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1267,6 +1297,8 @@ mod tests {
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
                         cavity_repair: None,
+                        wall_mm: None,
+                        realized_wall: None,
                     },
                 ),
                 model("refused", refused),

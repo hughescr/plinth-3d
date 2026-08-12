@@ -45,7 +45,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use plinth_core::{ModelId, PositiveFinite, PrinterProfile};
+use plinth_core::{Finite, ModelId, PositiveFinite, PrinterProfile};
 use plinth_decimate::{
     run as run_decimation, DecimatedModel, DecimationBudget, ProbeConfig, ScaleSanity,
 };
@@ -421,6 +421,15 @@ pub struct ChainOutcome {
     /// ran. Carried out of the chain rather than left inside `plinth-hollow`,
     /// where nothing outside the crate could read it.
     pub cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+    /// FU-37: the wall this model's hollow attempt requested, read off the
+    /// same `HollowReport` as `cavity_repair` and for the same reason —
+    /// `seal_and_emit` is the last place that report is in hand, and a
+    /// measurement that stops here reaches no run output at all.
+    pub wall: Option<plinth_core::Finite>,
+    /// FU-55: what the shell actually delivered against that wall, when a
+    /// shell was built and measured, with its
+    /// [`plinth_hollow::RealizedWallClaim`] attached.
+    pub realized_wall: Option<plinth_hollow::RealizedWall>,
     pub supported_geometry: SupportedGeometry,
     pub routed_contacts: usize,
     pub final_live_members: usize,
@@ -756,6 +765,11 @@ fn prepare_one(
                 geometry: outcome.supported_geometry,
                 hollow_disposition: outcome.hollow_disposition,
                 cavity_repair: outcome.cavity_repair,
+                // FU-37 / FU-55: the wall the run asked for and the wall it
+                // got, so the report on disk can tell two otherwise identical
+                // runs apart.
+                wall_mm: outcome.wall,
+                realized_wall: outcome.realized_wall,
             },
         ),
         Ok(None) => report(
@@ -974,11 +988,18 @@ pub fn run_from_oriented(
             // the model was treated — would say a repair never happened on
             // every refusal class except the two that name themselves.
             let cavity_repair = failure.cavity_repair();
+            // FU-37: the wall this attempt requested, carried onto the
+            // reserve exactly as the repair measurement is above.
+            let wall = Some(
+                Finite::new(policy.hollow.wall_mm.get())
+                    .expect("a PositiveFinite wall is always finite"),
+            );
             let solid = HollowedModel::solid_decision_recording_repair(
                 hollow_error_reserve_mesh,
                 hollow_error_reserve_history,
                 SolidDecisionReason::BelowThreshold,
                 cavity_repair,
+                wall,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
@@ -1030,6 +1051,9 @@ pub fn run_from_oriented(
     let reserve_mesh = candidate.reserve_mesh().clone();
     let reserve_history = candidate.reserve_history().clone();
     let reserve_cavity_repair = candidate.hollowed().history().hollow().cavity_repair();
+    // FU-37: the wall this drilled shell was requested at, carried onto the
+    // reserve the same way `reserve_cavity_repair` is just above.
+    let reserve_wall = candidate.hollowed().history().hollow().wall();
     let drilled = (*candidate).approve_hollow();
     let drilled_faces = drilled.mesh().tris().len();
 
@@ -1057,6 +1081,7 @@ pub fn run_from_oriented(
                 reserve_history,
                 SolidDecisionReason::BelowThreshold,
                 reserve_cavity_repair,
+                reserve_wall,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
@@ -1117,7 +1142,18 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::ResourceAccountingOverflow
         | HollowError::VoxelCellLimitExceeded { .. }
         | HollowError::RasterWorkLimitExceeded { .. }
-        | HollowError::RasterSubdivisionLimitExceeded
+        | HollowError::CavityDistanceIndexLimitExceeded { .. }
+        // FU-54: the well-composedness repair's whole-grid re-selection loop
+        // hit its admitted `max_cavity_repair_passes` ceiling. A cap that was
+        // reached is a finding to report, never a reason to take a different
+        // route to an artifact -- the same FU-8b rule as every other ceiling
+        // in this group, and this one is unreachable through
+        // `plinth_hollow::run` today for the same structural reason
+        // `CavityRepairRemovedCavity` is: the module only ever removes
+        // cavity, so a real mask converges in 1-2 passes and 8 is 4x
+        // headroom. Listed here rather than with the geometry group below
+        // because it names a resource ceiling, not a shape.
+        | HollowError::CavityRepairPassLimitExceeded { .. }
         | HollowError::TriageAdmission(_) => false,
         // The model does not fit the machine. Emitting the solid would hand
         // back an artifact for a print that cannot be started.
@@ -1139,19 +1175,23 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::CavityExtractionFailed
         | HollowError::DrainGeometryFailed
         | HollowError::InvalidProductionMesh => true,
-        // Unreachable through `plinth_hollow::run`, which converts all five
+        // Unreachable through `plinth_hollow::run`, which converts all six
         // into a typed `HollowStageOutput::Solid` rather than propagating them.
         // Listed as geometry anyway, because if one ever did propagate, "keep
-        // the solid" is precisely what it means. The last two are the
+        // the solid" is precisely what it means. The middle two are the
         // well-composedness repair's own outcomes and reach the record as
         // `NoCavityAfterRepair` / `BelowThresholdAfterRepair`, which is how a
         // repair-caused solid stays distinguishable from a shape that never
-        // had a cavity.
+        // had a cavity. `RealizedWallBelowSpec` is FU-55's own check: a shell
+        // was built and its realized wall measured under the requested one,
+        // and `run` converts it into `ShellUnderWalled` before it ever
+        // reaches here — "keep the solid" is exactly the ruled behaviour.
         HollowError::IneligibleBelowBulk
         | HollowError::IneligibleNoCavity
         | HollowError::IneligibleSavings
         | HollowError::CavityRepairRemovedCavity { .. }
-        | HollowError::IneligibleSavingsAfterCavityRepair { .. } => true,
+        | HollowError::IneligibleSavingsAfterCavityRepair { .. }
+        | HollowError::RealizedWallBelowSpec { .. } => true,
     }
 }
 
@@ -1175,8 +1215,14 @@ pub fn seal_and_emit(
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
     // Read here, beside the disposition, because the hollowed model is the
-    // last place the hollow stage's own report is in hand.
+    // last place the hollow stage's own report is in hand — `run_support`
+    // consumes it a few lines below and the report is gone with it. FU-37's
+    // requested wall and FU-55's realized wall come off the same report for
+    // exactly that reason: leaving them there is how a landed, ruled
+    // measurement reaches no output of an actual run.
     let cavity_repair = hollowed.history().hollow().cavity_repair();
+    let wall = hollowed.history().hollow().wall();
+    let realized_wall = hollowed.history().hollow().realized_wall();
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -1272,6 +1318,8 @@ pub fn seal_and_emit(
         source_faces,
         prepared_faces,
         cavity_repair,
+        wall,
+        realized_wall,
         hollow_disposition,
         supported_geometry,
         routed_contacts: gated.routed_contacts,
@@ -1336,6 +1384,19 @@ mod tests {
         assert!(!hollow_error_refuses_this_geometry(
             &HollowError::VoxelGridTooLarge
         ));
+        // FU-54: the same rule for the cavity-repair pass ceiling. It reads
+        // as a resource cap, not a shape, even though it fires downstream of
+        // a partial repair the same way the two repair-caused geometry
+        // refusals below do.
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::CavityRepairPassLimitExceeded {
+                passes: 8,
+                max_passes: 8,
+                critical_cells: 1,
+                repaired_voxels: 2,
+                cell_visits: 27,
+            }
+        ));
         // A model that does not fit the machine is not answered with a solid
         // that also does not fit it.
         assert!(!hollow_error_refuses_this_geometry(
@@ -1371,6 +1432,16 @@ mod tests {
                 repaired_voxels: 2,
                 cell_visits: 27,
                 full_grid_passes: 2,
+            }
+        ));
+        // FU-55: the realized-wall check's own refusal. `run` converts this
+        // into `ShellUnderWalled` before it ever reaches here, but if it ever
+        // did propagate, "keep the solid" is what it means — a hollow
+        // refusal is not a model rejection.
+        assert!(hollow_error_refuses_this_geometry(
+            &HollowError::RealizedWallBelowSpec {
+                realized_wall_mm: 0.27,
+                requested_wall_mm: 2.5,
             }
         ));
     }

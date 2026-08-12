@@ -343,8 +343,10 @@ fn make_prehollowed_box() -> plinth_mesh::Mesh {
 /// The hollow-error fallback, gated on a model that actually takes it.
 ///
 /// `plinth_hollow::run` converts only `IneligibleNoCavity`,
-/// `IneligibleBelowBulk` and `IneligibleSavings` into a typed
-/// `HollowStageOutput::Solid`; **every other** `HollowError` propagates, and
+/// `IneligibleBelowBulk`, `IneligibleSavings`, the well-composedness
+/// repair's own `CavityRepairRemovedCavity` / `IneligibleSavingsAfterCavityRepair`,
+/// and (FU-55) `RealizedWallBelowSpec` into a typed `HollowStageOutput::Solid`;
+/// **every other** `HollowError` propagates, and
 /// before this fallback existed that error ended the chain, so such a model
 /// reached no artifact at all. This pins the path that carries it to one now,
 /// because a new branch in the shared composition with no gate on it is exactly
@@ -414,4 +416,65 @@ fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
 
     assert_artifact_is_sound(&outcome, &audit);
     assert_eq!(outcome.lift_mm, chain::LIFT_MM);
+}
+
+/// FU-55, downstream half: a shell discarded for measuring under the
+/// requested wall must still reach a written artifact, through exactly the
+/// call `run_from_oriented` makes for every `HollowStageOutput::Solid` --
+/// this is not a new route, it is the standing solid path carrying a new
+/// reason.
+///
+/// **Why this is built by hand rather than driven through a wall the real
+/// engine cannot honour.** FU-53's own exact-distance selection makes a
+/// genuinely under-walled shell close to unreachable through the full
+/// pipeline on purpose (that is the fix FU-55's check is the safety net
+/// under); `HollowRequest` has no seam for the internal margin a synthetic
+/// reproduction would need to defeat. `plinth-hollow`'s own test suite
+/// exercises the check firing on real geometry (a locally-built,
+/// zero-margin `HollowSettings` on the committed Sphere) and the exact
+/// `run` conversion this test's `HollowedModel` is the *output* of; this
+/// test's job is only the arrow neither of those covers: does the pipeline
+/// still write a file for it.
+#[test]
+fn shell_under_walled_solid_decision_still_reaches_a_written_artifact() {
+    let scratch = Scratch::new("shell-under-walled");
+    let mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
+        .expect("closed fixture box");
+    let (_, oriented) = chain::prepare_from_mesh(mesh.clone(), "make_box")
+        .expect("fixture box orients against the committed make_box baseline");
+    let (_, orientation) = oriented.into_parts();
+    let solid = plinth_hollow::HollowedModel::solid_decision(
+        mesh,
+        orientation,
+        SolidDecisionReason::ShellUnderWalled,
+    )
+    .expect("closed fixture box is a valid oriented-solid reserve");
+
+    let outcome = plinth_pipeline::prepare::seal_and_emit(
+        &plinth_core::ModelId::new("fu55-shell-under-walled"),
+        12,
+        solid,
+        chain::SupportedGeometry::HollowStageDecidedSolid,
+        &chain::stage_policy(),
+        scratch.path(),
+        None,
+    )
+    .expect("a ShellUnderWalled solid decision must reach a written artifact, not an error")
+    .expect("no stop_after was given, so the chain always reaches an outcome");
+
+    let audit = chain::audit_disk_artifact(scratch.path(), "fu55-shell-under-walled")
+        .expect("reopen and audit the artifact");
+
+    assert_eq!(
+        outcome.hollow_disposition,
+        HollowDisposition::Solid {
+            reason: SolidDecisionReason::ShellUnderWalled
+        },
+        "the disposition must name FU-55's own reason, not a different solid path"
+    );
+    assert_eq!(
+        outcome.prepared_faces, outcome.source_faces,
+        "the under-walled fallback is the oriented solid and must not lose faces"
+    );
+    assert_artifact_is_sound(&outcome, &audit);
 }

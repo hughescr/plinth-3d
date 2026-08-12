@@ -22,11 +22,25 @@
 //! a `.prepped.stl` is the legacy prep's *output*, already oriented and
 //! cleaned, so it seals well when run again. It is **no longer true of
 //! `Sphere.prepped.stl`**: the cavity-field exterior fix stopped its hollow
-//! cavity from breaching the wall at its poles, so its drilled shell now seals
-//! instead of being refused by the support run, reaches the gate on its own
-//! merits, and is refused there for uncovered islands like every other
-//! `Sphere`. The refusal case here is therefore driven by the procedural mesh
-//! *and* by that one committed fixture.
+//! cavity from breaching the wall at its poles, so its drilled shell sealed
+//! instead of being refused by the support run, reached the gate on its own
+//! merits, and was refused there for uncovered islands like every other
+//! `Sphere`. The refusal case here was therefore driven by the procedural mesh
+//! *and* by that one committed fixture, from 2026-08-10 to 2026-08-12.
+//!
+//! **2026-08-12, FU-53 landed, and `Sphere.prepped.stl`'s route moved a
+//! second time — but not back to the pre-2026-08-10 shape.** The exact
+//! nearest-surface cavity selection plus `HOLLOW_CAVITY_MARCH_MARGIN_MM`
+//! shrinks the sphere's cavity honestly, and on this doubly-decimated,
+//! doubly-oriented fixture (unlike the raw `corpus/models/Sphere.stl`
+//! `tests/first_artifact.rs` still runs fresh) the resulting support demand
+//! now exceeds the sealed run's registered routing capacity before the gate
+//! is ever reached. `DrilledShellRefusedBySupport` fires again — the same
+//! *named* pre-2026-08-10 outcome, on a different underlying cause — and the
+//! existing OQ-1/FU-34 reserve substitution converts it to an emitted solid
+//! artifact rather than a terminal gate refusal. See
+//! `a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours`
+//! for the full attribution. No cap, gate or bound moved to produce this.
 //!
 //! Deliberately absent: any new frozen digest (design record OQ-3). Everything
 //! asserted is a completion, disposition or path property that a changed
@@ -218,6 +232,8 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         geometry,
         hollow_disposition,
         cavity_repair,
+        wall_mm,
+        realized_wall,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -245,6 +261,19 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // claim "no repair result exists here", which is what distinguishes it from
     // a recorded repair of size zero.
     assert_eq!(cavity_repair, &None);
+    // **FU-37 reaches the run's own output.** The requested wall is on the
+    // artifact record, so this run is distinguishable from the same run at a
+    // different `--wall-mm`. It is the request's wall, not a constant: the
+    // fixture asks for the registered default.
+    assert_eq!(
+        wall_mm.map(plinth_core::Finite::get),
+        Some(2.5),
+        "the requested wall must reach the artifact record"
+    );
+    // FU-55: this model decided solid before a shell was ever built, so there
+    // is no realized wall to state -- `None` is the claim "nothing was
+    // measured", not "the measurement was dropped".
+    assert_eq!(realized_wall, &None);
     assert!(
         emit.support_record_count > 0,
         "an artifact with no supports"
@@ -639,43 +668,76 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
         ],
     ))
     .expect("run");
-    // **The two fixtures take different routes, and the sphere's route moved
-    // on 2026-08-10.** `mini` is decided solid by the hollow stage on its own
-    // terms and emits. `sphere` hollows, drains and drills — and until the
-    // cavity-field exterior fix its cavity reached to within 0.5 mm of the
-    // outer surface at the six points where it is tangent to its own bounding
-    // box, the sealed support run refused *that* shell, and the chain
-    // substituted the oriented solid, so this block used to assert two
-    // artifacts and a `DrilledShellRefusedBySupport` substitution. With the
-    // wall no longer breached the drilled shell **seals**, reaches the
-    // pre-write gate on its own merits, and `UncoveredIslands` refuses it —
-    // terminally, because a gate refusal is not answered by substituting
-    // different geometry. So one artifact, exit 3, and the sphere's outcome is
-    // a refusal carrying the geometry it was spoken over.
+    // **The two fixtures take different routes, and the sphere's route has
+    // moved twice.** `mini` is decided solid by the hollow stage on its own
+    // terms and emits, throughout every revision below.
     //
-    // This is the same verdict `first_artifact.rs`'s
-    // `corpus_sphere_drilled_plan_is_refused_before_any_file_exists` already
-    // pins; the sphere joins it rather than escaping it through a fallback. No
-    // gate, cap or bound moved. **The per-model baseline map is still proved:**
-    // both models resolved their own baseline and both reached a stage that
-    // could only be reached with it.
-    assert_eq!(report.artifacts().count(), 1);
-    assert_eq!(report.exit_code(), PipelineExitCode::Gates);
+    // Until the 2026-08-10 cavity-field exterior fix, `sphere`'s cavity
+    // reached to within 0.5 mm of the outer surface at the six points where
+    // it is tangent to its own bounding box; the sealed support run refused
+    // *that* shell, and the chain substituted the oriented solid, so this
+    // block used to assert two artifacts and a `DrilledShellRefusedBySupport`
+    // substitution.
+    //
+    // From 2026-08-10 to 2026-08-12 the wall was no longer breached, the
+    // drilled shell **sealed**, reached the pre-write gate on its own merits,
+    // and `UncoveredIslands` refused it — terminally, because a gate refusal
+    // is not answered by substituting different geometry. In that window this
+    // block asserted one artifact, exit 3, and the same verdict
+    // `first_artifact.rs`'s `corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
+    // pinned running the sphere alone.
+    //
+    // **2026-08-12, FU-53 landed: the sphere's route moved a second time, and
+    // it now diverges from `first_artifact.rs`'s single-model run.** FU-53
+    // corrected cavity selection to the exact nearest-surface distance plus
+    // `HOLLOW_CAVITY_MARCH_MARGIN_MM`, which is honestly smaller. Support
+    // demand on the resulting thinner-walled shell now exceeds the sealed
+    // run's registered routing capacity before the gate is ever reached, so
+    // the sphere takes `DrilledShellRefusedBySupport` again, the same named
+    // outcome the pre-2026-08-10 revision above took, converted by the
+    // existing OQ-1/FU-34 reserve substitution into an emitted solid artifact
+    // rather than a terminal gate refusal. Both models now reach an artifact.
+    //
+    // `first_artifact.rs`'s single-model run does NOT diverge the same way,
+    // and it is not a folder-sharing effect (`PrepareResourcePolicy`'s own
+    // doc: caps are absolute, fixed once from the largest model this
+    // workspace runs, never scaled to what else is in the batch — confirmed
+    // directly: running `sphere.prepped.stl` alone through this same
+    // executor hits the identical routing refusal). The real difference is
+    // the **input mesh**: `first_artifact.rs` decimates and orients the RAW
+    // `corpus/models/Sphere.stl` fresh, while this fixture is
+    // `Sphere.prepped.stl` — the legacy prep's *output*, already oriented and
+    // cleaned once — run through decimation and orientation a SECOND time, a
+    // known source of divergence this same module's doc comment already
+    // named for the pre-write gates ("no checked-in `.prepped.stl` is refused
+    // ... because a `.prepped.stl` is the legacy prep's output, already
+    // oriented and cleaned, so it seals well when run again"). FU-53 is what
+    // makes that divergence land on opposite sides of the routing cap this
+    // time, not a new mechanism. No cap, gate or bound moved to produce any
+    // of this: the geometry moved, and a resource ceiling this smaller,
+    // honestly-walled shell newly approaches on this doubly-processed fixture
+    // is measured and recorded here, not raised.
+    // **The per-model baseline map is still proved either way:** both models
+    // resolved their own baseline and both reached a stage that could only be
+    // reached with it.
+    assert_eq!(report.artifacts().count(), 2);
+    assert_eq!(report.exit_code(), PipelineExitCode::Ok);
     let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "mini") else {
         panic!("mini must reach an artifact");
     };
     assert_eq!(geometry, &SupportedGeometry::HollowStageDecidedSolid);
-    let ModelPreparationOutcome::Refused { gate, geometry, .. } = outcome(&report, "sphere") else {
+    let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "sphere") else {
         panic!(
-            "sphere's drilled shell must now be refused by the gate: {:?}",
+            "sphere's drilled shell now falls back to the solid reserve, not a gate refusal: {:?}",
             outcome(&report, "sphere")
         );
     };
-    assert_eq!(*gate, Some(plinth_pipeline::PreWriteGate::UncoveredIslands));
-    assert_eq!(
-        geometry.as_ref(),
-        Some(&SupportedGeometry::DrilledShellSealed),
-        "the refusal must be spoken over the shell the chain planned, not over a substitute"
+    assert!(
+        matches!(
+            geometry,
+            SupportedGeometry::DrilledShellRefusedBySupport { .. }
+        ),
+        "sphere must reach its artifact through the support-refusal reserve substitution: {geometry:?}"
     );
 }
 
@@ -784,10 +846,14 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 
     // Without a stop, the same models run to their own end — so the assertions
     // above are about `stop_after` and not about models that never get there.
-    // `mini` emits; `sphere`'s drilled shell now seals and is refused by the
-    // `UncoveredIslands` gate (see the per-model-baseline test above for the
-    // 2026-08-10 attribution), which is still a stage `stop_after` never
-    // reached and therefore still discriminates.
+    // `mini` emits. `sphere`'s drilled shell sealed and was refused by the
+    // `UncoveredIslands` gate from 2026-08-10 to 2026-08-12; FU-53 moved it a
+    // second time, onto the `DrilledShellRefusedBySupport` reserve
+    // substitution (see the per-model-baseline test above for the full
+    // attribution and why this doubly-processed `.prepped.stl` fixture
+    // diverges from `first_artifact.rs`'s raw-corpus run). Either way this is
+    // still a stage `stop_after` never reached and therefore still
+    // discriminates.
     let scratch = Scratch::new("stop-none");
     for (stem, fixture, _) in fixtures {
         scratch.place(fixture, stem);
@@ -800,6 +866,72 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
         ],
     ))
     .expect("run");
-    assert_eq!(report.artifacts().count(), 1);
-    assert!(report.has_gate_refusal());
+    assert_eq!(report.artifacts().count(), 2);
+    assert!(!report.has_gate_refusal());
+}
+
+/// **FU-37, end to end: two runs at different walls are distinguishable in
+/// what the pipeline actually writes.**
+///
+/// The row's own motivating claim was that "two artifacts prepared at 2.5 mm
+/// and 3.0 mm are byte-indistinguishable in metadata in every file the
+/// pipeline writes". `HollowReport` gained the `wall` field, but the report
+/// died inside `seal_and_emit` — `ChainOutcome` had no wall field and
+/// `ModelPreparationOutcome::Artifact` serialized none — so the claim stayed
+/// true of real runs while the in-crate tests, which serialize a
+/// `HollowReport` in isolation, passed. This runs the **whole executor**
+/// twice on the same fixture, changing nothing but `--wall-mm`, and asserts
+/// the serialized reports differ in the wall and only there.
+#[test]
+fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_report() {
+    let printer = OutputProfile::Saturn4Ultra
+        .resolve()
+        .expect("M0 Saturn profile")
+        .clone();
+
+    let run_at = |label: &str, wall: plinth_core::PositiveFinite| {
+        let scratch = Scratch::new(label);
+        scratch.place("make_toed_slab.prepped.stl", "mini");
+        let mut request = pinned(&scratch, "mini", "make_toed_slab.pipeline.json");
+        request.hollow = plinth_hollow::HollowRequest {
+            printer: printer.clone(),
+            wall_mm: wall,
+        };
+        let report = prepare(request).expect("run");
+        let json = serde_json::to_string(&report).expect("the report serializes");
+        // Drop the scratch path, which differs per run by construction and
+        // says nothing about the wall.
+        let outcome = outcome(&report, "mini").clone();
+        (outcome, json.contains("\"wall_mm\""))
+    };
+
+    let default_wall = plinth_hollow::registered_wall(plinth_hollow::WallSelection::Default)
+        .expect("registered default wall");
+    let heavy_wall = plinth_hollow::registered_wall(plinth_hollow::WallSelection::HandlingHeavy)
+        .expect("registered handling-heavy wall");
+    assert_ne!(
+        default_wall.get(),
+        heavy_wall.get(),
+        "the two registered walls must differ for this test to mean anything"
+    );
+
+    let (thin, thin_has_key) = run_at("wall-default", default_wall);
+    let (thick, thick_has_key) = run_at("wall-heavy", heavy_wall);
+    assert!(
+        thin_has_key && thick_has_key,
+        "the serialized report must carry the wall at all"
+    );
+
+    let wall_of = |outcome: &ModelPreparationOutcome| match outcome {
+        ModelPreparationOutcome::Artifact { wall_mm, .. } => {
+            wall_mm.map(plinth_core::Finite::get)
+        }
+        other => panic!("the fixture must reach an artifact; got {other:?}"),
+    };
+    assert_eq!(wall_of(&thin), Some(default_wall.get()));
+    assert_eq!(wall_of(&thick), Some(heavy_wall.get()));
+    assert_ne!(
+        thin, thick,
+        "two runs differing only in --wall-mm must not produce identical artifact records"
+    );
 }
