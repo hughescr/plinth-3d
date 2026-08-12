@@ -36,7 +36,7 @@ use plinth_decimate::{BudgetConfigError, DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
 use plinth_hollow::{
     drilling::DrillingLimits, H0AdmissionLimits, HollowDisposition, HollowError, HollowRequest,
-    HollowStageOutput,
+    HollowStageFailure, HollowStageOutput,
 };
 use plinth_orient::{OrientError, OrientSearchLimits, OrientedModel, PinnedBaseline};
 use plinth_support::{
@@ -54,10 +54,14 @@ use thiserror::Error;
 /// contains either a proved drilled hollow or the preserved oriented solid
 /// with an explicit fallback disposition. Planned but undrilled shells have
 /// no conversion through this boundary.
+///
+/// The failure carries the well-composedness repair's measurement when the
+/// repair had already run, because the caller's refusal record is built from
+/// this value and would otherwise say a repair never happened.
 pub fn hollow_stage(
     model: OrientedModel,
     request: &HollowRequest,
-) -> Result<HollowStageOutput, HollowError> {
+) -> Result<HollowStageOutput, HollowStageFailure> {
     plinth_hollow::run(model, request)
 }
 
@@ -367,10 +371,24 @@ pub enum ModelPreparationOutcome {
     /// the caveat [`prepare::SupportedGeometry::HollowStageRefused`] records:
     /// on the fallback paths the disposition is stamped by a stage that never
     /// reached a threshold test, and `geometry` is where the truth lives.
+    ///
+    /// `cavity_repair` is the well-composedness repair's own measurement, and
+    /// it is here because the alternative is that the repair is invisible
+    /// outside `plinth-hollow`. It says how many critical 2×2×2 cells the
+    /// cavity mask held, how many cavity voxels were handed back to material to
+    /// remove them, and what that cost in cell visits and whole-grid passes.
+    /// `None` means no repair result was recorded for this model — nothing in
+    /// this run reached cavity selection, so there is nothing to report. It is
+    /// **not** "a repair may have run and its measurement was dropped": the
+    /// substitution paths (a hollow-stage refusal, and a support refusal on a
+    /// shell that was built) carry the repair's measurement onto the record
+    /// they produce, which is what makes `None` a claim rather than a silence.
     Artifact {
         emit: EmitReport,
         geometry: prepare::SupportedGeometry,
         hollow_disposition: HollowDisposition,
+        #[serde(default)]
+        cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
     },
     Stopped {
         after: StageStop,
@@ -1112,11 +1130,17 @@ mod tests {
             ..hollow_request()
         };
         let model = oriented(make_box([20.0, 8.0, 8.0], [0.0; 3]).expect("thin closed box"));
-        let error = hollow_stage(model, &request).expect_err("profile mismatch must refuse");
-        assert_eq!(error.category(), HollowFailureCategory::PrinterProfile);
+        let failure = hollow_stage(model, &request).expect_err("profile mismatch must refuse");
+        assert_eq!(
+            failure.error().category(),
+            HollowFailureCategory::PrinterProfile
+        );
+        // A refusal raised before cavity selection makes no repair claim: there
+        // is nothing to report, as opposed to something that was dropped.
+        assert_eq!(failure.cavity_repair(), None);
         let wrapped = PipelineError::Hollow {
             model: ModelId::new("fixture"),
-            source: error,
+            source: failure.into_error(),
         };
         assert_eq!(wrapped.exit_code(), PipelineExitCode::Hollow);
     }
@@ -1176,6 +1200,7 @@ mod tests {
                         },
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
+                        cavity_repair: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1241,6 +1266,7 @@ mod tests {
                         },
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
+                        cavity_repair: None,
                     },
                 ),
                 model("refused", refused),
@@ -1645,9 +1671,22 @@ mod tests {
             // Measured 2026-08-10 on this tip. `true` means the measured field
             // and the zero field produce the same sealed outcome.
             let recorded_neutral = match name {
-                // Both configurations refuse the drilled shell identically
-                // during lowering; production falls back to the reserve solid.
-                "Sphere.prepped.stl" => true,
+                // Re-recorded 2026-08-10 by the cavity-field exterior fix,
+                // true -> false, with its attribution rather than an edited
+                // expectation. Until that fix the Sphere's cavity reached to
+                // within 0.5 mm of its outer surface at the six points where
+                // it is tangent to its own bounding box, and the drilled shell
+                // that produced was refused during lowering under *both*
+                // fields — two identical refusals, which is what made the
+                // fixture read as neutral. With the wall no longer breached
+                // the drilled shell **seals** under both fields, and the two
+                // sealed digests differ (measured 6219979372923930719 against
+                // 1114015346968956405), so the Sphere now says exactly what
+                // `make_toed_slab` and `make_overhang_table` already said.
+                // This does not change FU-38's substance: the divergence it
+                // records is the same contact-selection tie-break, and no
+                // pinned digest anywhere is re-frozen by this line.
+                "Sphere.prepped.stl" => false,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.

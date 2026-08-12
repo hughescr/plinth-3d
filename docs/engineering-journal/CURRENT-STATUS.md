@@ -5,6 +5,487 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-11 — the cavity mask is made well-composed, FU-49 closes, and the wall the shells actually ship is measured for the first time {#hollow-well-composed-2026-08-11}
+
+<a id="hollow-well-composed-2026-08-11"></a>
+
+**FU-49 is fixed here, exactly along the route FU-49 itself prescribed; a fourth defect
+is found, measured and filed.** FU-49's recorded first action was: *count the critical
+cells on the `Warhorse` and the treant — if it is tens, remedy (a) is bounded and cheap
+and should be measured to a fixpoint; if it is thousands, remedy (b) is the honest
+answer.* Counted: **44** on the raw `Warhorse.stl` and **70** on the committed
+`Weeping Treant v1.2` fixture. Tens. Remedy (a) is therefore the sanctioned path and it is
+what landed. (**Corrected 2026-08-11 on review.** This sentence first said *59* for the
+treant, which is the raw `Awakened Tree.stl` in its delivered pose — the same provenance
+slip the tables below already correct, restated at the top of the entry and missed by that
+sweep. The committed fixture's figure is 70, asserted by the release-gated test. Either
+number is tens, so the decision the sentence records is unchanged.)
+
+### DEFECT — FIXED: one vertex per lattice cell is not enough where the mask is not well-composed
+
+`fast_surface_nets` emits **at most one vertex per lattice cell**. That suffices only when
+the mask is *well-composed* — when no 2×2×2 cell holds a face-diagonal foreground pair
+(Latecki's C1) or an antipodal foreground/background pair (C2). Where it does not, two
+sheets of the surface are forced to share the cell's single vertex and the edges around it
+carry four faces instead of two. The cavity comes out watertight, consistently oriented,
+and **non-manifold**; the Boolean inherits it; `validate_shell_topology` correctly refuses
+its own shell with `InvalidShellTopology`.
+
+`crates/plinth-hollow/src/well_composed.rs` repairs the selected cavity component to
+well-composedness **by removing cavity voxels only, never adding them**. That direction is
+the whole safety argument: removing cavity turns void back into material, so the wall can
+only get *thicker* and a repair can never breach the registered wall thickness. Adding
+cavity would break the same configurations while thinning the wall at precisely the pinch
+points where it is already thinnest — a wall violation dressed as a topology fix. The wall
+constant is neither read nor written by the module.
+
+**Termination needs no new budget.** Removal is monotone on a finite set: every round that
+does not stop removes at least one voxel and the foreground only shrinks.
+
+**Work and memory, corrected 2026-08-11 to what the code actually guarantees.** The first
+version of this section claimed a single bound, `cells + 8 × changed` cell visits, and that
+claim was *narrower than the algorithm*. It is now stated as the two domains it really is,
+and both are counted rather than asserted:
+
+- **Cell visits ≤ `cells + 8 × changed`.** One full scan of `(nz+1)(ny+1)(nx+1)` cells, after
+  which only the eight cells incident to each *changed* voxel are re-examined. Reported as
+  `H0ResourceDiagnostics::cavity_repair_cell_visits`, and pinned end to end on the committed
+  treant, where it is exactly `5,404,960 + 8 × 115 = 5,405,880`.
+- **Whole-grid passes**, which the first bound did not cover at all. A round that removes
+  anything re-selects the component with a `label3d` plus a whole-grid sweep, and the number
+  of such rounds is bounded only by the removals, so total work is
+  `cells × (2 × passes − 1) + 8 × changed`, not `cells + 8 × changed`. A re-selection either
+  drops a voxel or ends the loop, so `passes ≤ 2 + dropped`; **measured, it is 2 on every
+  model available**, which is why nothing observable moved. Reported as
+  `cavity_repair_full_grid_passes` and pinned at 2 on the treant and on the synthetic
+  dumbbell. (**Corrected 2026-08-11 on review, twice over.** The factor: each counted pass is
+  *two* whole-grid traversals — the `label3d` and the `indexed_iter` sweep that applies its
+  verdict — so the first form, `cells × passes + 8 × changed`, undercounted the re-selection
+  domain by about 2×. And the bound: `passes ≤ 2 + dropped` is `O(N)` and is **not an
+  admitted limit**, which makes this the one work domain in H0 a caller cannot cap. That gap
+  is **FU-54**, filed with the measured profile rather than closed with a number of this
+  change's own invention.)
+- **Transient memory ≤ ~6 bytes per admitted voxel.** The first version held the eight
+  incident cells of every changed voxel as a sorted `Vec<[usize; 3]>` — 192 bytes per changed
+  voxel, ~3.2 GB at the admitted cap of 16,777,216 cells, uncounted and with no admitted
+  limit of its own, in a stage where every other work domain has one. That set is now
+  enumerated lazily and never materialised; what is held is a reused one-byte-per-voxel dedup
+  flag array and the changed voxels themselves as `u32` **linear indices**, four bytes each.
+  Both are the same order as the `Array3<i32>` label array `label3d` already builds over the
+  same grid for the caller. Duplicate incident cells are visited instead of deduplicated,
+  which is free because the removal rule is a pure function of the cell's eight bits — and it
+  is what makes the cell-visit count exactly `8 × changed` per incident round.
+
+**No constant, cap, floor, gate threshold or registry entry is introduced, raised,
+reinterpreted or bypassed.** Bounding the transient is a *tightening*; nothing was relaxed to
+accommodate it.
+
+The removal rule is a **pure function of the cell's 8-bit configuration**, so it is
+order-free and needs no tie-break; a `0..256` test asserts that, and asserts no background
+corner is ever marked.
+
+### What it bought, measured on every model available — **and on which mesh, in which pose**
+
+**Corrected 2026-08-11.** The first version of this table recorded the treant's row under
+the name of the **committed** fixture, `Weeping Treant v1.2`, and asserted it was the same
+thing as `Awakened Tree.stl`. It was not measured on the committed fixture, and the row it
+stated is arithmetically impossible for that fixture: the repair's opening full scan alone
+is `166 × 176 × 185 = 5,404,960` cell visits on that grid, so the recorded 3,561,128 is
+*below one scan* of it. The identity is nearly true and that is exactly what made the error
+easy to make — `Awakened Tree.stl` and the committed fixture have the same 429,120 faces and
+are the same source mesh — but they are **different poses**, so they have different bounding
+boxes (`165×109×194` vs `165×175×184`), different grids (3,489,090 vs 5,313,000 cells) and
+therefore different cavities. Every row now names the file it was measured on and whether
+that file is committed evidence or an uncommitted raw mini.
+
+Release, `create_shell` internals. Cost is the fraction of the selected cavity the repair
+hands back as material:
+
+| mesh, as measured | committed? | grid | critical cells | voxels removed | cavity voxels | cost | inner surface before → after |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl` | **yes** — committed evidence, oriented-solid pose | 165×175×184 | 70 | 115 | 64,351 | **0.18 %** | 132 non-manifold / 483 point-only → **0 / 0** |
+| `Warhorse.stl` | no — raw mini, as delivered, unoriented | 39×121×109 | 44 | 51 | 27,033 | **0.19 %** | 92 / 276 → **0 / 0** |
+| `Giant Toad.stl` | no — raw mini, as delivered, unoriented | 101×97×62 | 59 | 63 | 114,990 | **0.055 %** | 122 / 380 → **0 / 0** |
+| `Awakened Tree.stl` | no — raw mini, the treant's source mesh in its delivered pose | 165×109×194 | 59 | 66 | 63,958 | **0.10 %** | 124 / 404 → **0 / 0** |
+
+Cavity volumes: committed treant **8,043.875 mm³**, `Warhorse` 3,379.125 mm³, `Giant Toad`
+14,373.75 mm³, raw `Awakened Tree` 7,994.75 mm³. Cell visits 5,405,880 / 537,208 / 630,252 /
+3,561,228 — in every case exactly the grid's own `(n+1)³` opening scan plus `8 × changed`,
+which is the bound, arrived at rather than remembered. Whole-grid passes: **2** on all four.
+
+**The committed row is now a test, not a recollection.**
+`plinth-hollow`'s `the_committed_treant_hollows_and_its_repair_is_the_one_the_record_states`
+runs `create_shell` on that fixture under `cargo test --release` and asserts every number in
+its row, plus that the shell it produces carries zero cut flags of any kind. The two raw-mini
+rows cannot be tested, because those files are not in the repository and never will be; they
+are recorded here as what they are — local verification material.
+
+**Independent corroboration of the committed row.** The 2026-08-10 entry's own table records
+the treant's pre-repair cavity as 8,058.25 mm³, which is 64,466 voxels at the frozen 0.5 mm
+pitch. `8,058.25 − 115 × 0.125 = 8,043.875`, exactly. The two entries now agree on the same
+mesh; before this correction they described two.
+
+**Corpus-wide, all 37 minis plus the 8 committed corpus models: `InvalidShellTopology` is
+gone — zero refusals in that class remain.** Every remaining refusal is a different and
+already-owned class: `NotClosedOrOriented` (raw input defects, the repair-pre-pass work),
+`IneligibleBelowBulk`/`IneligibleSavings` (the savings gates doing their job), and
+`RasterWorkLimitExceeded` on `Round 50`/`Round 100` (FU-50, untouched). `Sphere`,
+`Cylinder` and every simple primitive report **0 critical cells** and are byte-for-byte
+unaffected — the repair is inert where the mask was already well-composed, which is what
+makes the attribution clean.
+
+### The repair is now reportable, and a repair-caused solid decision is distinguishable from a shape that has no cavity
+
+Added 2026-08-11 on review. The first version of this change measured the repair and then
+**threw the measurement away exactly where it decided how a model was treated.** Three
+problems, all fixed here, none of them touching a threshold:
+
+1. **The diagnostics were unreachable.** `cavity_critical_cells`,
+   `cavity_repaired_voxels` and `cavity_repair_cell_visits` lived on
+   `H0ResourceDiagnostics` and had **no consumer anywhere outside `plinth-hollow`**, so no
+   emitted artifact and no report could say a repair had run. They now travel the whole way
+   out: `HollowReport::cavity_repair` on the drilled path and on the refusal paths alike,
+   `ChainOutcome::cavity_repair` and `ModelPreparationOutcome::Artifact { cavity_repair }` in
+   the prepare report, and one `cavity repair` line from `plinth prepare` when a repair
+   actually took something — joined by the newly counted `cavity_repair_full_grid_passes`.
+2. **A repair that ate the cavity was reported as geometry.** When the fixpoint removed
+   everything, the module returned `IneligibleNoCavity`, which `plinth_hollow::run` converts
+   to `SolidDecisionReason::NoCavity` — *"this shape has no room for a cavity"*. It is not the
+   same finding, and the `prepare.rs` caveat about `NoCavity`/`BelowThreshold` imprecision
+   predates the repair and does not cover it. There are now two typed refusals,
+   `CavityRepairRemovedCavity` and `IneligibleSavingsAfterCavityRepair`, carrying the repair's
+   own numbers, and two matching reasons, `NoCavityAfterRepair` and
+   `BelowThresholdAfterRepair`. A cavity that fell under the savings gate *after* the repair
+   shrank it no longer reads as a cavity that was always too small.
+3. **The measurement FU-49's decision procedure turns on was `#[cfg(test)]`.** Counting the
+   critical cells is what chose remedy (a) over remedy (b); a number nothing in production
+   reports is a number nobody can check, which is how the treant row above came to state a
+   figure no committed input can produce. `critical_cell_count` remains the tests'
+   *independent* oracle, and the count production reports is the repair's own — now on the
+   record and now pinned end to end by the release-gated corpus test.
+
+### Second review round, 2026-08-11: the evidence seam, the default test run, and the transient nobody counted
+
+The round above carried the measurement to the record on *five* named refusal codes and left
+every other exit bare. Four findings, all fixed here; a fifth is filed and a sixth is an
+owner decision this branch must not make for itself. **No threshold, cap or bound moved.**
+
+1. **The refusal record was still repair-blind on most paths.** `plinth_hollow::run`
+   converted five `create_shell` errors into typed outputs and propagated everything else
+   naked — `InvalidShellTopology` (FU-53's finned-block class is live in exactly this path),
+   `DrainPlanning`, `Drilling`, `Solid`, `InvalidProductionMesh` — and `prepare.rs` then built
+   `SupportedGeometry::HollowStageRefused` through a constructor that hard-coded
+   `cavity_repair: None`. A repair that removed cavity voxels was invisible in the one record
+   that decided the model's treatment, which is the failure mode this measurement exists to
+   prevent. `create_shell_recording_repair` now returns a typed **`HollowStageFailure`** —
+   the error plus what the repair had already measured — written as one fallible block with a
+   single exit that attaches the evidence, so the fix is not "one `map_err` per call site"
+   and cannot be defeated by a future call site nobody remembered. `run` and
+   `prepare::run_from_oriented` carry it onto the substituted record. `create_shell` itself
+   keeps its `HollowError` signature and every existing caller is untouched.
+2. **The support-refusal substitution had the same hole**, and two comments asserted it did
+   not. `prepare.rs` built the oriented-solid reserve with `cavity_repair: None` *after*
+   `create_shell` had succeeded — so a repair may well have run — while
+   `ModelPreparationOutcome::Artifact`'s doc said `None` means "a stage earlier than cavity
+   selection decided it" and `into_solid_fallback`'s comment said "the repair's measurement
+   already travelled out with that shell's own report". Both were false on that branch,
+   because the shell's report was discarded with the `seal_and_emit` that failed. The
+   substitution now carries the shell's measurement and both comments say what the code does.
+   `None` is once again a claim: nothing reached cavity selection.
+3. **A default `cargo test` ran no end-to-end coverage of the fix at all.** The only test
+   exercising the repair through `create_shell` is release-gated on a 429,120-face fixture;
+   `well_composed.rs`'s twelve unit tests stop at the mask or at `marching_cavity`; and both
+   debug-runnable `create_shell` tests run masks with **0 critical cells**, in which the
+   repair is inert. The spec asked for a small synthetic *solid* and only a synthetic mask was
+   built. `a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it` closes it
+   in **0.9 s**: two 10 mm lobes joined by a 3.375 mm waist at **45° in the xy plane**, where
+   the diagonal is the point — at a 2.5 mm wall the waist's cavity is a sub-voxel thread, so
+   the mask crosses it as a chain of lattice-diagonal voxels, which is Latecki's C1/C2
+   exactly. Every constant is exact in binary. It asserts the chain in order: the unrepaired
+   cavity surface is watertight but **non-manifold (0 boundary / 8 non-manifold / 26
+   point-only)**, which is the FU-49 refusal; the repair is 4 critical cells, 4 voxels,
+   411,674 cell visits = the 99×99×42 opening scan + 8×4, 2 whole-grid passes; and the shell
+   that emerges from the marching, the Boolean and `validate_shell_topology` carries **0 cut
+   faces** and exactly **one negative contained cavity**. The middle assertion is what keeps
+   it a regression test rather than a tautology.
+4. **`frozen_distance_transform`'s transient peak was ~2× what the 2026-08-10 entry
+   recorded** — see the correction appended to that entry. Fixed by cropping in place.
+5. **The repair's whole-grid domain has no admitted bound, and the work formula undercounted
+   it ~2×.** `full_grid_passes` is bounded only by `2 + reselection_dropped_voxels`, and
+   `dropped` can be `O(N)`, so an admitted 16,777,216-cell mask has a worst-case `O(N²)` work
+   profile with no typed refusal — in a stage where every other work domain has an admitted
+   limit and FU-50 exists precisely because a work cap was *respected* rather than raised.
+   Separately, each counted pass performs **two** whole-grid traversals (the `label3d` and the
+   sweep that applies its verdict), so `p` passes are `2p − 1` traversals and the documented
+   `cells × p + 8 × changed` was low by about a factor of two. **The formula is corrected in
+   the module doc, the accessor docs and the test that asserts the bound.** The missing cap is
+   **filed as FU-54, not invented here**: choosing that number is an acceptance-bound decision,
+   the hard constraint on this work is that a fix which seems to need a bound is filed rather
+   than improvised, and the measured profile is 2 passes on every model available.
+6. **An owner ruling is outstanding and this branch should not merge without it — see
+   FU-55.** The branch knowingly converts three previously fail-closed models into emitted
+   `.chitubox` artifacts whose measured realised wall is 11–51 % of the registered 2.5 mm,
+   while `PreWriteGate::Printability` is unimplemented and no production stage measures or
+   gates realised wall. The journal itself says hollowed shells are not printable. Filing
+   FU-53 records the defect; it does not authorise shipping under it.
+
+### DEFECT — DIAGNOSED, FILED AS FU-53: the wall the engine actually ships is far thinner than the wall it is told to leave
+
+Fixing the extractor let three models through to a shell, and the obvious next question had
+never been asked of any hollowed model: **how thick is the wall that actually came out?**
+Measured directly — brute-force minimum distance from every vertex of the marching cavity
+surface to the source surface, source triangles bucketed into 3 mm cells and the answer
+capped at 3 mm, which is all that matters against a 2.5 mm wall:
+
+| mesh, as measured | committed? | realised wall | fraction of the 2.5 mm registered wall | critical cells |
+| --- | --- | --- | --- | --- |
+| `Cylinder` | **yes** | **1.95 mm** | 78 % | 0 — *untouched by this change* |
+| `Sphere` | **yes** | **1.85 mm** | 74 % | 0 — *untouched by this change* |
+| `corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl` | **yes** | **0.70 mm** | 28 % | 70 |
+| `Warhorse.stl` | no — raw mini | **1.27 mm** | 51 % | 44 |
+| `Giant Toad.stl` | no — raw mini | **0.27 mm** | 11 % | 59 |
+| `Awakened Tree.stl` | no — raw mini, treant's source in its delivered pose | **0.49 mm** | 19 % | 59 |
+| synthetic finned block | procedural | **breach** | 0 % | 0 |
+
+The treant row carried the same provenance defect as the table above and is corrected the
+same way: **0.49 mm was the raw `Awakened Tree.stl` in its delivered pose; the committed
+fixture ships 0.70 mm.** Both are far under the stated wall and neither changes FU-53's
+finding — the correction moves the treant from 19 % to 28 %, and the worst model in the
+corpus is still `Giant Toad` at 11 %. Pose matters here for the same reason it mattered
+above: the lattice is axis-aligned, so a rotated mesh is a differently aliased mesh.
+
+**This is pre-existing and is not caused by the well-composedness repair.** The `Sphere` and
+the `Cylinder` have **zero critical cells**, so the repair does not touch either of them, and
+they already ship at 74–78 % of the stated wall. The repair only ever *removes* cavity, so it
+can only ever move these numbers **up**. What this change does is newly expose three more
+models to a defect that was already there — and at far worse magnitudes, because the error
+grows with local surface obliquity and concavity, which is exactly what separates a smooth
+primitive from a branched organic mini.
+
+**One sentence here was wrong and is corrected.** It read "the `Sphere` and the `Cylinder` …
+hollow today on `develop`". The `Sphere` does. **The `Cylinder` does not** — `develop`
+(`dba1bc9`) refuses it, as the 2026-08-10 table below records in this same file, and it
+hollows only as of `10725ff` on this branch, the cavity-field exterior fix. That does not
+weaken the attribution, which never depended on it: what makes the repair non-causal for
+these two is that both report **0 critical cells**, so no voxel of either mask is touched by
+it. The under-walled `Cylinder` is `10725ff`'s to own, not this change's.
+
+**The same defect, taken to its limit, is a second refusal cause that has nothing to do with
+well-composedness.** A synthetic 20 mm block with a 20 mm fin leaving one face at an angle
+refuses with `InvalidShellTopology` in 13 of 15 thickness/direction configurations — while
+reporting **0 critical cells and a perfectly manifold cavity surface** (0 boundary edges, 0
+non-manifold, 0 point-only). The Boolean output is watertight and manifold; what it is not is
+*hollow*. Triage returns `Ok` — a plain solid with **zero enclosed cavities** — because the
+cavity was cut so close to the fin's surface that it broke through and opened the void to the
+outside. And the failure is **non-monotonic in fin thickness** (5.4, 5.6, 5.8, 6.2 mm refuse;
+6.0 mm hollows), which is the signature of lattice aliasing rather than a clean threshold.
+
+FU-53 carries the full evidence chain and the mechanism. It is filed rather than fixed
+because the honest remedy is in the EDT/rasterization semantics — the cavity is selected by a
+distance transform measured against the *conservatively rasterized* occupancy, which is
+fatter than the true solid — and changing that moves every hollowed model's cavity. That is
+architecturally larger than this change and it must be measured on the committed corpus
+before it is chosen, not improvised beside a topology fix.
+
+**Product consequence, stated plainly:** hollowed shells are currently under-walled, the
+three models this change newly hollows are the worst affected, and a 0.27 mm wall is not a
+printable wall. FU-53 is the blocker on trusting a hollowed shell to a printer, and it now
+gates three more models than it did yesterday.
+
+## 2026-08-10 — the cavity field had no exterior, and the three hollow refusal classes separate {#hollow-cavity-field-exterior-2026-08-10}
+
+<a id="hollow-cavity-field-exterior-2026-08-10"></a>
+
+**One defect is fixed here; two are diagnosed and filed.** The task was FU-34's first
+action, asked of the `Rotting Warhorse`/`Warhorse` refusal rather than the treant's: dump
+what the hollow stage actually produces and count it, then decide between "the check is
+right about bad geometry" and "the Boolean/marching path is producing a broken shell". The
+answer turned out to be **both, for different models**, plus a third defect that has
+nothing to do with either.
+
+### The measurement that separated them
+
+Every number below is from `create_shell`'s own internals, release build, at `dba1bc9` +
+this change. `inner` is the marching-cubes cavity surface before the Boolean; `shell` is
+`from_solid(difference(source, inner))`.
+
+| model | occupancy | EDT max | cavity | inner surface | shell |
+| --- | --- | --- | --- | --- | --- |
+| `make_box` 10 mm cube | **9,261/9,261** | **17.61 mm** | **1,148.5 mm³ on a 1,000 mm³ source** | closed, 1 component | REFUSED |
+| `Cylinder` | 179,889/226,981 | 15.30 mm | 16,294.6 mm³, spanning z −0.25…30.25 on a 0…30 source | closed, 1 component | REFUSED |
+| `Sphere` | 36,987/68,921 | 10.30 mm | 2,070.4 mm³ | closed, 1 component | OK |
+| `Warhorse.stl` (raw) | 101,874/514,371 | 7.92 mm | 3,385.5 mm³, wholly interior | **0 boundary edges, 92 faces `TOPOLOGY_CUT_NONMANIFOLD`, 276 `TOPOLOGY_CUT_POINT_ONLY`** | REFUSED |
+| `Weeping Treant v1.2` | 236,668/5,313,000 | 8.17 mm | 8,058.3 mm³, wholly interior | **0 boundary edges, 132 non-manifold, 483 point-only** | REFUSED |
+
+Two rows have a cavity that is not inside the solid. Two rows have a cavity that is
+perfectly placed and an inner *surface* that is not a manifold. They are different
+defects and they were hiding behind one refusal string.
+
+### DEFECT 1 — FIXED: the distance transform had no exterior to measure to
+
+`grid_spec` spans **exactly** the source's bounding box. A Euclidean distance transform
+can only measure to background samples the array contains. So every material voxel lying
+on the array boundary had no background neighbour at all, and the field answered with
+whatever it could reach laterally — or, when the solid filled its box completely, with a
+compatibility branch that measured from an implicit sample at `(-1, 0, 0)` and returned
+**17.6 mm of interior on a 10 mm cube**.
+
+The consequence is not subtle. `edt > wall` then selects a cavity that reaches the
+surface, or passes through it:
+
+- **A 10 mm cube's "cavity" was 1,148.5 mm³ — larger than the 1,000 mm³ solid it was cut
+  from.** The marching surface enclosed the source instead of sitting inside it, so the
+  difference was not one negative void in positive material and H0 refused its own shell.
+- **The `Cylinder`'s cavity ran from z = −0.25 to z = 30.25 through both end caps**, which
+  lie exactly on the z = 0 and z = 30 grid planes. Same refusal.
+- **The `Sphere` hollowed, and shipped a breached wall.** It is tangent to its bounding box
+  at six points; those 72 voxels read as deep interior and were selected as cavity. The
+  frozen Python artifact records the consequence in plain sight:
+  `corpus/baseline/Sphere.pipeline.json` puts the drain at `z = 0.5` with `wall_mm = 1.0`
+  on a solid whose bottom is `z = 0`, **under a stated 2.5 mm wall**.
+
+The fix is one function. `frozen_distance_transform` now pads the occupancy grid with one
+background layer on every side, runs the transform, and crops back to the caller's
+dimensions. The margin is a transient derived from the already-admitted grid: **no cap,
+threshold, floor or constant is raised, loosened or reinterpreted.** `max_voxel_cells`
+still binds on the unpadded `GridSpec::count` exactly as before, the wall stays 2.5 mm,
+the pitch stays 0.5 mm, and `H0ResourceDiagnostics::voxel_count` reports the same number
+it always did. The all-foreground compatibility branch is deleted rather than left
+standing, because with a margin the padded array can never be all-foreground.
+
+**What it costs:** `(n+2)³` instead of `n³` f64 for the transform — +33 % on the 21³
+`make_box` grid, +4 % on the treant's 165×175×184, both transient.
+
+**Corrected 2026-08-11 on review: that was the padding's cost, not the function's peak.**
+The first version cropped with `Array3::from_shape_fn` over the caller's dimensions, which
+holds the padded `(n+2)³` f64 array alive — it is the source being read — while allocating
+the `n³` f64 result. The true transient peak was therefore **both at once**: ~141 MB beside
+~134 MB at the admitted 16,777,216-cell grid, roughly **2×** the unpadded field rather than
++4 %. The crop now compacts the interior into the front of the padded array's own buffer and
+truncates it — every source index is at or above its destination and both walk forward, so
+one forward sweep of whole contiguous rows is safe — so the peak is the padded array alone
+and the stated +4 %/+33 % is now the whole of it. On a branch whose companion module audits
+its transients to four bytes per changed voxel, this one was uncounted and misstated. **No
+cap moved:** `max_voxel_cells` still binds on the unpadded `GridSpec::count`.
+
+**What it bought, measured on the committed corpus:** `Cylinder` hollows for the first
+time, and `make_box` reaches a **typed** verdict (`IneligibleSavings` — its true 166.4 mm³
+cavity is not worth cutting from a 1,000 mm³ cube) instead of a hard error. Of the eight
+corpus models the hollow-refusal count goes **3 → 1**.
+
+### The frozen movements, attributed
+
+Five pinned values move. Every one of them traces to the same cause and every one moves in
+the direction of the geometry being more correct, not less.
+
+| pin | from | to | why |
+| --- | --- | --- | --- |
+| `Sphere` cavity voxels | 16,563 | 16,491 | the six polar tangent points leave the cavity |
+| `make_box` raster bulk | 35.2 mm | 11.0 mm | a 10 mm cube does not have 35 mm of bulk |
+| `make_box` cavity | 1.1 (mm³ ×10³) | 0.166 | a cavity can never exceed its source |
+| `Sphere` refill fixtures | 7,880 / 502 voxels | 7,856 / 490 | the severed slab is cut from a smaller cavity |
+| `Sphere` drain / vent | z = 0.5 / 19.5 | z = 2.5 / 16.0 | the drain now sits **on** the stated wall, not inside it |
+
+**`corpus/baseline` is NOT regenerated.** It is evidence, and the frozen Python artifact is
+the record of what the old field produced — including the 1.0 mm drain exit. The drains
+test now pins **both** numbers and the difference between them, so the divergence is loud
+and attributed rather than silently re-pinned. Whether the artifact is ever re-frozen is
+the owner's call: **FU-51**.
+
+**The `Sphere`'s route through the pipeline moved, and it now stops at the gate.** Until
+this fix the sealed support run refused the `Sphere`'s drilled shell — a shell whose wall
+was breached at both poles — and the chain substituted the oriented solid, so `plinth
+prepare` wrote a file made of the reserve. With the wall intact the drilled shell **seals**
+(`SupportedGeometry::DrilledShellSealed`), reaches the pre-write gate on its own merits,
+and `PreWriteGate::UncoveredIslands` refuses it with three blocking defects — terminally,
+because a gate refusal is a physics verdict on the plan the chain actually planned and is
+never answered by substituting different geometry. That is the **same verdict**
+`corpus_sphere_drilled_plan_is_refused_before_any_file_exists` already pins; the `Sphere`
+joins it instead of escaping it through a fallback. **No gate, cap or bound moved.** The
+product consequence is real and is stated rather than buried: one corpus model that used
+to produce a (substituted) artifact now produces none, and the uncovered islands that stop
+it are a support-planning finding that predates this change. One consequence is a **lost
+gate**, filed as FU-52: that `Sphere` was the only committed fixture reaching
+`SupportedGeometry::DrilledShellRefusedBySupport`, so that production branch now has no
+test on it.
+
+The same movement re-records one FU-38 fixture verdict, `true → false`: the `Sphere`'s
+zero-field-versus-measured-field comparison used to read *neutral* only because **both**
+configurations refused the breached shell identically. Both now seal, with differing
+digests (`6219979372923930719` against `1114015346968956405`), so the `Sphere` says exactly
+what `make_toed_slab` and `make_overhang_table` already said. FU-38's substance is
+unchanged and nothing pinned is re-frozen by it.
+
+`crates/plinth-pipeline/tests/first_artifact.rs`'s hollow-error fallback gate was pinned to
+`make_box`, which no longer takes that branch. It is retargeted to a **procedural
+pre-hollowed solid** (two nested outward-wound boxes), whose `TriageError::PreHollowed`
+refusal is a *designed* one — the engine declines to hollow what is already hollow — so
+unlike `InvalidShellTopology` it cannot evaporate the next time a geometry defect is
+fixed, and the branch keeps a permanent gate.
+
+### DEFECT 2 — DIAGNOSED, FILED AS FU-49: the marching cavity surface is not a manifold
+
+The `Warhorse` and the treant are **not** in defect 1's class. Their EDT is unchanged by
+the margin, byte for byte — their cavities never touched the array boundary. Their inner
+surface is watertight (0 boundary edges, 0 same-direction edges) and **non-manifold**: 92
+faces carrying `TOPOLOGY_CUT_NONMANIFOLD` and 276 carrying `TOPOLOGY_CUT_POINT_ONLY` on
+the `Warhorse`; 132 and 483 on the treant; **zero of either** on the `Sphere`, `Cylinder`
+and cube, which is what makes the attribution clean.
+
+The mechanism is `fast_surface_nets`' one-vertex-per-cell rule meeting a cavity mask that
+is not *well-composed*. Where a 2×2 face of a lattice cell holds the checkerboard pattern,
+or a 2×2×2 cell's foreground is an antipodal pair, two sheets of the surface must share
+that cell's single vertex — and the edges around it end up used by four faces instead of
+two. The Boolean inherits it; `certify_closed_components` refuses; `orient_boolean_cavity`
+and `validate_shell_topology` both demand `PreHollowed` with exactly one cavity component
+and ≥ 2 certified closed components with exactly one negative, get neither, and return
+`InvalidShellTopology`.
+
+This is the same `TOPOLOGY_CUT_POINT_ONLY` self-contact class the corpus census counts on
+*input* meshes — except here the hollow stage manufactures it on a pristine one.
+`Warhorse.stl` is clean at raw and after decimation; the pinch is born inside hollowing.
+
+**Not fixed here** because the honest remedy is a well-composedness repair on the cavity
+mask (or a manifold-guaranteeing extractor), and both are new algorithms with their own
+work bound and their own convergence argument — architecturally larger than this change,
+and not something to improvise beside a one-function boundary-condition fix. FU-49 carries
+the evidence chain and the two candidate remedies.
+
+### DEFECT 3 — DIAGNOSED, FILED AS FU-50: raster subdivision is quadratic in the longest edge
+
+`Round 50.stl` and `Round 100.stl` — plain flat display bases — fail with `frozen voxel
+subdivision exceeded the caller work cap 16777216`. **The cap is not the problem.** The
+rasterizer quarters each triangle by midpoints until every edge is ≤ pitch/2; midpoint
+quartering is shape-preserving, so the recursion runs to a uniform depth
+`d = ⌈log₂(L_max / (pitch/2))⌉` and a triangle's leaf count is `4^d` — **growing as the
+square of its longest edge, in power-of-four steps, and completely blind to its area.** A
+fan-triangulated round base is made of slivers that span the whole disc.
+
+Measured over all 37 minis (`raster_work_item_count` with a diagnostic ceiling; the
+production cap was not touched), against the area-proportional demand the same
+rasterization actually needs (`Σ area / pitch²`):
+
+| model | work items | cap ratio | area cells | waste |
+| --- | --- | --- | --- | --- |
+| `Round 100` | 22,486,336 | **1.340×** | 70,493 | 319× |
+| `Round 50` | 19,291,472 | **1.150×** | 19,698 | 979× |
+| `Rotting Warhorse` | 8,724,485 | 0.520× | 41,084 | 212× |
+| `Awakened Tree` | 4,454,778 | 0.266× | 67,901 | 66× |
+| `Round 25` | 3,489,488 | 0.208× | 5,637 | 619× |
+| median of 37 | — | 0.026× | — | ~80× |
+
+Two of 37 models exceed the cap, both by less than 1.4×. **The cap is already ~240× larger
+than the honest need of the worst model in the corpus.** `Round 100`'s single worst
+triangle is 97.96 mm long and 144.70 mm² in area: `d = ⌈log₂(97.96/0.25)⌉ = 9`, so 4⁹ =
+262,144 leaves for about 579 voxel cells, a 452× overshoot on one triangle.
+
+**The cap is not raised and must not be.** Raising it to admit `Round 100` (≥ 22,486,336,
+or **67,108,864** under the repo's own `next_power_of_two(2 × worst case)` rule; 33,554,432
+only if the doubling is dropped) would enshrine 300–1,000× waste as a
+budget — FU-8b's standing lesson — and buy nothing durable, because the demand grows as
+`L_max²`: the next larger base blows it again. FU-50 carries the full 37-model profile and
+the cap-vs-need curve for the owner to rule on.
+
 ## 2026-08-10 — the decimator stops manufacturing duplicate faces; meshoptimizer's collapse is not link-condition checked {#decimate-dupfaces-2026-08-10}
 
 <a id="decimate-dupfaces-2026-08-10"></a>
@@ -7012,6 +7493,13 @@ Everything else here is non-blocking.
 | FU-46 | **Duplicate groups the pre-pass cannot resolve stay refusals: a doubled (double-sided) sheet halves to a one-sided sheet with an open boundary, and a model made only of removable faces is handed back untouched. OWNER RULING REQUESTED on whether wider coincident-flap deletion is in scope** | **Opened 2026-08-11 by the repair pre-pass review, which found the alternative empirically.** **What was measured.** The duplicate action's keep-none disposition was originally admitted by the same local-edge-cleanliness test as the keep-one candidates. On a doubled sheet that test **self-propagates**: every group's edge-neighbours are themselves duplicate groups, so each shared edge reads one-up/one-down from *outside* the group and each rim edge reads zero, making keep-none "locally clean" for every group independently. Reproduced against the worktree: a box plus a free-floating **8 × 2 mm double-sided sheet (16 faces, 8 groups)** lost **the entire sheet**, the residual came out clean, and a model the gate **refused** became one it **passed** with the owner's geometry silently gone. The shard strip does not catch it — the sheet is 8 mm across against a 1.0 mm dust ceiling, so `shard-faces=0` — and the scale is unbounded: a 100 mm doubled cape deleted identically. **What was landed first, and why it was reverted.** The first attempt at a bound kept keep-none but narrowed it to a group **no face outside it shares any edge with**, which is unsatisfiable for any group with an edge-neighbour and so cannot cascade across a sheet. The follow-up review rejected that too, and correctly: it is still a rule the scope never authorized, it still deletes a whole group with **no survivor**, and narrowing the *shape* it applies to gave it no **size** bound at all — a 60 mm free-floating doubled triangle is edge-isolated exactly as a 0.2 mm one is, and goes the same way. Reproduced on a box+flap model: `validate_closed_mesh` went from `Err` to `Ok` with the owner's geometry gone. A pre-pass able to turn a gate refusal into a gate pass by deleting the geometry being refused is not upstream of the gate; it is a hole in it. **What is landed now:** the one rule the scope authorized, and nothing else — drop faces sharing an identical vertex triple, keep the first by deterministic order. There is no disposition that keeps no survivor, and there is none that promotes a **later, opposite-wound** member either (that second draft was an orientation repair for a defect class the census counted zero of: 0 same-direction edges across all 21 models). `DuplicateDisposition` no longer chooses which face lives; it records whether keeping the first left the group's three edges walked once in each direction (`KeepOne`) or not (`KeptFirstUnresolved`), which is evidence about the result and the count this row's class is measured by. Separately, the empty-mesh guard — a plan that would leave the mesh with **no triangles at all** is rolled back whole, the input is returned bit-identical, and `EmptyResultRefusal` says so on the card — is now **unreachable by construction** and is kept anyway: the strip never strips the main component, the duplicate rule always keeps a survivor, and the split only appends, so "no action can empty a model" is an argument about today's three actions, and the fourth this row asks about is exactly the one that would break it. Regressions: `plinth-mesh/tests/repair.rs`'s `a_doubled_sheet_is_halved_rather_than_deleted` and `a_model_that_is_only_a_coincident_flap_keeps_a_face_and_is_left_to_the_gate`, plus `repair.rs`'s `a_free_floating_coincident_group_keeps_the_first_and_goes_to_the_gate` and `a_later_member_is_not_promoted_for_having_the_better_winding`. **What the corpus says**, re-measured 2026-08-11 by `repair_probe` over all 37 STLs after this revert: on **raw** input — the only place the pre-pass runs in production — the conservative rule changes **nothing**: no duplicate group reaches action 2 at all (the shard strip removes the census's three groups first), and all 14 raw-refused models are still rescued. On the probe's **decimated** column, which is diagnostic and not production (FU-44), 14 models carry 1–14 decimator-manufactured groups each; every one keeps a survivor and is refused. Nowhere in the corpus, at either stage, is a group deleted outright — because no rule that could do so exists any more. **What this row claims:** three input shapes reach the unchanged gate and are refused — a doubled sheet (halved, so genuinely open), a model that is nothing but coincident faces, and the decimated-column class above. Under the standing doctrine every remaining refusal is an automation work item, so they are recorded here. **The question that is filed, not decided:** the spec authorized "drop faces sharing an identical vertex triple, keeping the first by deterministic order", and both wider rules — deleting a coincident group with no survivor, and preferring a later member for its winding — are fourth actions. Whether the pipeline *should* delete zero-volume double-sided geometry at all — a flap, a sheet, a cape, a shell modelled inside-out and doubled — is an owner call about what may be silently removed from a customer's model rather than a technical one, and if it is ruled in it needs a **size bound** and report visibility, neither of which the reverted drafts had. **What it must NOT become:** a reason to reinstate keep-none in any form ahead of the ruling. **First action:** an owner ruling on the scope question; until then the conservative rule stands and the gate refuses. **No cap, floor, constant or registry entry is touched by opening this row.** |
 | FU-47 | **The closed-solid gate folds `TOPOLOGY_CUT_POINT_ONLY` into a refusal whose message claims only "closed, consistently oriented solid" — which the census proves these meshes already are. OWNER RULING REQUESTED; this row decides nothing** | **Opened 2026-08-10 by the automatic-repair pre-pass landing** (D-22 revision, `docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md`). **Number note: this row was opened as "FU-43" on `feature/repair-prepass`, and "FU-43" was already taken** by the candidate-free-ratio row above (opened 2026-08-10 by the zero-volume-pair landing on `feature/decimate-dupfaces`, landed on `develop` first); it is filed at the next free number instead and **no existing row was renumbered, edited or displaced** — the same collision protocol FU-34 and FU-37 record. **The mismatch, stated exactly.** `plinth_hollow::validate_closed_mesh` (`crates/plinth-hollow/src/lib.rs`) refuses on `topology.cut_flags().iter().any(\|flags\| *flags != 0)` and raises `HollowError::NotClosedOrOriented`, whose `Display` is about closure and orientation. `TOPOLOGY_CUT_POINT_ONLY` is one of the six flags in that `any`, and it is **neither**: it says two locally-disconnected face fans meet at one vertex. **The census measurement that makes this concrete** (verified harness reproducing this gate 21/21 with `build_face_topology(WeldPolicy::ExactBits)`, the exact call the gate makes): all 21 refused/suspect models are **watertight — 0 boundary edges**, **consistently oriented — 0 same-direction edges**, **0 non-manifold edges**, and each has **one positive-signed-volume shell**; an epsilon weld at 1e-4 mm changes none of it. The whole corpus pinch surface is **113 vertices**, at most 25 in one model. So every one of these models satisfies, on the measurement, the property the refusal message names. **The question, which belongs to the hollowing owner and not to this row:** do pinch vertices actually harm voxelization / marching cubes / the Boolean? A self-contact point is a real geometric fact and may well be a legitimate refusal for the voxel path — the point is that **nobody has measured whether it is**, and the message currently asserts a different reason than the one that fired. **What this row does NOT claim:** that the gate is wrong, that the flag should be dropped from the `any`, or that the message should be reworded to make the refusal easier to accept. **What it must NOT become:** a reason to loosen the gate. The 2026-08-10 ruling is explicit that automation lands upstream of gates and never by relaxing them, and the repair pre-pass already splits these pinches upstream — so a ruling that pinches are harmless would **remove work**, not add a waiver. **First action:** an owner ruling on whether `TOPOLOGY_CUT_POINT_ONLY` is a voxelization hazard. If it is, the refusal stays and its message is corrected to name self-contact as its own reason. If it is not, the flag comes out of this one gate's `any` with a recorded rationale, and the pinch-split action becomes optional rather than required. **No cap, floor, constant or registry entry is touched by opening this row.** |
 | FU-48 | **The manufactured point-only pinch is refused but not attributed: the collapse and the pair removal that follows it are both candidates, and neither is exonerated** | **Opened 2026-08-11 by the second review pass on `feature/decimate-dupfaces`.** **Number note: this row was opened as "FU-44" on `feature/decimate-dupfaces`, and "FU-44" was already taken** by the duplicate-face-manufacture row above (opened 2026-08-10 by the automatic-repair pre-pass landing on `feature/repair-prepass`, landed on `develop` first, together with FU-45, FU-46 and FU-47); it is filed at the next free number instead and **no existing row was renumbered, edited or displaced** — the same collision protocol FU-34, FU-37 and FU-47 record. The review that opened it strengthened the emitted-candidate gate to refuse any increase in any canonical count and deliberately did **not** change what the reduction produces. **What is known.** Production decimation manufactures `TOPOLOGY_CUT_POINT_ONLY` faces from sources clean in all six cut classes: `Tavey Base` 10 at r = 0.40625 and 9 at r = 0.3765625, `Rotting Warhorse` 9 at r = 0.9109375, `Weeping Treant v1.2` 298 at r = 0.940625 (alongside its 16 non-manifold edges). All are refused now, and every affected model still verifies at another ratio, so this is a *reduction-quality* follow-up and not a correctness hole. **What is not known: which stage writes the pinch.** Two mechanisms can produce one and the evidence does not separate them. (a) meshoptimizer's collapse is not link-condition checked — the same root cause as the duplicate pair — so it can fuse a neighbourhood into a single-vertex contact directly. (b) `remove_zero_volume_face_pairs` checks that removing a pair does not open a **boundary** (edge incidence parity) and does **not** check that the vertex fans it touches stay connected, so deleting the pair that was the only link across a fan pinches that vertex by construction. The Treant candidate removed 67 pairs and carries 298 pinch faces, which is consistent with either. **How to settle it.** Count `TOPOLOGY_CUT_POINT_ONLY` on meshoptimizer's own compacted result versus the repaired one at a refused ratio; the difference is (b) and the remainder is (a). If (b) contributes, the fix is a fan-connectivity clause in the removal, refusing the *pair* rather than the candidate — strictly narrower than the gate refusal it replaces, never wider. Do not weaken the gate for it. |
+| FU-49 | ~~**The hollow stage manufactures a non-manifold cavity surface on branched models — `Warhorse` and the Weeping Treant refuse their own shells with pristine input and a perfectly placed cavity**~~ | **RESOLVED 2026-08-11** by the well-composedness repair ([`#hollow-well-composed-2026-08-11`](#hollow-well-composed-2026-08-11)); the finding as first written is left standing below and the resolution is appended to it, not substituted for it. **The prescribed first action was carried out and it decided the remedy:** the critical cells were counted — **44** on the raw `Warhorse.stl`, **70** on the committed treant fixture. Tens, not thousands, so remedy (a) was the sanctioned path and remedy (b) (a new extractor) was not needed. `crates/plinth-hollow/src/well_composed.rs` repairs the selected cavity mask to well-composedness by **removing cavity voxels only**, iterated to a fixpoint. Removal-only is the safety argument: it turns void back into material, so the wall can only get thicker and the repair can never breach the registered wall — the wall constant is neither read nor written by the module. Termination needs no budget (removal is monotone on a finite set). **Work is two counted domains, not one:** cell visits are bounded by the already-admitted grid at `cells + 8 × changed`, and the whole-grid `label3d` re-selections are counted separately as `cavity_repair_full_grid_passes` (measured: **2** on every model available, bounded only by `2 + dropped`) because the cell-visit bound does not cover them. **Corrected 2026-08-11 on review:** each counted pass is *two* whole-grid traversals, so `p` passes are `2p − 1` traversals and the total is `cells × (2p − 1) + 8 × changed`; and that domain has no admitted bound of its own, which is filed as **FU-54**. The transient workset is the changed voxels themselves as four-byte linear indices plus a reused one-byte-per-voxel flag array — the incident cells are enumerated lazily and never materialised, which is what keeps the working set at the same order as the label array `label3d` already builds. The removal rule is a pure function of the cell's 8-bit configuration, so it is order-free and deterministic. **Measured cost: 0.055–0.19 % of the cavity** (51/27,033 voxels on the raw `Warhorse`, **115/64,351 on the committed treant fixture**, 63/114,990 on the raw `Giant Toad`), and the inner surface goes 92 non-manifold + 276 point-only → **0 + 0** on the `Warhorse`, 132 + 483 → **0 + 0** on the treant. All three models hollow for the first time (3,379.1 / **8,043.9** / 14,373.8 mm³). **Every measurement here names the mesh and the pose it was taken in** — the table at [`#hollow-well-composed-2026-08-11`](#hollow-well-composed-2026-08-11) carries the full provenance, and the committed row is asserted by a release-gated test rather than recalled. **A first version of this row recorded the treant's numbers from the raw, uncommitted `Awakened Tree.stl` under the committed fixture's name; those were 59/66/63,958 and 3,561,128 cell visits, which is below one full scan of the committed fixture's grid and could not have been it.** The two files are the same 429,120-face mesh in **different poses**, which is exactly why the numbers differ. **Corpus-wide across all 37 minis and the 8 committed corpus models, zero `InvalidShellTopology` refusals remain**; `Sphere`, `Cylinder` and every simple primitive report 0 critical cells and are unaffected. **A repair-caused solid decision is distinguishable in the record**: `CavityRepairRemovedCavity` / `IneligibleSavingsAfterCavityRepair` and the matching `NoCavityAfterRepair` / `BelowThresholdAfterRepair` reasons carry the repair's measurement rather than presenting it as a property of the geometry, and `HollowReport::cavity_repair` puts the three diagnostics on the report for the first time. **No cap, floor, constant or registry entry was touched.** **What the resolution does NOT claim:** that the resulting shells are printable. They are not — the wall they actually ship is 11–78 % of the registered 2.5 mm, which is the separate and pre-existing defect filed as **FU-53**, and this fix newly exposes three models to it. Closing FU-49 closes the *topology* refusal only. **Original finding follows.** **Opened 2026-08-10 by the cavity-field exterior work** ([`#hollow-cavity-field-exterior-2026-08-10`](#hollow-cavity-field-exterior-2026-08-10)), which is FU-34's recorded first action carried out. **This is the residue of FU-34, not a duplicate of it:** FU-34 filed one refusal string over three corpus models; two of those three (`Cylinder`, `make_box`) were the boundary-condition defect and are fixed, and this row is what is left. **The measurement**, release, `create_shell` internals: on `Warhorse.stl` (raw, 197,936 faces) the cavity is 3,385.5 mm³ and lies **wholly interior** — its EDT is byte-identical before and after the exterior margin, so it is provably not in defect 1's class — and the marching cavity surface is watertight (**0** boundary edges, **0** same-direction edges) and **non-manifold**: **92** faces carry `TOPOLOGY_CUT_NONMANIFOLD` and **276** carry `TOPOLOGY_CUT_POINT_ONLY` out of 20,272. The Weeping Treant: **132** and **483** out of 55,084. The `Sphere`, `Cylinder` and a 30 mm cube carry **zero of either**, which is what makes the attribution clean rather than assumed. **The mechanism, stated as a mechanism and not a guess:** `fast_surface_nets` emits at most **one vertex per lattice cell**. Where the cavity mask is not *well-composed* — a 2×2 face of a cell holding the checkerboard pattern, or a 2×2×2 cell whose foreground is an antipodal pair — two sheets of the surface must share that cell's single vertex, and the edges around it are used by four faces instead of two. `ManifoldBackend::difference_limited` inherits it, `certify_closed_components` refuses the result, and both `orient_boolean_cavity` (`crates/plinth-hollow/src/lib.rs`) and `validate_shell_topology` demand `TriageError::PreHollowed` with **exactly one** cavity component and ≥ 2 certified closed components with **exactly one** negative — they get neither, and return `HollowError::InvalidShellTopology`. **This is the same defect class the corpus census counts on inputs** (113 `TOPOLOGY_CUT_POINT_ONLY` pinch vertices across 21 models) — except here a pristine input acquires it inside the hollow stage: `Warhorse.stl` is clean at raw and after decimation. **What this row does NOT claim:** that the shell check is wrong. It is right — that shell is genuinely not one negative void in positive material, and printing it would be a defect, not a saving. **Why it was not fixed beside the boundary-condition fix:** the two candidate remedies are both new algorithms. (a) Make the mask well-composed by removing the foreground voxels that participate in a critical configuration, iterating to a fixpoint — deterministic and monotone, but it needs its own work bound, a convergence argument, and a re-label pass, and the 6-foreground/2-antipodal-background case is not repaired in one round. (b) Replace the extractor with one that guarantees manifold output (Marching Cubes 33, or a multi-vertex-per-cell Surface Nets), which is a dependency or a new extractor and moves every hollowed model's geometry. Neither belongs improvised beside a one-function boundary-condition fix. **First action:** count the critical cells on the `Warhorse` and the treant — if it is tens, remedy (a) is bounded and cheap (0.07 % of a 27,084-voxel cavity) and should be measured to a fixpoint before anything else is considered; if it is thousands, remedy (b) is the honest answer. **No cap, floor, constant or registry entry is touched by opening this row**, and both models still reach an artifact through the `HollowStageRefused` fallback, with the refusal recorded verbatim. **Product consequence:** hollowing is where the resin saving lives, and the project's two largest models still get none. **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-43" on `feature/hollow-warhorse`, and "FU-43" was already taken on `develop` by the ratio search's candidate-level failure ending the whole run (opened by `feature/decimate-dupfaces`) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-43" in this branch's code, tests, module docs and journal sections was rewritten to "FU-49" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-50 | **Raster subdivision work is quadratic in a triangle's longest edge and blind to its area, so plain flat display bases blow a work cap that is already ~240× larger than the honest need** | **Opened 2026-08-10 by the cavity-field exterior work** ([`#hollow-cavity-field-exterior-2026-08-10`](#hollow-cavity-field-exterior-2026-08-10)). `Round 50.stl` and `Round 100.stl` refuse with `frozen voxel subdivision exceeded the caller work cap 16777216`. **The cap is not the defect.** `walk_raster_leaves` reproduces trimesh's `subdivide` voxelizer: quarter each triangle at its edge midpoints until every edge is ≤ pitch/2. Midpoint quartering is **shape-preserving**, so every child has its parent's aspect ratio, the recursion runs to a uniform depth `d = ⌈log₂(L_max/(pitch/2))⌉`, and a triangle's leaf count is exactly `4^d` — **growing as the square of the longest edge, in power-of-four steps, and completely independent of the triangle's area**. (This row first stated the leaf count as `(L_max/(pitch/2))²`, which is the same growth law but the wrong number: its own worst-triangle example, 97.96 mm at pitch 0.5 mm, gives `d = 9` and `4⁹ = 262,144` leaves, not `391.84² = 153,538`.) A fan-triangulated round base is built from slivers that span the whole disc, which is the worst possible input for that rule. **The measured work profile**, all 37 minis, release, `raster_work_item_count` called with a diagnostic ceiling (**the production cap was not raised, reinterpreted or bypassed — the ceiling exists only so the true demand could be counted**), against the area-proportional demand the same rasterization actually needs (`Σ area / pitch²`, pitch 0.5 mm): `Round 100` **22,486,336** items = **1.340× cap** against 70,493 area cells (**319× waste**); `Round 50` **19,291,472** = **1.150× cap** against 19,698 cells (**979× waste**); then the whole rest of the corpus is under the cap — `Rotting Warhorse` 8,724,485 (0.520×, 212× waste), `Awakened Tree` 4,454,778 (0.266×, 66×), `Giant Bat` 4,274,299 (0.255×, 81×), `Round 25` 3,489,488 (0.208×, **619×**), median 0.026× of cap, minimum waste 45× (`Tavey Badger`, `Myconid Adult`). **The cap-vs-need curve:** the honest demand of the *worst* model in the corpus is 70,493 cells — **0.42 % of the cap**, i.e. the cap already carries ~240× headroom over a correct rasterizer. `Round 100`'s single worst triangle is 97.96 mm long and 144.70 mm² in area and costs **262,144 leaves for about 579 voxel cells**, a 452× overshoot on one triangle; its depth histogram puts 58 triangles at depth 9 (15.2 M items) and 36 at depth 8 (2.4 M) out of 1,966 triangles total. **DO NOT RAISE THE CAP.** Admitting `Round 100` needs ≥ 22,486,336, which is **67,108,864** under the repo's own `next_power_of_two(2 × worst case)` rule (33,554,432 only if the doubling is dropped; this row first stated the smaller figure while citing the doubling rule) — either of which would enshrine 300–1,000× waste as a budget (FU-8b's standing lesson) and buy nothing durable, because demand grows as `L_max²`: the next larger base blows it again. **What this row claims:** the remedy is a rasterizer whose work is proportional to the surface area it covers rather than to the square of the longest edge, and under such a rasterizer the existing cap is untouched with three orders of magnitude of headroom. **What it does NOT claim:** that a cheap in-place fix exists. It does not. The frozen marked-voxel set is *defined* by the leaf vertices of this exact recursion, so any cheaper enumeration must be proved to mark the identical voxels — and the counted "work item" is the leaf, so a change that reduces marking work without reducing leaf count does not move the cap comparison at all, and redefining what a work item *is* would be reinterpreting the cap, which is forbidden. **First action:** an owner ruling on whether the frozen trimesh rasterization semantics may be replaced by an area-proportional conservative rasterizer (which moves the marked voxel set, and therefore every hollowed model's cavity, by a small amount that must be measured on the committed corpus first). Until that ruling, large flat bases are refused rather than admitted. **No cap, floor, constant or registry entry is touched by opening this row.** **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-44" on `feature/hollow-warhorse`, and "FU-44" was already taken on `develop` by the decimator manufacturing duplicate faces (opened by the automatic-repair pre-pass landing) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-44" in this branch's code, tests, module docs and journal sections was rewritten to "FU-50" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-51 | **The `Sphere`'s frozen Python hollow artifact and the engine have diverged by an attributed amount — the recorded drain sits inside the wall it is drilled through** | **Opened 2026-08-10 by the cavity-field exterior work** ([`#hollow-cavity-field-exterior-2026-08-10`](#hollow-cavity-field-exterior-2026-08-10)). `corpus/baseline/Sphere.pipeline.json`'s hollow report records a drain at `xyz = [0, 0, 0.5]` with `wall_mm = 1.0` on a solid whose bottom is `z = 0`, under a **stated 2.5 mm wall**, and a vent at `z = 19.5` on a solid whose top is `z = 20`. Those positions are a faithful record of the pre-2026-08-10 cavity field, which had no exterior: the `Sphere` is tangent to its own bounding box at six points, those 72 voxels read as deep interior, and the selected cavity therefore reached to within a fraction of a millimetre of the outer surface at each pole. With the exterior margin the drain sits at `z = 2.5` — **on** the stated wall — and the vent at `z = 16.0`; the vent's lateral exit axis also moves from `+x` to `−y`, because it is a tie among equal-cost directions on a body of revolution and the smaller cavity breaks that tie elsewhere. **`corpus/baseline` was deliberately NOT regenerated:** it is evidence, and `development.md` is explicit that it is not regenerated as a side effect of another change. `frozen_shell_field_has_an_enclosed_drain_and_vent_plan` therefore now pins **both** figures and the sign of the difference (`drain_z_new > drain_z_frozen`, `vent_z_new < vent_z_frozen`), so the divergence is loud and attributed rather than quietly re-pinned. **What this row claims:** exactly one corpus artifact's recorded hollow report no longer describes what the engine produces, and the reason is known and one-line. **What it does NOT claim:** that any other frozen artifact moved (the support and emit baselines are built from the oriented solid and are untouched), or that the old numbers were wrong *as a record* — they are a correct record of a defective field. **First action:** the owner decides whether `Sphere.pipeline.json`'s hollow stage is re-frozen against the native engine, or left standing as the Python-era record with this row as its footnote. **No cap, floor, constant or registry entry is touched by opening this row.** **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-45" on `feature/hollow-warhorse`, and "FU-45" was already taken on `develop` by the oversize raw input that gets no repair at all (opened by the repair pre-pass review) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-45" in this branch's code, tests, module docs and journal sections was rewritten to "FU-51" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-52 | **`SupportedGeometry::DrilledShellRefusedBySupport` is now an ungated production branch — no committed fixture reaches it** | **Opened 2026-08-10 by the cavity-field exterior work** ([`#hollow-cavity-field-exterior-2026-08-10`](#hollow-cavity-field-exterior-2026-08-10)). The support-refusal substitution — the chain hollows, drains and drills, the sealed support run refuses *that* shell, and the oriented solid carries the model instead — had exactly one gate in the workspace: `prepare_folder.rs`'s per-model-baseline test, which asserted the `Sphere` took it. It no longer does. Until this fix the `Sphere`'s cavity reached to within 0.5 mm of its outer surface at the six points where it is tangent to its own bounding box; the support run refused the shell that produced, and the reserve stood in. With the wall intact the shell **seals** and the `Sphere` is refused by `PreWriteGate::UncoveredIslands` instead — a terminal gate stop, which is a different variant on a different branch. The production code path is untouched and still correct (`crates/plinth-pipeline/src/prepare.rs`, consumed by `crates/plinth-cli/src/execute.rs:278`); what is gone is the fixture that proved it. **What this row claims:** a live branch of the shared composition now has no test on it, which is the precise condition the retired gate's own comment names as what drifts. **What it does NOT claim:** that the branch is unreachable — the `Cylinder` hollows for the first time as of this change and its drilled shell's support verdict has never been measured (FU-35 blocks it in debug profiles), so a corpus fixture may well still exist. **First action:** measure the `Cylinder`'s drilled-shell support verdict in release; if it takes this branch, re-gate on it. If no corpus model does, construct a fixture whose drilled shell is deliberately unsealable rather than leaving the branch bare. **No cap, floor, constant or registry entry is touched by opening this row.** **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-46" on `feature/hollow-warhorse`, and "FU-46" was already taken on `develop` by the duplicate groups the pre-pass cannot resolve (opened by the repair pre-pass review) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-46" in this branch's code, tests, module docs and journal sections was rewritten to "FU-52" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-53 | **Every hollowed shell is under-walled — the engine ships 11–78 % of the 2.5 mm wall it is told to leave, and where the error exceeds the local half-thickness the cavity breaks through and the shell has no void at all** | **Opened 2026-08-11 by the well-composedness work** ([`#hollow-well-composed-2026-08-11`](#hollow-well-composed-2026-08-11)). Fixing the extractor let three models reach a shell, and the obvious question had never been asked of *any* hollowed model: how thick is the wall that actually came out? **The measurement**, release, brute-force minimum distance from every vertex of the marching cavity surface to the source surface (source triangles bucketed into 3 mm cells, answer capped at 3 mm — all that matters against a 2.5 mm wall): `Cylinder` **1.95 mm** (78 %), `Sphere` **1.85 mm** (74 %), `Warhorse.stl` **1.27 mm** (51 %), the committed `Weeping Treant v1.2` fixture **0.70 mm** (28 %), `Giant Toad.stl` **0.27 mm** (11 %), and the raw `Awakened Tree.stl` — the treant's source mesh in its *delivered* pose, not the committed one — **0.49 mm** (19 %). **This is pre-existing and is NOT caused by the well-composedness repair:** the `Sphere` and `Cylinder` have **0 critical cells**, are not modified by that change in any way, and already ship at 74–78 %. (**Corrected 2026-08-11 on review:** this row first said both "hollow today on `develop`". The `Sphere` does; the **`Cylinder` does not** — `develop` (`dba1bc9`) refuses it and it hollows only as of `10725ff`, the cavity-field exterior fix on the same branch as the repair. The attribution never depended on it and is unchanged: what makes the repair non-causal for these two is that both report **0 critical cells**, so no voxel of either mask is touched by it. The under-walled `Cylinder` is `10725ff`'s to own.) The repair only ever *removes* cavity, so it can only move these numbers up. What it did was newly expose three more models to a defect that was already there. **The error grows with local surface obliquity and concavity**, which is what separates a smooth primitive (loses ~0.55–0.65 mm) from a branched organic mini (loses 1.2–2.2 mm). **The same defect at its limit is a second, independent refusal cause.** A synthetic 20 mm block with a 20 mm fin leaving one face at an angle refuses with `InvalidShellTopology` in **13 of 15** thickness/direction configurations while reporting **0 critical cells and a perfectly manifold cavity surface** (0 boundary edges, 0 non-manifold, 0 point-only). The Boolean output is watertight and manifold; what it is not is *hollow* — triage returns `Ok`, a plain solid with **zero enclosed cavities**, because the cavity was cut so close to the fin's surface that it broke through and opened the void to the outside. The failure is **non-monotonic in fin thickness** (5.4, 5.6, 5.8, 6.2 mm refuse; 6.0 mm hollows), the signature of lattice aliasing rather than a clean threshold. **The mechanism, as far as it is proven:** the cavity is selected by `edt > wall`, where the EDT is a voxel-lattice Euclidean distance transform computed on the **conservatively rasterized** occupancy — a voxelization that marks every voxel the surface passes through, so the boundary the EDT measures from lies *outside* the true surface — and the marching surface then sits up to half a voxel outside the outermost cavity voxel centres. **What this row claims:** the realised wall numbers above, which are measured, not inferred; that the defect predates the well-composedness fix; and that the breach case is the same defect past its limit. **What it does NOT claim:** a precise decomposition of the 0.55–2.2 mm error into rasterization dilation versus marching offset versus lattice quantization — that apportionment is unmeasured and is the first thing the remedy needs. **Why it is not fixed here:** the honest remedy is in the EDT/rasterization semantics, and changing them moves every hollowed model's cavity, so it must be measured on the committed corpus before it is chosen — architecturally larger than a topology fix and not improvisable beside one. Candidate remedies to weigh: measure the EDT against the true surface rather than the rasterized occupancy; erode the selected cavity by the measured worst-case lattice error; or select the cavity from a signed distance field sampled from the mesh instead of from a binary voxelization. **First action:** apportion the error — measure, on the `Sphere` (where the analytic answer is known exactly), how much of the 0.65 mm loss is rasterization dilation, how much is the marching half-voxel, and how much is EDT quantization. That decides which of the three remedies is the cheap one. **Do NOT respond to this row by lowering the registered wall constant to match what the engine produces** — the constant is the physical requirement and the engine is what is wrong. **Product consequence:** hollowed shells are currently not printable, a 0.27 mm wall being roughly five layers of resin, and this row is the blocker on trusting any hollowed shell to a printer. **No cap, floor, constant or registry entry is touched by opening this row.** **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-47" on `feature/hollow-warhorse`, and "FU-47" was already taken on `develop` by the closed-solid gate's `TOPOLOGY_CUT_POINT_ONLY` refusal message (opened by the automatic-repair pre-pass landing) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-47" in this branch's code, tests, module docs and journal sections was rewritten to "FU-53" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-54 | **The well-composedness repair's whole-grid re-selection domain has no admitted bound — it is the one work domain in H0 that a caller cannot cap** | **Opened 2026-08-11 by the second review round of the well-composedness work** ([`#hollow-well-composed-2026-08-11`](#hollow-well-composed-2026-08-11)). Every other work domain in `create_shell` is admitted against a caller-owned limit: `max_voxel_cells`, `max_raster_work_items`, `max_edge_occurrences`, `max_containment_probe_slots`, the four Boolean limits, `drain_planning_bytes`. The repair's *cell visits* are bounded by the already-admitted grid at `cells + 8 × changed`, and that is counted. Its **whole-grid passes are not bounded by anything a caller states.** `well_composed_cavity_component` re-selects the component with a `label3d` after any round that removed a voxel, and the loop continues while the re-selection drops anything, so `full_grid_passes ≤ 2 + reselection_dropped_voxels` and `dropped` can be `O(N)`. On an admitted 16,777,216-cell mask the worst case is therefore `O(N²)` cell reads **with no typed refusal at all** — the run would simply take arbitrarily long. **The measured profile, every model available:** `full_grid_passes` = **2** on the committed `Weeping Treant v1.2` fixture, the raw `Warhorse.stl`, the raw `Giant Toad.stl`, the raw `Awakened Tree.stl`, and the synthetic pinched dumbbell; **1** (no re-selection at all) on `Sphere`, `Cylinder`, `make_box` and every mask with zero critical cells. **The cap-vs-need curve is flat:** the need is 2 passes, and 2 passes is `2p − 1 = 3` whole-grid traversals — at the admitted cell cap, ~50 M cell reads against a worst case with no ceiling. There is more than enough room between the measured need and any plausible bound that the bound would never bite on real geometry; what is missing is the *number*, and choosing it is an acceptance-bound decision. **What this row claims:** an unbounded work domain exists in a stage whose entire design principle is that work domains are admitted, and FU-50 exists precisely because a work cap was respected rather than raised — so inventing one here without a ruling would be the same error in the opposite direction. **What it does NOT claim:** that any real input reaches it. None does; the profile above is the whole of the evidence. **First action:** the owner rules on the bound — either a new caller-owned `H0AdmissionLimits` field with a typed `CavityRepairPassLimitExceeded` refusal (in which case the value, its provenance class and its registry entry are the owner's to set), or an explicit ruling that a mask-shaped `O(N²)` tail is accepted because the mask is derived from an already-admitted grid. **The work formula was also wrong and is corrected on this branch, independently of the bound:** each counted pass is *two* whole-grid traversals (the `label3d` and the `indexed_iter` sweep applying its verdict), so total work is `cells × (2p − 1) + 8 × changed`, not `cells × p + 8 × changed` — the module doc, the accessor docs and the bound test now say so. **No cap, floor, constant or registry entry is touched by opening this row.** **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-48" on `feature/hollow-warhorse`, and "FU-48" was already taken on `develop` by the manufactured point-only pinch that is refused but not attributed (opened by the second `feature/decimate-dupfaces` review) — the two branches numbered independently off the same merge base (`dba1bc9`, which ended at FU-42). Per the FU-34/FU-36/FU-37 precedent the incoming row is refiled at the next free number and **no existing row was renumbered, edited or displaced**. Every reference to "FU-48" in this branch's code, tests, module docs and journal sections was rewritten to "FU-54" in the merge commit; the `develop` rows keep FU-43 through FU-48 exactly as they were merged. |
+| FU-55 | **OWNER RULING REQUIRED BEFORE MERGE: `feature/hollow-warhorse` converts three fail-closed models into emitted artifacts whose measured wall is 11–51 % of the registered 2.5 mm, with the `Printability` gate unimplemented and no production stage measuring realised wall** | **Opened 2026-08-11 by the second review round of the well-composedness work** ([`#hollow-well-composed-2026-08-11`](#hollow-well-composed-2026-08-11)). This is a decision, not a defect: the defect is FU-53 and it is already recorded. **The state of affairs.** Before this branch, the committed `Weeping Treant v1.2`, `Warhorse.stl` and `Giant Toad.stl` refused with `InvalidShellTopology` and reached an artifact through the solid-reserve substitution — a *solid* model, correctly walled by construction. After it they hollow, and `plinth prepare` writes a `.chitubox` of the **shell**, whose measured realised wall is **0.70 mm (28 %)**, **1.27 mm (51 %)** and **0.27 mm (11 %)** of the registered 2.5 mm respectively — the `Giant Toad` at roughly **five resin layers**. Meanwhile `PreWriteGate::Printability` returns `GateVerdict::NotYetPorted` (`crates/plinth-pipeline/src/gates.rs`), the only implemented pre-write gate is `UncoveredIslands`, and **no production stage anywhere measures or gates realised wall** — the 11–51 % figures come from a diagnostic harness, not from the pipeline. The journal states in its own words that hollowed shells are currently not printable. **What this row claims:** filing FU-53 records the defect; it does not authorise shipping under it, and no recorded ruling authorises emitting under-walled shells in the interim. A model that used to fail closed and now emits a plausible-looking artifact it cannot print is a *regression in what the owner can trust*, even though every individual change on the branch is correct. **What it does NOT claim:** that the well-composedness repair is wrong (it is right, and it only ever thickens the wall), or that FU-53 must be fixed first. **The two admissible outcomes, and this branch must take one before it merges:** (a) the owner records an explicit ruling accepting interim under-walled emission, with FU-53's ordering stated — in which case this row closes as ruled and the branch merges unchanged; or (b) hollow emission is held behind a bounded realised-wall check that refuses rather than emits until FU-53 is resolved, which is a *tightening* and moves no threshold. **Do not merge with the decision unmade.** **No cap, floor, constant or registry entry is touched by opening this row**, and nothing on the branch was changed in response to it — an agent choosing between (a) and (b) on the owner's behalf is exactly what this row exists to prevent. **Number note: filed at the next free number under the recorded collision protocol.** This row was authored as "FU-49" on `feature/hollow-warhorse`. "FU-49" is not occupied on `develop`, but FU-49 through FU-54 are consumed by the six sibling rows refiled above it in this same merge, so it is filed here at the next free number rather than renumbering any of them. **No existing row was renumbered, edited or displaced**; every reference to "FU-49" in this branch's code, tests and journal sections was rewritten to "FU-55" in the merge commit. |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 

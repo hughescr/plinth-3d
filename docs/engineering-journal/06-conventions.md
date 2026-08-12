@@ -441,7 +441,11 @@ round-trip tests (05-chitubox-and-corpus.md).
 
 The exact full baseline corpus is, in order: `Sphere`, `Cylinder`, `make_box`,
 `make_overhang_table`, `make_toed_slab`, `make_raking_blade`, `make_thin_fin`,
-and `Weeping Treant v1.2` (the same model as `Awakened Tree.stl`). The provisional
+and `Weeping Treant v1.2` (the same *mesh* as `Awakened Tree.stl` — same 429,120 faces —
+but **not the same file and not the same pose**: the committed baseline is the oriented
+solid, so it has a different bounding box, a different voxel grid and therefore different
+hollow-stage measurements. A number measured on one is not a number about the other; that
+substitution produced a wrong journal row on 2026-08-11). The provisional
 corpus is the same list minus Treant, exactly seven; neither includes Cone. Source
 STLs in `corpus/models/` are ignored inputs, while `corpus/manifest.json` and the
 frozen baseline outputs are committed. Tests fail by name when a required member or

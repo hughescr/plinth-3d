@@ -434,6 +434,11 @@ impl HollowedAndDrilled {
             drains,
             drilling_evidence: Some(evidence),
             drain_plan: Some(drain_plan),
+            // The repair that made this cavity extractable, carried into the
+            // record of the shell it produced. Nothing downstream could see it
+            // before: it lived only in `H0ResourceDiagnostics`, which no
+            // emitted artifact reads.
+            cavity_repair: Some(cavity.resources().cavity_repair()),
         };
         HollowedModel::from_verified_hollow(
             mesh,
@@ -1850,6 +1855,7 @@ mod tests {
             .with_test_diagnostics(8_192);
         let expected = drilled.evidence().clone();
         let expected_plan = drilled.drain_plan().clone();
+        let candidate_resources = drilled.cavity().resources();
         let holes_allocation = drilled.evidence().holes().as_ptr();
         let diagnostic_allocation = drilled.drain_plan().unavailable_candidates().as_ptr();
         assert_eq!(drilled.drain_plan().unavailable_candidates().len(), 8_192);
@@ -1869,6 +1875,15 @@ mod tests {
             Some(&expected)
         );
         assert_eq!(model.history().hollow().drain_plan(), Some(&expected_plan));
+        // The repair measurement reaches the report on the drilled path. It was
+        // reachable only from `H0ResourceDiagnostics` before, which no report,
+        // artifact or CLI reads -- so a repair could shrink a model's cavity and
+        // leave no trace anywhere a caller could look. The `Sphere` needs no
+        // repair, and that is a recorded zero rather than an absence.
+        assert_eq!(
+            model.history().hollow().cavity_repair(),
+            Some(candidate_resources.cavity_repair())
+        );
         assert_eq!(
             model
                 .history()
@@ -2396,10 +2411,15 @@ mod tests {
         let split = plan.with_test_refilled_field(&horizontal_gap);
         let refill = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
         assert_eq!(refill.holes.len(), 0);
-        assert_eq!(refill.refilled_voxels, 7_880);
-        assert_eq!(refill.refilled_pockets, vec![7_880]);
-        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_484));
-        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(66_399));
+        // Moved 7,880 -> 7,856 on 2026-08-10 with the cavity-field exterior
+        // margin: the Sphere's cavity lost the 72 voxels at its six polar
+        // tangent points, and the slab this fixture severs is cut from what
+        // remains. The refill *policy* is untouched; only the field it counts
+        // over is smaller. See the 2026-08-10 journal section.
+        assert_eq!(refill.refilled_voxels, 7_856);
+        assert_eq!(refill.refilled_pockets, vec![7_856]);
+        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_522));
+        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(59_841));
         let reconstructed =
             reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
                 .unwrap();
@@ -2528,8 +2548,12 @@ mod tests {
         let split = plan.with_test_refilled_field(&gap);
         let audit = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
         assert_eq!(audit.holes.len(), 0);
-        assert_eq!(audit.refilled_voxels, 502);
-        assert_eq!(audit.refilled_pockets, vec![502]);
+        // Moved 502 -> 490 on 2026-08-10 with the cavity-field exterior
+        // margin, for the same reason as the long-exit fixture above: the
+        // slab this fixture severs is cut from a cavity that lost its six
+        // polar tangent points. The refill policy is untouched.
+        assert_eq!(audit.refilled_voxels, 490);
+        assert_eq!(audit.refilled_pockets, vec![490]);
         for flat in 0..split.cavity_field().flat_count() {
             let expected = split.cavity_field().contains_flat(flat)
                 && split.cavity_field().flat_to_index(flat)[0] > 32;
@@ -2537,8 +2561,8 @@ mod tests {
         }
 
         let drilled = drill_planned_shell(split).expect("bounded production refill must drill");
-        assert_eq!(drilled.evidence().refilled_voxels, 502);
-        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 502);
+        assert_eq!(drilled.evidence().refilled_voxels, 490);
+        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 490);
         assert_eq!(
             drilled.evidence().cavity_voxels,
             drilled.evidence().drainable_voxels

@@ -321,49 +321,74 @@ fn procedural_toed_slab_passes_the_gates_and_still_emits() {
     );
 }
 
+/// A pre-hollowed solid: two nested closed shells, both wound outward, which is
+/// what an already-hollowed STL looks like to this engine.
+fn make_prehollowed_box() -> plinth_mesh::Mesh {
+    let outer = plinth_mesh::make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("outer shell");
+    let inner = plinth_mesh::make_box([12.0, 12.0, 12.0], [0.0, 0.0, 15.0]).expect("inner shell");
+    let offset = u32::try_from(outer.verts().len()).expect("fixture vertex count fits u32");
+    let mut vertices = outer.verts().to_vec();
+    vertices.extend_from_slice(inner.verts());
+    let mut triangles = outer.tris().to_vec();
+    triangles.extend(inner.tris().iter().map(|triangle| {
+        triangle.map(|index| {
+            index
+                .checked_add(offset)
+                .expect("fixture index cannot overflow")
+        })
+    }));
+    plinth_mesh::Mesh::new(vertices, triangles).expect("pre-hollowed fixture is structurally valid")
+}
+
 /// The hollow-error fallback, gated on a model that actually takes it.
 ///
-/// `make_box` errors out of `plinth_hollow::run` with `InvalidShellTopology`
-/// (FU-34) — it neither hollows nor decides solid — and before the fallback
-/// existed that error ended the chain, so `make_box` reached no artifact at
-/// all. This pins the path that carries it to one now, because a new branch in
-/// the shared composition with no gate on it is exactly what drifts.
+/// `plinth_hollow::run` converts only `IneligibleNoCavity`,
+/// `IneligibleBelowBulk` and `IneligibleSavings` into a typed
+/// `HollowStageOutput::Solid`; **every other** `HollowError` propagates, and
+/// before this fallback existed that error ended the chain, so such a model
+/// reached no artifact at all. This pins the path that carries it to one now,
+/// because a new branch in the shared composition with no gate on it is exactly
+/// what drifts.
 ///
-/// **Why `make_box` and not `Cylinder`, which refuses identically.** `Cylinder`
-/// cannot be gated here at all today: on the sealed run it trips FU-8f phase
-/// G6c's `debug_assert` in `specialized.rs` — a retained round executes 23,203
-/// load operations against a charge of 4,146 — so any debug-profile test that
-/// carries it into `run_support` panics before reaching an artifact. **That is
-/// not this fallback's doing and it is not new:** `embed_incidence_census`,
-/// which shares none of this code and takes the same solid handoff, panics
-/// identically on `Cylinder` at this tip. It is filed as **FU-35**, and this
-/// test deliberately does not paper over it by pinning a model that hides it.
+/// **Why a procedural pre-hollowed box, and not `make_box`.** This test was
+/// written against `make_box`, which used to error with `InvalidShellTopology`
+/// (FU-34). It no longer does: the 2026-08-10 cavity-field exterior margin
+/// fixed the defect that made every bounding-box-filling solid refuse its own
+/// shell, and `make_box` now reaches a *typed* `IneligibleSavings` — its true
+/// 166 mm³ cavity is not worth cutting — which is `HollowStageDecidedSolid`,
+/// not this branch. The `Cylinder` likewise hollows now. The last corpus model
+/// on this branch was the Weeping Treant, and as of 2026-08-11 it is not on it
+/// either: the well-composedness repair closed FU-49 and the treant hollows.
+/// **No corpus model reaches this branch today**, which is precisely why the
+/// gate below cannot be a corpus model.
 ///
-/// `make_box` and not the Weeping Treant, in turn, because the two take the
-/// identical path and this one costs milliseconds where the treant costs
-/// minutes, which is not a test's budget.
+/// A pre-hollowed input is the right permanent gate for it: `TriageError::
+/// PreHollowed` is a **designed, stable** refusal — the engine declines to
+/// hollow what is already hollow — so unlike `InvalidShellTopology` it will not
+/// evaporate when a geometry defect is fixed, and the branch keeps its gate.
 #[test]
 fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
-    let _ = require_corpus_stl("make_box");
-    let scratch = Scratch::new("make-box-hollow-refusal");
+    let scratch = Scratch::new("prehollowed-hollow-refusal");
 
-    let outcome = chain::run_corpus_model("make_box", scratch.path())
-        .expect("make_box must reach a written file through the hollow-error fallback");
+    let outcome = chain::run_procedural_model("make_box", make_prehollowed_box(), scratch.path())
+        .expect("a pre-hollowed solid must reach a written file through the hollow-error fallback");
     let audit = chain::audit_disk_artifact(scratch.path(), "make_box")
         .expect("reopen and audit the artifact");
 
     // Pinned as an equality on the whole variant, refusal string included, so
-    // that the day `plinth-hollow` stops refusing this shell — or starts
+    // that the day `plinth-hollow` stops refusing this input — or starts
     // refusing it for a different reason — this fails and says so rather than
     // quietly changing the artifact's provenance.
     assert_eq!(
         outcome.supported_geometry,
         chain::SupportedGeometry::HollowStageRefused {
-            refusal: "native shell did not contain one negative cavity enclosed by \
-                      positive outer material"
+            refusal: "pre-hollowed input: PreHollowed { cavity_components: \
+                      [ComponentDescription { component_id: 1, face_count: 12, \
+                      dims_mm: [12.0, 12.0, 12.0] }] }"
                 .to_owned()
         },
-        "make_box's hollow-stage verdict moved; re-derive what this artifact is made of"
+        "the pre-hollowed fixture's hollow-stage verdict moved; re-derive what \
+         this artifact is made of"
     );
 
     // The provenance caveat this fallback knowingly inherits, asserted rather
