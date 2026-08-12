@@ -1438,32 +1438,37 @@ mod tests {
         );
     }
 
-    /// The Sphere's drain and vent plan, and the one attributed place where it
-    /// now **diverges** from the frozen Python artifact rather than matching it.
+    /// The Sphere's drain and vent plan, pinned against the re-recorded
+    /// frozen baseline.
     ///
-    /// **Read this before re-pinning anything.** Until 2026-08-10 the cavity
-    /// field had no exterior: `grid_spec` spans exactly the source's bounding
-    /// box and a distance transform can only measure to background samples the
-    /// array contains, so the Sphere's six polar tangent points — the voxels
-    /// where it touches its own bounding box — read as deep interior and were
-    /// selected as cavity. The recorded Python artifact carries the
-    /// consequence: a drain at `z = 0.5` with `wall_mm = 1.0` on a solid whose
-    /// bottom is `z = 0`, under a **stated 2.5 mm wall**. That is a drilled
-    /// exit through a quarter of the wall the operator asked for.
+    /// **Re-recorded 2026-08-12 by FU-51, gated on FU-61.** FU-61 verified on
+    /// the corrected engine that every drain and vent bore fully penetrates —
+    /// outer surface to cavity void, at full bore width — under worst-case
+    /// placement on the 0.5 mm voxel-stepped cavity surface: measured margin
+    /// `>= 4.0 mm` by construction (the registered `HOLLOW_EXTRA_DRAIN_POLICY`
+    /// extension ladder), `4.50 mm` measured worst case at full bore width on
+    /// this model, 5.2x the `0.5 * sqrt(3) ~= 0.866 mm` voxel body diagonal.
+    /// **No new margin constant was needed.** Only with that confirmation in
+    /// hand does `corpus/baseline/Sphere.pipeline.json` get the ONE
+    /// deliberate, recorded regeneration `development.md` reserves for it —
+    /// never a side effect of another change, and not taken while the
+    /// bore-penetration guarantee was still unproven.
     ///
-    /// With the margin the cavity floor is the floor the wall actually implies
-    /// and the drain sits on it. The frozen artifact is **not** regenerated
-    /// here — `corpus/baseline` is evidence, not output — so this test pins
-    /// both numbers and the difference between them, and the question of
-    /// whether the artifact is re-frozen is the owner's (FU-51).
-    ///
-    /// **2026-08-12, FU-53 landed.** The engine's own drain `z` moved again,
-    /// 2.5 -> 3.5, and its realised exit wall 3.0 -> 4.0: cavity selection
-    /// now runs on the exact nearest-surface distance plus
-    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM`, not the EDT's own conservative
-    /// overestimate, so the divergence from the frozen 1.0 mm artifact grows
-    /// rather than shrinks — in the direction the wall was always supposed
-    /// to move.
+    /// **History, for provenance (old -> new).** The originally frozen
+    /// Python artifact recorded a drain at `xyz = [0, 0, 0.5]`, `wall_mm =
+    /// 1.0`, and a vent at `xyz = [0, 0, 19.5]` (axis `+x`), `wall_mm = 4.0`,
+    /// under a **stated 2.5 mm wall** — a drilled exit through a quarter of
+    /// the requested wall, because the pre-2026-08-10 cavity field had no
+    /// exterior margin (the Sphere's six polar tangent points read as deep
+    /// interior). The 2026-08-10 exterior-margin fix moved the drain to
+    /// `z = 2.5` and the vent to `z = 16.0`; the 2026-08-12 FU-53
+    /// exact-distance cavity selection moved them again. **This re-record
+    /// replaces the stale Python-era numbers with what that same,
+    /// bore-verified engine produces today:** drain `xyz = [0, 0, 3.5]`,
+    /// `wall_mm = 4.0`; vent `xyz = [-1.5, -4.0, 15.0]` (axis `-y`, a
+    /// different equal-cost tie-break on this body of revolution than the
+    /// frozen `+x`), `wall_mm = 5.0`. The old numbers are recorded here, not
+    /// in the baseline file, which now states only what the engine does.
     #[test]
     fn frozen_shell_field_has_an_enclosed_drain_and_vent_plan() {
         let baseline = frozen_hollow_report();
@@ -1482,130 +1487,64 @@ mod tests {
             ]
         };
 
-        // What the frozen Python artifact records, asserted rather than
-        // described, so this divergence cannot be read as drift.
+        // What the re-recorded baseline states, asserted rather than
+        // described, so a future accidental re-freeze cannot drift unnoticed.
         assert_eq!(
             xyz(&baseline["drains"][0]["xyz"]),
-            [
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.5).expect("finite"),
-            ]
-        );
-        assert_eq!(
-            baseline["drains"][0]["wall_mm"]
-                .as_f64()
-                .expect("drain wall_mm"),
-            1.0
-        );
-        assert_eq!(
-            xyz(&baseline["vent"]["xyz"]),
-            [
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(19.5).expect("finite"),
-            ]
-        );
-
-        // What the engine produces now, pinned **whole**. Pinning `z` alone
-        // would leave the engine free to slide either hole sideways
-        // unobserved, which is a moved drill site and a moved keepout
-        // volume.
-        //
-        // Moved 2.5 -> 3.5 on 2026-08-12 by FU-53: the cavity is now
-        // selected from the EXACT nearest-surface distance plus
-        // HOLLOW_CAVITY_MARCH_MARGIN_MM (2.5 + 0.866 mm), not the EDT's
-        // conservative overestimate, so the cavity floor the drain sits on
-        // is honestly a full wall below the outer surface rather than the
-        // 0.87 mm-short floor the pre-fix engine selected. This is the
-        // realised-wall correction FU-53 exists for, on the same hole the
-        // 2026-08-10 exterior-margin fix moved from `z = 0` to `z = 2.5`.
-        assert_eq!(
-            holes[0].center_mm,
             [
                 Finite::new(0.0).expect("finite"),
                 Finite::new(0.0).expect("finite"),
                 Finite::new(3.5).expect("finite"),
             ]
         );
-        // Moved (-0.5, -5.0, 16.0) -> (-1.5, -4.0, 15.0) on 2026-08-12 by
-        // FU-53: the smaller, honestly-walled cavity again breaks the
-        // equal-cost lateral-direction tie on this body of revolution
-        // differently (the same tie the 2026-08-12 FU-50 note above
-        // recorded moving once already), and the shrunken cavity's own top
-        // moved from `z = 16.0` to `z = 15.0`.
         assert_eq!(
-            holes[1].center_mm,
+            baseline["drains"][0]["wall_mm"]
+                .as_f64()
+                .expect("drain wall_mm"),
+            4.0
+        );
+        assert_eq!(
+            xyz(&baseline["vent"]["xyz"]),
             [
                 Finite::new(-1.5).expect("finite"),
                 Finite::new(-4.0).expect("finite"),
                 Finite::new(15.0).expect("finite"),
             ]
         );
-        assert!(
-            holes[0].center_mm[2].get() > xyz(&baseline["drains"][0]["xyz"])[2].get(),
-            "the drain must not sit inside the wall it is drilled through"
-        );
-        assert!(
-            holes[1].center_mm[2].get() < xyz(&baseline["vent"]["xyz"])[2].get(),
-            "the vent must not sit inside the wall it is drilled through"
+        assert_eq!(
+            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm"),
+            5.0
         );
 
-        // **The realised exit wall — the quantity FU-53 is about.** The frozen
-        // artifact records 1.0 mm for the drain against a stated 2.5 mm wall.
-        // Moved 3.0 -> 4.0 on 2026-08-12 by FU-53's honest cavity selection
-        // (see the note on holes[0].center_mm): the divergence from the
-        // frozen artifact is now pinned in the direction the fix promises --
-        // a thicker realised wall, not a thinner one.
-        assert_eq!(holes[0].sampled_exit_mm.get(), 4.0);
-        // Moved 3.5 -> 5.0 on 2026-08-12 by FU-53, tracking the vent's new
-        // centre and lateral direction above.
-        assert_eq!(holes[1].sampled_exit_mm.get(), 5.0);
-        assert!(
-            holes[0].sampled_exit_mm.get()
-                > baseline["drains"][0]["wall_mm"]
-                    .as_f64()
-                    .expect("drain wall_mm"),
-            "the drain's realised exit wall regressed toward the frozen 1.0 mm"
+        // What the engine produces now, pinned **whole** and required to
+        // equal the freshly re-recorded baseline exactly: a deliberate
+        // regeneration means the record and the engine agree the moment it
+        // lands, so this is an equality (a regression pin), not a divergence
+        // check. A future engine change that moves either hole must fail
+        // this, not silently redefine the baseline.
+        assert_eq!(holes[0].center_mm, xyz(&baseline["drains"][0]["xyz"]));
+        assert_eq!(holes[1].center_mm, xyz(&baseline["vent"]["xyz"]));
+        assert_eq!(
+            holes[0].sampled_exit_mm.get(),
+            baseline["drains"][0]["wall_mm"]
+                .as_f64()
+                .expect("drain wall_mm")
         );
-        // Moved from "did not move" to a fact about the engine, on the same
-        // 2026-08-12 FU-50 pass: the frozen artifact's vent axis was a
-        // different equal-cost direction, so its wall_mm no longer applies
-        // pointwise to this engine's vent. What still holds, and is asserted
-        // below, is that neither hole's realised wall regressed toward the
-        // frozen record.
-        assert!(
-            holes[1].sampled_exit_mm.get() > 0.0,
-            "the vent's realised exit wall must be a real, positive sample"
+        assert_eq!(
+            holes[1].sampled_exit_mm.get(),
+            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm")
         );
 
         let keepouts = baseline["cavity_descriptor"]["drain_keepouts"]
             .as_array()
             .expect("baseline keepouts");
-        // The drain still exits straight down, as the frozen artifact records,
-        // and both radii are the two registered values. The **vent axis moves**
-        // -- +x in the frozen artifact, -y now -- because the vent's lateral
-        // exit is a tie among equal-cost directions on a body of revolution and
-        // the smaller cavity breaks that tie elsewhere. Pinned as a fact, not
-        // smoothed over: a moved vent axis is a moved keepout volume.
+        // The drain exits straight down and the vent exits along -y (the
+        // re-recorded axis; the superseded Python-era record held +x), and
+        // both radii are the two registered values, all now read straight
+        // off the re-recorded baseline rather than asserted as a divergence.
         assert_eq!(holes[0].direction, xyz(&keepouts[0]["axis"]));
         assert_eq!(holes[0].radius_mm.get().to_bits(), 1.5_f64.to_bits());
-        assert_eq!(
-            xyz(&keepouts[1]["axis"]),
-            [
-                Finite::new(1.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-            ]
-        );
-        assert_eq!(
-            holes[1].direction,
-            [
-                Finite::new(0.0).expect("finite"),
-                Finite::new(-1.0).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-            ]
-        );
+        assert_eq!(holes[1].direction, xyz(&keepouts[1]["axis"]));
         assert_eq!(holes[1].radius_mm.get().to_bits(), 1.25_f64.to_bits());
 
         // **The keepout volumes support planning is handed.** The frozen

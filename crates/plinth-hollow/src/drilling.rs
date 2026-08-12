@@ -1844,10 +1844,18 @@ mod tests {
         // The committed stage report was authoritative for rounded stage
         // metrics through 2026-08-12, even though no provenance proves its
         // exported STL still contains this drilled mesh. FU-53 broke that
-        // correspondence on purpose: the frozen baseline is evidence of the
-        // pre-fix engine and is deliberately NOT regenerated until FU-61
-        // (see FU-51's ruling). `drilled_material_mm3` is the shell's own
-        // remaining plastic (`final_ml`); the live engine now selects a
+        // correspondence on purpose. **The frozen baseline's drain/vent
+        // geometry was re-recorded 2026-08-12 by FU-51, gated on FU-61's
+        // bore-penetration confirmation** (see `drains.rs`'s
+        // `frozen_shell_field_has_an_enclosed_drain_and_vent_plan`) — but
+        // that re-record is scoped to drain/vent placement only, exactly what
+        // FU-51 named. The Python-era volume fields (`final_ml`, `solid_ml`
+        // and the rest of the a5-algorithm report this test does not read)
+        // are untouched and still describe the pre-fix engine: no Rust code
+        // reads them, and reproducing them would mean re-running the retired
+        // Python pipeline, which this project does not do.
+        // `drilled_material_mm3` is the shell's own remaining plastic (the
+        // live equivalent of `final_ml`); the live engine now selects a
         // smaller, honestly-walled cavity (exact distance plus
         // HOLLOW_CAVITY_MARCH_MARGIN_MM), so it drills away LESS material and
         // MORE remains: 2.1 -> 2.9 mL. That is the direction the fix
