@@ -394,11 +394,19 @@ pub enum ModelPreparationOutcome {
     /// serializes one, so `plinth prepare --wall-mm 3.0` and `--wall-mm 2.5`
     /// produced runs whose printed report, serialized report and `.chitubox`
     /// artifact were all metadata-indistinguishable — the exact
-    /// indistinguishability FU-37 was filed to fix. `wall_mm` is `None` only
-    /// where no hollow request stood behind the model; `realized_wall` is
-    /// `None` on every path that never built a shell to measure, and carries
-    /// its own [`plinth_hollow::RealizedWallClaim`] so a bound is never read
-    /// as a measurement.
+    /// indistinguishability FU-37 was filed to fix. What these two fields
+    /// close is **this report**, printed and serialized; the `.chitubox` wire
+    /// format still carries no wall (`plinth_emit::write` embeds geometry,
+    /// placement and support records only), which is recorded as a remaining
+    /// gap rather than claimed closed.
+    ///
+    /// `wall_mm` is `None` only where no hollow request stood behind the
+    /// model; `realized_wall` is `None` on every path that never built a
+    /// shell to measure — including the two solid-reserve substitutions,
+    /// whose artifact is the oriented solid and for which a realized wall
+    /// would describe a shell that is not in the file — and it carries its
+    /// own [`plinth_hollow::RealizedWallClaim`] so a query bound is never
+    /// read as a measurement.
     Artifact {
         emit: EmitReport,
         geometry: prepare::SupportedGeometry,
