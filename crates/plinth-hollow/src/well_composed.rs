@@ -58,21 +58,25 @@
 //!   into the cell-visit bound, which it is not covered by.
 //!
 //!   **Each counted re-selection pass was two whole-grid traversals before
-//!   FU-47 and is four now**: `label3d` and the `indexed_iter` sweep that
-//!   applies its verdict, versus resin-flow re-selection's EDT, core
-//!   `label3d`, the wave-synchronous flood, and the `indexed_iter` sweep that
-//!   applies *its* verdict (`crate::flow::select_largest_flow_component`,
-//!   FU-47 §4: a re-selection that silently rejoined two interiors across a
-//!   sub-bore throat would undo the doctrine at the one call site that exists
-//!   to enforce it downstream of the initial selection). `full_grid_passes`
-//!   keeps counting **passes**, not traversals — the number on the record
-//!   moves with what a pass costs, and that cost is stated here rather than
-//!   left to be inferred from the count. An earlier version of this doc wrote
-//!   `cells × p + 8 × changed` for the two-traversal accounting, which
-//!   undercounted even that by about 2×; with today's four-traversal
-//!   accounting the true total is `cells × (4p − 3) + 8 × changed` — the
-//!   opening cell scan, then four traversals per re-selection. Measured
-//!   corpus-wide `p` is 2.
+//!   FU-47 and is thirteen now**: `label3d` and the `indexed_iter` sweep that
+//!   applies its verdict, versus the twelve
+//!   `crate::flow::select_largest_flow_component` makes (its module doc names
+//!   them one by one) plus the `indexed_iter` sweep here that applies *its*
+//!   verdict. FU-47 §4 is why: a re-selection that silently rejoined two
+//!   interiors across a sub-bore throat would undo the doctrine at the one
+//!   call site that exists to enforce it downstream of the initial selection.
+//!   `full_grid_passes` keeps counting **passes**, not traversals — the
+//!   number on the record moves with what a pass costs, and that cost is
+//!   stated here rather than left to be inferred from the count. An earlier
+//!   version of this doc wrote `cells × p + 8 × changed` for the
+//!   two-traversal accounting, which undercounted even that by about 2×; with
+//!   today's thirteen-traversal accounting the true total is
+//!   `cells × (13p − 12) + 8 × changed` — the opening cell scan, then
+//!   thirteen traversals per re-selection. Measured corpus-wide `p` is 2.
+//!
+//!   **This is a constant-factor cost on a pass count that has not moved.**
+//!   It buys the doctrine at the re-selection, and it is stated at its true
+//!   size rather than at a flattering one.
 //!
 //!   **The pass count has no admitted bound of its own**, which is the one
 //!   place this module departs from the stage's own habit: a re-selection pass
@@ -150,9 +154,11 @@ impl WellComposedRepair {
     /// re-selections, so this is what makes the second `O(cells)` domain
     /// visible.
     ///
-    /// **A re-selection pass costs two whole-grid traversals**, the `label3d`
-    /// and the sweep that applies its verdict, so `p` counted passes are
-    /// `2p − 1` traversals of the grid.
+    /// **A re-selection pass costs thirteen whole-grid traversals** since
+    /// FU-47 — the twelve inside `crate::flow::select_largest_flow_component`
+    /// and the sweep here that applies its verdict — so `p` counted passes
+    /// are `13p − 12` traversals of the grid. It was two (`label3d` plus the
+    /// sweep) when re-selection was plain 6-connectivity.
     pub(crate) const fn full_grid_passes(self) -> usize {
         self.full_grid_passes
     }
@@ -692,11 +698,11 @@ mod tests {
 
     /// The second `O(cells)` domain, counted rather than described.
     ///
-    /// The cell-visit bound above says nothing about the whole-grid `label3d`
-    /// and whole-grid sweep each component re-selection performs. This asserts
-    /// the count exists, that it is what the doc claims — one opening scan plus
-    /// one pass per re-selection, each pass being two whole-grid traversals —
-    /// and that it obeys the only bound the code actually guarantees,
+    /// The cell-visit bound above says nothing about the whole-grid work each
+    /// component re-selection performs. This asserts the count exists, that it
+    /// is what the doc claims — one opening scan plus one pass per
+    /// re-selection, each pass being thirteen whole-grid traversals since
+    /// FU-47 — and that it obeys the only bound the code actually guarantees,
     /// `2 + reselection_dropped_voxels`. That bound is `O(cells)` and is not an
     /// admitted limit; see FU-54.
     #[test]
