@@ -445,7 +445,7 @@ impl HollowedAndDrilled {
             wall: Some(cavity.wall_thickness_mm()),
             // FU-55: the realized minimum wall this shell measured before it
             // was ever allowed to reach drain planning or drilling.
-            realized_wall_mm: Some(cavity.realized_wall_mm()),
+            realized_wall: Some(cavity.realized_wall()),
         };
         HollowedModel::from_verified_hollow(
             mesh,
@@ -2630,6 +2630,22 @@ mod tests {
         assert_eq!(
             report.wall(),
             Some(registered_settings().wall_thickness_mm())
+        );
+        // FU-55: and so does the wall the shell actually delivered, with the
+        // claim it is making. This is the only path that produces a hollowed
+        // artifact, so it is the one that has to carry the realized figure
+        // out to `seal_and_emit` for the run's own output to record it.
+        let realized = report
+            .realized_wall()
+            .expect("a drilled shell records what wall it realized");
+        assert!(
+            realized.wall_mm().get() >= registered_settings().wall_thickness_mm().get(),
+            "a shipped shell never realizes less than the requested wall"
+        );
+        assert!(
+            !realized.is_lower_bound(),
+            "this shell's cavity vertices are all inside the query bound, so the \
+             record is a measurement rather than a bound"
         );
         assert_eq!(report.cavities.len(), 1);
         assert_eq!(report.cavities[0].cavity_id, 1);

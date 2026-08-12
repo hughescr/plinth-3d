@@ -421,6 +421,15 @@ pub struct ChainOutcome {
     /// ran. Carried out of the chain rather than left inside `plinth-hollow`,
     /// where nothing outside the crate could read it.
     pub cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+    /// FU-37: the wall this model's hollow attempt requested, read off the
+    /// same `HollowReport` as `cavity_repair` and for the same reason —
+    /// `seal_and_emit` is the last place that report is in hand, and a
+    /// measurement that stops here reaches no run output at all.
+    pub wall: Option<plinth_core::Finite>,
+    /// FU-55: what the shell actually delivered against that wall, when a
+    /// shell was built and measured, with its
+    /// [`plinth_hollow::RealizedWallClaim`] attached.
+    pub realized_wall: Option<plinth_hollow::RealizedWall>,
     pub supported_geometry: SupportedGeometry,
     pub routed_contacts: usize,
     pub final_live_members: usize,
@@ -756,6 +765,11 @@ fn prepare_one(
                 geometry: outcome.supported_geometry,
                 hollow_disposition: outcome.hollow_disposition,
                 cavity_repair: outcome.cavity_repair,
+                // FU-37 / FU-55: the wall the run asked for and the wall it
+                // got, so the report on disk can tell two otherwise identical
+                // runs apart.
+                wall_mm: outcome.wall,
+                realized_wall: outcome.realized_wall,
             },
         ),
         Ok(None) => report(
@@ -1201,8 +1215,14 @@ pub fn seal_and_emit(
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
     // Read here, beside the disposition, because the hollowed model is the
-    // last place the hollow stage's own report is in hand.
+    // last place the hollow stage's own report is in hand — `run_support`
+    // consumes it a few lines below and the report is gone with it. FU-37's
+    // requested wall and FU-55's realized wall come off the same report for
+    // exactly that reason: leaving them there is how a landed, ruled
+    // measurement reaches no output of an actual run.
     let cavity_repair = hollowed.history().hollow().cavity_repair();
+    let wall = hollowed.history().hollow().wall();
+    let realized_wall = hollowed.history().hollow().realized_wall();
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -1298,6 +1318,8 @@ pub fn seal_and_emit(
         source_faces,
         prepared_faces,
         cavity_repair,
+        wall,
+        realized_wall,
         hollow_disposition,
         supported_geometry,
         routed_contacts: gated.routed_contacts,

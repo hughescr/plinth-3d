@@ -167,6 +167,90 @@ pub enum SolidDecisionReason {
     ShellUnderWalled,
 }
 
+/// Whether a recorded realized wall is a **measurement** or only the **bound**
+/// the measurement could establish.
+///
+/// [`measure_realized_wall_mm`] queries the source surface with a finite
+/// upper bound, and a vertex beyond it comes back as [`f64::INFINITY`] rather
+/// than a distance. When *every* vertex is over-bound the minimum is not
+/// known — only that it exceeds the bound — and the number recorded is the
+/// bound itself. Without this discriminant a reader of the FU-37/FU-55 record
+/// could not tell "measured exactly 6.73 mm" from "at least 6.73 mm", which
+/// is a different claim about the same shell. Both are honest; only one is a
+/// measurement, and the record has to say which it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealizedWallClaim {
+    /// The recorded number is the realized minimum wall the query returned.
+    Measured,
+    /// Every sampled cavity-surface vertex was beyond the query bound, so the
+    /// realized minimum wall is **at least** the recorded number (which is
+    /// the query bound) and is otherwise unknown. Never below it — the
+    /// refusal check runs on the raw measurement, not on this clamp — so a
+    /// shell recorded this way passed spec with room to spare.
+    AtLeast,
+}
+
+/// FU-55's realized-wall record: the number **and** what kind of claim it is.
+///
+/// Kept as one value rather than a number beside a flag so the two cannot be
+/// serialized, copied or read apart. See [`RealizedWallClaim`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RealizedWall {
+    wall_mm: Finite,
+    claim: RealizedWallClaim,
+}
+
+impl RealizedWall {
+    /// A realized wall the query returned outright.
+    #[must_use]
+    pub const fn measured(wall_mm: Finite) -> Self {
+        Self {
+            wall_mm,
+            claim: RealizedWallClaim::Measured,
+        }
+    }
+
+    /// A realized wall the query could only bound from below.
+    #[must_use]
+    pub const fn at_least(wall_mm: Finite) -> Self {
+        Self {
+            wall_mm,
+            claim: RealizedWallClaim::AtLeast,
+        }
+    }
+
+    /// The number. **Read [`Self::claim`] before treating it as an exact
+    /// figure** — see [`RealizedWallClaim`].
+    #[must_use]
+    pub const fn wall_mm(self) -> Finite {
+        self.wall_mm
+    }
+
+    #[must_use]
+    pub const fn claim(self) -> RealizedWallClaim {
+        self.claim
+    }
+
+    /// `true` when this record is a lower bound rather than a measurement.
+    #[must_use]
+    pub const fn is_lower_bound(self) -> bool {
+        matches!(self.claim, RealizedWallClaim::AtLeast)
+    }
+}
+
+impl std::fmt::Display for RealizedWall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.claim {
+            RealizedWallClaim::Measured => write!(formatter, "{} mm", self.wall_mm.get()),
+            RealizedWallClaim::AtLeast => {
+                write!(formatter, "at least {} mm", self.wall_mm.get())
+            }
+        }
+    }
+}
+
 /// What the well-composedness repair did, carried into the record so that a
 /// repair-caused outcome is never reported as a property of the geometry.
 ///
@@ -282,7 +366,7 @@ pub struct HollowReport {
     /// FU-55: the realized minimum wall this report's shell measured, when
     /// one was measured. Populated on the hollowed path (by
     /// [`drilling::into_hollowed_model`], from [`CavityEvidence::
-    /// realized_wall_mm`]) and on the [`SolidDecisionReason::
+    /// realized_wall`]) and on the [`SolidDecisionReason::
     /// ShellUnderWalled`] fallback (by `run`, from the refusal's own
     /// measurement). `None` on every other report: a hand-built
     /// [`Self::solid_decision`], and every solid decision that never reached
@@ -290,10 +374,15 @@ pub struct HollowReport {
     /// reason. Distinct from `wall` (FU-37, requested) — see that field's
     /// own doc.
     ///
+    /// **A [`RealizedWall`], not a bare number**, because the query that
+    /// produces it can only bound an over-bound minimum from below and a
+    /// record that conflated "measured 6.73 mm" with "at least 6.73 mm"
+    /// would be making a claim it cannot support. See [`RealizedWallClaim`].
+    ///
     /// `default` for the same reason `cavity_repair` is: a report frozen
     /// before this field existed has to keep deserializing.
     #[serde(default)]
-    realized_wall_mm: Option<Finite>,
+    realized_wall: Option<RealizedWall>,
 }
 
 impl HollowReport {
@@ -307,7 +396,7 @@ impl HollowReport {
             drain_plan: None,
             cavity_repair: None,
             wall: None,
-            realized_wall_mm: None,
+            realized_wall: None,
         }
     }
 
@@ -319,18 +408,29 @@ impl HollowReport {
 
     /// FU-37: the wall the caller requested, when this report was built by a
     /// production path. See the field's own doc for exactly which reports
-    /// carry it and how it differs from [`Self::realized_wall_mm`].
+    /// carry it and how it differs from [`Self::realized_wall`].
     #[must_use]
     pub const fn wall(&self) -> Option<Finite> {
         self.wall
     }
 
     /// FU-55: the realized minimum wall this report's shell measured, when
-    /// one was measured. See the field's own doc for exactly which reports
-    /// carry it.
+    /// one was measured, **with the claim it is making** — see
+    /// [`RealizedWallClaim`] and the field's own doc for exactly which
+    /// reports carry it.
     #[must_use]
-    pub const fn realized_wall_mm(&self) -> Option<Finite> {
-        self.realized_wall_mm
+    pub const fn realized_wall(&self) -> Option<RealizedWall> {
+        self.realized_wall
+    }
+
+    /// The number behind [`Self::realized_wall`], with its claim dropped.
+    ///
+    /// Convenience for readers that only need the figure; anything that
+    /// *reports* it must go through [`Self::realized_wall`], because a bare
+    /// number cannot say whether it is a measurement or a lower bound.
+    #[must_use]
+    pub fn realized_wall_mm(&self) -> Option<Finite> {
+        self.realized_wall.map(RealizedWall::wall_mm)
     }
 
     #[must_use]
@@ -441,10 +541,10 @@ impl HollowedModel {
             cavity_repair,
             wall,
             // FU-55: `run`'s `ShellUnderWalled` arm attaches its measurement
-            // after this constructor returns, via `with_realized_wall_mm` —
+            // after this constructor returns, via `with_realized_wall` —
             // every other solid decision (including this function's other
             // two callers) has no shell to have measured.
-            realized_wall_mm: None,
+            realized_wall: None,
         };
         Ok(Self {
             mesh,
@@ -501,8 +601,8 @@ impl HollowedModel {
     /// [`Self::solid_decision_recording_repair`] returns; every other solid
     /// decision has no shell measurement to attach.
     #[must_use]
-    fn with_realized_wall_mm(mut self, realized_wall_mm: Option<Finite>) -> Self {
-        self.history.hollow.realized_wall_mm = realized_wall_mm;
+    fn with_realized_wall(mut self, realized_wall: Option<RealizedWall>) -> Self {
+        self.history.hollow.realized_wall = realized_wall;
         self
     }
 
@@ -784,7 +884,7 @@ fn convert_shell_failure_to_solid(
     requested_wall_mm: Finite,
 ) -> Result<HollowStageOutput, HollowStageFailure> {
     let cavity_repair = failure.cavity_repair();
-    let decided = |reason: SolidDecisionReason, realized_wall_mm: Option<Finite>| {
+    let decided = |reason: SolidDecisionReason, realized_wall: Option<RealizedWall>| {
         HollowedModel::solid_decision_recording_repair(
             solid,
             orientation,
@@ -792,9 +892,7 @@ fn convert_shell_failure_to_solid(
             cavity_repair,
             Some(requested_wall_mm),
         )
-        .map(|model| {
-            HollowStageOutput::Solid(Box::new(model.with_realized_wall_mm(realized_wall_mm)))
-        })
+        .map(|model| HollowStageOutput::Solid(Box::new(model.with_realized_wall(realized_wall))))
         .map_err(HollowStageFailure::from)
     };
     match failure.into_error() {
@@ -817,10 +915,17 @@ fn convert_shell_failure_to_solid(
         // that measured under spec is discarded, never a model failure, and
         // the measurement that condemned it travels onto the solid decision
         // that replaces it.
+        // The refusal's own number is a genuine measurement by construction:
+        // it is strictly below the requested wall, therefore strictly below
+        // the (doubled) query bound, therefore never the over-bound clamp
+        // `RealizedWallClaim::AtLeast` exists for.
         HollowError::RealizedWallBelowSpec {
             realized_wall_mm, ..
         } => match finite(realized_wall_mm) {
-            Ok(value) => decided(SolidDecisionReason::ShellUnderWalled, Some(value)),
+            Ok(value) => decided(
+                SolidDecisionReason::ShellUnderWalled,
+                Some(RealizedWall::measured(value)),
+            ),
             Err(error) => Err(HollowStageFailure {
                 error,
                 cavity_repair,
@@ -1309,8 +1414,11 @@ pub struct CavityEvidence {
     /// all — a shell whose realized wall came in under spec is refused
     /// before a `CavityEvidence` is ever built (see
     /// [`HollowError::RealizedWallBelowSpec`]); the in-process authority
-    /// behind [`HollowReport::realized_wall_mm`] on the hollowed path.
-    realized_wall_mm: Finite,
+    /// behind [`HollowReport::realized_wall`] on the hollowed path. Carries
+    /// its [`RealizedWallClaim`] with it — the query can only bound an
+    /// over-bound minimum from below, and that is a different claim from a
+    /// measurement.
+    realized_wall: RealizedWall,
 }
 
 impl CavityEvidence {
@@ -1350,10 +1458,18 @@ impl CavityEvidence {
 
     /// FU-55: the realized minimum wall this shell measured, `>=`
     /// [`Self::wall_thickness_mm`] by construction — [`create_shell`] never
-    /// returns a `CavityEvidence` for which that would be false.
+    /// returns a `CavityEvidence` for which that would be false — together
+    /// with the claim it is making (see [`RealizedWallClaim`]).
+    #[must_use]
+    pub const fn realized_wall(self) -> RealizedWall {
+        self.realized_wall
+    }
+
+    /// The number behind [`Self::realized_wall`], with its claim dropped.
+    /// Anything that *reports* the figure must use [`Self::realized_wall`].
     #[must_use]
     pub const fn realized_wall_mm(self) -> Finite {
-        self.realized_wall_mm
+        self.realized_wall.wall_mm()
     }
 }
 
@@ -1658,7 +1774,7 @@ pub fn create_shell_recording_repair(
             realized_wall_query_bound_mm,
             realized_wall_query_batch_points,
         );
-        let realized_wall_mm = checked_realized_wall_mm(
+        let realized_wall = checked_realized_wall_mm(
             raw_realized_wall_mm,
             settings.wall_thickness_mm.get(),
             realized_wall_query_bound_mm,
@@ -1718,7 +1834,7 @@ pub fn create_shell_recording_repair(
             source_volume_mm3: finite(source_volume_mm3)?,
             resources,
             drain_planning_cap_bytes: limits.drain_planning_bytes,
-            realized_wall_mm,
+            realized_wall,
         };
         Ok(ShellCandidate {
             mesh,
@@ -3097,24 +3213,39 @@ fn measure_realized_wall_mm(
 /// the boundary irrelevant. `raw_realized_wall_mm == requested_wall_mm`
 /// passes.
 ///
-/// On success, the value recorded as evidence is clamped to
-/// `clamp_upper_bound_mm` — the same bound the measurement was queried
-/// against — so that a minimum the query could only bound (an over-bound
-/// vertex reads as [`f64::INFINITY`], which [`Finite`] cannot represent) is
-/// still recorded as a truthful lower bound ("at least this much") rather
-/// than failing to construct evidence for a shell that comfortably passed.
+/// On success, a measurement the query could only bound — every sampled
+/// vertex over-bound, so the raw minimum is [`f64::INFINITY`], which
+/// [`Finite`] cannot represent — is recorded as the bound itself, clamped to
+/// `clamp_upper_bound_mm`, rather than failing to construct evidence for a
+/// shell that comfortably passed.
+///
+/// **The clamp is labelled, not hidden.** A clamped record and a genuine
+/// measurement at the same number are different claims about the shell, and
+/// the returned [`RealizedWall`] carries [`RealizedWallClaim::AtLeast`] or
+/// [`RealizedWallClaim::Measured`] accordingly, all the way onto the
+/// serialized report. Without that label a downstream reader of the
+/// FU-37/FU-55 record could not tell "measured exactly 6.73 mm" from
+/// "at least 6.73 mm".
 fn checked_realized_wall_mm(
     raw_realized_wall_mm: f64,
     requested_wall_mm: f64,
     clamp_upper_bound_mm: f64,
-) -> Result<Finite, HollowError> {
+) -> Result<RealizedWall, HollowError> {
     if raw_realized_wall_mm < requested_wall_mm {
         return Err(HollowError::RealizedWallBelowSpec {
             realized_wall_mm: raw_realized_wall_mm,
             requested_wall_mm,
         });
     }
-    finite(raw_realized_wall_mm.min(clamp_upper_bound_mm))
+    // `NativeSurface::query` returns the true distance when it is within the
+    // bound and `INFINITY` when it is not, so "raw exceeds the bound" is
+    // exactly "the query could only bound this from below".
+    let wall_mm = finite(raw_realized_wall_mm.min(clamp_upper_bound_mm))?;
+    Ok(if raw_realized_wall_mm > clamp_upper_bound_mm {
+        RealizedWall::at_least(wall_mm)
+    } else {
+        RealizedWall::measured(wall_mm)
+    })
 }
 
 pub(crate) fn marching_cavity(
@@ -6136,11 +6267,50 @@ mod fu55_realized_wall_check {
     /// [`Finite`] cannot represent) is recorded as a truthful "at least this
     /// much" — clamped to the bound it was queried against — rather than
     /// failing to construct evidence for a shell that comfortably passed.
+    ///
+    /// **And it is LABELLED as a bound.** The clamped number and a genuine
+    /// measurement at the same figure are different claims about the shell;
+    /// the record carries [`RealizedWallClaim::AtLeast`] so a reader can tell
+    /// them apart, which a bare `Option<Finite>` could not.
     #[test]
     fn an_over_bound_measurement_is_recorded_as_a_clamped_lower_bound() {
         let recorded = checked_realized_wall_mm(f64::INFINITY, 2.5, 7.0)
             .expect("an over-bound measurement still passes the check");
-        assert_eq!(recorded.get(), 7.0);
+        assert_eq!(recorded.wall_mm().get(), 7.0);
+        assert_eq!(recorded.claim(), RealizedWallClaim::AtLeast);
+        assert!(recorded.is_lower_bound());
+        assert_eq!(recorded.to_string(), "at least 7 mm");
+
+        // A distance the query actually returned — including one exactly at
+        // the bound, which `NativeSurface::query` reports as a distance and
+        // not as the over-bound sentinel — is a measurement, and says so.
+        let measured = checked_realized_wall_mm(6.73, 2.5, 7.0).expect("in-bound measurement");
+        assert_eq!(measured.wall_mm().get(), 6.73);
+        assert_eq!(measured.claim(), RealizedWallClaim::Measured);
+        assert!(!measured.is_lower_bound());
+        assert_eq!(measured.to_string(), "6.73 mm");
+        assert_eq!(
+            checked_realized_wall_mm(7.0, 2.5, 7.0)
+                .expect("exactly at the bound")
+                .claim(),
+            RealizedWallClaim::Measured
+        );
+
+        // The two claims are distinguishable in the serialized record, which
+        // is the whole point: the same 7.0 mm carries a different verdict.
+        let bound_json = serde_json::to_string(&recorded).expect("serializes");
+        let exact_json = serde_json::to_string(&RealizedWall::measured(
+            Finite::new(7.0).expect("finite"),
+        ))
+        .expect("serializes");
+        assert_ne!(
+            bound_json, exact_json,
+            "a bound and a measurement at the same number must not serialize alike"
+        );
+        assert_eq!(
+            serde_json::from_str::<RealizedWall>(&bound_json).expect("round trips"),
+            recorded
+        );
     }
 
     /// `measure_realized_wall_mm`'s own contract: a serial min-fold over
@@ -6300,8 +6470,10 @@ mod fu55_realized_wall_check {
             "the oriented solid must reach the record unchanged"
         );
         assert_eq!(
-            model.history().hollow().realized_wall_mm(),
-            Some(Finite::new(1.9).expect("finite"))
+            model.history().hollow().realized_wall(),
+            Some(RealizedWall::measured(Finite::new(1.9).expect("finite"))),
+            "a refusal's own number is below the requested wall, so it is below the \
+             query bound too: a measurement, never the over-bound clamp"
         );
         // FU-37: the requested wall reaches the report even on a discarded
         // shell -- the whole point of the field is that it does not depend
@@ -6315,7 +6487,7 @@ mod fu55_realized_wall_check {
     #[test]
     fn realized_wall_mm_is_none_on_a_hand_built_solid_decision() {
         assert_eq!(
-            HollowReport::solid_decision(SolidDecisionReason::NoCavity).realized_wall_mm(),
+            HollowReport::solid_decision(SolidDecisionReason::NoCavity).realized_wall(),
             None
         );
     }
@@ -6330,7 +6502,7 @@ mod fu55_realized_wall_check {
         let with_wall = HollowReport::solid_decision(SolidDecisionReason::NoCavity);
         let json = serde_json::to_string(&with_wall).expect("serialize");
         let round_tripped: HollowReport = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(round_tripped.realized_wall_mm(), with_wall.realized_wall_mm());
+        assert_eq!(round_tripped.realized_wall(), with_wall.realized_wall());
 
         let old_report_json = r#"{
             "disposition": {"kind": "solid", "reason": "no_cavity"},

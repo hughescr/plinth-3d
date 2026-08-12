@@ -232,6 +232,8 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         geometry,
         hollow_disposition,
         cavity_repair,
+        wall_mm,
+        realized_wall,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -259,6 +261,19 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // claim "no repair result exists here", which is what distinguishes it from
     // a recorded repair of size zero.
     assert_eq!(cavity_repair, &None);
+    // **FU-37 reaches the run's own output.** The requested wall is on the
+    // artifact record, so this run is distinguishable from the same run at a
+    // different `--wall-mm`. It is the request's wall, not a constant: the
+    // fixture asks for the registered default.
+    assert_eq!(
+        wall_mm.map(plinth_core::Finite::get),
+        Some(2.5),
+        "the requested wall must reach the artifact record"
+    );
+    // FU-55: this model decided solid before a shell was ever built, so there
+    // is no realized wall to state -- `None` is the claim "nothing was
+    // measured", not "the measurement was dropped".
+    assert_eq!(realized_wall, &None);
     assert!(
         emit.support_record_count > 0,
         "an artifact with no supports"
@@ -853,4 +868,70 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
     .expect("run");
     assert_eq!(report.artifacts().count(), 2);
     assert!(!report.has_gate_refusal());
+}
+
+/// **FU-37, end to end: two runs at different walls are distinguishable in
+/// what the pipeline actually writes.**
+///
+/// The row's own motivating claim was that "two artifacts prepared at 2.5 mm
+/// and 3.0 mm are byte-indistinguishable in metadata in every file the
+/// pipeline writes". `HollowReport` gained the `wall` field, but the report
+/// died inside `seal_and_emit` — `ChainOutcome` had no wall field and
+/// `ModelPreparationOutcome::Artifact` serialized none — so the claim stayed
+/// true of real runs while the in-crate tests, which serialize a
+/// `HollowReport` in isolation, passed. This runs the **whole executor**
+/// twice on the same fixture, changing nothing but `--wall-mm`, and asserts
+/// the serialized reports differ in the wall and only there.
+#[test]
+fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_report() {
+    let printer = OutputProfile::Saturn4Ultra
+        .resolve()
+        .expect("M0 Saturn profile")
+        .clone();
+
+    let run_at = |label: &str, wall: plinth_core::PositiveFinite| {
+        let scratch = Scratch::new(label);
+        scratch.place("make_toed_slab.prepped.stl", "mini");
+        let mut request = pinned(&scratch, "mini", "make_toed_slab.pipeline.json");
+        request.hollow = plinth_hollow::HollowRequest {
+            printer: printer.clone(),
+            wall_mm: wall,
+        };
+        let report = prepare(request).expect("run");
+        let json = serde_json::to_string(&report).expect("the report serializes");
+        // Drop the scratch path, which differs per run by construction and
+        // says nothing about the wall.
+        let outcome = outcome(&report, "mini").clone();
+        (outcome, json.contains("\"wall_mm\""))
+    };
+
+    let default_wall = plinth_hollow::registered_wall(plinth_hollow::WallSelection::Default)
+        .expect("registered default wall");
+    let heavy_wall = plinth_hollow::registered_wall(plinth_hollow::WallSelection::HandlingHeavy)
+        .expect("registered handling-heavy wall");
+    assert_ne!(
+        default_wall.get(),
+        heavy_wall.get(),
+        "the two registered walls must differ for this test to mean anything"
+    );
+
+    let (thin, thin_has_key) = run_at("wall-default", default_wall);
+    let (thick, thick_has_key) = run_at("wall-heavy", heavy_wall);
+    assert!(
+        thin_has_key && thick_has_key,
+        "the serialized report must carry the wall at all"
+    );
+
+    let wall_of = |outcome: &ModelPreparationOutcome| match outcome {
+        ModelPreparationOutcome::Artifact { wall_mm, .. } => {
+            wall_mm.map(plinth_core::Finite::get)
+        }
+        other => panic!("the fixture must reach an artifact; got {other:?}"),
+    };
+    assert_eq!(wall_of(&thin), Some(default_wall.get()));
+    assert_eq!(wall_of(&thick), Some(heavy_wall.get()));
+    assert_ne!(
+        thin, thick,
+        "two runs differing only in --wall-mm must not produce identical artifact records"
+    );
 }
