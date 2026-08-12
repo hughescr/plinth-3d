@@ -4897,9 +4897,9 @@ mod corpus_cavity_repair {
         // once the production selection threshold moved from the bare 2.5 mm
         // wall to 2.5 mm + HOLLOW_CAVITY_MARCH_MARGIN_MM (0.866 mm) evaluated
         // on the EXACT nearest-surface distance rather than the EDT. A sweep
-        // over rod radius (`corpus_cavity_repair::zzz_sweep_rod_radius`,
-        // 3.0-6.0 mm in 0.125 mm steps) found the defect is non-monotonic in
-        // radius, the same lattice-aliasing signature FU-53's finned-block
+        // over rod radius (3.0-6.0 mm in 0.125 mm steps, ad hoc, not
+        // committed as a test) found the defect is non-monotonic in radius,
+        // the same lattice-aliasing signature FU-53's finned-block
         // breach class shows: 3.875, 4.375, 4.875 mm (132 critical cells),
         // 5.375 mm (136) and 5.875 mm (140) reproduce it; every radius
         // between and outside them does not. 3.875 mm is the closest
