@@ -1117,7 +1117,6 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::ResourceAccountingOverflow
         | HollowError::VoxelCellLimitExceeded { .. }
         | HollowError::RasterWorkLimitExceeded { .. }
-        | HollowError::RasterSubdivisionLimitExceeded
         | HollowError::TriageAdmission(_) => false,
         // The model does not fit the machine. Emitting the solid would hand
         // back an artifact for a print that cannot be started.

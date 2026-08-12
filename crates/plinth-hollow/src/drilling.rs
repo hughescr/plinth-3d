@@ -2416,10 +2416,17 @@ mod tests {
         // tangent points, and the slab this fixture severs is cut from what
         // remains. The refill *policy* is untouched; only the field it counts
         // over is smaller. See the 2026-08-10 journal section.
-        assert_eq!(refill.refilled_voxels, 7_856);
-        assert_eq!(refill.refilled_pockets, vec![7_856]);
+        //
+        // Moved 7,856 -> 7,957 on 2026-08-12 by FU-50's area-proportional
+        // conservative rasterizer (decisions/2026-08-12-owner-rulings-fu-
+        // batch.md §3): the marked-voxel set is a strict superset of the old
+        // one, so the Sphere's cavity gained voxels and the slab this fixture
+        // severs is larger. Policy untouched; only the field is bigger.
+        assert_eq!(refill.refilled_voxels, 7_957);
+        assert_eq!(refill.refilled_pockets, vec![7_957]);
         assert_eq!(refill.refill.iter().position(|value| *value), Some(35_522));
-        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(59_841));
+        // Moved 59,841 -> 59,842 in the same 2026-08-12 FU-50 pass.
+        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(59_842));
         let reconstructed =
             reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
                 .unwrap();
@@ -2552,8 +2559,13 @@ mod tests {
         // margin, for the same reason as the long-exit fixture above: the
         // slab this fixture severs is cut from a cavity that lost its six
         // polar tangent points. The refill policy is untouched.
-        assert_eq!(audit.refilled_voxels, 490);
-        assert_eq!(audit.refilled_pockets, vec![490]);
+        //
+        // Moved 490 -> 499 on 2026-08-12 by FU-50, for the same reason as the
+        // long-exit fixture above: the marked-voxel set only grows under the
+        // new area-proportional conservative rasterizer, so the slab this
+        // fixture severs is cut from a larger cavity.
+        assert_eq!(audit.refilled_voxels, 499);
+        assert_eq!(audit.refilled_pockets, vec![499]);
         for flat in 0..split.cavity_field().flat_count() {
             let expected = split.cavity_field().contains_flat(flat)
                 && split.cavity_field().flat_to_index(flat)[0] > 32;
@@ -2561,8 +2573,9 @@ mod tests {
         }
 
         let drilled = drill_planned_shell(split).expect("bounded production refill must drill");
-        assert_eq!(drilled.evidence().refilled_voxels, 490);
-        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 490);
+        // Moved 490 -> 499 on 2026-08-12 by FU-50, tracking `audit.refilled_voxels` above.
+        assert_eq!(drilled.evidence().refilled_voxels, 499);
+        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 499);
         assert_eq!(
             drilled.evidence().cavity_voxels,
             drilled.evidence().drainable_voxels

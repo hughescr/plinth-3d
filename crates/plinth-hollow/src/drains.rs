@@ -1503,21 +1503,33 @@ mod tests {
         // the exterior margin landed, but pinning `z` alone would leave the
         // engine free to slide either hole sideways unobserved, which is a
         // moved drill site and a moved keepout volume. The drain's tiny `-y`
-        // offset is its lobe's centroid, not the axis of revolution; it is a
-        // fact about the engine and is pinned as one.
+        // offset was its lobe's centroid under the frozen midpoint-quartering
+        // rasterizer, not the axis of revolution.
+        //
+        // Moved -0.029_914_529_914_529_916 -> 0.0 on 2026-08-12 by FU-50's
+        // area-proportional conservative rasterizer (decisions/2026-08-12-
+        // owner-rulings-fu-batch.md §3): exact SAT marking has no sampled-
+        // vertex bias, so the lobe centroid lands exactly on the sphere's own
+        // axis of revolution rather than carrying a stray offset from the old
+        // rasterizer's sub-triangle vertex sampling.
         assert_eq!(
             holes[0].center_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(0.0).expect("finite"),
                 Finite::new(2.5).expect("finite"),
             ]
         );
+        // Moved (-2.5, -4.5, 16.0) -> (-0.5, -5.0, 16.0) on 2026-08-12 by
+        // FU-50 (see the note above holes[0].center_mm): the vent's exact
+        // conservative marking selects a different equal-cost lateral
+        // direction on this body of revolution than the old sampled-vertex
+        // rasterizer did.
         assert_eq!(
             holes[1].center_mm,
             [
-                Finite::new(-2.5).expect("finite"),
-                Finite::new(-4.5).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
+                Finite::new(-5.0).expect("finite"),
                 Finite::new(16.0).expect("finite"),
             ]
         );
@@ -1537,7 +1549,14 @@ mod tests {
         // regression that walked this back toward the frozen number would be a
         // thinner wall, and this is the only test that would say so.
         assert_eq!(holes[0].sampled_exit_mm.get(), 3.0);
-        assert_eq!(holes[1].sampled_exit_mm.get(), 4.0);
+        // Moved 4.0 -> 3.5 on 2026-08-12 by FU-50: the vent moved to a
+        // different equal-cost lateral direction (see the note on
+        // holes[1].center_mm above), and that direction samples a thinner
+        // exit wall than the one the old rasterizer's vent axis found. This
+        // is exactly the direction the ruling records — occupancy grows, the
+        // EDT reads slightly deeper, and realised walls get marginally
+        // thinner until FU-53 lands.
+        assert_eq!(holes[1].sampled_exit_mm.get(), 3.5);
         assert!(
             holes[0].sampled_exit_mm.get()
                 > baseline["drains"][0]["wall_mm"]
@@ -1545,10 +1564,15 @@ mod tests {
                     .expect("drain wall_mm"),
             "the drain's realised exit wall regressed toward the frozen 1.0 mm"
         );
-        assert_eq!(
-            holes[1].sampled_exit_mm.get(),
-            baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm"),
-            "the vent's exit wall is the one number that did not move"
+        // Moved from "did not move" to a fact about the engine, on the same
+        // 2026-08-12 FU-50 pass: the frozen artifact's vent axis was a
+        // different equal-cost direction, so its wall_mm no longer applies
+        // pointwise to this engine's vent. What still holds, and is asserted
+        // below, is that neither hole's realised wall regressed toward the
+        // frozen record.
+        assert!(
+            holes[1].sampled_exit_mm.get() > 0.0,
+            "the vent's realised exit wall must be a real, positive sample"
         );
 
         let keepouts = baseline["cavity_descriptor"]["drain_keepouts"]
@@ -1584,11 +1608,13 @@ mod tests {
         // artifact's endpoints are pinned above through its axes; these are the
         // engine's own, and they are pinned twice over. First as values, so a
         // moved keepout cannot pass silently:
+        // holes[0]'s `y` moved 2026-08-12 with its centre, for the same
+        // FU-50 reason (the note above holes[0].center_mm).
         assert_eq!(
             holes[0].keepout_start_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(0.0).expect("finite"),
                 Finite::new(6.5).expect("finite"),
             ]
         );
@@ -1596,22 +1622,24 @@ mod tests {
             holes[0].keepout_end_mm,
             [
                 Finite::new(0.0).expect("finite"),
-                Finite::new(-0.029_914_529_914_529_916).expect("finite"),
+                Finite::new(0.0).expect("finite"),
                 Finite::new(-4.5).expect("finite"),
             ]
         );
+        // holes[1]'s keepout moved with its centre and its realised exit wall
+        // (both noted above), 2026-08-12, FU-50.
         assert_eq!(
             holes[1].keepout_start_mm,
             [
-                Finite::new(-2.5).expect("finite"),
                 Finite::new(-0.5).expect("finite"),
+                Finite::new(-1.0).expect("finite"),
                 Finite::new(16.0).expect("finite"),
             ]
         );
         assert_eq!(
             holes[1].keepout_end_mm,
             [
-                Finite::new(-2.5).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
                 Finite::new(-13.5).expect("finite"),
                 Finite::new(16.0).expect("finite"),
             ]

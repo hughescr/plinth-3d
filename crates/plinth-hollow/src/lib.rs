@@ -1670,24 +1670,13 @@ fn boolean_limits_for_h0(
     })
 }
 
-const MAX_RASTER_SUBDIVISION_ROUNDS: u8 = 10;
-const RASTER_STACK_CAPACITY: usize = 1 + 3 * MAX_RASTER_SUBDIVISION_ROUNDS as usize;
-
-#[derive(Clone, Copy)]
-struct RasterNode {
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    depth: u8,
-}
-
 fn raster_work_item_count(
     mesh: &Mesh,
     spec: GridSpec,
     max_work_items: usize,
 ) -> Result<usize, HollowError> {
     let mut count = 0_usize;
-    walk_raster_leaves(mesh, spec, |_, _, _| {
+    walk_raster_candidates(mesh, spec, |_cell, _overlaps| {
         count = count
             .checked_add(1)
             .ok_or(HollowError::ResourceAccountingOverflow)?;
@@ -1707,22 +1696,31 @@ fn voxelize_filled(
     spec: GridSpec,
     expected_work_items: usize,
 ) -> Result<VoxelGrid, HollowError> {
-    // Frozen source: `trimesh.voxelized(pitch).fill()`. Its default
-    // `subdivide` voxelizer recursively quarters each triangle until every
-    // edge is at most pitch/2, rounds each resulting vertex to a grid point,
-    // then `binary_fill_holes` fills the 6-connected exterior complement.
-    // Point-in-mesh and closest-surface tests are a different voxelizer: their
-    // boundary bands are not the source field and can put an H1 candidate
-    // outside the Boolean cavity.
+    // Area-proportional conservative rasterizer (FU-50). See
+    // docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md
+    // §3 ("the frozen rasterizer is replaced, and the replacement is proven
+    // first"). This is no longer a reproduction of trimesh's `subdivide`
+    // voxelizer: that freeze was lifted by the ruling above, which the FU-50
+    // journal row and the delta table recorded before this path shipped. A
+    // voxel is marked when its axis-aligned cube (centred on the voxel, half
+    // extent one pitch/2) exactly overlaps a source triangle, decided by the
+    // 13-axis separating-axis test (`triangle_cube_overlaps`); candidate
+    // cells are enumerated by walking, for each triangle, the columns of its
+    // dilated index-space bounding box along the two axes orthogonal to the
+    // triangle's dominant normal axis, and for each column only the narrow
+    // span of the third axis the triangle's plane can reach there
+    // (`walk_triangle_candidates`). `binary_fill_holes`'s 6-connected exterior
+    // flood (`fill_voxel_holes`) is unchanged.
     let mut occupancy = vec![false; spec.count];
     let mut observed_work_items = 0_usize;
-    walk_raster_leaves(mesh, spec, |a, b, c| {
+    walk_raster_candidates(mesh, spec, |cell, overlaps| {
         observed_work_items = observed_work_items
             .checked_add(1)
             .ok_or(HollowError::ResourceAccountingOverflow)?;
-        mark_voxel_vertex(a, spec, &mut occupancy)?;
-        mark_voxel_vertex(b, spec, &mut occupancy)?;
-        mark_voxel_vertex(c, spec, &mut occupancy)
+        if overlaps {
+            mark_voxel_index(cell, spec, &mut occupancy)?;
+        }
+        Ok(())
     })?;
     if observed_work_items != expected_work_items {
         return Err(HollowError::RasterWorkMismatch {
@@ -1741,137 +1739,251 @@ fn voxelize_filled(
     })
 }
 
-fn walk_raster_leaves(
+/// Below this squared normal length a triangle is treated as degenerate
+/// (zero-area or numerically indistinguishable from it) and candidate
+/// generation falls back to a plain dilated-AABB scan rather than dividing by
+/// a near-zero dominant-axis normal component.
+const DEGENERATE_NORMAL_SQ: f64 = 1e-18;
+
+/// WORK ITEM = one candidate voxel cell tested against one triangle (not one
+/// cell marked). Both callers (`raster_work_item_count`, `voxelize_filled`)
+/// call `visit` once per candidate exactly, with the exact overlap verdict
+/// already decided, so the two passes agree on the count by construction —
+/// candidate generation depends only on `mesh` and `spec`, never on `visit`.
+fn walk_raster_candidates(
     mesh: &Mesh,
     spec: GridSpec,
-    mut visit: impl FnMut([f64; 3], [f64; 3], [f64; 3]) -> Result<(), HollowError>,
+    mut visit: impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
 ) -> Result<(), HollowError> {
     for triangle in mesh.tris() {
-        let [a, b, c] = *triangle;
-        let point = |index| {
-            mesh.verts()
+        let [ia, ib, ic] = *triangle;
+        let point = |index: u32| -> Result<[f64; 3], HollowError> {
+            let world = mesh
+                .verts()
                 .get(usize::try_from(index).map_err(|_| HollowError::VoxelGridTooLarge)?)
                 .copied()
-                .ok_or(HollowError::VoxelGridTooLarge)
+                .ok_or(HollowError::VoxelGridTooLarge)?;
+            to_index_space(world, spec)
         };
-        let mut stack = [None; RASTER_STACK_CAPACITY];
-        stack[0] = Some(RasterNode {
-            a: point(a)?,
-            b: point(b)?,
-            c: point(c)?,
-            depth: 0,
-        });
-        let mut stack_len = 1_usize;
-        while stack_len > 0 {
-            stack_len -= 1;
-            let node = stack[stack_len]
-                .take()
-                .ok_or(HollowError::ResourceAccountingOverflow)?;
-            if raster_leaf(node, spec.pitch) {
-                visit(node.a, node.b, node.c)?;
+        let tri = [point(ia)?, point(ib)?, point(ic)?];
+        walk_triangle_candidates(tri, spec, &mut visit)?;
+    }
+    Ok(())
+}
+
+fn to_index_space(point: [f64; 3], spec: GridSpec) -> Result<[f64; 3], HollowError> {
+    let mut out = [0.0; 3];
+    for axis in 0..3 {
+        let value = (point[axis] - spec.origin[axis]) / spec.pitch;
+        if !value.is_finite() {
+            return Err(HollowError::VoxelGridTooLarge);
+        }
+        out[axis] = value;
+    }
+    Ok(out)
+}
+
+/// Dilated per-axis index-space bounding box of `tri`, clamped to `spec`'s
+/// voxel index range: `[lo, hi]` inclusive on each axis, or `lo > hi` on an
+/// axis whose dilated extent misses the grid entirely.
+fn dilated_index_aabb(
+    tri: [[f64; 3]; 3],
+    spec: GridSpec,
+) -> Result<[[isize; 2]; 3], HollowError> {
+    let mut axis_range = [[0_isize; 2]; 3];
+    for axis in 0..3 {
+        let lo = tri[0][axis].min(tri[1][axis]).min(tri[2][axis]) - 0.5;
+        let hi = tri[0][axis].max(tri[1][axis]).max(tri[2][axis]) + 0.5;
+        if !lo.is_finite() || !hi.is_finite() {
+            return Err(HollowError::VoxelGridTooLarge);
+        }
+        let dim_max = isize::try_from(spec.dims[axis].saturating_sub(1))
+            .map_err(|_| HollowError::VoxelGridTooLarge)?;
+        let lo_index = (lo.floor() as isize).max(0);
+        let hi_index = (hi.ceil() as isize).min(dim_max);
+        axis_range[axis] = [lo_index, hi_index];
+    }
+    Ok(axis_range)
+}
+
+/// Candidate cell enumeration for one triangle, in index space (see the
+/// `voxelize_filled` doc comment for the algorithm). Every candidate this
+/// walks is exactly SAT-tested, so over-generating candidates costs work but
+/// never marks a false positive; the correctness property that matters is
+/// that no cell overlapping the triangle is skipped (proven in the FU-50
+/// journal section this landed with).
+fn walk_triangle_candidates(
+    tri: [[f64; 3]; 3],
+    spec: GridSpec,
+    visit: &mut impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
+) -> Result<(), HollowError> {
+    let axis_range = dilated_index_aabb(tri, spec)?;
+    if axis_range.iter().any(|range| range[0] > range[1]) {
+        return Ok(());
+    }
+
+    let [a, b, c] = tri;
+    let normal = cross3(sub3(b, a), sub3(c, a));
+    let normal_sq = dot3(normal, normal);
+    if !normal_sq.is_finite() || normal_sq < DEGENERATE_NORMAL_SQ {
+        return scan_dilated_aabb(tri, axis_range, visit);
+    }
+
+    let k_axis = if normal[0].abs() >= normal[1].abs() && normal[0].abs() >= normal[2].abs() {
+        0
+    } else if normal[1].abs() >= normal[2].abs() {
+        1
+    } else {
+        2
+    };
+    let (p_axis, q_axis) = match k_axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let n_k = normal[k_axis];
+
+    for i in axis_range[p_axis][0]..=axis_range[p_axis][1] {
+        for j in axis_range[q_axis][0]..=axis_range[q_axis][1] {
+            let mut wmin = f64::INFINITY;
+            let mut wmax = f64::NEG_INFINITY;
+            for dp in [-0.5, 0.5] {
+                for dq in [-0.5, 0.5] {
+                    let p = i as f64 + dp;
+                    let q = j as f64 + dq;
+                    let w = a[k_axis]
+                        - (normal[p_axis] * (p - a[p_axis]) + normal[q_axis] * (q - a[q_axis]))
+                            / n_k;
+                    wmin = wmin.min(w);
+                    wmax = wmax.max(w);
+                }
+            }
+            if !wmin.is_finite() || !wmax.is_finite() {
+                return Err(HollowError::VoxelGridTooLarge);
+            }
+            let k_lo = ((wmin - 0.5).ceil() as isize).max(axis_range[k_axis][0]);
+            let k_hi = ((wmax + 0.5).floor() as isize).min(axis_range[k_axis][1]);
+            if k_lo > k_hi {
                 continue;
             }
-            if node.depth >= MAX_RASTER_SUBDIVISION_ROUNDS {
-                return Err(HollowError::RasterSubdivisionLimitExceeded);
-            }
-            let ab = midpoint(node.a, node.b);
-            let bc = midpoint(node.b, node.c);
-            let ca = midpoint(node.c, node.a);
-            let next = node.depth + 1;
-            let children = [
-                RasterNode {
-                    a: ab,
-                    b: bc,
-                    c: ca,
-                    depth: next,
-                },
-                RasterNode {
-                    a: ca,
-                    b: bc,
-                    c: node.c,
-                    depth: next,
-                },
-                RasterNode {
-                    a: ab,
-                    b: node.b,
-                    c: bc,
-                    depth: next,
-                },
-                RasterNode {
-                    a: node.a,
-                    b: ab,
-                    c: ca,
-                    depth: next,
-                },
-            ];
-            let next_len = stack_len
-                .checked_add(children.len())
-                .ok_or(HollowError::ResourceAccountingOverflow)?;
-            if next_len > RASTER_STACK_CAPACITY {
-                return Err(HollowError::ResourceAccountingOverflow);
-            }
-            for child in children {
-                stack[stack_len] = Some(child);
-                stack_len += 1;
+            for k in k_lo..=k_hi {
+                let mut cell = [0_usize; 3];
+                cell[p_axis] = i as usize;
+                cell[q_axis] = j as usize;
+                cell[k_axis] = k as usize;
+                let center = [cell[0] as f64, cell[1] as f64, cell[2] as f64];
+                let overlaps = triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]);
+                visit(cell, overlaps)?;
             }
         }
     }
     Ok(())
 }
 
-fn raster_leaf(node: RasterNode, pitch: f64) -> bool {
-    let max_edge = pitch / 2.0;
-    !edge_too_long(node.a, node.b, max_edge)
-        && !edge_too_long(node.b, node.c, max_edge)
-        && !edge_too_long(node.c, node.a, max_edge)
+/// Fallback candidate generation for a degenerate (zero-area or non-finite
+/// normal) triangle: every cell in its own dilated bounding box, exactly
+/// SAT-tested. `axis_range` is already dilated and clamped, so this is small
+/// for the point- or edge-like triangles that reach it.
+fn scan_dilated_aabb(
+    tri: [[f64; 3]; 3],
+    axis_range: [[isize; 2]; 3],
+    visit: &mut impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
+) -> Result<(), HollowError> {
+    for x in axis_range[0][0]..=axis_range[0][1] {
+        for y in axis_range[1][0]..=axis_range[1][1] {
+            for z in axis_range[2][0]..=axis_range[2][1] {
+                let cell = [x as usize, y as usize, z as usize];
+                let center = [x as f64, y as f64, z as f64];
+                let overlaps = triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]);
+                visit(cell, overlaps)?;
+            }
+        }
+    }
+    Ok(())
 }
 
-fn edge_too_long(left: [f64; 3], right: [f64; 3], max_edge: f64) -> bool {
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| (left - right).powi(2))
-        .sum::<f64>()
-        .sqrt()
-        > max_edge
+fn sub3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
 
-fn midpoint(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+fn cross3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [
-        (left[0] + right[0]) / 2.0,
-        (left[1] + right[1]) / 2.0,
-        (left[2] + right[2]) / 2.0,
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
     ]
 }
 
-fn mark_voxel_vertex(
-    point: [f64; 3],
+fn dot3(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+/// Exact triangle/axis-aligned-box overlap: the 13-axis separating-axis test
+/// (Akenine-Moller 2001; Ericson, *Real-Time Collision Detection* §5.2.9).
+/// `half` is the box's per-axis half-extent about `center`. Touching exactly
+/// (a shared point, edge, or face) counts as overlap: every comparison is a
+/// non-strict separation test, so nothing that only grazes the cube is
+/// missed. Degenerate triangle edges or a degenerate triangle normal produce
+/// a zero test axis, which trivially fails to separate rather than needing a
+/// special case.
+fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) -> bool {
+    let v = [
+        sub3(tri[0], center),
+        sub3(tri[1], center),
+        sub3(tri[2], center),
+    ];
+    let e = [sub3(v[1], v[0]), sub3(v[2], v[1]), sub3(v[0], v[2])];
+
+    for axis in 0..3 {
+        let lo = v[0][axis].min(v[1][axis]).min(v[2][axis]);
+        let hi = v[0][axis].max(v[1][axis]).max(v[2][axis]);
+        if lo > half[axis] || hi < -half[axis] {
+            return false;
+        }
+    }
+
+    const BOX_AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for box_axis in BOX_AXES {
+        for edge in e {
+            let axis = cross3(box_axis, edge);
+            let p0 = dot3(axis, v[0]);
+            let p1 = dot3(axis, v[1]);
+            let p2 = dot3(axis, v[2]);
+            let r = half[0] * axis[0].abs() + half[1] * axis[1].abs() + half[2] * axis[2].abs();
+            let lo = p0.min(p1).min(p2);
+            let hi = p0.max(p1).max(p2);
+            if lo > r || hi < -r {
+                return false;
+            }
+        }
+    }
+
+    let normal = cross3(e[0], e[1]);
+    let d = dot3(normal, v[0]);
+    let r =
+        half[0] * normal[0].abs() + half[1] * normal[1].abs() + half[2] * normal[2].abs();
+    if d > r || d < -r {
+        return false;
+    }
+
+    true
+}
+
+fn mark_voxel_index(
+    cell: [usize; 3],
     spec: GridSpec,
     occupancy: &mut [bool],
 ) -> Result<(), HollowError> {
-    let mut index = [0_usize; 3];
-    for axis in 0..3 {
-        let grid = round_ties_even(point[axis] / spec.pitch);
-        let origin = round_ties_even(spec.origin[axis] / spec.pitch);
-        let relative = grid - origin;
-        if !relative.is_finite()
-            || relative < 0.0
-            || relative >= spec.dims[axis] as f64
-            || relative.fract() != 0.0
-        {
-            return Err(HollowError::VoxelGridTooLarge);
-        }
-        index[axis] = relative as usize;
-    }
     let plane = spec.dims[0]
         .checked_mul(spec.dims[1])
         .ok_or(HollowError::VoxelGridTooLarge)?;
-    let flat = index[0]
+    let flat = cell[0]
         .checked_add(
-            index[1]
+            cell[1]
                 .checked_mul(spec.dims[0])
                 .ok_or(HollowError::VoxelGridTooLarge)?,
         )
-        .and_then(|value| value.checked_add(index[2].checked_mul(plane)?))
+        .and_then(|value| value.checked_add(cell[2].checked_mul(plane)?))
         .ok_or(HollowError::VoxelGridTooLarge)?;
     *occupancy
         .get_mut(flat)
@@ -2396,15 +2508,13 @@ pub enum HollowError {
     #[error("voxel grid has {cells} cells, exceeding the H0 limit {max_cells}")]
     VoxelCellLimitExceeded { cells: usize, max_cells: usize },
     #[error(
-        "frozen voxel subdivision exceeded the caller work cap {max_work_items} at item {work_items}"
+        "voxel rasterization exceeded the caller work cap {max_work_items} at item {work_items}"
     )]
     RasterWorkLimitExceeded {
         work_items: usize,
         max_work_items: usize,
     },
-    #[error("frozen voxel subdivision exceeded trimesh's exact ten-round limit")]
-    RasterSubdivisionLimitExceeded,
-    #[error("the second frozen raster pass disagreed with its preflight work count")]
+    #[error("the second raster pass disagreed with its preflight work count")]
     RasterWorkMismatch {
         expected_work_items: usize,
         observed_work_items: usize,
@@ -2604,7 +2714,19 @@ mod tests {
         // selected as cavity, so the shell's wall at each pole was a fraction
         // of a millimetre rather than the stated 2.5 mm. See the 2026-08-10
         // journal section.
-        assert_eq!(sphere.cavity_voxels, 16_491);
+        //
+        // Moved 16,491 -> 16,697 on 2026-08-12 by FU-50's area-proportional
+        // conservative rasterizer replacing the frozen midpoint-quartering
+        // one (decisions/2026-08-12-owner-rulings-fu-batch.md §3). The new
+        // marked-voxel set is a strict superset of the old one (proved in
+        // `frozen_walker_marks_a_subset_of_the_area_proportional_rasterizer`
+        // below): every old leaf vertex lies inside the cube of the voxel it
+        // rounds to, so the new exact SAT test marks that voxel too, and may
+        // mark others the old sampled-vertex rounding missed. More marked
+        // surface material reads the EDT slightly deeper, so occupancy above
+        // the wall threshold grows and the cavity gains voxels — the
+        // direction the ruling records as expected, not a wall improvement.
+        assert_eq!(sphere.cavity_voxels, 16_697);
 
         // Record of record: make_box is the bounding-box-filling case. Every
         // one of its six faces is tangent to its own grid, so its occupancy is
@@ -2792,7 +2914,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_subdivision_preflight_has_exact_cap_and_stops_before_raster_allocation() {
+    fn raster_preflight_has_exact_cap_and_stops_before_raster_allocation() {
         let spec = GridSpec {
             origin: [0.0, 0.0, 0.0],
             dims: [5, 5, 5],
@@ -2815,15 +2937,367 @@ mod tests {
             Err(HollowError::RasterWorkLimitExceeded { .. })
         ));
 
-        let malicious = Mesh::new(
+        // FU-50: a triangle far larger than the grid no longer explodes the
+        // old recursive-quartering depth limit (`4^ceil(log2(L_max/(pitch/2)))`,
+        // independent of area). Candidate generation is bounded by the
+        // admitted grid itself — for one triangle, at most one candidate per
+        // grid cell — never by the triangle's edge length.
+        let huge = Mesh::new(
             vec![[0.0, 0.0, 0.0], [300.0, 0.0, 0.0], [0.0, 300.0, 0.0]],
             vec![[0, 1, 2]],
         )
         .expect("finite triangle");
-        assert!(matches!(
-            raster_work_item_count(&malicious, spec, usize::MAX),
-            Err(HollowError::RasterSubdivisionLimitExceeded)
+        let huge_work = raster_work_item_count(&huge, spec, usize::MAX)
+            .expect("area-proportional work stays bounded by the grid, not the edge length");
+        assert!(
+            huge_work <= spec.count,
+            "one triangle cannot generate more candidates than the grid has cells: {huge_work}"
+        );
+    }
+
+    /// FU-50's exact overlap primitive, against hand (and search-verified;
+    /// see the case below) cases. Every comparison in `triangle_cube_overlaps`
+    /// is non-strict, so a triangle that only grazes the cube must still mark
+    /// it -- the face/corner/edge cases below are the boundary-inclusive
+    /// claim, not just the interior one.
+    #[test]
+    fn triangle_cube_overlap_hand_computed_cases() {
+        let half = [0.5, 0.5, 0.5];
+        let center = [0.0, 0.0, 0.0];
+
+        // Strictly inside.
+        assert!(triangle_cube_overlaps(
+            [[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.1, 0.0]],
+            center,
+            half,
         ));
+        // Grazing exactly one face (z = 0.5).
+        assert!(triangle_cube_overlaps(
+            [[-0.1, -0.1, 0.5], [0.1, -0.1, 0.5], [0.0, 0.1, 0.5]],
+            center,
+            half,
+        ));
+        // Grazing exactly one corner (0.5, 0.5, 0.5).
+        assert!(triangle_cube_overlaps(
+            [[0.5, 0.5, 0.5], [2.0, 0.5, 0.5], [0.5, 2.0, 0.5]],
+            center,
+            half,
+        ));
+        // Grazing exactly one edge (x = y = 0.5).
+        assert!(triangle_cube_overlaps(
+            [[0.5, 0.5, -2.0], [0.5, 0.5, 2.0], [2.0, 2.0, 0.0]],
+            center,
+            half,
+        ));
+        // A triangle at constant x = 0.6: its own (undilated) AABB does not
+        // even reach the cube, caught by the plain box-axis test.
+        assert!(!triangle_cube_overlaps(
+            [[0.6, -2.0, -2.0], [0.6, 2.0, -2.0], [0.6, 0.0, 2.0]],
+            center,
+            half,
+        ));
+        // A triangle whose per-axis AABB overlaps the cube on x, y and z
+        // independently, but which does not actually touch it: only one of
+        // the nine edge-cross-box-axis tests catches this (box x-axis cross
+        // edge 1, verified by exhaustive random search over triangles whose
+        // per-axis AABB overlaps the cube, then rounded to clean values and
+        // re-verified). This is the case a plain per-axis AABB overlap check
+        // would wrongly mark.
+        let sliver: [[f64; 3]; 3] = [[-1.5, 2.0, 0.5], [1.0, 1.5, 0.0], [0.0, 0.5, 2.0]];
+        for axis in 0..3 {
+            let lo = sliver[0][axis].min(sliver[1][axis]).min(sliver[2][axis]);
+            let hi = sliver[0][axis].max(sliver[1][axis]).max(sliver[2][axis]);
+            assert!(
+                lo <= half[axis] && hi >= -half[axis],
+                "fixture must overlap the cube's AABB on every axis to be a meaningful case"
+            );
+        }
+        assert!(!triangle_cube_overlaps(sliver, center, half));
+
+        // A general (non-axis-aligned, non-unit) box half-extent still works.
+        assert!(triangle_cube_overlaps(
+            [[-0.2, -0.2, -0.2], [0.2, -0.2, -0.2], [0.0, 0.2, 0.0]],
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 0.5],
+        ));
+    }
+
+    fn mesh_surface_area_mm2(mesh: &Mesh) -> f64 {
+        mesh.tris()
+            .iter()
+            .map(|triangle| {
+                let [ia, ib, ic] = *triangle;
+                let a = mesh.verts()[ia as usize];
+                let b = mesh.verts()[ib as usize];
+                let c = mesh.verts()[ic as usize];
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let cross = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                0.5 * (cross[0].powi(2) + cross[1].powi(2) + cross[2].powi(2)).sqrt()
+            })
+            .sum()
+    }
+
+    /// The ruling's area-proportionality claim, pinned on the two smallest
+    /// committed fixtures and checked against the corpus's own surface area
+    /// rather than a remembered number.
+    #[test]
+    fn raster_work_profile_is_area_proportional_and_pinned() {
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        let cap = H0AdmissionLimits::production().max_raster_work_items();
+
+        for (name, expected_work_items, max_ratio_to_area) in [
+            ("Sphere.prepped.oriented-solid.stl", 161_491_usize, 50.0_f64),
+            ("make_box.prepped.oriented-solid.stl", 5_292_usize, 50.0_f64),
+        ] {
+            let mesh = frozen_mesh(name);
+            let spec = grid_spec(&mesh, pitch).expect("grid spec");
+            let work =
+                raster_work_item_count(&mesh, spec, cap).expect("bounded corpus fixture work");
+            assert_eq!(work, expected_work_items, "{name}: raster_work_items moved");
+            let area_cells = mesh_surface_area_mm2(&mesh) / pitch.powi(2);
+            let ratio = work as f64 / area_cells;
+            assert!(
+                ratio < max_ratio_to_area,
+                "{name}: work/area-cells ratio {ratio} is not the small constant the ruling claims"
+            );
+        }
+    }
+
+    /// The two-pass count/mark contract `RasterWorkMismatch` exists to guard:
+    /// candidate generation depends only on `(mesh, spec)`, so the count pass
+    /// and the mark pass must always agree, on every fixture.
+    #[test]
+    fn raster_count_and_mark_passes_agree_on_every_fixture() {
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        let cap = H0AdmissionLimits::production().max_raster_work_items();
+        for name in [
+            "Cylinder.prepped.oriented-solid.stl",
+            "make_box.prepped.oriented-solid.stl",
+            "make_overhang_table.prepped.stl",
+            "make_raking_blade.prepped.stl",
+            "make_thin_fin.prepped.stl",
+            "make_toed_slab.prepped.stl",
+            "Sphere.prepped.oriented-solid.stl",
+        ] {
+            let mesh = frozen_mesh(name);
+            let spec = grid_spec(&mesh, pitch).expect("grid spec");
+            let work = raster_work_item_count(&mesh, spec, cap).expect("bounded fixture work");
+            voxelize_filled(&mesh, spec, work)
+                .unwrap_or_else(|error| panic!("{name}: two-pass mismatch: {error}"));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // FU-50 reference oracle: the frozen midpoint-quartering rasterizer,
+    // retained here `#[cfg(test)]`-only (decisions/2026-08-12-owner-rulings-
+    // fu-batch.md §3) so the superset property stays mechanically checkable
+    // against the *real* production `walk_raster_candidates`, now that the
+    // frozen walker itself is gone from production. A second, independent
+    // copy of both walkers lives in `examples/raster_delta.rs` for the
+    // corpus-wide delta measurement recorded in the journal; this one exists
+    // only to drive the test below.
+    // -----------------------------------------------------------------
+
+    const FROZEN_MAX_RASTER_SUBDIVISION_ROUNDS: u8 = 10;
+
+    #[derive(Clone, Copy)]
+    struct FrozenRasterNode {
+        a: [f64; 3],
+        b: [f64; 3],
+        c: [f64; 3],
+        depth: u8,
+    }
+
+    fn frozen_midpoint(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+        [
+            (left[0] + right[0]) / 2.0,
+            (left[1] + right[1]) / 2.0,
+            (left[2] + right[2]) / 2.0,
+        ]
+    }
+
+    fn frozen_edge_too_long(left: [f64; 3], right: [f64; 3], max_edge: f64) -> bool {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            > max_edge
+    }
+
+    fn frozen_raster_leaf(node: FrozenRasterNode, pitch: f64) -> bool {
+        let max_edge = pitch / 2.0;
+        !frozen_edge_too_long(node.a, node.b, max_edge)
+            && !frozen_edge_too_long(node.b, node.c, max_edge)
+            && !frozen_edge_too_long(node.c, node.a, max_edge)
+    }
+
+    fn frozen_mark_voxel_vertex(point: [f64; 3], spec: GridSpec, occupancy: &mut [bool]) {
+        let mut index = [0_usize; 3];
+        for axis in 0..3 {
+            let grid = round_ties_even(point[axis] / spec.pitch);
+            let origin = round_ties_even(spec.origin[axis] / spec.pitch);
+            index[axis] = (grid - origin) as usize;
+        }
+        mark_voxel_index(index, spec, occupancy).expect("fixture-sized grid");
+    }
+
+    /// The frozen rasterizer's marked-voxel set, for one small fixture. No
+    /// cap and a bare `assert!` on the ten-round limit: this only ever runs
+    /// on the small corpus fixtures below, never on production input.
+    fn frozen_marked_set(mesh: &Mesh, spec: GridSpec) -> Vec<bool> {
+        let mut occupancy = vec![false; spec.count];
+        for triangle in mesh.tris() {
+            let [ia, ib, ic] = *triangle;
+            let point = |index: u32| mesh.verts()[index as usize];
+            let mut stack = vec![FrozenRasterNode {
+                a: point(ia),
+                b: point(ib),
+                c: point(ic),
+                depth: 0,
+            }];
+            while let Some(node) = stack.pop() {
+                if frozen_raster_leaf(node, spec.pitch) {
+                    frozen_mark_voxel_vertex(node.a, spec, &mut occupancy);
+                    frozen_mark_voxel_vertex(node.b, spec, &mut occupancy);
+                    frozen_mark_voxel_vertex(node.c, spec, &mut occupancy);
+                    continue;
+                }
+                assert!(
+                    node.depth < FROZEN_MAX_RASTER_SUBDIVISION_ROUNDS,
+                    "frozen reference oracle: fixture exceeded the ten-round subdivision limit"
+                );
+                let ab = frozen_midpoint(node.a, node.b);
+                let bc = frozen_midpoint(node.b, node.c);
+                let ca = frozen_midpoint(node.c, node.a);
+                let next = node.depth + 1;
+                stack.push(FrozenRasterNode {
+                    a: ab,
+                    b: bc,
+                    c: ca,
+                    depth: next,
+                });
+                stack.push(FrozenRasterNode {
+                    a: ca,
+                    b: bc,
+                    c: node.c,
+                    depth: next,
+                });
+                stack.push(FrozenRasterNode {
+                    a: ab,
+                    b: node.b,
+                    c: bc,
+                    depth: next,
+                });
+                stack.push(FrozenRasterNode {
+                    a: node.a,
+                    b: ab,
+                    c: ca,
+                    depth: next,
+                });
+            }
+        }
+        occupancy
+    }
+
+    fn production_marked_set(mesh: &Mesh, spec: GridSpec) -> Vec<bool> {
+        let mut occupancy = vec![false; spec.count];
+        walk_raster_candidates(mesh, spec, |cell, overlaps| {
+            if overlaps {
+                mark_voxel_index(cell, spec, &mut occupancy)?;
+            }
+            Ok(())
+        })
+        .expect("bounded fixture");
+        occupancy
+    }
+
+    /// **The ruling's precondition.** Every voxel the frozen rasterizer would
+    /// have marked is also marked by the area-proportional one -- proved in
+    /// the module doc as "every old leaf vertex lies inside the cube of the
+    /// voxel it rounds to", and checked here mechanically on real geometry
+    /// rather than only argued. Also checked, corpus-wide with exact counts,
+    /// by `examples/raster_delta.rs` (see the FU-50 journal section it wrote).
+    #[test]
+    fn frozen_walker_marks_a_subset_of_the_area_proportional_rasterizer() {
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        for name in [
+            "make_box.prepped.oriented-solid.stl",
+            "Cylinder.prepped.oriented-solid.stl",
+            "Sphere.prepped.oriented-solid.stl",
+            "make_thin_fin.prepped.stl",
+            "make_raking_blade.prepped.stl",
+        ] {
+            let mesh = frozen_mesh(name);
+            let spec = grid_spec(&mesh, pitch).expect("grid spec");
+            let old = frozen_marked_set(&mesh, spec);
+            let new = production_marked_set(&mesh, spec);
+            for (index, (old_marked, new_marked)) in old.iter().zip(&new).enumerate() {
+                assert!(
+                    !*old_marked || *new_marked,
+                    "{name}: voxel {index} was marked by the frozen rasterizer but not by \
+                     the area-proportional one -- the superset property is violated"
+                );
+            }
+        }
+    }
+
+    /// **FU-50's acceptance test.** `Round 50.stl` and `Round 100.stl` used to
+    /// refuse with `RasterWorkLimitExceeded` under the frozen rasterizer
+    /// (1.150x and 1.340x the cap; see the FU-50 journal row). Neither is
+    /// committed -- both live read-only under `minis-to-process/`, beside the
+    /// workspace -- so this follows the same loud, `#[ignore]`-by-default
+    /// pattern as `plinth-decimate`'s `local_minis_repair` harness: silent in
+    /// `cargo test --workspace`, and a loud, named failure if run explicitly
+    /// without the fixtures where the harness expects them.
+    #[test]
+    #[ignore = "reads local, uncommitted minis-to-process STLs"]
+    fn round_50_and_round_100_rasterize_under_the_unchanged_production_cap() {
+        let directory = match std::env::var_os("PLINTH_MINIS_DIR") {
+            Some(path) => PathBuf::from(path),
+            None => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("plinth-hollow must remain in the workspace crates directory")
+                .parent()
+                .expect("the workspace must have a parent directory")
+                .join("minis-to-process"),
+        };
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        let cap = H0AdmissionLimits::production().max_raster_work_items();
+        for name in ["Round 50.stl", "Round 100.stl"] {
+            let path = directory.join(name);
+            assert!(
+                path.is_file(),
+                "LocalMinisMissing: {} not found. Point PLINTH_MINIS_DIR at the read-only \
+                 minis directory (FU-50's acceptance test needs {name} to rasterize under \
+                 the cap).",
+                path.display()
+            );
+            let mesh = load_binary_stl(&path, WeldPolicy::None)
+                .unwrap_or_else(|error| panic!("{name}: could not load: {error}"));
+            let spec = grid_spec(&mesh, pitch).expect("grid spec");
+            let work = raster_work_item_count(&mesh, spec, cap);
+            let work = work.unwrap_or_else(|error| {
+                panic!(
+                    "FU-50 regression: {name} must rasterize under the unchanged production \
+                     cap {cap}, got {error}"
+                )
+            });
+            println!(
+                "{name}: {work} raster work items ({:.4}x cap {cap})",
+                work as f64 / cap as f64
+            );
+        }
     }
 
     #[test]
@@ -3747,9 +4221,17 @@ mod corpus_cavity_repair {
         let (unrepaired, grid) = unrepaired_cavity_mask(&source, settings);
         let raw = marching_cavity(&unrepaired, grid.origin, grid.pitch)
             .expect("the unrepaired mask still extracts a closed surface");
+        // Moved (0, 8, 26) -> (0, 16, 50) on 2026-08-12 by FU-50's area-
+        // proportional conservative rasterizer replacing the frozen midpoint-
+        // quartering one (decisions/2026-08-12-owner-rulings-fu-batch.md §3):
+        // the marked-voxel set only grows, so the lattice-diagonal thread
+        // across the waist this fixture is built to exercise now spans more
+        // non-manifold and point-only faces. Still watertight (0 boundary
+        // edges) but non-manifold, which is the whole premise this fixture
+        // proves.
         assert_eq!(
             cut_census(&raw),
-            (0, 8, 26),
+            (0, 16, 50),
             "the fixture no longer exhibits the defect the repair exists to fix: \
              watertight but non-manifold is the whole premise"
         );
@@ -3759,21 +4241,29 @@ mod corpus_cavity_repair {
         //    equalities.
         let candidate = create_shell(source, settings).expect("the repaired dumbbell hollows");
         let resources = candidate.cavity().resources();
-        assert_eq!(resources.cavity_critical_cells(), 4);
-        assert_eq!(resources.cavity_repaired_voxels(), 4);
+        // Moved 4 -> 8 on 2026-08-12 by FU-50: the extra non-manifold/
+        // point-only faces above (8 -> 16, 26 -> 50) come from a wider
+        // lattice-diagonal thread, which the repair now finds more critical
+        // cells on.
+        assert_eq!(resources.cavity_critical_cells(), 8);
+        assert_eq!(resources.cavity_repaired_voxels(), 8);
         // The opening cell scan plus exactly one whole-grid re-selection: the
         // removal stranded part of the component, which is the second
         // `O(cells)` domain the cell-visit bound does not cover.
         assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
         // The 98 x 98 x 41 grid's own `(n+1)³` opening scan plus eight cells per
-        // changed voxel, arrived at rather than remembered.
+        // changed voxel, arrived at rather than remembered. `voxel_count` is
+        // `GridSpec::count` -- the admitted grid's cell total, computed from
+        // the mesh's own bounds -- so it is untouched by FU-50's rasterizer.
         assert_eq!(resources.voxel_count(), 393_764);
         let cells = 99 * 99 * 42;
         assert_eq!(
             resources.cavity_repair_cell_visits(),
             cells + 8 * resources.cavity_repaired_voxels()
         );
-        assert_eq!(resources.cavity_repair_cell_visits(), 411_674);
+        // Moved 411,674 -> 411,706 on 2026-08-12 by FU-50, tracking
+        // `cavity_repaired_voxels` above (4 -> 8, so +8*4 = 32 more visits).
+        assert_eq!(resources.cavity_repair_cell_visits(), 411_706);
 
         // 3. The end of the chain. Not one face of the shell or its cavity is
         //    cut, and the difference is one negative void inside positive
@@ -3831,9 +4321,19 @@ mod corpus_cavity_repair {
         // 2. The exact measurement, which is what the journal row states. These
         //    are integer combinatorics over a deterministic voxel field, so
         //    they are equalities, not tolerances.
-        assert_eq!(resources.cavity_critical_cells(), 70);
-        assert_eq!(resources.cavity_repaired_voxels(), 115);
-        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_880);
+        //
+        // Moved 70 -> 52 critical cells, 115 -> ??? repaired voxels, and
+        // 5,405,880 -> ??? cell visits on 2026-08-12 by FU-50's area-
+        // proportional conservative rasterizer (decisions/2026-08-12-owner-
+        // rulings-fu-batch.md §3). Unlike the pinched-dumbbell fixture above,
+        // this fell rather than grew: the well-composedness repair's critical-
+        // cell count is a property of the *local pinch pattern* the exact
+        // marking produces, not a monotone function of the (monotonically
+        // growing) marked-voxel set, so either direction is consistent with
+        // the superset proof.
+        assert_eq!(resources.cavity_critical_cells(), 52);
+        assert_eq!(resources.cavity_repaired_voxels(), 67);
+        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_496);
         // The opening cell scan and exactly one whole-grid re-selection. This
         // is the second `O(cells)` domain the cell-visit bound does not cover,
         // and it is here so that a change which turned the fixpoint into many
@@ -3851,13 +4351,16 @@ mod corpus_cavity_repair {
             resources.cavity_repair_cell_visits()
         );
 
-        // 4. The cavity that survived, and the shell built from it. 8,043.875
-        //    mm3 is 64,351 voxels at the frozen 0.5 mm pitch — the 64,466 the
-        //    wall selected, less the 115 the repair handed back.
+        // 4. The cavity that survived, and the shell built from it. Moved
+        //    8,043.875 -> 8,196.5 mm3 on 2026-08-12 by FU-50: 65,572 voxels at
+        //    the frozen 0.5 mm pitch (up from 64,351) — the 65,639 the wall
+        //    now selects (up from 64,466, tracking the marked-voxel set's
+        //    growth), less the 67 the repair hands back (down from 115; see
+        //    the note on `cavity_repaired_voxels` above).
         let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
-        assert_eq!(cavity_mm3, 8_043.875);
+        assert_eq!(cavity_mm3, 8_196.5);
         let pitch = candidate.cavity().frozen_voxel_pitch_mm().get();
-        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 64_351);
+        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 65_572);
 
         // 5. **The end of the causal chain FU-49 filed.** The shell carries the
         //    outer surface and the cavity together, and not one face of either
