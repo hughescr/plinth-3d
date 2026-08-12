@@ -39,7 +39,7 @@ use plinth_core::{m0_constants, ArtifactId, ModelId};
 use plinth_emit::{write as emit_write, EmitReport, EmitRequest};
 use plinth_support::{
     CoverageMeasurementError, CoverageMeasurementRequest, FinalSupportAuthority,
-    SupportPreparationLimits, SupportVerificationError, SupportVerificationSnapshot,
+    SupportVerificationError, SupportVerificationSnapshot,
 };
 use plinth_verify::{verify_coverage, CoverageReport, CoverageVerificationError};
 use serde::{Deserialize, Serialize};
@@ -215,24 +215,32 @@ impl GateRefusal {
 /// same production support policy, through
 /// [`SupportPreparationLimits::coverage_measurement_limits`].
 ///
+/// **A thin delegation to `plinth_support::registered_coverage_request`
+/// (FU-56).** That is now the one implementation: the coverage-closure
+/// controller and this gate must measure under the identical request, or
+/// closing coverage in the controller would not guarantee the gate agrees.
+/// This wrapper exists only to keep this crate's own [`GateRefusal`] mapping
+/// at the door, rather than leaking `plinth-support`'s setup error type into
+/// the gate's public error surface.
+///
 /// # Errors
 ///
-/// Returns [`GateRefusal::ConstantsUnavailable`] if the registry cannot be read
+/// Returns [`GateRefusal::ConstantsUnavailable`] /
+/// [`GateRefusal::ResourcePolicyUnavailable`] if the registry cannot be read
 /// and [`GateRefusal::InvalidCoverageRequest`] if the registered values do not
 /// form a valid request.
 pub fn registered_coverage_request() -> Result<CoverageMeasurementRequest, GateRefusal> {
-    let limits = SupportPreparationLimits::production()
-        .map_err(|error| GateRefusal::ResourcePolicyUnavailable(error.to_string()))?;
-    let constants = m0_constants().map_err(|_| GateRefusal::ConstantsUnavailable)?;
-    let policy = constants.placeholders();
-    let radius_mm = policy.coverage_radius_factor().diagnostic().get()
-        * policy.target_spacing_mm().diagnostic().get();
-    let patch_area_floor_mm2 = policy.voxel_pitch_mm().diagnostic().get().powi(2);
-    let limits = limits
-        .coverage_measurement_limits()
-        .map_err(GateRefusal::InvalidCoverageRequest)?;
-    CoverageMeasurementRequest::from_f64(radius_mm, patch_area_floor_mm2, limits)
-        .map_err(GateRefusal::InvalidCoverageRequest)
+    plinth_support::registered_coverage_request().map_err(|error| match error {
+        plinth_support::CoverageClosureSetupError::RegisteredConstantsUnavailable(_) => {
+            GateRefusal::ConstantsUnavailable
+        }
+        plinth_support::CoverageClosureSetupError::ResourcePolicyUnavailable(detail) => {
+            GateRefusal::ResourcePolicyUnavailable(detail)
+        }
+        plinth_support::CoverageClosureSetupError::InvalidCoverageRequest(source) => {
+            GateRefusal::InvalidCoverageRequest(source)
+        }
+    })
 }
 
 /// Judge one gate against the sealed snapshot.
@@ -455,6 +463,7 @@ fn judged_emission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_support::SupportPreparationLimits;
 
     #[test]
     fn every_named_gate_appears_exactly_once_in_the_consulted_set() {

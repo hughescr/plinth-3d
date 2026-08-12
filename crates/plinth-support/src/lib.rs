@@ -64,6 +64,13 @@ pub mod census;
 )]
 pub(crate) mod contact;
 mod coverage;
+/// The coverage-closure controller (FU-56): shared blocking predicate,
+/// registered request, typed refusal evidence and batch-first nomination.
+/// `pub` because [`SupportRunError::CoverageClosure`] carries
+/// [`coverage_closure::CoverageClosureRefusal`] in its public error surface,
+/// and `plinth_pipeline::gates::registered_coverage_request` delegates to
+/// [`coverage_closure::registered_coverage_request`].
+pub mod coverage_closure;
 mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
@@ -120,6 +127,11 @@ use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use coverage_closure::{
+    coverage_patch_is_blocking, registered_coverage_request, CoverageClosureAttempt,
+    CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason, CoverageClosureRefusal,
+    CoverageClosureSetupError,
+};
 pub use coverage_measurement::{
     CoverageGap, CoverageMeasurement, CoverageMeasurementError, CoverageMeasurementEvidence,
     CoverageMeasurementIslandEvidence, CoverageMeasurementLimits, CoverageMeasurementPatchEvidence,
@@ -1057,6 +1069,16 @@ impl<'a> ContactSelectionConfig<'a> {
         surface_max_grid_bytes: usize,
     ) -> Result<Self, ContactSelectionError> {
         Self::current(delicacy_by_face, 2_000_000, 65_536, surface_max_grid_bytes)
+    }
+
+    /// The registered bound on coverage-closure repair rounds
+    /// (`COVERAGE_REPAIR_MAX_ATTEMPTS`, registered value 8). The
+    /// coverage-closure controller (FU-56) is this constant's production
+    /// reader; the legacy pre-routing repair loop this config also drives
+    /// reads the private field directly.
+    #[must_use]
+    pub const fn coverage_repair_max_attempts(&self) -> usize {
+        self.coverage_repair_max_attempts
     }
 }
 

@@ -349,11 +349,39 @@ impl ChainStop {
     /// a `DegenerateExtent` says nothing about whether the geometry is
     /// supportable, and re-planning a different geometry after one of those
     /// would write a *substitute* artifact and label it a support refusal.
+    ///
+    /// **A [`Self::is_coverage_closure_refusal`] stop is excluded (FU-56).**
+    /// That refusal means the sealed run built, routed and lowered a real
+    /// plan for *this* geometry and could not close its own coverage promise
+    /// from the immutable repair pool within the registered attempt bound —
+    /// it is a physics verdict on a plan that sealed perfectly well, exactly
+    /// like a pre-write gate refusal, not a claim that the geometry itself
+    /// could not be sealed. Re-planning the oriented solid after it would be
+    /// the same substitution the gate case above already refuses to allow.
     #[must_use]
     pub fn is_support_refusal(&self) -> bool {
+        match &*self.error {
+            PipelineError::Support { .. } => true,
+            PipelineError::SealedRun { source, .. } => !matches!(
+                source,
+                plinth_support::SupportRunError::CoverageClosure(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether this stop is specifically a coverage-closure refusal (FU-56):
+    /// the sealed run's own coverage-closure controller could not admit every
+    /// measured island within the registered attempt bound. See
+    /// [`Self::is_support_refusal`] for why this is excluded from that check.
+    #[must_use]
+    pub fn is_coverage_closure_refusal(&self) -> bool {
         matches!(
-            *self.error,
-            PipelineError::SealedRun { .. } | PipelineError::Support { .. }
+            &*self.error,
+            PipelineError::SealedRun {
+                source: plinth_support::SupportRunError::CoverageClosure(_),
+                ..
+            }
         )
     }
 
@@ -1412,6 +1440,35 @@ mod tests {
                 stop.detail()
             );
         }
+    }
+
+    /// **A coverage-closure refusal (FU-56) is excluded from
+    /// `is_support_refusal`, and is its own named class.**
+    ///
+    /// The sealed run built and routed a real plan for the drilled shell and
+    /// could not close its own coverage promise within the registered attempt
+    /// bound; re-planning the oriented solid after it would substitute a
+    /// different artifact for a refusal that is about the plan, not the
+    /// geometry — the same reasoning `only_a_sealed_run_or_planner_refusal_is_a_support_refusal`
+    /// already documents for a pre-write gate stop.
+    #[test]
+    fn a_coverage_closure_refusal_is_named_and_excluded_from_support_refusal() {
+        let model = ModelId::new("fixture");
+        let refusal = plinth_support::CoverageClosureRefusal {
+            attempts: 8,
+            reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+            islands: Vec::new(),
+            history: Vec::new(),
+        };
+        let stop = ChainStop::new(PipelineError::SealedRun {
+            model,
+            source: plinth_support::SupportRunError::CoverageClosure(Box::new(refusal)),
+        });
+        assert!(stop.is_coverage_closure_refusal());
+        assert!(
+            !stop.is_support_refusal(),
+            "a coverage-closure refusal must not be answered with a substitute geometry"
+        );
     }
 
     /// The target is cleared idempotently, and a target that cannot be cleared

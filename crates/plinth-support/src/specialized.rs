@@ -522,6 +522,22 @@ pub struct RepairRowId {
     source_kind: RepairRowSourceKind,
 }
 
+impl RepairRowId {
+    /// The logical island this row was frozen for. Crate-private: the
+    /// coverage-closure controller groups the pool by this and by
+    /// [`Self::component_id`] without re-deriving occupancy per group, which
+    /// is the whole point of exposing the key rather than only the opaque id.
+    #[must_use]
+    pub(crate) const fn owner_island_id(self) -> u32 {
+        self.owner_island_id
+    }
+    /// The topology component this row was frozen for.
+    #[must_use]
+    pub(crate) const fn component_id(self) -> u32 {
+        self.component_id
+    }
+}
+
 /// One frozen candidate seat retained verbatim for a later regular-only
 /// physical contact.  No later stage may recreate this geometry from ids.
 #[derive(Clone, Debug, PartialEq)]
@@ -951,6 +967,21 @@ impl SpecializedContactPlan {
         &self.coverage_samples
     }
 
+    /// Every frozen repair-pool row, in stable pool order, with no occupancy
+    /// or `failed` filtering applied.
+    ///
+    /// Crate-private: this is the one-pass batch source the coverage-closure
+    /// controller groups by `(island_id, component_id)` ONCE per attempt.
+    /// [`Self::eligible_repair_rows`] re-derives [`Self::occupied_repair_rows`]
+    /// on every call, so calling it once per blocking patch would make
+    /// nomination an `O(patches × contacts × rows)` scalar hot path; this
+    /// accessor is how the controller avoids that without a second pool
+    /// implementation.
+    #[must_use]
+    pub(crate) fn all_repair_rows(&self) -> &[RepairRow] {
+        &self.repair_pool.rows
+    }
+
     /// Retrieves a verbatim planner-frozen repair row by its opaque,
     /// source-qualified identity. The returned row is read-only.
     #[must_use]
@@ -1256,61 +1287,96 @@ impl<'a> SpecializedContactPlanEdit<'a> {
     /// this lineage, including holes left by removal.  This method is the only
     /// regular-contact addition seam; its geometry and route are copied from
     /// the immutable repair pool rather than caller data.
+    ///
+    /// A one-element delegation to [`Self::append_regular_repair_rows`] — see
+    /// that method for the batched form the coverage-closure controller uses.
+    /// There is one implementation, not two that could drift: a single-row
+    /// batch is byte-identical to this call on the same id.
     pub fn append_regular_repair_row(
         &self,
         row_id: RepairRowId,
     ) -> Result<SpecializedContactPlan, SpecializedError> {
-        let row = self
-            .plan
-            .repair_pool
-            .row(row_id)
-            .ok_or(SpecializedError::UnknownRepairRow { row_id })?;
-        if self
-            .plan
-            .occupied_repair_rows()?
-            .iter()
-            .any(|occupancy| occupancy.row_id == row_id)
-        {
-            return Err(SpecializedError::OccupiedRepairRow { row_id });
+        self.append_regular_repair_rows(&[row_id])
+    }
+
+    /// Derive a child that appends every named previously unoccupied repair
+    /// row in one replay of the load finalizer.
+    ///
+    /// Batch-first (D-37): every row is validated — unknown, occupied
+    /// (including a row named twice in the same batch), or a duplicate
+    /// physical seat — BEFORE any contact is appended, so a batch containing
+    /// one bad row appends nothing.  Occupancy is read once
+    /// ([`SpecializedContactPlan::occupied_repair_rows`]), not once per row.
+    /// Contacts are then pushed for every admitted row and the whole batch is
+    /// committed through exactly one [`Self::derive_child`] — `derive_child`
+    /// replays `finalize_specialized_load_partition` over the complete
+    /// contact set, so `N` sequential single-row appends would replay it `N`
+    /// times, which is the scalar-per-item defect this method exists to
+    /// avoid.
+    pub fn append_regular_repair_rows(
+        &self,
+        row_ids: &[RepairRowId],
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        let occupied = self.plan.occupied_repair_rows()?;
+        let mut claimed: BTreeSet<RepairRowId> = BTreeSet::new();
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for &row_id in row_ids {
+            let row = self
+                .plan
+                .repair_pool
+                .row(row_id)
+                .ok_or(SpecializedError::UnknownRepairRow { row_id })?;
+            if occupied.iter().any(|occupancy| occupancy.row_id == row_id)
+                || !claimed.insert(row_id)
+            {
+                return Err(SpecializedError::OccupiedRepairRow { row_id });
+            }
+            rows.push(row);
         }
-        if self
+        let mut seats: Vec<[f64; 3]> = self
             .plan
             .contacts
             .iter()
-            .any(|contact| contact.position_mm == row.candidate.point_mm)
-        {
-            return Err(SpecializedError::DuplicateChildPhysicalSeat {
-                contact_id: row.candidate.id.0,
-            });
+            .map(|contact| contact.position_mm)
+            .collect();
+        for row in &rows {
+            if seats.contains(&row.candidate.point_mm) {
+                return Err(SpecializedError::DuplicateChildPhysicalSeat {
+                    contact_id: row.candidate.id.0,
+                });
+            }
+            seats.push(row.candidate.point_mm);
         }
-        let contact_id = self
-            .plan
-            .next_contact_id
-            .ok_or(SpecializedError::PhysicalContactIdOverflow)?;
-        let route = RegularContactRoute {
-            candidate_id: row.id.candidate_id.0,
-            owner_island_id: row.id.owner_island_id,
-            coverage_face_id: row.id.face_id,
-            component_id: row.id.component_id,
-            source_kind: row.id.source_kind,
-        };
-        let primary = PrimaryRegularIdentity {
-            route,
-            position_mm: row.candidate.point_mm,
-            normal: row.candidate.normal,
-        };
+
         let mut contacts = self.plan.contacts.clone();
-        contacts.push(SpecializedPhysicalContact {
-            contact_id,
-            position_mm: row.candidate.point_mm,
-            normal: row.candidate.normal,
-            seat_provenance: PhysicalSeatProvenance::Regular(primary),
-            carried_area_mm2: 0.0,
-            primary_regular: Some(primary),
-            regular_routes: vec![route],
-            demands: Vec::new(),
-        });
-        self.derive_child(contacts, contact_id.checked_add(1))
+        let mut next_contact_id = self.plan.next_contact_id;
+        for row in rows {
+            let contact_id = next_contact_id.ok_or(SpecializedError::PhysicalContactIdOverflow)?;
+            let route = RegularContactRoute {
+                candidate_id: row.id.candidate_id.0,
+                owner_island_id: row.id.owner_island_id,
+                coverage_face_id: row.id.face_id,
+                component_id: row.id.component_id,
+                source_kind: row.id.source_kind,
+            };
+            let primary = PrimaryRegularIdentity {
+                route,
+                position_mm: row.candidate.point_mm,
+                normal: row.candidate.normal,
+            };
+            contacts.push(SpecializedPhysicalContact {
+                contact_id,
+                position_mm: row.candidate.point_mm,
+                normal: row.candidate.normal,
+                seat_provenance: PhysicalSeatProvenance::Regular(primary),
+                carried_area_mm2: 0.0,
+                primary_regular: Some(primary),
+                regular_routes: vec![route],
+                demands: Vec::new(),
+            });
+            next_contact_id = contact_id.checked_add(1);
+        }
+        self.derive_child(contacts, next_contact_id)
     }
 
     fn derive_child(
@@ -12871,6 +12937,228 @@ mod tests {
             stale.begin_regular_edit(),
             Err(SpecializedError::StaleRepairPool)
         ));
+    }
+
+    /// FU-56 test #6: `append_regular_repair_rows(&[r])` is byte-identical to
+    /// `append_regular_repair_row(r)` — there is one implementation, not two
+    /// that could drift.
+    #[test]
+    fn batched_single_row_append_matches_the_unbatched_form_exactly() {
+        let (_mesh, _generic, plan) =
+            edit_fixture(make_overhang_table().unwrap(), "batched append parity")
+                .unwrap_or_else(|error| panic!("{error}"));
+        let route_seed = plan
+            .contacts()
+            .iter()
+            .find_map(|contact| contact.regular_routes().first().copied())
+            .expect("required fixture has a regular route");
+        let row = plan
+            .eligible_repair_rows(
+                route_seed.owner_island_id(),
+                route_seed.component_id(),
+                &BTreeSet::new(),
+            )
+            .unwrap()
+            .first()
+            .expect("required fixture has an eligible repair row")
+            .id();
+        let single = plan
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_row(row)
+            .unwrap();
+        let batched = plan
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_rows(&[row])
+            .unwrap();
+        assert_eq!(single, batched);
+        assert_eq!(single.digest(), batched.digest());
+    }
+
+    /// FU-56 test #6: a batch containing one occupied row admits nothing, and
+    /// every row is validated before any contact is appended.
+    #[test]
+    fn batched_repair_row_append_validates_every_row_before_appending_any() {
+        let (_mesh, _generic, plan) =
+            edit_fixture(make_overhang_table().unwrap(), "batched append all-or-nothing")
+                .unwrap_or_else(|error| panic!("{error}"));
+        let occupied = plan
+            .occupied_repair_rows()
+            .unwrap()
+            .first()
+            .expect("required fixture has an occupied row")
+            .row_id();
+        let route_seed = plan
+            .contacts()
+            .iter()
+            .find_map(|contact| contact.regular_routes().first().copied())
+            .expect("required fixture has a regular route");
+        let good = plan
+            .eligible_repair_rows(
+                route_seed.owner_island_id(),
+                route_seed.component_id(),
+                &BTreeSet::new(),
+            )
+            .unwrap()
+            .first()
+            .expect("required fixture has an eligible repair row")
+            .id();
+
+        // The bad row anywhere in the batch refuses the WHOLE batch, in
+        // either position -- the check is over the whole named set, not a
+        // stop-at-first-failure scan that could admit an earlier good row.
+        assert_eq!(
+            plan.begin_regular_edit()
+                .unwrap()
+                .append_regular_repair_rows(&[good, occupied]),
+            Err(SpecializedError::OccupiedRepairRow { row_id: occupied })
+        );
+        assert_eq!(
+            plan.begin_regular_edit()
+                .unwrap()
+                .append_regular_repair_rows(&[occupied, good]),
+            Err(SpecializedError::OccupiedRepairRow { row_id: occupied })
+        );
+
+        // `plan` itself is an immutable `&self` receiver throughout every
+        // edit call above, so nothing could have appended into it even on a
+        // partial failure; a fresh solo append of the good row alone still
+        // succeeds and adds exactly one contact, confirming it was never
+        // consumed by the failed batches.
+        let solo = plan
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_row(good)
+            .unwrap();
+        assert_eq!(solo.contacts().len(), plan.contacts().len() + 1);
+    }
+
+    /// FU-56 test #6: an admitted multi-row batch appends every named row in
+    /// one replay.
+    #[test]
+    fn batched_repair_row_append_admits_every_named_row_in_one_replay() {
+        let (_mesh, _generic, plan) =
+            edit_fixture(make_overhang_table().unwrap(), "batched append two rows")
+                .unwrap_or_else(|error| panic!("{error}"));
+        let occupied: BTreeSet<RepairRowId> = plan
+            .occupied_repair_rows()
+            .unwrap()
+            .into_iter()
+            .map(|occupancy| occupancy.row_id())
+            .collect();
+        let candidates: Vec<RepairRowId> = plan
+            .repair_pool
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .filter(|id| !occupied.contains(id))
+            .take(2)
+            .collect();
+        assert_eq!(
+            candidates.len(),
+            2,
+            "required overhang-table fixture offers at least two unoccupied repair rows"
+        );
+        let batched = plan
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_rows(&candidates)
+            .unwrap();
+        assert_eq!(batched.contacts().len(), plan.contacts().len() + 2);
+        for &row_id in &candidates {
+            let seat = plan.repair_row(row_id).unwrap().candidate().point_mm;
+            assert!(batched
+                .contacts()
+                .iter()
+                .any(|contact| contact.position_mm() == seat));
+        }
+        assert_eq!(batched.finalized_load_plan_digest(), batched.digest());
+    }
+
+    /// FU-56 tests #1-#3: nomination is deterministic, never nominates an
+    /// occupied or `failed` row, and stays inside a blocking patch's own
+    /// `(island_id, component_id)`.
+    #[test]
+    fn coverage_closure_nomination_is_deterministic_and_respects_occupancy_and_failed_rows() {
+        let (_mesh, _generic, plan) =
+            edit_fixture(make_overhang_table().unwrap(), "closure nomination")
+                .unwrap_or_else(|error| panic!("{error}"));
+
+        let mut seen_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut blocking = Vec::new();
+        for sample in plan.coverage_samples() {
+            if seen_keys.insert((sample.island_id, sample.component_id)) {
+                blocking.push(crate::coverage_closure::BlockingPatchKey {
+                    island_id: sample.island_id,
+                    component_id: sample.component_id,
+                    representative_face_id: sample.face_id,
+                    sorted_face_ids: vec![sample.face_id],
+                    uncovered_area_mm2_bits: 1.0_f64.to_bits(),
+                    worst_gap: crate::coverage_closure::CoverageClosureGap::Finite(0.5),
+                });
+            }
+        }
+        assert!(!blocking.is_empty(), "required fixture has coverage samples");
+
+        let empty_failed = BTreeSet::new();
+        let first = crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &blocking,
+            6.0,
+            65_536,
+            &empty_failed,
+        )
+        .unwrap();
+        let second = crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &blocking,
+            6.0,
+            65_536,
+            &empty_failed,
+        )
+        .unwrap();
+        assert_eq!(
+            first, second,
+            "nomination must be byte-identical across repeated calls on the same plan"
+        );
+        assert!(
+            !first.is_empty(),
+            "required fixture has at least one eligible repair row"
+        );
+
+        let occupied: BTreeSet<RepairRowId> = plan
+            .occupied_repair_rows()
+            .unwrap()
+            .into_iter()
+            .map(|occupancy| occupancy.row_id())
+            .collect();
+        for &row_id in &first {
+            assert!(
+                !occupied.contains(&row_id),
+                "an occupied row must never be nominated"
+            );
+            assert!(
+                seen_keys.contains(&(row_id.owner_island_id(), row_id.component_id())),
+                "nomination must stay inside a blocking patch's own island/component"
+            );
+        }
+
+        let already_nominated = *first.first().expect("checked non-empty above");
+        let mut failed_with_row = BTreeSet::new();
+        failed_with_row.insert(already_nominated);
+        let excluded = crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &blocking,
+            6.0,
+            65_536,
+            &failed_with_row,
+        )
+        .unwrap();
+        assert!(
+            !excluded.contains(&already_nominated),
+            "a row recorded as failed must never be re-nominated"
+        );
     }
 
     #[test]

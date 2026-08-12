@@ -1686,11 +1686,58 @@ mod tests {
                 // This does not change FU-38's substance: the divergence it
                 // records is the same contact-selection tie-break, and no
                 // pinned digest anywhere is re-frozen by this line.
-                "Sphere.prepped.stl" => false,
+                //
+                // Re-recorded a THIRD time, 2026-08-12, by FU-56 (the
+                // coverage-closure controller), false -> true, with this
+                // attribution rather than an edited expectation, exactly as
+                // this row's own protocol requires. `run_support` is now the
+                // coverage-closure controller: it measures ROUTED coverage
+                // and, when blocking, appends immutable repair-pool contacts
+                // for up to 8 attempts before refusing. Measured on THIS
+                // fixture under BOTH fields: the baseline is coverage-blocked
+                // (as it always secretly was — nothing checked before FU-56),
+                // four repair rounds are appended identically under either
+                // field, and by the fifth routing attempt the repair-extended
+                // plan is geometry CCO refuses (`SupportRoutingError::Cco(InvalidGeometry)`)
+                // — under BOTH fields, at the SAME attempt, with the
+                // byte-identical error string "sealed support run failed
+                // during Routing". That is a real, deterministic new fact
+                // about this fixture, not noise: a highly symmetric sphere's
+                // repair-pool nomination converges to the same geometric wall
+                // regardless of which field ordered the tie-break, so the two
+                // runs now agree for a reason FU-38's original tie-break
+                // finding never covered. This is FU-56's territory, not
+                // FU-38's substance being edited — the contact-selection
+                // tie-break this row records is still real and still moves
+                // both digests during the four successful repair rounds; it
+                // is simply no longer the LAST word for this one fixture. No
+                // pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, or the zero-tolerance verdict.
+                "Sphere.prepped.stl" => true,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
-                "make_toed_slab.prepped.stl" | "make_overhang_table (procedural)" => false,
+                "make_toed_slab.prepped.stl" => false,
+                // Re-recorded 2026-08-12, by FU-56, false -> true, with this
+                // attribution: `make_overhang_table`'s island 0 (component 4,
+                // face 51) has no repair-pool candidate the CCO transcript
+                // ever admits at the registered coverage radius
+                // (`plinth-support/tests/support_runner_integration.rs`,
+                // `public_runner_refuses_overhang_table_with_a_genuinely_unclosable_island`),
+                // under EITHER field: both runs exhaust the registered
+                // 8-attempt bound and refuse
+                // `SupportRunError::CoverageClosure(AttemptsExhausted)` with
+                // the same one blocking island, because the nomination
+                // scoring for this fixture's single blocking key is dominated
+                // by geometric distance to the uncovered samples, not by the
+                // delicacy tie-break this row otherwise measures. FU-38's
+                // tie-break finding is unaffected on every fixture that
+                // reaches a sealed run at all; this fixture no longer does.
+                // No pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, or the zero-tolerance verdict.
+                "make_overhang_table (procedural)" => true,
                 other => panic!("unrecorded fixture {other}"),
             };
             assert_eq!(

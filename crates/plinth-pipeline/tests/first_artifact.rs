@@ -28,14 +28,6 @@ use chitubox_io::SegmentType;
 use plinth_hollow::{HollowDisposition, SolidDecisionReason};
 use plinth_mesh::{make_overhang_table, make_toed_slab};
 
-/// The geometry `make_overhang_table` reaches the pre-write gate on.
-///
-/// Pinned rather than left implicit: the gate refusal below is only the
-/// refusal this test is about if it was spoken over the geometry the hollow
-/// stage actually decided on, and not over a fallback the chain substituted.
-const EXPECTED_OVERHANG_TABLE_GEOMETRY: chain::SupportedGeometry =
-    chain::SupportedGeometry::HollowStageDecidedSolid;
-
 /// A per-test scratch path that is removed on the way in and on the way out.
 struct Scratch(PathBuf);
 
@@ -249,30 +241,45 @@ fn a_gate_refusal_removes_a_stale_artifact_already_at_the_target() {
 /// The same refusal on a model that needs no provisioned corpus, and the one
 /// `plinth-verify`'s own frozen coverage golden is built from: nine uncovered
 /// islands measured on `make_overhang_table`.
+/// **FU-56, 2026-08-12: refused earlier, by the SEALED RUN, not by the gate.**
+/// `run_support` is now the coverage-closure controller (`ChainStop::is_coverage_closure_refusal`):
+/// it measures ROUTED coverage under the SAME registered radius the pre-write
+/// gate measures, and `make_overhang_table`'s island 0 (component 4, face 51)
+/// has no repair-pool candidate the CCO transcript ever admits at that radius
+/// (`plinth-support/tests/support_runner_integration.rs`,
+/// `public_runner_refuses_overhang_table_with_a_genuinely_unclosable_island`).
+/// So this model is refused by the sealed run itself, before the pre-write
+/// gate is ever reached — the SAME real defect the gate used to be the only
+/// thing measuring, caught one stage earlier. `EXPECTED_OVERHANG_TABLE_GEOMETRY`
+/// and `refused_geometry()` no longer apply: that accessor is `None` for
+/// every non-gate stop, by design (`ChainStop::refused_geometry`), and a
+/// coverage-closure stop is deliberately excluded from `is_support_refusal`
+/// too — re-planning the oriented solid after it would substitute a different
+/// artifact for a refusal that is about the plan, not the geometry.
 #[test]
 fn procedural_overhang_table_is_refused_before_any_file_exists() {
     let scratch = Scratch::new("overhang-table");
     let mesh = make_overhang_table().expect("procedural overhang table");
 
     let refusal = chain::run_procedural_model("make_overhang_table", mesh, scratch.path())
-        .expect_err("make_overhang_table's plan leaves uncovered islands");
+        .expect_err(
+            "make_overhang_table's island 0 has no closing repair-pool candidate at the registered radius",
+        );
     assert!(
-        refusal.is_gates(),
-        "make_overhang_table must be refused by the gates: {refusal}"
+        refusal.is_coverage_closure_refusal(),
+        "make_overhang_table must be refused by coverage closure: {refusal}"
     );
-    assert_eq!(
-        refusal.gate(),
-        Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
-        "the refusal must name the gate that spoke: {refusal}"
+    assert!(
+        !refusal.is_gates(),
+        "the sealed run refuses before the pre-write gate is ever reached: {refusal}"
     );
-    assert_eq!(
-        refusal.refused_geometry(),
-        Some(&EXPECTED_OVERHANG_TABLE_GEOMETRY),
-        "make_overhang_table reached the gate on a different geometry: {refusal}"
+    assert!(
+        !refusal.is_support_refusal(),
+        "a coverage-closure refusal must not be answered with a substitute geometry: {refusal}"
     );
     assert!(
         !scratch.path().exists(),
-        "a gate-refused model wrote {}",
+        "a coverage-closure-refused model wrote {}",
         scratch.path().display()
     );
 }
