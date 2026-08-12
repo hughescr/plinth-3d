@@ -429,6 +429,336 @@ fn validate_dimensions(prefix: &'static str, values: [f64; 3]) -> Result<(), Mes
     )
 }
 
+// ---------------------------------------------------------------------------
+// Dual-cavity pawn: the E1 hollowing fixture.
+// ---------------------------------------------------------------------------
+
+/// Radius, in mm, of the silhouette sphere whose flat-truncated base forms
+/// the lower chamber and the model's foot.
+pub const DUAL_CAVITY_LOWER_SPHERE_R_MM: f64 = 17.0;
+/// Height, in mm, of the lower silhouette sphere's centre above the foot
+/// plane (`z = 0`).
+pub const DUAL_CAVITY_LOWER_SPHERE_Z_MM: f64 = 13.0;
+/// Radius, in mm, of the silhouette sphere that forms the upper chamber.
+pub const DUAL_CAVITY_UPPER_SPHERE_R_MM: f64 = 11.0;
+/// Distance, in mm, between the two silhouette spheres' centres.
+pub const DUAL_CAVITY_CENTRE_SPACING_MM: f64 = 29.0;
+/// Vertices per ring of the lathe. One value for the whole profile: the
+/// throat radius only ever moves *where* two rings sit, never how many
+/// vertices a ring carries or how many rings exist.
+pub const DUAL_CAVITY_SLICES: usize = 128;
+/// Equal-angle steps carrying the lower arc from the foot rim to the throat's
+/// lower junction (so `LOWER_ARC_STEPS + 1` lower-arc rings).
+pub const DUAL_CAVITY_LOWER_ARC_STEPS: usize = 96;
+/// Equal-angle steps carrying the upper arc from the throat's upper junction
+/// to the apex.
+pub const DUAL_CAVITY_UPPER_ARC_STEPS: usize = 120;
+
+/// The cavity-side (post-erosion) throat radius, in mm, for the SEPARATED
+/// control's physical setting is not expressible as a cavity radius at all —
+/// see [`DUAL_CAVITY_THROAT_SEPARATED_MM`] instead, which states the
+/// physical passage directly.
+///
+/// AT_BORE: the cavity-side throat radius that pins the throat's axis
+/// clearance to exactly 1.5 mm (`= HOLLOW_DRAIN_R_MM`, three 0.5 mm voxel
+/// steps) — refused by the FU-47 core threshold (1.75 mm) on real geometry.
+pub const DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM: f64 = 1.45;
+/// ABOVE_BORE: the cavity-side throat radius that pins the throat's axis
+/// clearance to exactly 2.0 mm, comfortably admitted by the FU-47 core
+/// threshold with a whole lattice step of margin on either side.
+pub const DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 1.90;
+/// SEPARATED: a physical throat radius under the registered erosion `t`, so
+/// the throat holds no cavity voxel at all and the two chambers are not even
+/// 6-connected. The control that proves the split is real.
+pub const DUAL_CAVITY_THROAT_SEPARATED_MM: f64 = 3.0;
+/// ABOVE_BORE: the fixture's frozen default physical throat radius,
+/// `HOLLOW_WALL_DEFAULT_MM + HOLLOW_CAVITY_MARCH_MARGIN_MM + 1.90`
+/// = `2.5 + 0.5*sqrt(3) + 1.90`. A hollow-side test asserts this literal
+/// still equals that live-registry sum, so a wall or margin change fails a
+/// named test instead of silently invalidating this fixture.
+pub const DUAL_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 5.266_025_403_784_439;
+
+/// The E1 dual-cavity hollowing fixture, at [`DUAL_CAVITY_THROAT_ABOVE_BORE_MM`].
+///
+/// See [`make_dual_cavity_pawn_with_throat_radius`] for the full geometry and
+/// rationale. This default is sized so **both** doctrine settings the crate
+/// ships hollow (ABOVE_BORE with one flow-connected interior, AT_BORE with
+/// the far chamber left solid) — it is deliberately not a
+/// `Solid{BelowThreshold}` witness.
+pub fn make_dual_cavity_pawn() -> Result<Mesh, MeshError> {
+    make_dual_cavity_pawn_with_throat_radius(DUAL_CAVITY_THROAT_ABOVE_BORE_MM)
+}
+
+/// A coaxial surface of revolution: two silhouette spheres — a 17 mm lower
+/// sphere flat-truncated at the foot plane `z = 0`, and an 11 mm upper sphere
+/// 29 mm above it — joined by a right-circular-cylinder throat of the given
+/// physical radius. Built as one ordered lathe profile, so it is manifold and
+/// watertight **by construction**: no boolean kernel, no repair pass, pure f64
+/// trigonometry snapped to the STL f32 wire.
+///
+/// **Why a lathe and not a union.** The shape is axially symmetric about
+/// `x = y = 0`, so its silhouette is an exact 2-D profile and needs no
+/// boolean at all — unlike `plinth-hollow`'s test-only pinched dumbbell,
+/// which needs `ManifoldBackend::union_limited` and is therefore stranded
+/// behind that crate's Manifold dependency. This fixture has zero new
+/// dependencies, byte-stable output, and no dependence on Manifold's
+/// floating-point behaviour.
+///
+/// **This fixture is an argument about one lattice phase.** The axis sits at
+/// `x = y = 0` with `low_x = low_y = -17.0` exactly, so H0's
+/// `grid_spec_from_bounds` — which anchors its origin at
+/// `round_ties_even(low[axis]/pitch)` times the pitch — lands a voxel sample
+/// exactly on the axis at every pitch that divides 17.0 evenly at the
+/// frozen 0.5 mm pitch. The throat's cross-section therefore lands on
+/// lattice offsets `(0.5i, 0.5j)` with no phase error, which is what makes
+/// the throat clearance thresholds in `plinth-hollow`'s `dual_cavity_doctrine`
+/// tests exact rather than approximate.
+///
+/// **Do not translate this fixture off the 0.5 mm lattice**, and do not run
+/// it through an orientation sweep before measuring it — either can silently
+/// invalidate those exact assertions.
+///
+/// **The owner's explainer numbers, and why they became these numbers.** The
+/// approved explainer described a ~35 mm pawn with a ~12 mm lower chamber, a
+/// ~10 mm upper chamber, and a ~1 mm throat. None of those survive contact
+/// with the registered savings gate unchanged:
+/// - The gate weighs the **largest resin-flow component alone** (FU-47), so
+///   even the below-bore setting must clear it on the lower chamber by
+///   itself. For a single spherical chamber of cavity radius `R - t` (erosion
+///   `t = HOLLOW_WALL_DEFAULT_MM + HOLLOW_CAVITY_MARCH_MARGIN_MM ≈ 3.366 mm`)
+///   to clear the 25 % savings-fraction limb against a matching second
+///   chamber, `R` must be at least `t / (1 - 0.75^{1/3}) ≈ 16.3 mm`. A 35 mm
+///   pawn cannot host a chamber anywhere near that.
+/// - So the silhouette is asymmetric — a 17 mm lower sphere and an 11 mm
+///   upper sphere, 29 mm apart — sized so the **lower chamber alone** clears
+///   the gate at every throat setting; the upper chamber is a bonus interior
+///   when the throat admits it. That puts the model at 53 mm tall, 34 mm
+///   wide: taller than the explainer's number, because that is what owning
+///   the gate on one chamber costs.
+/// - A cavity-level throat cannot exist at all below the eroded radius `t ≈
+///   3.366 mm`, so the explainer's "~1 mm throat" cannot become a *cavity*
+///   throat at any parameter value — it survives in spirit as
+///   [`DUAL_CAVITY_THROAT_SEPARATED_MM`], the control where the two
+///   interiors are genuinely separate cavities.
+/// - The "~12 mm" and "~10 mm" chamber call-outs become 27.3 mm and 15.3 mm
+///   across (cavity diameters, after the ≈3.366 mm erosion): this is not a
+///   rounding error, it is the wall-plus-march-margin cost stated honestly.
+/// - The owner's "round base" is the flat foot the truncated lower sphere
+///   already produces, rather than a separate base disc: a disc adds several
+///   mL of dead volume with no cavity of its own (a base's own EDT never
+///   exceeds its own half-thickness), which only erodes the savings ratio for
+///   no benefit.
+/// - The "3 mm drain bore that exits the base" is deliberately **not**
+///   modelled here — the fixture is a closed solid; `plinth-hollow`'s own
+///   `drains`/`drilling` stages drill the registered
+///   `HOLLOW_DRAIN_R_MM` bore downstream, and pre-drilling it here would
+///   both break watertightness and steal the thing this fixture exists to
+///   let those stages exercise.
+///
+/// # Profile construction
+///
+/// One ordered lathe profile of 217 rings (independent of `throat_radius_mm`
+/// — the throat only moves where two rings sit) times [`DUAL_CAVITY_SLICES`]
+/// vertices per ring, plus a foot-centre vertex and an apex vertex:
+/// 1. `foot_centre = (0, 0, 0)`.
+/// 2. The lower arc: [`DUAL_CAVITY_LOWER_ARC_STEPS`] equal steps in the polar
+///    angle from the sphere's own top, from the foot rim down to the
+///    throat's lower junction — 97 rings, the first the foot rim, the last
+///    exactly `(throat_radius_mm, zA)`.
+/// 3. The throat's upper-junction ring, `(throat_radius_mm, zB)` — one ring;
+///    the band immediately below it is the throat's cylindrical wall.
+/// 4. The upper arc: [`DUAL_CAVITY_UPPER_ARC_STEPS`] equal steps from the
+///    throat's upper junction to the apex, with the first point (which
+///    duplicates the throat ring) and the last (the degenerate `r = 0` apex
+///    point) both dropped — 119 rings.
+/// 5. `apex = (0, 0, upper centre z + upper radius)`.
+///
+/// Every vertex is a full lathe circle: `(r cos theta_s, r sin theta_s, z)`
+/// for `theta_s = 2 pi s / DUAL_CAVITY_SLICES`. Ring 0's slice 0 therefore
+/// sits at the equator `(+r, 0, z)`, so `low_x = -17.0` exactly.
+///
+/// # Mandatory f32 snap
+///
+/// Every coordinate is stored as `(value as f32) as f64` before it enters
+/// the mesh. Two reasons, both load-bearing: [`crate::write_binary_stl`]
+/// refuses any coordinate that round-trips lossily through f32
+/// (`MeshIoError::LossyF32Encoding`), so without the snap this fixture could
+/// not be written to STL at all; and it collapses cross-platform `sin`/`cos`
+/// libm differences below the STL wire resolution, hardening determinism.
+/// The mesh's minimum vertex separation (the ring just below the apex,
+/// ~0.012 mm) is five orders of magnitude above the f32 step at these
+/// magnitudes, so the snap cannot weld two vertices or create a zero-area
+/// face — `dual_cavity_pawn_has_no_degenerate_face_after_the_f32_snap`
+/// proves that with [`Mesh::audit_strict`] rather than arguing it in prose.
+///
+/// # Errors
+///
+/// [`MeshError::InvalidPositiveFixtureParameter`] for a non-finite or
+/// non-positive `throat_radius_mm`, and
+/// [`MeshError::InvalidRangeFixtureParameter`] for a `throat_radius_mm` at or
+/// above [`DUAL_CAVITY_UPPER_SPHERE_R_MM`] (past that bound the throat's
+/// upper junction cannot exist on the upper sphere at all). This upper bound
+/// is a new admitted domain, not a loosened one — FU-8b permits adding a
+/// bound and forbids only loosening or bypassing an existing one.
+pub fn make_dual_cavity_pawn_with_throat_radius(throat_radius_mm: f64) -> Result<Mesh, MeshError> {
+    validate_positive("throat_radius_mm", throat_radius_mm)?;
+    if throat_radius_mm >= DUAL_CAVITY_UPPER_SPHERE_R_MM {
+        return Err(MeshError::InvalidRangeFixtureParameter {
+            parameter: "throat_radius_mm",
+            value: throat_radius_mm,
+            min: 0.0,
+            max: DUAL_CAVITY_UPPER_SPHERE_R_MM,
+        });
+    }
+
+    let r1 = DUAL_CAVITY_LOWER_SPHERE_R_MM;
+    let z1 = DUAL_CAVITY_LOWER_SPHERE_Z_MM;
+    let r2 = DUAL_CAVITY_UPPER_SPHERE_R_MM;
+    let z2 = z1 + DUAL_CAVITY_CENTRE_SPACING_MM;
+    let rt = throat_radius_mm;
+    let slices = DUAL_CAVITY_SLICES;
+    let lower_steps = DUAL_CAVITY_LOWER_ARC_STEPS;
+    let upper_steps = DUAL_CAVITY_UPPER_ARC_STEPS;
+
+    // Junction angles, measured from each sphere's own +z pole.
+    let theta_foot = (-z1 / r1).acos();
+    let z_a = z1 + (r1 * r1 - rt * rt).sqrt();
+    let theta_a = ((z_a - z1) / r1).acos();
+    let z_b = z2 - (r2 * r2 - rt * rt).sqrt();
+    let theta_b = ((z_b - z2) / r2).acos();
+
+    let lower_rings = lower_steps + 1; // 97: k = 0..=lower_steps
+    let upper_rings = upper_steps - 1; // 119: j = 1..upper_steps
+    let ring_count = lower_rings + 1 + upper_rings; // + the throat's upper-junction ring
+
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 + ring_count * slices);
+    let mut tris: Vec<[u32; 3]> =
+        Vec::with_capacity(2 * slices + 2 * slices * (ring_count - 1));
+
+    verts.push(snap_vertex([0.0, 0.0, 0.0])); // index 0: foot_centre
+
+    // Lower arc: theta sweeps DOWN from theta_foot (foot rim) to theta_a
+    // (the throat's lower junction). The two endpoints are forced to their
+    // exact closed-form (r, z) rather than round-tripped through
+    // acos/sin/cos, which cannot invert bit-exactly: ring 0 must sit exactly
+    // on the foot plane `z = 0` (frozen by `dual_cavity_pawn_has_frozen_
+    // counts_and_bounds`), and the last ring must sit exactly at the
+    // throat's own radius (load-bearing for the exact-clearance hollow-side
+    // doctrine tests).
+    let foot_r = (r1 * r1 - z1 * z1).sqrt();
+    for k in 0..lower_rings {
+        let (r, z) = if k == 0 {
+            (foot_r, 0.0)
+        } else if k == lower_rings - 1 {
+            (rt, z_a)
+        } else {
+            let t = k as f64 / lower_steps as f64;
+            let theta = theta_foot + (theta_a - theta_foot) * t;
+            (r1 * theta.sin(), z1 + r1 * theta.cos())
+        };
+        push_lathe_ring(&mut verts, r, z, slices);
+    }
+
+    // Throat upper-junction ring, exact by the same closed form as the lower
+    // junction above.
+    push_lathe_ring(&mut verts, rt, z_b, slices);
+
+    // Upper arc: theta sweeps from theta_b (excluded: duplicates the throat
+    // ring) toward 0 (excluded: the degenerate r = 0 apex point).
+    for j in 1..upper_steps {
+        let t = j as f64 / upper_steps as f64;
+        let theta = theta_b * (1.0 - t);
+        push_lathe_ring(&mut verts, r2 * theta.sin(), z2 + r2 * theta.cos(), slices);
+    }
+
+    let apex_index = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    verts.push(snap_vertex([0.0, 0.0, z2 + r2]));
+
+    let ring_base = |ring_idx: usize| -> u32 { 1 + u32::try_from(ring_idx * slices).unwrap_or(u32::MAX) };
+
+    // Bottom fan: foot_centre to the foot-rim ring (ring 0), outward normal
+    // points down (-z), which (slice angle increasing counter-clockwise
+    // viewed from +z) needs `s + 1` before `s`.
+    let foot_base = ring_base(0);
+    for s in 0..slices {
+        let next = (s + 1) % slices;
+        tris.push([0, foot_base + next as u32, foot_base + s as u32]);
+    }
+
+    // Bands between every consecutive pair of rings, including the
+    // lower-arc/throat and throat/upper-arc seams — they are ordinary bands,
+    // the throat radius only changes where a ring's own (r, z) sits.
+    for k in 0..ring_count - 1 {
+        let base_k = ring_base(k);
+        let base_k1 = ring_base(k + 1);
+        for s in 0..slices {
+            let next = (s + 1) % slices;
+            let (s, next) = (s as u32, next as u32);
+            tris.push([base_k + s, base_k1 + next, base_k1 + s]);
+            tris.push([base_k + s, base_k + next, base_k1 + next]);
+        }
+    }
+
+    // Apex fan: the last upper-arc ring to the apex, outward normal points
+    // up (+z), which needs `s` before `s + 1`.
+    let last_base = ring_base(ring_count - 1);
+    for s in 0..slices {
+        let next = (s + 1) % slices;
+        tris.push([apex_index, last_base + s as u32, last_base + next as u32]);
+    }
+
+    let mesh = Mesh::new(verts, tris)?;
+    let signed_volume = mesh_signed_volume(&mesh);
+    if !signed_volume.is_finite() || signed_volume <= 0.0 {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "dual cavity pawn signed volume",
+            value: signed_volume,
+        });
+    }
+    Ok(mesh)
+}
+
+/// Push one full lathe ring of [`DUAL_CAVITY_SLICES`] vertices at radius `r`,
+/// height `z`, f32-snapped as they are produced.
+fn push_lathe_ring(verts: &mut Vec<[f64; 3]>, r: f64, z: f64, slices: usize) {
+    for s in 0..slices {
+        let theta_s = 2.0 * core::f64::consts::PI * s as f64 / slices as f64;
+        let (sin, cos) = theta_s.sin_cos();
+        verts.push(snap_vertex([r * cos, r * sin, z]));
+    }
+}
+
+/// Snap a vertex onto the STL f32 wire: `v -> (v as f32) as f64`. See the
+/// "Mandatory f32 snap" section of [`make_dual_cavity_pawn_with_throat_radius`].
+fn snap_vertex(point: [f64; 3]) -> [f64; 3] {
+    [
+        f64::from(point[0] as f32),
+        f64::from(point[1] as f32),
+        f64::from(point[2] as f32),
+    ]
+}
+
+/// The mesh's own signed volume (positive iff every face winds outward), by
+/// the divergence-theorem tetrahedron sum. Used only to derive, rather than
+/// assume, that this fixture's triangulation order winds outward — the
+/// `append_tetra` precedent this module already follows.
+fn mesh_signed_volume(mesh: &Mesh) -> f64 {
+    mesh.tris()
+        .iter()
+        .map(|triangle| {
+            let a = mesh.verts()[triangle[0] as usize];
+            let b = mesh.verts()[triangle[1] as usize];
+            let c = mesh.verts()[triangle[2] as usize];
+            let cross = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+        })
+        .sum()
+}
+
 fn validate_positive(parameter: &'static str, value: f64) -> Result<(), MeshError> {
     if value.is_finite() && value > 0.0 {
         Ok(())

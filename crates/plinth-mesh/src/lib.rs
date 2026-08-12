@@ -20,10 +20,15 @@ pub use delicacy::{
 };
 pub use delicacy_eval::evaluate_delicacy;
 pub use fixtures::{
-    make_box, make_box_default, make_doubled_sheet_box, make_duplicated_face_box,
-    make_dust_shard_box, make_edge_shared_boxes, make_overhang_table, make_overhang_table_with,
-    make_pinched_boxes, make_raking_blade, make_raking_blade_with, make_thin_fin,
-    make_thin_fin_with, make_toed_slab, make_toed_slab_with, make_triply_wound_face_box,
+    make_box, make_box_default, make_doubled_sheet_box, make_dual_cavity_pawn,
+    make_dual_cavity_pawn_with_throat_radius, make_duplicated_face_box, make_dust_shard_box,
+    make_edge_shared_boxes, make_overhang_table, make_overhang_table_with, make_pinched_boxes,
+    make_raking_blade, make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab,
+    make_toed_slab_with, make_triply_wound_face_box, DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM,
+    DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_CENTRE_SPACING_MM,
+    DUAL_CAVITY_LOWER_ARC_STEPS, DUAL_CAVITY_LOWER_SPHERE_R_MM, DUAL_CAVITY_LOWER_SPHERE_Z_MM,
+    DUAL_CAVITY_SLICES, DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM,
+    DUAL_CAVITY_UPPER_ARC_STEPS, DUAL_CAVITY_UPPER_SPHERE_R_MM,
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use repair::{
@@ -302,6 +307,18 @@ pub enum MeshError {
     InvalidPositiveFixtureParameter { parameter: &'static str, value: f64 },
     #[error("fixture parameter {parameter} must be finite, got {value}")]
     InvalidFiniteFixtureParameter { parameter: &'static str, value: f64 },
+    /// An added admission bound (FU-8b permits adding a bound; it never
+    /// permits loosening one). Distinct from
+    /// [`Self::InvalidPositiveFixtureParameter`] because "outside an open
+    /// interval" is a different, more specific claim than "not positive" and
+    /// deserves its own reason in the error rather than a misreported one.
+    #[error("fixture parameter {parameter} must be finite and within ({min}, {max}), got {value}")]
+    InvalidRangeFixtureParameter {
+        parameter: &'static str,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
     #[error("fixture has too many vertices for u32 triangle indices")]
     FixtureIndexOverflow,
 }

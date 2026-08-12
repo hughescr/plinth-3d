@@ -5904,7 +5904,7 @@ mod corpus_cavity_repair {
     /// on, the flow evidence that selected it, and how many cavity voxels the
     /// `edt > wall` field held before the doctrine judged them:
     /// `create_shell`'s own selection, stopped one line early.
-    fn unrepaired_cavity_mask(
+    pub(super) fn unrepaired_cavity_mask(
         source: &Mesh,
         settings: HollowSettings,
     ) -> (Array3<bool>, VoxelGrid, flow::FlowStats, usize) {
@@ -5925,6 +5925,51 @@ mod corpus_cavity_repair {
             .expect("flow selection")
             .expect("the fixture must admit the registered drain bore somewhere");
         (selected, grid, stats, cavity_voxels)
+    }
+
+    /// `create_shell`'s own cavity selection, stopped **before**
+    /// `unrepaired_cavity_mask` goes one step further and runs flow
+    /// selection. The dual-cavity doctrine's throat-clearance assertions need
+    /// the cavity mask itself — `label3d` connectivity and raw EDT clearance
+    /// — independently of the flow rule they exist to check, so this cannot
+    /// reuse `unrepaired_cavity_mask` and must not fork its own copy of the
+    /// selection preamble either.
+    ///
+    /// Unlike `unrepaired_cavity_mask` (which thresholds the sound,
+    /// unrefined prefilter EDT against the bare wall for a cheap
+    /// combinatorial pin), this reproduces `create_shell_recording_repair`'s
+    /// actual selection exactly: the wall-plus-margin threshold against the
+    /// `exact_cavity_distance`-refined field. The dual-cavity fixture's
+    /// throat clearances are exact only under that real selection.
+    pub(super) fn cavity_mask_and_grid(
+        source: &Mesh,
+        settings: HollowSettings,
+    ) -> (Array3<bool>, VoxelGrid) {
+        let limits = H0AdmissionLimits::production();
+        let spec = grid_spec(source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        let work =
+            raster_work_item_count(source, spec, limits.max_raster_work_items())
+                .expect("bounded source work");
+        let grid = voxelize_filled(source, spec, work).expect("bounded voxelization");
+        let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
+        let wall_plus_margin_mm =
+            settings.wall_thickness_mm().get() + settings.cavity_march_margin_mm().get();
+        let candidate_threshold_mm = wall_plus_margin_mm.min(settings.bulk_min_mm().get() / 2.0);
+        let (edt, _index_bytes, _query_points, _surface) = exact_cavity_distance(
+            source,
+            edt,
+            grid.origin,
+            grid.pitch,
+            candidate_threshold_mm,
+            limits,
+        )
+        .expect("exact cavity distance");
+        let cavity_mask = edt.mapv(|distance_mm| distance_mm > wall_plus_margin_mm);
+        assert!(
+            cavity_mask.iter().any(|value| *value),
+            "the fixture must select a cavity"
+        );
+        (cavity_mask, grid)
     }
 
     /// `(boundary edges, non-manifold faces, point-only faces)`.
@@ -6820,5 +6865,463 @@ mod fu37_wall_field {
             requested_wall_mm.get().to_bits(),
             "Finite must preserve its exact bits across the round trip"
         );
+    }
+}
+
+/// The E1 dual-cavity pawn fixture (`plinth_mesh::make_dual_cavity_pawn*`):
+/// FU-47's resin-flow doctrine and FU-53/FU-55's hollowing witnessed on real
+/// geometry rather than a hand-built mask, at all three named throat
+/// settings (SEPARATED, AT_BORE, ABOVE_BORE).
+///
+/// **Why this fixture exists.** The 2026-08-12 ruled batch landed the
+/// hollowing work and the 37-mini corpus rerun emitted eight artifacts, all
+/// `Solid{BelowThreshold}` — not one hollow shell shipped, so none of FU-53,
+/// FU-55, or FU-47 was witnessed on real geometry. `B1` below is that
+/// witness: the production entry point, on a mesh sized to clear the
+/// registered savings gate.
+///
+/// **Lattice-phase warning, repeated from the fixture's own doc comment.**
+/// Every exact assertion here (B4 above all) depends on the fixture's axis
+/// sitting on `x = y = 0` with the mesh's low corner anchoring
+/// `grid_spec_from_bounds`'s origin exactly on the 0.5 mm lattice. Nothing
+/// here decimates, re-orients, or otherwise moves the fixture before
+/// measuring it.
+#[cfg(test)]
+mod dual_cavity_doctrine {
+    use super::*;
+    use plinth_mesh::{
+        make_dual_cavity_pawn, make_dual_cavity_pawn_with_throat_radius,
+        DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM,
+        DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM,
+    };
+    use scirs2_ndimage::morphology3d::label3d;
+
+    /// The registered erosion `t = HOLLOW_WALL_DEFAULT_MM +
+    /// HOLLOW_CAVITY_MARCH_MARGIN_MM`, read live off the same settings every
+    /// other test here uses — never restated as a literal.
+    fn registered_erosion_mm(settings: HollowSettings) -> f64 {
+        settings.wall_thickness_mm().get() + settings.cavity_march_margin_mm().get()
+    }
+
+    /// The physical AT_BORE throat radius: `t + DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM`.
+    /// `plinth-mesh` has no registry access of its own, so this crate is the
+    /// one that adds the live `t` to the cavity-side constant it publishes.
+    fn at_bore_throat_radius_mm(settings: HollowSettings) -> f64 {
+        registered_erosion_mm(settings) + DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM
+    }
+
+    /// The voxel index nearest world `(0, 0, z)`, in the `(z, y, x)` order
+    /// `Array3` fields use throughout H0. The fixture's axis sits exactly on
+    /// the lattice (see the module doc), so this index is exact, not merely
+    /// nearest.
+    fn axis_voxel_at_z(grid_origin: [f64; 3], pitch: f64, z: f64) -> (usize, usize, usize) {
+        let index_of = |value: f64, origin: f64| ((value - origin) / pitch).round() as usize;
+        (
+            index_of(z, grid_origin[2]),
+            index_of(0.0, grid_origin[1]),
+            index_of(0.0, grid_origin[0]),
+        )
+    }
+
+    /// The throat's own upper-junction world height,
+    /// `DUAL_CAVITY_LOWER_SPHERE_Z_MM + DUAL_CAVITY_CENTRE_SPACING_MM -
+    /// sqrt(DUAL_CAVITY_UPPER_SPHERE_R_MM^2 - throat_radius_mm^2)` — the same
+    /// closed form the fixture builds `zB` from. Beyond this height the
+    /// geometry is genuinely upper-sphere material; B3 uses it to prove the
+    /// AT_BORE selection never reaches the upper chamber, only (legitimately)
+    /// some of the throat's own sub-core dead space below it.
+    fn upper_junction_z(throat_radius_mm: f64) -> f64 {
+        plinth_mesh::DUAL_CAVITY_LOWER_SPHERE_Z_MM + plinth_mesh::DUAL_CAVITY_CENTRE_SPACING_MM
+            - (plinth_mesh::DUAL_CAVITY_UPPER_SPHERE_R_MM.powi(2) - throat_radius_mm.powi(2)).sqrt()
+    }
+
+    /// B1 (the primary deliverable): the fixture hollows through
+    /// `create_shell`, the production entry point, at its default
+    /// (ABOVE_BORE) throat setting — FU-53's realized wall and FU-55's check
+    /// witnessed on real geometry, and the shell certifies as two closed
+    /// components (the outer skin, the inner cavity skin).
+    #[test]
+    fn the_dual_cavity_fixture_hollows_through_the_production_entry_point() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let source = make_dual_cavity_pawn().expect("default fixture");
+        let candidate = create_shell(source, settings)
+            .expect("the fixture is sized to clear the registered savings gate");
+        let cavity = candidate.cavity();
+
+        // The gate it cleared, recomputed from the settings and the
+        // candidate's own evidence -- never against a literal, so this
+        // cannot drift from the registered constant.
+        let required_fraction_mm3 = cavity.source_volume_mm3().get() * settings.save_min_fraction().get();
+        assert!(
+            cavity.cavity_volume_mm3().get() >= required_fraction_mm3,
+            "cavity {} did not clear the recomputed 25% fraction floor {required_fraction_mm3}",
+            cavity.cavity_volume_mm3().get()
+        );
+
+        // FU-53/FU-55: the realized wall is provably >= the requested wall.
+        let realized_wall = cavity.realized_wall();
+        assert!(
+            realized_wall.wall_mm().get() >= settings.wall_thickness_mm().get(),
+            "realized wall {} did not clear the requested wall {}",
+            realized_wall.wall_mm().get(),
+            settings.wall_thickness_mm().get()
+        );
+        match realized_wall.claim() {
+            RealizedWallClaim::Measured | RealizedWallClaim::AtLeast => {}
+        }
+
+        // The shell is a real shell: two closed components (outer + inner
+        // cavity skin), no closed-solid-gate cut flag anywhere.
+        let topology = build_face_topology(candidate.mesh(), WeldPolicy::ExactBits)
+            .expect("shell topology is buildable");
+        assert_eq!(topology.counts().boundary_edges, 0);
+        assert!(topology
+            .cut_flags()
+            .iter()
+            .all(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK == 0));
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("closed certificate");
+        assert_eq!(
+            certificate.components().len(),
+            2,
+            "expected the outer skin and the inner cavity skin as two closed components"
+        );
+
+        // Machine-measured on the reference toolchain, in the style of the
+        // pinched-dumbbell's own pins above -- re-pin if the registered
+        // wall, margin, or pitch ever moves (test B7 catches that first).
+        assert!(
+            (cavity.source_volume_mm3().get() - 25_534.702).abs() < 0.5,
+            "source volume moved: {}",
+            cavity.source_volume_mm3().get()
+        );
+        assert!(
+            (cavity.cavity_volume_mm3().get() - 11_999.125).abs() < 0.5,
+            "cavity volume moved: {}",
+            cavity.cavity_volume_mm3().get()
+        );
+    }
+
+    /// The default `H0AdmissionLimits::production()` sizes its 1 GiB
+    /// `drain_planning_bytes` ceiling against corpus-shaped shells; this
+    /// fixture's surface-nets cavity boundary is denser (relative to its
+    /// candidate ray count) than any committed corpus member, so the ray
+    /// buffer preflight in `drains::plan_drains` legitimately needs more
+    /// than the default. This raises a **caller-owned resource ceiling**
+    /// (`H0AdmissionLimits` — its own doc: "not a whole-process or
+    /// third-party private-heap cap"), not a FU-8b gate: every other field
+    /// stays at the production default, only the byte budget grows, and the
+    /// preflight arithmetic this bounds is still exercised in full.
+    fn drain_planning_limits() -> H0AdmissionLimits {
+        H0AdmissionLimits {
+            drain_planning_bytes: 8 * 1024 * 1024 * 1024,
+            ..H0AdmissionLimits::production()
+        }
+    }
+
+    /// B2: the shipped article has exactly one drain (at the bottom of the
+    /// lower chamber) and one vent (at the top of the cavity) — the far
+    /// chamber gets no drain of its own, so resin from it must traverse the
+    /// throat. This is the physical experiment the owner asked for, and it
+    /// falls out of the production planner without special pleading.
+    #[test]
+    fn the_dual_cavity_fixture_drains_and_drills() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let source = make_dual_cavity_pawn().expect("default fixture");
+        let candidate = create_shell_with_admission_limits(source, settings, drain_planning_limits())
+            .expect("hollows");
+
+        let constants = m0_constants().expect("M0 constants");
+        let policy = constants.placeholders();
+        let lobe_band_mm = policy.hollow_lobe_band_mm().diagnostic().get();
+        let vent_top_band_mm = policy.hollow_vent_top_band_mm().diagnostic().get();
+        let field = candidate.cavity_field();
+        let low_z = field
+            .member_flats()
+            .map(|flat| field.world_at_flat(flat)[2])
+            .fold(f64::INFINITY, f64::min);
+        let high_z = field
+            .member_flats()
+            .map(|flat| field.world_at_flat(flat)[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let planned = drains::plan_drains(candidate).expect("drain plan succeeds");
+        let holes = planned.drain_plan().holes();
+        let drain_holes: Vec<_> = holes
+            .iter()
+            .filter(|hole| hole.role == drains::HoleRole::Drain)
+            .collect();
+        let vent_holes: Vec<_> = holes
+            .iter()
+            .filter(|hole| hole.role == drains::HoleRole::Vent)
+            .collect();
+        assert_eq!(
+            drain_holes.len(),
+            1,
+            "expected exactly one drain (the lower chamber, the only lobe within the lobe band): {holes:?}"
+        );
+        assert_eq!(vent_holes.len(), 1, "expected exactly one vent: {holes:?}");
+
+        let drain = drain_holes[0];
+        let drain_z = drain.center_mm[2].get();
+        assert!(
+            drain_z < low_z + lobe_band_mm,
+            "drain centre z {drain_z} is not within the lobe band of the cavity's low point {low_z}"
+        );
+        assert!(
+            drain.direction[2].get() < 0.0,
+            "drain axis must point downward: {:?}",
+            drain.direction
+        );
+
+        let vent = vent_holes[0];
+        let vent_z = vent.center_mm[2].get();
+        assert!(
+            vent_z > high_z - vent_top_band_mm,
+            "vent centre z {vent_z} is not within {vent_top_band_mm} mm of the cavity top {high_z}"
+        );
+
+        let drilled = drilling::drill_planned_shell(planned).expect("drilling succeeds");
+        assert_eq!(
+            drilled.evidence().holes().len(),
+            2,
+            "one drilled drain, one drilled vent"
+        );
+    }
+
+    /// B3 (the doctrine test): at the AT_BORE setting, the cavity is
+    /// voxel-connected through the throat (`label3d` sees one component) but
+    /// resin-flow-disconnected (`flow::flow_labels` sees two) — plain
+    /// 6-connectivity and the FU-47 flow rule disagree on real geometry, and
+    /// the selected (largest) component is the lower chamber, plus
+    /// whichever part of the throat's own sub-core dead space the downhill
+    /// flood reaches first from the lower core (measured: up to `z = 30.5`,
+    /// comfortably short of the throat's upper junction `z = 32.11` where
+    /// genuine upper-sphere material begins) — never the upper chamber
+    /// itself.
+    #[test]
+    fn a_sub_bore_throat_splits_the_two_chambers_while_plain_connectivity_does_not() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let throat_radius_mm = at_bore_throat_radius_mm(settings);
+        let source = make_dual_cavity_pawn_with_throat_radius(throat_radius_mm)
+            .expect("at-bore fixture");
+        let (cavity_mask, grid) = corpus_cavity_repair::cavity_mask_and_grid(&source, settings);
+
+        let (plain_labels, plain_count) =
+            label3d(cavity_mask.view(), 6).expect("plain 6-connectivity labels");
+        drop(plain_labels);
+        assert_eq!(
+            plain_count, 1,
+            "plain 6-connectivity must see the cavity as one component through the throat"
+        );
+
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let (selected, stats) =
+            flow::select_largest_flow_component(&cavity_mask, grid.pitch, throat_r_mm)
+                .expect("flow selection")
+                .expect("the lower chamber admits the registered bore");
+        assert_eq!(
+            stats.flow_components, 2,
+            "resin-flow connectivity must split the two chambers: {stats:?}"
+        );
+
+        // The selected set may legitimately include some of the throat's own
+        // sub-core dead space (measured up to z = 30.5, well short of the
+        // 32.11 mm upper junction) -- what it must never do is reach
+        // genuine upper-sphere material past that junction. That is the
+        // actual doctrine claim: the far chamber is excluded, not merely
+        // "everything below the near junction."
+        let junction_z_b = upper_junction_z(throat_radius_mm);
+        let max_selected_z = selected
+            .indexed_iter()
+            .filter(|(_, is_selected)| **is_selected)
+            .map(|((iz, _iy, _ix), _)| grid.origin[2] + iz as f64 * grid.pitch)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max_selected_z < junction_z_b,
+            "a selected voxel at z = {max_selected_z} reached past the throat's upper junction {junction_z_b} into the upper chamber"
+        );
+
+        let selected_voxels = selected.iter().filter(|value| **value).count();
+        let selected_mm3 = selected_voxels as f64 * grid.pitch.powi(3);
+        // The analytic lower-chamber-alone reference from the fixture's own
+        // sizing arithmetic (design doc `guaranteedHollow`): a full ball of
+        // radius `17.0 - t` minus the foot-plane cap.
+        const LOWER_CHAMBER_REFERENCE_MM3: f64 = 9_997.6;
+        let relative_error =
+            (selected_mm3 - LOWER_CHAMBER_REFERENCE_MM3).abs() / LOWER_CHAMBER_REFERENCE_MM3;
+        assert!(
+            relative_error < 0.05,
+            "selected cavity {selected_mm3} mm^3 is not within 5% of the lower-chamber reference {LOWER_CHAMBER_REFERENCE_MM3} mm^3"
+        );
+    }
+
+    /// B4 (the FU-47 half-voxel correction, witnessed on real geometry): at
+    /// the AT_BORE setting the throat's own axis voxel reads a clearance of
+    /// **exactly** 1.5 mm (`= HOLLOW_DRAIN_R_MM`, three lattice steps) and is
+    /// refused; at ABOVE_BORE the same voxel reads **exactly** 2.0 mm and is
+    /// admitted. A comparison against the raw, uncorrected 1.5 mm threshold
+    /// would wrongly admit the AT_BORE case.
+    #[test]
+    fn the_throat_clearance_is_exactly_three_voxel_steps_and_is_still_refused() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let pitch = settings.voxel_pitch_mm().get();
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let threshold = flow::core_clearance_threshold_mm(throat_r_mm, pitch);
+        assert_eq!(threshold, 1.75, "the FU-47 corrected core threshold moved");
+
+        // AT_BORE: exactly 1.5 mm, refused.
+        let at_bore_radius = at_bore_throat_radius_mm(settings);
+        let at_bore_source =
+            make_dual_cavity_pawn_with_throat_radius(at_bore_radius).expect("at-bore fixture");
+        let (at_bore_mask, at_bore_grid) =
+            corpus_cavity_repair::cavity_mask_and_grid(&at_bore_source, settings);
+        let at_bore_clearance =
+            frozen_distance_transform(&at_bore_mask, at_bore_grid.pitch).expect("EDT");
+        let at_bore_voxel = axis_voxel_at_z(at_bore_grid.origin, at_bore_grid.pitch, 30.5);
+        let at_bore_measured = at_bore_clearance[at_bore_voxel];
+        assert_eq!(at_bore_measured, 1.5, "AT_BORE axis clearance moved");
+        assert!(
+            at_bore_measured < threshold,
+            "AT_BORE clearance {at_bore_measured} must be refused by the corrected threshold {threshold}"
+        );
+
+        // ABOVE_BORE: exactly 2.0 mm, admitted, and the whole cavity is one
+        // flow component through it.
+        let above_bore_source = make_dual_cavity_pawn().expect("above-bore fixture");
+        let (above_bore_mask, above_bore_grid) =
+            corpus_cavity_repair::cavity_mask_and_grid(&above_bore_source, settings);
+        let above_bore_clearance =
+            frozen_distance_transform(&above_bore_mask, above_bore_grid.pitch).expect("EDT");
+        let above_bore_voxel = axis_voxel_at_z(above_bore_grid.origin, above_bore_grid.pitch, 30.5);
+        let above_bore_measured = above_bore_clearance[above_bore_voxel];
+        assert_eq!(above_bore_measured, 2.0, "ABOVE_BORE axis clearance moved");
+        assert!(
+            above_bore_measured >= threshold,
+            "ABOVE_BORE clearance {above_bore_measured} must be admitted by the corrected threshold {threshold}"
+        );
+
+        let (_selected, stats) = flow::select_largest_flow_component(
+            &above_bore_mask,
+            above_bore_grid.pitch,
+            throat_r_mm,
+        )
+        .expect("flow selection")
+        .expect("the above-bore cavity admits the registered bore");
+        assert_eq!(
+            stats.flow_components, 1,
+            "the corrected threshold must admit one flow-connected interior at ABOVE_BORE"
+        );
+    }
+
+    /// B5 (the control): with no cavity-level throat at all, the two
+    /// chambers are not even 6-connected -- `label3d` and the flow rule
+    /// agree, which is what proves B3's "1 by plain connectivity" is a
+    /// property of the geometry rather than of the labeller.
+    #[test]
+    fn an_absent_cavity_throat_leaves_two_disconnected_interiors() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let source = make_dual_cavity_pawn_with_throat_radius(DUAL_CAVITY_THROAT_SEPARATED_MM)
+            .expect("separated fixture");
+        let (cavity_mask, grid) = corpus_cavity_repair::cavity_mask_and_grid(&source, settings);
+
+        let (plain_labels, plain_count) =
+            label3d(cavity_mask.view(), 6).expect("plain 6-connectivity labels");
+        drop(plain_labels);
+        assert_eq!(
+            plain_count, 2,
+            "with no cavity-level throat the two chambers must not even be 6-connected"
+        );
+
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let (_labels, stats) =
+            flow::flow_labels(&cavity_mask, grid.pitch, throat_r_mm).expect("flow labels");
+        assert_eq!(stats.flow_components, 2, "{stats:?}");
+    }
+
+    /// B6: the deliberate design choice from the design doc's
+    /// `guaranteedHollow` section, pinned so a later change that flips a
+    /// setting to `Solid` is a named failure rather than a silent one. Both
+    /// sides of the doctrine boundary hollow; ABOVE_BORE's cavity (both
+    /// chambers) is strictly larger than AT_BORE's (the lower chamber
+    /// alone), and AT_BORE's is close to the lower-chamber-alone reference.
+    #[test]
+    fn both_sides_of_the_doctrine_boundary_still_clear_the_registered_savings_gate() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let separated_source =
+            make_dual_cavity_pawn_with_throat_radius(DUAL_CAVITY_THROAT_SEPARATED_MM)
+                .expect("separated fixture");
+        let at_bore_source =
+            make_dual_cavity_pawn_with_throat_radius(at_bore_throat_radius_mm(settings))
+                .expect("at-bore fixture");
+        let above_bore_source = make_dual_cavity_pawn().expect("above-bore fixture");
+
+        let separated = create_shell(separated_source, settings).expect("separated hollows");
+        let at_bore = create_shell(at_bore_source, settings).expect("at-bore hollows");
+        let above_bore = create_shell(above_bore_source, settings).expect("above-bore hollows");
+
+        assert!(
+            above_bore.cavity().cavity_volume_mm3().get() > at_bore.cavity().cavity_volume_mm3().get(),
+            "ABOVE_BORE (both chambers) must retain strictly more cavity than AT_BORE (lower chamber alone)"
+        );
+
+        const LOWER_CHAMBER_REFERENCE_MM3: f64 = 9_997.6;
+        for (name, measured) in [
+            ("AT_BORE", at_bore.cavity().cavity_volume_mm3().get()),
+            ("SEPARATED", separated.cavity().cavity_volume_mm3().get()),
+        ] {
+            let relative_error =
+                (measured - LOWER_CHAMBER_REFERENCE_MM3).abs() / LOWER_CHAMBER_REFERENCE_MM3;
+            assert!(
+                relative_error < 0.05,
+                "{name} cavity {measured} mm^3 is not within 5% of the lower-chamber reference {LOWER_CHAMBER_REFERENCE_MM3} mm^3"
+            );
+        }
+    }
+
+    /// B7 (the FU-8b guard): the fixture's throat settings still straddle the
+    /// registered core threshold, computed live off the registry rather than
+    /// hard-coded, and exact equality with the corrected threshold is proved
+    /// unreachable on the 0.5 mm lattice rather than merely asserted. A wall,
+    /// pitch, margin, or bore change fails **here**, naming the number that
+    /// moved, instead of silently invalidating every test above.
+    #[test]
+    fn the_fixture_throat_settings_still_straddle_the_registered_core_threshold() {
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let t = registered_erosion_mm(settings);
+        assert!(
+            (DUAL_CAVITY_THROAT_ABOVE_BORE_MM - (t + 1.90)).abs() < 1e-9,
+            "the fixture's frozen ABOVE_BORE literal has drifted from t + 1.90 (t = {t})"
+        );
+
+        let pitch = settings.voxel_pitch_mm().get();
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let threshold = flow::core_clearance_threshold_mm(throat_r_mm, pitch);
+
+        let at_bore_r_cav = DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM;
+        let above_bore_r_cav = DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM;
+        assert!(
+            at_bore_r_cav > 0.5 * 8_f64.sqrt() && at_bore_r_cav < 0.5 * 9_f64.sqrt(),
+            "AT_BORE's cavity radius {at_bore_r_cav} left the (0.5*sqrt(8), 0.5*sqrt(9)) bracket"
+        );
+        assert!(
+            above_bore_r_cav > 0.5 * 13_f64.sqrt() && above_bore_r_cav < 0.5 * 16_f64.sqrt(),
+            "ABOVE_BORE's cavity radius {above_bore_r_cav} left the (0.5*sqrt(13), 0.5*sqrt(16)) bracket"
+        );
+
+        // The computed proof that exact equality with the corrected
+        // threshold (1.75 mm = 0.5*sqrt(12.25)) is unreachable: no lattice
+        // offset (0.5*i, 0.5*j) produces it, because 12.25 is not a sum of
+        // two integer squares.
+        for i in 0..=8_i64 {
+            for j in 0..=8_i64 {
+                let k = i * i + j * j;
+                let clearance = 0.5 * (k as f64).sqrt();
+                assert!(
+                    (clearance - threshold).abs() > 1e-9,
+                    "offset ({i}, {j}) produces clearance {clearance}, exactly the threshold {threshold}"
+                );
+            }
+        }
     }
 }

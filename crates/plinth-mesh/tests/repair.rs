@@ -21,11 +21,11 @@
 //! by inspection.
 
 use plinth_mesh::{
-    build_face_topology, make_box_default, make_doubled_sheet_box, make_duplicated_face_box,
-    make_dust_shard_box, make_edge_shared_boxes, make_overhang_table, make_pinched_boxes,
-    make_thin_fin, make_toed_slab, make_triply_wound_face_box, repair_mesh, write_binary_stl,
-    DuplicateDisposition, Mesh, WeldPolicy, TOPOLOGY_CUT_CLOSED_SOLID_MASK, TOPOLOGY_CUT_DUPLICATE,
-    TOPOLOGY_CUT_POINT_ONLY,
+    build_face_topology, make_box_default, make_doubled_sheet_box, make_dual_cavity_pawn,
+    make_duplicated_face_box, make_dust_shard_box, make_edge_shared_boxes, make_overhang_table,
+    make_pinched_boxes, make_thin_fin, make_toed_slab, make_triply_wound_face_box, repair_mesh,
+    write_binary_stl, DuplicateDisposition, Mesh, WeldPolicy, TOPOLOGY_CUT_CLOSED_SOLID_MASK,
+    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_POINT_ONLY,
 };
 
 /// The exact condition the closed-solid gate applies, so a fixture cannot pass
@@ -75,6 +75,11 @@ fn a_clean_mesh_passes_through_byte_identical() {
         ("overhang", make_overhang_table().expect("overhang"), true),
         ("toed_slab", make_toed_slab().expect("slab"), false),
         ("thin_fin", make_thin_fin().expect("fin"), false),
+        (
+            "dual_cavity_pawn",
+            make_dual_cavity_pawn().expect("dual cavity pawn"),
+            true,
+        ),
     ] {
         let repaired = repair_mesh(&mesh);
         assert!(
