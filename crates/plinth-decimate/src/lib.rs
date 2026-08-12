@@ -2043,8 +2043,10 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 ///   a 429 k-face mesh that is ~1,700 points, any one of which could be a
 ///   collapsed twig. An absent `max_mm` is a refusal, never a pass.
 /// - **U4 — structural invariants downstream stages assume.**
-///   `topology_not_increased`, the same predicate the search gate uses, because
-///   `stitch_layer` genuinely requires degree-2 adjacency. Strict audit is
+///   `topology_not_increased`, the same predicate the search gate uses — now
+///   over every canonical count, because `stitch_layer` genuinely requires
+///   degree-2 adjacency and `validate_closed_mesh` refuses any nonzero cut flag
+///   whatever its class. Strict audit is
 ///   already enforced inside `compact_result` and inside every probe. OD-9
 ///   exterior-ness is relied on, not re-proved: the contact machinery screens it
 ///   later. **This clause is defence in depth and is unreachable in production
@@ -2092,11 +2094,10 @@ fn assess_downstream_utility(
         // is taken in its own pass against a frozen duplicate-face snapshot, so
         // no edge's verdict depends on how many edges preceded it, and
         // duplicate faces are reported beside the edge counts instead of
-        // vanishing into the exclusion that hid them. What remains deliberate
-        // is that this clause binds on the two edge counts alone:
-        // `duplicate_faces` is counted and serialized but does not gate,
-        // because whether a reduction may introduce duplicate faces at all is a
-        // separate decision to make with the corpus numbers in hand.
+        // vanishing into the exclusion that hid them. The predicate now binds
+        // on every canonical count, including the three cut classes no edge
+        // count covers — the pinch this witness would otherwise have certified
+        // as downstream-useful is refused here as well as at the search gate.
         || !topology_not_increased(topology_before, topology_after)
         || !registered_face_scaled_demand_falls(
             candidate.input_face_count,
@@ -2576,14 +2577,53 @@ fn within_final_slack(probe: &TwoSidedProbe, budget: ErrorBudget, slack: f64) ->
     probe.p99_mm <= budget.p99_mm * slack && probe.p99_9_mm <= budget.p99_9_mm * slack
 }
 
-/// The two edge counts are the gate.  `duplicate_faces` is reported alongside
-/// them but deliberately does not bind here: FU-26 lands the counter, and
-/// whether a reduction may introduce duplicate faces at all is a separate gate
-/// decision with its own corpus consequences.  Adding the clause here would
-/// only ever refuse more candidates, never fewer.
+/// No canonical count may rise across the reduction — every field, not the two
+/// edge counts this predicate began as.
+///
+/// The two edge counts alone left the gate asymmetric, and the asymmetry was
+/// the defect: a manufactured non-manifold edge was refused by name (the
+/// Rotting Warhorse's 8, the Treant's 199), while a manufactured *pinch* was
+/// not part of the comparison at all and shipped inside a candidate this stage
+/// called verified. `Tavey Base.stl` is clean at raw under
+/// `build_face_topology(ExactBits)` in all six cut classes and emitted a
+/// 73,582 -> 29,890 candidate carrying 10 faces flagged
+/// `TOPOLOGY_CUT_POINT_ONLY`; `validate_closed_mesh` refuses **any** nonzero
+/// cut flag, so that candidate could only ever be refused downstream, after
+/// every stage between here and there had spent its work on it.
+///
+/// So the clause is the whole struct. `TopologyCounts` is destructured
+/// exhaustively rather than compared field by field through `after.x` so that
+/// adding a count to it is a compile error here until this predicate gives it a
+/// verdict; a count that exists and does not bind is exactly how the pinch got
+/// out. `duplicate_faces` and `duplicate_face_groups` join the gate with them:
+/// FU-26 landed the counter and deferred the gate decision "with its own corpus
+/// consequences", and the corpus numbers are now in hand — all seven
+/// clean-at-raw models come through 0 -> 0 duplicate faces, so the clause costs
+/// nothing it should not cost.
+///
+/// This is a strengthening in the only direction available: it refuses
+/// candidates the old predicate admitted and admits none it refused. Every
+/// caller treats a refusal as a fact about one ratio — the bisection, the
+/// final-verification loop and the adaptive sweep all record it and step on —
+/// so a model whose ratio manufactures a pinch is searched at the other ratios
+/// rather than surrendered.
 fn topology_not_increased(before: TopologyCounts, after: TopologyCounts) -> bool {
-    after.boundary_edges <= before.boundary_edges
-        && after.nonmanifold_edges <= before.nonmanifold_edges
+    let TopologyCounts {
+        boundary_edges,
+        nonmanifold_edges,
+        duplicate_faces,
+        duplicate_face_groups,
+        point_only_cut_faces,
+        same_direction_cut_faces,
+        degenerate_cut_faces,
+    } = after;
+    boundary_edges <= before.boundary_edges
+        && nonmanifold_edges <= before.nonmanifold_edges
+        && duplicate_faces <= before.duplicate_faces
+        && duplicate_face_groups <= before.duplicate_face_groups
+        && point_only_cut_faces <= before.point_only_cut_faces
+        && same_direction_cut_faces <= before.same_direction_cut_faces
+        && degenerate_cut_faces <= before.degenerate_cut_faces
 }
 
 #[cfg(test)]
@@ -4546,6 +4586,200 @@ mod tests {
                 nonmanifold_edges: 2,
                 ..TopologyCounts::default()
             }
+        ));
+    }
+
+    /// Every count in `TopologyCounts` binds, one field at a time. The three
+    /// cut classes are the ones this test exists for: `Tavey Base.stl` is clean
+    /// at raw in all six classes and shipped a "verified" candidate carrying 10
+    /// point-only cut faces, because the gate compared two edge counts and the
+    /// pinch was in neither. A field left ungated is a field a reduction may
+    /// manufacture into a candidate this stage certifies.
+    #[test]
+    fn topology_guard_refuses_a_manufactured_cut_of_any_class() {
+        let before = TopologyCounts {
+            boundary_edges: 2,
+            nonmanifold_edges: 1,
+            duplicate_faces: 4,
+            duplicate_face_groups: 2,
+            point_only_cut_faces: 3,
+            same_direction_cut_faces: 1,
+            degenerate_cut_faces: 1,
+        };
+        assert!(
+            topology_not_increased(before, before),
+            "an unmoved count is not an increase in any class"
+        );
+        // One field raised by one, seven times: the candidate that differs from
+        // its source in exactly that count and nothing else.
+        let raised: [(&str, TopologyCounts); 7] = [
+            (
+                "boundary_edges",
+                TopologyCounts {
+                    boundary_edges: before.boundary_edges + 1,
+                    ..before
+                },
+            ),
+            (
+                "nonmanifold_edges",
+                TopologyCounts {
+                    nonmanifold_edges: before.nonmanifold_edges + 1,
+                    ..before
+                },
+            ),
+            (
+                "duplicate_faces",
+                TopologyCounts {
+                    duplicate_faces: before.duplicate_faces + 1,
+                    ..before
+                },
+            ),
+            (
+                "duplicate_face_groups",
+                TopologyCounts {
+                    duplicate_face_groups: before.duplicate_face_groups + 1,
+                    ..before
+                },
+            ),
+            (
+                "point_only_cut_faces",
+                TopologyCounts {
+                    point_only_cut_faces: before.point_only_cut_faces + 1,
+                    ..before
+                },
+            ),
+            (
+                "same_direction_cut_faces",
+                TopologyCounts {
+                    same_direction_cut_faces: before.same_direction_cut_faces + 1,
+                    ..before
+                },
+            ),
+            (
+                "degenerate_cut_faces",
+                TopologyCounts {
+                    degenerate_cut_faces: before.degenerate_cut_faces + 1,
+                    ..before
+                },
+            ),
+        ];
+        for (field, after) in raised {
+            assert!(
+                !topology_not_increased(before, after),
+                "{field} rose and the candidate must be refused"
+            );
+            assert_eq!(
+                classify_final_attempt(
+                    &probe_with_percentiles(0.0, 0.0),
+                    ErrorBudget {
+                        p99_mm: 1.0,
+                        p99_9_mm: 1.0,
+                    },
+                    1.1,
+                    before,
+                    after,
+                ),
+                FinalVerificationResult::TopologyIncreased,
+                "{field} must refuse the emitted candidate, not only the predicate"
+            );
+            assert!(
+                topology_not_increased(after, before),
+                "{field} falling is admissible; only a rise is refused"
+            );
+        }
+    }
+
+    /// The refusal on real topology arrays rather than hand-written counts:
+    /// two closed boxes welded at one corner are watertight, consistently
+    /// oriented and free of duplicates — every count the gate used to read is
+    /// *identical* to the single clean box's — and the surface pinches to a
+    /// point at the shared corner. That is the shape `Tavey Base.stl`'s
+    /// decimated candidate had, and the shape the old two-edge-count predicate
+    /// admitted.
+    #[test]
+    fn a_pinch_with_clean_edge_counts_is_admitted_by_the_edge_counts_and_refused_by_the_gate() {
+        let clean = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("clean box");
+        let far =
+            plinth_mesh::make_box([10.0, 10.0, 10.0], [10.0, 10.0, 10.0]).expect("corner box");
+        let mut verts = clean.verts().to_vec();
+        let offset = u32::try_from(verts.len()).expect("small fixture");
+        verts.extend_from_slice(far.verts());
+        let mut tris = clean.tris().to_vec();
+        tris.extend(far.tris().iter().map(|triangle| {
+            [
+                triangle[0] + offset,
+                triangle[1] + offset,
+                triangle[2] + offset,
+            ]
+        }));
+        let pinched = Mesh::new(verts, tris).expect("two boxes sharing one corner");
+
+        let before = build_face_topology(&clean, WeldPolicy::ExactBits)
+            .expect("clean topology")
+            .counts();
+        let after = build_face_topology(&pinched, WeldPolicy::ExactBits)
+            .expect("pinched topology")
+            .counts();
+        assert_eq!(
+            (
+                before.boundary_edges,
+                before.nonmanifold_edges,
+                before.duplicate_faces,
+                before.point_only_cut_faces
+            ),
+            (0, 0, 0, 0),
+            "the source is clean in every class"
+        );
+        assert_eq!(
+            (
+                after.boundary_edges,
+                after.nonmanifold_edges,
+                after.duplicate_faces
+            ),
+            (0, 0, 0),
+            "the pinched mesh moves none of the counts the gate used to read"
+        );
+        assert!(
+            after.point_only_cut_faces > 0,
+            "the shared corner is a point-only cut"
+        );
+        assert!(
+            !topology_not_increased(before, after),
+            "a manufactured pinch must be refused"
+        );
+    }
+
+    /// The clean-raw case the corpus census names: a source with nothing in any
+    /// class, and a candidate that manufactured a pinch, is refused by the
+    /// witness as well as by the search gate. Without the cut-class clauses
+    /// this candidate satisfies every U-clause and mints the registered
+    /// witness.
+    #[test]
+    fn u4_refuses_a_pinch_manufactured_from_a_clean_source() {
+        let clean = TopologyCounts::default();
+        let pinched = TopologyCounts {
+            point_only_cut_faces: 10,
+            ..TopologyCounts::default()
+        };
+        assert_eq!(
+            assess_downstream_utility(
+                utility_policy(),
+                &admissible_candidate(),
+                &admissible_probe(),
+                clean,
+                pinched,
+            ),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+        assert!(matches!(
+            assess_downstream_utility(
+                utility_policy(),
+                &admissible_candidate(),
+                &admissible_probe(),
+                clean,
+                clean,
+            ),
+            DownstreamUtilityEvidence::DownstreamUseful(_)
         ));
     }
 

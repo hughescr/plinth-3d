@@ -17,6 +17,17 @@ use plinth_mesh::{load_binary_stl, write_binary_stl, Mesh, TopologyCounts, WeldP
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// v9 (2026-08-11) adds `point_only_cut_faces`, `same_direction_cut_faces` and
+/// `degenerate_cut_faces` to every topology report, and they are gating rather
+/// than merely reported: the emitted-candidate certification now refuses any
+/// increase in *any* canonical count. Before v9 the gate compared two edge
+/// counts, so a reduction could manufacture a pinch and the report said
+/// nothing — `Tavey Base.stl` emitted a verified 73,582 -> 29,890 candidate
+/// carrying 10 point-only cut faces from a source clean in all six classes,
+/// which `validate_closed_mesh` then refused downstream. The duplicate
+/// counters v5 added, and which v6 explained, join the gate at the same time:
+/// their corpus consequences are now measured rather than deferred.
+///
 /// v8 (2026-08-11) adds `search_candidate_free_ratios`. A bisection midpoint
 /// that yields no usable candidate publishes no `SearchStepReport`, so a
 /// step-count audit that reads `search_steps.len()` alone would reject a model
@@ -68,7 +79,7 @@ use sha2::{Digest, Sha256};
 /// clean checkout without re-adding scratch instrumentation. Per-phase
 /// wall-clock, which §6 Phase 1 also lists, is deliberately NOT serialized —
 /// see the record's §9.8.
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v8";
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v9";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
     CorpusModel::already_print_scale(
@@ -281,12 +292,20 @@ struct FinalAttemptReport {
     downstream_utility: String,
 }
 
+/// Every canonical count, including the three cut classes no edge count
+/// covers. They are serialized because they now *gate*: a candidate whose
+/// point-only, same-direction or degenerate cut-face count rose against the
+/// source is refused, so a report that omitted them would describe a decision
+/// with part of its evidence missing.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct TopologyReport {
     boundary_edges: usize,
     nonmanifold_edges: usize,
     duplicate_faces: usize,
     duplicate_face_groups: usize,
+    point_only_cut_faces: usize,
+    same_direction_cut_faces: usize,
+    degenerate_cut_faces: usize,
 }
 
 impl From<TopologyCounts> for TopologyReport {
@@ -296,6 +315,9 @@ impl From<TopologyCounts> for TopologyReport {
             nonmanifold_edges: counts.nonmanifold_edges,
             duplicate_faces: counts.duplicate_faces,
             duplicate_face_groups: counts.duplicate_face_groups,
+            point_only_cut_faces: counts.point_only_cut_faces,
+            same_direction_cut_faces: counts.same_direction_cut_faces,
+            degenerate_cut_faces: counts.degenerate_cut_faces,
         }
     }
 }
@@ -421,12 +443,18 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 nonmanifold_edges: 0,
                 duplicate_faces: 0,
                 duplicate_face_groups: 0,
+                point_only_cut_faces: 0,
+                same_direction_cut_faces: 0,
+                degenerate_cut_faces: 0,
             }),
             topology_after: Some(TopologyReport {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
                 duplicate_faces: 0,
                 duplicate_face_groups: 0,
+                point_only_cut_faces: 0,
+                same_direction_cut_faces: 0,
+                degenerate_cut_faces: 0,
             }),
             final_attempts: Vec::new(),
             adaptive_exploration: None,
@@ -889,21 +917,69 @@ fn independently_audit_verified(
             search_p99_9_limit * 1.1
         ));
     }
-    if topology_after.boundary_edges > topology_before.boundary_edges
-        || topology_after.nonmanifold_edges > topology_before.nonmanifold_edges
-    {
-        return Err(format!(
-            "M3TopologyIncreased: before boundary={} nonmanifold={}; after boundary={} nonmanifold={}",
-            topology_before.boundary_edges,
-            topology_before.nonmanifold_edges,
-            topology_after.boundary_edges,
-            topology_after.nonmanifold_edges
-        ));
+    // The gate's own audit of the invariant the crate enforces, over every
+    // canonical count rather than the two edge counts it began with: a
+    // manufactured pinch moves neither edge count, and the crate is refusing
+    // those candidates now, so an audit that still read two numbers would
+    // certify meshes the crate itself would not emit.
+    for (field, before, after) in canonical_counts(topology_before, topology_after) {
+        if after > before {
+            return Err(format!(
+                "M3TopologyIncreased: {field} rose from {before} to {after}"
+            ));
+        }
     }
     if expected.name == "Weeping Treant v1.2" {
         write_and_reopen_treant_artifacts(output_dir, original, success.mesh())?;
     }
     Ok(())
+}
+
+/// Every canonical count paired across a stage, named, in one gathered list —
+/// the audit walks it instead of naming fields one comparison at a time, so a
+/// count added to `TopologyCounts` is added here once and audited everywhere
+/// this list is read.
+fn canonical_counts(
+    before: TopologyCounts,
+    after: TopologyCounts,
+) -> [(&'static str, usize, usize); 7] {
+    [
+        (
+            "boundary_edges",
+            before.boundary_edges,
+            after.boundary_edges,
+        ),
+        (
+            "nonmanifold_edges",
+            before.nonmanifold_edges,
+            after.nonmanifold_edges,
+        ),
+        (
+            "duplicate_faces",
+            before.duplicate_faces,
+            after.duplicate_faces,
+        ),
+        (
+            "duplicate_face_groups",
+            before.duplicate_face_groups,
+            after.duplicate_face_groups,
+        ),
+        (
+            "point_only_cut_faces",
+            before.point_only_cut_faces,
+            after.point_only_cut_faces,
+        ),
+        (
+            "same_direction_cut_faces",
+            before.same_direction_cut_faces,
+            after.same_direction_cut_faces,
+        ),
+        (
+            "degenerate_cut_faces",
+            before.degenerate_cut_faces,
+            after.degenerate_cut_faces,
+        ),
+    ]
 }
 
 fn write_and_reopen_treant_artifacts(

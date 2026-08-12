@@ -8,6 +8,17 @@
 //! the defect `remove_zero_volume_face_pairs` exists to stop, and this is the
 //! test that measures whether it did.
 //!
+//! **What it reads, and why that had to change.** The first version of this
+//! harness read `TopologyCounts` alone — four numbers, none of which is a
+//! cut-flag count — and so it was structurally blind to five of the six cut
+//! classes. It passed while `Tavey Base.stl` emitted a *verified* 73,582 ->
+//! 29,890 candidate carrying 10 faces flagged `TOPOLOGY_CUT_POINT_ONLY` from a
+//! source clean in every class, and `validate_closed_mesh` refuses any nonzero
+//! cut flag, so that model stayed pipeline-refused end to end with this harness
+//! green. It now counts **every** cut class per stage, straight off
+//! `FaceTopology::cut_flags()`, and fails on any class the decimation
+//! manufactured — not duplicate faces alone.
+//!
 //! **Why it is `#[ignore]`d.** Its inputs are 4–20 MB binary STLs that are not
 //! in git and never will be (see `docs/development.md`, "Corpus provisioning").
 //! A checkout without them must not fail `cargo test --workspace`, and a
@@ -30,7 +41,23 @@ use std::path::{Path, PathBuf};
 
 use geom_kernel::NativeSurfaceConfig;
 use plinth_decimate::{run, BudgetSearchOutcome, DecimationBudget, ProbeConfig};
-use plinth_mesh::{build_face_topology, load_binary_stl, Mesh, TopologyCounts, WeldPolicy};
+use plinth_mesh::{
+    build_face_topology, load_binary_stl, Mesh, TopologyCounts, WeldPolicy, TOPOLOGY_CUT_BOUNDARY,
+    TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
+    TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+};
+
+/// Every class `validate_closed_mesh` refuses, in flag order. A stage that
+/// gains faces in any of them has manufactured a defect, whatever the four
+/// `TopologyCounts` numbers say.
+const CUT_CLASSES: [(&str, u8); 6] = [
+    ("boundary", TOPOLOGY_CUT_BOUNDARY),
+    ("nonmanifold", TOPOLOGY_CUT_NONMANIFOLD),
+    ("same_direction", TOPOLOGY_CUT_SAME_DIRECTION),
+    ("duplicate", TOPOLOGY_CUT_DUPLICATE),
+    ("point_only", TOPOLOGY_CUT_POINT_ONLY),
+    ("degenerate", TOPOLOGY_CUT_DEGENERATE),
+];
 
 /// The seven the census named clean-raw-but-damaged-by-decimation. These are
 /// the models the claim is about, so these are the models the harness runs by
@@ -60,7 +87,7 @@ fn local_minis_zero_volume_repair() {
         directory.display()
     );
 
-    let mut report = String::from("plinth/local-minis-zero-volume-repair/v1\n");
+    let mut report = String::from("plinth/local-minis-zero-volume-repair/v2\n");
     let mut manufactured = Vec::new();
     for path in &models {
         let name = path
@@ -73,7 +100,17 @@ fn local_minis_zero_volume_repair() {
         report.push_str(&observation.line(&name));
         report.push('\n');
         eprintln!("  {}", observation.line(&name));
-        if observation.manufactured_duplicate_faces() > 0 || observation.refused_by_defect.is_some()
+        // The refused ratios are the record of the gate doing its work, so the
+        // artifact carries them in full even though the summary line counts
+        // them: this is where "Tavey Base verifies at a *different* ratio" is
+        // legible as a decision rather than as a changed number.
+        for refusal in &observation.topology_refusals {
+            report.push_str("\t\t");
+            report.push_str(refusal);
+            report.push('\n');
+        }
+        if !observation.manufactured_cut_classes().is_empty()
+            || observation.refused_by_defect.is_some()
         {
             manufactured.push(observation.line(&name));
         }
@@ -90,8 +127,8 @@ fn local_minis_zero_volume_repair() {
 
     assert!(
         manufactured.is_empty(),
-        "LocalMinisManufacturedCoincidence: decimation must not add duplicate faces to a model \
-         that did not have them, and must not refuse a model over coincidence it manufactured:\n{}",
+        "LocalMinisManufacturedCut: decimation must not add a cut face of ANY class to a model \
+         that did not have one, and must not refuse a model over coincidence it manufactured:\n{}",
         manufactured.join("\n")
     );
 }
@@ -102,39 +139,89 @@ struct Observation {
     input_faces: usize,
     output_faces: usize,
     status: &'static str,
-    before: TopologyCounts,
-    after: TopologyCounts,
+    before: Stage,
+    after: Stage,
     /// `CoincidentFacesRemain` or `ZeroVolumePairOpensBoundary` reaching the
     /// operator means the repair met something it cannot handle; the census
     /// says it should meet neither on these models.
     refused_by_defect: Option<String>,
+    /// Ratios the emitted-candidate certification refused because a canonical
+    /// count rose. Unlike the two above these are not failures: they are the
+    /// gate declining one ratio and the search stepping on, and a model that
+    /// verifies with some of these verified at a ratio that manufactured
+    /// nothing.
+    topology_refusals: Vec<String>,
+}
+
+/// One stage's canonical topology: the four counts, and the face count of each
+/// of the six cut classes. `TopologyCounts` covers three of the six on its own,
+/// so the classes are read from `cut_flags()` directly and all six are reported
+/// the same way — the report says what the gate downstream reads, with nothing
+/// inferred.
+struct Stage {
+    counts: TopologyCounts,
+    cut_faces: [usize; CUT_CLASSES.len()],
 }
 
 impl Observation {
-    fn manufactured_duplicate_faces(&self) -> usize {
-        self.after
-            .duplicate_faces
-            .saturating_sub(self.before.duplicate_faces)
+    /// Every class whose face count rose across decimation, with both numbers.
+    fn manufactured_cut_classes(&self) -> Vec<(&'static str, usize, usize)> {
+        CUT_CLASSES
+            .iter()
+            .enumerate()
+            .filter(|&(class, _)| self.after.cut_faces[class] > self.before.cut_faces[class])
+            .map(|(class, &(name, _))| {
+                (
+                    name,
+                    self.before.cut_faces[class],
+                    self.after.cut_faces[class],
+                )
+            })
+            .collect()
     }
 
     fn line(&self, name: &str) -> String {
-        format!(
-            "{name}\tstatus={}\tfaces={}->{}\tduplicate_faces={}->{}\tduplicate_groups={}->{}\t\
-             boundary={}->{}\tnonmanifold={}->{}\tmanufactured={}\tdefect_refusal={}",
-            self.status,
-            self.input_faces,
-            self.output_faces,
-            self.before.duplicate_faces,
-            self.after.duplicate_faces,
-            self.before.duplicate_face_groups,
-            self.after.duplicate_face_groups,
-            self.before.boundary_edges,
-            self.after.boundary_edges,
-            self.before.nonmanifold_edges,
-            self.after.nonmanifold_edges,
-            self.manufactured_duplicate_faces(),
+        let mut line = format!(
+            "{name}\tstatus={}\tfaces={}->{}",
+            self.status, self.input_faces, self.output_faces
+        );
+        for (class, &(class_name, _)) in CUT_CLASSES.iter().enumerate() {
+            line.push_str(&format!(
+                "\tcut_{class_name}={}->{}",
+                self.before.cut_faces[class], self.after.cut_faces[class]
+            ));
+        }
+        line.push_str(&format!(
+            "\tboundary_edges={}->{}\tnonmanifold_edges={}->{}\tduplicate_faces={}->{}\t\
+             duplicate_groups={}->{}",
+            self.before.counts.boundary_edges,
+            self.after.counts.boundary_edges,
+            self.before.counts.nonmanifold_edges,
+            self.after.counts.nonmanifold_edges,
+            self.before.counts.duplicate_faces,
+            self.after.counts.duplicate_faces,
+            self.before.counts.duplicate_face_groups,
+            self.after.counts.duplicate_face_groups,
+        ));
+        let manufactured = self.manufactured_cut_classes();
+        line.push_str(&format!(
+            "\ttopology_refusals={}",
+            self.topology_refusals.len()
+        ));
+        line.push_str(&format!(
+            "\tmanufactured={}\tdefect_refusal={}",
+            if manufactured.is_empty() {
+                "none".to_owned()
+            } else {
+                manufactured
+                    .iter()
+                    .map(|(class, before, after)| format!("{class}:{before}->{after}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
             self.refused_by_defect.as_deref().unwrap_or("none"),
-        )
+        ));
+        line
     }
 }
 
@@ -145,7 +232,7 @@ fn observe(path: &Path) -> Observation {
             path.display()
         )
     });
-    let before = counts(&original);
+    let before = stage(&original);
     let outcome = run(&original, harness_budget()).unwrap_or_else(|error| {
         panic!(
             "LocalMinisExecutionFailure: {} ended the run: {error}",
@@ -173,13 +260,19 @@ fn observe(path: &Path) -> Observation {
             refusal.contains("CoincidentFacesRemain") || refusal.contains("ZeroVolumePairOpens")
         })
         .cloned();
+    let topology_refusals = refusals
+        .iter()
+        .filter(|refusal| refusal.starts_with("TopologyIncreased"))
+        .cloned()
+        .collect();
     Observation {
         input_faces: original.tris().len(),
         output_faces: mesh.tris().len(),
         status,
         before,
-        after: counts(&mesh),
+        after: stage(&mesh),
         refused_by_defect: defect,
+        topology_refusals,
     }
 }
 
@@ -193,10 +286,24 @@ fn refusal_text(trace: &plinth_decimate::BudgetSearchTrace) -> Vec<String> {
 
 /// `WeldPolicy::ExactBits` is the policy `validate_closed_mesh` uses, so these
 /// counts are the ones the pipeline gate reads.
-fn counts(mesh: &Mesh) -> TopologyCounts {
-    build_face_topology(mesh, WeldPolicy::ExactBits)
-        .expect("build the exact-bits face topology the pipeline gate reads")
-        .counts()
+///
+/// One topology build, one scan over its flags, six classes scattered out of
+/// that single pass — never one pass per class.
+fn stage(mesh: &Mesh) -> Stage {
+    let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
+        .expect("build the exact-bits face topology the pipeline gate reads");
+    let mut cut_faces = [0_usize; CUT_CLASSES.len()];
+    for flags in topology.cut_flags() {
+        for (class, &(_, flag)) in CUT_CLASSES.iter().enumerate() {
+            if flags & flag != 0 {
+                cut_faces[class] += 1;
+            }
+        }
+    }
+    Stage {
+        counts: topology.counts(),
+        cut_faces,
+    }
 }
 
 fn harness_budget() -> DecimationBudget {
