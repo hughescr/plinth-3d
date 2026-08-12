@@ -49,8 +49,10 @@ use thiserror::Error;
 /// are registered `Placeholder`s carrying no measurement, so neither is an
 /// acceptance claim and nothing here classifies a model: the caller states the
 /// wall, and [`CavityEvidence::wall_thickness_mm`] records what was stated —
-/// in-process, on the returned model; no serialized artifact carries it yet
-/// (FU-37). [`HollowRequest::with_registered_wall_default`] is the ordinary
+/// in-process, on the returned model. FU-37 carries that same requested wall
+/// onto the serialized [`HollowReport::wall`], so a caller reading a written
+/// artifact can see what wall built it without holding the in-process model.
+/// [`HollowRequest::with_registered_wall_default`] is the ordinary
 /// construction.
 ///
 /// The stated wall is not unbounded below: [`checked_wall_mm`] refuses anything
@@ -254,6 +256,29 @@ pub struct HollowReport {
     /// existed have to keep deserializing.
     #[serde(default)]
     cavity_repair: Option<CavityRepairEvidence>,
+    /// FU-37: the wall the caller *requested*, carried onto every report a
+    /// production path builds. This is what makes two artifacts prepared at
+    /// 2.5 mm and 3.0 mm distinguishable in metadata — before this field,
+    /// [`CavityEvidence::wall_thickness_mm`] recorded the same number
+    /// in-process only and died with the process. `Option` rather than
+    /// required: [`Self::solid_decision`] is a public hand-built constructor
+    /// (used by `plinth-emit` and `plinth-support` test fixtures) with no
+    /// wall to state, and `#[serde(default)]` for the same reason
+    /// `cavity_repair` is — a report frozen before this field existed has to
+    /// keep deserializing. Populated on every production path: the hollowed
+    /// path ([`drilling::into_hollowed_model`]), every typed
+    /// [`SolidDecisionReason`] arm `run` converts a failure into (via
+    /// [`HollowedModel::solid_decision_recording_repair`]), and the internal
+    /// support refusal substitution ([`HollowedWithSolidReserve::
+    /// into_solid_fallback`], carried from the discarded shell's own report).
+    ///
+    /// Distinct from [`Self::realized_wall_mm`] (FU-53/FU-55, *realized*):
+    /// this field states what the caller asked for, that one states what the
+    /// shell actually measured. The 2026-08-12 owner ruling names this field
+    /// the natural future home for the realized figure recorded beside it,
+    /// without scheduling that as work of its own.
+    #[serde(default)]
+    wall: Option<Finite>,
     /// FU-55: the realized minimum wall this report's shell measured, when
     /// one was measured. Populated on the hollowed path (by
     /// [`drilling::into_hollowed_model`], from [`CavityEvidence::
@@ -281,6 +306,7 @@ impl HollowReport {
             drilling_evidence: None,
             drain_plan: None,
             cavity_repair: None,
+            wall: None,
             realized_wall_mm: None,
         }
     }
@@ -289,6 +315,14 @@ impl HollowReport {
     #[must_use]
     pub const fn cavity_repair(&self) -> Option<CavityRepairEvidence> {
         self.cavity_repair
+    }
+
+    /// FU-37: the wall the caller requested, when this report was built by a
+    /// production path. See the field's own doc for exactly which reports
+    /// carry it and how it differs from [`Self::realized_wall_mm`].
+    #[must_use]
+    pub const fn wall(&self) -> Option<Finite> {
+        self.wall
     }
 
     /// FU-55: the realized minimum wall this report's shell measured, when
@@ -395,6 +429,7 @@ impl HollowedModel {
         orientation: OrientationHistory,
         disposition: HollowDisposition,
         cavity_repair: Option<CavityRepairEvidence>,
+        wall: Option<Finite>,
     ) -> Result<Self, HollowError> {
         validate_oriented_solid(&mesh)?;
         let report = HollowReport {
@@ -404,6 +439,7 @@ impl HollowedModel {
             drilling_evidence: None,
             drain_plan: None,
             cavity_repair,
+            wall,
             // FU-55: `run`'s `ShellUnderWalled` arm attaches its measurement
             // after this constructor returns, via `with_realized_wall_mm` —
             // every other solid decision (including this function's other
@@ -422,28 +458,40 @@ impl HollowedModel {
         orientation: OrientationHistory,
         reason: SolidDecisionReason,
     ) -> Result<Self, HollowError> {
-        Self::solid(mesh, orientation, HollowDisposition::Solid { reason }, None)
+        Self::solid(
+            mesh,
+            orientation,
+            HollowDisposition::Solid { reason },
+            None,
+            None,
+        )
     }
 
     /// A solid decision recorded together with whatever the well-composedness
-    /// repair measured on the shell candidate that was abandoned.
+    /// repair measured on the shell candidate that was abandoned, and the
+    /// wall that was requested of it.
     ///
     /// The evidence is the point: without it a caller reading the record can
     /// see *that* the model went solid but not whether a repair decided it, nor
     /// how much cavity the repair handed back. `None` is a claim in its own
     /// right — nothing reached cavity selection — and is why the parameter is
-    /// an `Option` rather than two constructors.
+    /// an `Option` rather than two constructors. `wall` (FU-37) is `Some` on
+    /// every production caller reached from `run` — see [`HollowReport::wall`]
+    /// for the full list — and `None` only where this constructor is used as a
+    /// hand-built test stand-in with no request behind it.
     pub fn solid_decision_recording_repair(
         mesh: Mesh,
         orientation: OrientationHistory,
         reason: SolidDecisionReason,
         cavity_repair: Option<CavityRepairEvidence>,
+        wall: Option<Finite>,
     ) -> Result<Self, HollowError> {
         Self::solid(
             mesh,
             orientation,
             HollowDisposition::Solid { reason },
             cavity_repair,
+            wall,
         )
     }
 
@@ -530,18 +578,23 @@ impl HollowedWithSolidReserve {
     ) -> Result<HollowedModel, HollowError> {
         // The shell the repair ran on is discarded here, and with it the only
         // other copy of the measurement. The reserve is a different mesh and
-        // makes no claim about its own wall — but the record this substitution
-        // produces is the one a reader uses to decide how this *model* was
-        // treated, and "a repair ran and then the shell was refused" is not the
-        // same finding as "no repair was ever attempted". So the shell's
-        // measurement is carried onto the substitution rather than dropped with
-        // the shell.
+        // makes no claim about its own realized wall — but the record this
+        // substitution produces is the one a reader uses to decide how this
+        // *model* was treated, and "a repair ran and then the shell was
+        // refused" is not the same finding as "no repair was ever attempted".
+        // So the shell's repair measurement is carried onto the substitution
+        // rather than dropped with the shell — and so is the *requested* wall
+        // (FU-37): the reserve was built to the same request the discarded
+        // shell was, so the wall that was asked for is exactly as true of the
+        // substitution as it was of the shell.
         let cavity_repair = self.hollowed.history().hollow().cavity_repair();
+        let wall = self.hollowed.history().hollow().wall();
         HollowedModel::solid(
             self.reserve_mesh,
             self.reserve_history,
             HollowDisposition::SolidFallback { reason },
             cavity_repair,
+            wall,
         )
     }
 }
@@ -671,7 +724,14 @@ pub fn run(
         H0AdmissionLimits::production(),
     ) {
         Ok(candidate) => candidate,
-        Err(failure) => return convert_shell_failure_to_solid(solid, orientation, failure),
+        Err(failure) => {
+            return convert_shell_failure_to_solid(
+                solid,
+                orientation,
+                failure,
+                settings.wall_thickness_mm(),
+            )
+        }
     };
     // Drain planning and drilling consume the candidate, and with it the only
     // other copy of the repair's measurement. Take it first.
@@ -712,18 +772,30 @@ pub fn run(
 /// change lost it at: five errors became typed outputs and everything else
 /// propagated naked, and the record a naked propagation produces is the one
 /// that decides how the model is treated.
+///
+/// `requested_wall_mm` (FU-37) is `settings.wall_thickness_mm()` from the
+/// same request that built the shell candidate this failure came from — it
+/// is in scope at every one of `run`'s typed decisions, so every one of them
+/// records what wall built it rather than leaving the report blank.
 fn convert_shell_failure_to_solid(
     solid: Mesh,
     orientation: OrientationHistory,
     failure: HollowStageFailure,
+    requested_wall_mm: Finite,
 ) -> Result<HollowStageOutput, HollowStageFailure> {
     let cavity_repair = failure.cavity_repair();
     let decided = |reason: SolidDecisionReason, realized_wall_mm: Option<Finite>| {
-        HollowedModel::solid_decision_recording_repair(solid, orientation, reason, cavity_repair)
-            .map(|model| {
-                HollowStageOutput::Solid(Box::new(model.with_realized_wall_mm(realized_wall_mm)))
-            })
-            .map_err(HollowStageFailure::from)
+        HollowedModel::solid_decision_recording_repair(
+            solid,
+            orientation,
+            reason,
+            cavity_repair,
+            Some(requested_wall_mm),
+        )
+        .map(|model| {
+            HollowStageOutput::Solid(Box::new(model.with_realized_wall_mm(realized_wall_mm)))
+        })
+        .map_err(HollowStageFailure::from)
     };
     match failure.into_error() {
         HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity, None),
@@ -3852,6 +3924,7 @@ mod tests {
                 reason: InternalSupportRefusalReason::InternalVerifierException,
             },
             None,
+            None,
         )
         .expect("closed oriented solid is an executable public fallback handoff");
         let (mesh, history) = model.into_parts();
@@ -3882,11 +3955,13 @@ mod tests {
             cell_visits: 5_678,
             full_grid_passes: 2,
         };
+        let requested_wall = Finite::new(2.5).expect("finite wall");
         let model = HollowedModel::solid_decision_recording_repair(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             orientation_history(),
             SolidDecisionReason::NoCavityAfterRepair,
             Some(evidence),
+            Some(requested_wall),
         )
         .expect("a closed oriented solid is a valid reserve");
         assert_eq!(
@@ -3896,8 +3971,11 @@ mod tests {
             }
         );
         assert_eq!(model.history().hollow().cavity_repair(), Some(evidence));
-        // The plain decision path makes no repair claim at all, which is what
-        // `None` means here — not "a repair of size zero".
+        // FU-37: the requested wall travels with the repair-caused decision.
+        assert_eq!(model.history().hollow().wall(), Some(requested_wall));
+        // The plain decision path makes no repair claim and no wall claim at
+        // all, which is what `None` means here — not "a repair of size zero"
+        // or "a wall of zero".
         let plain = HollowedModel::solid_decision(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             orientation_history(),
@@ -3905,6 +3983,7 @@ mod tests {
         )
         .expect("a closed oriented solid is a valid reserve");
         assert_eq!(plain.history().hollow().cavity_repair(), None);
+        assert_eq!(plain.history().hollow().wall(), None);
     }
 
     /// The failure type that carries the measurement past an untyped refusal.
@@ -3948,7 +4027,10 @@ mod tests {
     /// The measurement has to survive the substitution: the substituted record
     /// is the one a reader uses to decide how the model was treated, and the
     /// shell whose own report held the number is discarded here. The reserve
-    /// makes no claim about its own wall — that is not what is being carried.
+    /// makes no claim about its own *realized* wall — that is not what is
+    /// being carried — but the *requested* wall (FU-37) is exactly as true of
+    /// the reserve as it was of the discarded shell, since both were built to
+    /// the same request, and it must survive the substitution too.
     #[test]
     fn a_support_refusal_substitution_carries_the_discarded_shells_repair_measurement() {
         let evidence = CavityRepairEvidence {
@@ -3957,6 +4039,7 @@ mod tests {
             cell_visits: 411_674,
             full_grid_passes: 2,
         };
+        let requested_wall = Finite::new(2.5).expect("finite wall");
         // Stands in for the drilled shell's own report; `into_solid_fallback`
         // reads the number off it rather than restating one of its own.
         let hollowed = HollowedModel::solid_decision_recording_repair(
@@ -3964,6 +4047,7 @@ mod tests {
             orientation_history(),
             SolidDecisionReason::NoCavityAfterRepair,
             Some(evidence),
+            Some(requested_wall),
         )
         .expect("a closed oriented solid is a valid stand-in");
         let pair = HollowedWithSolidReserve {
@@ -3984,6 +4068,11 @@ mod tests {
             substituted.history().hollow().cavity_repair(),
             Some(evidence),
             "the substitution dropped the repair the discarded shell recorded"
+        );
+        assert_eq!(
+            substituted.history().hollow().wall(),
+            Some(requested_wall),
+            "the substitution dropped the requested wall the discarded shell recorded"
         );
     }
 
@@ -4007,6 +4096,7 @@ mod tests {
                     reason: InternalSupportRefusalReason::A5GateFailure,
                 },
                 None,
+                None,
             ),
             Err(HollowError::NotClosedOrOriented)
         ));
@@ -4027,6 +4117,7 @@ mod tests {
                 HollowDisposition::SolidFallback {
                     reason: InternalSupportRefusalReason::A5GateFailure,
                 },
+                None,
                 None,
             ),
             Err(HollowError::OutsidePrintableEnvelope { .. })
@@ -5701,8 +5792,9 @@ mod fu55_realized_wall_check {
             realized_wall_mm: 1.9,
             requested_wall_mm: 2.5,
         });
+        let requested_wall_mm = Finite::new(2.5).expect("finite");
 
-        let output = convert_shell_failure_to_solid(mesh, history, failure)
+        let output = convert_shell_failure_to_solid(mesh, history, failure, requested_wall_mm)
             .expect("a realized-wall refusal must never propagate as a model failure");
         let HollowStageOutput::Solid(model) = output else {
             panic!("expected the oriented-solid fallback, got AwaitingInternalSupport");
@@ -5722,6 +5814,10 @@ mod fu55_realized_wall_check {
             model.history().hollow().realized_wall_mm(),
             Some(Finite::new(1.9).expect("finite"))
         );
+        // FU-37: the requested wall reaches the report even on a discarded
+        // shell -- the whole point of the field is that it does not depend
+        // on the shell surviving.
+        assert_eq!(model.history().hollow().wall(), Some(requested_wall_mm));
     }
 
     /// **Test 5 of the FU-55 ruling, half of it: evidence continuity.** A
@@ -5806,5 +5902,268 @@ mod fu55_realized_wall_check {
                 baseline = Some(realized);
             }
         }
+    }
+}
+
+/// FU-37: the requested wall is persisted on the top-level [`HollowReport`],
+/// on every production path.
+#[cfg(test)]
+mod fu37_wall_field {
+    use super::*;
+    use plinth_mesh::{load_binary_stl, make_box};
+    use plinth_orient::{
+        BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform,
+    };
+    use std::path::PathBuf;
+
+    fn frozen_mesh(file: &str) -> Mesh {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(file);
+        load_binary_stl(path, WeldPolicy::None).expect("committed frozen STL")
+    }
+
+    fn orientation_history() -> OrientationHistory {
+        let mesh = make_box([10.0; 3], [0.0; 3]).expect("closed audit fixture");
+        let budget = plinth_decimate::DecimationBudget::ratified_default(
+            plinth_decimate::ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0),
+        )
+        .expect("registered fixture budget");
+        let outcome = plinth_decimate::run(&mesh, budget).expect("fixture decimation succeeds");
+        let (_, audit) = outcome
+            .into_decimated_model()
+            .expect("fixture scale is in contract")
+            .into_parts();
+        OrientationHistory::from_reports(
+            audit,
+            OrientationReport {
+                provenance: OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                },
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        )
+    }
+
+    fn registered_printer() -> PrinterProfile {
+        m0_constants()
+            .expect("registered constants")
+            .saturn4_ultra()
+            .clone()
+    }
+
+    /// `run`'s own production wiring, replicated exactly (a shell candidate
+    /// on the happy path is drained and drilled; a refusal is converted to a
+    /// solid decision) without needing a `plinth_orient::OrientedModel`,
+    /// which this crate has no way to construct directly. Either branch ends
+    /// in a `HollowReport`, which is all this module's tests examine.
+    fn build_report(source: Mesh, settings: HollowSettings) -> HollowReport {
+        match create_shell_recording_repair(
+            source.clone(),
+            settings,
+            H0AdmissionLimits::production(),
+        ) {
+            Ok(candidate) => {
+                let planned = drains::plan_drains(candidate).expect("drain plan succeeds");
+                let drilled = drilling::drill_planned_shell(planned).expect("drilling succeeds");
+                drilled
+                    .into_hollowed_model(orientation_history())
+                    .history()
+                    .hollow()
+                    .clone()
+            }
+            Err(failure) => {
+                let output = convert_shell_failure_to_solid(
+                    source,
+                    orientation_history(),
+                    failure,
+                    settings.wall_thickness_mm(),
+                )
+                .expect("a hollow-stage refusal must never propagate as a model failure");
+                output.report().clone()
+            }
+        }
+    }
+
+    /// **Test 1 of the FU-37 ruling: the row's own claim, inverted.** Two
+    /// artifacts prepared at 2.5 mm and 3.0 mm were "byte-indistinguishable
+    /// in metadata" before this field existed. They are not anymore: this
+    /// builds the committed Sphere's report at both registered walls through
+    /// exactly `run`'s own production wiring and asserts the two reports —
+    /// and their serialized JSON — differ.
+    #[test]
+    fn two_artifacts_prepared_at_different_walls_are_distinguishable_in_serialized_metadata() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let default_request = HollowRequest::with_registered_wall_default(registered_printer())
+            .expect("registered default wall request");
+        let heavy_request =
+            HollowRequest::with_registered_handling_heavy_wall(registered_printer())
+                .expect("registered heavy wall request");
+        let default_settings =
+            HollowSettings::from_request(&default_request).expect("default settings");
+        let heavy_settings = HollowSettings::from_request(&heavy_request).expect("heavy settings");
+
+        let default_report = build_report(source.clone(), default_settings);
+        let heavy_report = build_report(source, heavy_settings);
+
+        assert_eq!(
+            default_report.wall(),
+            Some(Finite::new(2.5).expect("finite"))
+        );
+        assert_eq!(heavy_report.wall(), Some(Finite::new(3.0).expect("finite")));
+        assert_ne!(
+            default_report.wall(),
+            heavy_report.wall(),
+            "two artifacts prepared at different walls must differ in the requested wall they record"
+        );
+
+        let default_json = serde_json::to_string(&default_report).expect("serialize default");
+        let heavy_json = serde_json::to_string(&heavy_report).expect("serialize heavy");
+        assert_ne!(
+            default_json, heavy_json,
+            "two artifacts prepared at 2.5mm and 3.0mm must be byte-distinguishable in metadata"
+        );
+        assert!(
+            default_json.contains("\"wall\":2.5"),
+            "default report JSON missing the expected wall: {default_json}"
+        );
+        assert!(
+            heavy_json.contains("\"wall\":3.0"),
+            "heavy report JSON missing the expected wall: {heavy_json}"
+        );
+    }
+
+    /// **Test 2 of the FU-37 ruling: every production path populates it.**
+    /// The hollowed-and-drilled path and every typed
+    /// [`SolidDecisionReason`] `run` converts a failure into all carry
+    /// `Some(wall)`; only the hand-built [`HollowReport::solid_decision`]
+    /// carries `None`.
+    #[test]
+    fn every_typed_solid_decision_reason_run_produces_carries_the_requested_wall() {
+        let requested_wall_mm = Finite::new(2.5).expect("finite");
+        let mesh = || make_box([10.0; 3], [0.0; 3]).expect("closed fixture");
+
+        let cases = [
+            (
+                HollowError::IneligibleNoCavity,
+                SolidDecisionReason::NoCavity,
+            ),
+            (
+                HollowError::IneligibleBelowBulk,
+                SolidDecisionReason::BelowThreshold,
+            ),
+            (
+                HollowError::IneligibleSavings,
+                SolidDecisionReason::BelowThreshold,
+            ),
+            (
+                HollowError::CavityRepairRemovedCavity {
+                    critical_cells: 1,
+                    repaired_voxels: 1,
+                    cell_visits: 1,
+                    full_grid_passes: 1,
+                },
+                SolidDecisionReason::NoCavityAfterRepair,
+            ),
+            (
+                HollowError::IneligibleSavingsAfterCavityRepair {
+                    critical_cells: 1,
+                    repaired_voxels: 1,
+                    cell_visits: 1,
+                    full_grid_passes: 1,
+                },
+                SolidDecisionReason::BelowThresholdAfterRepair,
+            ),
+            (
+                HollowError::RealizedWallBelowSpec {
+                    realized_wall_mm: 1.9,
+                    requested_wall_mm: 2.5,
+                },
+                SolidDecisionReason::ShellUnderWalled,
+            ),
+        ];
+
+        for (error, expected_reason) in cases {
+            let failure = HollowStageFailure::before_cavity_repair(error);
+            let output = convert_shell_failure_to_solid(
+                mesh(),
+                orientation_history(),
+                failure,
+                requested_wall_mm,
+            )
+            .expect("every typed conversion must never propagate as a model failure");
+            let HollowStageOutput::Solid(model) = output else {
+                panic!("expected a solid decision, got AwaitingInternalSupport");
+            };
+            assert_eq!(
+                model.history().hollow().disposition(),
+                HollowDisposition::Solid {
+                    reason: expected_reason
+                }
+            );
+            assert_eq!(
+                model.history().hollow().wall(),
+                Some(requested_wall_mm),
+                "{expected_reason:?} did not carry the requested wall"
+            );
+        }
+
+        // The hand-built constructor is the one path that legitimately has
+        // no request behind it, and must keep saying so.
+        assert_eq!(
+            HollowReport::solid_decision(SolidDecisionReason::NoCavity).wall(),
+            None
+        );
+    }
+
+    /// **Test 3 of the FU-37 ruling: backward compatibility.** A `HollowReport`
+    /// serialized before this field existed has no `wall` key at all; it must
+    /// still deserialize, reading as `None` rather than tripping
+    /// `deny_unknown_fields` or refusing to parse.
+    #[test]
+    fn a_report_predating_the_wall_field_still_deserializes() {
+        let old_report_json = r#"{
+            "disposition": {"kind": "solid", "reason": "no_cavity"},
+            "cavities": [],
+            "drains": [],
+            "drilling_evidence": null,
+            "drain_plan": null
+        }"#;
+        let old_report: HollowReport = serde_json::from_str(old_report_json)
+            .expect("a report predating this field must still parse");
+        assert_eq!(old_report.wall(), None);
+        // The fields FU-53/FU-54/FU-55 added the same way must still default
+        // too -- this fixture predates all of them.
+        assert_eq!(old_report.cavity_repair(), None);
+        assert_eq!(old_report.realized_wall_mm(), None);
+    }
+
+    /// **Test 4 of the FU-37 ruling: round trip.** Serializing and
+    /// deserializing a report that does carry a wall reproduces the exact
+    /// value, `Finite`'s bit pattern included.
+    #[test]
+    fn wall_round_trips_through_serialization() {
+        let requested_wall_mm = Finite::new(2.5).expect("finite");
+        let report = HollowedModel::solid_decision_recording_repair(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            orientation_history(),
+            SolidDecisionReason::BelowThreshold,
+            None,
+            Some(requested_wall_mm),
+        )
+        .expect("a closed oriented solid is a valid reserve")
+        .history()
+        .hollow()
+        .clone();
+
+        let json = serde_json::to_string(&report).expect("serialize");
+        let round_tripped: HollowReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_tripped.wall(), report.wall());
+        assert_eq!(
+            round_tripped.wall().expect("wall present").get().to_bits(),
+            requested_wall_mm.get().to_bits(),
+            "Finite must preserve its exact bits across the round trip"
+        );
     }
 }

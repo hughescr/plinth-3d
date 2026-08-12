@@ -439,6 +439,10 @@ impl HollowedAndDrilled {
             // before: it lived only in `H0ResourceDiagnostics`, which no
             // emitted artifact reads.
             cavity_repair: Some(cavity.resources().cavity_repair()),
+            // FU-37: the wall this shell was built to. `CavityEvidence`
+            // carries it in-process only; this is what makes it survive
+            // serialization.
+            wall: Some(cavity.wall_thickness_mm()),
             // FU-55: the realized minimum wall this shell measured before it
             // was ever allowed to reach drain planning or drilling.
             realized_wall_mm: Some(cavity.realized_wall_mm()),
@@ -1896,6 +1900,12 @@ mod tests {
             model.history().hollow().cavity_repair(),
             Some(candidate_resources.cavity_repair())
         );
+        // FU-37: the requested wall reaches the report on the hollowed path,
+        // read off the cavity evidence that built this shell.
+        assert_eq!(
+            model.history().hollow().wall(),
+            Some(registered_settings().wall_thickness_mm())
+        );
         assert_eq!(
             model
                 .history()
@@ -2615,6 +2625,12 @@ mod tests {
             .clone();
         let model = drilled.into_hollowed_model(orientation_history());
         let report = model.history().hollow();
+        // FU-37: the requested wall reaches the report on this production
+        // drilling path too, not only the simpler `sphere_plan` fixture above.
+        assert_eq!(
+            report.wall(),
+            Some(registered_settings().wall_thickness_mm())
+        );
         assert_eq!(report.cavities.len(), 1);
         assert_eq!(report.cavities[0].cavity_id, 1);
         assert_eq!(report.cavities[0].volume_ml.get(), expected_cavity_ml);

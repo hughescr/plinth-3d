@@ -836,14 +836,19 @@ a piece that gets handled, at exactly the provenance the default carries — the
 same unmeasured legacy option, **P**, no plate and no study behind either number.
 **There is deliberately no classifier**: nothing decides that a model is
 handling-heavy. The caller states the wall, and `CavityEvidence::wall_thickness_mm`
-records what was stated — **in-process evidence only**. `CavityEvidence` is not
-`Serialize`; it hangs off `HollowedModel::cavity_authority` and dies with the
-process, while the serialized `HollowReport`, `CavityRecord` and
-`DrillingEvidence` carry no wall field at all. Two artifacts prepared at 2.5 mm
-and 3.0 mm are therefore **indistinguishable in every file the pipeline writes**.
-Auditing the choice from a persisted artifact is **FU-37**, an open follow-up,
-not a property this stage has today: persisting the wall moves frozen goldens
-and is deliberately not done in the same commit that restored the knob.
+records what was stated **in-process**. `CavityEvidence` is not `Serialize`; it
+hangs off `HollowedModel::cavity_authority` and dies with the process — but as
+of **FU-37** (landed 2026-08-12, see
+[`CURRENT-STATUS.md#hollow-wall-field-2026-08-12`](CURRENT-STATUS.md#hollow-wall-field-2026-08-12))
+the same requested wall also reaches the serialized `HollowReport`, as
+`HollowReport::wall: Option<Finite>`, populated on every production path
+(hollowed-and-drilled, every typed solid-decision reason, and the internal
+support-refusal substitution). Two artifacts prepared at 2.5 mm and 3.0 mm are
+therefore no longer indistinguishable in the files the pipeline writes.
+`CavityRecord` and `DrillingEvidence` still carry no wall field — the ruling
+placed the field on the report's own top level, not on the drilling evidence,
+because the wall is the shell's defining parameter rather than a property of
+its holes.
 
 **The wall has a floor, and it is the lattice's, not a policy's.** Cavity
 eligibility is `edt > wall` over the frozen `HOLLOW_PITCH_MM` = 0.5 mm voxel

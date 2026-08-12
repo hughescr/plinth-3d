@@ -45,7 +45,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use plinth_core::{ModelId, PositiveFinite, PrinterProfile};
+use plinth_core::{Finite, ModelId, PositiveFinite, PrinterProfile};
 use plinth_decimate::{
     run as run_decimation, DecimatedModel, DecimationBudget, ProbeConfig, ScaleSanity,
 };
@@ -974,11 +974,18 @@ pub fn run_from_oriented(
             // the model was treated — would say a repair never happened on
             // every refusal class except the two that name themselves.
             let cavity_repair = failure.cavity_repair();
+            // FU-37: the wall this attempt requested, carried onto the
+            // reserve exactly as the repair measurement is above.
+            let wall = Some(
+                Finite::new(policy.hollow.wall_mm.get())
+                    .expect("a PositiveFinite wall is always finite"),
+            );
             let solid = HollowedModel::solid_decision_recording_repair(
                 hollow_error_reserve_mesh,
                 hollow_error_reserve_history,
                 SolidDecisionReason::BelowThreshold,
                 cavity_repair,
+                wall,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
@@ -1030,6 +1037,9 @@ pub fn run_from_oriented(
     let reserve_mesh = candidate.reserve_mesh().clone();
     let reserve_history = candidate.reserve_history().clone();
     let reserve_cavity_repair = candidate.hollowed().history().hollow().cavity_repair();
+    // FU-37: the wall this drilled shell was requested at, carried onto the
+    // reserve the same way `reserve_cavity_repair` is just above.
+    let reserve_wall = candidate.hollowed().history().hollow().wall();
     let drilled = (*candidate).approve_hollow();
     let drilled_faces = drilled.mesh().tris().len();
 
@@ -1057,6 +1067,7 @@ pub fn run_from_oriented(
                 reserve_history,
                 SolidDecisionReason::BelowThreshold,
                 reserve_cavity_repair,
+                reserve_wall,
             )
             .map_err(|source| {
                 ChainStop::new(PipelineError::Hollow {
