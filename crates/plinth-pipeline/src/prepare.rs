@@ -513,6 +513,9 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
                 model,
                 source_path,
                 assumed_print_size: None,
+                // Refused by name before it was ever opened, so the pre-pass
+                // never saw it.
+                repair: None,
                 outcome: ModelPreparationOutcome::Failed {
                     exit_code: PipelineExitCode::Input,
                     detail: format!(
@@ -581,11 +584,19 @@ fn prepare_one(
     policy: &StagePolicy,
     stop_after: Option<StageStop>,
 ) -> ModelPreparationReport {
-    let report = |assumed_print_size, outcome| ModelPreparationReport {
-        model: model.clone(),
-        source_path: source_path.to_path_buf(),
-        assumed_print_size,
-        outcome,
+    // `repair` is threaded through every disposition rather than attached only
+    // to the success path: a model refused *after* the pre-pass edited it must
+    // say what was edited, or the refusal is being reported against geometry
+    // the reader cannot reconstruct.
+    let mut repair: Option<plinth_mesh::RepairEvidence> = None;
+    let report = |repair: &Option<plinth_mesh::RepairEvidence>, assumed_print_size, outcome| {
+        ModelPreparationReport {
+            model: model.clone(),
+            source_path: source_path.to_path_buf(),
+            assumed_print_size,
+            repair: repair.clone(),
+            outcome,
+        }
     };
 
     // **Clear the target before anything can fail.** The no-file guarantee is
@@ -602,6 +613,7 @@ fn prepare_one(
     // it fails the model by name instead of proceeding.
     if let Err(source) = clear_stale_artifact(target) {
         return report(
+            &repair,
             None,
             failure(&ChainStop::new(PipelineError::StaleArtifact {
                 model: model.clone(),
@@ -615,6 +627,7 @@ fn prepare_one(
         Ok(mesh) => mesh,
         Err(source) => {
             return report(
+                &repair,
                 None,
                 failure(&ChainStop::new(PipelineError::Load {
                     model: model.clone(),
@@ -626,10 +639,42 @@ fn prepare_one(
     };
     let source_faces = mesh.tris().len();
 
+    // **The repair pre-pass.** D-22 as written refused bad geometry and left
+    // the owner to fix it in Blender; the owner ruling of 2026-08-10 overturned
+    // that and made repair automatic and in-pipeline
+    // (`docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md`).
+    // It sits here, on the loaded input, because that is upstream of every gate
+    // in the chain — and it is *only* here. No gate below is softened by a
+    // single line of this change; a model whose defects survive the pre-pass is
+    // refused exactly as it was before, and the refusal becomes an automation
+    // work item rather than a threshold to move.
+    //
+    // A mesh with none of the three census defect classes comes out of this
+    // bit-identical, so a clean model is not perturbed by a stage that had
+    // nothing to do.
+    let mesh = match plinth_mesh::repair_mesh(&mesh) {
+        Ok(repaired) => {
+            let (mesh, evidence) = repaired.into_parts();
+            repair = Some(evidence);
+            mesh
+        }
+        Err(source) => {
+            return report(
+                &repair,
+                None,
+                failure(&ChainStop::new(PipelineError::Repair {
+                    model: model.clone(),
+                    source,
+                })),
+            )
+        }
+    };
+
     let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,
         Err(source) => {
             return report(
+                &repair,
                 None,
                 failure(&ChainStop::new(PipelineError::Decimate {
                     model: model.clone(),
@@ -647,6 +692,7 @@ fn prepare_one(
         Ok(decimated) => decimated,
         Err(scale) => {
             return report(
+                &repair,
                 Some(AssumedPrintSize::from(scale)),
                 failure(&ChainStop::new(PipelineError::ScaleSuspicious {
                     model: model.clone(),
@@ -658,6 +704,7 @@ fn prepare_one(
     let assumed = Some(AssumedPrintSize::from(decimated.audit().trace().scale));
     if stop_after == Some(StageStop::Decimate) {
         return report(
+            &repair,
             assumed,
             ModelPreparationOutcome::Stopped {
                 after: StageStop::Decimate,
@@ -672,10 +719,11 @@ fn prepare_one(
         policy.resources.orient(),
     ) {
         Ok(oriented) => oriented,
-        Err(stop) => return report(assumed, failure(&stop)),
+        Err(stop) => return report(&repair, assumed, failure(&stop)),
     };
     if stop_after == Some(StageStop::Orient) {
         return report(
+            &repair,
             assumed,
             ModelPreparationOutcome::Stopped {
                 after: StageStop::Orient,
@@ -690,6 +738,7 @@ fn prepare_one(
         // would make a substituted artifact indistinguishable from the intended
         // drilled shell.
         Ok(Some(outcome)) => report(
+            &repair,
             assumed,
             ModelPreparationOutcome::Artifact {
                 emit: outcome.emit,
@@ -698,12 +747,13 @@ fn prepare_one(
             },
         ),
         Ok(None) => report(
+            &repair,
             assumed,
             ModelPreparationOutcome::Stopped {
                 after: stop_after.expect("a chain that stopped was told where to stop"),
             },
         ),
-        Err(stop) => report(assumed, failure(&stop)),
+        Err(stop) => report(&repair, assumed, failure(&stop)),
     }
 }
 

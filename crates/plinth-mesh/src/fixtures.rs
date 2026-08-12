@@ -20,6 +20,181 @@ pub fn make_box_default() -> Result<Mesh, MeshError> {
     make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
 }
 
+/// The default box with a 4-face dust shard hanging off one corner vertex.
+///
+/// One of three deliberately tiny fixtures for the repair pre-pass — they are
+/// **not** corpus members and never enter a parity or frozen-digest gate. Each
+/// carries exactly one census defect class so a rescue test names which repair
+/// did the rescuing.
+///
+/// This one is the shard class. The tetrahedron meets the vertex `(5, 5, 10)`
+/// exactly and lies wholly inside the box's material and bounding box, so it
+/// satisfies the six triage criteria (4 faces, 0.1 mm across, 1.6e-4 mm³,
+/// watertight, no shared edge, touching the main component's vertex set). It
+/// is also, on the way in, a pinch: a shard that kisses the body at a single
+/// vertex is precisely how the corpus's dust presents.
+pub fn make_dust_shard_box() -> Result<Mesh, MeshError> {
+    let mut verts = Vec::with_capacity(12);
+    let mut tris = Vec::with_capacity(16);
+    append_box(&mut verts, &mut tris, [10.0, 10.0, 10.0], [0.0, 0.0, 5.0])?;
+    append_tetra(
+        &mut verts,
+        &mut tris,
+        [
+            [5.0, 5.0, 10.0],
+            [4.9, 4.99, 9.99],
+            [4.99, 4.9, 9.99],
+            [4.99, 4.99, 9.9],
+        ],
+    )?;
+    Mesh::new(verts, tris)
+}
+
+/// The default box with one of its twelve faces present twice, same winding.
+///
+/// The duplicate class. Every edge of the repeated face carries three
+/// occurrences rather than two, so the mesh has no boundary edge and no
+/// same-direction edge — exactly what the corpus census measured — and the
+/// gate refuses it on `TOPOLOGY_CUT_DUPLICATE` alone.
+pub fn make_duplicated_face_box() -> Result<Mesh, MeshError> {
+    let box_mesh = make_box_default()?;
+    let mut tris = box_mesh.tris().to_vec();
+    tris.push(tris[0]);
+    Mesh::new(box_mesh.verts().to_vec(), tris)
+}
+
+/// The default box with one face present three times: twice as itself and once
+/// reverse-wound.
+///
+/// The duplicate class again, in the shape that tells the two candidate
+/// removal rules apart. A rule that reduces `f` forward and `r` reverse
+/// members to `|f - r|` faces deletes all three of these and takes a
+/// watertight box to three boundary edges; the surviving member has to be one
+/// wound with its neighbours, because the copies are sitting on load-bearing
+/// surface rather than floating free.
+pub fn make_triply_wound_face_box() -> Result<Mesh, MeshError> {
+    let box_mesh = make_box_default()?;
+    let mut tris = box_mesh.tris().to_vec();
+    let face = tris[0];
+    tris.push(face);
+    tris.push([face[0], face[2], face[1]]);
+    Mesh::new(box_mesh.verts().to_vec(), tris)
+}
+
+/// The default box beside a free-floating 8 × 2 mm **double-sided sheet** —
+/// four triangles, each also present reverse-wound.
+///
+/// **The shape a cancellation rule deletes if it is allowed to cascade.** Every
+/// one of the sheet's four duplicate groups has duplicate groups for
+/// neighbours, so a keep-none disposition judged only by "do the local edges
+/// come out clean" is clean for all four independently and the whole sheet
+/// disappears — leaving a residual that looks repaired while 8 mm of the
+/// owner's geometry is gone, and turning a model the gate refuses into one it
+/// passes. The sheet is 8 mm across, thirty times the triage dust ceiling, so
+/// the shard strip does not touch it; only the duplicate action can reach it.
+/// A pass that halves the sheet to one-sided and hands the open boundary to the
+/// unchanged gate is the correct behaviour, and this fixture is what proves it.
+pub fn make_doubled_sheet_box() -> Result<Mesh, MeshError> {
+    let box_mesh = make_box_default()?;
+    let mut verts = box_mesh.verts().to_vec();
+    let mut tris = box_mesh.tris().to_vec();
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    // A 8 x 2 mm strip well clear of the box, split into four triangles.
+    for step in 0..3_u32 {
+        let x = 20.0 + 4.0 * f64::from(step);
+        verts.push([x, 0.0, 0.0]);
+        verts.push([x, 2.0, 0.0]);
+    }
+    for quad in 0..2_u32 {
+        let corner = base + 2 * quad;
+        for face in [
+            [corner, corner + 2, corner + 1],
+            [corner + 1, corner + 2, corner + 3],
+        ] {
+            tris.push(face);
+            tris.push([face[0], face[2], face[1]]);
+        }
+    }
+    Mesh::new(verts, tris)
+}
+
+/// Two 10 mm boxes sharing exactly one whole edge.
+///
+/// **Not a census class, and that is the point.** The shared edge carries four
+/// face occurrences, so it is non-manifold — a defect the census found zero of
+/// and this pass deliberately does not repair. Its two endpoint vertices
+/// nevertheless show up as `TOPOLOGY_CUT_POINT_ONLY` pinches, because fan
+/// connectivity is computed across *accepted* edges and a non-manifold edge is
+/// not one. A pinch split applied here would tear the junction into a boundary
+/// crack and record it as an ordinary repair, so the pre-pass has to recognise
+/// the shape and refuse it.
+pub fn make_edge_shared_boxes() -> Result<Mesh, MeshError> {
+    let mut verts = Vec::with_capacity(16);
+    let mut tris = Vec::with_capacity(24);
+    append_box(&mut verts, &mut tris, [10.0, 10.0, 10.0], [0.0, 0.0, 5.0])?;
+    append_box(&mut verts, &mut tris, [10.0, 10.0, 10.0], [10.0, 10.0, 5.0])?;
+    Mesh::new(verts, tris)
+}
+
+/// Two 10 mm boxes meeting at exactly one shared corner vertex.
+///
+/// The pinch class, and nothing else: both shells are watertight, both are
+/// consistently oriented, both enclose positive volume, and neither is small
+/// enough to be dust. The only defect is that six faces meet at
+/// `(5, 5, 10)` in two locally disconnected fans, which is what
+/// `TOPOLOGY_CUT_POINT_ONLY` names.
+pub fn make_pinched_boxes() -> Result<Mesh, MeshError> {
+    let mut verts = Vec::with_capacity(16);
+    let mut tris = Vec::with_capacity(24);
+    append_box(&mut verts, &mut tris, [10.0, 10.0, 10.0], [0.0, 0.0, 5.0])?;
+    append_box(
+        &mut verts,
+        &mut tris,
+        [10.0, 10.0, 10.0],
+        [10.0, 10.0, 15.0],
+    )?;
+    Mesh::new(verts, tris)
+}
+
+/// Append a closed tetrahedron whose faces all wind outward.
+///
+/// The winding is derived from the points' own signed volume rather than
+/// assumed, so a caller cannot silently produce an inside-out fixture and
+/// then blame the topology for noticing.
+fn append_tetra(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    points: [[f64; 3]; 4],
+) -> Result<(), MeshError> {
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    let edge = |to: usize| {
+        [
+            points[to][0] - points[0][0],
+            points[to][1] - points[0][1],
+            points[to][2] - points[0][2],
+        ]
+    };
+    let (u, v, w) = (edge(1), edge(2), edge(3));
+    let determinant = u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+        + u[2] * (v[0] * w[1] - v[1] * w[0]);
+    if !determinant.is_finite() || determinant == 0.0 {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "tetra volume",
+            value: determinant,
+        });
+    }
+    let [a, b, c, d] = if determinant > 0.0 {
+        [0_u32, 1, 2, 3]
+    } else {
+        [0_u32, 2, 1, 3]
+    };
+    verts.extend(points);
+    for face in [[a, c, b], [a, b, d], [a, d, c], [b, c, d]] {
+        tris.push([base + face[0], base + face[1], base + face[2]]);
+    }
+    Ok(())
+}
+
 /// Native counterpart of `mesh_io.make_box(size, translate)`.
 pub fn make_box(size: [f64; 3], translate: [f64; 3]) -> Result<Mesh, MeshError> {
     validate_positive("size.x", size[0])?;

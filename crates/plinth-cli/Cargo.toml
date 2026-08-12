@@ -16,3 +16,9 @@ plinth-core = { path = "../plinth-core" }
 plinth-hollow = { path = "../plinth-hollow" }
 plinth-orient = { path = "../plinth-orient" }
 plinth-pipeline = { path = "../plinth-pipeline" }
+
+[dev-dependencies]
+# Test-only: the repair evidence the run report renders is a `plinth-mesh`
+# type, and the report block's line builder is tested against it directly
+# rather than by capturing stdout.
+plinth-mesh = { path = "../plinth-mesh" }

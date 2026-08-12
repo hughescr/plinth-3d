@@ -123,6 +123,8 @@ pub enum TopologyValidationError {
     DigestMismatch,
     #[error("face-topology source vertex map is invalid")]
     InvalidWeldMap,
+    #[error("face-topology pinch fans disagree with its point-only cut flags")]
+    InvalidPointOnlyFans,
 }
 
 /// The canonicalized source-geometry identity used by topology.
@@ -159,6 +161,39 @@ pub fn mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
     Ok(hex_digest(hasher))
 }
 
+/// One pinch vertex — a welded vertex whose incident faces form more than one
+/// locally-connected fan — together with those fans.
+///
+/// This is the same fact `TOPOLOGY_CUT_POINT_ONLY` records, carried at the
+/// resolution a repair needs: the flag says *this face touches a pinch*, which
+/// cannot tell a repair which copy of the vertex each face should follow. The
+/// fan partition is computed exactly once, inside
+/// [`build_face_topology`]'s own incidence pass, so no consumer re-derives a
+/// second (possibly disagreeing) notion of a fan — owner override O-5.
+///
+/// Ordering is total and deterministic: `fans` are sorted by their smallest
+/// face id, each fan's faces ascend, and
+/// [`FaceTopology::point_only_vertices`] ascends by welded vertex id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointOnlyVertex {
+    welded_vertex: u32,
+    fans: Vec<Vec<u32>>,
+}
+
+impl PointOnlyVertex {
+    /// The welded vertex the fans meet at.
+    #[must_use]
+    pub const fn welded_vertex(&self) -> u32 {
+        self.welded_vertex
+    }
+
+    /// The disjoint face fans meeting at this vertex, at least two of them.
+    #[must_use]
+    pub fn fans(&self) -> &[Vec<u32>] {
+        &self.fans
+    }
+}
+
 /// An immutable topology authority constructed once for one explicit view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FaceTopology {
@@ -167,6 +202,7 @@ pub struct FaceTopology {
     component_ids: Vec<u32>,
     cut_flags: Vec<u8>,
     counts: TopologyCounts,
+    point_only_vertices: Vec<PointOnlyVertex>,
     source_vertex_to_welded: Vec<u32>,
     welded_vertex_count: u32,
     weld_policy: WeldPolicy,
@@ -246,6 +282,17 @@ impl FaceTopology {
     #[must_use]
     pub const fn counts(&self) -> TopologyCounts {
         self.counts
+    }
+    /// Every pinch vertex and its fans, ascending by welded vertex id.
+    ///
+    /// Empty exactly when no face carries `TOPOLOGY_CUT_POINT_ONLY`. The
+    /// content digest deliberately does not cover this list: it is a
+    /// re-derivable projection of the same incidence pass that wrote the cut
+    /// flags the digest already hashes, and schema v4's identity is the four
+    /// topology arrays plus the mesh fingerprint.
+    #[must_use]
+    pub fn point_only_vertices(&self) -> &[PointOnlyVertex] {
+        &self.point_only_vertices
     }
     #[must_use]
     pub fn source_vertex_to_welded(&self) -> &[u32] {
@@ -453,25 +500,41 @@ pub fn build_face_topology(
             }
         }
     }
-    for fan in incidence.values() {
+    let mut point_only_vertices = Vec::new();
+    for (vertex, fan) in &incidence {
         let mut unseen: BTreeSet<usize> = fan.keys().copied().collect();
-        let mut components = 0;
+        // The fans are materialized rather than merely counted. Counting
+        // answers "is this a pinch"; a repair additionally has to know which
+        // faces belong to which sheet, and deriving that a second time
+        // elsewhere is exactly the duplicated-capability hazard O-5 forbids.
+        let mut fans: Vec<Vec<u32>> = Vec::new();
         while let Some(&start) = unseen.iter().next() {
-            components += 1;
+            let mut members = Vec::new();
             let mut queue = VecDeque::from([start]);
             unseen.remove(&start);
             while let Some(face) = queue.pop_front() {
+                members.push(face as u32);
                 for neighbor in &fan[&face] {
                     if unseen.remove(neighbor) {
                         queue.push_back(*neighbor);
                     }
                 }
             }
+            members.sort_unstable();
+            fans.push(members);
         }
-        if components > 1 {
+        if fans.len() > 1 {
             for face in fan.keys() {
                 cut_flags[*face] |= TOPOLOGY_CUT_POINT_ONLY;
             }
+            // `unseen` is a `BTreeSet`, so the fans are already discovered in
+            // ascending smallest-face order; sorting says so rather than
+            // relying on it.
+            fans.sort_by(|left, right| left[0].cmp(&right[0]));
+            point_only_vertices.push(PointOnlyVertex {
+                welded_vertex: *vertex,
+                fans,
+            });
         }
     }
 
@@ -493,6 +556,7 @@ pub fn build_face_topology(
         component_ids,
         cut_flags,
         counts,
+        point_only_vertices,
         source_vertex_to_welded: welded.map,
         welded_vertex_count: welded.vertex_count,
         weld_policy,
@@ -580,8 +644,74 @@ pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyVal
     {
         return Err(TopologyValidationError::InvalidWeldMap);
     }
+    validate_point_only_vertices(topology, n)?;
     if topology.content_digest != topology_digest(topology) {
         return Err(TopologyValidationError::DigestMismatch);
+    }
+    Ok(())
+}
+
+/// The pinch-fan list must describe the same pinches the cut flags do, in the
+/// one total order its consumers are entitled to rely on.
+fn validate_point_only_vertices(
+    topology: &FaceTopology,
+    face_count: usize,
+) -> Result<(), TopologyValidationError> {
+    let mut previous_vertex = None;
+    let mut fan_faces = BTreeSet::new();
+    for pinch in &topology.point_only_vertices {
+        if pinch.welded_vertex >= topology.welded_vertex_count
+            || previous_vertex.is_some_and(|prior| prior >= pinch.welded_vertex)
+        {
+            return Err(TopologyValidationError::InvalidPointOnlyFans);
+        }
+        previous_vertex = Some(pinch.welded_vertex);
+        if pinch.fans.len() < 2 {
+            return Err(TopologyValidationError::InvalidPointOnlyFans);
+        }
+        let mut previous_first = None;
+        for fan in &pinch.fans {
+            let Some(first) = fan.first().copied() else {
+                return Err(TopologyValidationError::InvalidPointOnlyFans);
+            };
+            if previous_first.is_some_and(|prior| prior >= first) {
+                return Err(TopologyValidationError::InvalidPointOnlyFans);
+            }
+            previous_first = Some(first);
+            let mut previous_face = None;
+            for &face in fan {
+                if face as usize >= face_count
+                    || previous_face.is_some_and(|prior| prior >= face)
+                    || topology.cut_flags[face as usize] & TOPOLOGY_CUT_POINT_ONLY == 0
+                {
+                    return Err(TopologyValidationError::InvalidPointOnlyFans);
+                }
+                previous_face = Some(face);
+                fan_faces.insert(face);
+            }
+        }
+    }
+    // **The cross-check has to compare two independently derived quantities.**
+    // The per-face check above only proves the fans are a *subset* of the
+    // flagged faces, and the boolean check below only proves "any flag" agrees
+    // with "any pinch"; a flagged face belonging to no fan would slip past both
+    // as long as one pinch existed. That is exactly the disagreement that
+    // matters, because the repair pre-pass drives edits from
+    // `point_only_vertices` while the gate refuses on `cut_flags` — one of them
+    // naming a face the other does not is the two representations describing
+    // different damage. So the flag side is counted from `cut_flags` and the
+    // fan side from the fans, over distinct faces because a face can carry the
+    // flag from more than one pinch vertex.
+    let flagged_faces = topology
+        .cut_flags
+        .iter()
+        .filter(|flags| **flags & TOPOLOGY_CUT_POINT_ONLY != 0)
+        .count();
+    if flagged_faces != fan_faces.len() {
+        return Err(TopologyValidationError::InvalidPointOnlyFans);
+    }
+    if (flagged_faces != 0) != !topology.point_only_vertices.is_empty() {
+        return Err(TopologyValidationError::InvalidPointOnlyFans);
     }
     Ok(())
 }
