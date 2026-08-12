@@ -890,6 +890,25 @@ const DEFAULT_MAX_RASTER_WORK_ITEMS: usize = 16 * 1024 * 1024;
 /// (the 429,120-face Weeping Treant) with headroom to spare, matching the
 /// order of magnitude of the other named-work admission defaults above.
 const DEFAULT_CAVITY_DISTANCE_INDEX_BYTES: usize = 512 * 1024 * 1024;
+/// FU-54: the caller-owned ceiling on
+/// [`well_composed::WellComposedRepair::full_grid_passes`] — the
+/// well-composedness repair's whole-grid re-selection loop, previously
+/// unbounded (`p <= 2 + dropped`, `dropped` up to `O(cells)`). A round that
+/// would exceed this bounces off
+/// [`HollowError::CavityRepairPassLimitExceeded`] instead of taking the next
+/// re-selection.
+///
+/// **Provenance: this number is the owner's, not derived from anything.**
+/// Decided 2026-08-12
+/// (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+/// §7). Measured real models use 1-2 passes: 2 on the committed Weeping
+/// Treant v1.2 fixture, the raw Warhorse, the raw Giant Toad, the raw
+/// Awakened Tree and the synthetic pinched dumbbell; 1 on every
+/// zero-critical-cell mask. 8 is 4x headroom over the worst measured case —
+/// a ceiling that is never meant to bite real geometry, not a budget to grow
+/// into. If a real model ever reaches it, the correct response is to
+/// investigate the mask, never to raise this number.
+const DEFAULT_MAX_CAVITY_REPAIR_PASSES: usize = 8;
 /// The six raw-input ceilings, taken from the one place they are defined:
 /// `plinth_mesh::TriageTopologyLimits::production()`, which the repair pre-pass
 /// admits raw input with as well. Keeping a private second copy here would let
@@ -928,6 +947,10 @@ pub struct H0AdmissionLimits {
     /// `NativeSurface` built over the triaged source mesh. A new, independent
     /// H0 admission domain — see [`DEFAULT_CAVITY_DISTANCE_INDEX_BYTES`].
     max_cavity_distance_index_bytes: usize,
+    /// FU-54: the ceiling on the well-composedness repair's whole-grid
+    /// re-selection passes. A new, independent H0 admission domain — see
+    /// [`DEFAULT_MAX_CAVITY_REPAIR_PASSES`].
+    max_cavity_repair_passes: usize,
 }
 
 impl H0AdmissionLimits {
@@ -940,6 +963,7 @@ impl H0AdmissionLimits {
         boolean: BooleanLimits,
         drain_planning_bytes: usize,
         max_cavity_distance_index_bytes: usize,
+        max_cavity_repair_passes: usize,
     ) -> Result<Self, HollowError> {
         if triage.raw_vertices() == usize::MAX
             || triage.raw_faces() == usize::MAX
@@ -961,6 +985,8 @@ impl H0AdmissionLimits {
             || drain_planning_bytes == usize::MAX
             || max_cavity_distance_index_bytes == 0
             || max_cavity_distance_index_bytes == usize::MAX
+            || max_cavity_repair_passes == 0
+            || max_cavity_repair_passes == usize::MAX
         {
             return Err(HollowError::InvalidAdmissionLimits);
         }
@@ -980,6 +1006,7 @@ impl H0AdmissionLimits {
             max_boolean_output_triangles: boolean.max_output_triangles,
             drain_planning_bytes,
             max_cavity_distance_index_bytes,
+            max_cavity_repair_passes,
         })
     }
 
@@ -1002,6 +1029,7 @@ impl H0AdmissionLimits {
             max_boolean_output_triangles: DEFAULT_MAX_BOOLEAN_OUTPUT_TRIANGLES,
             drain_planning_bytes: DEFAULT_DRAIN_PLANNING_BYTES,
             max_cavity_distance_index_bytes: DEFAULT_CAVITY_DISTANCE_INDEX_BYTES,
+            max_cavity_repair_passes: DEFAULT_MAX_CAVITY_REPAIR_PASSES,
         }
     }
 
@@ -1028,6 +1056,14 @@ impl H0AdmissionLimits {
     #[must_use]
     pub const fn max_cavity_distance_index_bytes(self) -> usize {
         self.max_cavity_distance_index_bytes
+    }
+
+    /// FU-54: the ceiling on the well-composedness repair's whole-grid
+    /// re-selection passes. Production default 8 — see
+    /// [`DEFAULT_MAX_CAVITY_REPAIR_PASSES`] for the provenance.
+    #[must_use]
+    pub const fn max_cavity_repair_passes(self) -> usize {
+        self.max_cavity_repair_passes
     }
 
     fn triage_topology_limits(self, retained_source_buffer_bytes: usize) -> TriageTopologyLimits {
@@ -1174,8 +1210,12 @@ impl H0ResourceDiagnostics {
     /// cell-visit count above does not cover these, which is why they are
     /// counted separately rather than folded into it. Each re-selection pass is
     /// **two** whole-grid traversals (the `label3d` and the sweep that applies
-    /// it), so `p` passes are `2p − 1` traversals; and the pass count has no
-    /// admitted bound of its own, which is FU-54.
+    /// it), so `p` passes are `2p − 1` traversals. FU-54 bounds `p` at
+    /// [`H0AdmissionLimits::max_cavity_repair_passes`] (production default 8):
+    /// a round that would exceed it is refused
+    /// ([`HollowError::CavityRepairPassLimitExceeded`]) rather than taken, so
+    /// a value read off a shell that was actually built never exceeds the
+    /// limit it ran under.
     #[must_use]
     pub const fn cavity_repair_full_grid_passes(self) -> usize {
         self.cavity_repair.full_grid_passes
@@ -1410,8 +1450,10 @@ pub fn create_shell_recording_repair(
     // or marches it, so the cavity volume the savings gate weighs is the cavity
     // that is actually cut. The repair only ever removes cavity voxels, so the
     // wall can only get thicker (`well_composed`).
-    let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(selected)
-    {
+    let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(
+        selected,
+        limits.max_cavity_repair_passes(),
+    ) {
         Ok(repaired) => repaired,
         // The fixpoint consumed the component. The error names the measurement
         // itself, but lift it onto the failure as well so that a caller reading
@@ -1434,6 +1476,36 @@ pub fn create_shell_recording_repair(
                     repaired_voxels,
                     cell_visits,
                     full_grid_passes,
+                },
+                evidence,
+            ));
+        }
+        // FU-54: the re-selection loop hit its admitted pass ceiling. Same
+        // lift-onto-the-failure treatment as the variant above, using `passes`
+        // (the pass count at refusal) as the evidence's `full_grid_passes` --
+        // the same vocabulary every other repair-caused refusal uses, so a
+        // caller reading `cavity_repair` cannot tell this apart from a repair
+        // that converged, only from the error itself.
+        Err(HollowError::CavityRepairPassLimitExceeded {
+            passes,
+            max_passes,
+            critical_cells,
+            repaired_voxels,
+            cell_visits,
+        }) => {
+            let evidence = CavityRepairEvidence {
+                critical_cells,
+                repaired_voxels,
+                cell_visits,
+                full_grid_passes: passes,
+            };
+            return Err(HollowStageFailure::after_cavity_repair(
+                HollowError::CavityRepairPassLimitExceeded {
+                    passes,
+                    max_passes,
+                    critical_cells,
+                    repaired_voxels,
+                    cell_visits,
                 },
                 evidence,
             ));
@@ -2985,6 +3057,33 @@ pub enum HollowError {
         cell_visits: usize,
         full_grid_passes: usize,
     },
+    /// FU-54. The well-composedness repair's whole-grid re-selection loop
+    /// hit its admitted ceiling ([`H0AdmissionLimits::max_cavity_repair_passes`],
+    /// production default 8) before it converged. The check runs at the top
+    /// of each re-selection round, strictly before that round's `label3d`
+    /// call, so this replaces the traversal that would have exceeded the
+    /// bound rather than following it. `passes` is the pass count at the
+    /// moment of refusal (equal to `max_passes`); the other fields are the
+    /// same repair evidence [`Self::CavityRepairRemovedCavity`] and
+    /// [`Self::IneligibleSavingsAfterCavityRepair`] carry, because a partial
+    /// repair still ran and the record must say what it did. This is an
+    /// *added* bound (FU-8b: adding a bound is allowed, loosening one is
+    /// not) — it does not relax the well-composedness repair, and it never
+    /// substitutes a different route to an artifact: `plinth-pipeline`
+    /// classifies it as a resource ceiling like every other admission
+    /// refusal.
+    #[error(
+        "the well-composedness repair's re-selection loop reached {passes} whole-grid passes, \
+         exceeding the H0 limit {max_passes}: {critical_cells} critical cells, \
+         {repaired_voxels} voxels returned to material over {cell_visits} cell visits"
+    )]
+    CavityRepairPassLimitExceeded {
+        passes: usize,
+        max_passes: usize,
+        critical_cells: usize,
+        repaired_voxels: usize,
+        cell_visits: usize,
+    },
     /// FU-55. A shell was built, its cavity survived every other gate, and
     /// its realized minimum wall — measured directly against the source
     /// surface, on every vertex of the extracted cavity mesh — came in
@@ -4282,6 +4381,7 @@ mod tests {
                 BooleanLimits::UNLIMITED,
                 1,
                 1,
+                1,
             ),
             Err(HollowError::InvalidAdmissionLimits)
         ));
@@ -4318,6 +4418,52 @@ mod tests {
             grid_spec(&source, f64::MIN_POSITIVE),
             Err(HollowError::VoxelGridTooLarge)
         ));
+    }
+
+    /// FU-54: `max_cavity_repair_passes` is validated exactly like its
+    /// admission-limit siblings -- zero and `usize::MAX` both refuse
+    /// construction, and every value strictly between is accepted.
+    #[test]
+    fn cavity_repair_pass_admission_rejects_zero_and_usize_max() {
+        let valid_but_for_the_field_under_test = |max_cavity_repair_passes: usize| {
+            H0AdmissionLimits::new(
+                TriageTopologyLimits::production(),
+                DEFAULT_MAX_VOXEL_CELLS,
+                DEFAULT_QUERY_WORKING_BYTES,
+                DEFAULT_MAX_RASTER_WORK_ITEMS,
+                BooleanLimits {
+                    max_input_primitive_units: DEFAULT_MAX_BOOLEAN_PRIMITIVE_UNITS,
+                    max_logical_marshaled_input_bytes: DEFAULT_MAX_BOOLEAN_MARSHALLED_BYTES,
+                    max_output_vertices: DEFAULT_MAX_BOOLEAN_OUTPUT_VERTICES,
+                    max_output_triangles: DEFAULT_MAX_BOOLEAN_OUTPUT_TRIANGLES,
+                },
+                DEFAULT_DRAIN_PLANNING_BYTES,
+                DEFAULT_CAVITY_DISTANCE_INDEX_BYTES,
+                max_cavity_repair_passes,
+            )
+        };
+        assert!(matches!(
+            valid_but_for_the_field_under_test(0),
+            Err(HollowError::InvalidAdmissionLimits)
+        ));
+        assert!(matches!(
+            valid_but_for_the_field_under_test(usize::MAX),
+            Err(HollowError::InvalidAdmissionLimits)
+        ));
+        let admitted = valid_but_for_the_field_under_test(1).expect("1 is a valid ceiling");
+        assert_eq!(admitted.max_cavity_repair_passes(), 1);
+        let production_default =
+            valid_but_for_the_field_under_test(DEFAULT_MAX_CAVITY_REPAIR_PASSES)
+                .expect("the production default is a valid ceiling");
+        assert_eq!(
+            production_default.max_cavity_repair_passes(),
+            DEFAULT_MAX_CAVITY_REPAIR_PASSES
+        );
+        assert_eq!(
+            H0AdmissionLimits::production().max_cavity_repair_passes(),
+            DEFAULT_MAX_CAVITY_REPAIR_PASSES,
+            "production() must carry the same default this constructor validates"
+        );
     }
 
     #[test]
@@ -5150,6 +5296,66 @@ mod corpus_cavity_repair {
             1,
             "the shell must hold exactly one negative, contained cavity"
         );
+    }
+
+    /// FU-54, on real geometry rather than only the synthetic mask in
+    /// `well_composed.rs`'s own tests. The same pinched-dumbbell fixture the
+    /// test above proves needs exactly `full_grid_passes() == 2` at the
+    /// production limit of 8. Admitted at a `max_cavity_repair_passes` of 1 —
+    /// enough for the opening scan and nothing else — the same fixture
+    /// refuses instead of repairing, through the real production entry
+    /// point, `create_shell` and its H0 pipeline included, not a call
+    /// straight into `well_composed_cavity_component`.
+    #[test]
+    fn the_pass_limit_refuses_a_real_shell_candidate_through_the_production_entry_point() {
+        let source = pinched_dumbbell_with_rod_radius(3.875);
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        // Same isolation as the test above: only the pass limit under test
+        // moves, so a refusal here is provably about the pass bound and not
+        // about the unrelated savings floor this fixture's small cavity
+        // would otherwise also trip.
+        let step3_settings = HollowSettings {
+            save_min_mm3: Finite::new(1.0).expect("finite"),
+            save_min_fraction: Finite::new(0.0).expect("finite"),
+            ..settings
+        };
+        let mut starved = H0AdmissionLimits::production();
+        starved.max_cavity_repair_passes = 1;
+        let error = create_shell_with_admission_limits(source.clone(), step3_settings, starved)
+            .expect_err("one admitted pass cannot repair this fixture's waist pinch");
+        match error {
+            HollowError::CavityRepairPassLimitExceeded {
+                passes,
+                max_passes,
+                critical_cells,
+                repaired_voxels,
+                cell_visits,
+            } => {
+                assert_eq!(passes, 1, "refused at the opening scan's own pass count");
+                assert_eq!(max_passes, 1);
+                assert_eq!(critical_cells, 132, "same defect the unstarved run measures");
+                assert!(repaired_voxels > 0, "the opening scan already removed voxels");
+                assert!(cell_visits > 0);
+            }
+            other => panic!("expected CavityRepairPassLimitExceeded, got {other}"),
+        }
+
+        // The recording entry point lifts the same evidence onto the
+        // failure, exactly as `CavityRepairRemovedCavity` and
+        // `IneligibleSavingsAfterCavityRepair` do -- a caller reading
+        // `cavity_repair` must see the partial repair regardless of which of
+        // the three variants stopped it.
+        let failure = create_shell_recording_repair(source, step3_settings, starved)
+            .expect_err("the same starved limit refuses through the recording entry point");
+        let evidence = failure
+            .cavity_repair()
+            .expect("a repair ran before the pass limit stopped it");
+        assert_eq!(evidence.critical_cells, 132);
+        assert_eq!(evidence.full_grid_passes, 1);
+        assert!(matches!(
+            failure.error(),
+            HollowError::CavityRepairPassLimitExceeded { .. }
+        ));
     }
 
     /// Release-gated: the fixture is 429,120 faces and the run is seconds

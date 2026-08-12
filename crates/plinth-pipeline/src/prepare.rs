@@ -1118,6 +1118,17 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         | HollowError::VoxelCellLimitExceeded { .. }
         | HollowError::RasterWorkLimitExceeded { .. }
         | HollowError::CavityDistanceIndexLimitExceeded { .. }
+        // FU-54: the well-composedness repair's whole-grid re-selection loop
+        // hit its admitted `max_cavity_repair_passes` ceiling. A cap that was
+        // reached is a finding to report, never a reason to take a different
+        // route to an artifact -- the same FU-8b rule as every other ceiling
+        // in this group, and this one is unreachable through
+        // `plinth_hollow::run` today for the same structural reason
+        // `CavityRepairRemovedCavity` is: the module only ever removes
+        // cavity, so a real mask converges in 1-2 passes and 8 is 4x
+        // headroom. Listed here rather than with the geometry group below
+        // because it names a resource ceiling, not a shape.
+        | HollowError::CavityRepairPassLimitExceeded { .. }
         | HollowError::TriageAdmission(_) => false,
         // The model does not fit the machine. Emitting the solid would hand
         // back an artifact for a print that cannot be started.
@@ -1339,6 +1350,19 @@ mod tests {
         ));
         assert!(!hollow_error_refuses_this_geometry(
             &HollowError::VoxelGridTooLarge
+        ));
+        // FU-54: the same rule for the cavity-repair pass ceiling. It reads
+        // as a resource cap, not a shape, even though it fires downstream of
+        // a partial repair the same way the two repair-caused geometry
+        // refusals below do.
+        assert!(!hollow_error_refuses_this_geometry(
+            &HollowError::CavityRepairPassLimitExceeded {
+                passes: 8,
+                max_passes: 8,
+                critical_cells: 1,
+                repaired_voxels: 2,
+                cell_visits: 27,
+            }
         ));
         // A model that does not fit the machine is not answered with a solid
         // that also does not fit it.
