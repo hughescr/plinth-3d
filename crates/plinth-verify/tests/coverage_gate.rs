@@ -167,17 +167,22 @@ fn cap_minus_one_returns_a_typed_error_without_a_report() {
     );
 }
 
-/// FU-56 guard (design test #12): `plinth_support::coverage_patch_is_blocking`
-/// must never independently drift from `defects_for_patches`'s own per-patch
-/// blocking predicate — that predicate is private to this crate, so this
-/// walks the SAME frozen report's own serialized evidence (already proven
-/// byte-identical above) and re-derives the per-island defect set from it
-/// with the shared predicate, entirely through this crate's public
-/// `Serialize` output rather than by importing anything private. Agreement
-/// here on all 9 real islands, spanning finite positive area with and without
-/// `assessment_failed`, is the additive drift alarm: if the two predicates
-/// ever disagreed, this test would fail without either crate's gate logic
-/// having to change.
+/// FU-56 guard (design test #12): the same predicate, on a real measurement.
+///
+/// **Scope, stated honestly (2026-08-12).** `defects_for_patches` now CALLS
+/// `plinth_support::coverage_patch_is_blocking` rather than restating it, so
+/// this is no longer the thing standing between the two definitions — the
+/// per-axis rule is pinned by `defects_for_patches`'s own unit test
+/// (`a_patch_blocks_on_each_axis_independently_and_only_blocking_area_is_summed`),
+/// which can set the three axes independently. This test's remaining, real
+/// value is that it walks a FROZEN REAL MEASUREMENT end to end through this
+/// crate's public `Serialize` output and shows the shared predicate names
+/// exactly the islands the report's own defects name.
+///
+/// It cannot do more than that, and the earlier version of this comment
+/// claimed it could: all 9 patches in the frozen fixture are blocking on
+/// positive area, and every one has `cut_ambiguous = false`, so a predicate
+/// that dropped either of the other two terms would still pass here.
 #[test]
 fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
     let parsed: serde_json::Value =
@@ -197,11 +202,14 @@ fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
         if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
             expected_islands.push(island_id);
         }
-        // `defects_for_patches` sums area across every patch of an island
-        // regardless of whether that one patch is individually blocking, so
-        // the reconstruction mirrors that rather than only summing blocking
-        // patches.
-        *expected_measure.entry(island_id).or_insert(0.0) += area;
+        // `defects_for_patches` sums area over an island's BLOCKING patches
+        // only (a non-blocking patch contributes nothing), so the
+        // reconstruction mirrors that. On this fixture every patch is
+        // blocking, which is why the difference is invisible here and is
+        // pinned by the unit test named in this function's doc instead.
+        if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
+            *expected_measure.entry(island_id).or_insert(0.0) += area;
+        }
     }
     expected_islands.sort_unstable();
     expected_islands.dedup();

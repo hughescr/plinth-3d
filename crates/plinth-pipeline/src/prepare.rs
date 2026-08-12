@@ -1365,6 +1365,18 @@ pub fn seal_and_emit(
         // persists. Every other `SupportRunError` is a stage failure with
         // nothing coverage-shaped to rank.
         let evidence = if let SupportRunError::CoverageClosure(refusal) = &source {
+            // **"A refused model leaves no path on disk" is a claim about the
+            // path, and this refusal now owns it.** The coverage verdict used
+            // to be spoken only by the pre-write gate, and `judge_then_emit`
+            // cleared an earlier run's artifact on its way out. FU-56 moved
+            // the verdict one stage earlier, to a stage that never reaches
+            // `judge_then_emit` — so without this, a model that emitted
+            // yesterday and is coverage-refused today would leave yesterday's
+            // `.chitubox` sitting at the target beside today's refusal, where
+            // the next reader takes it for this run's answer. Best-effort for
+            // the same reason the gate's own clearing is: this is cleanup on a
+            // path that has already decided to refuse.
+            let _ = std::fs::remove_file(target);
             Some(coverage_evidence::persist_closure_refusal(
                 model,
                 target,
@@ -1410,19 +1422,41 @@ pub fn seal_and_emit(
         PipelineError::Gates { source, .. } => {
             let gate = source.gate();
             // FU-57: a blocking coverage verdict carries the full
-            // `CoverageReport` on `GateRefusal::Refused`; every other gate
-            // outcome (unmeasurable, unauthorized, a pending-but-unported
-            // gate) has nothing coverage-shaped to persist.
-            let evidence = source.report().map(|report| {
-                coverage_evidence::persist_gate_refusal(
-                    model,
-                    target,
-                    &render_mesh,
-                    gate,
-                    Some(&supported_geometry),
-                    report,
-                )
-            });
+            // `CoverageReport` on `GateRefusal::Refused`, and an UNMEASURABLE
+            // coverage gate is still a coverage refusal — fail-closed, the
+            // model `Refused`, the coverage gate named — so it keeps evidence
+            // too, as a reason-only sidecar naming the measurement failure.
+            // That is exactly what the controller's own equivalent failure
+            // (`CoverageClosureReason::MeasurementRefused`) has always
+            // written; before this the identical error produced a sidecar one
+            // stage earlier and complete silence here. Gate outcomes that are
+            // not about coverage at all (unauthorized emission, an
+            // unavailable registry, a pending-but-unported gate) persist
+            // nothing, because there is no coverage refusal to explain.
+            let evidence = source.report().map_or_else(
+                || {
+                    source.unmeasurable_coverage_reason().map(|reason| {
+                        coverage_evidence::persist_unmeasurable_gate(
+                            model,
+                            target,
+                            &render_mesh,
+                            gate,
+                            Some(&supported_geometry),
+                            &reason,
+                        )
+                    })
+                },
+                |report| {
+                    Some(coverage_evidence::persist_gate_refusal(
+                        model,
+                        target,
+                        &render_mesh,
+                        gate,
+                        Some(&supported_geometry),
+                        report,
+                    ))
+                },
+            );
             let stop = ChainStop::refused(
                 error,
                 GateStop {

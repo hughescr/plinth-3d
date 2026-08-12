@@ -1659,6 +1659,27 @@ pub(crate) struct CoverageAssessment {
     pub(crate) objective: CoverageObjective,
     pub(crate) failing_sample_indices: Vec<usize>,
     pub(crate) patches: Vec<CoverageAssessmentPatch>,
+    /// Every sample whose nearest routed contact is farther than the request
+    /// radius, ascending, populated ONLY in
+    /// [`CoverageAssessmentMode::MeasurementEvidence`].
+    ///
+    /// **This is the traversal's own `uncovered_indices` scratch vector,
+    /// moved rather than copied.** It is already charged in
+    /// [`CoverageAssessmentResourcePlan::scratch_bytes`] (one of the four
+    /// per-sample `usize` vectors in `traversal_scratch_bytes`) and therefore
+    /// in `phase_peak_bytes` and in the measurement's `logical_peak_bytes`;
+    /// retaining it past the phase allocates nothing new and raises no peak,
+    /// so no charge moves and no ceiling is re-stated. Retained-after-return
+    /// bytes stay strictly below the phase peak that admitted them.
+    ///
+    /// It exists because the closure controller's nomination scoring must
+    /// know WHICH samples still need covering: scoring a candidate against
+    /// every sample on a blocking patch's faces counts already-covered area
+    /// and lets a row near a large covered region outrank the row that closes
+    /// the residual gap. That is the same failing-row discipline the legacy
+    /// `rank_coverage_repair_rows` already applies, sourced from the one
+    /// measurement rather than re-derived beside it.
+    pub(crate) uncovered_sample_indices: Vec<usize>,
 }
 
 /// The repair controller needs only the objective and failing rows.  The
@@ -1929,6 +1950,7 @@ pub(crate) fn assess_coverage_with_mode(
     let mut assessment = CoverageAssessment {
         objective: CoverageObjective::default(),
         failing_sample_indices: Vec::with_capacity(samples.len()),
+        uncovered_sample_indices: Vec::new(),
         patches: match mode {
             CoverageAssessmentMode::RepairNoEvidence => Vec::new(),
             CoverageAssessmentMode::MeasurementEvidence => Vec::with_capacity(samples.len()),
@@ -2012,6 +2034,15 @@ pub(crate) fn assess_coverage_with_mode(
         }
     }
     assessment.failing_sample_indices.sort_unstable();
+    if mode == CoverageAssessmentMode::MeasurementEvidence {
+        // The traversal is finished with `uncovered_indices` (its group
+        // slices were consumed above), so this is a move of an
+        // already-charged buffer, not a new allocation. Sorted ascending so
+        // a consumer can binary-search it and so two runs over the same
+        // measurement produce the identical list.
+        uncovered_indices.sort_unstable();
+        assessment.uncovered_sample_indices = uncovered_indices;
+    }
     failing_islands.sort_unstable();
     failing_islands.dedup();
     assessment.objective.worst_gap_mm = samples

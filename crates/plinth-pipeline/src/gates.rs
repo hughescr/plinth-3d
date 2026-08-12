@@ -188,6 +188,33 @@ impl GateRefusal {
         }
     }
 
+    /// The measurement error behind an UNMEASURABLE **coverage** gate, when
+    /// that is what this refusal is.
+    ///
+    /// FU-57 keeps evidence on every remaining coverage refusal, and an
+    /// unmeasurable coverage gate is one: fail-closed, model refused, the
+    /// coverage gate named, no artifact. There is no [`CoverageReport`] to
+    /// persist — that is what unmeasurable means — but there is a reason, and
+    /// the reason is the evidence. Scoped to gates that actually measure
+    /// coverage, so a future non-coverage gate's measurement failure does not
+    /// silently start writing a coverage sidecar.
+    #[must_use]
+    pub fn unmeasurable_coverage_reason(&self) -> Option<String> {
+        match self {
+            Self::Unmeasurable {
+                gate: PreWriteGate::UncoveredIslands,
+                source,
+            } => Some(source.to_string()),
+            Self::Unmeasurable { .. }
+            | Self::Refused { .. }
+            | Self::EmissionAuthorizationNotEnabled
+            | Self::ConstantsUnavailable
+            | Self::ResourcePolicyUnavailable(_)
+            | Self::InvalidCoverageRequest(_)
+            | Self::SnapshotIntegrity(_) => None,
+        }
+    }
+
     /// The full evidence behind a blocking verdict, when there is one.
     #[must_use]
     pub fn report(&self) -> Option<&CoverageReport> {

@@ -13101,10 +13101,16 @@ mod tests {
         }
         assert!(!blocking.is_empty(), "required fixture has coverage samples");
 
+        // This fixture stands in for a measurement in which every sample is
+        // still uncovered, which is what the synthetic blocking set above
+        // claims. Nomination scores against exactly this set (FU-56 fix:
+        // never against covered samples on a partially covered face).
+        let uncovered: Vec<usize> = (0..plan.coverage_samples().len()).collect();
         let empty_failed = BTreeSet::new();
         let first = crate::coverage_closure::nominate_repair_rows(
             &plan,
             &blocking,
+            &uncovered,
             6.0,
             65_536,
             &empty_failed,
@@ -13113,6 +13119,7 @@ mod tests {
         let second = crate::coverage_closure::nominate_repair_rows(
             &plan,
             &blocking,
+            &uncovered,
             6.0,
             65_536,
             &empty_failed,
@@ -13123,7 +13130,7 @@ mod tests {
             "nomination must be byte-identical across repeated calls on the same plan"
         );
         assert!(
-            !first.is_empty(),
+            !first.rows.is_empty(),
             "required fixture has at least one eligible repair row"
         );
 
@@ -13133,7 +13140,7 @@ mod tests {
             .into_iter()
             .map(|occupancy| occupancy.row_id())
             .collect();
-        for &row_id in &first {
+        for &row_id in &first.rows {
             assert!(
                 !occupied.contains(&row_id),
                 "an occupied row must never be nominated"
@@ -13144,20 +13151,107 @@ mod tests {
             );
         }
 
-        let already_nominated = *first.first().expect("checked non-empty above");
+        let already_nominated = *first.rows.first().expect("checked non-empty above");
         let mut failed_with_row = BTreeSet::new();
         failed_with_row.insert(already_nominated);
         let excluded = crate::coverage_closure::nominate_repair_rows(
             &plan,
             &blocking,
+            &uncovered,
             6.0,
             65_536,
             &failed_with_row,
         )
         .unwrap();
         assert!(
-            !excluded.contains(&already_nominated),
+            !excluded.rows.contains(&already_nominated),
             "a row recorded as failed must never be re-nominated"
+        );
+        // FU-56 (2026-08-12 fix): every blocking key is accounted for, so a
+        // refusal can say per island whether it was ever attempted at all.
+        assert_eq!(
+            first.per_key.len(),
+            seen_keys.len(),
+            "every blocking (island, component) key must be recorded, including keys with zero eligible rows"
+        );
+        for (key, counts) in &first.per_key {
+            assert!(
+                counts.nominated_rows <= counts.eligible_rows,
+                "key {key:?} nominated more rows than it had eligible"
+            );
+        }
+    }
+
+    /// FU-56 (2026-08-12 fix): nomination scores against the samples the
+    /// measurement found UNCOVERED, never against every sample on a blocking
+    /// patch's faces. Scoring a candidate against already-covered area is how
+    /// a row beside a large covered region outranks the row that closes the
+    /// residual gap — and because the score set is fixed across attempts,
+    /// that mis-ranking burns the whole attempt bound while a viable closer
+    /// waits below it.
+    #[test]
+    fn coverage_closure_nomination_scores_only_the_uncovered_samples() {
+        let (_mesh, _generic, plan) =
+            edit_fixture(make_overhang_table().unwrap(), "closure nomination scoring")
+                .unwrap_or_else(|error| panic!("{error}"));
+
+        // One blocking key, its own faces, and two different claims about
+        // which of its samples are still uncovered.
+        let first_sample = plan.coverage_samples().first().expect("fixture samples");
+        let key = (first_sample.island_id, first_sample.component_id);
+        let indices_for_key: Vec<usize> = plan
+            .coverage_samples()
+            .iter()
+            .enumerate()
+            .filter(|(_, sample)| (sample.island_id, sample.component_id) == key)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            indices_for_key.len() > 2,
+            "required fixture key has several coverage samples"
+        );
+        let mut faces: Vec<u32> = indices_for_key
+            .iter()
+            .map(|&index| plan.coverage_samples()[index].face_id)
+            .collect();
+        faces.sort_unstable();
+        faces.dedup();
+        let blocking = vec![crate::coverage_closure::BlockingPatchKey {
+            island_id: key.0,
+            component_id: key.1,
+            representative_face_id: faces[0],
+            sorted_face_ids: faces,
+            uncovered_area_mm2_bits: 1.0_f64.to_bits(),
+            worst_gap: crate::coverage_closure::CoverageClosureGap::Finite(0.5),
+        }];
+
+        let empty_failed = BTreeSet::new();
+        let all_uncovered = crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &blocking,
+            &indices_for_key,
+            6.0,
+            65_536,
+            &empty_failed,
+        )
+        .unwrap();
+        // The same patch, but with only its LAST sample still uncovered: a
+        // face that is almost entirely covered with one residual gap.
+        let residual = vec![*indices_for_key.last().expect("non-empty")];
+        let residual_only = crate::coverage_closure::nominate_repair_rows(
+            &plan,
+            &blocking,
+            &residual,
+            6.0,
+            65_536,
+            &empty_failed,
+        )
+        .unwrap();
+        assert!(!all_uncovered.rows.is_empty() && !residual_only.rows.is_empty());
+        assert_ne!(
+            all_uncovered.rows, residual_only.rows,
+            "the nominated row must follow the uncovered set: if it does not, the score is \
+             blind to coverage state and the controller cannot close a residual gap"
         );
     }
 

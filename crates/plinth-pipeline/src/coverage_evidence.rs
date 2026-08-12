@@ -131,6 +131,15 @@ pub struct CoverageRefusalEvidence {
     pub render_paths: Vec<PathBuf>,
     pub render_skipped: Option<String>,
     pub write_error: Option<String>,
+    /// `Some` when the refusal is a coverage MEASUREMENT failure rather than
+    /// a coverage verdict — the gate's `GateRefusal::Unmeasurable`, or the
+    /// controller's `CoverageClosureReason::MeasurementRefused`. There is no
+    /// `CoverageReport` to embed in that case and no islands to rank, but
+    /// there is still a coverage refusal, and FU-57 says a coverage refusal
+    /// keeps its evidence. The string is the measurement error as the
+    /// refusing side reported it.
+    #[serde(default)]
+    pub measurement_error: Option<String>,
 }
 
 /// The flat vertex/triangle data a render needs, captured from the prepared
@@ -139,12 +148,34 @@ pub struct CoverageRefusalEvidence {
 ///
 /// **Why this exists at all.** `run_support` takes `HollowedModel` by value,
 /// and a coverage-closure refusal is only knowable from its `Err`, by which
-/// point the mesh is gone. There is no way to borrow-and-copy only on the
-/// failing path without restructuring `run_support`'s signature, which is
-/// out of this row's scope and would touch a controller FU-56 just built and
-/// tested. The clone below is therefore paid on every model, not only
-/// refused ones -- a real, documented cost, flagged in this row's
-/// `openQuestions` rather than hidden.
+/// point the mesh is gone. The clone below is therefore paid on every model,
+/// not only refused ones -- a real, documented cost, flagged rather than
+/// hidden.
+///
+/// **Two remedies were tried on paper and neither works today (2026-08-12),
+/// which is why this is a follow-up row and not a fix.**
+///
+/// 1. *Return the mesh inside the refusal.* `SupportRunError::CoverageClosure`
+///    could carry it, and at the `AttemptsExhausted` / `NoEligibleRepairRows`
+///    exits the lowered run is still alive, so the mesh is in hand. It is NOT
+///    in hand at the `RepairPlanRefused` exits: the runner's typestate MOVES
+///    the context into each stage (`prepared_run_for_plan(context, ...)`,
+///    `LoweredSupportRun::into_context`) precisely so the `NativeSurface` grid
+///    is never duplicated, so a stage failure consumes the context and the
+///    mesh with it. Carrying the mesh there means restructuring every stage
+///    to hand the context back on failure — a much larger change than this
+///    cost justifies, and one that touches the memory discipline it is trying
+///    to protect.
+/// 2. *Take the mesh from the sealed snapshot instead.* That works for the
+///    controller path but not for the pre-write GATE refusal, which happens
+///    inside `judge_then_emit` after the authority has been handed over — the
+///    caller has no borrow left to copy from.
+///
+/// So the copy stays, deliberately, with both dead ends recorded so the
+/// follow-up starts from what was already ruled out. For scale: it is
+/// `verts × 24 + tris × 12` bytes — a few megabytes on a 150k-face mini,
+/// against the `max_grid_bytes` ceiling of 64 MiB the same phase already
+/// carries.
 #[derive(Clone, Debug)]
 pub struct RenderMesh {
     pub verts: Vec<[f64; 3]>,
@@ -368,6 +399,8 @@ struct CoverageSidecarBody<'a> {
     renders: Vec<String>,
     render_skipped: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    measurement_error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     report: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     closure: Option<serde_json::Value>,
@@ -384,6 +417,7 @@ struct SidecarWrite<'a> {
     islands: &'a [UncoveredIslandSummary],
     render_paths: &'a [PathBuf],
     render_skipped: Option<&'a str>,
+    measurement_error: Option<&'a str>,
     report: Option<&'a CoverageReport>,
     closure: Option<&'a CoverageClosureRefusal>,
 }
@@ -409,6 +443,7 @@ fn write_sidecar(path: &Path, inputs: SidecarWrite<'_>) -> Result<(), String> {
         islands: inputs.islands,
         renders,
         render_skipped: inputs.render_skipped,
+        measurement_error: inputs.measurement_error,
         // Embedded verbatim via `serde_json::to_value`: no re-derivation, no
         // second format, and it deserializes back into the original typed
         // report/closure exactly (both are `Serialize + Deserialize`).
@@ -560,10 +595,24 @@ fn render_panel(
     }
 
     // Painter's order: farthest first, by a total comparator so two runs
-    // over the same mesh draw in the same order.
+    // over the same mesh draw in the same order — but the HIGHLIGHTED faces
+    // are drawn after every neutral face regardless of depth.
+    //
+    // **Why highlighted-last rather than strict depth order.** An uncovered
+    // support island is by construction a DOWN-facing surface, so in the
+    // plate view (looking down -Z) there is always solid geometry above it:
+    // strict painter's order draws the red patch first and then paints the
+    // model's top surface over it at identical screen coordinates, and the
+    // render shows the owner a picture with no red in it at all. The panel is
+    // evidence, not a rendering of what a camera would see; the ruling's
+    // stated purpose is that the owner can SEE what could not be covered
+    // (2026-08-12 rulings §2), and a hidden patch fails that purpose
+    // completely. Depth order is still total within each class, so the
+    // neutral shell reads correctly and two runs stay byte-identical.
     projected.sort_by(|left, right| {
-        left.depth
-            .total_cmp(&right.depth)
+        left.highlighted
+            .cmp(&right.highlighted)
+            .then_with(|| left.depth.total_cmp(&right.depth))
     });
 
     let _ = writeln!(
@@ -598,20 +647,114 @@ fn xml_escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Render one island's evidence as a deterministic, self-contained SVG: two
-/// orthographic panels (plate view down -Z, elevation looking down +X) side
-/// by side, a neutral fill for every face and a warning fill for the
-/// island's own uncovered-patch faces, painter's-ordered by a total depth
-/// comparator so two runs on the same fixture produce byte-identical output.
+/// The view direction that shows the highlighted patch at its largest: the
+/// patch's own area-weighted average face normal, as an orthonormal basis
+/// `(u, v, n)` with `n` the view axis.
+///
+/// **Why a third, island-derived projection exists at all.** An uncovered
+/// support island is a DOWN-facing surface, and a normal horizontal underside
+/// is exactly edge-on in any fixed elevation: it projects to a degenerate,
+/// zero-area sliver and the render shows the owner nothing. The two fixed
+/// panels answer "where on the model is this", which is worth having; only a
+/// projection derived from the patch itself can answer "what shape is the
+/// uncovered region", which is the half of the ruling's purpose the fixed
+/// panels structurally cannot serve.
+///
+/// `None` when the highlighted faces carry no usable normal (no highlighted
+/// faces, or their area-weighted normals cancel exactly), in which case the
+/// caller falls back to the plate axis rather than rendering a basis built
+/// from noise.
+fn island_view_basis(
+    mesh: &RenderMesh,
+    highlighted: &BTreeSet<u32>,
+) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let mut normal = [0.0_f64; 3];
+    for &face_id in highlighted {
+        let Some(tri) = mesh.tris.get(face_id as usize) else {
+            continue;
+        };
+        let (Some(a), Some(b), Some(c)) = (
+            mesh.verts.get(tri[0] as usize),
+            mesh.verts.get(tri[1] as usize),
+            mesh.verts.get(tri[2] as usize),
+        ) else {
+            continue;
+        };
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        // The cross product's magnitude is twice the triangle's area, so
+        // summing raw cross products IS the area weighting -- no per-face
+        // normalization, no division, and deterministic in the highlighted
+        // set's own (sorted) order.
+        normal[0] += ab[1].mul_add(ac[2], -(ab[2] * ac[1]));
+        normal[1] += ab[2].mul_add(ac[0], -(ab[0] * ac[2]));
+        normal[2] += ab[0].mul_add(ac[1], -(ab[1] * ac[0]));
+    }
+    let length = normal
+        .iter()
+        .fold(0.0_f64, |sum, value| value.mul_add(*value, sum))
+        .sqrt();
+    if !length.is_finite() || length <= f64::EPSILON {
+        return None;
+    }
+    let n = [normal[0] / length, normal[1] / length, normal[2] / length];
+    // Any axis not parallel to `n` seeds the basis; picking the smallest
+    // component keeps the cross product well conditioned.
+    let helper: [f64; 3] = if n[0].abs() <= n[1].abs() && n[0].abs() <= n[2].abs() {
+        [1.0, 0.0, 0.0]
+    } else if n[1].abs() <= n[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let mut u = [
+        helper[1].mul_add(n[2], -(helper[2] * n[1])),
+        helper[2].mul_add(n[0], -(helper[0] * n[2])),
+        helper[0].mul_add(n[1], -(helper[1] * n[0])),
+    ];
+    let u_length = u
+        .iter()
+        .fold(0.0_f64, |sum, value| value.mul_add(*value, sum))
+        .sqrt();
+    if !u_length.is_finite() || u_length <= f64::EPSILON {
+        return None;
+    }
+    u = [u[0] / u_length, u[1] / u_length, u[2] / u_length];
+    let v = [
+        n[1].mul_add(u[2], -(n[2] * u[1])),
+        n[2].mul_add(u[0], -(n[0] * u[2])),
+        n[0].mul_add(u[1], -(n[1] * u[0])),
+    ];
+    Some((u, v, n))
+}
+
+fn dot(left: [f64; 3], right: &[f64; 3]) -> f64 {
+    left[0].mul_add(right[0], left[1].mul_add(right[1], left[2] * right[2]))
+}
+
+/// Render one island's evidence as a deterministic, self-contained SVG: three
+/// orthographic panels — plate view (down -Z), +X elevation, and a third
+/// panel projected along the ISLAND'S OWN average normal — a neutral fill for
+/// every face and a warning fill for the island's own uncovered-patch faces,
+/// painter's-ordered by a total comparator so two runs on the same fixture
+/// produce byte-identical output.
+///
+/// **The uncovered patch is always visible, in every panel.** Two structural
+/// facts about uncovered support islands defeat a naive render, and both are
+/// answered here rather than left to luck: they are down-facing, so the model
+/// itself occludes them in the plate view (answered by drawing the
+/// highlighted faces after every neutral face — see `render_panel`); and they
+/// are usually near-horizontal, so they project edge-on to zero area in a
+/// fixed elevation (answered by the island-normal panel, whose whole purpose
+/// is to show the patch at its true shape and size). A render in which the
+/// owner cannot see what was uncovered does not serve the ruling at all.
 ///
 /// **Scope, stated rather than hidden.** Routed contact points are not drawn:
 /// this evidence layer has face membership and gap distance, not contact
 /// coordinates, and adding those would mean capturing a second, larger slice
 /// of the sealed run's own geometry at every refusal. The render answers "is
 /// this uncovered patch a real overhang or a modelling artifact", which is
-/// the ruling's own stated purpose; whether it answers that well enough is
-/// the owner's to judge once a real render is in front of them (see this
-/// row's own risk #7).
+/// the ruling's own stated purpose.
 #[must_use]
 pub fn render_island_svg(
     mesh: &RenderMesh,
@@ -646,6 +789,31 @@ pub fn render_island_svg(
         |vertex| (vertex[1], vertex[2], vertex[0]),
         degrade,
     );
+    match island_view_basis(mesh, &highlighted) {
+        Some((u, v, n)) => render_panel(
+            &mut body,
+            "island face-on (along its own normal)",
+            CANVAS_W * 2.0,
+            &mesh.verts,
+            &mesh.tris,
+            &highlighted,
+            |vertex| (dot(*vertex, &u), dot(*vertex, &v), dot(*vertex, &n)),
+            degrade,
+        ),
+        // No usable island normal: repeat the plate axis rather than invent
+        // one, so the panel is still present, still deterministic, and still
+        // labelled honestly.
+        None => render_panel(
+            &mut body,
+            "island face-on (unavailable: no island normal)",
+            CANVAS_W * 2.0,
+            &mesh.verts,
+            &mesh.tris,
+            &highlighted,
+            |vertex| (vertex[0], vertex[1], vertex[2]),
+            degrade,
+        ),
+    }
 
     let gap_line = match island.worst_gap {
         CoverageClosureGap::Finite(value) => format!("worst gap {} mm", fmt3(value)),
@@ -670,7 +838,7 @@ pub fn render_island_svg(
          {body}\
          <text x=\"{pad}\" y=\"{legend_y}\" class=\"legend\">{legend}</text>\n\
          </svg>\n",
-        width = fmt3(CANVAS_W * 2.0),
+        width = fmt3(CANVAS_W * 3.0),
         height = fmt3(CANVAS_H),
         pad = fmt3(PANEL_PAD),
         legend_y = fmt3(CANVAS_H - PANEL_PAD),
@@ -737,6 +905,7 @@ fn persist(
     geometry: Option<&SupportedGeometry>,
     attempts: Option<usize>,
     islands: Vec<UncoveredIslandSummary>,
+    measurement_error: Option<&str>,
     report: Option<&CoverageReport>,
     closure: Option<&CoverageClosureRefusal>,
 ) -> CoverageRefusalEvidence {
@@ -753,6 +922,7 @@ fn persist(
             islands: &islands,
             render_paths: &rendered.paths,
             render_skipped: rendered.skipped.as_deref(),
+            measurement_error,
             report,
             closure,
         },
@@ -769,6 +939,7 @@ fn persist(
         render_paths: rendered.paths,
         render_skipped: rendered.skipped,
         write_error,
+        measurement_error: measurement_error.map(ToOwned::to_owned),
     }
 }
 
@@ -792,7 +963,45 @@ pub fn persist_gate_refusal(
         geometry,
         None,
         islands,
+        None,
         Some(report),
+        None,
+    )
+}
+
+/// Persist evidence for a pre-write coverage gate that could NOT be measured
+/// (`GateRefusal::Unmeasurable`).
+///
+/// **Why this exists.** An unmeasurable coverage gate is fail-closed: the
+/// model is `Refused` with the coverage gate named, and there is no artifact.
+/// It has no `CoverageReport` — that is what "unmeasurable" means — but FU-57
+/// says evidence is kept on EVERY remaining coverage refusal, and the
+/// controller's equivalent failure
+/// (`CoverageClosureReason::MeasurementRefused`) has always written a
+/// reason-only sidecar. Writing one here removes an asymmetry in which the
+/// identical error produced a sidecar inside `run_support` and complete
+/// silence one stage later. Islands are empty because none were measured, and
+/// the sidecar says so rather than implying there were none.
+#[must_use]
+pub fn persist_unmeasurable_gate(
+    model: &ModelId,
+    target: &Path,
+    mesh: &RenderMesh,
+    gate: Option<PreWriteGate>,
+    geometry: Option<&SupportedGeometry>,
+    measurement_error: &str,
+) -> CoverageRefusalEvidence {
+    persist(
+        model,
+        target,
+        mesh,
+        EvidenceSource::PreWriteGate,
+        gate,
+        geometry,
+        None,
+        Vec::new(),
+        Some(measurement_error),
+        None,
         None,
     )
 }
@@ -807,6 +1016,12 @@ pub fn persist_closure_refusal(
     refusal: &CoverageClosureRefusal,
 ) -> CoverageRefusalEvidence {
     let islands = islands_from_closure(refusal);
+    let measurement_error = match &refusal.reason {
+        plinth_support::CoverageClosureReason::MeasurementRefused(detail) => Some(detail.clone()),
+        plinth_support::CoverageClosureReason::AttemptsExhausted
+        | plinth_support::CoverageClosureReason::NoEligibleRepairRows
+        | plinth_support::CoverageClosureReason::RepairPlanRefused { .. } => None,
+    };
     persist(
         model,
         target,
@@ -816,6 +1031,7 @@ pub fn persist_closure_refusal(
         geometry,
         Some(refusal.attempts),
         islands,
+        measurement_error.as_deref(),
         None,
         Some(refusal),
     )
@@ -947,6 +1163,8 @@ mod tests {
                     uncovered_area_mm2: 0.5,
                     worst_gap: CoverageClosureGap::Finite(2.0),
                     patch_count: 1,
+                    nominated_repair_rows: 0,
+                    eligible_repair_rows: 0,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 5,
@@ -956,6 +1174,8 @@ mod tests {
                     uncovered_area_mm2: 0.7,
                     worst_gap: CoverageClosureGap::NoRoutedContact,
                     patch_count: 1,
+                    nominated_repair_rows: 0,
+                    eligible_repair_rows: 0,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 2,
@@ -965,6 +1185,8 @@ mod tests {
                     uncovered_area_mm2: 5.0,
                     worst_gap: CoverageClosureGap::Finite(1.0),
                     patch_count: 1,
+                    nominated_repair_rows: 0,
+                    eligible_repair_rows: 0,
                 },
             ],
             history: Vec::new(),
@@ -1034,6 +1256,8 @@ mod tests {
                 uncovered_area_mm2: 0.9,
                 worst_gap: CoverageClosureGap::NoRoutedContact,
                 patch_count: 1,
+                nominated_repair_rows: 3,
+                eligible_repair_rows: 0,
             }],
             history: Vec::new(),
         };
@@ -1076,10 +1300,132 @@ mod tests {
         let first = render_island_svg(&mesh, &island, false);
         let second = render_island_svg(&mesh, &island, false);
         assert_eq!(first, second, "two renders of the same fixture must be byte-identical");
-        assert_eq!(first.matches("class=\"uncovered\"").count(), 2, "one highlighted triangle per panel");
-        assert_eq!(first.matches("class=\"neutral\"").count(), 2, "one neutral triangle per panel");
+        assert_eq!(first.matches("class=\"uncovered\"").count(), 3, "one highlighted triangle per panel");
+        assert_eq!(first.matches("class=\"neutral\"").count(), 3, "one neutral triangle per panel");
         assert!(first.contains("island 1"));
         assert!(first.contains("worst gap 2.250 mm"));
+    }
+
+    /// Split one render into its per-panel bodies, by the `class="title"`
+    /// line each panel opens with.
+    fn panels(svg: &str) -> Vec<String> {
+        svg.split("class=\"title\"")
+            .skip(1)
+            .map(std::borrow::ToOwned::to_owned)
+            .collect()
+    }
+
+    /// The polygons of one class in one panel, as their three screen points.
+    fn polygons(panel: &str, class: &str) -> Vec<[(f64, f64); 3]> {
+        let needle = format!("\" class=\"{class}\"/>");
+        panel
+            .lines()
+            .filter(|line| line.ends_with(&needle))
+            .filter_map(|line| {
+                let points = line.strip_prefix("<polygon points=\"")?;
+                let points = points.split('"').next()?;
+                let mut parsed = [(0.0, 0.0); 3];
+                for (slot, pair) in points.split_whitespace().enumerate().take(3) {
+                    let (x, y) = pair.split_once(',')?;
+                    parsed[slot] = (x.parse().ok()?, y.parse().ok()?);
+                }
+                Some(parsed)
+            })
+            .collect()
+    }
+
+    fn triangle_area(points: [(f64, f64); 3]) -> f64 {
+        ((points[1].0 - points[0].0) * (points[2].1 - points[0].1)
+            - (points[2].0 - points[0].0) * (points[1].1 - points[0].1))
+            .abs()
+            / 2.0
+    }
+
+    /// **FU-57's whole purpose: the owner can SEE the uncovered patch.**
+    ///
+    /// The archetypal uncovered support island is a horizontal underside —
+    /// here the bottom face of a unit cube. Two structural facts used to make
+    /// that island invisible in every panel of its own render: the model
+    /// occludes it from above in the plate view (it was drawn first, then
+    /// painted over by the top face at identical screen coordinates), and it
+    /// projects edge-on to a zero-area sliver in a fixed elevation. This test
+    /// pins both fixes: highlighted faces are drawn after every neutral face
+    /// in each panel, and the third panel — projected along the island's own
+    /// normal — shows the patch with real area.
+    #[test]
+    fn a_horizontal_underside_is_visible_in_its_own_render() {
+        // Unit cube, 12 triangles, faces 0 and 1 the z = 0 bottom.
+        let verts = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2], // bottom (z = 0), outward normal -Z
+            [4, 5, 6],
+            [4, 6, 7], // top
+            [0, 1, 5],
+            [0, 5, 4], // -Y side
+            [2, 3, 7],
+            [2, 7, 6], // +Y side
+            [1, 2, 6],
+            [1, 6, 5], // +X side
+            [3, 0, 4],
+            [3, 4, 7], // -X side
+        ];
+        let mesh = RenderMesh { verts, tris };
+        let island = UncoveredIslandSummary {
+            island_id: 0,
+            uncovered_area_mm2: 1.0,
+            worst_gap: CoverageClosureGap::NoRoutedContact,
+            face_ids: vec![0, 1],
+        };
+        let svg = render_island_svg(&mesh, &island, false);
+        let panels = panels(&svg);
+        assert_eq!(panels.len(), 3, "plate view, elevation, island face-on");
+
+        for (index, panel) in panels.iter().enumerate() {
+            let uncovered_at = panel
+                .find("class=\"uncovered\"")
+                .unwrap_or_else(|| panic!("panel {index} draws the uncovered patch"));
+            let last_neutral = panel
+                .rfind("class=\"neutral\"")
+                .unwrap_or_else(|| panic!("panel {index} draws the model"));
+            assert!(
+                uncovered_at > last_neutral,
+                "panel {index} paints model geometry over the uncovered patch, which is exactly \
+                 the render that shows the owner nothing"
+            );
+        }
+
+        // The island-normal panel must show the patch at real size: an
+        // edge-on projection (what the fixed elevation gives a horizontal
+        // underside) is a zero-area sliver and answers nothing.
+        let face_on = polygons(&panels[2], "uncovered");
+        assert_eq!(face_on.len(), 2, "both bottom triangles are drawn face-on");
+        let area: f64 = face_on.iter().copied().map(triangle_area).sum();
+        assert!(
+            area > 1_000.0,
+            "the face-on panel must show the patch at real size, measured {area}"
+        );
+        // And the fixed elevation is exactly the degenerate case that made
+        // the third panel necessary: recorded, not asserted away.
+        let elevation: f64 = polygons(&panels[1], "uncovered")
+            .iter()
+            .copied()
+            .map(triangle_area)
+            .sum();
+        assert!(
+            elevation < 1.0,
+            "a horizontal underside is edge-on in the fixed elevation; if that ever stops \
+             being true this test's premise has changed, measured {elevation}"
+        );
     }
 
     #[test]

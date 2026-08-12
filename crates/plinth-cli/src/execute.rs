@@ -314,6 +314,12 @@ fn coverage_lines(model: &ModelPreparationReport) -> Vec<String> {
     let mut lines = vec![format!(
         "  uncovered islands  {total} island(s), {shown} shown worst-first"
     )];
+    // A coverage refusal whose measurement itself failed has no islands to
+    // rank, and "0 island(s)" on its own reads as "nothing was uncovered" —
+    // the opposite of what happened. Name the failure instead (FU-57).
+    if let Some(error) = &evidence.measurement_error {
+        lines.push(format!("  coverage unmeasurable  {error}"));
+    }
     for island in evidence.islands.iter().take(COVERAGE_CARD_MAX_ISLANDS_SHOWN) {
         let gap = match island.worst_gap {
             plinth_pipeline::CoverageClosureGap::Finite(value) => {
@@ -643,6 +649,7 @@ mod tests {
             ],
             render_skipped: None,
             write_error: None,
+            measurement_error: None,
         };
         let lines = coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
             gate: Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
@@ -709,6 +716,7 @@ mod tests {
             render_paths: Vec::new(),
             render_skipped: Some("mesh over COVERAGE_RENDER_MAX_FACES".to_owned()),
             write_error: Some("permission denied".to_owned()),
+            measurement_error: None,
         };
         let lines = coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
             exit_code: plinth_pipeline::PipelineExitCode::Supports,

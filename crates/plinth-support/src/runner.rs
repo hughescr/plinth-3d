@@ -458,7 +458,10 @@ pub enum SupportRunError {
     CoverageClosure(Box<crate::coverage_closure::CoverageClosureRefusal>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// `Serialize`/`Deserialize` because FU-57 persists
+// `CoverageClosureReason::RepairPlanRefused`, which names the stage that
+// refused a repair-extended plan, into the coverage sidecar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SupportRunPhase {
     Preparation,
     Routing,
@@ -475,19 +478,45 @@ pub enum SupportRunPhase {
 
 /// Opaque, move-only final support authority. It admits only borrowed
 /// verification evidence or final consuming scene conversion.
-pub struct FinalSupportAuthority<'a>(LoweredSupportRun<'a>);
+pub struct FinalSupportAuthority<'a> {
+    lowered: LoweredSupportRun<'a>,
+    closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+}
 
 impl FinalSupportAuthority<'_> {
     pub fn verification_snapshot(
         &self,
     ) -> Result<SupportVerificationSnapshot<'_>, SupportVerificationError> {
-        self.0
+        self.lowered
             .verification_snapshot()
             .map_err(|_| SupportVerificationError::AuthorityMismatch)
     }
 
+    /// Every coverage-closure attempt this run measured, in order, ending
+    /// with the attempt that measured clean.
+    ///
+    /// **This is what makes closure-after-repair observable.** A run that
+    /// covered on its baseline layout has exactly one entry with
+    /// `nominated_rows == 0`; a run that closed only after the controller
+    /// appended repair-pool contacts has more, and the earlier entries say
+    /// how many rows each round added and how the blocking patch count fell.
+    /// Without it a successful run cannot be told apart from a run in which
+    /// the controller did nothing, which is precisely the question FU-56's
+    /// outcome claim turns on.
+    #[must_use]
+    pub fn coverage_closure_history(&self) -> &[crate::coverage_closure::CoverageClosureAttempt] {
+        &self.closure_history
+    }
+
+    /// How many repair rounds this run needed: zero when the baseline layout
+    /// already covered every island.
+    #[must_use]
+    pub fn coverage_repair_rounds(&self) -> usize {
+        self.closure_history.len().saturating_sub(1)
+    }
+
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
-        self.0
+        self.lowered
             .into_supported_model()
             .map_err(|_| SupportRunError::Failed(SupportRunPhase::Lowering))
     }
@@ -584,59 +613,95 @@ pub fn run_support<'a>(
 
     let mut failed: BTreeSet<RepairRowId> = BTreeSet::new();
     let mut history: Vec<crate::coverage_closure::CoverageClosureAttempt> = Vec::new();
+    // Per-`(island_id, component_id)` nomination accounting, accumulated
+    // across attempts so a refusal can say, per island, whether it was ever
+    // attempted at all — see `CoverageClosureIsland::nominated_repair_rows`.
+    let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
+    // The last attempt's blocking set, kept so a refusal raised by a stage
+    // that runs BEFORE the next measurement (the repair-extended plan failing
+    // to route, rewire, brace, structure or lower) still names the islands
+    // the controller was trying to close.
+    let mut last_blocking: Vec<crate::coverage_closure::BlockingPatchKey> = Vec::new();
 
     for attempt in 0..=max_attempts {
-        let prepared = prepared_run_for_plan(context, plan.clone()).map_err(|error| {
-            note_stage_failure("Preparation", &error);
-            SupportRunError::Failed(SupportRunPhase::Preparation)
-        })?;
-        let routed = prepared.route_initial_cco().map_err(|error| {
-            note_stage_failure("Routing", &error);
-            SupportRunError::Failed(SupportRunPhase::Routing)
-        })?;
-        let rewired = routed.rewire().map_err(|error| {
-            note_stage_failure("Rewire", &error);
-            SupportRunError::Failed(SupportRunPhase::Rewire)
-        })?;
-        let braced = rewired.brace().map_err(|error| {
-            note_stage_failure("Brace", &error);
-            SupportRunError::Failed(SupportRunPhase::Brace)
-        })?;
-        let structured = braced.structure().map_err(|error| {
-            note_stage_failure("Structure", &error);
-            SupportRunError::Failed(SupportRunPhase::Structure)
-        })?;
-        let lowered = structured.lower().map_err(|error| {
-            note_stage_failure("Lowering", &error);
-            SupportRunError::Failed(SupportRunPhase::Lowering)
-        })?;
+        // Every stage below is fallible, and what a failure MEANS depends on
+        // whether this controller had already extended the plan. On attempt 0
+        // the plan is the model's own and a stage failure is exactly the
+        // pre-FU-56 `Failed(phase)`. On attempt > 0 the plan carries contacts
+        // this controller appended, so the failure is the controller's own
+        // and is a coverage refusal — with the evidence FU-57 requires, and
+        // ineligible for the oriented-solid reserve, because attempt 0 proved
+        // this geometry seals.
+        macro_rules! stage {
+            ($expr:expr, $stage:literal, $phase:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => {
+                        note_stage_failure($stage, &error);
+                        return Err(repair_plan_or_stage_failure(
+                            attempt,
+                            $phase,
+                            &error,
+                            &last_blocking,
+                            &tally,
+                            history,
+                        ));
+                    }
+                }
+            };
+        }
 
-        let blocking = {
-            let snapshot = lowered.verification_snapshot().map_err(|error| {
-                note_stage_failure("CoverageMeasurement", &error);
-                SupportRunError::Failed(SupportRunPhase::CoverageMeasurement)
-            })?;
+        let prepared = stage!(
+            prepared_run_for_plan(context, plan.clone()),
+            "Preparation",
+            SupportRunPhase::Preparation
+        );
+        let routed = stage!(
+            prepared.route_initial_cco(),
+            "Routing",
+            SupportRunPhase::Routing
+        );
+        let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
+        let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
+        let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
+        let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
+
+        let (blocking, uncovered_samples) = {
+            let snapshot = stage!(
+                lowered.verification_snapshot(),
+                "CoverageMeasurement",
+                SupportRunPhase::CoverageMeasurement
+            );
             match snapshot.measure_coverage(coverage_request) {
-                Ok(measurement) => measurement
-                    .evidence()
-                    .patches()
-                    .iter()
-                    .filter(|patch| {
-                        crate::coverage_closure::coverage_patch_is_blocking(
-                            patch.uncovered_area_mm2().get(),
-                            patch.cut_ambiguous(),
-                            patch.assessment_failed(),
-                        )
-                    })
-                    .map(|patch| crate::coverage_closure::BlockingPatchKey {
-                        island_id: patch.island_id(),
-                        component_id: patch.component_id(),
-                        representative_face_id: patch.representative_face_id(),
-                        sorted_face_ids: patch.sorted_face_ids().to_vec(),
-                        uncovered_area_mm2_bits: patch.uncovered_area_mm2().get().to_bits(),
-                        worst_gap: patch.worst_gap().into(),
-                    })
-                    .collect::<Vec<_>>(),
+                Ok(measurement) => {
+                    let blocking = measurement
+                        .evidence()
+                        .patches()
+                        .iter()
+                        .filter(|patch| {
+                            crate::coverage_closure::coverage_patch_is_blocking(
+                                patch.uncovered_area_mm2().get(),
+                                patch.cut_ambiguous(),
+                                patch.assessment_failed(),
+                            )
+                        })
+                        .map(|patch| crate::coverage_closure::BlockingPatchKey {
+                            island_id: patch.island_id(),
+                            component_id: patch.component_id(),
+                            representative_face_id: patch.representative_face_id(),
+                            sorted_face_ids: patch.sorted_face_ids().to_vec(),
+                            uncovered_area_mm2_bits: patch.uncovered_area_mm2().get().to_bits(),
+                            worst_gap: patch.worst_gap().into(),
+                        })
+                        .collect::<Vec<_>>();
+                    // The measurement's own uncovered rows, indexed into the
+                    // same `coverage_samples()` slice this plan owns. Moved
+                    // out here so nomination can score against what still
+                    // needs covering rather than re-deriving coverage beside
+                    // the one measurement.
+                    let uncovered = measurement.uncovered_sample_indices().to_vec();
+                    (blocking, uncovered)
+                }
                 Err(error) => {
                     note_stage_failure("CoverageMeasurement", &error);
                     return Err(SupportRunError::CoverageClosure(Box::new(
@@ -645,7 +710,10 @@ pub fn run_support<'a>(
                             reason: crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
                                 error.to_string(),
                             ),
-                            islands: Vec::new(),
+                            islands: crate::coverage_closure::islands_from_blocking(
+                                &last_blocking,
+                                &tally,
+                            ),
                             history,
                         },
                     )));
@@ -660,11 +728,16 @@ pub fn run_support<'a>(
         });
 
         if blocking.is_empty() {
-            return Ok(FinalSupportAuthority(lowered));
+            return Ok(FinalSupportAuthority {
+                lowered,
+                closure_history: history,
+            });
         }
+        last_blocking = blocking;
 
         if attempt == max_attempts {
-            let islands = crate::coverage_closure::islands_from_blocking(&blocking);
+            let islands =
+                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
             return Err(SupportRunError::CoverageClosure(Box::new(
                 crate::coverage_closure::CoverageClosureRefusal {
                     attempts: attempt,
@@ -675,20 +748,36 @@ pub fn run_support<'a>(
             )));
         }
 
-        let nominations = crate::coverage_closure::nominate_repair_rows(
+        let nominations = match crate::coverage_closure::nominate_repair_rows(
             &plan,
-            &blocking,
+            &last_blocking,
+            &uncovered_samples,
             radius_mm,
             matrix_budget,
             &failed,
-        )
-        .map_err(|error| {
-            note_stage_failure("Preparation", &error);
-            SupportRunError::Failed(SupportRunPhase::Preparation)
-        })?;
+        ) {
+            Ok(nominations) => nominations,
+            Err(error) => {
+                note_stage_failure("Preparation", &error);
+                return Err(repair_plan_or_stage_failure(
+                    attempt,
+                    SupportRunPhase::Preparation,
+                    &error,
+                    &last_blocking,
+                    &tally,
+                    history,
+                ));
+            }
+        };
+        for (key, counts) in &nominations.per_key {
+            let entry = tally.entry(*key).or_default();
+            entry.nominated_rows += counts.nominated_rows;
+            entry.eligible_rows = counts.eligible_rows;
+        }
 
-        if nominations.is_empty() {
-            let islands = crate::coverage_closure::islands_from_blocking(&blocking);
+        if nominations.rows.is_empty() {
+            let islands =
+                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
             return Err(SupportRunError::CoverageClosure(Box::new(
                 crate::coverage_closure::CoverageClosureRefusal {
                     attempts: attempt,
@@ -699,7 +788,7 @@ pub fn run_support<'a>(
             )));
         }
         if let Some(last) = history.last_mut() {
-            last.nominated_rows = nominations.len();
+            last.nominated_rows = nominations.rows.len();
         }
 
         // A row this attempt appended is `occupied` in the next plan
@@ -708,18 +797,62 @@ pub fn run_support<'a>(
         // transcript), so it can never be re-nominated; `failed` is retained
         // for a future controller that can also retract an unproductive
         // addition, which this one does not yet do.
-        failed.extend(nominations.iter().copied());
+        failed.extend(nominations.rows.iter().copied());
 
-        plan = plan
+        plan = match plan
             .begin_regular_edit()
-            .and_then(|edit| edit.append_regular_repair_rows(&nominations))
-            .map_err(|error| {
+            .and_then(|edit| edit.append_regular_repair_rows(&nominations.rows))
+        {
+            Ok(plan) => plan,
+            Err(error) => {
                 note_stage_failure("Preparation", &error);
-                SupportRunError::Failed(SupportRunPhase::Preparation)
-            })?;
+                return Err(repair_plan_or_stage_failure(
+                    attempt,
+                    SupportRunPhase::Preparation,
+                    &error,
+                    &last_blocking,
+                    &tally,
+                    history,
+                ));
+            }
+        };
         context = lowered.into_context();
     }
     unreachable!("bounded coverage-closure loop returns before exhausting its own bound check")
+}
+
+/// Classify one closure-loop stage failure.
+///
+/// Attempt 0 runs the model's own plan and its failures are the pre-FU-56
+/// `Failed(phase)` verdicts, unchanged. From attempt 1 the plan carries
+/// contacts THIS controller appended, so a stage refusal is the controller's
+/// own doing: it becomes a
+/// [`crate::coverage_closure::CoverageClosureReason::RepairPlanRefused`]
+/// coverage refusal, which keeps the coverage evidence FU-57 requires and
+/// keeps the oriented-solid reserve out of a path where the geometry already
+/// proved it seals.
+fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
+    attempt: usize,
+    phase: SupportRunPhase,
+    error: &E,
+    last_blocking: &[crate::coverage_closure::BlockingPatchKey],
+    tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
+    history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+) -> SupportRunError {
+    if attempt == 0 {
+        return SupportRunError::Failed(phase);
+    }
+    SupportRunError::CoverageClosure(Box::new(
+        crate::coverage_closure::CoverageClosureRefusal {
+            attempts: attempt,
+            reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
+                phase,
+                detail: format!("{error:?}"),
+            },
+            islands: crate::coverage_closure::islands_from_blocking(last_blocking, tally),
+            history,
+        },
+    ))
 }
 
 /// One physical contact admitted by the finalized CCO transcript for future
@@ -1322,7 +1455,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             })?;
         #[cfg(test)]
         record_measurement_call(|counts| counts.coverage_assessment_traversals += 1);
-        let assessment = assess_coverage_with_mode(
+        let mut assessment = assess_coverage_with_mode(
             self.coverage_samples,
             self.topology,
             &nearest,
@@ -1377,6 +1510,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 island.representative_face_id(),
             )
         });
+        let uncovered_sample_indices = std::mem::take(&mut assessment.uncovered_sample_indices);
         let mut patches = assessment
             .patches
             .into_iter()
@@ -1433,6 +1567,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 islands.into_boxed_slice(),
                 patches.into_boxed_slice(),
             ),
+            uncovered_sample_indices,
         ))
     }
     #[must_use]

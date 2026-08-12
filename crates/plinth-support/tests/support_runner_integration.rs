@@ -181,6 +181,12 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
         support_input(&delicacy, &layers),
     )
     .expect("make_toed_slab must close coverage on its first closure attempt");
+    assert_eq!(
+        authority.coverage_repair_rounds(),
+        0,
+        "make_toed_slab must cover on its baseline layout: the controller costs nothing on a \
+         model that already passes"
+    );
     let snapshot = authority
         .verification_snapshot()
         .expect("borrow sealed verification snapshot");
@@ -264,6 +270,18 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             ),
         ]
     );
+    // FU-56 (2026-08-12 fix): the refusal says PER ISLAND whether it was ever
+    // attempted. "Nominated N times and still blocking" is a router problem;
+    // "zero eligible repair rows, ever" is a pool or mesh problem, and they
+    // need different actions from the owner. Both of this fixture's islands
+    // were nominated for and neither closed, which is the first of the two.
+    for island in &islands {
+        assert!(
+            island.nominated_repair_rows > 0,
+            "island {} was nominated for on every attempt, so the evidence must say so",
+            island.island_id
+        );
+    }
 }
 
 fn support_input<'a>(
@@ -275,79 +293,88 @@ fn support_input<'a>(
         .input(layers, delicacy_by_face, &[])
 }
 
-/// **FU-56, 2026-08-12: `make_overhang_table` refuses with a named,
-/// genuinely-unclosable coverage-closure island, and that is the correct
-/// answer.** Island 0 (component 4, face 51) is 788.05 mm² uncovered at this
-/// crate's own small test-radius probe (radius 1.0 mm — see
-/// `public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`,
-/// re-pinned off this fixture for the same reason) and still 13.68 mm²
-/// uncovered at the registered gate radius (6.0 mm): the larger radius helps
-/// a great deal but does not close it. Across all 8 closure attempts the
-/// controller nominates 8 DISTINCT repair-pool candidates on face 51
-/// (`ContactCandidateId`s 535, 568, 569, 601, 602, 603, 634, 635) and the
-/// measured uncovered area does not move by even one bit — the routed-contact
-/// projection this island needs is never admitted by the CCO transcript from
-/// this fixture's repair pool at this radius, for any of them. This is a real,
-/// previously invisible defect in the fixture's baseline placement, exactly
-/// the class FU-56 exists to surface (`CURRENT-STATUS.md` FU-56: "not one of
-/// the 21 has been shown to be closable ... report the measured before/after
-/// count; do not respond to a poor rate by touching the radius, the floor or
-/// the tolerance"). Nothing here does.
+/// **FU-56's happy path, demonstrated end to end: `make_overhang_table`
+/// CLOSES, and only because the controller appended repair contacts.**
+///
+/// Re-pinned 2026-08-12 by the FU-56 review fixes, from a refusal
+/// (`AttemptsExhausted`, one island named unclosable) to a sealed authority,
+/// with this attribution rather than an edited expectation. What changed is
+/// nomination scoring, not the gate: candidates are now scored against the
+/// samples the measurement found UNCOVERED instead of against every sample on
+/// the blocking patch's faces. Face 51 is a large, MOSTLY COVERED face with a
+/// residual gap, so summing its covered samples' area into every candidate's
+/// score ranked rows beside the covered region above the row that closes the
+/// gap — and, because that score set never changes between attempts, the old
+/// controller walked a fixed ranking of eight useless rows and then declared
+/// the island unclosable. Scored against the uncovered rows only, the closing
+/// candidate ranks first and the island shuts.
+///
+/// **Nothing was loosened to get here.** The coverage radius is still the
+/// registered `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm, the
+/// patch-area floor is still `VOXEL_PITCH_MM²`, the uncovered-area tolerance
+/// is still zero, and closure is still achieved only by appending immutable
+/// repair-pool contacts. This is the emission FU-56 said the controller
+/// should be able to produce, on the first committed fixture to produce one.
 #[test]
-fn public_runner_refuses_overhang_table_with_a_genuinely_unclosable_island() {
+fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
     let hollowed = hollowed_overhang_table();
     let delicacy = vec![0.0; hollowed.mesh().tris().len()];
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
-    let error = run_support(
+    let authority = run_support(
         hollowed,
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
         },
         support_input(&delicacy, &layers),
     )
-    ;
-    let error = match error {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "make_overhang_table's island 0 has no closing repair-pool candidate at the registered radius"
-        ),
-    };
-    let plinth_support::SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got a different SupportRunError");
-    };
-    assert_eq!(refusal.attempts, 8);
-    assert_eq!(
-        refusal.reason,
-        plinth_support::CoverageClosureReason::AttemptsExhausted
+    .expect("make_overhang_table closes coverage from its own repair pool");
+
+    let history = authority.coverage_closure_history();
+    assert!(
+        authority.coverage_repair_rounds() >= 1,
+        "this fixture must NOT close on its baseline layout -- that is what makes it the \
+         success-after-repair demonstration: {history:?}"
     );
-    assert_eq!(refusal.islands.len(), 1);
-    let island = &refusal.islands[0];
-    assert_eq!(
-        (
-            island.island_id,
-            island.component_id,
-            island.representative_face_id
-        ),
-        (0, 4, 51)
+    // The first attempt measures blocking patches and nominates rows for
+    // them; the last measures clean and nominates nothing. Anything else
+    // would mean the loop returned without the repair rounds doing the work.
+    let first = history.first().expect("at least one measured attempt");
+    let last = history.last().expect("at least one measured attempt");
+    assert_eq!(first.attempt, 0);
+    assert!(
+        first.blocking_patch_count > 0 && first.nominated_rows > 0,
+        "attempt 0 must have measured a blocking patch and nominated for it: {history:?}"
     );
-    assert!(island.uncovered_area_mm2 > 0.0 && island.uncovered_area_mm2 < 788.05);
-    assert!(matches!(
-        island.worst_gap,
-        plinth_support::CoverageClosureGap::Finite(_)
-    ));
     assert_eq!(
-        refusal.history.len(),
-        9,
-        "attempts 0..=8 each measure exactly once"
+        (last.blocking_patch_count, last.nominated_rows),
+        (0, 0),
+        "the closing attempt measures clean and nominates nothing: {history:?}"
     );
-    // Every attempt measures the same one blocking patch and nominates
-    // exactly one candidate, up to the terminal attempt, which measures but
-    // does not nominate -- the shape the registered bound itself predicts.
-    for (index, attempt) in refusal.history.iter().enumerate() {
+    for (index, attempt) in history.iter().enumerate() {
         assert_eq!(attempt.attempt, index);
-        assert_eq!(attempt.blocking_patch_count, 1);
-        assert_eq!(attempt.nominated_rows, usize::from(index < 8));
     }
+    // An appended repair contact measurably reduced uncovered coverage: the
+    // blocking patch count is non-increasing and strictly falls at least once.
+    assert!(
+        history
+            .windows(2)
+            .all(|pair| pair[1].blocking_patch_count <= pair[0].blocking_patch_count),
+        "a repair round must never make coverage worse: {history:?}"
+    );
+    assert!(
+        history
+            .windows(2)
+            .any(|pair| pair[1].blocking_patch_count < pair[0].blocking_patch_count),
+        "at least one repair round must measurably close a blocking patch: {history:?}"
+    );
+
+    let snapshot = authority
+        .verification_snapshot()
+        .expect("borrow sealed verification snapshot");
+    snapshot.validate_integrity().expect("snapshot integrity");
+    authority
+        .into_supported_model()
+        .expect("consume final support authority after verification");
 }
 
 /// **Re-pinned off `make_overhang_table` onto `make_toed_slab` (FU-56,

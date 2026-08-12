@@ -110,12 +110,41 @@ pub enum CoverageClosureReason {
     /// (`ContactSelectionConfig::coverage_repair_max_attempts`, registered
     /// value 8) was reached with blocking patches still measured.
     AttemptsExhausted,
-    /// At least one blocking patch had no unoccupied, unfailed repair-pool row
-    /// in its own `(island_id, component_id)`, so closure could not even
-    /// attempt to shrink it.
+    /// **No** blocking patch anywhere had an unoccupied, unfailed repair-pool
+    /// row in its own `(island_id, component_id)`, so the attempt produced an
+    /// empty nomination set and closure could not shrink anything at all.
+    ///
+    /// This is deliberately the whole-attempt condition, not a per-patch one:
+    /// a model with one row-less island and one island that still has rows
+    /// keeps iterating, because refusing the moment ANY island runs dry would
+    /// abandon islands that were still closing. The per-island distinction
+    /// the owner needs — "never had a row" versus "nominated every attempt
+    /// and never closed" — is carried on
+    /// [`CoverageClosureIsland::eligible_repair_rows`] and
+    /// [`CoverageClosureIsland::nominated_repair_rows`] instead, on EVERY
+    /// refusal reason including [`Self::AttemptsExhausted`].
     NoEligibleRepairRows,
     /// The routed-contact coverage measurement itself could not be completed.
     MeasurementRefused(String),
+    /// A plan the controller had ALREADY extended with repair-pool contacts
+    /// could not be re-planned: one of routing, rewire, brace, structure,
+    /// lowering or the re-preparation refused the extended plan.
+    ///
+    /// **This is a coverage verdict, not a generic sealed-run failure.**
+    /// Attempt 0 — the model's own plan, untouched by this controller —
+    /// sealed all the way through lowering, so the geometry demonstrably
+    /// seals; what failed is the controller's own extension of it. Reporting
+    /// it as [`crate::SupportRunError::Failed`] would make a coverage refusal
+    /// indistinguishable from a routing failure the model would have had
+    /// anyway: it would lose the coverage evidence FU-57 requires, and it
+    /// would let the oriented-solid reserve substitute a different geometry
+    /// after a coverage verdict, which the terminal-refusal design forbids.
+    RepairPlanRefused {
+        /// The stage that refused the repair-extended plan.
+        phase: crate::SupportRunPhase,
+        /// That stage's own error, as it was reported.
+        detail: String,
+    },
 }
 
 /// A worst routed-contact gap, projected from [`CoverageGap`] for a refusal
@@ -155,6 +184,24 @@ pub struct CoverageClosureIsland {
     pub uncovered_area_mm2: f64,
     pub worst_gap: CoverageClosureGap,
     pub patch_count: usize,
+    /// How many repair-pool rows the controller nominated for this island
+    /// over the whole run, summed across attempts.
+    ///
+    /// **Zero means this island was never even attempted** — it had no
+    /// unoccupied, unfailed repair-pool row in its own
+    /// `(island_id, component_id)` on any attempt that reached nomination.
+    /// A positive count with the island still blocking means the opposite:
+    /// rows WERE appended and the CCO transcript did not turn them into
+    /// coverage. Those are different problems with different fixes (the pool
+    /// or the mesh, versus the router), and before this field the refusal
+    /// could not tell them apart.
+    #[serde(default)]
+    pub nominated_repair_rows: usize,
+    /// How many repair-pool rows were still eligible for this island the last
+    /// time nomination ran. Zero beside a positive
+    /// [`Self::nominated_repair_rows`] means the pool for this island drained.
+    #[serde(default)]
+    pub eligible_repair_rows: usize,
 }
 
 /// One closure round's measured shape, kept for refusal evidence: how many
@@ -196,8 +243,12 @@ pub(crate) struct BlockingPatchKey {
 
 /// Aggregate one attempt's blocking patches into the per-island evidence
 /// [`CoverageClosureRefusal`] carries. One gathered pass, grouped by
-/// `(island_id, component_id)`.
-pub(crate) fn islands_from_blocking(patches: &[BlockingPatchKey]) -> Vec<CoverageClosureIsland> {
+/// `(island_id, component_id)`, with each island's nomination history stamped
+/// on from `tally` in the same pass.
+pub(crate) fn islands_from_blocking(
+    patches: &[BlockingPatchKey],
+    tally: &BTreeMap<(u32, u32), KeyNomination>,
+) -> Vec<CoverageClosureIsland> {
     let mut grouped: BTreeMap<(u32, u32), CoverageClosureIsland> = BTreeMap::new();
     for patch in patches {
         let key = (patch.island_id, patch.component_id);
@@ -223,7 +274,14 @@ pub(crate) fn islands_from_blocking(patches: &[BlockingPatchKey]) -> Vec<Coverag
                 uncovered_area_mm2,
                 worst_gap: patch.worst_gap,
                 patch_count: 1,
+                nominated_repair_rows: 0,
+                eligible_repair_rows: 0,
             });
+    }
+    for (key, island) in &mut grouped {
+        let counts = tally.get(key).copied().unwrap_or_default();
+        island.nominated_repair_rows = counts.nominated_rows;
+        island.eligible_repair_rows = counts.eligible_rows;
     }
     grouped.into_values().collect()
 }
@@ -239,8 +297,46 @@ fn worse_gap(left: CoverageClosureGap, right: CoverageClosureGap) -> CoverageClo
     }
 }
 
+/// What nomination found for one blocking `(island_id, component_id)` key.
+///
+/// Kept per key rather than summed, because the two ways a key can fail to
+/// close are the two different actions an owner would take (FU-57's card
+/// exists to tell them apart): "this key never had a single unoccupied,
+/// unfailed repair-pool row" says the pool or the mesh is wrong, while
+/// "rows were nominated every attempt and the area never moved" says the
+/// transcript is not admitting them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeyNomination {
+    /// Rows still eligible for this key at the moment nomination ran.
+    pub(crate) eligible_rows: usize,
+    /// Rows this attempt actually nominated for this key.
+    pub(crate) nominated_rows: usize,
+}
+
+/// One attempt's nomination outcome: the flat, deduplicated row list to
+/// append, plus the per-key accounting the refusal evidence needs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Nominations {
+    pub(crate) rows: Vec<RepairRowId>,
+    pub(crate) per_key: BTreeMap<(u32, u32), KeyNomination>,
+}
+
 /// Batch-first, deterministic nomination of repair-pool rows for one attempt's
 /// blocking patches.
+///
+/// **Candidates are scored against the samples the measurement found
+/// UNCOVERED, never against every sample on a blocking patch's faces.** A
+/// blocking patch is a connected group of faces each of which has at least
+/// one uncovered sample; a face can be — and on real geometry usually is —
+/// partially covered. Scoring against every sample on those faces sums
+/// already-covered area into the score, which lets a candidate sitting beside
+/// a large covered region outrank the candidate that actually closes the
+/// residual gap, and (because the score set is fixed across attempts) makes
+/// the whole 8-round ranking walk useless rows while a viable closer waits
+/// below them. `uncovered_samples` is the measurement's own
+/// [`crate::CoverageMeasurement::uncovered_sample_indices`], the same
+/// discipline the legacy `rank_coverage_repair_rows` (`lib.rs`) applies when
+/// it scores against failing sample rows only.
 ///
 /// Occupancy is read ONCE ([`SpecializedContactPlan::occupied_repair_rows`]),
 /// and the whole pool is grouped by `(island_id, component_id)` ONCE
@@ -268,10 +364,11 @@ fn worse_gap(left: CoverageClosureGap, right: CoverageClosureGap) -> CoverageClo
 pub(crate) fn nominate_repair_rows(
     plan: &SpecializedContactPlan,
     blocking: &[BlockingPatchKey],
+    uncovered_samples: &[usize],
     radius_mm: f64,
     matrix_budget: usize,
     failed: &BTreeSet<RepairRowId>,
-) -> Result<Vec<RepairRowId>, SpecializedError> {
+) -> Result<Nominations, SpecializedError> {
     let mut excluded: BTreeSet<RepairRowId> = plan
         .occupied_repair_rows()?
         .into_iter()
@@ -309,8 +406,20 @@ pub(crate) fn nominate_repair_rows(
             .push(row);
     }
 
+    // Only the measurement's uncovered rows are grouped: one gathered pass
+    // over the uncovered set (never over every sample), so the scoring matrix
+    // below is sized by what still needs covering rather than by the whole
+    // island. `uncovered_samples` is ascending, so each group stays ascending
+    // and the tiling below is order-stable.
+    let samples = plan.coverage_samples();
     let mut samples_by_key: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
-    for (index, sample) in plan.coverage_samples().iter().enumerate() {
+    for &index in uncovered_samples {
+        let Some(sample) = samples.get(index) else {
+            // The measurement is taken against this plan's own sample slice,
+            // so this cannot happen; skipping rather than indexing keeps a
+            // future caller mismatch from panicking inside the controller.
+            continue;
+        };
         samples_by_key
             .entry((sample.island_id, sample.component_id))
             .or_default()
@@ -334,10 +443,14 @@ pub(crate) fn nominate_repair_rows(
     // contacts occupy (seeded above); picking below extends it in place so a
     // seat chosen for an earlier key in THIS attempt is excluded from every
     // later key too.
-    let mut nominated: Vec<RepairRowId> = Vec::new();
+    let mut nominated = Nominations::default();
 
     for (key, patches) in patches_by_key {
         let Some(candidate_rows) = rows_by_key.get(&key) else {
+            // Recorded rather than silently skipped: "this blocking key had
+            // zero eligible repair-pool rows" is the distinction the refusal
+            // evidence must carry, and it used to leave no trace at all.
+            nominated.per_key.insert(key, KeyNomination::default());
             continue;
         };
         let mut sorted_faces: Vec<u32> = patches
@@ -395,9 +508,16 @@ pub(crate) fn nominate_repair_rows(
                 continue;
             }
             claimed_points.push(point);
-            nominated.push(row.id());
+            nominated.rows.push(row.id());
             picked += 1;
         }
+        nominated.per_key.insert(
+            key,
+            KeyNomination {
+                eligible_rows: candidate_rows.len(),
+                nominated_rows: picked,
+            },
+        );
     }
 
     Ok(nominated)
@@ -452,7 +572,19 @@ mod tests {
             key(2, 0, &[12]),
             key(7, 1, &[20]),
         ];
-        let islands = islands_from_blocking(&patches);
+        // Island 2 was nominated for twice and still has rows left; island 7
+        // never had an eligible row at all. Those are the two different
+        // stories the refusal must be able to tell apart.
+        let mut tally = BTreeMap::new();
+        tally.insert(
+            (2, 0),
+            KeyNomination {
+                eligible_rows: 4,
+                nominated_rows: 2,
+            },
+        );
+        tally.insert((7, 1), KeyNomination::default());
+        let islands = islands_from_blocking(&patches, &tally);
         assert_eq!(islands.len(), 2);
         let island_two = islands
             .iter()
@@ -461,6 +593,26 @@ mod tests {
         assert_eq!(island_two.patch_count, 2);
         assert_eq!(island_two.sorted_face_ids, vec![10, 11, 12]);
         assert!((island_two.uncovered_area_mm2 - 3.0).abs() < 1e-9);
+        assert_eq!(
+            (
+                island_two.nominated_repair_rows,
+                island_two.eligible_repair_rows
+            ),
+            (2, 4)
+        );
+        let island_seven = islands
+            .iter()
+            .find(|island| island.island_id == 7)
+            .expect("island 7 present");
+        assert_eq!(
+            (
+                island_seven.nominated_repair_rows,
+                island_seven.eligible_repair_rows
+            ),
+            (0, 0),
+            "an island that never had an eligible repair row must be distinguishable from one \
+             that was nominated for and never closed"
+        );
     }
 
     #[test]
