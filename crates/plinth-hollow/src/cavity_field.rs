@@ -193,6 +193,45 @@ impl CavityField {
         (0..self.flat_count()).filter(|flat| self.contains_flat(*flat))
     }
 
+    /// How many **separate chambers** this one selected resin-flow interior
+    /// occupies, counted as the connected components of its own deep core —
+    /// the members whose clearance to the cavity's boundary is at least
+    /// `min_clearance_mm`.
+    ///
+    /// A **rotation- and translation-invariant** structural measurement, and
+    /// the honest way to ask "did the far chamber get in?" once the
+    /// orientation sweep has turned the model and there is no axis left to
+    /// ask along. A passage narrower than `min_clearance_mm` contributes no
+    /// deep voxels at all, so two chambers joined only through such a passage
+    /// count as two, while one chamber plus however much dead space a flood
+    /// legitimately claimed inside that passage still counts as one. Pick
+    /// `min_clearance_mm` between the throat's own cavity radius and the
+    /// smaller chamber's, and the count is exactly the chamber count.
+    ///
+    /// # Errors
+    ///
+    /// [`HollowError`] if the distance transform or the labelling refuses the
+    /// field's own dimensions.
+    pub fn deep_lobe_count(&self, min_clearance_mm: f64) -> Result<usize, HollowError> {
+        if !min_clearance_mm.is_finite() || min_clearance_mm <= 0.0 {
+            return Err(HollowError::InvalidArithmetic);
+        }
+        let [nx, ny, nz] = self.dims;
+        let mut mask = Array3::from_elem((nz, ny, nx), false);
+        for flat in self.member_flats() {
+            let [x, y, z] = self.flat_to_index(flat);
+            mask[(z, y, x)] = true;
+        }
+        let clearance = crate::frozen_distance_transform(&mask, self.pitch_mm.get())?;
+        let deep = clearance.mapv(|distance_mm| distance_mm >= min_clearance_mm);
+        if !deep.iter().any(|value| *value) {
+            return Ok(0);
+        }
+        let (_labels, count) = scirs2_ndimage::morphology3d::label3d(deep.view(), 6)
+            .map_err(|_| HollowError::VoxelStack)?;
+        Ok(count)
+    }
+
     pub(crate) fn mask_excluding(&self, excluded: &[bool]) -> Result<Array3<bool>, HollowError> {
         if excluded.len() != self.flat_count() {
             return Err(HollowError::VoxelStack);
