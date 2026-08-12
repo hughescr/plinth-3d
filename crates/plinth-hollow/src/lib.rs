@@ -5329,6 +5329,48 @@ mod fu53_exact_cavity_distance {
         }
     }
 
+    /// **The margin's derivation is enforced, not merely written down.**
+    ///
+    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM` is declared in the registry as the
+    /// literal `0.5 * 1.7320508075688772`, where the `0.5` duplicates
+    /// `HOLLOW_PITCH_MM`'s value rather than reading it, and its own prose
+    /// says it is DERIVED and MUST be re-derived if the pitch ever moves.
+    /// Nothing mechanical held those two together: the constants tests pin
+    /// each as an independent literal, and `HollowSettings::with_wall_mm`
+    /// reads each from the registry independently. Bumping the pitch to
+    /// 0.6 mm would leave the margin at 0.866 mm while a surface-nets vertex
+    /// could sit 0.6·√3 ≈ 1.039 mm from a selected cavity centre — the
+    /// realised wall undershooting the requested one by ~0.17 mm, silently
+    /// reopening the FU-53 shortfall with every constants test green.
+    ///
+    /// This is the cross-constant assertion that closes it: the margin is
+    /// exactly one voxel body diagonal of the pitch the same registry
+    /// publishes, checked against the settings the engine actually runs on.
+    /// Exact equality, no tolerance — the registered literal is the f64
+    /// nearest to `pitch * sqrt(3)` and a re-derivation that is not is a
+    /// re-derivation that was not done.
+    #[test]
+    fn the_cavity_march_margin_is_one_body_diagonal_of_the_registered_pitch() {
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        let margin = settings.cavity_march_margin_mm().get();
+        assert_eq!(
+            margin,
+            pitch * 3.0_f64.sqrt(),
+            "HOLLOW_CAVITY_MARCH_MARGIN_MM ({margin}) is no longer HOLLOW_PITCH_MM \
+             ({pitch}) x sqrt(3): the FU-53 soundness margin's own prose says it is \
+             DERIVED from the pitch and must be re-derived whenever the pitch moves"
+        );
+        // The lemma the margin buys, restated as the inequality FU-53's
+        // selection math relies on: no surface-nets vertex of a boundary
+        // cavity cell can be further from that cell's centre than the margin.
+        let furthest_vertex_from_a_cell_centre = pitch * 3.0_f64.sqrt();
+        assert!(
+            margin >= furthest_vertex_from_a_cell_centre,
+            "the margin no longer covers a full cell body diagonal"
+        );
+    }
+
     /// **The analytic Sphere: the cavity radius and the realised minimum wall.**
     ///
     /// The committed Sphere is close enough to an ideal sphere (its origin
