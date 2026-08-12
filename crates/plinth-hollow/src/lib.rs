@@ -18,6 +18,7 @@
 mod cavity_field;
 pub mod drains;
 pub mod drilling;
+mod flow;
 mod well_composed;
 
 pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
@@ -29,14 +30,15 @@ use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, Printe
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
     StrictMeshAuditError, TopologyError, TopologyValidationError, TriageAdmissionError,
-    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
+    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh,
+    TOPOLOGY_CUT_CLOSED_SOLID_MASK, WeldPolicy,
 };
 use plinth_orient::OrientationHistory;
 use plinth_solid::{
     BooleanInputEstimate, BooleanLimits, ManifoldBackend, Mesh as SolidMesh, SolidError,
 };
 use scirs2_core::ndarray::Array3;
-use scirs2_ndimage::{distance_transform_edt, morphology3d::label3d};
+use scirs2_ndimage::distance_transform_edt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -143,6 +145,12 @@ pub fn checked_wall_mm(wall_mm: PositiveFinite) -> Result<PositiveFinite, Hollow
 #[serde(rename_all = "snake_case")]
 pub enum SolidDecisionReason {
     NoCavity,
+    /// The wall left cavity, but no passage through it admits the registered
+    /// drain bore anywhere (FU-47: resin-flow connectivity). Not `NoCavity`:
+    /// there genuinely is an interior, it just cannot be drained at the
+    /// registered throat, so it is left as solid material rather than cut
+    /// into an undrainable trap.
+    CavityBelowDrainThroat,
     BelowThreshold,
     /// The wall left a cavity and the well-composedness repair removed all of
     /// it. **Not `NoCavity`:** that reason is a statement about the model's
@@ -269,9 +277,10 @@ pub struct CavityRepairEvidence {
     pub cell_visits: usize,
     /// Passes over the whole grid: the opening cell scan plus one per component
     /// re-selection. Counted separately because the cell-visit bound does not
-    /// cover them. A re-selection pass is **two** whole-grid traversals — the
-    /// `label3d` and the sweep applying its verdict — so `p` here is `2p − 1`
-    /// traversals of the grid.
+    /// cover them. Since FU-47 a re-selection pass is **thirteen** whole-grid
+    /// traversals — the twelve resin-flow selection makes plus the sweep
+    /// applying its verdict — so `p` here is `13p − 12` traversals of the
+    /// grid; it was `2p − 1` when re-selection was plain 6-connectivity.
     pub full_grid_passes: usize,
 }
 
@@ -897,6 +906,9 @@ fn convert_shell_failure_to_solid(
     };
     match failure.into_error() {
         HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity, None),
+        HollowError::IneligibleCavityBelowDrainThroat { .. } => {
+            decided(SolidDecisionReason::CavityBelowDrainThroat, None)
+        }
         HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
             decided(SolidDecisionReason::BelowThreshold, None)
         }
@@ -1383,11 +1395,13 @@ impl H0ResourceDiagnostics {
         self.cavity_repair.cell_visits
     }
     /// Passes the repair made over the *whole* grid: the opening cell scan plus
-    /// one `label3d` re-selection per round that removed anything. The
+    /// one resin-flow re-selection per round that removed anything. The
     /// cell-visit count above does not cover these, which is why they are
-    /// counted separately rather than folded into it. Each re-selection pass is
-    /// **two** whole-grid traversals (the `label3d` and the sweep that applies
-    /// it), so `p` passes are `2p − 1` traversals. FU-54 bounds `p` at
+    /// counted separately rather than folded into it. Since FU-47 each
+    /// re-selection pass is **thirteen** whole-grid traversals (the twelve the
+    /// flow selection makes plus the sweep that applies its verdict), so `p`
+    /// passes are `13p − 12` traversals; it was `2p − 1` when re-selection was
+    /// plain 6-connectivity. FU-54 bounds `p` at
     /// [`H0AdmissionLimits::max_cavity_repair_passes`] (production default 8):
     /// a round that would exceed it is refused
     /// ([`HollowError::CavityRepairPassLimitExceeded`]) rather than taken, so
@@ -1625,14 +1639,25 @@ pub fn create_shell_recording_repair(
     // argument that sizes it.
     let cavity_mask = edt.mapv(|distance_mm| distance_mm > wall_plus_margin_mm);
     drop(edt);
-    let (labels, label_count) =
-        label3d(cavity_mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
-    drop(cavity_mask);
-    if label_count == 0 {
+    if !cavity_mask.iter().any(|value| *value) {
         return Err(HollowError::IneligibleNoCavity.into());
     }
-    let largest = largest_label(&labels, label_count)?;
-    let selected = labels.mapv(|label| label == largest);
+    // FU-47 (owner ruling, 2026-08-12, §4): two cavity voxels are part of the
+    // same drainable interior only if resin can flow between them -- a
+    // passage whose free radius admits the registered drain bore. Plain
+    // 6-connectivity would happily select a dumbbell through a needle-width
+    // neck; the flow rule is what refuses to.
+    let throat_r_mm = flow::registered_throat_radius_mm()?;
+    let selected = match flow::select_largest_flow_component(&cavity_mask, grid_pitch, throat_r_mm)? {
+        Some((selected, _stats)) => selected,
+        None => {
+            return Err(HollowError::IneligibleCavityBelowDrainThroat {
+                throat_radius_mm: throat_r_mm,
+            }
+            .into());
+        }
+    };
+    drop(cavity_mask);
     // The extractor emits one vertex per lattice cell, which is only enough
     // where the mask is well-composed. Repair it here, before anything measures
     // or marches it, so the cavity volume the savings gate weighs is the cavity
@@ -1641,6 +1666,8 @@ pub fn create_shell_recording_repair(
     let (main, well_composed_repair) = match well_composed::well_composed_cavity_component(
         selected,
         limits.max_cavity_repair_passes(),
+        grid_pitch,
+        throat_r_mm,
     ) {
         Ok(repaired) => repaired,
         // The fixpoint consumed the component. The error names the measurement
@@ -1858,18 +1885,30 @@ const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
 /// living in a diagnostic is exactly how a diagnostic starts reporting that
 /// models pass a gate they do not pass.
 ///
+/// Per the owner ruling of 2026-08-12 (FU-47, §4 of
+/// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`):
+/// a point-touch (`TOPOLOGY_CUT_POINT_ONLY`) is not a closed-solid defect, so
+/// this gate refuses on [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`] rather than on any
+/// nonzero cut flag. Closure and orientation are not relaxed by that mask,
+/// and no threshold moves.
+///
 /// # Errors
 ///
 /// [`HollowError::StrictAudit`] for a repeated index or a zero-area face,
 /// [`HollowError::Topology`] / [`HollowError::TopologyValidation`] when the
 /// topology cannot be built or does not validate, and
-/// [`HollowError::NotClosedOrOriented`] when any face carries any cut flag.
+/// [`HollowError::NotClosedOrOriented`] when any face carries a cut flag in
+/// [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`].
 pub fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
     mesh.audit_strict().map_err(HollowError::StrictAudit)?;
     let topology =
         build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
     validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
-    if topology.cut_flags().iter().any(|flags| *flags != 0) {
+    if topology
+        .cut_flags()
+        .iter()
+        .any(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
+    {
         return Err(HollowError::NotClosedOrOriented);
     }
     Ok(())
@@ -3454,6 +3493,18 @@ pub enum HollowError {
     IneligibleBelowBulk,
     #[error("the wall offset leaves no cavity")]
     IneligibleNoCavity,
+    /// The wall offset leaves cavity, but no passage through it admits the
+    /// registered drain bore anywhere — a 6-connected region that nowhere
+    /// clears `HOLLOW_DRAIN_R_MM`. Distinct from [`Self::IneligibleNoCavity`]
+    /// on purpose: that one says there is no interior at all, this one says
+    /// the interior exists and cannot be drained. Per the owner ruling of
+    /// 2026-08-12 (FU-47): resin cannot flow through a passage narrower than
+    /// the bore, so cutting it would leave a trap, and leaving it uncut
+    /// leaves solid material, which is always safe.
+    #[error(
+        "no cavity passage admits the registered {throat_radius_mm} mm drain bore radius"
+    )]
+    IneligibleCavityBelowDrainThroat { throat_radius_mm: f64 },
     #[error("the largest cavity does not meet the registered resin-saving threshold")]
     IneligibleSavings,
     /// The well-composedness repair consumed the whole selected component.
@@ -3647,14 +3698,17 @@ mod tests {
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
-        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
-        let largest =
-            (label_count > 0).then(|| largest_label(&labels, label_count).expect("largest label"));
-        let cavity_voxels = largest.map_or(0, |label| {
-            labels
-                .iter()
-                .filter(|candidate| **candidate == label)
-                .count()
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let selected = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+            .expect("flow selection");
+        // The interior count is the flow evidence itself, not a restatement
+        // of "the cavity is nonempty": a regression that split one interior
+        // into three has to be able to fail this.
+        let (label_count, cavity_voxels) = selected.map_or((0, 0), |(mask, stats)| {
+            (
+                stats.flow_components,
+                mask.iter().filter(|value| **value).count(),
+            )
         });
         (
             components,
@@ -5804,8 +5858,12 @@ mod corpus_cavity_repair {
     ///
     /// FU-53 note: the rod radius is a parameter (rather than the historical
     /// fixed 3.375 mm) because the lattice-diagonal defect this fixture
-    /// exists to reproduce is non-monotonic in it — see the retune note on
-    /// `a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it`.
+    /// exists to reproduce is non-monotonic in it. FU-53's own retune used
+    /// 3.875 mm against a test that hollowed this fixture; FU-47's doctrine
+    /// (2026-08-12 merge) now correctly keeps its two lobes separate resin-flow
+    /// interiors below the drain throat, so the surviving integration test
+    /// (`a_synthetic_pinched_dumbbell_stays_solid_because_its_waist_is_below_the_drain_bore`)
+    /// uses the original 3.375 mm radius instead.
     fn pinched_dumbbell_with_rod_radius(rod_radius: f64) -> Mesh {
         let yaw = std::f64::consts::FRAC_PI_4;
         let span = 40.0;
@@ -5842,12 +5900,14 @@ mod corpus_cavity_repair {
         .expect("fixture in the positive octant")
     }
 
-    /// The selected cavity component **before** any repair, plus the grid it
-    /// lives on: `create_shell`'s own selection, stopped one line early.
+    /// The selected cavity component **before** any repair, the grid it lives
+    /// on, the flow evidence that selected it, and how many cavity voxels the
+    /// `edt > wall` field held before the doctrine judged them:
+    /// `create_shell`'s own selection, stopped one line early.
     fn unrepaired_cavity_mask(
         source: &Mesh,
         settings: HollowSettings,
-    ) -> (Array3<bool>, VoxelGrid) {
+    ) -> (Array3<bool>, VoxelGrid, flow::FlowStats, usize) {
         let spec = grid_spec(source, settings.voxel_pitch_mm().get()).expect("grid spec");
         let work = raster_work_item_count(
             source,
@@ -5858,10 +5918,13 @@ mod corpus_cavity_repair {
         let grid = voxelize_filled(source, spec, work).expect("bounded voxelization");
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
-        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
-        assert!(label_count > 0, "the fixture must select a cavity");
-        let largest = largest_label(&labels, label_count).expect("largest label");
-        (labels.mapv(|label| label == largest), grid)
+        let cavity_voxels = cavity.iter().filter(|value| **value).count();
+        assert!(cavity_voxels > 0, "the fixture must select a cavity");
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let (selected, stats) = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+            .expect("flow selection")
+            .expect("the fixture must admit the registered drain bore somewhere");
+        (selected, grid, stats, cavity_voxels)
     }
 
     /// `(boundary edges, non-manifold faces, point-only faces)`.
@@ -5882,202 +5945,160 @@ mod corpus_cavity_repair {
         )
     }
 
-    /// **The default `cargo test`'s end-to-end gate on the repair.**
+    /// **The default `cargo test`'s end-to-end gate on the doctrine.**
     ///
-    /// It asserts the whole chain in the order the chain runs: the mask is not
-    /// well-composed; the extractor *provably cannot* represent that mask (the
-    /// unrepaired cavity surface is non-manifold, which is the refusal FU-49
-    /// filed); the repair removes exactly the voxels the record states; and the
-    /// shell that comes out of the marching, the Boolean and
-    /// `validate_shell_topology` carries no cut face of any kind.
+    /// Before FU-47 this fixture hollowed: the waist's cavity thread, though
+    /// sub-throat width along nearly its whole 40 mm length, was one
+    /// 6-connected component with the two end lobes, the well-composedness
+    /// repair opened its four Latecki-critical cells, and the shell that came
+    /// out carried no cut face. `HOLLOW_DRAIN_R_MM` = 1.5 mm never reaches
+    /// into a rod-derived thread whose cavity radius is ~0.875 mm, so the two
+    /// end lobes are separate resin-flow interiors (FU-47, §4) and the
+    /// largest one, alone, falls under the registered savings threshold:
+    /// from→to, this fixture went from *hollows* to *stays solid*, correctly,
+    /// because it was always two small cavities joined by an undrainable
+    /// neck.
     ///
-    /// The middle step is what makes this a regression test rather than a
-    /// tautology: without it, an extractor change that made the repair
-    /// unnecessary would leave this test passing while measuring nothing.
+    /// **The doctrine takes the whole thread, not half of it.** An earlier
+    /// version of this test recorded the selected lobe still carrying its
+    /// share of the diagonal thread — ~20 mm of needle-width channel, cut
+    /// into the shell, drainable only through a passage the same ruling says
+    /// resin cannot flow through. It came in because the flood that assigns
+    /// sub-bore voxels to an interior climbed *into* the thread from the
+    /// lobe. It no longer does (`flow.rs`, steps 4–6), and the proof is the
+    /// extractor: the thread is exactly what made the one-vertex-per-cell
+    /// surface non-manifold, so a selection that excludes it marches to a
+    /// mesh with no cut face at all. That is why this test no longer reaches
+    /// the well-composedness repair — there is nothing left for it to repair
+    /// here. `well_composed.rs`'s own direct unit tests exercise the repair
+    /// mechanism on synthetic masks and are unaffected.
     #[test]
-    fn a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it() {
-        let source = pinched_dumbbell_with_rod_radius(3.875);
+    fn a_synthetic_pinched_dumbbell_stays_solid_because_its_waist_is_below_the_drain_bore() {
+        let source = pinched_dumbbell_with_rod_radius(3.375);
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
 
-        // 1. The mask this fixture exists to produce, and the extractor's
-        //    failure on it. The cavity thread across the 45° waist is a chain
-        //    of lattice-diagonal voxels, so the one-vertex-per-cell surface has
-        //    edges used by four faces instead of two.
-        let (unrepaired, grid) = unrepaired_cavity_mask(&source, settings);
-        let raw = marching_cavity(&unrepaired, grid.origin, grid.pitch)
-            .expect("the unrepaired mask still extracts a closed surface");
-        // Moved (0, 8, 26) -> (0, 16, 50) on 2026-08-12 by FU-50's area-
-        // proportional conservative rasterizer replacing the frozen midpoint-
-        // quartering one (decisions/2026-08-12-owner-rulings-fu-batch.md §3):
-        // the marked-voxel set only grows, so the lattice-diagonal thread
-        // across the waist this fixture is built to exercise now spans more
-        // non-manifold and point-only faces.
-        //
-        // Unaffected by FU-53's rod-radius retune below (3.375 -> 3.875 mm):
-        // `unrepaired_cavity_mask` stops one line early, at the pre-fix
-        // `edt > wall` selection with no exact distance and no march margin,
-        // so it characterizes the same lattice-diagonal thread topology
-        // either way. Still watertight (0 boundary edges) but non-manifold,
-        // which is the whole premise this fixture proves.
-        assert_eq!(
-            cut_census(&raw),
-            (0, 16, 50),
-            "the fixture no longer exhibits the defect the repair exists to fix: \
-             watertight but non-manifold is the whole premise"
-        );
-
-        // 2. The repair, through the production entry point. Integer
+        // 1. The doctrine's verdict on the fixture's own cavity field, taken
+        //    through the same flow selection production uses. Integer
         //    combinatorics over a deterministic voxel field, so these are
         //    equalities.
-        //
-        // FU-53 note: this fixture's two 10 mm lobes are deliberately small
-        // so the repair closes in under a second, and its cavity (a few
-        // thousand mm3) no longer clears the registered savings floor once
-        // the honest exact-distance-plus-margin wall shrinks it — a real and
-        // separately covered consequence of the fix (see
-        // `the_committed_sphere_clears_savings_at_the_default_wall_but_not_the_handling_heavy_wall`),
-        // not something this test exists to measure. `wall_thickness_mm`,
-        // `voxel_pitch_mm` and `cavity_march_margin_mm` stay exactly the
-        // registered values step 1 and the assertions below depend on; only
-        // the unrelated savings floor is relaxed, so this test keeps
-        // isolating repair mechanics from the savings gate.
-        let step3_settings = HollowSettings {
-            save_min_mm3: Finite::new(1.0).expect("finite"),
-            save_min_fraction: Finite::new(0.0).expect("finite"),
-            ..settings
-        };
-        let candidate =
-            create_shell(source, step3_settings).expect("the repaired dumbbell hollows");
-        let resources = candidate.cavity().resources();
-        // Moved 4 -> 8 on 2026-08-12 by FU-50: the extra non-manifold/
-        // point-only faces above (8 -> 16, 26 -> 50) come from a wider
-        // lattice-diagonal thread, which the repair now finds more critical
-        // cells on.
-        // Moved 8 -> 132 critical cells (repaired_voxels 8 -> 68, full-grid
-        // passes unchanged at 2) by FU-53's fixture retune: the rod radius
-        // moved 3.375 -> 3.875 mm to keep exhibiting the non-manifold pinch
-        // once the production selection threshold moved from the bare 2.5 mm
-        // wall to 2.5 mm + HOLLOW_CAVITY_MARCH_MARGIN_MM (0.866 mm) evaluated
-        // on the EXACT nearest-surface distance rather than the EDT. A sweep
-        // over rod radius (3.0-6.0 mm in 0.125 mm steps, ad hoc, not
-        // committed as a test) found the defect is non-monotonic in radius,
-        // the same lattice-aliasing signature FU-53's finned-block
-        // breach class shows: 3.875, 4.375, 4.875 mm (132 critical cells),
-        // 5.375 mm (136) and 5.875 mm (140) reproduce it; every radius
-        // between and outside them does not. 3.875 mm is the closest
-        // reproduction to the original 3.375 mm.
-        assert_eq!(resources.cavity_critical_cells(), 132);
-        assert_eq!(resources.cavity_repaired_voxels(), 68);
-        // The opening cell scan plus exactly one whole-grid re-selection: the
-        // removal stranded part of the component, which is the second
-        // `O(cells)` domain the cell-visit bound does not cover.
-        assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
-        // `voxel_count` is `GridSpec::count` -- the admitted grid's cell
-        // total, computed from the mesh's own bounds. Unchanged by the rod
-        // radius retune: the rod is thin relative to the two 10 mm lobes
-        // that dominate the bounding box either way.
-        assert_eq!(resources.voxel_count(), 393_764);
-        let cells = 99 * 99 * 42;
+        let (unrepaired, grid, stats, cavity_voxels) = unrepaired_cavity_mask(&source, settings);
+        // Re-pinned 33_875 -> 34_453 on this merge (2026-08-12), measured
+        // rather than argued: FU-47's own branch measured this fixture
+        // against the pre-FU-53 `edt > wall` selection; merging onto develop
+        // puts it on FU-53's exact-nearest-surface-distance-plus-margin
+        // selection instead, which moves the cavity field's own voxel count.
+        // The doctrine's verdict is unaffected -- still two flow components,
+        // still an undrainable neck, still refused at the savings floor --
+        // only the boundary's own integer count moved with the selection it
+        // is measuring.
+        assert_eq!(cavity_voxels, 34_453, "the fixture's own cavity field moved");
         assert_eq!(
-            resources.cavity_repair_cell_visits(),
-            cells + 8 * resources.cavity_repaired_voxels()
+            stats.flow_components, 2,
+            "the two lobes are separate resin-flow interiors: {stats:?}"
         );
-        // Moved 411,706 -> 412,186 tracking `cavity_repaired_voxels` above
-        // (8 -> 68, so +8*60 = 480 more visits).
-        assert_eq!(resources.cavity_repair_cell_visits(), 412_186);
-
-        // 3. The end of the chain. Not one face of the shell or its cavity is
-        //    cut, and the difference is one negative void inside positive
-        //    material — the two things the unrepaired mask could not deliver.
+        // Re-pinned 1_206 -> 1_116 alongside cavity_voxels above, same cause.
         assert_eq!(
-            cut_census(candidate.mesh()),
+            stats.unreached_voxels, 1_116,
+            "the waist thread and its skin are undrainable and stay solid: {stats:?}"
+        );
+        let selected_voxels = unrepaired.iter().filter(|value| **value).count();
+        // Re-pinned 16_402 -> 16_680 alongside cavity_voxels above, same cause.
+        assert_eq!(selected_voxels, 16_680);
+        assert!(
+            selected_voxels + stats.unreached_voxels < cavity_voxels,
+            "the far lobe is a second interior and is not in the selection"
+        );
+
+        // 2. The selection marches to a clean surface, because the thread
+        //    that made it non-manifold is precisely what the doctrine left
+        //    solid. Before the fix this census was `(0, 8, 26)`.
+        let raw = marching_cavity(&unrepaired, grid.origin, grid.pitch)
+            .expect("the selected mask extracts a closed surface");
+        assert_eq!(
+            cut_census(&raw),
             (0, 0, 0),
-            "the repaired shell is cut; the repair no longer closes FU-49"
+            "excluding the sub-bore thread must also exclude the non-manifoldness it caused"
         );
-        let topology =
-            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("shell topology");
-        let certificate =
-            certify_closed_components(candidate.mesh(), &topology).expect("shell certificate");
-        assert_eq!(
-            certificate
-                .components()
-                .iter()
-                .filter(|component| component.signed_volume_mm3() < 0.0)
-                .count(),
-            1,
-            "the shell must hold exactly one negative, contained cavity"
+
+        // 3. Through the production entry point: one lobe's cavity is below
+        //    the registered savings threshold, so the model stays solid.
+        let error = create_shell(source, settings)
+            .expect_err("the two lobes are separate resin-flow interiors (FU-47); the larger one alone is below the registered savings threshold");
+        assert!(
+            matches!(error, HollowError::IneligibleSavings),
+            "expected IneligibleSavings, got {error}"
         );
     }
 
-    /// FU-54, on real geometry rather than only the synthetic mask in
-    /// `well_composed.rs`'s own tests. The same pinched-dumbbell fixture the
-    /// test above proves needs exactly `full_grid_passes() == 2` at the
-    /// production limit of 8. Admitted at a `max_cavity_repair_passes` of 1 —
-    /// enough for the opening scan and nothing else — the same fixture
-    /// refuses instead of repairing, through the real production entry
-    /// point, `create_shell` and its H0 pipeline included, not a call
-    /// straight into `well_composed_cavity_component`.
-    #[test]
-    fn the_pass_limit_refuses_a_real_shell_candidate_through_the_production_entry_point() {
-        let source = pinched_dumbbell_with_rod_radius(3.875);
-        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
-        // Same isolation as the test above: only the pass limit under test
-        // moves, so a refusal here is provably about the pass bound and not
-        // about the unrelated savings floor this fixture's small cavity
-        // would otherwise also trip.
-        let step3_settings = HollowSettings {
-            save_min_mm3: Finite::new(1.0).expect("finite"),
-            save_min_fraction: Finite::new(0.0).expect("finite"),
-            ..settings
-        };
-        let mut starved = H0AdmissionLimits::production();
-        starved.max_cavity_repair_passes = 1;
-        let error = create_shell_with_admission_limits(source.clone(), step3_settings, starved)
-            .expect_err("one admitted pass cannot repair this fixture's waist pinch");
-        match error {
-            HollowError::CavityRepairPassLimitExceeded {
-                passes,
-                max_passes,
-                critical_cells,
-                repaired_voxels,
-                cell_visits,
-            } => {
-                assert_eq!(passes, 1, "refused at the opening scan's own pass count");
-                assert_eq!(max_passes, 1);
-                assert_eq!(critical_cells, 132, "same defect the unstarved run measures");
-                assert!(repaired_voxels > 0, "the opening scan already removed voxels");
-                assert!(cell_visits > 0);
-            }
-            other => panic!("expected CavityRepairPassLimitExceeded, got {other}"),
-        }
+    // FU-54's own dedicated integration test formerly here
+    // (`the_pass_limit_refuses_a_real_shell_candidate_through_the_production_entry_point`)
+    // relied on this exact pinched-dumbbell fixture reaching
+    // `well_composed_cavity_component` with a real multi-pass repair. FU-47's
+    // flow-based initial selection now excludes the far lobe -- and the
+    // sub-bore thread that produced the non-well-composed pinch -- before
+    // `well_composed_cavity_component` ever runs, per the doc comment on the
+    // test above: "there is nothing left for it to repair here." That
+    // integration-level coverage of the FU-54 bound is gone with the premise
+    // that produced it; the bound itself is still proved, directly, by
+    // `well_composed.rs`'s own
+    // `the_pass_limit_refuses_instead_of_taking_the_next_reselection`, which
+    // does not depend on any lib.rs fixture reaching a particular repair
+    // shape through `create_shell`.
 
-        // The recording entry point lifts the same evidence onto the
-        // failure, exactly as `CavityRepairRemovedCavity` and
-        // `IneligibleSavingsAfterCavityRepair` do -- a caller reading
-        // `cavity_repair` must see the partial repair regardless of which of
-        // the three variants stopped it.
-        let failure = create_shell_recording_repair(source, step3_settings, starved)
-            .expect_err("the same starved limit refuses through the recording entry point");
-        let evidence = failure
-            .cavity_repair()
-            .expect("a repair ran before the pass limit stopped it");
-        assert_eq!(evidence.critical_cells, 132);
-        assert_eq!(evidence.full_grid_passes, 1);
-        assert!(matches!(
-            failure.error(),
-            HollowError::CavityRepairPassLimitExceeded { .. }
-        ));
-    }
-
+    /// **The committed Weeping Treant, re-measured under the corrected
+    /// throat — and it no longer hollows.**
+    ///
     /// Release-gated: the fixture is 429,120 faces and the run is seconds
     /// optimized, minutes without optimization. `cargo test --release` runs it;
     /// a debug `cargo test` reports it ignored rather than silently skipping it.
+    ///
+    /// **What changed and why, measured rather than argued.** This model used
+    /// to hollow, and on this branch it hollowed under FU-47's first
+    /// implementation too. It stops hollowing once the throat comparison
+    /// carries the half-voxel surface offset (`core_clearance_threshold_mm`),
+    /// and the numbers below say exactly where the cavity goes.
+    ///
+    /// **Re-pinned on this merge (2026-08-12), measured rather than argued.**
+    /// FU-47's own branch measured this fixture against develop as it stood
+    /// before FU-50's area-proportional rasterizer landed; merging onto
+    /// develop puts `voxelize_filled` on the new rasterizer's superset-marked
+    /// material grid instead, which moves the frozen `edt > wall` field this
+    /// test derives from it (the source-mesh-derived grid dimensions
+    /// themselves, `spec.count` and `spec.dims`, are unaffected — they come
+    /// from bounds and pitch, not the rasterizer):
+    ///
+    /// - the `edt > wall` field holds **65,937** cavity voxels, of which plain
+    ///   6-connectivity — what the pipeline selected before FU-47 — would take
+    ///   **65,639** as one cavity;
+    /// - against the corrected (surface-offset) throat it is **13 interiors**,
+    ///   and the largest takes **62,835** (95.3 %) — most of the trunk and its
+    ///   limbs remain one flow-connected interior; the other 3,102 voxels
+    ///   split off into thinner branch tips whose realized aperture falls
+    ///   under the 3.0 mm bore the pipeline actually drills.
+    ///
+    /// Under FU-47 those are separate cavities and **each needs its own
+    /// drain**. H0 retains exactly one — `select_largest_flow_component` — so
+    /// the other voxels are not cut. Even at 95.3 % retention the well-
+    /// composedness repair (79 critical cells, 406 repaired voxels, 4 whole-
+    /// grid passes) shrinks the honest, exact-distance-selected cavity
+    /// (FU-53) below the registered savings fraction, and the model takes the
+    /// **solid reserve** (`HollowError::IneligibleSavingsAfterCavityRepair` →
+    /// `SolidDecisionReason::BelowThresholdAfterRepair`). **It still prints.**
+    ///
+    /// **This is a recorded consequence, not a silent one.** Retaining and
+    /// draining every qualifying interior is what the ruling's own text asks
+    /// for and is the work that would give this model its cavity back; it is
+    /// an H0+H1b change (per-cavity drain planning, per-cavity drainability
+    /// proof) and is not this test's to make. FU-49's chain — repair, clean
+    /// shell, no cut face — is still proven, on the pinched-dumbbell and
+    /// well-composedness unit tests; what is no longer proven *here* is that
+    /// this particular model reaches a shell.
     #[test]
     #[cfg_attr(
         debug_assertions,
         ignore = "429,120-face corpus fixture; run under cargo test --release"
     )]
-    fn the_committed_treant_hollows_and_its_repair_is_the_one_the_record_states() {
+    fn the_committed_treant_splits_into_thirteen_interiors_and_takes_the_solid_reserve() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl");
         assert!(
@@ -6087,118 +6108,91 @@ mod corpus_cavity_repair {
         );
         let source = load_binary_stl(&path, WeldPolicy::None).expect("committed frozen STL");
         assert_eq!(source.tris().len(), 429_120, "the fixture itself moved");
-
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
-        // FU-53 note: at the REGISTERED savings floor the honestly-walled
-        // Treant (exact distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM) now
-        // fails `IneligibleSavingsAfterCavityRepair` -- the mandated,
-        // measured-and-recorded consequence FU-55's ruling anticipates (an
-        // under-walled shell never ships; this one now correctly does not
-        // clear savings and the pipeline substitutes the solid reserve). See
-        // the FU-53 journal landing entry for that production-settings
-        // measurement. This test's own subject is the well-composedness
-        // repair (FU-49), proved end to end through the real production
-        // entry point; only the unrelated savings floor is relaxed here, the
-        // same isolation the synthetic pinched-dumbbell test above uses.
-        let repair_test_settings = HollowSettings {
-            save_min_mm3: Finite::new(1.0).expect("finite"),
-            save_min_fraction: Finite::new(0.0).expect("finite"),
-            ..settings
+
+        // 1. The doctrine's own verdict on this model's cavity field, on the
+        //    same grid production admits. Integer combinatorics over a
+        //    deterministic voxel field, so these are equalities.
+        let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        assert_eq!(spec.count, 5_313_000, "the admitted grid moved");
+        assert_eq!(spec.dims, [165, 175, 184], "the admitted grid's own shape moved");
+        let work = raster_work_item_count(
+            &source,
+            spec,
+            H0AdmissionLimits::production().max_raster_work_items(),
+        )
+        .expect("bounded source work");
+        let grid = voxelize_filled(&source, spec, work).expect("bounded voxelization");
+        let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
+        let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
+        drop(edt);
+        // Re-pinned 64,718 -> 65,937 on this merge (2026-08-12): FU-50's
+        // area-proportional rasterizer (landed on develop after this branch)
+        // marks a superset of the old rasterizer's material voxels, which
+        // moves the EDT and therefore this threshold field.
+        assert_eq!(cavity.iter().filter(|value| **value).count(), 65_937);
+
+        // What plain 6-connectivity would have called one cavity, kept here as
+        // the before-side of the doctrine's from→to.
+        let (labels, label_count) =
+            scirs2_ndimage::morphology3d::label3d(cavity.view(), 6).expect("labels");
+        let plain_largest = (1..=label_count)
+            .map(|label| labels.iter().filter(|value| **value == label as i32).count())
+            .max()
+            .unwrap_or(0);
+        // Re-pinned 64,466 -> 65,639, same cause as cavity_voxels above.
+        assert_eq!(plain_largest, 65_639);
+        drop(labels);
+
+        let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
+        let (selected, stats) =
+            flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+                .expect("flow selection")
+                .expect("the treant admits the bore somewhere");
+        // Re-pinned 9 -> 13 interiors, same cause as cavity_voxels above: a
+        // different material grid moves the EDT, which moves exactly where
+        // the corrected throat comparison draws each branch boundary.
+        assert_eq!(stats.flow_components, 13, "{stats:?}");
+        assert_eq!(stats.core_voxels, 19_981, "{stats:?}");
+        assert_eq!(stats.unreached_voxels, 2_583, "{stats:?}");
+        // Re-pinned 40,982 (63%) -> 62,835 (95.3%): the corrected threshold
+        // still separates the treant's thin branch tips, but the trunk and
+        // its main limbs stay one interior on the new material grid.
+        assert_eq!(selected.iter().filter(|value| **value).count(), 62_835);
+        drop(selected);
+        drop(cavity);
+
+        // 2. Through the production entry point: the retained interior is
+        //    below the registered savings fraction, and the model takes the
+        //    solid reserve carrying the repair's own measurement.
+        let error = create_shell(source, settings).expect_err(
+            "one of thirteen interiors is below the registered savings fraction; the model stays solid",
+        );
+        let HollowError::IneligibleSavingsAfterCavityRepair {
+            critical_cells,
+            repaired_voxels,
+            cell_visits,
+            full_grid_passes,
+        } = error
+        else {
+            panic!("expected IneligibleSavingsAfterCavityRepair, got {error}");
         };
-        let candidate = create_shell(source, repair_test_settings)
-            .expect("the committed treant is the model FU-49 was filed on and it must now hollow");
-
-        // 1. A repair actually ran on this input. Without this the rest of the
-        //    test would still pass on a mask that never needed anything, and it
-        //    would be pinning the wrong thing.
-        let resources = candidate.cavity().resources();
-        assert!(resources.cavity_critical_cells() > 0);
-        assert!(resources.cavity_repaired_voxels() > 0);
-
-        // 2. The exact measurement, which is what the journal row states. These
-        //    are integer combinatorics over a deterministic voxel field, so
-        //    they are equalities, not tolerances.
-        //
-        // Moved 70 -> 52 critical cells, 115 -> 67 repaired voxels, and
-        // 5,405,880 -> 5,405,496 cell visits on 2026-08-12 by FU-50's area-
-        // proportional conservative rasterizer (decisions/2026-08-12-owner-
-        // rulings-fu-batch.md §3). Unlike the pinched-dumbbell fixture above,
-        // this fell rather than grew: the well-composedness repair's critical-
-        // cell count is a property of the *local pinch pattern* the exact
-        // marking produces, not a monotone function of the (monotonically
-        // growing) marked-voxel set, so either direction is consistent with
-        // the superset proof.
-        //
-        // Moved 52 -> 116 critical cells, 67 -> 170 repaired voxels, and
-        // 5,405,496 -> 5,406,320 cell visits on 2026-08-12 by FU-53: cavity
-        // selection now runs on the exact nearest-surface distance plus
-        // HOLLOW_CAVITY_MARCH_MARGIN_MM instead of the EDT's conservative
-        // overestimate, which is a different selection boundary with its own
-        // local pinch pattern -- again not a monotone consequence of the
-        // margin shrinking the cavity, for the same reason recorded above.
-        assert_eq!(resources.cavity_critical_cells(), 116);
-        assert_eq!(resources.cavity_repaired_voxels(), 170);
-        assert_eq!(resources.cavity_repair_cell_visits(), 5_406_320);
-        // The opening cell scan and exactly one whole-grid re-selection. This
-        // is the second `O(cells)` domain the cell-visit bound does not cover,
-        // and it is here so that a change which turned the fixpoint into many
-        // whole-grid passes would be caught by the count rather than by a
-        // stopwatch.
-        assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
+        // Re-pinned 93 -> 79 critical cells, 759 -> 406 repaired voxels, same
+        // cause as cavity_voxels above: a different selected mask has a
+        // different local pinch pattern.
+        assert_eq!(critical_cells, 79);
+        assert_eq!(repaired_voxels, 406);
+        // Re-pinned 3 -> 4 full-grid passes, same cause.
+        assert_eq!(full_grid_passes, 4);
 
         // 3. The work bound the module doc claims, checked against the grid the
         //    caller admitted rather than against a remembered number.
-        assert_eq!(resources.voxel_count(), 5_313_000);
         let cells = 166 * 176 * 185;
-        assert!(
-            resources.cavity_repair_cell_visits() <= cells + 8 * resources.cavity_repaired_voxels(),
-            "cell visits {} exceeded cells + 8 x changed",
-            resources.cavity_repair_cell_visits()
-        );
-
-        // 4. The cavity that survived, and the shell built from it.
-        //
-        // Moved 8,196.5 -> 3,118.75 mm3 on 2026-08-12 by FU-53: the honestly
-        // larger wall (exact distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM)
-        // removes far more of the treant's branched, oblique geometry than
-        // the EDT's own conservative overestimate did -- the same effect the
-        // FU-53 diagnosis measured directly against the source surface as a
-        // 0.70 mm (28%) realised wall on this exact fixture, now corrected.
-        // This is measured with `save_min_mm3`/`save_min_fraction` relaxed
-        // (see the note above `create_shell`, this test's whole reason for
-        // doing that): at the REGISTERED savings floor this honest cavity no
-        // longer clears it, and the model falls back to Solid in production
-        // (see the FU-53 journal landing entry).
-        let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
-        assert_eq!(cavity_mm3, 3_118.75);
-        let pitch = candidate.cavity().frozen_voxel_pitch_mm().get();
-        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 24_950);
-
-        // 5. **The end of the causal chain FU-49 filed.** The shell carries the
-        //    outer surface and the cavity together, and not one face of either
-        //    is cut. Before the repair the inner surface alone carried 132
-        //    non-manifold and 483 point-only faces, the Boolean inherited them,
-        //    and `create_shell` refused its own shell.
-        assert_eq!(
-            cut_census(candidate.mesh()),
-            (0, 0, 0),
-            "the shell or its cavity is cut again; the repair no longer closes FU-49"
-        );
-
-        // 6. The diagnostics record is populated by a real run, which nothing
-        //    else asserts: every field a shell of this size must have made
-        //    nonzero is nonzero.
-        assert!(resources.query_batch_points() > 0);
-        assert!(resources.raster_work_items() > 0);
-        assert!(resources.retained_raw_source_buffer_bytes() > 0);
-        assert!(resources.retained_cavity_membership_bytes() > 0);
-        assert!(resources.retained_source_occupancy_bytes() > 0);
-        assert!(resources.marching_vertex_upper_bound() > 0);
-        assert!(resources.marching_triangle_upper_bound() > 0);
-        assert!(resources.boolean_input_primitive_units() > 0);
-        assert!(resources.boolean_marshaled_input_bytes() > 0);
-        assert!(resources.boolean_output_vertex_limit() > 0);
-        assert!(resources.boolean_output_triangle_limit() > 0);
+        assert_eq!(cell_visits, cells + 8 * repaired_voxels);
+        // Re-pinned 5,411,032 -> 5,408,208, same cause and same formula as
+        // the other counts above -- cells itself is unchanged (`spec.dims`
+        // does not move with the rasterizer), only `repaired_voxels` did.
+        assert_eq!(cell_visits, 5_408_208);
     }
 }
 

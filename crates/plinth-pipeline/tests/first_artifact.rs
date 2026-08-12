@@ -384,9 +384,10 @@ fn make_prehollowed_box() -> plinth_mesh::Mesh {
 /// The hollow-error fallback, gated on a model that actually takes it.
 ///
 /// `plinth_hollow::run` converts only `IneligibleNoCavity`,
-/// `IneligibleBelowBulk`, `IneligibleSavings`, the well-composedness
-/// repair's own `CavityRepairRemovedCavity` / `IneligibleSavingsAfterCavityRepair`,
-/// and (FU-55) `RealizedWallBelowSpec` into a typed `HollowStageOutput::Solid`;
+/// `IneligibleCavityBelowDrainThroat` (FU-47), `IneligibleBelowBulk`,
+/// `IneligibleSavings`, the well-composedness repair's own
+/// `CavityRepairRemovedCavity` / `IneligibleSavingsAfterCavityRepair`, and
+/// (FU-55) `RealizedWallBelowSpec` into a typed `HollowStageOutput::Solid`;
 /// **every other** `HollowError` propagates, and
 /// before this fallback existed that error ended the chain, so such a model
 /// reached no artifact at all. This pins the path that carries it to one now,

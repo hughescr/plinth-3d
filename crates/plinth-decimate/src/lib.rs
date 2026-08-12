@@ -2045,8 +2045,12 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 /// - **U4 — structural invariants downstream stages assume.**
 ///   `topology_not_increased`, the same predicate the search gate uses — now
 ///   over every canonical count, because `stitch_layer` genuinely requires
-///   degree-2 adjacency and `validate_closed_mesh` refuses any nonzero cut flag
-///   whatever its class. Strict audit is
+///   degree-2 adjacency. This clause no longer rests on `validate_closed_mesh`
+///   refusing any nonzero cut flag — per the owner ruling of 2026-08-12
+///   (FU-47), that gate now admits `TOPOLOGY_CUT_POINT_ONLY` and refuses only
+///   `TOPOLOGY_CUT_CLOSED_SOLID_MASK` — so this predicate stands on its own
+///   no-regression argument: no canonical count, point-only included, may rise
+///   across the reduction. Strict audit is
 ///   already enforced inside `compact_result` and inside every probe. OD-9
 ///   exterior-ness is relied on, not re-proved: the contact machinery screens it
 ///   later. **This clause is defence in depth and is unreachable in production
@@ -2587,9 +2591,15 @@ fn within_final_slack(probe: &TwoSidedProbe, budget: ErrorBudget, slack: f64) ->
 /// called verified. `Tavey Base.stl` is clean at raw under
 /// `build_face_topology(ExactBits)` in all six cut classes and emitted a
 /// 73,582 -> 29,890 candidate carrying 10 faces flagged
-/// `TOPOLOGY_CUT_POINT_ONLY`; `validate_closed_mesh` refuses **any** nonzero
-/// cut flag, so that candidate could only ever be refused downstream, after
-/// every stage between here and there had spent its work on it.
+/// `TOPOLOGY_CUT_POINT_ONLY`. At the time this clause was written,
+/// `validate_closed_mesh` refused **any** nonzero cut flag, so that candidate
+/// could only ever be refused downstream, after every stage between here and
+/// there had spent its work on it. The owner ruling of 2026-08-12 (FU-47)
+/// has since taken `TOPOLOGY_CUT_POINT_ONLY` out of that downstream gate — a
+/// point-touch is not a closed-solid defect — but this clause is unchanged
+/// and unweakened: FU-48 is explicitly unruled and this predicate must not be
+/// loosened on its account, so a rise in the point-only count is still a
+/// refusal here regardless of what the closed-solid gate now admits.
 ///
 /// So the clause is the whole struct. `TopologyCounts` is destructured
 /// exhaustively rather than compared field by field through `after.x` so that

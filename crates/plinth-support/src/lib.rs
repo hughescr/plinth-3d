@@ -123,7 +123,7 @@ pub(crate) mod transit_measurement;
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_hollow::HollowHistory;
-use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
+use plinth_mesh::{build_face_topology, Mesh, WeldPolicy, TOPOLOGY_CUT_CLOSED_SOLID_MASK};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -782,11 +782,21 @@ pub(crate) fn validate_perception_input<'a>(
         .map_err(|error| SupportPerceptionError::StrictMesh(error.to_string()))?;
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| SupportPerceptionError::StrictMesh(error.to_string()))?;
+    // The cut classes that refuse here are the closed-solid gate's, read from
+    // `plinth_mesh` rather than restated as "any flag". Per the owner ruling
+    // of 2026-08-12 (FU-47,
+    // `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+    // §4) a point-touch is legitimate sculpting -- two fingertips meeting --
+    // and a model that hollows and drills has to be able to reach A5 as well,
+    // or the ruling's outcome (such models print) is not delivered. Open,
+    // non-manifold, wrongly wound, duplicated and degenerate faces are
+    // refused exactly as before: perception's ray work needs a closed
+    // oriented surface, and a point-touch is one.
     if let Some((face, &cut_flags)) = topology
         .cut_flags()
         .iter()
         .enumerate()
-        .find(|(_, flags)| **flags != 0)
+        .find(|(_, flags)| **flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
     {
         return Err(SupportPerceptionError::OpenOrInvalidTopology { face, cut_flags });
     }
@@ -2594,6 +2604,22 @@ mod tests {
             .expect("closed box")
             .candidates()
             .is_empty());
+    }
+
+    /// **A point-touch reaches perception.** Per the owner ruling of
+    /// 2026-08-12 (FU-47, §4) a point-touch is legitimate sculpting, not a
+    /// defect. A5 is the last stage that could still refuse such a model, and
+    /// it did: `validate_perception_input` refused any nonzero cut flag,
+    /// `TOPOLOGY_CUT_POINT_ONLY` included, so a mini with two fingertips
+    /// meeting passed hollowing and then died here. Open topology is still
+    /// refused — the test below this one proves that — so this is one cut
+    /// class leaving the check, not the check leaving.
+    #[test]
+    fn a_point_touch_mesh_is_perceived_rather_than_refused_as_open_topology() {
+        let mesh = plinth_mesh::make_pinched_boxes().expect("point-touch fixture");
+        let delicacy = vec![0.0; mesh.tris().len()];
+        perceive_contacts(&mesh, &config(&mesh, &delicacy))
+            .expect("a point-touch is not open or invalid topology (FU-47)");
     }
 
     #[test]

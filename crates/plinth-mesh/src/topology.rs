@@ -102,6 +102,29 @@ const TOPOLOGY_KNOWN_CUT_MASK: u8 = TOPOLOGY_CUT_BOUNDARY
     | TOPOLOGY_CUT_POINT_ONLY
     | TOPOLOGY_CUT_DEGENERATE;
 
+/// The cut classes that refuse a mesh at the closed-solid gate
+/// (`plinth_hollow::validate_closed_mesh`).
+///
+/// This is **not** [`TOPOLOGY_KNOWN_CUT_MASK`] with a bit subtracted: each
+/// class is written out so that a new cut class added to the topology in the
+/// future is a deliberate decision made here, not one silently inherited from
+/// the "every known flag" mask.
+///
+/// `TOPOLOGY_CUT_POINT_ONLY` is deliberately absent. Per the owner ruling of
+/// 2026-08-12 (`docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+/// §4, FU-47): a point-touch is not a modelling defect — resin cannot flow
+/// through a point, so a vertex fan that falls into more than one component
+/// there is a legitimate fingertip touch, not a hole in the solid. The flag
+/// is still measured (`TopologyCounts::point_only_cut_faces` is untouched)
+/// and still gates decimation's no-regression check; it simply no longer
+/// refuses the closed-solid gate. Closure and orientation are not relaxed by
+/// this mask, and no threshold moves.
+pub const TOPOLOGY_CUT_CLOSED_SOLID_MASK: u8 = TOPOLOGY_CUT_BOUNDARY
+    | TOPOLOGY_CUT_NONMANIFOLD
+    | TOPOLOGY_CUT_SAME_DIRECTION
+    | TOPOLOGY_CUT_DUPLICATE
+    | TOPOLOGY_CUT_DEGENERATE;
+
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum TopologyError {
     #[error("topology coordinate at vertex {vertex} axis {axis} is not finite")]
@@ -762,6 +785,20 @@ fn validate_point_only_vertices(
 /// origin, so translating the complete mesh does not inject a large global
 /// coordinate into every volume term. This function never repairs, rewinds,
 /// welds, or performs containment classification.
+///
+/// **What "closed" means here is [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`], the same
+/// definition the closed-solid gate uses.** Per the owner ruling of
+/// 2026-08-12 (FU-47,
+/// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`,
+/// §4) a point-touch is not a defect, and a certificate is where that ruling
+/// has to hold or it does not hold at all: `plinth_hollow`'s
+/// `validate_oriented_solid` passes the gate and then immediately certifies,
+/// so a certificate refusing what the gate admits refuses the model anyway,
+/// one line later and under a less accurate name. Nothing about closure or
+/// orientation is relaxed — a point-touch mesh is closed and consistently
+/// oriented, it simply has more face components than it has solids, and each
+/// of those components is closed, which is exactly what this function
+/// integrates over.
 pub fn certify_closed_components(
     mesh: &Mesh,
     topology: &FaceTopology,
@@ -772,7 +809,11 @@ pub fn certify_closed_components(
     {
         return Err(TopologyError::CertificateMeshMismatch);
     }
-    if topology.cut_flags.iter().any(|flags| *flags != 0) {
+    if topology
+        .cut_flags
+        .iter()
+        .any(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
+    {
         return Err(TopologyError::CertificateNotClosedOrOriented);
     }
     let component_count = topology
