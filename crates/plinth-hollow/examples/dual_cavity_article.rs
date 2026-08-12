@@ -15,15 +15,21 @@
 //! path inside the repository -- this binary writes nothing into the repo,
 //! matching every other run-output rule in this workspace.
 //!
-//! **This is the direct hollow chain** (`create_shell_recording_repair` ->
-//! `plan_drains` -> `drill_planned_shell`), deliberately without decimation
-//! or the orientation sweep, so the printed geometry is exactly the geometry
-//! `plinth-hollow`'s `dual_cavity_doctrine` tests measured. Feeding
-//! `<name>.source.stl` to `plinth prepare` instead runs both of those stages,
-//! either of which can move the model off the 0.5 mm lattice phase the
-//! throat thresholds depend on -- fine for exercising the full CLI, but it
-//! will not reproduce the flow-component numbers this fixture is built to
-//! witness.
+//! **This is the direct hollow chain** (`create_shell` -> `plan_drains` ->
+//! `drill_planned_shell`) under genuinely unmodified
+//! `H0AdmissionLimits::production()`, deliberately without decimation or the
+//! orientation sweep, so the printed geometry is exactly the geometry
+//! `plinth-hollow`'s `dual_cavity_doctrine` tests measured -- including its
+//! *exact* throat clearances, which belong to the fixture's own 0.5 mm
+//! lattice phase.
+//!
+//! Feeding `<name>.source.stl` to `plinth prepare` instead runs decimation
+//! and the orientation sweep first, which land the model on an arbitrary
+//! phase. That no longer changes the verdict: since the 2026-08-12 resizing
+//! the doctrine survives the real chain, and
+//! `plinth-pipeline/tests/dual_cavity_real_pipeline.rs` asserts exactly that.
+//! What it does change is the exact clearance *numbers*, which is why this
+//! binary still exists as the direct chain.
 //!
 //! **What to print.** `above-bore.drilled.stl` is the drainage experiment:
 //! one registered bore out of the foot, one registered vent at the crown,
@@ -43,44 +49,10 @@ use plinth_hollow::drilling::drill_planned_shell;
 use plinth_hollow::{create_shell_recording_repair, H0AdmissionLimits, HollowSettings};
 use plinth_mesh::{
     make_box, make_dual_cavity_pawn_with_throat_radius, write_binary_stl, Mesh, MeshError,
-    TriageTopologyLimits, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
+    DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
     DUAL_CAVITY_THROAT_SEPARATED_MM,
 };
 use plinth_solid::{BooleanLimits, ManifoldBackend, Mesh as SolidMesh};
-
-/// This binary's own admission limits. `H0AdmissionLimits`'s private fields
-/// (and its `production()` default) are not reachable from an example
-/// binary, so this goes through the public `new` constructor instead, with
-/// every ceiling at least as generous as `production()`'s and
-/// `drain_planning_bytes` raised well past it.
-///
-/// **Why `drain_planning_bytes` needs raising at all.** The fixture's
-/// surface-nets cavity boundary is denser (relative to its candidate ray
-/// count) than any committed corpus member, so the 1 GiB production default
-/// is not enough for `plan_drains`'s own preflight arithmetic. This is a
-/// caller-owned resource ceiling (`H0AdmissionLimits`'s own doc: "not a
-/// whole-process or third-party private-heap cap") — see the identical note
-/// on the crate's own `dual_cavity_doctrine::drain_planning_limits` test
-/// helper — never a FU-8b gate: no wall, margin, pitch, or savings threshold
-/// moves here, only a memory-accounting budget.
-fn admission_limits() -> H0AdmissionLimits {
-    H0AdmissionLimits::new(
-        TriageTopologyLimits::production(),
-        16 * 1024 * 1024,
-        8 * 1024 * 1024,
-        16 * 1024 * 1024,
-        BooleanLimits {
-            max_input_primitive_units: 1_000_000_000,
-            max_logical_marshaled_input_bytes: 8 * 1024 * 1024 * 1024,
-            max_output_vertices: 200_000_000,
-            max_output_triangles: 800_000_000,
-        },
-        8 * 1024 * 1024 * 1024,
-        512 * 1024 * 1024,
-        8,
-    )
-    .expect("hand-picked admission limits are internally valid")
-}
 
 /// Snap every coordinate onto the STL f32 wire so the canonical strict
 /// writer will take it. Same normalization `plinth-mesh/examples/
@@ -135,13 +107,74 @@ fn from_solid(mesh: SolidMesh) -> Mesh {
 /// A half-section cutaway: the difference of `mesh` with a box occupying
 /// `y < 0`, so the interior -- both chambers and the throat -- is legible
 /// without a slicer.
+///
+/// **`make_box`'s `translate` is the box's CENTRE on all three axes**, not
+/// its low corner. Getting that backwards produces a cutter disjoint from
+/// the model and a "cutaway" that is a byte-for-byte copy of its input --
+/// which is what this function shipped until 2026-08-12. The panic below is
+/// the guard: a cutaway that removed no volume is not a cutaway, and it is
+/// better to stop than to write an uncut file under a name that promises a
+/// section.
 fn cutaway(mesh: &Mesh) -> Mesh {
-    let cutter = make_box([80.0, 40.0, 80.0], [-40.0, -40.0, -10.0]).expect("cutter box");
+    let (lo, hi) = bounds(mesh);
+    // Centred on the model in x and z, and covering exactly the `y < 0` half
+    // of it, with a millimetre of overhang on every open side so the boolean
+    // never has to resolve a coplanar face.
+    let size = [
+        (hi[0] - lo[0]) + 2.0,
+        (hi[1] - lo[1]) + 2.0,
+        (hi[2] - lo[2]) + 2.0,
+    ];
+    let centre = [
+        0.5 * (lo[0] + hi[0]),
+        0.0 - size[1] / 2.0,
+        0.5 * (lo[2] + hi[2]),
+    ];
+    let cutter = make_box(size, centre).expect("cutter box");
     let operands = [to_solid(mesh), to_solid(&cutter)];
     let solid = ManifoldBackend
-        .difference_limited(&operands, BooleanLimits::UNLIMITED)
+        .difference_limited(&operands, cutaway_boolean_limits(mesh, &cutter))
         .expect("cutaway boolean succeeds on a closed, oriented, printable-sized shell");
-    on_the_wire(&from_solid(solid)).expect("cutaway is f32-representable")
+    let cut = on_the_wire(&from_solid(solid)).expect("cutaway is f32-representable");
+    let before = closed_solid_volume_mm3(mesh);
+    let after = closed_solid_volume_mm3(&cut);
+    assert!(
+        after < 0.9 * before,
+        "the cutaway removed only {} of {before} mm^3 -- the cutter is not intersecting the model",
+        before - after
+    );
+    cut
+}
+
+/// The presentation-only cutaway boolean's own ceilings, sized from the
+/// operands in hand rather than switched off. `BooleanLimits::UNLIMITED`
+/// would make this binary's output unfalsifiable evidence of what a bounded
+/// kernel can do; nothing here is on an evidence path, but a limit that is
+/// stated and generous is still worth more than one that is absent.
+fn cutaway_boolean_limits(mesh: &Mesh, cutter: &Mesh) -> BooleanLimits {
+    let vertices = mesh.verts().len() + cutter.verts().len();
+    let triangles = mesh.tris().len() + cutter.tris().len();
+    BooleanLimits {
+        max_input_primitive_units: (vertices + triangles) as u64 * 8,
+        max_logical_marshaled_input_bytes: (vertices * 24 + triangles * 12) as u64 * 8,
+        // A difference against a half-space box cannot multiply the input
+        // triangle count by more than a small constant; eight is slack, not
+        // a licence.
+        max_output_vertices: vertices as u64 * 8,
+        max_output_triangles: triangles as u64 * 8,
+    }
+}
+
+fn bounds(mesh: &Mesh) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for vertex in mesh.verts() {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(vertex[axis]);
+            hi[axis] = hi[axis].max(vertex[axis]);
+        }
+    }
+    (lo, hi)
 }
 
 fn write(dir: &Path, name: &str, mesh: &Mesh) {
@@ -165,10 +198,11 @@ fn run_setting(dir: &Path, name: &str, throat_radius_mm: f64) {
 
     let settings = HollowSettings::from_registered_constants().expect("M0 settings");
     let source_volume_mm3 = closed_solid_volume_mm3(&source);
-    let candidate = create_shell_recording_repair(source, settings, admission_limits())
-        .unwrap_or_else(|failure| {
-            panic!("{name}: expected this setting to hollow, got {failure:?}")
-        });
+    let candidate =
+        create_shell_recording_repair(source, settings, H0AdmissionLimits::production())
+            .unwrap_or_else(|failure| {
+                panic!("{name}: expected this setting to hollow, got {failure:?}")
+            });
     let cavity_volume_mm3 = candidate.cavity().cavity_volume_mm3().get();
     let realized_wall = candidate.cavity().realized_wall();
     let savings_pct = 100.0 * cavity_volume_mm3 / source_volume_mm3;
@@ -179,6 +213,14 @@ fn run_setting(dir: &Path, name: &str, throat_radius_mm: f64) {
     let shell_on_the_wire =
         on_the_wire(planned.shell()).expect("boolean-derived shell is f32-representable");
     write(dir, &format!("{name}.shell.stl"), &shell_on_the_wire);
+    // The section of the undrilled shell, so every setting -- including the
+    // two whose vent the drilling stage refuses -- still has an article the
+    // owner can look inside.
+    write(
+        dir,
+        &format!("{name}.shell.cutaway.stl"),
+        &cutaway(&shell_on_the_wire),
+    );
     let drain_count = planned
         .drain_plan()
         .holes()
