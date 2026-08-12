@@ -1834,14 +1834,23 @@ mod tests {
             drilled.evidence().drilled_material_mm3.get()
                 - drilled.evidence().expected_material_mm3.get()
         );
-        // The committed stage report is authoritative for rounded stage
-        // metrics even though no provenance proves its exported STL still
-        // contains this drilled mesh.
-        let report = frozen_hollow_report();
+        // The committed stage report was authoritative for rounded stage
+        // metrics through 2026-08-12, even though no provenance proves its
+        // exported STL still contains this drilled mesh. FU-53 broke that
+        // correspondence on purpose: the frozen baseline is evidence of the
+        // pre-fix engine and is deliberately NOT regenerated until FU-61
+        // (see FU-51's ruling). `drilled_material_mm3` is the shell's own
+        // remaining plastic (`final_ml`); the live engine now selects a
+        // smaller, honestly-walled cavity (exact distance plus
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM), so it drills away LESS material and
+        // MORE remains: 2.1 -> 2.9 mL. That is the direction the fix
+        // promises -- a regression that walked this back toward 2.1 would be
+        // a thinner, under-walled shell again.
         assert_eq!(
             (drilled.evidence().drilled_material_mm3.get() / 100.0).round() / 10.0,
-            report["final_ml"].as_f64().expect("numeric final_ml")
+            2.9
         );
+        let report = frozen_hollow_report();
         assert_eq!(report["bodies"], 1);
         assert_eq!(report["watertight"], true);
         assert_eq!(report["winding"], true);
@@ -2422,11 +2431,18 @@ mod tests {
         // batch.md §3): the marked-voxel set is a strict superset of the old
         // one, so the Sphere's cavity gained voxels and the slab this fixture
         // severs is larger. Policy untouched; only the field is bigger.
-        assert_eq!(refill.refilled_voxels, 7_957);
-        assert_eq!(refill.refilled_pockets, vec![7_957]);
-        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_522));
-        // Moved 59,841 -> 59,842 in the same 2026-08-12 FU-50 pass.
-        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(59_842));
+        //
+        // Moved 7,957 -> 4,609 on 2026-08-12 by FU-53: cavity selection now
+        // runs on the exact nearest-surface distance plus
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM instead of the EDT's conservative
+        // overestimate, so the honestly-walled Sphere cavity shrinks and the
+        // slab this fixture severs is smaller again. Policy untouched; only
+        // the field is smaller.
+        assert_eq!(refill.refilled_voxels, 4_609);
+        assert_eq!(refill.refilled_pockets, vec![4_609]);
+        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_606));
+        // Moved 59,842 -> 56,396 in the same 2026-08-12 FU-53 pass.
+        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(56_396));
         let reconstructed =
             reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
                 .unwrap();
@@ -2564,8 +2580,14 @@ mod tests {
         // long-exit fixture above: the marked-voxel set only grows under the
         // new area-proportional conservative rasterizer, so the slab this
         // fixture severs is cut from a larger cavity.
-        assert_eq!(audit.refilled_voxels, 499);
-        assert_eq!(audit.refilled_pockets, vec![499]);
+        //
+        // Moved 499 -> 21 on 2026-08-12 by FU-53, for the same reason as the
+        // long-exit fixture above: cavity selection now runs on the exact
+        // nearest-surface distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM, so the
+        // honestly-walled Sphere cavity is smaller and the slab this fixture
+        // severs is cut from less of it.
+        assert_eq!(audit.refilled_voxels, 21);
+        assert_eq!(audit.refilled_pockets, vec![21]);
         for flat in 0..split.cavity_field().flat_count() {
             let expected = split.cavity_field().contains_flat(flat)
                 && split.cavity_field().flat_to_index(flat)[0] > 32;
@@ -2573,9 +2595,9 @@ mod tests {
         }
 
         let drilled = drill_planned_shell(split).expect("bounded production refill must drill");
-        // Moved 490 -> 499 on 2026-08-12 by FU-50, tracking `audit.refilled_voxels` above.
-        assert_eq!(drilled.evidence().refilled_voxels, 499);
-        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 499);
+        // Moved 499 -> 21 on 2026-08-12 by FU-53, tracking `audit.refilled_voxels` above.
+        assert_eq!(drilled.evidence().refilled_voxels, 21);
+        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 21);
         assert_eq!(
             drilled.evidence().cavity_voxels,
             drilled.evidence().drainable_voxels

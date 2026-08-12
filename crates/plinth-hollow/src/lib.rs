@@ -24,6 +24,7 @@ pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
+use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, PrinterProfile};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
@@ -703,6 +704,12 @@ pub struct HollowSettings {
     save_min_mm3: Finite,
     save_min_fraction: Finite,
     volume_balance_rel_tol: Finite,
+    /// FU-53: `HOLLOW_CAVITY_MARCH_MARGIN_MM`, registered as one voxel body
+    /// diagonal (`HOLLOW_PITCH_MM * sqrt(3)`). Added to the stated wall before
+    /// cavity selection so the realised wall is provably >= the requested one;
+    /// see [`create_shell_recording_repair`] and the module doc lemma above
+    /// [`frozen_distance_transform`].
+    cavity_march_margin_mm: Finite,
 }
 
 impl HollowSettings {
@@ -730,6 +737,10 @@ impl HollowSettings {
             placeholders.hollow_save_min_frac().diagnostic().get(),
             placeholders
                 .hollow_volume_balance_rel_tol()
+                .diagnostic()
+                .get(),
+            placeholders
+                .hollow_cavity_march_margin_mm()
                 .diagnostic()
                 .get(),
         )
@@ -764,8 +775,14 @@ impl HollowSettings {
     pub const fn volume_balance_rel_tol(self) -> Finite {
         self.volume_balance_rel_tol
     }
+
+    #[must_use]
+    pub const fn cavity_march_margin_mm(self) -> Finite {
+        self.cavity_march_margin_mm
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finite_settings(
     wall_thickness_mm: f64,
     voxel_pitch_mm: f64,
@@ -773,6 +790,7 @@ fn finite_settings(
     save_min_mm3: f64,
     save_min_fraction: f64,
     volume_balance_rel_tol: f64,
+    cavity_march_margin_mm: f64,
 ) -> Result<HollowSettings, HollowError> {
     let finite = |value| Finite::new(value).map_err(|_| HollowError::InvalidArithmetic);
     Ok(HollowSettings {
@@ -782,12 +800,22 @@ fn finite_settings(
         save_min_mm3: finite(save_min_mm3)?,
         save_min_fraction: finite(save_min_fraction)?,
         volume_balance_rel_tol: finite(volume_balance_rel_tol)?,
+        cavity_march_margin_mm: finite(cavity_march_margin_mm)?,
     })
 }
 
 const DEFAULT_DRAIN_PLANNING_BYTES: usize = 1024 * 1024 * 1024;
 const DEFAULT_QUERY_WORKING_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_RASTER_WORK_ITEMS: usize = 16 * 1024 * 1024;
+/// FU-53: the caller-owned ceiling on the BVH + parity-index memory estimate
+/// [`geom_kernel::NativeSurface::estimate_index_memory_from_indexed`] reports
+/// for the exact cavity-distance surface built over the triaged source mesh.
+/// This is a new, independent H0 admission domain (drain planning and
+/// drilling build their own `NativeSurface`s downstream of H0 and are not
+/// affected). 512 MiB comfortably covers the largest committed corpus source
+/// (the 429,120-face Weeping Treant) with headroom to spare, matching the
+/// order of magnitude of the other named-work admission defaults above.
+const DEFAULT_CAVITY_DISTANCE_INDEX_BYTES: usize = 512 * 1024 * 1024;
 /// The six raw-input ceilings, taken from the one place they are defined:
 /// `plinth_mesh::TriageTopologyLimits::production()`, which the repair pre-pass
 /// admits raw input with as well. Keeping a private second copy here would let
@@ -822,9 +850,14 @@ pub struct H0AdmissionLimits {
     max_boolean_output_vertices: u64,
     max_boolean_output_triangles: u64,
     drain_planning_bytes: usize,
+    /// FU-53: the peak-bytes ceiling for the exact cavity-distance
+    /// `NativeSurface` built over the triaged source mesh. A new, independent
+    /// H0 admission domain — see [`DEFAULT_CAVITY_DISTANCE_INDEX_BYTES`].
+    max_cavity_distance_index_bytes: usize,
 }
 
 impl H0AdmissionLimits {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         triage: TriageTopologyLimits,
         max_voxel_cells: usize,
@@ -832,6 +865,7 @@ impl H0AdmissionLimits {
         max_raster_work_items: usize,
         boolean: BooleanLimits,
         drain_planning_bytes: usize,
+        max_cavity_distance_index_bytes: usize,
     ) -> Result<Self, HollowError> {
         if triage.raw_vertices() == usize::MAX
             || triage.raw_faces() == usize::MAX
@@ -851,6 +885,8 @@ impl H0AdmissionLimits {
             || boolean.max_output_triangles == u64::MAX
             || drain_planning_bytes == 0
             || drain_planning_bytes == usize::MAX
+            || max_cavity_distance_index_bytes == 0
+            || max_cavity_distance_index_bytes == usize::MAX
         {
             return Err(HollowError::InvalidAdmissionLimits);
         }
@@ -869,6 +905,7 @@ impl H0AdmissionLimits {
             max_boolean_output_vertices: boolean.max_output_vertices,
             max_boolean_output_triangles: boolean.max_output_triangles,
             drain_planning_bytes,
+            max_cavity_distance_index_bytes,
         })
     }
 
@@ -890,6 +927,7 @@ impl H0AdmissionLimits {
             max_boolean_output_vertices: DEFAULT_MAX_BOOLEAN_OUTPUT_VERTICES,
             max_boolean_output_triangles: DEFAULT_MAX_BOOLEAN_OUTPUT_TRIANGLES,
             drain_planning_bytes: DEFAULT_DRAIN_PLANNING_BYTES,
+            max_cavity_distance_index_bytes: DEFAULT_CAVITY_DISTANCE_INDEX_BYTES,
         }
     }
 
@@ -911,6 +949,11 @@ impl H0AdmissionLimits {
     #[must_use]
     pub const fn drain_planning_bytes(self) -> usize {
         self.drain_planning_bytes
+    }
+
+    #[must_use]
+    pub const fn max_cavity_distance_index_bytes(self) -> usize {
+        self.max_cavity_distance_index_bytes
     }
 
     fn triage_topology_limits(self, retained_source_buffer_bytes: usize) -> TriageTopologyLimits {
@@ -944,6 +987,18 @@ pub struct H0ResourceDiagnostics {
     boolean_output_vertex_limit: u64,
     boolean_output_triangle_limit: u64,
     cavity_repair: CavityRepairEvidence,
+    /// FU-53: the measured peak-bytes estimate for the exact cavity-distance
+    /// `NativeSurface`, admitted against
+    /// [`H0AdmissionLimits::max_cavity_distance_index_bytes`]. Zero when no
+    /// candidate voxel needed an exact query (the EDT prefilter alone already
+    /// settled every voxel's cavity membership).
+    cavity_distance_index_bytes: usize,
+    /// FU-53: the number of voxel centres the EDT prefilter handed to the
+    /// exact BVH nearest-triangle query — the count the module doc's lemma
+    /// bounds well below the grid's total voxel count on every measured
+    /// model. A blow-up toward `voxel_count` is the visible signature of a
+    /// pathological candidate set the design's risk section names.
+    cavity_distance_exact_query_points: usize,
 }
 
 impl H0ResourceDiagnostics {
@@ -1002,6 +1057,14 @@ impl H0ResourceDiagnostics {
     #[must_use]
     pub const fn boolean_output_triangle_limit(self) -> u64 {
         self.boolean_output_triangle_limit
+    }
+    #[must_use]
+    pub const fn cavity_distance_index_bytes(self) -> usize {
+        self.cavity_distance_index_bytes
+    }
+    #[must_use]
+    pub const fn cavity_distance_exact_query_points(self) -> usize {
+        self.cavity_distance_exact_query_points
     }
     /// What the well-composedness repair did to this shell's cavity. The same
     /// measurement travels on the repair's two refusal paths, so a repair is
@@ -1199,6 +1262,36 @@ pub fn create_shell_recording_repair(
         material,
     } = grid;
     let edt = frozen_distance_transform(&material, grid_pitch)?;
+    // FU-53. `edt` is a SOUND PREFILTER, never the selection authority: the
+    // module doc's lemma above `frozen_distance_transform` proves
+    // `edt(v) >= d_true(v)` for every material voxel, so `{d_true > t}` is a
+    // subset of `{edt > t}` for every threshold `t`. The exact distance only
+    // has to be evaluated where the prefilter cannot already rule a voxel
+    // out — the candidate set below — and it is sufficient to cover both
+    // decisions this field feeds (cavity selection against `wall + margin`,
+    // and the bulk gate against `bulk_min / 2`) with the smaller of the two
+    // thresholds, which is the more inclusive (superset) filter of the two.
+    let wall_plus_margin_mm = settings.wall_thickness_mm.get() + settings.cavity_march_margin_mm.get();
+    let candidate_threshold_mm = wall_plus_margin_mm.min(settings.bulk_min_mm.get() / 2.0);
+    if !candidate_threshold_mm.is_finite() {
+        return Err(HollowError::InvalidArithmetic.into());
+    }
+    let (edt, cavity_distance_index_bytes, cavity_distance_exact_query_points) =
+        exact_cavity_distance(
+            &source,
+            edt,
+            grid_origin,
+            grid_pitch,
+            candidate_threshold_mm,
+            limits,
+        )?;
+    // Honest bulk figure: `edt` is now exact everywhere a voxel could
+    // plausibly be the true interior maximum (every voxel with
+    // `edt > candidate_threshold_mm`, which by construction covers every
+    // voxel with `edt > bulk_min / 2`), so its whole-grid maximum is the true
+    // maximum wherever it matters to this gate, and a safe upper bound
+    // (bounded by `candidate_threshold_mm`, which cannot flip the gate)
+    // everywhere else.
     let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if !bulk_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic.into());
@@ -1206,7 +1299,13 @@ pub fn create_shell_recording_repair(
     if bulk_mm < settings.bulk_min_mm.get() {
         return Err(HollowError::IneligibleBelowBulk.into());
     }
-    let cavity_mask = edt.mapv(|distance_mm| distance_mm > settings.wall_thickness_mm.get());
+    // Selection: `material[v] && d_true(v) > wall + margin`. The lemma above
+    // ensures this can never select a voxel whose TRUE distance to the
+    // source surface is `<= wall + margin`, so the realised wall is provably
+    // `>=` the requested wall — see the margin's registry provenance
+    // (`HOLLOW_CAVITY_MARCH_MARGIN_MM`) for the surface-nets half-cell-offset
+    // argument that sizes it.
+    let cavity_mask = edt.mapv(|distance_mm| distance_mm > wall_plus_margin_mm);
     drop(edt);
     let (labels, label_count) =
         label3d(cavity_mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
@@ -1345,6 +1444,8 @@ pub fn create_shell_recording_repair(
             boolean_output_vertex_limit: boolean_limits.max_output_vertices,
             boolean_output_triangle_limit: boolean_limits.max_output_triangles,
             cavity_repair: repair_evidence,
+            cavity_distance_index_bytes,
+            cavity_distance_exact_query_points,
         };
         let cavity = CavityEvidence {
             wall_thickness_mm: settings.wall_thickness_mm,
@@ -2250,6 +2351,35 @@ pub(crate) fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<
 /// reproduce SciPy's implicit background sample at `(-1, 0, 0)` was only ever
 /// reachable for a source that filled its bounding box completely — a box —
 /// and for that source it returned a field rising to 17.6 mm on a 10 mm cube.
+///
+/// # FU-53: the sound-prefilter lemma
+///
+/// This function's field is deliberately **not** the cavity-selection
+/// authority — [`create_shell_recording_repair`] uses it only to shrink the
+/// set of voxels [`exact_cavity_distance`] has to query exactly. The lemma
+/// that makes that sound:
+///
+/// **`edt(v) >= d_true(v)` for every material voxel `v`**, where `d_true(v)`
+/// is the exact Euclidean distance from `v`'s centre to the nearest point on
+/// the source mesh's surface. Proof: the EDT measures to the nearest
+/// *background voxel centre* in the conservatively rasterized occupancy, and
+/// any straight segment from an interior sample to a background voxel centre
+/// must cross the true surface at least once (the occupancy is conservative:
+/// every voxel the surface passes through is marked material, so a
+/// background voxel's centre lies strictly outside the true solid). A
+/// straight segment is the shortest path between its endpoints, so the
+/// segment's length — `edt(v)` — is at least the length of the shortest path
+/// from `v` to the surface, which is `d_true(v)`.
+///
+/// Two consequences this crate relies on: (1) `{d_true > t}` is a subset of
+/// `{edt > t}` for every threshold `t`, so filtering candidates on `edt`
+/// before an exact query never discards a voxel the exact selection could
+/// have chosen; (2) the largest `edt` value over any candidate set is a
+/// sound single upper bound to pass as a batched nearest-query's
+/// `upper_bound` argument, because no candidate's true distance can exceed
+/// its own `edt` value. `frozen_oracle_edt_never_understates_the_exact_distance`
+/// below asserts this mechanically against the real production rasterizer on
+/// four fixtures (`Sphere`, `Cylinder`, `make_box`, and a synthetic thin fin).
 fn frozen_distance_transform(
     material: &Array3<bool>,
     pitch: f64,
@@ -2329,6 +2459,99 @@ fn crop_margin_in_place(
     }
     buffer.truncate(nz * ny * nx);
     Array3::from_shape_vec((nz, ny, nx), buffer).map_err(|_| HollowError::VoxelStack)
+}
+
+/// FU-53: refines the frozen EDT prefilter into exact nearest-surface
+/// distance wherever the prefilter cannot already settle a voxel's cavity
+/// membership, by one batched BVH nearest-triangle query against `source`.
+///
+/// **Soundness, not merely speed.** Every value in the returned field
+/// remains `>= d_true(v)` for every material voxel: untouched voxels keep
+/// `frozen_distance_transform`'s own sound bound (the lemma on that
+/// function's doc), and touched voxels hold the exact value, which trivially
+/// satisfies `d_true(v) >= d_true(v)`. Selecting cavity on this field can
+/// therefore never choose a voxel whose true distance to the source surface
+/// is at or below the caller's threshold — the defect this function exists
+/// to close.
+///
+/// **Candidate gathering, not a per-voxel call.** Every voxel whose EDT
+/// exceeds `candidate_threshold_mm` is gathered into one flat point buffer
+/// and queried in caller-sized batches (`query_working_bytes /
+/// QUERY_BYTES_PER_POINT` points per call) through
+/// [`geom_kernel::NativeSurface::query`], which is itself an index-parallel
+/// `par_iter().map().collect()` (`rust/geom_kernel/src/queries.rs`) —
+/// batch-first end to end, no per-voxel call anywhere. A single scalar
+/// `upper_bound`, the largest EDT value among the candidates, bounds the
+/// whole batch: by the lemma no candidate's true distance can exceed its own
+/// EDT value, so the query can never truncate a real answer to the
+/// out-of-bound sentinel.
+///
+/// Returns the refined field, the measured `NativeSurface` peak-bytes
+/// estimate (0 when no candidate existed and no surface was built), and the
+/// exact-query point count, both for [`H0ResourceDiagnostics`].
+fn exact_cavity_distance(
+    source: &Mesh,
+    mut edt: Array3<f64>,
+    origin: [f64; 3],
+    pitch: f64,
+    candidate_threshold_mm: f64,
+    limits: H0AdmissionLimits,
+) -> Result<(Array3<f64>, usize, usize), HollowError> {
+    let candidates: Vec<([usize; 3], [f64; 3])> = edt
+        .indexed_iter()
+        .filter(|(_, distance)| **distance > candidate_threshold_mm)
+        .map(|((iz, iy, ix), _)| {
+            (
+                [iz, iy, ix],
+                [
+                    origin[0] + (ix as f64) * pitch,
+                    origin[1] + (iy as f64) * pitch,
+                    origin[2] + (iz as f64) * pitch,
+                ],
+            )
+        })
+        .collect();
+    if candidates.is_empty() {
+        // Every voxel is bounded by `candidate_threshold_mm`: none can be the
+        // true grid maximum past that threshold and none can satisfy a
+        // selection test against a strictly larger threshold either, so the
+        // EDT prefilter alone already settles both decisions this field
+        // feeds. No surface is built.
+        return Ok((edt, 0, 0));
+    }
+    let estimate =
+        NativeSurface::estimate_index_memory_from_indexed(source.verts(), source.tris(), pitch)
+            .map_err(|_| HollowError::Kernel)?;
+    if estimate.peak_bytes() > limits.max_cavity_distance_index_bytes() {
+        return Err(HollowError::CavityDistanceIndexLimitExceeded {
+            bytes: estimate.peak_bytes(),
+            max_bytes: limits.max_cavity_distance_index_bytes(),
+        });
+    }
+    let surface = NativeSurface::from_indexed(
+        source.verts(),
+        source.tris(),
+        NativeSurfaceConfig {
+            grid_pitch_mm: pitch,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .map_err(|_| HollowError::Kernel)?;
+    let upper_bound = candidates
+        .iter()
+        .fold(0.0_f64, |max, (voxel, _)| max.max(edt[*voxel]));
+    let batch_size = (limits.query_working_bytes() / QUERY_BYTES_PER_POINT).max(1);
+    for chunk in candidates.chunks(batch_size) {
+        let points: Vec<[f64; 3]> = chunk.iter().map(|(_, point)| *point).collect();
+        let (distances, _faces) = surface.query(&points, upper_bound);
+        for ((voxel, _), distance) in chunk.iter().zip(distances) {
+            // `.min` is a defensive clamp, not load-bearing: by the lemma the
+            // exact distance can never exceed the prefilter's own value for
+            // a material voxel, so this can only hold or shrink it.
+            edt[*voxel] = edt[*voxel].min(distance);
+        }
+    }
+    Ok((edt, estimate.peak_bytes(), candidates.len()))
 }
 
 pub(crate) fn marching_cavity(
@@ -2507,6 +2730,16 @@ pub enum HollowError {
     ResourceAccountingOverflow,
     #[error("voxel grid has {cells} cells, exceeding the H0 limit {max_cells}")]
     VoxelCellLimitExceeded { cells: usize, max_cells: usize },
+    /// FU-53: the exact cavity-distance `NativeSurface`'s conservative memory
+    /// estimate exceeded the caller's
+    /// [`H0AdmissionLimits::max_cavity_distance_index_bytes`]. Refused before
+    /// any BVH or parity-grid allocation, exactly like the sibling admission
+    /// checks above; there is no fallback to the EDT-only selection this
+    /// admission domain exists to move H0 off of.
+    #[error(
+        "the exact cavity-distance index estimate needs {bytes} bytes, exceeding the H0 limit {max_bytes}"
+    )]
+    CavityDistanceIndexLimitExceeded { bytes: usize, max_bytes: usize },
     #[error(
         "voxel rasterization exceeded the caller work cap {max_work_items} at item {work_items}"
     )]
@@ -2835,10 +3068,14 @@ mod tests {
             "the inner surface must be a negative, contained cavity"
         );
         assert_eq!(candidate.cavity().source_volume_mm3().get(), 27_000.0);
-        // A 30 mm cube at a 2.5 mm wall leaves a 25 mm cube of cavity, plus
-        // the one-pitch centre-to-centre margin the discrete field carries.
+        // Moved 16,000-17,000 -> 12,800-13,100 mm3 by FU-53 (measured
+        // 12,977.875 mm3): selection now runs on the exact nearest-surface
+        // distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM (2.5 + 0.866 mm) rather
+        // than the EDT's conservative overestimate, so a 30 mm cube leaves an
+        // inner cube of edge ~23.268 mm analytically (~12,597 mm3); the
+        // measured figure is the voxel-lattice quantization of that edge.
         assert!(
-            (16_000.0..=17_000.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            (12_800.0..=13_100.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
             "{:?}",
             candidate.cavity().cavity_volume_mm3()
         );
@@ -3544,9 +3781,16 @@ mod tests {
         );
         assert_eq!(candidate.cavity().wall_thickness_mm().get(), 2.5);
         assert_eq!(candidate.cavity().frozen_voxel_pitch_mm().get(), 0.5);
+        // Moved 1,900-2,300 -> 1,150-1,300 mm3 by FU-53 (measured 1,221.375
+        // mm3): the cavity is now selected on the EXACT nearest-surface
+        // distance plus the HOLLOW_CAVITY_MARCH_MARGIN_MM marching margin,
+        // not on the EDT's own conservative-rasterization overestimate, so
+        // the realised wall is honestly >= 2.5 mm rather than the 1.85 mm
+        // (74%) the pre-fix engine actually shipped — see
+        // docs/engineering-journal/CURRENT-STATUS.md's FU-53 landing entry.
         assert!(
-            (1_900.0..=2_300.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
-            "the frozen 0.5mm EDT shell has the expected 2.5mm-wall cavity range"
+            (1_150.0..=1_300.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            "the corrected exact-distance shell has the expected honestly-walled cavity range"
         );
         assert!(
             candidate.cavity().cavity_volume_mm3().get()
@@ -3733,12 +3977,23 @@ mod tests {
 
     #[test]
     fn the_requested_wall_reaches_the_extraction_and_is_recorded_as_cavity_evidence() {
+        // FU-53 moved this off the frozen Sphere: at the corrected exact-distance
+        // selection plus the new HOLLOW_CAVITY_MARCH_MARGIN_MM margin, the
+        // Sphere's cavity at the registered handling-heavy wall (3.0 mm + 0.866
+        // mm margin, cavity ~1,091 mm3 of a 4,175 mm3 source) falls under the
+        // 25% savings floor, which the frozen fixture's default wall (2.5 mm,
+        // cavity ~1,221 mm3, 29.3%) clears only narrowly itself — both are
+        // legitimate outcomes of the honestly-measured cavity (the whole point
+        // of this fix), not a defect, but they make the Sphere too tight a
+        // fixture for a test about wall-selection *plumbing*. A 40 mm box has
+        // ample headroom at both registered walls and isolates the property
+        // this test actually asserts.
         let shell = |request: &HollowRequest| {
             create_shell(
-                frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+                make_box([40.0, 40.0, 40.0], [0.0, 0.0, 0.0]).expect("box fixture"),
                 HollowSettings::from_request(request).expect("request settings"),
             )
-            .expect("the frozen Sphere is hollow-eligible at either registered wall")
+            .expect("a 40mm box is hollow-eligible at either registered wall")
         };
         let default = shell(
             &HollowRequest::with_registered_wall_default(registered_printer())
@@ -3760,6 +4015,38 @@ mod tests {
             default.cavity().source_volume_mm3().get(),
             "the outer solid is untouched by the wall selection"
         );
+    }
+
+    /// FU-53: the registered handling-heavy wall (3.0 mm) now correctly
+    /// removes the frozen Sphere from eligibility once the honest margin is
+    /// applied (3.866 mm effective threshold on a 10.25 mm-radius sphere
+    /// leaves a cavity of ~1,091 mm3 against a ~1,044 mm3 25%-of-source
+    /// floor) — the tightened savings gate the design's risk section
+    /// predicted, converted by [`run`] into a typed Solid decision rather
+    /// than a shipped shell. This is the "measured and recorded" the design
+    /// asked for on the committed Sphere: the default wall clears with
+    /// ~1,221 mm3 of ~4,175 mm3 (29.3%), and the heavier wall does not.
+    #[test]
+    fn the_committed_sphere_clears_savings_at_the_default_wall_but_not_the_handling_heavy_wall() {
+        let default = create_shell(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            HollowSettings::from_registered_constants().expect("M0 settings"),
+        )
+        .expect("the frozen Sphere hollows at the default 2.5mm wall");
+        assert!(default.cavity().cavity_volume_mm3().get() > 0.0);
+
+        let heavy_wall = registered_wall(WallSelection::HandlingHeavy).expect("registered wall");
+        let heavy_settings = HollowSettings::from_request(&HollowRequest {
+            printer: registered_printer(),
+            wall_mm: heavy_wall,
+        })
+        .expect("heavy wall settings");
+        let error = create_shell(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            heavy_settings,
+        )
+        .expect_err("the honest cavity at the heavier wall falls under the savings floor");
+        assert!(matches!(error, HollowError::IneligibleSavings));
     }
 
     #[test]
@@ -3788,6 +4075,7 @@ mod tests {
                 QUERY_BYTES_PER_POINT,
                 1,
                 BooleanLimits::UNLIMITED,
+                1,
                 1,
             ),
             Err(HollowError::InvalidAdmissionLimits)
@@ -4001,6 +4289,334 @@ mod tests {
     }
 }
 
+/// FU-53: the exact-distance cavity selection, its soundness lemma, and the
+/// wall it now honestly ships.
+#[cfg(test)]
+mod fu53_exact_cavity_distance {
+    use super::*;
+    use plinth_mesh::{load_binary_stl, make_box};
+
+    fn frozen_mesh(file: &str) -> Mesh {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(file);
+        load_binary_stl(path, WeldPolicy::None).expect("committed frozen STL")
+    }
+
+    /// A box with one face tilted into a ramp: axis-aligned everywhere except
+    /// the top, which slopes linearly from `low_z` (at `x = 0`) to `high_z`
+    /// (at `x = size`) — "one face at an angle", the FU-53 diagnosis's
+    /// synthetic breach-class shape, built directly rather than recovered
+    /// from an undocumented ad hoc script. Still a valid closed hexahedron:
+    /// the top is planar (`z` depends only on `x`), the two faces at
+    /// constant `x` stay flat rectangles, and the two faces at constant `y`
+    /// stay flat (if sloped) trapezoids.
+    fn ramped_box(size: f64, low_z: f64, high_z: f64, tilt_axis_is_x: bool) -> Mesh {
+        let z_at = |primary: f64| low_z + (high_z - low_z) * (primary / size);
+        let mut verts = Vec::with_capacity(8);
+        let mut push = |x: f64, y: f64, z: f64| {
+            verts.push([x, y, z]);
+        };
+        for &(x, y) in &[(0.0, 0.0), (size, 0.0), (size, size), (0.0, size)] {
+            push(x, y, 0.0);
+        }
+        for &(x, y) in &[(0.0, 0.0), (size, 0.0), (size, size), (0.0, size)] {
+            let top_z = z_at(if tilt_axis_is_x { x } else { y });
+            push(x, y, top_z);
+        }
+        // Bottom 0..4 (z=0, outward normal -z), top 4..8 (ramped, outward
+        // normal has a positive z component), four flat sides between them.
+        let tris = vec![
+            // Bottom, wound to face -z.
+            [0, 2, 1],
+            [0, 3, 2],
+            // Ramped top, wound to face +z (ish).
+            [4, 5, 6],
+            [4, 6, 7],
+            // Side x=0..size, y=0 (front).
+            [0, 1, 5],
+            [0, 5, 4],
+            // Side x=size, y=0..size (right).
+            [1, 2, 6],
+            [1, 6, 5],
+            // Side x=0..size, y=size (back).
+            [2, 3, 7],
+            [2, 7, 6],
+            // Side x=0, y=0..size (left).
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        Mesh::new(verts, tris).expect("ramped box fixture")
+    }
+
+    /// **The lemma the whole fix rests on: `edt(v) >= d_true(v)` for every
+    /// material voxel.** Proved mechanically against the real production
+    /// rasterizer and the real geom-kernel BVH query, not asserted in prose,
+    /// on four fixtures spanning smooth (Sphere, Cylinder), axis-aligned
+    /// (box) and oblique (ramped box) geometry. If this ever fails the
+    /// exact-distance prefilter in [`exact_cavity_distance`] is UNSOUND —
+    /// candidates could be dropped that the true selection needed — which is
+    /// a correctness defect, not merely a missed speedup.
+    #[test]
+    fn frozen_oracle_edt_never_understates_the_exact_distance() {
+        for (label, mesh) in [
+            (
+                "sphere",
+                frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            ),
+            (
+                "cylinder",
+                frozen_mesh("Cylinder.prepped.oriented-solid.stl"),
+            ),
+            ("box", make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("box")),
+            (
+                "ramped_box",
+                ramped_box(20.0, 4.0, 16.0, true),
+            ),
+        ] {
+            let source = triage_exact_with_measured_limits(&mesh)
+                .unwrap_or_else(|error| panic!("{label} triage: {error:?}"))
+                .into_mesh();
+            let pitch = registered_settings().voxel_pitch_mm().get();
+            let spec = grid_spec(&source, pitch).unwrap_or_else(|error| {
+                panic!("{label} grid spec: {error:?}")
+            });
+            let work = raster_work_item_count(
+                &source,
+                spec,
+                H0AdmissionLimits::production().max_raster_work_items(),
+            )
+            .unwrap_or_else(|error| panic!("{label} raster work: {error:?}"));
+            let grid = voxelize_filled(&source, spec, work)
+                .unwrap_or_else(|error| panic!("{label} voxelize: {error:?}"));
+            let edt = frozen_distance_transform(&grid.material, grid.pitch)
+                .unwrap_or_else(|error| panic!("{label} EDT: {error:?}"));
+
+            let candidates: Vec<([usize; 3], [f64; 3])> = edt
+                .indexed_iter()
+                .filter(|(_, distance)| **distance > 0.0)
+                .map(|((iz, iy, ix), _)| {
+                    (
+                        [iz, iy, ix],
+                        [
+                            grid.origin[0] + (ix as f64) * grid.pitch,
+                            grid.origin[1] + (iy as f64) * grid.pitch,
+                            grid.origin[2] + (iz as f64) * grid.pitch,
+                        ],
+                    )
+                })
+                .collect();
+            assert!(
+                !candidates.is_empty(),
+                "{label} must have at least one interior voxel"
+            );
+
+            let estimate = NativeSurface::estimate_index_memory_from_indexed(
+                source.verts(),
+                source.tris(),
+                grid.pitch,
+            )
+            .unwrap_or_else(|error| panic!("{label} surface estimate: {error:?}"));
+            let surface = NativeSurface::from_indexed(
+                source.verts(),
+                source.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: grid.pitch,
+                    max_grid_bytes: estimate.max_axis_grid_bytes(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("{label} surface build: {error:?}"));
+            let points: Vec<[f64; 3]> =
+                candidates.iter().map(|(_, point)| *point).collect();
+            let (distances, _faces) = surface.query(&points, f64::INFINITY);
+
+            for ((voxel, _), &d_true) in candidates.iter().zip(distances.iter()) {
+                let edt_value = edt[*voxel];
+                assert!(
+                    d_true <= edt_value + 1e-9,
+                    "{label} voxel {voxel:?}: EDT {edt_value} understated the exact distance {d_true}"
+                );
+            }
+        }
+    }
+
+    /// **The analytic Sphere: the cavity radius and the realised minimum wall.**
+    ///
+    /// The committed Sphere is close enough to an ideal sphere (its origin
+    /// and bounds are frozen in `frozen_oracle_characterizes_...` above:
+    /// `origin = [-10, -10, 0]`, `dims = [41, 41, 41]` at 0.5 mm pitch, so
+    /// radius ~= 10.25 mm) that the analytic cavity radius `R - wall` is a
+    /// real prediction, not a hand-tuned number. The realised minimum wall —
+    /// brute-force minimum distance from every cavity-shell vertex to the
+    /// source surface — is what the FU-53 diagnosis measured directly and is
+    /// what this test re-measures against the fixed engine: the journal
+    /// recorded 1.85 mm (74 % of the registered 2.5 mm) before this fix.
+    #[test]
+    fn the_analytic_sphere_reaches_its_requested_wall() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let settings = registered_settings();
+        let candidate = create_shell(source.clone(), settings)
+            .expect("the frozen Sphere is hollow-eligible at the default wall");
+
+        // The cavity radius: `V = 4/3 pi r^3`, so `r = (3V / 4pi)^(1/3)`.
+        let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
+        let cavity_radius = (3.0 * cavity_mm3 / (4.0 * std::f64::consts::PI)).cbrt();
+        // Source bounds pin the sphere's own radius independently of the
+        // cavity: origin [-10,-10,0], dims [41,41,41] at 0.5 mm pitch, so the
+        // bounding box spans 20.5 mm on every axis and the analytic radius is
+        // 10.25 mm.
+        let source_radius = 10.25_f64;
+        let wall = settings.wall_thickness_mm().get();
+        // Selection runs against `wall + margin` (this fix's whole point),
+        // not against the bare requested wall.
+        let predicted_cavity_radius =
+            source_radius - (wall + settings.cavity_march_margin_mm().get());
+        assert!(
+            (cavity_radius - predicted_cavity_radius).abs() <= settings.voxel_pitch_mm().get(),
+            "cavity radius {cavity_radius} is not within one pitch of the analytic R - (wall + margin) = {predicted_cavity_radius}"
+        );
+
+        // The realised minimum wall: brute-force nearest-source-surface
+        // distance from every vertex of the shell's inner (negative) cavity
+        // surface, exactly the FU-53 diagnosis's own measurement.
+        let native_estimate = NativeSurface::estimate_index_memory_from_indexed(
+            source.verts(),
+            source.tris(),
+            0.5,
+        )
+        .expect("surface estimate");
+        let native = NativeSurface::from_indexed(
+            source.verts(),
+            source.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: native_estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("surface build");
+        let topology = build_face_topology(candidate.mesh(), WeldPolicy::ExactBits)
+            .expect("shell topology");
+        let certificate = certify_closed_components(candidate.mesh(), &topology)
+            .expect("shell certificate");
+        let cavity_component_id = certificate
+            .components()
+            .iter()
+            .find(|component| component.signed_volume_mm3() < 0.0)
+            .expect("shell must have a negative cavity component")
+            .component_id();
+        let mut cavity_vertex_ids: Vec<u32> = topology
+            .component_ids()
+            .iter()
+            .zip(candidate.mesh().tris())
+            .filter(|(&component_id, _)| component_id == cavity_component_id)
+            .flat_map(|(_, triangle)| *triangle)
+            .collect();
+        cavity_vertex_ids.sort_unstable();
+        cavity_vertex_ids.dedup();
+        let cavity_points: Vec<[f64; 3]> = cavity_vertex_ids
+            .iter()
+            .map(|&index| candidate.mesh().verts()[index as usize])
+            .collect();
+        let (distances, _faces) = native.query(&cavity_points, 10.0);
+        let realised_wall_mm = distances
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            realised_wall_mm.is_finite(),
+            "every cavity vertex must be within the 10.0mm query bound of the source surface"
+        );
+        assert!(
+            realised_wall_mm >= wall,
+            "realised wall {realised_wall_mm} mm fell below the requested {wall} mm -- FU-53 must guarantee realised >= requested"
+        );
+    }
+
+    /// **The breach class disappears.** A synthetic box with one face tilted
+    /// into a ramp (`ramped_box`, this module's own reconstruction of the
+    /// FU-53 diagnosis's undocumented ad hoc fixture) refused with
+    /// `InvalidShellTopology` in 13 of 15 configurations pre-fix: the cavity
+    /// was cut so close to the oblique face that it broke through and opened
+    /// the void to the outside, non-monotonically in fin thickness (the
+    /// signature of lattice aliasing). A cavity that is never within `wall`
+    /// of the true surface cannot break out, so this sweep asserts the class
+    /// is gone: every configuration either hollows or refuses for a *named,
+    /// different* reason (a legitimate savings/bulk shortfall on a thin
+    /// synthetic ramp is expected and is not the defect this test guards).
+    #[test]
+    fn the_ramped_box_breach_class_is_gone() {
+        let settings = HollowSettings {
+            save_min_mm3: Finite::new(1.0).expect("finite"),
+            save_min_fraction: Finite::new(0.0).expect("finite"),
+            ..registered_settings()
+        };
+        let mut any_hollowed = false;
+        for rise_mm in [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0] {
+            for tilt_axis_is_x in [true, false] {
+                let mesh = ramped_box(20.0, 4.0, 4.0 + rise_mm, tilt_axis_is_x);
+                match create_shell(mesh, settings) {
+                    Ok(candidate) => {
+                        any_hollowed = true;
+                        assert_eq!(
+                            cut_census(candidate.mesh()),
+                            (0, 0, 0),
+                            "rise={rise_mm} axis_is_x={tilt_axis_is_x}: a hollowed shell must be uncut"
+                        );
+                    }
+                    Err(HollowError::InvalidShellTopology) => panic!(
+                        "rise={rise_mm} axis_is_x={tilt_axis_is_x}: the breach class FU-53 exists to close is still live"
+                    ),
+                    Err(_other) => {
+                        // A different, named refusal (no cavity, below bulk,
+                        // below savings) is not the defect this test guards.
+                    }
+                }
+            }
+        }
+        assert!(
+            any_hollowed,
+            "the sweep must hollow at least one configuration to be a meaningful proof"
+        );
+    }
+
+    /// `(boundary edges, non-manifold faces, point-only faces)`, mirroring
+    /// `corpus_cavity_repair::cut_census`.
+    fn cut_census(mesh: &Mesh) -> (usize, usize, usize) {
+        let topology =
+            build_face_topology(mesh, WeldPolicy::ExactBits).expect("shell topology is buildable");
+        let count = |flag: u8| {
+            topology
+                .cut_flags()
+                .iter()
+                .filter(|flags| **flags & flag != 0)
+                .count()
+        };
+        (
+            topology.counts().boundary_edges,
+            count(plinth_mesh::TOPOLOGY_CUT_NONMANIFOLD),
+            count(plinth_mesh::TOPOLOGY_CUT_POINT_ONLY),
+        )
+    }
+
+    /// FU-53's ADMISSION addition: a caller-set `max_cavity_distance_index_bytes`
+    /// too small to build the exact-distance surface refuses typed, with no
+    /// fallback to the EDT-only selection this admission domain exists to
+    /// move H0 off of.
+    #[test]
+    fn a_too_small_cavity_distance_index_limit_is_a_typed_refusal_not_a_fallback() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let mut limits = H0AdmissionLimits::production();
+        limits.max_cavity_distance_index_bytes = 1;
+        let error = create_shell_with_admission_limits(source, registered_settings(), limits)
+            .expect_err("a 1-byte cavity-distance index limit must refuse");
+        assert!(matches!(
+            error,
+            HollowError::CavityDistanceIndexLimitExceeded { bytes, max_bytes: 1 }
+                if bytes > 1
+        ));
+    }
+}
+
 /// The well-composedness repair, end to end through `create_shell`: once on a
 /// small synthetic solid that a default `cargo test` runs, and once on the
 /// committed corpus fixture that made FU-49 necessary.
@@ -4112,23 +4728,30 @@ mod corpus_cavity_repair {
 
     /// **The synthetic solid whose cavity mask is not well-composed.**
     ///
-    /// Two 10 mm-radius lobes joined by a 3.375 mm-radius waist running at 45°
-    /// in the xy plane. The waist is the whole point: at a 2.5 mm wall its
-    /// cavity is a *sub-voxel* thread, so the selected mask crosses the waist as
-    /// a chain of lattice-diagonal voxels — which is precisely Latecki's C1/C2
-    /// configuration, the one a one-vertex-per-cell extractor cannot represent.
+    /// Two 10 mm-radius lobes joined by a thin waist running at 45° in the xy
+    /// plane. The waist is the whole point: at the production selection
+    /// threshold its cavity is a *sub-voxel* thread, so the selected mask
+    /// crosses the waist as a chain of lattice-diagonal voxels — which is
+    /// precisely Latecki's C1/C2 configuration, the one a one-vertex-per-cell
+    /// extractor cannot represent.
     ///
-    /// Every number is exact in binary (the waist is 27/8) so the lattice
-    /// decides the same way on any target. The diagonal is what makes it work:
-    /// an axis-aligned waist produces a thread that is thin but well-composed.
-    fn pinched_dumbbell() -> Mesh {
+    /// The rod radius is exact in binary at every value this module uses
+    /// (3.375 mm = 27/8, 3.875 mm = 31/8) so the lattice decides the same way
+    /// on any target. The diagonal is what makes it work: an axis-aligned
+    /// waist produces a thread that is thin but well-composed.
+    ///
+    /// FU-53 note: the rod radius is a parameter (rather than the historical
+    /// fixed 3.375 mm) because the lattice-diagonal defect this fixture
+    /// exists to reproduce is non-monotonic in it — see the retune note on
+    /// `a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it`.
+    fn pinched_dumbbell_with_rod_radius(rod_radius: f64) -> Mesh {
         let yaw = std::f64::consts::FRAC_PI_4;
         let span = 40.0;
         let far = [span * yaw.cos(), span * yaw.sin(), 0.0];
         let parts = [
             sphere(10.0, [0.0, 0.0, 0.0], 32, 48),
             sphere(10.0, far, 32, 48),
-            rod(3.375, span, yaw, 48),
+            rod(rod_radius, span, yaw, 48),
         ];
         let operands = parts
             .iter()
@@ -4211,7 +4834,7 @@ mod corpus_cavity_repair {
     /// unnecessary would leave this test passing while measuring nothing.
     #[test]
     fn a_synthetic_pinched_dumbbell_needs_the_repair_and_hollows_because_of_it() {
-        let source = pinched_dumbbell();
+        let source = pinched_dumbbell_with_rod_radius(3.875);
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
 
         // 1. The mask this fixture exists to produce, and the extractor's
@@ -4226,9 +4849,14 @@ mod corpus_cavity_repair {
         // quartering one (decisions/2026-08-12-owner-rulings-fu-batch.md §3):
         // the marked-voxel set only grows, so the lattice-diagonal thread
         // across the waist this fixture is built to exercise now spans more
-        // non-manifold and point-only faces. Still watertight (0 boundary
-        // edges) but non-manifold, which is the whole premise this fixture
-        // proves.
+        // non-manifold and point-only faces.
+        //
+        // Unaffected by FU-53's rod-radius retune below (3.375 -> 3.875 mm):
+        // `unrepaired_cavity_mask` stops one line early, at the pre-fix
+        // `edt > wall` selection with no exact distance and no march margin,
+        // so it characterizes the same lattice-diagonal thread topology
+        // either way. Still watertight (0 boundary edges) but non-manifold,
+        // which is the whole premise this fixture proves.
         assert_eq!(
             cut_census(&raw),
             (0, 16, 50),
@@ -4239,31 +4867,62 @@ mod corpus_cavity_repair {
         // 2. The repair, through the production entry point. Integer
         //    combinatorics over a deterministic voxel field, so these are
         //    equalities.
-        let candidate = create_shell(source, settings).expect("the repaired dumbbell hollows");
+        //
+        // FU-53 note: this fixture's two 10 mm lobes are deliberately small
+        // so the repair closes in under a second, and its cavity (a few
+        // thousand mm3) no longer clears the registered savings floor once
+        // the honest exact-distance-plus-margin wall shrinks it — a real and
+        // separately covered consequence of the fix (see
+        // `the_committed_sphere_clears_savings_at_the_default_wall_but_not_the_handling_heavy_wall`),
+        // not something this test exists to measure. `wall_thickness_mm`,
+        // `voxel_pitch_mm` and `cavity_march_margin_mm` stay exactly the
+        // registered values step 1 and the assertions below depend on; only
+        // the unrelated savings floor is relaxed, so this test keeps
+        // isolating repair mechanics from the savings gate.
+        let step3_settings = HollowSettings {
+            save_min_mm3: Finite::new(1.0).expect("finite"),
+            save_min_fraction: Finite::new(0.0).expect("finite"),
+            ..settings
+        };
+        let candidate =
+            create_shell(source, step3_settings).expect("the repaired dumbbell hollows");
         let resources = candidate.cavity().resources();
         // Moved 4 -> 8 on 2026-08-12 by FU-50: the extra non-manifold/
         // point-only faces above (8 -> 16, 26 -> 50) come from a wider
         // lattice-diagonal thread, which the repair now finds more critical
         // cells on.
-        assert_eq!(resources.cavity_critical_cells(), 8);
-        assert_eq!(resources.cavity_repaired_voxels(), 8);
+        // Moved 8 -> 132 critical cells (repaired_voxels 8 -> 68, full-grid
+        // passes unchanged at 2) by FU-53's fixture retune: the rod radius
+        // moved 3.375 -> 3.875 mm to keep exhibiting the non-manifold pinch
+        // once the production selection threshold moved from the bare 2.5 mm
+        // wall to 2.5 mm + HOLLOW_CAVITY_MARCH_MARGIN_MM (0.866 mm) evaluated
+        // on the EXACT nearest-surface distance rather than the EDT. A sweep
+        // over rod radius (`corpus_cavity_repair::zzz_sweep_rod_radius`,
+        // 3.0-6.0 mm in 0.125 mm steps) found the defect is non-monotonic in
+        // radius, the same lattice-aliasing signature FU-53's finned-block
+        // breach class shows: 3.875, 4.375, 4.875 mm (132 critical cells),
+        // 5.375 mm (136) and 5.875 mm (140) reproduce it; every radius
+        // between and outside them does not. 3.875 mm is the closest
+        // reproduction to the original 3.375 mm.
+        assert_eq!(resources.cavity_critical_cells(), 132);
+        assert_eq!(resources.cavity_repaired_voxels(), 68);
         // The opening cell scan plus exactly one whole-grid re-selection: the
         // removal stranded part of the component, which is the second
         // `O(cells)` domain the cell-visit bound does not cover.
         assert_eq!(resources.cavity_repair_full_grid_passes(), 2);
-        // The 98 x 98 x 41 grid's own `(n+1)³` opening scan plus eight cells per
-        // changed voxel, arrived at rather than remembered. `voxel_count` is
-        // `GridSpec::count` -- the admitted grid's cell total, computed from
-        // the mesh's own bounds -- so it is untouched by FU-50's rasterizer.
+        // `voxel_count` is `GridSpec::count` -- the admitted grid's cell
+        // total, computed from the mesh's own bounds. Unchanged by the rod
+        // radius retune: the rod is thin relative to the two 10 mm lobes
+        // that dominate the bounding box either way.
         assert_eq!(resources.voxel_count(), 393_764);
         let cells = 99 * 99 * 42;
         assert_eq!(
             resources.cavity_repair_cell_visits(),
             cells + 8 * resources.cavity_repaired_voxels()
         );
-        // Moved 411,674 -> 411,706 on 2026-08-12 by FU-50, tracking
-        // `cavity_repaired_voxels` above (4 -> 8, so +8*4 = 32 more visits).
-        assert_eq!(resources.cavity_repair_cell_visits(), 411_706);
+        // Moved 411,706 -> 412,186 tracking `cavity_repaired_voxels` above
+        // (8 -> 68, so +8*60 = 480 more visits).
+        assert_eq!(resources.cavity_repair_cell_visits(), 412_186);
 
         // 3. The end of the chain. Not one face of the shell or its cavity is
         //    cut, and the difference is one negative void inside positive
@@ -4308,7 +4967,23 @@ mod corpus_cavity_repair {
         assert_eq!(source.tris().len(), 429_120, "the fixture itself moved");
 
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
-        let candidate = create_shell(source, settings)
+        // FU-53 note: at the REGISTERED savings floor the honestly-walled
+        // Treant (exact distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM) now
+        // fails `IneligibleSavingsAfterCavityRepair` -- the mandated,
+        // measured-and-recorded consequence FU-55's ruling anticipates (an
+        // under-walled shell never ships; this one now correctly does not
+        // clear savings and the pipeline substitutes the solid reserve). See
+        // the FU-53 journal landing entry for that production-settings
+        // measurement. This test's own subject is the well-composedness
+        // repair (FU-49), proved end to end through the real production
+        // entry point; only the unrelated savings floor is relaxed here, the
+        // same isolation the synthetic pinched-dumbbell test above uses.
+        let repair_test_settings = HollowSettings {
+            save_min_mm3: Finite::new(1.0).expect("finite"),
+            save_min_fraction: Finite::new(0.0).expect("finite"),
+            ..settings
+        };
+        let candidate = create_shell(source, repair_test_settings)
             .expect("the committed treant is the model FU-49 was filed on and it must now hollow");
 
         // 1. A repair actually ran on this input. Without this the rest of the
@@ -4322,8 +4997,8 @@ mod corpus_cavity_repair {
         //    are integer combinatorics over a deterministic voxel field, so
         //    they are equalities, not tolerances.
         //
-        // Moved 70 -> 52 critical cells, 115 -> ??? repaired voxels, and
-        // 5,405,880 -> ??? cell visits on 2026-08-12 by FU-50's area-
+        // Moved 70 -> 52 critical cells, 115 -> 67 repaired voxels, and
+        // 5,405,880 -> 5,405,496 cell visits on 2026-08-12 by FU-50's area-
         // proportional conservative rasterizer (decisions/2026-08-12-owner-
         // rulings-fu-batch.md §3). Unlike the pinched-dumbbell fixture above,
         // this fell rather than grew: the well-composedness repair's critical-
@@ -4331,9 +5006,17 @@ mod corpus_cavity_repair {
         // marking produces, not a monotone function of the (monotonically
         // growing) marked-voxel set, so either direction is consistent with
         // the superset proof.
-        assert_eq!(resources.cavity_critical_cells(), 52);
-        assert_eq!(resources.cavity_repaired_voxels(), 67);
-        assert_eq!(resources.cavity_repair_cell_visits(), 5_405_496);
+        //
+        // Moved 52 -> 116 critical cells, 67 -> 170 repaired voxels, and
+        // 5,405,496 -> 5,406,320 cell visits on 2026-08-12 by FU-53: cavity
+        // selection now runs on the exact nearest-surface distance plus
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM instead of the EDT's conservative
+        // overestimate, which is a different selection boundary with its own
+        // local pinch pattern -- again not a monotone consequence of the
+        // margin shrinking the cavity, for the same reason recorded above.
+        assert_eq!(resources.cavity_critical_cells(), 116);
+        assert_eq!(resources.cavity_repaired_voxels(), 170);
+        assert_eq!(resources.cavity_repair_cell_visits(), 5_406_320);
         // The opening cell scan and exactly one whole-grid re-selection. This
         // is the second `O(cells)` domain the cell-visit bound does not cover,
         // and it is here so that a change which turned the fixpoint into many
@@ -4351,16 +5034,23 @@ mod corpus_cavity_repair {
             resources.cavity_repair_cell_visits()
         );
 
-        // 4. The cavity that survived, and the shell built from it. Moved
-        //    8,043.875 -> 8,196.5 mm3 on 2026-08-12 by FU-50: 65,572 voxels at
-        //    the frozen 0.5 mm pitch (up from 64,351) — the 65,639 the wall
-        //    now selects (up from 64,466, tracking the marked-voxel set's
-        //    growth), less the 67 the repair hands back (down from 115; see
-        //    the note on `cavity_repaired_voxels` above).
+        // 4. The cavity that survived, and the shell built from it.
+        //
+        // Moved 8,196.5 -> 3,118.75 mm3 on 2026-08-12 by FU-53: the honestly
+        // larger wall (exact distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM)
+        // removes far more of the treant's branched, oblique geometry than
+        // the EDT's own conservative overestimate did -- the same effect the
+        // FU-53 diagnosis measured directly against the source surface as a
+        // 0.70 mm (28%) realised wall on this exact fixture, now corrected.
+        // This is measured with `save_min_mm3`/`save_min_fraction` relaxed
+        // (see the note above `create_shell`, this test's whole reason for
+        // doing that): at the REGISTERED savings floor this honest cavity no
+        // longer clears it, and the model falls back to Solid in production
+        // (see the FU-53 journal landing entry).
         let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
-        assert_eq!(cavity_mm3, 8_196.5);
+        assert_eq!(cavity_mm3, 3_118.75);
         let pitch = candidate.cavity().frozen_voxel_pitch_mm().get();
-        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 65_572);
+        assert_eq!((cavity_mm3 / pitch.powi(3)) as usize, 24_950);
 
         // 5. **The end of the causal chain FU-49 filed.** The shell carries the
         //    outer surface and the cavity together, and not one face of either
