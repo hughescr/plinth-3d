@@ -5,6 +5,213 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-10 — the decimator stops manufacturing duplicate faces; meshoptimizer's collapse is not link-condition checked {#decimate-dupfaces-2026-08-10}
+
+<a id="decimate-dupfaces-2026-08-10"></a>
+
+FU-26 landed the counter that could see duplicate faces. This section is what the counter
+was pointed at. **No gate, cap, work bound or acceptance threshold is raised, loosened or
+bypassed here**; one deterministic edit is added to `compact_result`, and every counter it
+moves, it moves toward zero.
+
+**The mechanism, and it is not ours.** An edge collapse `x → y` is topologically admissible
+only when `link(x) ∩ link(y)` is exactly `link(xy)`. meshoptimizer does not test that: it
+classifies vertices and rejects collapses that flip a triangle normal, which is a weaker
+condition. So whenever the mesh contains an edge `(a, b)` whose two opposite vertices happen
+to be `x` and `y`, collapsing `x → y` rewrites the two faces `(a, b, x)` and `(b, a, y)` into
+`(a, b, y)` and `(b, a, y)` — **one triangle, stored twice, wound in opposite directions**.
+Every dense organic mesh has thousands of such configurations wherever a surface nearly
+touches itself: a limb against a body, a wing membrane, an eye socket. The same collapse
+also produces non-manifold edges and point-only pinches; the coincident pair is the
+manifestation this section fixes.
+
+**Four candidate root causes were tested and eliminated before this one.** (1) *Dirty
+input:* the `Cat (wild shape - Cat Lord)` source is one vertex-connected component of 82,564
+faces with **0** boundary edges, **0** non-manifold edges and **0** duplicate faces — the
+duplicates appear only after decimation. (2) *Dust shards collapsing to pancakes:* the
+duplicate pair sits inside the 53,170-face main body, not in a detached component. (3) *An
+f32 collision in our own adapter:* measured on five models including the Weeping Treant v1.2
+— `f32_collision_groups = 0` on every one, 214,562 welded vertices at 214,562 distinct f32
+positions, and **0** faces degenerate under f32. (4) *A lock artifact:* the pattern
+reproduces with an all-false lock vector. What does reproduce it is a **torus**, at every
+size tried, and never a uv-sphere at any target down to four faces — exactly the
+sheet-fusing neighbourhood the link condition exists to forbid.
+
+**The fix is a deletion, and it is the identity on the represented solid.** The two faces of
+such a pair have equal area and exactly opposite normals: they contribute nothing to the
+divergence-theorem volume, and a ray crossing them crosses twice, so they are not part of the
+boundary of the solid at all. They are the bookkeeping residue of a collapse that already
+happened. Because they span the same triple with opposite winding, they contribute exactly
+one forward and one backward directed occurrence to each of their three undirected edges, so
+removing both decrements every affected edge **in both directions**: an edge whose only faces
+were the pair drops to zero occurrences and ceases to exist, every other keeps its balance,
+and the only way a boundary could open is an edge that already carried an odd incidence.
+That case is measured, not assumed, and refused by name
+(`ZeroVolumePairOpensBoundary` — it fired nowhere in the corpus).
+
+Groups are reduced by opposite-winding **pairs**, `min(even, odd)` of them, because two
+coincident faces with the *same* winding are two copies of real surface and deleting either
+would change the solid; anything surviving that is `CoincidentFacesRemain` and is not
+repaired.
+
+**Only groups this reduction wrote are touched, and "touched" is all-or-nothing.**
+meshoptimizer's own input is passed to the removal and decides *which groups are eligible*:
+a group whose occupancy the source already fully accounts for is not something this
+reduction made, so it is neither removed nor refused — repairing an input stays a pre-pass
+decision (D-22). That is what keeps the census property ("where the decimator declines to
+reduce, the mesh passes through unedited") true of a no-op *in any face order*, and it is
+why a source that carries its own coincident faces — `Giant Bat` 4 in 2 groups, `Plague
+Zombie` 2 in 1 — does not turn every reducing ratio into a blanket refusal. What the source
+must **not** decide is how much of an eligible group pairs off; see the correction below.
+
+**What it buys, measured, reproducibly.** The removal runs on meshoptimizer's welded index
+space before compaction, so the emitted mesh, its fingerprint, its probes and its topology
+counts all describe the repaired candidate. The table below is the committed harness
+`local_minis_zero_volume_repair` (`crates/plinth-decimate/tests/local_minis_repair.rs`,
+`#[ignore]`d because its inputs are local read-only STLs), run at the branch tip over the
+seven models the census named clean-raw-but-damaged-by-decimation. Every column is
+production `plinth_decimate::run` output read through `build_face_topology(ExactBits)` — the
+same call `validate_closed_mesh` makes.
+
+| model | disposition | faces in → out | duplicate faces in → out |
+|---|---|---|---|
+| `Cat (wild shape - Cat Lord)` | verified | 82,564 → 53,148 | 0 → **0** |
+| `Morel base` | verified | 153,494 → 71,466 | 0 → **0** |
+| `Rotting Warhorse` | verified | 277,382 → 260,906 | 0 → **0** |
+| `Tavey Base` | verified | 73,582 → 29,890 | 0 → **0** |
+| `Thorny Vegepygmy` | verified | 76,188 → 60,352 | 0 → **0** |
+| `zombie-8-a` | verified | 289,388 → 83,194 | 0 → **0** |
+| `zombie-9-b` | verified | 373,748 → 51,966 | 0 → **0** |
+
+Boundary and non-manifold edges are 0 → 0 on all seven, and neither `CoincidentFacesRemain`
+nor `ZeroVolumePairOpensBoundary` reaches the operator on any of them. The harness fails
+the run if either happens, so it is a discriminator rather than a formality — see the
+correction below, where the same harness fails all but one model under the code this branch
+originally proposed.
+
+The cut-face collapse is the second-order win and it is why the fix is worth more than its
+own counter: `build_face_topology` severs adjacency at every edge touching a duplicate, so
+one manufactured pair fragments the whole vertex fan around it into point-only cuts. The
+per-ratio cut-face figures recorded on 2026-08-10 (`Weeping Treant v1.2` 30,724 → 3,828 at
+r = 0.525, `Giant Bat` 1,780 → 481, `Crawler Zombie` 570 → 27, `Cat` 86 → 0) were **scratch
+measurements** taken against an instrument that was never committed; they are left here as
+the direction of travel and are explicitly *not* re-derivable from a clean checkout. The
+table above is what a clean checkout reproduces.
+
+**What it does not fix, stated plainly.** `Rotting Warhorse` still manufactures 8 non-manifold
+edges at r = 0.525 from clean input, and the Treant 199. Those are the same meshoptimizer
+defect in its unrepairable manifestation — two sheets genuinely fused, not a zero-volume
+residue — and `topology_not_increased` refuses them, which is the gate working. **One
+consequence to be honest about:** removing the pairs *reveals* non-manifold edges that
+FU-26's duplicate-face exclusion was hiding (Treant 192 → 199, `Giant Bat` 31 → 32), so the
+gate now refuses on a slightly truer number. It can only ever refuse more.
+
+**Three tests were reading zero-volume artifacts and now say so.** `captured_treant_fan_\
+closes_a_bare_lock_over_the_minimum_incident_face` asserted that a `[0, 1, 2]` face survived
+the closure — it was one half of a coincident pair over a fan that cannot reduce at all.
+`feature_locks_are_hard_constraints_in_simplification` inspected an eight-face octahedron
+halved to a pancake, and now uses a fixture dense enough for a real reduction to be what
+proves the lock. `production_feature_selection_pins_the_ratio_twenty_probe` reached its cap
+refusal by scoring `make_box`'s two-face probe pancake as though it were a surface: a
+twelve-face model has no ratio-0.20 candidate, that is now named
+(`FeatureProbeHasNoCandidate`), and it is still a refusal on the audited identity path — the
+corpus keeps its `already_print_scale`.
+
+**The lock is checked twice, against two different meshes, because it is two different
+statements.** Against meshoptimizer's own result it asks whether the simplifier honoured the
+constraint it was given; a `no` is a fact about the machinery and stays loud and fatal
+(`LockedVertexRemoved`). Against the **repaired** face list it asks the question that
+actually binds, because a hard lock is a constraint on the mesh this stage *emits*: a
+protected vertex whose entire surviving incidence sits inside removed pairs would otherwise
+be deleted with them, silently, with no error and nothing in the trace — an unbounded
+relaxation of a hard constraint. That candidate is refused by name
+(`LockedVertexLostToZeroVolumeRepair`), and because the refusal is a fact about *this ratio*
+rather than about the engine, the search records it and steps on. Measured on the Weeping
+Treant v1.2: the ratios that would have surrendered 27, 4 and 1 protected vertices are
+refused, r = 0.940625 surrenders none and is still measured, and the corpus disposition is
+unchanged. `ZeroVolumeRepairRecord::locked_vertices_dropped` is therefore structurally zero
+on every emitted candidate, and the corpus gate asserts it there
+(`audit_no_lock_was_surrendered`) so the field is a standing witness rather than a constant.
+
+**Report schema** goes to `plinth/m3-decimation-corpus-budget-report/v8`: v7 turned
+`zero_volume_pairs_removed` into the full `zero_volume_repair` record on every candidate the
+search describes (each bisection step, each adaptive probe, each final attempt, plus the
+mandatory ratio-0.20 feature probe that decides the entire protected set), and v8 adds
+`search_candidate_free_ratios`. The thread-determinism sweep's report goes to v2 for the
+same reason — the one edit this crate makes now travels in the artifact whose byte-identity
+across 1/4/16 threads *is* the determinism claim, and the sweep asserts the fixture really
+exercises it (12 pairs removed, 12 vertices dropped, 0 locked). Corpus dispositions are
+unchanged — all eight `already_print_scale`, the Treant still refused by `TopologyIncreased`
+before the witness is consulted.
+
+### 2026-08-11 — the review's eight, applied in place
+
+The branch above was reviewed before merge and did not survive first contact: it **did not
+compile** (`remove_zero_volume_face_pairs` had grown a second parameter and eight unit-test
+call sites had not), so *nothing* in the working tree had ever been executed. Everything
+above stands except where corrected here. No gate, cap, work bound or acceptance threshold
+is raised, loosened or bypassed by any of it.
+
+1. **The repair was disabled in the primary case.** Source occupancy was subtracted from each
+   winding *before* pairing. Run that against the mechanism this whole section is about:
+   collapsing `x → y` turns `(a, b, x)` into `(a, b, y)`, whose partner `(b, a, y)` is a
+   **source** face meshoptimizer retained. The group is `even = 1, odd = 1` against a source
+   occupancy of `even = 0, odd = 1`, so subtraction scores `min(1, 0) = 0` and pairs nothing.
+   A pair is a pair: deleting the manufactured face *requires* deleting its retained partner,
+   and doing so is still the identity on the represented solid. The source now decides only
+   **which groups are eligible** (any group carrying a face the source did not) and never how
+   much of an eligible group pairs off. Measured with the committed harness, the subtraction
+   version costs six of the seven models their reduction outright — `Cat` and `zombie-9-b`
+   refuse at the ratio-0.20 feature probe and ship at 82,564 and 373,748 faces instead of
+   53,148 and 51,966; `Rotting Warhorse` ships unreduced; `Morel base`, `Thorny Vegepygmy`
+   and `zombie-8-a` verify at 121,594 / 69,402 / 186,292 instead of 71,466 / 60,352 / 83,194
+   — all of them on `CoincidentFacesRemain` refusals over coincidence the reduction itself
+   manufactured. The same asymmetry is fixed in the repeated-index degeneracy guard, which
+   read raw group size and so blanket-refused a source that already carried a duplicated
+   degenerate triple.
+2. **The hard-lock re-check is committed with the rest.** The version originally committed
+   checked the lock only against meshoptimizer's pre-repair result and then deleted pair
+   faces with no re-check, so a protected vertex could be dropped in silence with the only
+   witness a field nothing audited. See the paragraph above for the semantics that shipped.
+3. **The per-cause bisection direction is wired, not dead.** `CandidateFreeCause::
+   bisection_response` existed, was never called, and the arm that ran instead took
+   `high = midpoint` unconditionally — which that dead code's own analysis calls
+   self-reinforcing for five of its six members: a lower midpoint is *more* aggressive, so
+   one candidate-free hit burns the remaining bisection budget and the model falls out as
+   `already_print_scale`. Only `DegenerateOutputTriangle` has its candidates on the denser
+   side. Both directions are now pinned by test, including that a refused ratio moves the
+   search **away** from the wall.
+4. **The corpus gate's step-count audit accounts for refused ratios.** It rejected any
+   `Verified` model with `trace.steps.len() != 6`, but a candidate-free midpoint pushes a
+   refusal and no step, so one unusable ratio out of five would have failed the gate on a
+   model that verified perfectly well — latent only because all eight corpus members are
+   `already_print_scale`. The trace now counts them (`candidate_free_ratios`) and the audit
+   checks `steps + candidate-free ratios`.
+5. **The verification instrument now exists.** The doc comment and the table above cited
+   `local_minis_zero_volume_repair` as committed; the `tests/` directory contained no such
+   file. It is committed, it fails on the pre-correction code, and the table above is its
+   output.
+6. **The feature-probe downgrade carries its cause.** Any candidate-free outcome at the
+   mandatory r = 0.20 probe becomes `already_print_scale`. That is right for "the model is
+   too coarse" (`EmptyResult`, `AllFacesWereZeroVolume` — `make_box` is twelve faces) and
+   indistinguishable-from-fine for the four *defect* causes, which were loud `ProbeSimplify`
+   failures on `develop`. `FeatureProbeHasNoCandidate` now carries the `CandidateFreeCause`,
+   so the report can tell "too coarse" from "the probe hit a defect".
+
+**FU-43 part (1) landed here; part (2) is still filed, not fixed.** A candidate-level failure
+inside the ratio search no longer ends the whole run. The six outcomes that are facts about
+*one ratio* rather than failures of the machinery are collected in `CandidateFreeCause`,
+recorded as `ReductionRefusalReason::CandidateFree`, and stepped past — in the direction the
+cause implies, per cause (see the review's item 3 above). `LockedVertexRemoved` is
+deliberately not a member: it says meshoptimizer violated a hard constraint it was given, and
+that stays loud. `zombie-2-a`'s r = 0.525 output triangle — three *distinct* f64 vertices
+that are *exactly* collinear, a needle meshoptimizer cannot see because it measured the
+collapse in f32 — is named (`DegenerateOutputTriangle`), refused at that ratio, and the
+search continues to the ratios where the same model is clean. **Part (2), the exact
+geometry-preserving repair for the needle** (delete it and split the single face across its
+long edge at the on-segment midpoint: no vertex moves, no surface point changes, zero net
+faces) is a separate design decision and is still open in the FU-43 row with the coordinates.
+
 ## 2026-08-10 — the orientation-search review's twelve, applied in place {#orient-search-review-2026-08-10}
 
 <a id="orient-search-review-2026-08-10"></a>
@@ -6742,6 +6949,7 @@ Everything else here is non-blocking.
 | FU-40 | **The legacy-13 comparison driver and `plinth calibrate` are unbuilt, so the sweep's fidelity is recorded but not gated** | **Opened 2026-08-10 by the dense-orientation-search landing.** Two recorded pieces are deliberately absent. (1) The legacy-compat **driver** — block-0 candidates only, `PeakSectionMethod::LegacyStepped{margin_mm: 0.1, step_mm: 4.0}`, the literal `-0.707` cutoff, the L1 proxy, scar off — which `04-migration-plan.md:1009-1012` records as a driver rather than a policy, and which is what design tests T1 (reproduce the recorded argmin for all 8 baselines) and T2 (the six recorded scores as a one-sided bound) need. (2) `plinth calibrate` and D-12's own safety valves: Spearman(coarse, exact) ≥ 0.7 or the sweep is demoted, exact-best inside the top-24 or K doubles, outside the top-48 after one doubling → the recorded fallback ladder (02:856-857). **What this row claims:** the sweep measures and records its own fidelity honestly — `coarse_rank_of_final_winner`, `refine_rank_of_final_winner`, `proxy_agreed_with_exact`, `decision_resolved`, the winner–runner-up angle beside the grid spacing — but **nothing acts on any of it**, so a proxy that degrades is visible and not stopped. Two concrete cases are already waiting for those gates: the committed `Sphere`, whose winning pose the L1 proxy ranks **478th of 643** (which is why the legacy block is escorted to the exact tier — [`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md)), and the fact that `decision_resolved` reads **false on all eight** corpus models — re-measured 2026-08-10 after the flag was corrected to compare margin and spread at the **same** tier (it first compared an exact-tier margin against a ~2 % proxy spread, which biased it toward `false` for reasons unrelated to the grid; on the `Sphere` that proxy spread is 674.08 score points against a committed margin of 0.0059). The verdict now carries its tier in the record (`margin_tier`, `spread_tier`) and reads as "did the coarse grid separate these two directions", never as "did the pipeline resolve the choice". **What it does NOT claim:** that any orientation shipped so far is wrong. **First action:** the driver, because T1 is the cheapest evidence that the objective did not change meaning, and it needs no new constant. |
 | FU-41 | **Rest poses are an area-binned substitute for convex-hull face-aligned poses, and three-point rest poses are not covered** | **Opened 2026-08-10 by the dense-orientation-search landing.** D-12 names convex-hull **face-aligned** poses. This workspace has no 3-D convex hull kernel in any crate or in the lockfile, and the lockfile is frozen, so the shipped substitute bins each face's down direction `-n_f` into a 2048-point reference Fibonacci lattice, accumulates area, and emits the area-weighted mean direction of the heaviest `ORIENT_REST_POSE_MAX` bins — O(F), no new dependency, and it finds a cube's six axis poses exactly. **What this row claims:** a genuine three-point rest pose — a treant balanced on three toes, a figure on a narrow base — has no single large facet and this substitute will not propose it as its own candidate. **What it does NOT claim:** that such a pose is unreachable; every direction on S² is within one grid spacing (~9.0° at `ORIENT_FIBONACCI_COUNT` = 512) of a block-2 Fibonacci candidate, so the loss is bounded by the grid resolution rather than unbounded. **First action:** decide whether a hull kernel is worth a lockfile change at all — the honest prior is that it is not until calibration (FU-40) shows a model whose best pose the grid misses by more than the spacing. |
 | FU-42 | **The dense sweep's closed-boundary precondition is enforced on the Exact tier, which makes a not-perfectly-closed mesh unpreparable under the default policy** | **Opened 2026-08-10 by the dense-orientation-search review.** The exact section solver's shoelace identity assumes each section is a union of closed loops, so `OrientFaceTable` refuses any LOD with `boundary_edges > 0` after `WeldPolicy::ExactBits` welding. Design §2.1 put that floor on the **proxies**, where the LOD ladder catches it and answers with a finer rung. Enforced on Exact there is no finer rung: it becomes `SearchError::ExactUnscorable`, and since `--orient dense` is the default, such a model is unpreparable — while `--orient pinned` still prepares it, because the pinned path never builds a section profile. **What this row claims:** this is a **new refusal class** the record did not previously carry, and it is now recorded rather than latent. **What it does NOT claim:** that the refusal is wrong. It is arguably necessary — a hole makes the identity produce a plausible *wrong* area rather than a slow one, and a silently wrong peak cross-section would be scored against 653 candidates. **Reachability, measured 2026-08-10:** all eight corpus models weld closed — `boundary_edges = 0` on `make_box` (12 faces), `make_raking_blade` (24), `make_thin_fin` (24), `make_overhang_table` (60), `make_toed_slab` (140), `Cylinder` (244), `Sphere` (4,760) and the Weeping Treant (429,120), and `nonmanifold_edges = 0` on every one. No input class in the corpus reaches it. **First action:** decide whether a hole should refuse the *model* or degrade the *term* — the honest options are a typed per-model refusal (today's behaviour, now named), or a section method that tolerates open boundaries and is recorded as a different, weaker measurement. Do not widen it silently in either direction. |
+| FU-43 | **A candidate-level failure inside the ratio search still ends the whole run, and the exactly-collinear output triangle is the case that fires it** | **Opened 2026-08-10 by the zero-volume-pair landing** (`feature/decimate-dupfaces`), which fixed the duplicate-face half of meshoptimizer's non-link-condition collapse and deliberately did **not** touch the search's control flow. **The defect.** `simplify_locked` can fail on one candidate for reasons that are facts about *that ratio*, not failures of the machinery — `DegenerateOutputTriangle`, `AllFacesWereZeroVolume`, `EmptyResult`, `LockedVertexRemoved`, `CoincidentFacesRemain`, `ZeroVolumePairOpensBoundary`. Every one of them propagates out of `sampled_step` / the final-verification loop / `run_adaptive_diagnostics` as `BudgetSearchError::SearchExecution`, so one unusable ratio ends the entire decimation instead of being recorded as a refusal and stepped past. **The live instance: `zombie-2-a.stl` (397,226 faces) fails production decimation outright at r = 0.525**, on output triangle 63,345, whose three surviving vertices are `(-1.0828016996383667, -2.585498571395874, 15.263912200927734)`, `(-1.0678989887237549, -2.5856692790985107, 15.246969223022461)` and `(-1.052996277809143, -2.5858399868011475, 15.230026245117188)` — three *distinct* f64 points that are exactly collinear and evenly spaced (the middle one is the exact midpoint), i.e. three consecutive vertices of a straight source edge that a collapse flattened into a needle. `robust::orient2d` returns exactly 0 on all three projections, so `audit_strict` refuses it; meshoptimizer measured the same collapse in **f32**, where the cross product rounds to a small non-zero value with an arbitrary sign, and cannot see it. Model coordinates come from binary STL and are f32-exact, which is why exact collinearity is common enough to hit rather than a measure-zero curiosity. The same model is clean at r = 0.2875, 0.2 and 0.16875, so a search that recorded the refusal and continued would have found a candidate. **Two parts, in order.** **(1)** Make a candidate-free `simplify_locked` outcome a recorded `ReductionRefusalReason` and a bisection step (`high = midpoint`, the branch a meshoptimizer no-op already takes, since only a lower ratio can produce a candidate), not a `SearchExecution` error. Note the constraint this must respect: the corpus gate's independent audit asserts `trace.steps.len() == 6` for a `Verified` model, so a refused step has to be counted somewhere it can still see. **(2)** Only then decide whether the needle itself is repairable. There is an *exact* repair available and it is worth measuring before anything approximate is considered: the needle `(p0, p1, p2)` has `p1` exactly on segment `p0 p2`, so deleting the needle and splitting the single face across its long edge `(p0, p2)` at `p1` is geometry-preserving to the bit — it moves no vertex and changes no surface point — costs zero net faces, and closes the slit that plain deletion would open. It needs the long edge to have exactly two incident faces and both replacement triangles to pass `audit_strict`, both of which are checkable rather than assumed. **Scope note:** the corpus-wide census behind this row (38 models × 7 search ratios, local `minis-to-process` plus `corpus/models`) found the collinear failure exactly **once**. What is *not* rare is part (1)'s exposure: `make_box`, `make_overhang_table`, `make_raking_blade` and `make_thin_fin` all reach `AllFacesWereZeroVolume` or `EmptyResult` at the deeper search ratios, and today they are saved only by refusing earlier — `make_box` on the new `FeatureProbeHasNoCandidate` path and the other three on `ProtectionCap`. A model that reaches those ratios through the bisection would hard-fail. **Nothing here is a gate change and no bound may be raised to close it.** **[Part (1) LANDED 2026-08-11 on `feature/decimate-dupfaces`, in the same amended commit as the zero-volume repair; part (2) remains open and nothing above is retracted.** The six candidate-free outcomes are collected in `CandidateFreeCause`, recorded as `ReductionRefusalReason::CandidateFree`, and stepped past at every site that could end the run — the bisection, the final-verification loop and the adaptive dense sweep. `LockedVertexRemoved` is deliberately **not** a member: it says meshoptimizer violated a hard constraint it was given, which is a fact about the machinery, not about the ratio; its sibling `LockedVertexLostToZeroVolumeRepair` *is* a member, because there the simplifier honoured the lock and this crate's own pair removal is what would have dropped the vertex. **Two corrections to this row's own prescription, both found in review before merge.** (a) The direction is **not** `high = midpoint` uniformly. That is right only for `DegenerateOutputTriangle`, whose candidates are on the denser side (`zombie-2-a` is clean at r = 0.2875, 0.2, 0.16875); for the other five a lower midpoint is strictly *more* aggressive than the one that just failed, so a single refusal would burn the whole remaining bisection budget and a model with real candidates further up would fall out as `already_print_scale`. `CandidateFreeCause::bisection_response` answers per cause and is wired into the arm. (b) The `trace.steps.len() == 6` constraint this row names was **not** in fact respected by the first implementation: the arm pushed a refusal and no step, so any model that hit one unusable ratio and still verified would have failed the corpus gate on `M3SearchStepCount`. Latent only because all eight corpus members are `already_print_scale`. `BudgetSearchTrace::candidate_free_ratios` counts them and the gate now audits `steps + candidate-free ratios`, pinned by `the_step_count_audit_counts_a_candidate_free_midpoint_as_a_bisection`. Report schema `plinth/m3-decimation-corpus-budget-report/v8`.]** |
 
 ## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
 
