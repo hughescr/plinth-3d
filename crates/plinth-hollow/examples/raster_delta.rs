@@ -234,9 +234,15 @@ fn old_marked_set(mesh: &Mesh, spec: GridSpec) -> Result<(usize, Vec<bool>), &'s
 // verbatim from `plinth_hollow::lib` for local marked-set comparison.
 // The real production copy is what `create_shell` runs; this is only for
 // measuring the delta against the old walker above in one process.
+//
+// Kept verbatim across the FU-50 follow-up that replaced the projected-AABB
+// sweep with the slab-clipping walk (the diagonal-sliver and degenerate-
+// triangle cases). That change tightened CANDIDATE generation only: the
+// marked-voxel set is the set of cells whose cube the exact separating-axis
+// test accepts, and both candidate sets contain every such cell, so the
+// delta table this harness recorded against the frozen walker is unmoved.
+// The work-item counts it prints do move -- down.
 // ---------------------------------------------------------------------
-
-const DEGENERATE_NORMAL_SQ: f64 = 1e-18;
 
 fn sub3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
@@ -311,25 +317,158 @@ fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> [[isize; 2]; 3] {
     axis_range
 }
 
-fn scan_dilated_aabb(
-    tri: [[f64; 3]; 3],
-    axis_range: [[isize; 2]; 3],
-    spec: GridSpec,
-    count: &mut usize,
-    occupancy: &mut [bool],
-) {
-    for x in axis_range[0][0]..=axis_range[0][1] {
-        for y in axis_range[1][0]..=axis_range[1][1] {
-            for z in axis_range[2][0]..=axis_range[2][1] {
-                let cell = [x as usize, y as usize, z as usize];
-                let center = [x as f64, y as f64, z as f64];
-                *count += 1;
-                if triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]) {
-                    mark_index(cell, spec, occupancy);
-                }
+const CANDIDATE_EXTENT_SLACK: f64 = 1e-9;
+const MAX_COLUMN_VERTICES: usize = 8;
+
+fn extent_slack(magnitude: f64) -> f64 {
+    CANDIDATE_EXTENT_SLACK * magnitude.abs().max(1.0)
+}
+
+#[derive(Clone, Copy)]
+struct ColumnPolygon {
+    points: [[f64; 3]; MAX_COLUMN_VERTICES],
+    len: usize,
+}
+
+impl ColumnPolygon {
+    fn triangle(tri: &[[f64; 3]; 3]) -> Self {
+        let mut points = [[0.0_f64; 3]; MAX_COLUMN_VERTICES];
+        points[..3].copy_from_slice(tri);
+        Self { points, len: 3 }
+    }
+
+    fn push(&mut self, point: [f64; 3]) -> bool {
+        if self.len == MAX_COLUMN_VERTICES {
+            return false;
+        }
+        self.points[self.len] = point;
+        self.len += 1;
+        true
+    }
+
+    fn clip_half(&self, axis: usize, bound: f64, keep_above: bool) -> Option<Self> {
+        let mut out = Self {
+            points: [[0.0_f64; 3]; MAX_COLUMN_VERTICES],
+            len: 0,
+        };
+        if self.len == 0 {
+            return Some(out);
+        }
+        let inside = |point: &[f64; 3]| {
+            if keep_above {
+                point[axis] >= bound
+            } else {
+                point[axis] <= bound
+            }
+        };
+        for index in 0..self.len {
+            let current = self.points[index];
+            let next = self.points[(index + 1) % self.len];
+            let current_inside = inside(&current);
+            if current_inside && !out.push(current) {
+                return None;
+            }
+            if current_inside == inside(&next) {
+                continue;
+            }
+            let ratio = ((bound - current[axis]) / (next[axis] - current[axis])).clamp(0.0, 1.0);
+            let mut crossing = [0.0_f64; 3];
+            for coordinate in 0..3 {
+                crossing[coordinate] =
+                    current[coordinate] + ratio * (next[coordinate] - current[coordinate]);
+            }
+            if !crossing.iter().all(|value| value.is_finite()) {
+                return None;
+            }
+            if !out.push(crossing) {
+                return None;
             }
         }
+        Some(out)
     }
+
+    fn clipped_to_slab(&self, axis: usize, lo: f64, hi: f64) -> Self {
+        self.clip_half(axis, lo, true)
+            .and_then(|above| above.clip_half(axis, hi, false))
+            .unwrap_or(*self)
+    }
+
+    fn slab_extent(
+        &self,
+        slab_axis: usize,
+        lo: f64,
+        hi: f64,
+        out_axis: usize,
+    ) -> Option<(f64, f64)> {
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for index in 0..self.len {
+            let start = self.points[index];
+            let end = self.points[(index + 1) % self.len];
+            let (mut first, mut last) = (0.0_f64, 1.0_f64);
+            let delta = end[slab_axis] - start[slab_axis];
+            if delta == 0.0 {
+                if start[slab_axis] < lo || start[slab_axis] > hi {
+                    continue;
+                }
+            } else {
+                let to_lo = (lo - start[slab_axis]) / delta;
+                let to_hi = (hi - start[slab_axis]) / delta;
+                let (near, far) = if delta > 0.0 {
+                    (to_lo, to_hi)
+                } else {
+                    (to_hi, to_lo)
+                };
+                first = first.max(near);
+                last = last.min(far);
+                if first > last {
+                    continue;
+                }
+            }
+            let span = end[out_axis] - start[out_axis];
+            for ratio in [first, last] {
+                let value = start[out_axis] + ratio * span;
+                if !value.is_finite() {
+                    return None;
+                }
+                low = low.min(value);
+                high = high.max(value);
+            }
+        }
+        (low <= high).then_some((low, high))
+    }
+
+    fn extent(&self, axis: usize) -> Option<(f64, f64)> {
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for point in &self.points[..self.len] {
+            if !point[axis].is_finite() {
+                return None;
+            }
+            low = low.min(point[axis]);
+            high = high.max(point[axis]);
+        }
+        (low <= high).then_some((low, high))
+    }
+}
+
+fn candidate_index_span(low: f64, high: f64, clamp: [isize; 2]) -> Option<[isize; 2]> {
+    let slack = extent_slack(low.abs().max(high.abs()));
+    let first = (low - 0.5 - slack).ceil();
+    let last = (high + 0.5 + slack).floor();
+    if !first.is_finite() || !last.is_finite() {
+        return None;
+    }
+    let first = (first as isize).max(clamp[0]);
+    let last = (last as isize).min(clamp[1]);
+    (first <= last).then_some([first, last])
+}
+
+fn candidate_axis_order(axis_range: [[isize; 2]; 3]) -> [usize; 3] {
+    let mut order = [0_usize, 1, 2];
+    let span = |axis: usize| axis_range[axis][1] - axis_range[axis][0];
+    order.sort_by(|left, right| span(*right).cmp(&span(*left)).then(left.cmp(right)));
+    order
 }
 
 fn walk_triangle_candidates(
@@ -342,51 +481,41 @@ fn walk_triangle_candidates(
     if axis_range.iter().any(|range| range[0] > range[1]) {
         return;
     }
-    let [a, b, c] = tri;
-    let normal = cross3(sub3(b, a), sub3(c, a));
-    let normal_sq = dot3(normal, normal);
-    if !normal_sq.is_finite() || normal_sq < DEGENERATE_NORMAL_SQ {
-        scan_dilated_aabb(tri, axis_range, spec, count, occupancy);
-        return;
-    }
-    let k_axis = if normal[0].abs() >= normal[1].abs() && normal[0].abs() >= normal[2].abs() {
-        0
-    } else if normal[1].abs() >= normal[2].abs() {
-        1
-    } else {
-        2
-    };
-    let (p_axis, q_axis) = match k_axis {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
-    };
-    let n_k = normal[k_axis];
-    for i in axis_range[p_axis][0]..=axis_range[p_axis][1] {
-        for j in axis_range[q_axis][0]..=axis_range[q_axis][1] {
-            let mut wmin = f64::INFINITY;
-            let mut wmax = f64::NEG_INFINITY;
-            for dp in [-0.5, 0.5] {
-                for dq in [-0.5, 0.5] {
-                    let p = i as f64 + dp;
-                    let q = j as f64 + dq;
-                    let w = a[k_axis]
-                        - (normal[p_axis] * (p - a[p_axis]) + normal[q_axis] * (q - a[q_axis]))
-                            / n_k;
-                    wmin = wmin.min(w);
-                    wmax = wmax.max(w);
-                }
-            }
-            let k_lo = ((wmin - 0.5).ceil() as isize).max(axis_range[k_axis][0]);
-            let k_hi = ((wmax + 0.5).floor() as isize).min(axis_range[k_axis][1]);
-            if k_lo > k_hi {
+    let [outer, middle, inner] = candidate_axis_order(axis_range);
+    let whole = ColumnPolygon::triangle(&tri);
+    for i in axis_range[outer][0]..=axis_range[outer][1] {
+        let outer_slack = extent_slack(i as f64);
+        let column = whole.clipped_to_slab(
+            outer,
+            i as f64 - 0.5 - outer_slack,
+            i as f64 + 0.5 + outer_slack,
+        );
+        let Some((middle_low, middle_high)) = column.extent(middle) else {
+            continue;
+        };
+        let Some(middle_span) = candidate_index_span(middle_low, middle_high, axis_range[middle])
+        else {
+            continue;
+        };
+        for j in middle_span[0]..=middle_span[1] {
+            let middle_slack = extent_slack(j as f64);
+            let Some((inner_low, inner_high)) = column.slab_extent(
+                middle,
+                j as f64 - 0.5 - middle_slack,
+                j as f64 + 0.5 + middle_slack,
+                inner,
+            ) else {
                 continue;
-            }
-            for k in k_lo..=k_hi {
+            };
+            let Some(inner_span) = candidate_index_span(inner_low, inner_high, axis_range[inner])
+            else {
+                continue;
+            };
+            for k in inner_span[0]..=inner_span[1] {
                 let mut cell = [0_usize; 3];
-                cell[p_axis] = i as usize;
-                cell[q_axis] = j as usize;
-                cell[k_axis] = k as usize;
+                cell[outer] = i as usize;
+                cell[middle] = j as usize;
+                cell[inner] = k as usize;
                 let center = [cell[0] as f64, cell[1] as f64, cell[2] as f64];
                 *count += 1;
                 if triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]) {

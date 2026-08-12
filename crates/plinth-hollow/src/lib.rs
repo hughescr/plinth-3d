@@ -2042,7 +2042,10 @@ fn raster_work_item_count(
     max_work_items: usize,
 ) -> Result<usize, HollowError> {
     let mut count = 0_usize;
-    walk_raster_candidates(mesh, spec, |_cell, _overlaps| {
+    // The verdict is never asked for here: the count is candidate enumeration
+    // alone (see `walk_raster_candidates`), so this pass does not pay the
+    // 13-axis separating-axis test that the mark pass pays.
+    walk_raster_candidates(mesh, spec, |_candidate| {
         count = count
             .checked_add(1)
             .ok_or(HollowError::ResourceAccountingOverflow)?;
@@ -2071,20 +2074,19 @@ fn voxelize_filled(
     // voxel is marked when its axis-aligned cube (centred on the voxel, half
     // extent one pitch/2) exactly overlaps a source triangle, decided by the
     // 13-axis separating-axis test (`triangle_cube_overlaps`); candidate
-    // cells are enumerated by walking, for each triangle, the columns of its
-    // dilated index-space bounding box along the two axes orthogonal to the
-    // triangle's dominant normal axis, and for each column only the narrow
-    // span of the third axis the triangle's plane can reach there
-    // (`walk_triangle_candidates`). `binary_fill_holes`'s 6-connected exterior
-    // flood (`fill_voxel_holes`) is unchanged.
+    // cells are enumerated by clipping each triangle to the cell slabs of its
+    // own dilated index-space bounding box, one axis at a time, so that the
+    // cells offered to the exact test track the triangle rather than its
+    // bounding box (`walk_triangle_candidates`). `binary_fill_holes`'s
+    // 6-connected exterior flood (`fill_voxel_holes`) is unchanged.
     let mut occupancy = vec![false; spec.count];
     let mut observed_work_items = 0_usize;
-    walk_raster_candidates(mesh, spec, |cell, overlaps| {
+    walk_raster_candidates(mesh, spec, |candidate| {
         observed_work_items = observed_work_items
             .checked_add(1)
             .ok_or(HollowError::ResourceAccountingOverflow)?;
-        if overlaps {
-            mark_voxel_index(cell, spec, &mut occupancy)?;
+        if candidate.overlaps() {
+            mark_voxel_index(candidate.cell(), spec, &mut occupancy)?;
         }
         Ok(())
     })?;
@@ -2105,21 +2107,51 @@ fn voxelize_filled(
     })
 }
 
-/// Below this squared normal length a triangle is treated as degenerate
-/// (zero-area or numerically indistinguishable from it) and candidate
-/// generation falls back to a plain dilated-AABB scan rather than dividing by
-/// a near-zero dominant-axis normal component.
-const DEGENERATE_NORMAL_SQ: f64 = 1e-18;
+/// One candidate cell offered to a `walk_raster_candidates` visitor, carrying
+/// its overlap verdict **unevaluated**.
+///
+/// The count pass (`raster_work_item_count`) never calls [`Self::overlaps`],
+/// because the work-item count is candidate enumeration alone and candidate
+/// enumeration does not consult the verdict. Handing the verdict over as a
+/// value would therefore make every voxelization pay the 13-axis
+/// separating-axis test twice per candidate — once in a count pass that
+/// discards it, once in the mark pass that uses it — which is exactly the
+/// waste this type exists to remove. The two-pass `RasterWorkMismatch`
+/// contract is untouched: the candidate set still depends only on
+/// `(mesh, spec)`.
+#[derive(Clone, Copy)]
+struct RasterCandidate<'tri> {
+    tri: &'tri [[f64; 3]; 3],
+    cell: [usize; 3],
+}
+
+impl RasterCandidate<'_> {
+    const fn cell(self) -> [usize; 3] {
+        self.cell
+    }
+
+    /// The exact 13-axis separating-axis verdict for this candidate, costed
+    /// only when a caller asks for it.
+    fn overlaps(self) -> bool {
+        let center = [
+            self.cell[0] as f64,
+            self.cell[1] as f64,
+            self.cell[2] as f64,
+        ];
+        triangle_cube_overlaps(*self.tri, center, [0.5, 0.5, 0.5])
+    }
+}
 
 /// WORK ITEM = one candidate voxel cell tested against one triangle (not one
 /// cell marked). Both callers (`raster_work_item_count`, `voxelize_filled`)
-/// call `visit` once per candidate exactly, with the exact overlap verdict
-/// already decided, so the two passes agree on the count by construction —
-/// candidate generation depends only on `mesh` and `spec`, never on `visit`.
+/// call `visit` once per candidate exactly, so the two passes agree on the
+/// count by construction — candidate generation depends only on `mesh` and
+/// `spec`, never on `visit` and never on the overlap verdict, which is why
+/// the verdict travels unevaluated in [`RasterCandidate`].
 fn walk_raster_candidates(
     mesh: &Mesh,
     spec: GridSpec,
-    mut visit: impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
+    mut visit: impl FnMut(RasterCandidate<'_>) -> Result<(), HollowError>,
 ) -> Result<(), HollowError> {
     for triangle in mesh.tris() {
         let [ia, ib, ic] = *triangle;
@@ -2172,96 +2204,294 @@ fn dilated_index_aabb(
     Ok(axis_range)
 }
 
-/// Candidate cell enumeration for one triangle, in index space (see the
-/// `voxelize_filled` doc comment for the algorithm). Every candidate this
-/// walks is exactly SAT-tested, so over-generating candidates costs work but
-/// never marks a false positive; the correctness property that matters is
-/// that no cell overlapping the triangle is skipped (proven in the FU-50
-/// journal section this landed with).
+/// Relative index-space slack every clip slab and every clipped extent is
+/// widened by before it becomes an inclusive cell-index range.
+///
+/// **This is not a tolerance on any decision.** The overlap decision is the
+/// exact separating-axis test, unchanged; this only widens *candidate*
+/// generation, so it can add a candidate the exact test then rejects for
+/// free, and can never drop one. It is owed because the clipped extents come
+/// out of floating-point segment/plane intersections while the exact test
+/// reads the original triangle: a triangle edge that grazes a cell boundary
+/// exactly (`x + y == 210` touching the corner of the cell above it) rounds
+/// to a hair inside, and without this the walk drops that cell — measured, on
+/// a flat fan-base triangle, before the slack existed.
+///
+/// Relative, not absolute: index-space coordinates run to a few hundred on an
+/// admitted grid (300 mm printable extent over a 0.5 mm pitch), where an f64
+/// ulp is ~1e-13. One part in 1e9 is four orders above the rounding those
+/// intersections can produce and nine orders below one voxel.
+const CANDIDATE_EXTENT_SLACK: f64 = 1e-9;
+
+/// [`CANDIDATE_EXTENT_SLACK`] at the magnitude a value actually sits at,
+/// floored at one voxel so a coordinate near zero still gets slack.
+fn extent_slack(magnitude: f64) -> f64 {
+    CANDIDATE_EXTENT_SLACK * magnitude.abs().max(1.0)
+}
+
+/// Vertices the per-column clip buffer holds.
+///
+/// A triangle (3) clipped by one half-space keeps at most its inside
+/// vertices plus one point per boundary crossing; a 3-cycle has an even
+/// number of crossings, so at most 2, giving at most 4. A second half-space
+/// on that 4-cycle gives at most 4 + 4 = 8 by the same parity argument, which
+/// is the bound for the two half-spaces of one slab. Eight is therefore
+/// sufficient, not a guess — and [`ColumnPolygon::clip_half`] still returns
+/// `None` rather than dropping a vertex if it were ever exceeded, which the
+/// caller answers by keeping the *wider* unclipped polygon.
+const MAX_COLUMN_VERTICES: usize = 8;
+
+/// A triangle clipped to one index-space slab: the closed point cycle
+/// bounding the convex set `triangle ∩ slab`, in order.
+#[derive(Clone, Copy)]
+struct ColumnPolygon {
+    points: [[f64; 3]; MAX_COLUMN_VERTICES],
+    len: usize,
+}
+
+impl ColumnPolygon {
+    fn triangle(tri: &[[f64; 3]; 3]) -> Self {
+        let mut points = [[0.0_f64; 3]; MAX_COLUMN_VERTICES];
+        points[..3].copy_from_slice(tri);
+        Self { points, len: 3 }
+    }
+
+    fn push(&mut self, point: [f64; 3]) -> bool {
+        if self.len == MAX_COLUMN_VERTICES {
+            return false;
+        }
+        self.points[self.len] = point;
+        self.len += 1;
+        true
+    }
+
+    /// Sutherland–Hodgman against one axis-aligned half-space. `None` means
+    /// the buffer or the arithmetic could not represent the result; the
+    /// caller keeps the unclipped polygon, which is conservative.
+    fn clip_half(&self, axis: usize, bound: f64, keep_above: bool) -> Option<Self> {
+        let mut out = Self {
+            points: [[0.0_f64; 3]; MAX_COLUMN_VERTICES],
+            len: 0,
+        };
+        if self.len == 0 {
+            return Some(out);
+        }
+        let inside = |point: &[f64; 3]| {
+            if keep_above {
+                point[axis] >= bound
+            } else {
+                point[axis] <= bound
+            }
+        };
+        for index in 0..self.len {
+            let current = self.points[index];
+            let next = self.points[(index + 1) % self.len];
+            let current_inside = inside(&current);
+            if current_inside && !out.push(current) {
+                return None;
+            }
+            if current_inside == inside(&next) {
+                continue;
+            }
+            // The endpoints sit on opposite sides of `bound`, so their `axis`
+            // coordinates differ and this denominator is non-zero.
+            let ratio = ((bound - current[axis]) / (next[axis] - current[axis])).clamp(0.0, 1.0);
+            let mut crossing = [0.0_f64; 3];
+            for coordinate in 0..3 {
+                crossing[coordinate] =
+                    current[coordinate] + ratio * (next[coordinate] - current[coordinate]);
+            }
+            if !crossing.iter().all(|value| value.is_finite()) {
+                return None;
+            }
+            if !out.push(crossing) {
+                return None;
+            }
+        }
+        Some(out)
+    }
+
+    /// `self ∩ {lo <= x[axis] <= hi}`, or `self` itself when the clip could
+    /// not be represented (see [`Self::clip_half`]).
+    fn clipped_to_slab(&self, axis: usize, lo: f64, hi: f64) -> Self {
+        self.clip_half(axis, lo, true)
+            .and_then(|above| above.clip_half(axis, hi, false))
+            .unwrap_or(*self)
+    }
+
+    /// Inclusive `[min, max]` of `out_axis` over the part of this polygon
+    /// whose `slab_axis` coordinate lies in `[lo, hi]`, or `None` when that
+    /// part is empty.
+    ///
+    /// The polygon bounds a convex set, so an extremum of a linear coordinate
+    /// over its intersection with a slab is attained on its boundary cycle —
+    /// which is what this walks, one segment at a time, without materializing
+    /// a second clipped polygon.
+    fn slab_extent(
+        &self,
+        slab_axis: usize,
+        lo: f64,
+        hi: f64,
+        out_axis: usize,
+    ) -> Option<(f64, f64)> {
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for index in 0..self.len {
+            let start = self.points[index];
+            let end = self.points[(index + 1) % self.len];
+            let (mut first, mut last) = (0.0_f64, 1.0_f64);
+            let delta = end[slab_axis] - start[slab_axis];
+            if delta == 0.0 {
+                if start[slab_axis] < lo || start[slab_axis] > hi {
+                    continue;
+                }
+            } else {
+                let to_lo = (lo - start[slab_axis]) / delta;
+                let to_hi = (hi - start[slab_axis]) / delta;
+                let (near, far) = if delta > 0.0 {
+                    (to_lo, to_hi)
+                } else {
+                    (to_hi, to_lo)
+                };
+                first = first.max(near);
+                last = last.min(far);
+                if first > last {
+                    continue;
+                }
+            }
+            let span = end[out_axis] - start[out_axis];
+            for ratio in [first, last] {
+                let value = start[out_axis] + ratio * span;
+                if !value.is_finite() {
+                    return None;
+                }
+                low = low.min(value);
+                high = high.max(value);
+            }
+        }
+        (low <= high).then_some((low, high))
+    }
+
+    /// Inclusive `[min, max]` of `axis` over the whole polygon, or `None`
+    /// when it is empty.
+    fn extent(&self, axis: usize) -> Option<(f64, f64)> {
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for point in &self.points[..self.len] {
+            if !point[axis].is_finite() {
+                return None;
+            }
+            low = low.min(point[axis]);
+            high = high.max(point[axis]);
+        }
+        (low <= high).then_some((low, high))
+    }
+}
+
+/// The inclusive cell-index range on `axis` whose cubes can reach
+/// `[low, high]`, clamped to the triangle's already-dilated grid range.
+///
+/// Cell `n` covers `[n - 0.5, n + 0.5]`, so it can meet `[low, high]` only
+/// when `n >= low - 0.5` and `n <= high + 0.5`.
+fn candidate_index_span(low: f64, high: f64, clamp: [isize; 2]) -> Option<[isize; 2]> {
+    let slack = extent_slack(low.abs().max(high.abs()));
+    let first = (low - 0.5 - slack).ceil();
+    let last = (high + 0.5 + slack).floor();
+    if !first.is_finite() || !last.is_finite() {
+        return None;
+    }
+    let first = (first as isize).max(clamp[0]);
+    let last = (last as isize).min(clamp[1]);
+    (first <= last).then_some([first, last])
+}
+
+/// The three axes ordered by descending clamped index span, ties by axis
+/// index so the walk is deterministic.
+///
+/// The innermost axis is the one the triangle is *thinnest* along, which is
+/// what keeps the inner span short for a triangle that lies edge-on to it.
+fn candidate_axis_order(axis_range: [[isize; 2]; 3]) -> [usize; 3] {
+    let mut order = [0_usize, 1, 2];
+    let span = |axis: usize| axis_range[axis][1] - axis_range[axis][0];
+    order.sort_by(|left, right| span(*right).cmp(&span(*left)).then(left.cmp(right)));
+    order
+}
+
+/// Candidate cell enumeration for one triangle, in index space.
+///
+/// **Area-proportional, in every orientation (FU-50).** The walk clips the
+/// triangle to one cell slab at a time instead of sweeping its projected
+/// bounding box: for each cell column `i` on the outermost axis it takes
+/// `triangle ∩ slab(i)`, reads the *triangle's own* extent there to bound the
+/// middle axis, and for each cell `(i, j)` reads the triangle's extent inside
+/// that column to bound the innermost axis. A long thin sliver therefore
+/// costs work along its length in every direction, not the area of the
+/// bounding box it happens to span — the diagonal case a projected-AABB sweep
+/// pays `Θ(L²)` for while covering `Θ(L)` cells. Degenerate (zero-area,
+/// collinear or coincident) triangles need no special case and get none:
+/// clipping a degenerate triangle yields a degenerate polygon whose extents
+/// are still exact, so the old dilated-AABB fallback — `Θ(L³)` for a
+/// grid-spanning collinear triangle — is gone rather than merely narrowed.
+///
+/// **Completeness.** If cell `(i, j, k)` overlaps the triangle then some
+/// triangle point `x` lies in its cube, so `x` is in `triangle ∩ slab(i)`,
+/// making that clip non-empty; `x`'s middle coordinate lies within half a
+/// cell of `j`, so `j` is inside the span read off that clip; and `x` also
+/// lies in the `(i, j)` column, so `k` is inside the span read off it. Every
+/// overlapping cell is therefore enumerated, and each is decided by the exact
+/// test ([`RasterCandidate::overlaps`]) — over-generating candidates costs
+/// work but can never mark a false positive, and the marked-voxel set is
+/// exactly the set of cells whose cube truly overlaps a triangle, unchanged
+/// by how tightly candidates are generated.
 fn walk_triangle_candidates(
     tri: [[f64; 3]; 3],
     spec: GridSpec,
-    visit: &mut impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
+    visit: &mut impl FnMut(RasterCandidate<'_>) -> Result<(), HollowError>,
 ) -> Result<(), HollowError> {
     let axis_range = dilated_index_aabb(tri, spec)?;
     if axis_range.iter().any(|range| range[0] > range[1]) {
         return Ok(());
     }
+    let [outer, middle, inner] = candidate_axis_order(axis_range);
+    let whole = ColumnPolygon::triangle(&tri);
 
-    let [a, b, c] = tri;
-    let normal = cross3(sub3(b, a), sub3(c, a));
-    let normal_sq = dot3(normal, normal);
-    if !normal_sq.is_finite() || normal_sq < DEGENERATE_NORMAL_SQ {
-        return scan_dilated_aabb(tri, axis_range, visit);
-    }
-
-    let k_axis = if normal[0].abs() >= normal[1].abs() && normal[0].abs() >= normal[2].abs() {
-        0
-    } else if normal[1].abs() >= normal[2].abs() {
-        1
-    } else {
-        2
-    };
-    let (p_axis, q_axis) = match k_axis {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
-    };
-    let n_k = normal[k_axis];
-
-    for i in axis_range[p_axis][0]..=axis_range[p_axis][1] {
-        for j in axis_range[q_axis][0]..=axis_range[q_axis][1] {
-            let mut wmin = f64::INFINITY;
-            let mut wmax = f64::NEG_INFINITY;
-            for dp in [-0.5, 0.5] {
-                for dq in [-0.5, 0.5] {
-                    let p = i as f64 + dp;
-                    let q = j as f64 + dq;
-                    let w = a[k_axis]
-                        - (normal[p_axis] * (p - a[p_axis]) + normal[q_axis] * (q - a[q_axis]))
-                            / n_k;
-                    wmin = wmin.min(w);
-                    wmax = wmax.max(w);
-                }
-            }
-            if !wmin.is_finite() || !wmax.is_finite() {
-                return Err(HollowError::VoxelGridTooLarge);
-            }
-            let k_lo = ((wmin - 0.5).ceil() as isize).max(axis_range[k_axis][0]);
-            let k_hi = ((wmax + 0.5).floor() as isize).min(axis_range[k_axis][1]);
-            if k_lo > k_hi {
+    for i in axis_range[outer][0]..=axis_range[outer][1] {
+        // Both slabs are widened by `extent_slack` for the reason that
+        // constant documents: a clipped slab narrower than the cell it stands
+        // for can drop a triangle that grazes the cell's face exactly.
+        let outer_slack = extent_slack(i as f64);
+        let column = whole.clipped_to_slab(
+            outer,
+            i as f64 - 0.5 - outer_slack,
+            i as f64 + 0.5 + outer_slack,
+        );
+        let Some((middle_low, middle_high)) = column.extent(middle) else {
+            continue;
+        };
+        let Some(middle_span) = candidate_index_span(middle_low, middle_high, axis_range[middle])
+        else {
+            continue;
+        };
+        for j in middle_span[0]..=middle_span[1] {
+            let middle_slack = extent_slack(j as f64);
+            let Some((inner_low, inner_high)) = column.slab_extent(
+                middle,
+                j as f64 - 0.5 - middle_slack,
+                j as f64 + 0.5 + middle_slack,
+                inner,
+            ) else {
                 continue;
-            }
-            for k in k_lo..=k_hi {
+            };
+            let Some(inner_span) = candidate_index_span(inner_low, inner_high, axis_range[inner])
+            else {
+                continue;
+            };
+            for k in inner_span[0]..=inner_span[1] {
                 let mut cell = [0_usize; 3];
-                cell[p_axis] = i as usize;
-                cell[q_axis] = j as usize;
-                cell[k_axis] = k as usize;
-                let center = [cell[0] as f64, cell[1] as f64, cell[2] as f64];
-                let overlaps = triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]);
-                visit(cell, overlaps)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Fallback candidate generation for a degenerate (zero-area or non-finite
-/// normal) triangle: every cell in its own dilated bounding box, exactly
-/// SAT-tested. `axis_range` is already dilated and clamped, so this is small
-/// for the point- or edge-like triangles that reach it.
-fn scan_dilated_aabb(
-    tri: [[f64; 3]; 3],
-    axis_range: [[isize; 2]; 3],
-    visit: &mut impl FnMut([usize; 3], bool) -> Result<(), HollowError>,
-) -> Result<(), HollowError> {
-    for x in axis_range[0][0]..=axis_range[0][1] {
-        for y in axis_range[1][0]..=axis_range[1][1] {
-            for z in axis_range[2][0]..=axis_range[2][1] {
-                let cell = [x as usize, y as usize, z as usize];
-                let center = [x as f64, y as f64, z as f64];
-                let overlaps = triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]);
-                visit(cell, overlaps)?;
+                cell[outer] = i as usize;
+                cell[middle] = j as usize;
+                cell[inner] = k as usize;
+                visit(RasterCandidate { tri: &tri, cell })?;
             }
         }
     }
@@ -3658,6 +3888,23 @@ mod tests {
     /// The ruling's area-proportionality claim, pinned on the two smallest
     /// committed fixtures and checked against the corpus's own surface area
     /// rather than a remembered number.
+    ///
+    /// **Re-pinned when the slab-clipping walk replaced the projected-AABB
+    /// sweep** (the FU-50 follow-up fix). Both numbers move DOWN, and only
+    /// down: candidate generation got tighter, the marked-voxel set did not
+    /// move at all (it is decided by the exact test, not by how many
+    /// candidates reach it — `frozen_walker_marks_a_subset_of_the_area_
+    /// proportional_rasterizer` and `the_candidate_walk_enumerates_every_cell_
+    /// an_exhaustive_aabb_scan_marks` hold it in place), so no shell, cavity
+    /// or artifact changes with these counts.
+    ///
+    /// - `Sphere.prepped.oriented-solid.stl`: 161,491 → 30,802 work items,
+    ///   work/area-cells 32.2 → 6.14.
+    /// - `make_box.prepped.oriented-solid.stl`: 5,292 → 3,012 work items,
+    ///   work/area-cells 2.21 → 1.26.
+    ///
+    /// The per-fixture ratio bound is **tightened** with them, from a shared
+    /// 50.0 to 8.0 and 2.0: a bound that no longer bites is not a bound.
     #[test]
     fn raster_work_profile_is_area_proportional_and_pinned() {
         let settings = registered_settings();
@@ -3665,8 +3912,8 @@ mod tests {
         let cap = H0AdmissionLimits::production().max_raster_work_items();
 
         for (name, expected_work_items, max_ratio_to_area) in [
-            ("Sphere.prepped.oriented-solid.stl", 161_491_usize, 50.0_f64),
-            ("make_box.prepped.oriented-solid.stl", 5_292_usize, 50.0_f64),
+            ("Sphere.prepped.oriented-solid.stl", 30_802_usize, 8.0_f64),
+            ("make_box.prepped.oriented-solid.stl", 3_012_usize, 2.0_f64),
         ] {
             let mesh = frozen_mesh(name);
             let spec = grid_spec(&mesh, pitch).expect("grid spec");
@@ -3822,9 +4069,9 @@ mod tests {
 
     fn production_marked_set(mesh: &Mesh, spec: GridSpec) -> Vec<bool> {
         let mut occupancy = vec![false; spec.count];
-        walk_raster_candidates(mesh, spec, |cell, overlaps| {
-            if overlaps {
-                mark_voxel_index(cell, spec, &mut occupancy)?;
+        walk_raster_candidates(mesh, spec, |candidate| {
+            if candidate.overlaps() {
+                mark_voxel_index(candidate.cell(), spec, &mut occupancy)?;
             }
             Ok(())
         })
@@ -3861,6 +4108,206 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The maximal candidate set: every cell of every triangle's dilated
+    /// bounding box, exactly tested. Completeness by construction, and far
+    /// too expensive to ship — which is the point of comparing against it.
+    fn exhaustive_marked_set(mesh: &Mesh, spec: GridSpec) -> Vec<bool> {
+        let mut occupancy = vec![false; spec.count];
+        for triangle in mesh.tris() {
+            let tri = triangle.map(|index| {
+                to_index_space(mesh.verts()[index as usize], spec).expect("finite vertex")
+            });
+            let range = dilated_index_aabb(tri, spec).expect("bounded fixture");
+            if range.iter().any(|axis| axis[0] > axis[1]) {
+                continue;
+            }
+            for x in range[0][0]..=range[0][1] {
+                for y in range[1][0]..=range[1][1] {
+                    for z in range[2][0]..=range[2][1] {
+                        let center = [x as f64, y as f64, z as f64];
+                        if triangle_cube_overlaps(tri, center, [0.5, 0.5, 0.5]) {
+                            mark_voxel_index(
+                                [x as usize, y as usize, z as usize],
+                                spec,
+                                &mut occupancy,
+                            )
+                            .expect("clamped index");
+                        }
+                    }
+                }
+            }
+        }
+        occupancy
+    }
+
+    /// Adversarial triangles the corpus does not contain: a long diagonal
+    /// sliver, its axis-aligned twin, an exactly-collinear zero-area triangle
+    /// spanning the grid, a single-point triangle, and a fan-base-sized flat
+    /// triangle. Index space is world space here (unit pitch, origin at zero)
+    /// so the coordinates read as cell indices.
+    fn adversarial_raster_fixtures() -> Vec<(&'static str, Mesh, GridSpec)> {
+        let flat_spec = GridSpec {
+            origin: [0.0, 0.0, 0.0],
+            dims: [220, 220, 3],
+            pitch: 1.0,
+            count: 220 * 220 * 3,
+        };
+        let cube_spec = GridSpec {
+            origin: [0.0, 0.0, 0.0],
+            dims: [204, 204, 204],
+            pitch: 1.0,
+            count: 204 * 204 * 204,
+        };
+        let triangle = |points: [[f64; 3]; 3]| {
+            Mesh::new(points.to_vec(), vec![[0, 1, 2]]).expect("finite triangle")
+        };
+        vec![
+            (
+                "diagonal sliver",
+                triangle([
+                    [10.0, 10.0, 1.0],
+                    [210.0, 210.0, 1.0],
+                    [10.014_142_135_623_73, 9.985_857_864_376_27, 1.0],
+                ]),
+                flat_spec,
+            ),
+            (
+                "axis-aligned sliver",
+                triangle([[10.0, 10.0, 1.0], [210.0, 10.0, 1.0], [10.0, 10.02, 1.0]]),
+                flat_spec,
+            ),
+            (
+                "collinear grid diagonal",
+                triangle([
+                    [1.0, 1.0, 1.0],
+                    [202.0, 202.0, 202.0],
+                    [101.5, 101.5, 101.5],
+                ]),
+                cube_spec,
+            ),
+            (
+                "single point",
+                triangle([[7.25, 8.75, 1.5]; 3]),
+                flat_spec,
+            ),
+            (
+                "flat fan base",
+                triangle([[5.0, 5.0, 1.0], [205.0, 5.0, 1.0], [5.0, 205.0, 1.0]]),
+                flat_spec,
+            ),
+        ]
+    }
+
+    /// **Completeness, mechanically.** The slab-clipping walk's candidate set
+    /// is a superset of every cell that truly overlaps a triangle, so the
+    /// marked-voxel set it produces is *identical* to the one the maximal
+    /// (whole-bounding-box) candidate set produces — on committed fixtures and
+    /// on the adversarial aspect ratios alike. This is the property that lets
+    /// candidate generation be tightened without moving a single voxel of any
+    /// shell, and it is what makes the re-pinned work-item counts a pure cost
+    /// reduction.
+    #[test]
+    fn the_candidate_walk_enumerates_every_cell_an_exhaustive_aabb_scan_marks() {
+        // Reported as the first differing cell rather than as two 4-million
+        // entry vectors: a completeness failure is one voxel, and the failure
+        // message has to be able to name it.
+        fn compare(name: &str, mesh: &Mesh, spec: GridSpec) {
+            let walked = production_marked_set(mesh, spec);
+            let exhaustive = exhaustive_marked_set(mesh, spec);
+            let missed = walked
+                .iter()
+                .zip(&exhaustive)
+                .enumerate()
+                .filter(|(_, (walked, exhaustive))| **exhaustive && !**walked)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert!(
+                missed.is_empty(),
+                "{name}: the candidate walk missed {} of {} cells the exhaustive scan \
+                 marks; first at linear index {} of dims {:?}",
+                missed.len(),
+                exhaustive.iter().filter(|marked| **marked).count(),
+                missed[0],
+                spec.dims
+            );
+            assert_eq!(
+                walked, exhaustive,
+                "{name}: the candidate walk marked a cell the exhaustive scan does not — \
+                 impossible unless the exact test disagreed with itself"
+            );
+        }
+
+        let settings = registered_settings();
+        let pitch = settings.voxel_pitch_mm().get();
+        for name in [
+            "make_box.prepped.oriented-solid.stl",
+            "make_thin_fin.prepped.stl",
+            "make_toed_slab.prepped.stl",
+            "make_raking_blade.prepped.stl",
+            "make_overhang_table.prepped.stl",
+            "Cylinder.prepped.oriented-solid.stl",
+            "Sphere.prepped.oriented-solid.stl",
+        ] {
+            let mesh = frozen_mesh(name);
+            let spec = grid_spec(&mesh, pitch).expect("grid spec");
+            compare(name, &mesh, spec);
+        }
+        for (name, mesh, spec) in adversarial_raster_fixtures() {
+            compare(name, &mesh, spec);
+        }
+    }
+
+    /// **The shape-conditioned quadratic tail is gone, not narrowed.** A
+    /// projected-AABB sweep costs `Θ(bounding-box area)` per triangle, so a
+    /// long diagonal sliver with vanishing area still paid `Θ(L²)` — 20,736
+    /// work items for 358 overlapping cells on this exact fixture, 34× its
+    /// own axis-aligned twin. That is the geometry-conditioned cap-failure
+    /// growth law FU-50 was ruled to remove, and this pins that it is: work
+    /// tracks the cells the triangle actually covers, in EVERY orientation,
+    /// and a zero-area collinear triangle spanning the grid diagonal no
+    /// longer walks its `Θ(L³)` bounding box.
+    #[test]
+    fn candidate_work_tracks_covered_cells_at_every_aspect_ratio() {
+        let cap = H0AdmissionLimits::production().max_raster_work_items();
+        let mut work_by_name = std::collections::BTreeMap::new();
+        for (name, mesh, spec) in adversarial_raster_fixtures() {
+            let work = raster_work_item_count(&mesh, spec, cap).expect("bounded adversary");
+            let covered = production_marked_set(&mesh, spec)
+                .iter()
+                .filter(|marked| **marked)
+                .count();
+            assert!(
+                covered > 0,
+                "{name}: fixture must actually cover cells to be a meaningful bound"
+            );
+            assert!(
+                work <= covered * 8,
+                "{name}: {work} work items for {covered} covered cells is not \
+                 area-proportional"
+            );
+            work_by_name.insert(name, work);
+        }
+        // The diagonal and the axis-aligned sliver are the same length and
+        // the same width; only the rotation differs, so only a walk that is
+        // blind to orientation can charge them differently.
+        let diagonal = work_by_name["diagonal sliver"];
+        let axis_aligned = work_by_name["axis-aligned sliver"];
+        assert!(
+            diagonal <= axis_aligned * 3,
+            "a rotated sliver costs {diagonal} where its axis-aligned twin costs \
+             {axis_aligned}: candidate generation is still orientation-conditioned"
+        );
+        // A zero-area triangle spanning the 204³ grid diagonal used to walk
+        // its whole dilated bounding box (8,242,408 work items, half the
+        // production cap, from ONE triangle).
+        let collinear = work_by_name["collinear grid diagonal"];
+        assert!(
+            collinear <= 204 * 32,
+            "a collinear grid-diagonal triangle cost {collinear} work items: the \
+             degenerate fallback's cubic tail is back"
+        );
     }
 
     /// **FU-50's acceptance test.** `Round 50.stl` and `Round 100.stl` used to

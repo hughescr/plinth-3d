@@ -5,6 +5,125 @@ extended 2026-08-06 with the FU-8b resolution and owner ruling R6. This
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-12 — the rasterizer's shape-conditioned quadratic tail is removed, not narrowed: candidate generation follows the triangle instead of its bounding box {#hollow-raster-slab-clip-2026-08-12}
+
+<a id="hollow-raster-slab-clip-2026-08-12"></a>
+
+**A review finding against the FU-50 landing below, fixed.** The
+area-proportional rasterizer that landed with FU-50 still enumerated
+candidates by sweeping **every column of the triangle's projected bounding
+box** before the exact test rejected them. That is `Θ(projected-AABB area)`
+per triangle, not `Θ(triangle area)`, so a long thin sliver with vanishing
+area kept paying quadratically in its longest edge whenever it lay diagonal
+to the axes — the same growth law that produced the `Round 50`/`Round 100`
+cap failures, surviving in the rotated direction. Measured before the fix, on
+a 45° sliver of index length 200 and width 0.02: **20,736 work items for 358
+covered cells (57.9× waste), 34× the identical axis-aligned sliver**. The
+degenerate fallback was worse: one exactly-collinear zero-area triangle
+spanning a 204³ grid diagonal walked its whole dilated bounding box for
+**8,242,408 work items — 0.49× the unchanged cap, from a single triangle**.
+FU-50's ruling ordered an area-proportional rasterizer and rested its
+headroom argument on that property; the implementation's own header claimed
+area-proportionality it did not have in the diagonal regime.
+
+**The fix: clip, do not sweep.** `walk_triangle_candidates` now orders the
+three axes by descending clamped index span and, for each cell column on the
+outermost axis, clips the triangle to that cell slab, reads the *triangle's
+own* extent there to bound the middle axis, and for each `(i, j)` reads the
+triangle's extent inside that column to bound the innermost axis. Work
+therefore tracks the cells the triangle actually covers **in every
+orientation**. Clipping a degenerate triangle yields a degenerate polygon
+whose extents are still exact, so the zero-area/collinear special case and
+its `Θ(L³)` dilated-AABB fallback (`DEGENERATE_NORMAL_SQ`,
+`scan_dilated_aabb`) are **deleted** rather than narrowed. The inner extent
+is read off the column polygon's boundary cycle one segment at a time — an
+extremum of a linear coordinate over a convex set intersected with a slab is
+attained on that boundary — so no second polygon is materialized per cell.
+
+**Completeness, proven and mechanized.** If cell `(i, j, k)` overlaps the
+triangle then some triangle point lies in its cube; that point is in
+`triangle ∩ slab(i)`, so the clip is non-empty; its middle coordinate is
+within half a cell of `j`, so `j` is in the span read off that clip; and it
+lies in the `(i, j)` column, so `k` is in the span read off that. The new
+test `the_candidate_walk_enumerates_every_cell_an_exhaustive_aabb_scan_marks`
+checks this against the **maximal** candidate set (every cell of every
+triangle's dilated bounding box, exactly tested) on seven committed fixtures
+and five adversarial ones, asserting set *equality*, not a subset relation.
+
+**A real completeness defect was found by that test and fixed.** Clipped
+extents come from floating-point segment/plane intersections while the exact
+test reads the original triangle, so a triangle edge grazing a cell boundary
+exactly (`x + y == 210` touching the corner of the cell above it) rounded a
+hair inside and the walk dropped that cell — **6 of 20,501 cells on a flat
+fan-base triangle**. Every clip slab and every clipped extent is now widened
+by `CANDIDATE_EXTENT_SLACK` (relative, 1e-9, floored at one voxel). **This is
+not a tolerance on any decision**: the overlap verdict is still the exact
+13-axis separating-axis test, and a widening can only add a candidate the
+exact test then rejects for free.
+
+**The count pass stops paying for a verdict it discards.** The work-item
+count is candidate enumeration alone, and candidate enumeration never
+consults the overlap verdict — but both passes evaluated the full 13-axis SAT
+per candidate, and the count pass threw it away (verified surviving in the
+release build's post-optimization IR, which cannot delete the call). The
+verdict now travels **unevaluated**, as `RasterCandidate::overlaps()`; the
+count pass never calls it. The two-pass `RasterWorkMismatch` contract is
+untouched — the candidate set still depends only on `(mesh, spec)`.
+
+**The marked-voxel set does not move — measured, not argued.** The exact test
+decides marking, and both the old and new candidate sets contain every truly
+overlapping cell, so the marked set is identical. `raster_delta` re-run on the
+eight committed models plus `Round 50`/`Round 100` reproduces
+**`|new marked|` byte-for-byte identical to the table below** on all ten
+(20,058 / 2,402 / 18,363 / 5,866 / 7,457 / 12,515 / 7,584 / 79,974 / 21,794 /
+74,698), with `|old ∖ new| = 0` throughout. **No shell, cavity, drain, vent or
+artifact changes.** Nothing downstream was re-pinned, and nothing needed to be.
+
+**Work items, from → to** (same harness, same pitch, same unchanged cap
+16,777,216):
+
+| Model | FU-50 landing | this fix | ratio |
+|---|---|---|---|
+| Cylinder | 153,765 (0.0092x) | 34,579 (0.0021x) | 4.4× less |
+| make_box | 5,292 (0.0003x) | 3,012 (0.0002x) | 1.8× less |
+| make_overhang_table | 61,661 (0.0037x) | 22,446 (0.0013x) | 2.7× less |
+| make_raking_blade | 15,923 (0.0009x) | 6,933 (0.0004x) | 2.3× less |
+| make_thin_fin | 22,015 (0.0013x) | 8,972 (0.0005x) | 2.5× less |
+| make_toed_slab | 43,472 (0.0026x) | 15,690 (0.0009x) | 2.8× less |
+| Sphere | 161,491 (0.0096x) | 30,802 (0.0018x) | 5.2× less |
+| **Weeping Treant v1.2** | **9,406,259 (0.5607x)** | **1,173,406 (0.0699x)** | **8.0× less** |
+| Round 50 | 418,730 (0.0250x) | 99,910 (0.0060x) | 4.2× less |
+| Round 100 | 443,767 (0.0265x) | 120,417 (0.0072x) | 3.7× less |
+
+The `Weeping Treant` row is the one the FU-50 landing recorded honestly as a
+regression against the frozen walker (9,406,259 vs 4,454,823 old items,
+0.561x of cap). It is now **3.8× cheaper than the frozen walker it replaced**,
+so that regression is gone rather than merely tolerated. FU-50's acceptance
+test still passes and its margin widens: `Round 50` **1.150x → 0.0060x**,
+`Round 100` **1.340x → 0.0072x** of the cap that did not move.
+
+**Re-pinned, downward only.** `raster_work_profile_is_area_proportional_and_pinned`:
+`Sphere` **161,491 → 30,802** work items (work/area-cells **32.2 → 6.14**),
+`make_box` **5,292 → 3,012** (**2.21 → 1.26**). Its ratio bound is
+**tightened** with them, from a shared 50.0 to per-fixture 8.0 and 2.0 — a
+bound that no longer bites is not a bound. New coverage:
+`candidate_work_tracks_covered_cells_at_every_aspect_ratio` pins work against
+covered cells on the diagonal sliver, its axis-aligned twin, the collinear
+grid diagonal, a single-point triangle and a fan base, and asserts the
+rotated sliver cannot cost more than 3× its axis-aligned twin.
+
+**Nothing loosened.** `max_raster_work_items` (16,777,216),
+`DEFAULT_MAX_VOXEL_CELLS`, the savings floors, the support gate, the 6.0 mm
+contact radius, the 0.16 mm² island floor and the zero coverage tolerance are
+all untouched. The only bound that moved is a test bound, and it moved
+tighter.
+
+**Files**: `crates/plinth-hollow/src/lib.rs` (rasterizer, lazy verdict,
+re-pinned and new tests), `crates/plinth-hollow/examples/raster_delta.rs`
+(its verbatim copy of the production walker, kept verbatim).
+
+---
+
 ## 2026-08-12 — the requested wall is persisted on the top-level `HollowReport`, on every production path {#hollow-wall-field-2026-08-12}
 
 <a id="hollow-wall-field-2026-08-12"></a>
