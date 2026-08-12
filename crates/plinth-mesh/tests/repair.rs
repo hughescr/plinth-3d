@@ -68,7 +68,7 @@ fn a_clean_mesh_passes_through_byte_identical() {
         ("toed_slab", make_toed_slab().expect("slab"), false),
         ("thin_fin", make_thin_fin().expect("fin"), false),
     ] {
-        let repaired = repair_mesh(&mesh).expect("clean fixtures repair");
+        let repaired = repair_mesh(&mesh);
         assert!(
             !repaired.evidence().changed(),
             "{name}: a clean mesh must give the pre-pass nothing to do, got {}",
@@ -101,7 +101,7 @@ fn a_dust_shard_is_stripped_and_the_result_passes_the_gate() {
     );
     assert!(cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY) > 0);
 
-    let repaired = repair_mesh(&mesh).expect("shard repair");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert_eq!(
         evidence.shards.faces_removed.len(),
@@ -132,7 +132,7 @@ fn a_duplicate_face_is_dropped_and_the_result_passes_the_gate() {
     assert!(!gate_clean(&mesh));
     assert!(cut_faces(&mesh, TOPOLOGY_CUT_DUPLICATE) > 0);
 
-    let repaired = repair_mesh(&mesh).expect("duplicate repair");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert_eq!(evidence.duplicates.groups.len(), 1);
     let group = &evidence.duplicates.groups[0];
@@ -161,7 +161,7 @@ fn a_mixed_winding_duplicate_group_on_real_surface_keeps_one_face() {
     let mesh = make_triply_wound_face_box().expect("triple fixture");
     assert!(!gate_clean(&mesh));
 
-    let repaired = repair_mesh(&mesh).expect("duplicate repair");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert_eq!(evidence.duplicates.groups.len(), 1);
     let group = &evidence.duplicates.groups[0];
@@ -191,17 +191,17 @@ fn a_mixed_winding_duplicate_group_on_real_surface_keeps_one_face() {
 /// A free-floating 8 × 2 mm double-sided sheet is four duplicate groups whose
 /// neighbours are themselves duplicate groups. A cancellation rule judged only
 /// by "do the local edges come out clean" fires on every one of them
-/// independently — measured, before the bound: all four groups cancelled, the
-/// whole sheet was deleted, the residual came out **clean**, and a model the
-/// gate refuses became one it passes with 8 mm of the owner's geometry
-/// silently gone. The shard strip cannot catch it either; the sheet is thirty
-/// times the dust ceiling across.
+/// independently — measured: all four groups cancelled, the whole sheet was
+/// deleted, the residual came out **clean**, and a model the gate refuses
+/// became one it passes with 8 mm of the owner's geometry silently gone. The
+/// shard strip cannot catch it either; the sheet is thirty times the dust
+/// ceiling across.
 ///
-/// What must happen instead: the sheet is halved to one-sided, every group
-/// keeps a survivor, the sheet's extent is still in the mesh, and the open
-/// boundary that results is handed to the **unchanged** gate, which refuses it.
-/// A refusal that stays a refusal is the correct outcome here; it is FU-46's
-/// work item, not a licence to delete.
+/// What happens instead: the sheet is halved to one-sided by the one rule the
+/// spec authorized, every group keeps its first member, the sheet's extent is
+/// still in the mesh, and the open boundary that results is handed to the
+/// **unchanged** gate, which refuses it. A refusal that stays a refusal is the
+/// correct outcome here; it is FU-46's work item, not a licence to delete.
 #[test]
 fn a_doubled_sheet_is_halved_rather_than_deleted() {
     let mesh = make_doubled_sheet_box().expect("doubled-sheet fixture");
@@ -209,16 +209,20 @@ fn a_doubled_sheet_is_halved_rather_than_deleted() {
     let sheet_faces = mesh.tris().len() - 12;
     assert_eq!(sheet_faces, 8, "four triangles, each doubled");
 
-    let repaired = repair_mesh(&mesh).expect("repair runs");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert_eq!(evidence.duplicates.groups.len(), 4);
     for group in &evidence.duplicates.groups {
-        assert_ne!(
-            group.disposition,
-            DuplicateDisposition::Cancel,
-            "an edge-neighbour that is itself a duplicate group is not a licence to delete: {group:?}"
+        assert_eq!(
+            group.kept.len(),
+            1,
+            "every group keeps a survivor; there is no disposition that does not: {group:?}"
         );
-        assert_eq!(group.kept.len(), 1, "{group:?}");
+        assert_eq!(
+            group.disposition,
+            DuplicateDisposition::KeptFirstUnresolved,
+            "and says outright that keeping it did not resolve the shape: {group:?}"
+        );
     }
     assert_eq!(
         repaired.mesh().tris().len(),
@@ -253,41 +257,62 @@ fn a_doubled_sheet_is_halved_rather_than_deleted() {
     );
 }
 
-/// **A pre-pass may not empty a model.** A mesh that is nothing but one
-/// free-floating coincident flap plans its way to zero triangles: every face is
-/// removable and the rule that removes them is right about each one. Applying
-/// that is not a repair — `Mesh::new` refuses an empty face array, so the
-/// operator would get a stage-internal error attributed to their input, with no
-/// record of what was deleted. The plan is rolled back whole, the input comes
-/// back untouched, and the refusal is typed evidence.
+/// **No action this pass performs can empty a model, and this is the mesh that
+/// proves it.**
+///
+/// A whole model that is nothing but one free-floating coincident flap is the
+/// smallest input for which "delete what is removable" and "delete everything"
+/// are the same instruction. Under an earlier rule that deleted an edge-isolated
+/// coincident group outright it planned its way to zero triangles and had to be
+/// rolled back; under the one rule the spec authorized — keep the first — one
+/// face survives, the group is recorded as unresolved, and the single-triangle
+/// result is handed to the **unchanged** gate, which refuses it for the three
+/// boundary edges an unattached triangle genuinely has.
+///
+/// That refusal is the correct outcome and the work item (FU-46), not a
+/// licence: deleting the flap would take a model from gate-refused to
+/// gate-passed by removing the geometry being judged.
 #[test]
-fn a_plan_that_would_empty_the_mesh_is_refused_and_the_input_returned() {
+fn a_model_that_is_only_a_coincident_flap_keeps_a_face_and_is_left_to_the_gate() {
     let flap = Mesh::new(
         vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]],
         vec![[0, 1, 2], [0, 2, 1]],
     )
     .expect("a two-face flap is a mesh");
+    assert!(!gate_clean(&flap), "the fixture is refused to begin with");
 
-    let repaired = repair_mesh(&flap).expect("the refusal is evidence, not an error");
+    let repaired = repair_mesh(&flap);
     let evidence = repaired.evidence();
-    let refusal = evidence
-        .refused_to_empty
-        .expect("the pass says it refused rather than emptying the mesh");
-    assert_eq!(refusal.source_faces, 2);
-    assert_eq!(refusal.duplicate_faces_planned, 2);
     assert!(
-        !evidence.changed(),
-        "nothing was applied: {}",
+        evidence.refused_to_empty.is_none(),
+        "nothing planned its way to an empty mesh: {evidence:?}"
+    );
+    assert_eq!(evidence.duplicates.groups.len(), 1);
+    let group = &evidence.duplicates.groups[0];
+    assert_eq!(group.kept, vec![0], "the first by source order survives");
+    assert_eq!(group.removed, vec![1]);
+    assert_eq!(
+        group.disposition,
+        DuplicateDisposition::KeptFirstUnresolved,
+        "and the pass records that keeping it did not close anything"
+    );
+    assert_eq!(
+        repaired.mesh().tris().len(),
+        1,
+        "one triangle, not zero: {}",
         evidence.summary_line()
     );
     assert!(
-        evidence.summary_line().contains("APPLIED=none"),
-        "the card says so too: {}",
-        evidence.summary_line()
+        !gate_clean(repaired.mesh()),
+        "an unattached triangle is still refused, and that refusal is the work item"
     );
-    assert_eq!(repaired.mesh().verts(), flap.verts());
-    assert_eq!(repaired.mesh().tris(), flap.tris());
-    assert_eq!(evidence.repaired_faces, evidence.source_faces);
+    assert!(
+        evidence
+            .residual
+            .expect("a changed mesh is re-measured")
+            .boundary_faces
+            > 0
+    );
 }
 
 /// **A defect class this pass does not own, refused instead of performed.**
@@ -310,7 +335,7 @@ fn fans_severed_by_a_non_manifold_edge_are_refused_not_torn() {
     );
     assert!(cut_faces(&mesh, TOPOLOGY_CUT_POINT_ONLY) > 0);
 
-    let repaired = repair_mesh(&mesh).expect("repair runs");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert!(
         evidence.pinches.splits.is_empty(),
@@ -362,7 +387,7 @@ fn a_pinch_vertex_is_split_and_the_result_passes_the_gate() {
         "five triangles of one box and four of the other meet at the shared corner"
     );
 
-    let repaired = repair_mesh(&mesh).expect("pinch repair");
+    let repaired = repair_mesh(&mesh);
     let evidence = repaired.evidence();
     assert!(evidence.shards.faces_removed.is_empty());
     assert!(evidence.duplicates.groups.is_empty());
@@ -423,7 +448,7 @@ fn a_pinch_vertex_is_split_and_the_result_passes_the_gate() {
 /// repair.
 #[test]
 fn a_split_pinch_survives_the_f32_stl_round_trip() {
-    let repaired = repair_mesh(&make_pinched_boxes().expect("pinch fixture")).expect("repair");
+    let repaired = repair_mesh(&make_pinched_boxes().expect("pinch fixture"));
     let path = std::env::temp_dir().join(format!("plinth-repair-pinch-{}.stl", std::process::id()));
     write_binary_stl(&path, repaired.mesh()).expect("write");
     let reloaded = plinth_mesh::load_binary_stl(&path, WeldPolicy::None).expect("reload");
@@ -446,8 +471,8 @@ fn repairing_twice_is_bit_identical() {
         make_pinched_boxes().expect("pinch"),
         make_box_default().expect("clean"),
     ] {
-        let first = repair_mesh(&mesh).expect("first pass");
-        let second = repair_mesh(&mesh).expect("second pass");
+        let first = repair_mesh(&mesh);
+        let second = repair_mesh(&mesh);
         assert_eq!(first.mesh().verts(), second.mesh().verts());
         assert_eq!(first.mesh().tris(), second.mesh().tris());
         assert_eq!(first.evidence(), second.evidence());
@@ -463,8 +488,8 @@ fn repairing_a_repaired_mesh_is_a_no_op() {
         make_duplicated_face_box().expect("duplicate"),
         make_pinched_boxes().expect("pinch"),
     ] {
-        let once = repair_mesh(&mesh).expect("first pass").into_mesh();
-        let twice = repair_mesh(&once).expect("second pass");
+        let once = repair_mesh(&mesh).into_mesh();
+        let twice = repair_mesh(&once);
         assert!(
             !twice.evidence().changed(),
             "{}",

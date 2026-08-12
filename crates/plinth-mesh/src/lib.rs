@@ -28,8 +28,8 @@ pub use fixtures::{
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use repair::{
     repair_mesh, DuplicateDisposition, DuplicateFaceEvidence, DuplicateFaceGroup,
-    EmptyResultRefusal, PinchFanMove, PinchSplit, PinchSplitEvidence, RepairError, RepairEvidence,
-    RepairedMesh, ResidualTopology, ShardStripEvidence, UnrepairedPinch,
+    EmptyResultRefusal, PinchFanMove, PinchSplit, PinchSplitEvidence, RepairEvidence, RepairedMesh,
+    ResidualTopology, ShardStripEvidence, UnrepairedPinch,
 };
 pub use topology::{
     build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,

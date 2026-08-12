@@ -32,6 +32,20 @@
 //! 3. **Pinch-vertex split**, re-derived from a fresh topology whenever step 1
 //!    or 2 changed a face, for the same reason.
 //!
+//! **The pass may decline; it may never refuse.** [`repair_mesh`] returns a
+//! [`RepairedMesh`] and not a `Result`, and that signature is the invariant
+//! rather than a note about one: "declining to repair is always available;
+//! refusing a model never is" (the 2026-08-10 ruling, FU-45). This stage is
+//! mandatory and unconditional on the `prepare` chain, so *any* internal
+//! failure it could raise — a resource bound, a topology build, a triage
+//! arithmetic path, the constants registry — would be a **new refusal class
+//! invented by a repair**, which is the exact inversion of the ruling. So the
+//! whole pass, all three actions, is gated on one admission check up front, and
+//! every internal failure below it lands in
+//! [`RepairEvidence::actions_skipped`]: the caller gets its own mesh back, bit
+//! for bit, and the unchanged gates downstream judge exactly what they judged
+//! before this stage existed.
+//!
 //! **Byte-identity is a contract, not an optimization.** A mesh with none of
 //! the three defects is returned exactly as it arrived — same vertex order,
 //! same triangle order, same bits — so a clean model cannot be perturbed by a
@@ -119,15 +133,33 @@ pub struct RepairEvidence {
     /// what the actions *found*, and the returned mesh is the input, bit for
     /// bit. See [`EmptyResultRefusal`].
     pub refused_to_empty: Option<EmptyResultRefusal>,
+    /// Set when **no action ran at all**, with the reason.
+    ///
+    /// This is the one place a stage-internal failure can surface, because it
+    /// is the only place it is allowed to: the raw input is over the pass's
+    /// resource bound, or the topology, the triage or the constants registry
+    /// failed. Every row above is then empty by construction — they record what
+    /// the actions found, and no action looked — and the returned mesh is the
+    /// input, bit for bit.
+    ///
+    /// **It is not a refusal and must never be read as one.** The model goes on
+    /// to every stage below exactly as it did before this pre-pass existed, and
+    /// the unchanged gates judge it on its own geometry. What is lost is
+    /// *repair*, not admission: a model that would have been rescued here is
+    /// refused downstream for the defect it still carries, which is a capability
+    /// gap recorded on the card (FU-45) rather than a new refusal class.
+    pub actions_skipped: Option<String>,
 }
 
 impl RepairEvidence {
     /// Whether any action was **applied**. False means the returned mesh is
     /// the input, bit for bit — which includes the refuse-to-empty case, where
-    /// actions were planned and then deliberately not applied.
+    /// actions were planned and then deliberately not applied, and the
+    /// actions-skipped case, where no action ran at all.
     #[must_use]
     pub fn changed(&self) -> bool {
         self.refused_to_empty.is_none()
+            && self.actions_skipped.is_none()
             && (!self.shards.faces_removed.is_empty()
                 || !self.duplicates.groups.is_empty()
                 || !self.pinches.splits.is_empty())
@@ -135,22 +167,23 @@ impl RepairEvidence {
 
     /// A one-line rendering for a run report.
     ///
-    /// **The dispositions are on the card, not just the counts.** A removal
-    /// count cannot distinguish a group that kept a survivor from one deleted
-    /// outright — `dup-faces=2` reads identically whether one face of a stack
-    /// of three survived or a whole group of two went — and keep-none is the
-    /// one disposition that removes geometry with no representative left
-    /// behind. It is therefore counted in its own column, beside the
-    /// unresolved groups the pass had no reason to prefer an answer for.
+    /// **The dispositions are on the card, not just the counts.** Every group
+    /// keeps exactly one survivor — the first by deterministic order, which is
+    /// the only rule the spec authorized — so the removal count cannot say
+    /// whether the reduction actually *resolved* anything. `dup-keep-one`
+    /// counts the groups where keeping the first left the group's three edges
+    /// walked once in each direction; `dup-unresolved` counts the ones where it
+    /// did not, and which therefore reach the unchanged gate carrying a
+    /// residual. That distinction is the work item (FU-46), and it is invisible
+    /// in a face count.
     #[must_use]
     pub fn summary_line(&self) -> String {
         let mut line = format!(
-            "shard-faces={} dup-groups={} dup-faces={} dup-keep-one={} dup-keep-none={} dup-unresolved={} pinch-vertices={} pinch-copies={} unrepaired-pinches={}",
+            "shard-faces={} dup-groups={} dup-faces={} dup-keep-one={} dup-unresolved={} pinch-vertices={} pinch-copies={} unrepaired-pinches={}",
             self.shards.faces_removed.len(),
             self.duplicates.groups.len(),
             self.duplicates.faces_removed(),
             self.duplicates.groups_with(DuplicateDisposition::KeepOne),
-            self.duplicates.groups_with(DuplicateDisposition::Cancel),
             self.duplicates
                 .groups_with(DuplicateDisposition::KeptFirstUnresolved),
             self.pinches.splits.len(),
@@ -159,6 +192,9 @@ impl RepairEvidence {
         );
         if self.refused_to_empty.is_some() {
             line.push_str(" APPLIED=none (refused: the plan would have emptied the mesh)");
+        }
+        if let Some(reason) = &self.actions_skipped {
+            line.push_str(&format!(" APPLIED=none (skipped: {reason})"));
         }
         line
     }
@@ -174,6 +210,17 @@ impl RepairEvidence {
 /// removable" is a finding about the *pass*, not a repaired model. So the
 /// actions are rolled back whole, the input is returned untouched, and the
 /// unchanged gate refuses the model with this evidence attached.
+///
+/// **Under the rules as landed this cannot fire, and it is still checked.** The
+/// shard strip never strips the main component, the duplicate rule keeps the
+/// first member of every group, and the pinch split only ever appends — so
+/// every action leaves at least one face by construction. The check stays
+/// because "by construction" is an argument about today's three actions and the
+/// consequence of being wrong about it is a stage-internal error wearing the
+/// operator's filename. FU-46's open question is precisely whether an action
+/// that deletes a group with **no survivor** should exist; the day it is ruled
+/// in, this guard is what stops it emptying a model, and it is far easier to
+/// keep than to remember to add back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyResultRefusal {
@@ -250,34 +297,35 @@ pub struct DuplicateFaceGroup {
     pub disposition: DuplicateDisposition,
 }
 
-/// Why one duplicate group kept what it kept.
+/// What keeping the first member of one duplicate group actually achieved.
 ///
-/// A count of removed faces cannot tell a later reader whether the pass had a
-/// reason; this can.
+/// **Both variants keep the same face.** The spec authorized exactly one rule —
+/// "drop faces sharing an identical vertex triple, keeping the first by
+/// deterministic order" — so this enum does not choose *which* member lives; it
+/// records whether the one rule left the group's neighbourhood in a state a
+/// closed solid can be in. A count of removed faces cannot say that, and it is
+/// the difference between a group this pass finished and one the gate is about
+/// to refuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicateDisposition {
-    /// One member was kept because keeping it leaves every edge of the triple
-    /// walked exactly once in each direction — the coincident copies were
-    /// sitting on real surface.
+    /// The survivor leaves every edge of the triple walked exactly once in each
+    /// direction — the coincident copies were sitting on real surface, and
+    /// reducing them to one is the whole repair.
     KeepOne,
-    /// The whole group is deleted, because it is a **stack of one triangle
-    /// standing entirely on its own**: no face outside the group walks any of
-    /// its three edges, so it is a free-floating zero-volume flap and keeping
-    /// one member would leave three boundary edges the input did not have.
+    /// The survivor does **not** leave the local edges clean, so the group is a
+    /// residual: the plain rule still stood and the first member was still
+    /// kept, but the shape wants a wider answer than the spec authorized and
+    /// the unchanged gate gets to refuse it.
     ///
-    /// This is the only disposition that removes a group with no survivor, so
-    /// it is the only one that can delete geometry outright, and its
-    /// admissibility test is deliberately the strictest one available: *every*
-    /// edge of the triple untouched by anything else in the mesh. See
-    /// [`group_is_free_floating`] for why a weaker test — "the local edges come
-    /// out clean" — self-propagates across a doubled sheet and deletes it
-    /// whole.
-    Cancel,
-    /// No disposition left the local edges clean, so the plain rule stands —
-    /// keep the first by deterministic order — and the residual is left for
-    /// the unchanged gate to judge. This is the honest "the pass had no reason
-    /// to prefer either answer" record, not a repair.
+    /// **This is deliberately not a repair.** The two wider answers the review
+    /// examined — deleting an edge-isolated coincident stack outright with no
+    /// survivor, and keeping a *later*, opposite-wound member instead of the
+    /// first — both delete or re-orient geometry on rules the spec did not
+    /// authorize and the census found zero corpus incidence for. They are the
+    /// open scope question on FU-46, **owner ruling requested**; until it lands
+    /// the pass keeps the first, records the shape here, and the refusal is the
+    /// work item.
     KeptFirstUnresolved,
 }
 
@@ -422,31 +470,78 @@ impl ResidualTopology {
     }
 }
 
+/// Why the pre-pass ran **no** action on a mesh.
+///
+/// Deliberately private and deliberately not a `RepairError`: there is no such
+/// thing as a repair failure the caller has to handle, because there is no
+/// disposition this stage is allowed to produce other than "here is a mesh".
+/// Every variant below is rendered into [`RepairEvidence::actions_skipped`] and
+/// the caller's own mesh is handed back untouched.
 #[derive(Clone, Debug, Error, PartialEq)]
-pub enum RepairError {
-    #[error(transparent)]
-    Topology(#[from] TopologyError),
-    #[error(transparent)]
-    Mesh(#[from] MeshError),
-    #[error("the shard strip could not admit this mesh: {0}")]
+enum RepairSkipped {
+    #[error("the raw input is over the pre-pass's resource bound ({0})")]
     Admission(#[from] TriageAdmissionError),
-    #[error("the shard strip failed: {0}")]
+    #[error("the shard triage failed internally ({0})")]
     Triage(TriageError),
-    #[error("M0 constants publication failed during repair: {0}")]
+    #[error("the welded topology could not be built ({0})")]
+    Topology(#[from] TopologyError),
+    #[error("an intermediate mesh could not be constructed ({0})")]
+    Mesh(#[from] MeshError),
+    #[error("the M0 constants registry could not be published ({0})")]
     Constants(&'static M0ConstantsError),
 }
 
 /// Repair one loaded mesh, before anything downstream judges it.
 ///
 /// Returns the input unchanged, bit for bit, when the census's three defect
-/// classes are all absent.
-///
-/// # Errors
-///
-/// [`RepairError`] when the topology, the shard triage, or the constants
-/// registry cannot be read. A defect this pass cannot fix is **not** an error:
-/// it is recorded in [`RepairEvidence`] and left for the unchanged gate.
-pub fn repair_mesh(mesh: &Mesh) -> Result<RepairedMesh, RepairError> {
+/// classes are all absent — and **also** when the pass could not run at all, in
+/// which case [`RepairEvidence::actions_skipped`] says why. There is no error
+/// return, and that is the invariant, not an omission: this stage is mandatory
+/// on the `prepare` chain, so any failure it could raise would be a new hard
+/// refusal invented by a repair. A defect this pass cannot fix is likewise not
+/// an error — it is recorded in [`RepairEvidence`] and left for the unchanged
+/// gate.
+#[must_use]
+pub fn repair_mesh(mesh: &Mesh) -> RepairedMesh {
+    repair_mesh_within(mesh, TriageTopologyLimits::production())
+}
+
+/// [`repair_mesh`] with the resource bound named, so the skip path can be
+/// exercised by a test without moving the production ceiling.
+fn repair_mesh_within(mesh: &Mesh, limits: TriageTopologyLimits) -> RepairedMesh {
+    match run_repair(mesh, limits) {
+        Ok(repaired) => repaired,
+        Err(reason) => RepairedMesh {
+            mesh: mesh.clone(),
+            evidence: RepairEvidence {
+                source_faces: mesh.tris().len(),
+                source_vertices: mesh.verts().len(),
+                repaired_faces: mesh.tris().len(),
+                repaired_vertices: mesh.verts().len(),
+                actions_skipped: Some(format!(
+                    "{reason}; all three repair actions are skipped, no model is refused for it, and every stage below runs exactly as it did before this pre-pass existed"
+                )),
+                ..RepairEvidence::default()
+            },
+        },
+    }
+}
+
+/// The pass proper. Every `?` in here is a **skip**, never a refusal: the one
+/// caller above turns each of them into evidence and hands back the input.
+fn run_repair(mesh: &Mesh, limits: TriageTopologyLimits) -> Result<RepairedMesh, RepairSkipped> {
+    // **The resource bound gates the whole pass, not one action of it.**
+    //
+    // It used to guard only the shard strip, and the line after it built the
+    // welded face topology unconditionally on the same unbounded mesh -- a
+    // `BTreeMap` edge index over ~3x the face count plus a per-welded-vertex
+    // incidence map plus materialized pinch fans, which is *heavier* than the
+    // triage it was standing in for. A raw STL over the ceiling therefore
+    // skipped the cheap action and performed the expensive one anyway, and the
+    // bound's own ledger row (FU-45) claimed a protection it did not provide.
+    // So admission is proven once, here, before any input-proportional work at
+    // all, and the capability it returns is what action 1 consumes.
+    let admission = TriageTopologyAdmission::from_raw_mesh(mesh, limits)?;
     let cap_mm = pinch_split_cap_mm()?;
 
     let mut evidence = RepairEvidence {
@@ -461,7 +556,7 @@ pub fn repair_mesh(mesh: &Mesh) -> Result<RepairedMesh, RepairError> {
     // "still the caller's own arrays, untouched" -- until some action actually
     // removes a face, so the ~23 of 37 corpus models that need nothing never
     // pay for a copy of a mesh nothing is going to edit.
-    evidence.shards = strip_dust_shards(mesh, TriageTopologyLimits::production())?;
+    evidence.shards = strip_dust_shards(admission)?;
     let mut stage: Option<Mesh> = if evidence.shards.faces_removed.is_empty() {
         None
     } else {
@@ -620,9 +715,9 @@ fn refuse_to_empty(mesh: &Mesh, mut evidence: RepairEvidence) -> RepairedMesh {
 }
 
 /// The registered ceiling on one pinch-split displacement.
-fn pinch_split_cap_mm() -> Result<f64, RepairError> {
+fn pinch_split_cap_mm() -> Result<f64, RepairSkipped> {
     Ok(m0_constants()
-        .map_err(RepairError::Constants)?
+        .map_err(RepairSkipped::Constants)?
         .placeholders()
         .repair_pinch_split_max_mm()
         .diagnostic()
@@ -642,46 +737,31 @@ fn pinch_split_cap_mm() -> Result<f64, RepairError> {
 /// compacted `TriagedMesh` at raw size — ~459k faces on the largest corpus
 /// model — on every call and dropped it unread.
 ///
-/// **The admission limits are absolute, and exceeding them skips the action
-/// rather than refusing the model.** This call runs *pre-gate*, on every raw
-/// input the pipeline is handed — up to ~459k faces in the corpus and unbounded
-/// for arbitrary input — so it needs a resource bound before it starts
-/// input-proportional work. Limits derived from the mesh's own measured counts
-/// would make every comparison `n <= n` and could not refuse anything at all;
-/// the workspace has already found and fixed that exact defect shape once, and
+/// **The resource bound is proven by the caller, and it covers the whole
+/// pass.** This action runs *pre-gate*, on every raw input the pipeline is
+/// handed — up to ~459k faces in the corpus and unbounded for arbitrary input —
+/// so it needs a bound before it starts input-proportional work. It does not
+/// prove that bound itself: [`run_repair`] does, once, ahead of *every* action,
+/// and passes the admission capability in. That is not tidiness. The bound used
+/// to live here, and the topology build one line below it ran unconditionally
+/// on the same unbounded mesh — heavier work than the triage the bound was
+/// skipping — so an over-large input skipped the cheap action and paid for the
+/// expensive one. Taking the capability by value makes that shape
+/// unrepresentable: this function cannot run without one.
+///
+/// Limits derived from the mesh's own measured counts would make every
+/// comparison `n <= n` and could not refuse anything at all; the workspace has
+/// already found and fixed that exact defect shape once, and
 /// `PrepareResourcePolicy`'s own doc records the conclusion: a cap that scales
 /// with its own charge is not a cap. So the ceilings are the absolute ones from
-/// [`TriageTopologyLimits::production`].
-///
-/// **What that bound must not do is invent a refusal.** `prepare_one` runs
-/// load → repair → decimate → hollow, so `H0AdmissionLimits::production()` has
-/// only ever been applied to the ~50k-face *decimated* mesh on this chain,
-/// never to the raw file, and `plinth-decimate` has no comparable raw
-/// face-count admission. A >8M-face raw STL therefore used to decimate and
-/// prepare successfully, and turning this bound into a `RepairError` would have
-/// made the repair pre-pass — which is mandatory and unconditional on that
-/// chain — refuse it. That is a **new refusal class created by a repair**, the
-/// exact inversion of the 2026-08-10 ruling, and it is not what happens here:
-/// an input too large to triage cheaply has its shard strip **skipped and
-/// recorded**, the other two actions and every downstream stage run exactly as
-/// they did before this pre-pass existed, and the hollow stage's own H0
-/// boundary still applies where it always did. Declining to repair is always
-/// available to this pass; refusing a model never is. Recorded as FU-45.
+/// [`TriageTopologyLimits::production`], and what an input over them gets is
+/// **less repair, never less admission** — the pass is skipped and recorded,
+/// the model reaches every stage below exactly as it did before this pre-pass
+/// existed, and the hollow stage's own H0 boundary still applies where it
+/// always did. Recorded as FU-45.
 fn strip_dust_shards(
-    mesh: &Mesh,
-    limits: TriageTopologyLimits,
-) -> Result<ShardStripEvidence, RepairError> {
-    let admission = match TriageTopologyAdmission::from_raw_mesh(mesh, limits) {
-        Ok(admission) => admission,
-        Err(refusal) => {
-            return Ok(ShardStripEvidence {
-                skipped: Some(format!(
-                    "raw input is too large for the shard strip's resource bound ({refusal}); the strip is skipped, no model is refused for it, and the stages below run unchanged"
-                )),
-                ..ShardStripEvidence::default()
-            })
-        }
-    };
+    admission: TriageTopologyAdmission<'_>,
+) -> Result<ShardStripEvidence, RepairSkipped> {
     match admission.triage_summary(WeldPolicy::ExactBits) {
         Ok(summary) => Ok(ShardStripEvidence {
             components_stripped: summary.stripped_components().to_vec(),
@@ -704,13 +784,13 @@ fn strip_dust_shards(
     }
 }
 
-fn map_triage_error(error: TriageError) -> RepairError {
+fn map_triage_error(error: TriageError) -> RepairSkipped {
     match error {
-        TriageError::Admission(admission) => RepairError::Admission(admission),
-        TriageError::Topology(topology) => RepairError::Topology(topology),
-        TriageError::Mesh(mesh) => RepairError::Mesh(mesh),
-        TriageError::Constants(constants) => RepairError::Constants(constants),
-        other => RepairError::Triage(other),
+        TriageError::Admission(admission) => RepairSkipped::Admission(admission),
+        TriageError::Topology(topology) => RepairSkipped::Topology(topology),
+        TriageError::Mesh(mesh) => RepairSkipped::Mesh(mesh),
+        TriageError::Constants(constants) => RepairSkipped::Constants(constants),
+        other => RepairSkipped::Triage(other),
     }
 }
 
@@ -786,40 +866,42 @@ fn welded_triple(triangle: [u32; 3], weld_map: &[u32]) -> [u32; 3] {
     ]
 }
 
-/// Action 2: decide, in one pass, which member of each duplicate group lives.
+/// Action 2: drop every duplicate of a welded vertex triple, keeping the first
+/// by source order, and record what that achieved.
 ///
-/// **Why the disposition is decided per group instead of by a formula.** The
-/// obvious rules both break, and they break on the *same* input shape:
+/// **One rule, because exactly one was authorized.** The spec's words are "drop
+/// faces sharing an identical vertex triple, keeping the first by deterministic
+/// order", and that is the whole action: the survivor is always the earliest
+/// member, whatever its winding and whatever the neighbourhood looks like. Two
+/// wider rules were tried and are *not* here, both filed on FU-46 rather than
+/// landed:
 ///
-/// * *Keep the first, always.* Right for a face simply present twice. Wrong
-///   for a free-floating opposite-wound pair — a zero-volume flap attached to
-///   nothing — where the survivor is left holding three boundary edges the
-///   input did not have. A repair that opens a hole is not a repair.
-/// * *Reduce to `|f - r|` of the majority winding.* Right for that flap. Wrong
-///   whenever the coincident faces sit on real surface: a box face plus one
-///   reverse-wound copy of it cancels to nothing under `|f - r|`, and the box
-///   comes out with a hole where a load-bearing face used to be. Measured, not
-///   supposed: `f = 2, r = 1` on a box took `boundary_faces` from 0 to 3.
+/// * *Delete the group outright when it is edge-isolated.* This removes
+///   geometry with nothing left in its place — a 60 mm free-floating doubled
+///   triangle vanishes — and it can turn a gate **refusal into a pass** by
+///   deleting the geometry that was being refused. Reproduced on a box + flap
+///   model: `validate_closed_mesh` went `Err` to `Ok` with the owner's
+///   triangles gone.
+/// * *Keep a later, opposite-wound member when that leaves the local edges
+///   cleaner.* This is an orientation repair wearing a duplicate's label, for a
+///   defect class the census counted **zero** of (0 same-direction edges across
+///   all 21 models).
 ///
-/// The difference between the two cases is not in the group at all — it is in
-/// what the *rest of the mesh* does with the group's three edges. So that is
-/// what is consulted. For each candidate disposition, in a fixed order, every
-/// edge of the triple is checked against the faces outside the group: a
-/// disposition is *locally clean* when it leaves each of those edges walked
-/// exactly once in each direction (a closed, consistently oriented surface) or
-/// not walked at all (the edge disappears with the group). The first clean
-/// candidate wins; if none is clean the spec's plain rule — keep the first by
-/// deterministic order — stands and the residual goes to the unchanged gate,
-/// with the group recorded as [`DuplicateDisposition::KeptFirstUnresolved`] so
-/// the reader can see that a rule, not a repair, decided it.
+/// Neither is a thing to decide inside an implementation. Until the owner rules
+/// on FU-46 the conservative rule stands, and the shapes it cannot finish —
+/// a free-floating coincident stack, a doubled sheet — reach the unchanged gate
+/// and are refused there. Under the standing doctrine of the 2026-08-10 ruling
+/// that refusal *is* the correct outcome: it becomes the work item.
 ///
-/// The candidate order is total and index-based, so this is deterministic:
-/// keep the earliest member, then the earliest member of the other winding.
-/// **Keep-none is not one of these candidates** — deleting a group outright is
-/// the one action with no survivor, so it is admitted only for an edge-isolated
-/// stack and never by the local-cleanliness test; see
-/// [`choose_duplicate_disposition`] for the doubled-sheet cascade that rule
-/// exists to prevent.
+/// **What the local-edge check is still for.** Keeping the first member is not
+/// always enough to close the group's neighbourhood, and a face count cannot
+/// say which case a reader is looking at. So each group is measured against the
+/// faces *outside* it: the disposition is [`DuplicateDisposition::KeepOne`]
+/// when the survivor leaves all three edges of the triple walked exactly once
+/// in each direction (or not at all), and
+/// [`DuplicateDisposition::KeptFirstUnresolved`] when it does not. That is
+/// evidence, not a decision — the same face is kept either way — and it is what
+/// makes FU-46's residual class countable in a run report.
 ///
 /// The counts are measured against the mesh as it arrives at this action, so a
 /// group whose neighbours are themselves about to be reduced is judged against
@@ -832,9 +914,8 @@ fn welded_triple(triangle: [u32; 3], weld_map: &[u32]) -> [u32; 3] {
 /// groups first, and all 14 raw-refused models are rescued without it. On the
 /// probe's **decimated** column, which the pre-pass does not run on in
 /// production (FU-44), 14 models carry between 1 and 14 decimator-manufactured
-/// groups each; every one of them keeps a survivor and none is deleted
-/// outright. So the rule's evidence is the fixtures in `tests/repair.rs`, which
-/// is why they cover the load-bearing and free-floating shapes of both
+/// groups each. So the rule's evidence is the fixtures in `tests/repair.rs`,
+/// which is why they cover the load-bearing and free-floating shapes of both
 /// `f = 2, r = 0` and `f, r >= 1`, plus the doubled sheet, rather than a bare
 /// two-triangle universe.
 fn plan_duplicate_removal(
@@ -891,37 +972,19 @@ fn plan_duplicate_removal(
     evidence
 }
 
-/// The candidate dispositions, in the fixed order they are tried, and the
-/// verdict of the local edge check on each.
+/// The survivor — always the earliest member — and what keeping it achieved.
 ///
-/// **Keep-none is bounded separately, and much more tightly, than the other
-/// two.** Keeping a survivor can at worst leave a face where a face already
-/// was; keeping none *deletes geometry with nothing left in its place*, and the
-/// spec authorized only "drop faces sharing an identical vertex triple, keeping
-/// the first by deterministic order". So it is admitted on one narrow shape —
-/// [`group_is_free_floating`] — rather than on the local-cleanliness test the
-/// other candidates use, because that test self-propagates:
-///
-/// > On a doubled (double-sided) sheet, every neighbour of every group is
-/// > itself a duplicate group. Each shared edge is therefore walked once up and
-/// > once down by the *outside* faces alone, and each rim edge not at all — so
-/// > keep-none reads "locally clean" for every group independently, and the
-/// > whole sheet is deleted. Measured: a box plus a free-floating 8 × 2 mm
-/// > double-sided sheet (16 faces, 8 groups) lost the entire sheet, and the
-/// > residual came out clean, so a model the gate used to **refuse** now
-/// > **passes** with visible geometry silently gone. The shard strip's
-/// > six-criteria conjunction does not catch it (the sheet is 8 mm across,
-/// > thirty times the dust ceiling), and the scale is unbounded: a 100 mm
-/// > doubled cape deleted identically.
-///
-/// A free-floating group cannot do that, because the condition is about faces
-/// *outside* the group and is therefore not satisfiable by a neighbour that is
-/// also about to be reduced: the group's three edges must be untouched by
-/// anything else in the mesh at all. What that admits is exactly one shape — a
-/// stack of copies of a single triangle, joined to the rest of the model at
-/// vertices if at all — which is zero-volume by construction, since every
-/// member shares one welded triple. Anything larger keeps a survivor and goes
-/// to the gate.
+/// **This function chooses nothing.** `kept` is a fixed function of the group's
+/// source indices; only the [`DuplicateDisposition`] varies, and it is a
+/// measurement of the result rather than an input to it. Two earlier drafts did
+/// choose, and both are now FU-46's un-ruled scope question rather than landed
+/// behaviour: keeping a later opposite-wound member (an orientation repair for
+/// a defect class the census found zero of) and keeping **none** at all for an
+/// edge-isolated stack. The second is the one that mattered — it is the only
+/// rule in the pass that could delete geometry with no survivor, it had no size
+/// bound, and it could flip a gate refusal into a pass by deleting the geometry
+/// the gate was refusing. A pre-pass that can do that is not upstream of the
+/// gate, it is a hole in it.
 fn choose_duplicate_disposition(
     key: [u32; 3],
     forward: &[usize],
@@ -936,51 +999,17 @@ fn choose_duplicate_disposition(
         .copied()
         .min()
         .expect("a duplicate group has at least two members");
-    let earliest_is_forward = forward.first() == Some(&earliest_overall);
-    let other_winding = if earliest_is_forward {
-        reverse.first().copied()
+    let (keep_forward, keep_reverse) = if forward.first() == Some(&earliest_overall) {
+        (1, 0)
     } else {
-        forward.first().copied()
+        (0, 1)
     };
-
-    let mut candidates = vec![(vec![earliest_overall], earliest_is_forward)];
-    if let Some(other) = other_winding {
-        candidates.push((vec![other], !earliest_is_forward));
-    }
-
-    for (kept, keeps_forward) in &candidates {
-        let (keep_forward, keep_reverse) = if *keeps_forward { (1, 0) } else { (0, 1) };
-        if locally_clean(key, keep_forward, keep_reverse, edges, group) {
-            return (kept.clone(), DuplicateDisposition::KeepOne);
-        }
-    }
-    // Keep-none, admitted only on the one shape that cannot cascade.
-    if group_is_free_floating(key, edges, group) {
-        return (Vec::new(), DuplicateDisposition::Cancel);
-    }
-    (
-        vec![earliest_overall],
-        DuplicateDisposition::KeptFirstUnresolved,
-    )
-}
-
-/// Whether **nothing outside the group** walks any of the group's three welded
-/// edges.
-///
-/// This is the admissibility test for [`DuplicateDisposition::Cancel`], and it
-/// is strictly stronger than "keep-none is locally clean", which also accepts
-/// an edge walked once in each direction from outside. That weaker reading is
-/// what let a doubled sheet delete itself group by group: each group's
-/// neighbours were themselves duplicate groups supplying exactly that one-up,
-/// one-down pair. Requiring zero outside occurrences makes the test unsatisfiable
-/// for a group with any edge-neighbour, duplicate or not, so a cancellation can
-/// never be justified by geometry that is itself about to be removed — and
-/// bounds what keep-none can delete to a single edge-isolated coincident stack.
-fn group_is_free_floating(key: [u32; 3], edges: &WeldedEdges, group: &BTreeSet<usize>) -> bool {
-    let [a, b, c] = key;
-    [(a, b), (b, c), (a, c)]
-        .into_iter()
-        .all(|edge| edges.outside(edge, group) == (0, 0))
+    let disposition = if locally_clean(key, keep_forward, keep_reverse, edges, group) {
+        DuplicateDisposition::KeepOne
+    } else {
+        DuplicateDisposition::KeptFirstUnresolved
+    };
+    (vec![earliest_overall], disposition)
 }
 
 /// Whether keeping `keep_forward` forward and `keep_reverse` reverse members of
@@ -1045,6 +1074,21 @@ fn is_forward(triple: [u32; 3], ascending: [u32; 3]) -> bool {
 /// at the vertex is therefore checked first, and a vertex with any unaccepted
 /// one is refused as [`UnrepairedPinch::FanSeveredByEdge`] and left to the
 /// gate.
+///
+/// **A copy has to land somewhere nothing already is — anywhere in the mesh,
+/// not just at this pinch.** The distinguishability test used to run against
+/// the pinch's own position and its own already-moved copies alone, which is a
+/// test of the wrong set: a copy nudged onto a bit-exact match with some
+/// *unrelated* vertex re-fuses under `WeldPolicy::ExactBits` and creates a
+/// fresh point contact at the destination, while [`PinchSplitEvidence`] records
+/// an unqualified success. Reproduced: `pinch-vertices=1 unrepaired-pinches=0`
+/// on a mesh whose residual still carried seven point-only faces. The residual
+/// and the gate stayed honest, but the split's own provenance did not — and
+/// false provenance sits on exactly the path the standing doctrine turns into
+/// work items. So one [`PositionRegistry`] of every position in the mesh is
+/// gathered up front (D-37: one batched pass, not a scan per candidate) and
+/// every candidate is tested against it, with each committed copy joining the
+/// registry so later pinches cannot land on earlier ones either.
 fn split_pinch_vertices(
     topology: &crate::FaceTopology,
     edges: &WeldedEdges,
@@ -1058,6 +1102,11 @@ fn split_pinch_vertices(
     // place would let the second pinch read a corner the first one already
     // repointed -- an index past the end of this topology's weld map.
     let mut evidence = PinchSplitEvidence::default();
+    // One gather over the whole vertex array, read by every candidate of every
+    // pinch. The alternative -- re-scanning `verts` per candidate -- is the
+    // per-item hot-path call D-37 forbids, and at 459k vertices times 113
+    // pinches it is not a micro-optimization.
+    let mut registry = PositionRegistry::build(verts);
     for pinch in topology.point_only_vertices() {
         let welded_vertex = pinch.welded_vertex();
         // Gather each fan's corner sites once, and refuse the whole pinch if
@@ -1118,17 +1167,22 @@ fn split_pinch_vertices(
         // Plan every fan before touching the arrays: a pinch is repaired whole
         // or not at all, so a fan that cannot be separated cannot leave the
         // vertex half-split.
+        // `tentative` holds this pinch's own copies until the pinch is applied
+        // whole. They cannot go straight into the registry, because a pinch
+        // that fails on a later fan is abandoned entirely -- and a registry
+        // holding positions no vertex ever took would make a later pinch step
+        // around geometry that is not there.
         let mut planned: Vec<(usize, [f64; 3], PinchFanMove)> = Vec::new();
-        let mut occupied = vec![position];
+        let mut tentative: Vec<[f64; 3]> = Vec::new();
         let mut failure = None;
         for (index, sites) in fan_sites.iter().enumerate().skip(1) {
             let Some(direction) = fan_mean_normal(verts, tris, sites) else {
                 failure = Some(UnrepairedPinch::NoFanDirection { welded_vertex });
                 break;
             };
-            match separate(position, direction, &occupied, cap_mm) {
+            match separate(position, direction, &tentative, &registry, cap_mm) {
                 Ok((moved, steps, displacement)) => {
-                    occupied.push(moved);
+                    tentative.push(moved);
                     planned.push((
                         index,
                         moved,
@@ -1177,6 +1231,9 @@ fn split_pinch_vertices(
         for (index, moved, record) in planned {
             let new_vertex =
                 u32::try_from(next_vertex_id(&plan)).expect("headroom checked for this pinch");
+            // Committed now, and only now: this position is real geometry from
+            // here on, so no later pinch may land a copy on it.
+            registry.insert(moved);
             plan.appended.push(moved);
             for &(face, corner) in &fan_sites[index] {
                 plan.rewrites.push((face, corner, new_vertex));
@@ -1237,8 +1294,15 @@ fn fan_mean_normal(
 }
 
 /// The smallest power-of-two ULP multiple that moves `position` along
-/// `direction` to a point distinguishable from every already-`occupied` copy,
-/// with a realized displacement at or below `cap_mm`.
+/// `direction` to a point distinguishable from **every position the mesh
+/// already has** — those in `registry` plus this pinch's own not-yet-committed
+/// `tentative` copies — with a realized displacement at or below `cap_mm`.
+///
+/// **Both sets are load-bearing.** Testing only against the pinch's own copies
+/// lets a candidate land bit-exactly on an unrelated vertex, where the
+/// exact-bit weld re-fuses it and the evidence reports a split that did not
+/// happen; testing only against the registry lets two fans of the same pinch
+/// stack, since neither is committed until the pinch is applied whole.
 ///
 /// **The moved copy lands on an exact f32 grid point.** `write_binary_stl`
 /// refuses outright to encode a coordinate that is not exactly representable
@@ -1251,7 +1315,8 @@ fn fan_mean_normal(
 fn separate(
     position: [f64; 3],
     direction: [f64; 3],
-    occupied: &[[f64; 3]],
+    tentative: &[[f64; 3]],
+    registry: &PositionRegistry,
     cap_mm: f64,
 ) -> Result<([f64; 3], u32, f64), SeparationRefusal> {
     let step = f32_ulp_at(position);
@@ -1292,7 +1357,8 @@ fn separate(
             });
         }
         if candidate.iter().all(|value| value.is_finite())
-            && occupied
+            && !registry.occupied(candidate)
+            && tentative
                 .iter()
                 .all(|other| distinguishable(candidate, *other))
         {
@@ -1371,25 +1437,71 @@ fn snap_to_f32(point: [f64; 3]) -> [f64; 3] {
 /// is not a separation — and still distinct after the f32 round trip a binary
 /// STL will perform on them.
 fn distinguishable(left: [f64; 3], right: [f64; 3]) -> bool {
-    let bits = |point: [f64; 3]| {
-        point.map(|coordinate| {
-            if coordinate == 0.0 {
-                0.0_f64.to_bits()
-            } else {
-                coordinate.to_bits()
-            }
-        })
-    };
-    let narrowed = |point: [f64; 3]| {
-        point.map(|coordinate| {
-            if coordinate == 0.0 {
-                0.0_f32.to_bits()
-            } else {
-                (coordinate as f32).to_bits()
-            }
-        })
-    };
-    bits(left) != bits(right) && narrowed(left) != narrowed(right)
+    exact_key(left) != exact_key(right) && narrowed_key(left) != narrowed_key(right)
+}
+
+/// The exact-bit weld's own key, with signed zero canonicalized the way
+/// `WeldPolicy::ExactBits` canonicalizes it.
+fn exact_key(point: [f64; 3]) -> [u64; 3] {
+    point.map(|coordinate| {
+        if coordinate == 0.0 {
+            0.0_f64.to_bits()
+        } else {
+            coordinate.to_bits()
+        }
+    })
+}
+
+/// The same key after the f32 narrowing a binary STL performs, which is the
+/// second way a split can be undone.
+fn narrowed_key(point: [f64; 3]) -> [u32; 3] {
+    point.map(|coordinate| {
+        if coordinate == 0.0 {
+            0.0_f32.to_bits()
+        } else {
+            (coordinate as f32).to_bits()
+        }
+    })
+}
+
+/// Every position the mesh already holds, keyed both ways a split can be
+/// undone, so a candidate can be tested in a lookup instead of a scan.
+///
+/// **Why a set and not a slice.** The question a candidate has to answer is
+/// "does *anything* in this mesh already sit here", and answering it by walking
+/// the vertex array once per candidate is the per-item hot-path call D-37
+/// forbids: 459k vertices × 113 pinches × the ULP escalation. One gather up
+/// front, `O(log n)` per candidate, and the two keys are exactly the two
+/// equalities [`distinguishable`] tests — no third notion of "same point"
+/// exists here to drift.
+struct PositionRegistry {
+    exact: BTreeSet<[u64; 3]>,
+    narrowed: BTreeSet<[u32; 3]>,
+}
+
+impl PositionRegistry {
+    /// One batched pass over the vertex array.
+    fn build(verts: &[[f64; 3]]) -> Self {
+        let mut exact = BTreeSet::new();
+        let mut narrowed = BTreeSet::new();
+        for vertex in verts {
+            exact.insert(exact_key(*vertex));
+            narrowed.insert(narrowed_key(*vertex));
+        }
+        Self { exact, narrowed }
+    }
+
+    fn insert(&mut self, position: [f64; 3]) {
+        self.exact.insert(exact_key(position));
+        self.narrowed.insert(narrowed_key(position));
+    }
+
+    /// Whether `candidate` would collide with something already here — under
+    /// the exact-bit weld, or after the STL round trip. Either one re-fuses it.
+    fn occupied(&self, candidate: [f64; 3]) -> bool {
+        self.exact.contains(&exact_key(candidate))
+            || self.narrowed.contains(&narrowed_key(candidate))
+    }
 }
 
 /// One f32 ULP at this position's largest coordinate magnitude — the finest
@@ -1472,6 +1584,36 @@ mod tests {
         ));
     }
 
+    /// The empty-result guard, exercised directly because no action this pass
+    /// performs can reach it any more — every one of the three leaves at least
+    /// one face by construction. It is kept for the rule FU-46 might rule in,
+    /// so what it *does* is pinned: roll everything back, hand the caller its
+    /// own mesh, and say so on the card.
+    #[test]
+    fn the_empty_result_guard_rolls_back_whole_and_returns_the_input() {
+        let mesh = crate::make_box_default().expect("box");
+        let evidence = RepairEvidence {
+            source_faces: mesh.tris().len(),
+            source_vertices: mesh.verts().len(),
+            shards: ShardStripEvidence {
+                faces_removed: (0..mesh.tris().len()).collect(),
+                ..ShardStripEvidence::default()
+            },
+            ..RepairEvidence::default()
+        };
+        let refused = refuse_to_empty(&mesh, evidence);
+        let refusal = refused
+            .evidence()
+            .refused_to_empty
+            .expect("the guard records itself");
+        assert_eq!(refusal.source_faces, 12);
+        assert_eq!(refusal.shard_faces_planned, 12);
+        assert!(!refused.evidence().changed(), "nothing was applied");
+        assert_eq!(refused.mesh().verts(), mesh.verts());
+        assert_eq!(refused.mesh().tris(), mesh.tris());
+        assert!(refused.evidence().summary_line().contains("APPLIED=none"));
+    }
+
     #[test]
     fn signed_zero_is_not_a_separation() {
         // The exact-bit weld canonicalizes signed zero, so a "move" that only
@@ -1547,13 +1689,20 @@ mod tests {
         }
     }
 
-    /// **The case a blanket keep-first gets wrong.** Nothing outside the group
-    /// walks any of its edges, so whichever member survived would be an
-    /// unattached triangle with three boundary edges the input did not have.
-    /// This is the *entire* licence keep-none has: one edge-isolated stack of
-    /// copies of a single triangle.
+    /// **The shape the pass deliberately does not finish.** Nothing outside the
+    /// group walks any of its edges, so the survivor is an unattached triangle
+    /// holding three boundary edges the input did not have — which the gate
+    /// refuses, correctly, and which is the work item.
+    ///
+    /// Deleting the group outright instead would "fix" it, and that is exactly
+    /// the rule this pass must not have: it is the one disposition with no
+    /// survivor, it has no size bound (a 60 mm free-floating doubled triangle
+    /// goes the same way as a 0.2 mm one), and it can take a mesh from gate
+    /// `Err` to gate `Ok` by deleting the geometry being refused. The spec
+    /// authorized keep-the-first and nothing else; widening it is FU-46's
+    /// **owner ruling requested**, not an implementation's call.
     #[test]
-    fn a_free_floating_coincident_group_cancels_outright() {
+    fn a_free_floating_coincident_group_keeps_the_first_and_goes_to_the_gate() {
         for tris in [
             vec![[0_u32, 1, 2], [0, 2, 1]], // the zero-volume flap
             vec![[0_u32, 1, 2], [0, 1, 2]], // and a coincident same-wound pair
@@ -1562,12 +1711,39 @@ mod tests {
             assert_eq!(evidence.groups.len(), 1, "{tris:?}");
             assert_eq!(
                 evidence.groups[0].disposition,
-                DuplicateDisposition::Cancel,
+                DuplicateDisposition::KeptFirstUnresolved,
                 "{tris:?}"
             );
-            assert!(evidence.groups[0].kept.is_empty(), "{tris:?}");
-            assert_eq!(evidence.groups[0].removed, vec![0, 1], "{tris:?}");
+            assert_eq!(evidence.groups[0].kept, vec![0], "{tris:?}");
+            assert_eq!(evidence.groups[0].removed, vec![1], "{tris:?}");
         }
+    }
+
+    /// **The winding does not buy a later member the survivorship either.** The
+    /// earliest face here is reverse-wound against its neighbours, so keeping
+    /// it leaves the local edges dirty and keeping face 12 instead would leave
+    /// them clean. That preference is an orientation repair for a defect class
+    /// the census counted zero of, so it is not made: the first is kept, the
+    /// group is recorded as unresolved, and FU-46 carries the question.
+    #[test]
+    fn a_later_member_is_not_promoted_for_having_the_better_winding() {
+        let mesh = crate::make_box_default().expect("box");
+        let mut tris = mesh.tris().to_vec();
+        // Flip face 0 in place and append a correctly wound copy after it.
+        let original = tris[0];
+        tris[0] = [original[0], original[2], original[1]];
+        tris.push(original);
+        let weld_map = (0..mesh.verts().len() as u32).collect::<Vec<_>>();
+        let evidence = plan(&tris, &weld_map);
+        assert_eq!(evidence.groups.len(), 1);
+        let group = &evidence.groups[0];
+        assert_eq!(group.kept, vec![0], "the first by source order, full stop");
+        assert_eq!(group.removed, vec![12]);
+        assert_eq!(
+            group.disposition,
+            DuplicateDisposition::KeptFirstUnresolved,
+            "and the pass says outright that keeping it did not close the box"
+        );
     }
 
     /// A whole shell present twice has no locally clean disposition — every
@@ -1593,14 +1769,15 @@ mod tests {
         }
     }
 
-    /// **The cascade, at the level the rule is written.** Two triangles of a
-    /// double-sided sheet, each present forward and reverse. Judged only by
-    /// local cleanliness, keep-none is clean for *both* groups — each one's
-    /// shared edge is walked once up and once down by the other group's two
-    /// faces, and each rim edge by nobody — so both cancel and the sheet is
-    /// deleted. The free-floating requirement is not satisfiable here, because
-    /// the neighbours that make the edges look clean are inside the mesh, not
-    /// outside the group.
+    /// **The cascade any keep-none rule has to survive, kept as a regression
+    /// even though no keep-none rule is landed.** Two triangles of a
+    /// double-sided sheet, each present forward and reverse. Judged by local
+    /// cleanliness, deleting a group outright reads "clean" for *both* of them
+    /// — each one's shared edge is walked once up and once down by the other
+    /// group's two faces, and each rim edge by nobody — so both would cancel
+    /// and the whole sheet would go. Every group here keeps its first member;
+    /// the sheet is halved, its extent survives, and the open boundary that
+    /// results is the unchanged gate's to refuse (FU-46).
     #[test]
     fn a_doubled_sheet_is_halved_and_never_cancelled() {
         let tris = vec![[0_u32, 2, 1], [0, 1, 2], [1, 2, 3], [1, 3, 2]];
@@ -1632,26 +1809,54 @@ mod tests {
         assert!(evidence.groups.is_empty());
     }
 
-    /// **An input too large for the strip's resource bound is skipped, not
-    /// refused.** The pre-pass is mandatory and unconditional on the `prepare`
-    /// chain, which runs load -> repair -> decimate -> hollow: a raw input
-    /// larger than the triage admission ceiling used to reach the decimator and
-    /// prepare successfully, so turning that ceiling into a repair *error*
-    /// would create a refusal class that never existed — a repair pass refusing
-    /// a model it was added to help. The production ceilings are far too large
-    /// to build a fixture for, so the boundary is exercised through the
-    /// parameter production passes: nothing is loosened, because
-    /// [`repair_mesh`] still hands it [`TriageTopologyLimits::production`].
+    /// **An input over the resource bound skips the WHOLE pass, and is never
+    /// refused for it.**
+    ///
+    /// Two claims, and the second is the one the review found broken. (1) A
+    /// raw input larger than the triage admission ceiling used to reach the
+    /// decimator and prepare successfully — `prepare_one` runs load → repair →
+    /// decimate → hollow and no raw face-count admission existed on that chain
+    /// — so turning the ceiling into a repair *error* would create a refusal
+    /// class that never existed. It does not: the mesh comes back bit-identical
+    /// with a reason on the card. (2) The bound has to cover every action, not
+    /// just the triage: it used to guard the shard strip alone while the line
+    /// below built the welded face topology on the same unbounded mesh, which
+    /// is the heavier of the two, so an over-large input skipped the cheap work
+    /// and did the expensive work anyway. Nothing runs now — no strip, no
+    /// topology, no duplicate index, no pinch fan.
+    ///
+    /// The production ceilings are far too large to build a fixture for, so the
+    /// boundary is exercised through the parameter production passes: nothing
+    /// is loosened, because [`repair_mesh`] still hands
+    /// [`repair_mesh_within`] the [`TriageTopologyLimits::production`] values.
     #[test]
-    fn an_input_over_the_strips_resource_bound_skips_the_strip_instead_of_refusing() {
+    fn an_input_over_the_resource_bound_skips_every_action_instead_of_refusing() {
         let mesh = crate::make_dust_shard_box().expect("shard fixture");
         let refused_everything = TriageTopologyLimits::new(1, 1, 1, 1, 1, 1);
-        let evidence = strip_dust_shards(&mesh, refused_everything)
-            .expect("an over-large input is not an error");
-        let skipped = evidence.skipped.expect("and says why it did nothing");
-        assert!(skipped.contains("too large"), "{skipped}");
-        assert!(evidence.faces_removed.is_empty());
-        assert!(evidence.components_stripped.is_empty());
+        let repaired = repair_mesh_within(&mesh, refused_everything);
+        let evidence = repaired.evidence();
+        let skipped = evidence
+            .actions_skipped
+            .as_ref()
+            .expect("an over-large input is not an error, it is a recorded skip");
+        assert!(skipped.contains("resource bound"), "{skipped}");
+        assert!(
+            skipped.contains("no model is refused"),
+            "the card has to say so in words too: {skipped}"
+        );
+        // Not one action ran, and the shard the fixture actually has is still
+        // in the mesh -- which is the difference between "the strip was
+        // skipped" and "the pass was skipped".
+        assert!(!evidence.changed());
+        assert!(evidence.shards.faces_removed.is_empty());
+        assert!(evidence.shards.skipped.is_none());
+        assert!(evidence.duplicates.groups.is_empty());
+        assert!(evidence.pinches.splits.is_empty());
+        assert!(evidence.pinches.unrepaired.is_empty());
+        assert!(evidence.residual.is_none());
+        assert_eq!(repaired.mesh().verts(), mesh.verts());
+        assert_eq!(repaired.mesh().tris(), mesh.tris());
+        assert!(evidence.summary_line().contains("APPLIED=none"));
         // That the *same* fixture has its shard stripped under the production
         // ceilings is `tests/repair.rs`'s
         // `a_dust_shard_is_stripped_and_the_result_passes_the_gate`, which runs
@@ -1669,8 +1874,14 @@ mod tests {
     fn a_cap_below_one_ulp_is_named_rather_than_reported_as_a_zero_attempt() {
         let cap_mm = pinch_split_cap_mm().expect("registered cap");
         let far = [600.0, 0.0, 0.0];
-        let refusal = separate(far, [1.0, 0.0, 0.0], &[far], cap_mm)
-            .expect_err("one ULP at 600 mm is above the registered cap");
+        let refusal = separate(
+            far,
+            [1.0, 0.0, 0.0],
+            &[],
+            &PositionRegistry::build(&[far]),
+            cap_mm,
+        )
+        .expect_err("one ULP at 600 mm is above the registered cap");
         let SeparationRefusal::OneUlpExceedsCap { ulp_mm } = refusal else {
             panic!("expected the structural refusal, got {refusal:?}")
         };
@@ -1683,11 +1894,50 @@ mod tests {
         let near = [10.0, 0.0, 0.0];
         let step = f32_ulp_at(near);
         let taken = [near[0] + step, 0.0, 0.0];
-        let refusal = separate(near, [1.0, 0.0, 0.0], &[near, taken], step * 1.5)
-            .expect_err("a cap between one and two ULP admits one attempt and refuses it");
+        let refusal = separate(
+            near,
+            [1.0, 0.0, 0.0],
+            &[],
+            &PositionRegistry::build(&[near, taken]),
+            step * 1.5,
+        )
+        .expect_err("a cap between one and two ULP admits one attempt and refuses it");
         let SeparationRefusal::Capped { largest_attempt_mm } = refusal else {
             panic!("expected a capped attempt, got {refusal:?}")
         };
         assert!(largest_attempt_mm > 0.0, "{largest_attempt_mm}");
+    }
+
+    /// **A moved copy may not land on somebody else's vertex.** The first
+    /// candidate here is bit-identical to a vertex belonging to unrelated
+    /// geometry: accepting it re-fuses under `WeldPolicy::ExactBits` and
+    /// creates a *new* point contact at the destination while the evidence
+    /// reports an unqualified split. The escalation has to step past it, under
+    /// the same registered cap — the cap is never what gives way.
+    #[test]
+    fn a_split_steps_past_a_vertex_that_is_not_part_of_the_pinch() {
+        let cap_mm = pinch_split_cap_mm().expect("registered cap");
+        let position = [10.0, 0.0, 0.0];
+        let step = f32_ulp_at(position);
+        let unrelated = [position[0] + step, 0.0, 0.0];
+        let registry = PositionRegistry::build(&[position, unrelated, [0.0, 0.0, 30.0]]);
+
+        let (moved, steps, displacement) =
+            separate(position, [1.0, 0.0, 0.0], &[], &registry, cap_mm)
+                .expect("two ULP is still far below the registered cap");
+        assert_eq!(steps, 2, "one ULP was taken by an unrelated vertex");
+        assert!(
+            distinguishable(moved, unrelated),
+            "{moved:?} landed on {unrelated:?}"
+        );
+        assert!(!registry.occupied(moved), "{moved:?}");
+        assert!(
+            displacement > 0.0 && displacement <= cap_mm,
+            "{displacement}"
+        );
+
+        // Without the registry the very first candidate would have been taken,
+        // which is the bug this test exists for.
+        assert!(!distinguishable([position[0] + step, 0.0, 0.0], unrelated));
     }
 }

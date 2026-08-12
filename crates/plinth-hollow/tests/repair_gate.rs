@@ -34,7 +34,7 @@ fn the_repair_prepass_rescues_each_census_defect_class_at_the_real_gate() {
             ),
             "{class}: the fixture must be refused by the unmodified gate first"
         );
-        let repaired = repair_mesh(&mesh).expect("repair");
+        let repaired = repair_mesh(&mesh);
         assert!(
             repaired.evidence().changed(),
             "{class}: something must actually have been repaired"
@@ -54,7 +54,7 @@ fn the_repair_prepass_rescues_each_census_defect_class_at_the_real_gate() {
 fn a_model_the_gate_already_accepts_is_untouched() {
     let mesh = make_box_default().expect("box");
     validate_closed_mesh(&mesh).expect("the box passes the gate to begin with");
-    let repaired = repair_mesh(&mesh).expect("repair");
+    let repaired = repair_mesh(&mesh);
     assert!(!repaired.evidence().changed());
     validate_closed_mesh(repaired.mesh()).expect("and still passes it");
     assert_eq!(repaired.mesh().verts(), mesh.verts());

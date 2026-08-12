@@ -298,6 +298,7 @@ fn repair_lines(model: &ModelPreparationReport) -> Vec<String> {
         return Vec::new();
     };
     let has_finding = repair.changed()
+        || repair.actions_skipped.is_some()
         || repair.shards.skipped.is_some()
         || repair.refused_to_empty.is_some()
         || !repair.pinches.unrepaired.is_empty()
@@ -306,6 +307,13 @@ fn repair_lines(model: &ModelPreparationReport) -> Vec<String> {
         return Vec::new();
     }
     let mut lines = vec![format!("  repaired  {}", repair.summary_line())];
+    if let Some(reason) = &repair.actions_skipped {
+        // The pass did not run at all. That is not a refusal — the model is
+        // going on to every stage below — but it means this model got *less
+        // repair* than a smaller one would, so if it is refused downstream the
+        // reader needs this line to know why nobody tried (FU-45).
+        lines.push(format!("  repair skipped  {reason}"));
+    }
     if let Some(refusal) = repair.refused_to_empty {
         // The loudest line the block can print: the pass found a plan that
         // deleted every triangle in the model and declined to apply it. The
@@ -438,6 +446,21 @@ mod tests {
         let lines = repair_lines(&report(Some(degenerate)));
         assert!(
             lines.iter().any(|line| line.contains("degenerate")),
+            "{lines:?}"
+        );
+
+        // The pass declining to run *at all* changes nothing by definition, so
+        // a `changed()` gate hides the one line that explains why a model
+        // nobody tried to repair was refused downstream (FU-45).
+        let skipped_whole = RepairEvidence {
+            actions_skipped: Some("the raw input is over the pre-pass's resource bound".to_owned()),
+            ..RepairEvidence::default()
+        };
+        let lines = repair_lines(&report(Some(skipped_whole)));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("repair skipped") && line.contains("resource bound")),
             "{lines:?}"
         );
 

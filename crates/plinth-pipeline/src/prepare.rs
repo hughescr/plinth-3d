@@ -652,23 +652,17 @@ fn prepare_one(
     // A mesh with none of the three census defect classes comes out of this
     // bit-identical, so a clean model is not perturbed by a stage that had
     // nothing to do.
-    let mesh = match plinth_mesh::repair_mesh(&mesh) {
-        Ok(repaired) => {
-            let (mesh, evidence) = repaired.into_parts();
-            repair = Some(evidence);
-            mesh
-        }
-        Err(source) => {
-            return report(
-                &repair,
-                None,
-                failure(&ChainStop::new(PipelineError::Repair {
-                    model: model.clone(),
-                    source,
-                })),
-            )
-        }
-    };
+    //
+    // **There is no failure arm here, and there cannot be one.** The pre-pass
+    // returns a mesh, never a `Result`: a stage that is mandatory on this chain
+    // and able to fail would be a new hard-refusal class invented by a repair,
+    // which is the exact inversion of the ruling. An input it cannot work on —
+    // over its resource bound, or any internal failure below it — comes back
+    // bit-identical with the reason in `RepairEvidence::actions_skipped`, and
+    // every stage below judges the model exactly as it did before this stage
+    // existed.
+    let (mesh, evidence) = plinth_mesh::repair_mesh(&mesh).into_parts();
+    repair = Some(evidence);
 
     let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,

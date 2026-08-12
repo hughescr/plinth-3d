@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use plinth_mesh::{make_box_default, make_duplicated_face_box, Mesh};
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    ModelPreparationReport, OrientationPolicy, OutputProfile, PipelineExitCode, PrepareReport,
-    PrepareRequest, StageStop,
+    ModelPreparationReport, OrientationPolicy, OutputProfile, PrepareReport, PrepareRequest,
+    StageStop,
 };
 
 /// A per-test scratch folder, removed on the way in and on the way out.
@@ -192,15 +192,37 @@ fn the_repair_evidence_survives_the_report_serde_round_trip() {
     );
 }
 
-/// A failure *of the stage itself* is an input failure, not a gate verdict:
-/// the pre-pass reads the loaded mesh and nothing else, so there is nothing
-/// else for it to be. (A defect the pass cannot fix is not this — it is
-/// evidence, and the unchanged gate judges it.)
+/// **The pre-pass has no failure disposition, and that is the fix.**
+///
+/// It used to have one: a `PipelineError::Repair` carrying a `RepairError`,
+/// which projected to the input exit code and failed the model at a stage added
+/// to help it. Any internal failure — the topology, the triage, the constants
+/// registry, the resource bound — became a hard refusal of the operator's file,
+/// which is the exact inversion the 2026-08-10 ruling forbids. Now
+/// `repair_mesh` returns a mesh: an input it cannot work on comes back
+/// bit-identical with the reason in `actions_skipped`, and the model reaches
+/// every stage below exactly as it did before the pre-pass existed.
+///
+/// The type system carries most of this claim — there is no `Result` to
+/// mishandle — so what is left to assert is that the *disposition* is a
+/// pass-through and not a refusal.
 #[test]
-fn a_failure_of_the_pre_pass_itself_projects_to_the_input_exit_code() {
-    let error = plinth_pipeline::PipelineError::Repair {
-        model: plinth_core::ModelId::new("fixture"),
-        source: plinth_mesh::RepairError::Topology(plinth_mesh::TopologyError::FaceCountOverflow),
-    };
-    assert_eq!(error.exit_code(), PipelineExitCode::Input);
+fn the_pre_pass_has_no_failure_disposition_at_all() {
+    let scratch = Scratch::new("no-failure");
+    let mesh = make_duplicated_face_box().expect("duplicate fixture");
+    scratch.write_mesh("duplicated", &mesh);
+
+    let report = prepare(request(&scratch, Some(StageStop::Decimate))).expect("the run succeeds");
+    let repair = model(&report, "duplicated")
+        .repair
+        .clone()
+        .expect("the pre-pass ran");
+    assert!(
+        repair.actions_skipped.is_none(),
+        "a fixture this small is nowhere near the resource bound: {repair:?}"
+    );
+    assert!(matches!(
+        model(&report, "duplicated").outcome,
+        plinth_pipeline::ModelPreparationOutcome::Stopped { .. }
+    ));
 }

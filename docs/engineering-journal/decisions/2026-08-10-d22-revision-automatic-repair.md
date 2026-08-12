@@ -89,14 +89,19 @@ production gate, 2026-08-10, over all 37 STLs in `minis-to-process`:
 | Models CLEAN raw but refused after decimation | **11** |
 | Models still refused after repair on the probe's *decimated* column | **14** (the 11 above, plus Crawler Zombie, Giant Wolf Spider, zombie-4-a) |
 
-Re-measured 2026-08-11 after the review bound the duplicate action's keep-none
-disposition (FU-46). The raw column — the only one the pre-pass runs on in
-production — is **unchanged by that bound**: 14 refused, 14 rescued, 0 pinches
-capped, and no group deleted outright anywhere in the corpus at either stage.
-The decimated column moved from 14 PASS to 14 CUT, because those models were
-passing *by deleting the decimator's manufactured coincident pairs whole*
-(`dup-faces = 2 × dup-groups`, no survivor), and that deletion is precisely the
-scope question FU-46 puts to the owner. It is diagnostic, not production.
+Re-measured 2026-08-11, over all 37 STLs, after the review **removed** the
+duplicate action's keep-none disposition rather than merely bounding it (FU-46)
+and made the pinch split test its candidates against every position in the mesh
+(not just the pinch's own copies). The raw column — the only one the pre-pass
+runs on in production — is **unchanged by both**: 14 refused, 14 rescued, 0
+pinches capped, 0 duplicate groups reaching action 2, 0 actions skipped anywhere
+in the corpus, and 118 shard faces plus 94 pinch vertices repaired in 96 fan
+copies. No group is deleted outright anywhere at either stage, because no rule
+that could do so exists. The decimated column shows 14 still refused after
+repair, because those models were previously passing *by deleting the
+decimator's manufactured coincident pairs whole* (`dup-faces = 2 × dup-groups`,
+no survivor) — precisely the deletion FU-46 puts to the owner. That column is
+diagnostic, not production.
 
 The eight corpus models are all PASS at every stage, including the
 429,120-face Weeping Treant, with zero repair actions between them — which is
@@ -113,10 +118,10 @@ and it belongs to the decimation stage rather than to this work.
 The 11 clean-raw/refused-decimated models are more than the 7 the census named.
 Applying the pre-pass *after* decimation does **not** rescue them under the
 landed rule: their defects are coincident pairs the decimator manufactured, and
-clearing them needs a group deleted with no survivor — the one action bounded to
-free-floating stacks pending an owner ruling (FU-46). What the probe measures is
-therefore the shape of the problem, not a fix waiting to be bolted on. See
-FU-44.
+clearing them would need a group deleted with **no survivor** — an action this
+pass does not have and will not have before the owner rules on FU-46. What the
+probe measures is therefore the shape of the problem, not a fix waiting to be
+bolted on. See FU-44.
 
 ## What was built
 
@@ -132,19 +137,28 @@ chain. Three actions, in this order:
    because that refusal belongs to the hollow stage where it already lives and
    this pre-pass must not invent a new one at a new place in the chain.
 2. **Exact-duplicate-face removal** — faces sharing a welded vertex triple
-   reduce to their earliest member. Which member survives is decided per group
-   by what the *rest of the mesh* does with the group's three edges, because
-   neither blanket rule is right on its own: keep-the-first leaves a
-   free-floating zero-volume flap holding three boundary edges the input did not
-   have, and a net-multiplicity cancellation takes a load-bearing box face out
-   of a watertight box (measured: `f = 2, r = 1` took `boundary_faces` 0 → 3).
-   **Deleting a group outright — keeping none — is bounded far more tightly
-   than that**, to a group no face outside it shares an edge with, because the
-   local-cleanliness test that licenses the other dispositions self-propagates
-   across a doubled sheet and deletes it whole; the measurement and the open
-   scope question are FU-46. Every other group keeps a survivor and goes to the
-   gate. This action runs *before* the pinch split, because a duplicate severs
-   the adjacency the pinch analysis is computed from.
+   reduce to their earliest member, **and to nothing else**. That is the one
+   rule the scope authorized ("drop faces sharing an identical vertex triple,
+   keeping the first by deterministic order") and the pass implements exactly
+   it: the survivor is the first by source order regardless of winding, and no
+   group is ever deleted outright. Two wider rules were built, measured, and
+   **reverted to this one** rather than landed — deleting an edge-isolated
+   coincident stack with no survivor, and promoting a later opposite-wound
+   member when it leaves the local edges cleaner. The first is the dangerous
+   one: it removes geometry with nothing in its place, has no size bound, and
+   can take a model from gate-`Err` to gate-`Ok` **by deleting the geometry
+   being refused** — a pre-pass that can do that is not upstream of the gate,
+   it is a hole in it. The second is an orientation repair for a defect class
+   the census counted zero of. Both are the open scope question on FU-46, owner
+   ruling requested, and the shapes the conservative rule cannot finish (a
+   halved doubled sheet, a lone coincident flap) reach the unchanged gate and
+   are refused — which under the standing doctrine is the correct outcome and
+   the work item. What the pass *does* record per group is whether keeping the
+   first left the group's three edges walked once in each direction
+   (`dup-keep-one`) or not (`dup-unresolved`); that is evidence about the
+   result, never a choice about which face lives. This action runs *before* the
+   pinch split, because a duplicate severs the adjacency the pinch analysis is
+   computed from.
 3. **Pinch-vertex split** — each pinch vertex is opened into one copy per fan,
    fan 0 staying exactly where it was. The census's own caveat drove the design:
    `exact_weld` keys on `to_bits()`, so a displacement that rounds away is
@@ -154,6 +168,13 @@ chain. Three actions, in this order:
    escalating in powers of two from one f32 ULP and bounded above by the new
    registered `REPAIR_PINCH_SPLIT_MAX_MM` (5e-5 mm — 280× below the 14 µm narrow
    pixel pitch). At mini scale the realized displacement is about 2 nanometres.
+   **Distinguishable from what** is the load-bearing word, and it means every
+   position in the mesh, not just the pinch's own copies: a copy that lands
+   bit-exactly on some unrelated vertex is re-fused by the very weld the nudge
+   exists to survive, creating a fresh point contact at the destination while
+   the evidence reports an unqualified success. Every candidate is therefore
+   tested against one gathered registry of all mesh positions (D-37: one batched
+   pass, not a scan per candidate), and each committed copy joins it.
 
 ## What was deliberately not done
 
@@ -167,18 +188,31 @@ chain. Three actions, in this order:
 - **A model needing no repair passes through byte-identical**, proved through a
   binary-STL round trip rather than by inspection
   (`a_clean_mesh_passes_through_byte_identical`).
-- **The pre-pass never refuses a model, and never empties one.** Two boundaries
-  it could plausibly have crossed, and does not. (1) The shard strip needs a
-  resource bound before it starts input-proportional work; exceeding it **skips
-  the action and records why**, because turning it into an error would have made
-  a mandatory repair stage the first thing on the `prepare` chain to refuse a
-  >8M-face raw input that used to prepare fine — a new refusal class created by a
-  repair, which is the inversion of this ruling (FU-45). (2) A plan that would
-  leave a mesh with no triangles at all is rolled back whole and the input
-  returned unchanged with typed `EmptyResultRefusal` evidence, rather than
-  applied and then discovered downstream as a stage-internal `MeshError`
-  attributed to the operator's file (FU-46). Declining to repair is always
-  available to this pass; refusing a model never is.
+- **The pre-pass has no failure disposition at all.** `repair_mesh` returns a
+  mesh, not a `Result`, and `PipelineError` has no `Repair` variant — the type
+  is the invariant rather than a note about one. This stage is mandatory and
+  unconditional on the `prepare` chain, so *any* internal failure it could raise
+  would be a new hard-refusal class invented by a repair, which is the inversion
+  of this ruling. So the whole pass is gated on one resource admission up front,
+  and every internal failure below it — the topology build, the triage, the
+  constants registry — lands in `RepairEvidence::actions_skipped` with the
+  caller's own mesh handed back bit for bit. The bound covers **every** action,
+  not one of them: it originally guarded only the shard strip while the welded
+  face-topology build ran unconditionally on the same unbounded mesh one line
+  later — the heavier of the two — so an over-large input skipped the cheap work
+  and paid for the expensive work anyway (FU-45). A >8M-face raw STL now gets
+  *less repair* and exactly the same admission it had before this stage existed.
+  Declining to repair is always available to this pass; refusing a model never
+  is.
+- **And it never empties one.** A plan that would leave a mesh with no triangles
+  at all is rolled back whole and the input returned unchanged with typed
+  `EmptyResultRefusal` evidence, rather than applied and then discovered
+  downstream as a stage-internal `MeshError` attributed to the operator's file.
+  Under the conservative duplicate rule this guard cannot fire — the strip never
+  strips the main component, the duplicate rule always keeps a survivor, the
+  split only appends — and it is kept anyway, because "by construction" is an
+  argument about today's three actions and FU-46's open question is precisely
+  whether a fourth that deletes with no survivor should exist.
 - **Four rows were filed, and two questions in them are not this change's to
   answer.** FU-47 (opened here as "FU-43"; refiled at the next free number on
   merge into `develop`, where "FU-43" was already taken — see that row's number

@@ -151,13 +151,12 @@ fn repair(mesh: Option<&Mesh>) -> (Option<Mesh>, String) {
     let Some(mesh) = mesh else {
         return (None, "n/a (no mesh at this stage)".to_owned());
     };
-    match repair_mesh(mesh) {
-        Ok(repaired) => {
-            let line = repaired.evidence().summary_line();
-            (Some(repaired.into_mesh()), line)
-        }
-        Err(error) => (None, format!("repair error: {error}")),
-    }
+    // No error arm: the pre-pass returns a mesh or a mesh. An input it could
+    // not work on comes back untouched with the reason on its summary line,
+    // which is what this column is here to show.
+    let repaired = repair_mesh(mesh);
+    let line = repaired.evidence().summary_line();
+    (Some(repaired.into_mesh()), line)
 }
 
 /// PASS or the production gate's own refusal, abbreviated to fit a column.

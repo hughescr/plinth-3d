@@ -86,7 +86,7 @@ pub fn make_triply_wound_face_box() -> Result<Mesh, MeshError> {
 ///
 /// **The shape a cancellation rule deletes if it is allowed to cascade.** Every
 /// one of the sheet's four duplicate groups has duplicate groups for
-/// neighbours, so a keep-none disposition judged only by "do the local edges
+/// neighbours, so a keep-none disposition (reverted, FU-46) judged only by "do the local edges
 /// come out clean" is clean for all four independently and the whole sheet
 /// disappears — leaving a residual that looks repaired while 8 mm of the
 /// owner's geometry is gone, and turning a model the gate refuses into one it

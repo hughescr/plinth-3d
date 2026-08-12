@@ -607,25 +607,18 @@ pub enum PipelineError {
         #[source]
         source: plinth_core::LayerPlanError,
     },
-    /// The automatic repair pre-pass could not run at all.
-    ///
-    /// This is **not** the disposition of a model whose defects the pre-pass
-    /// could not fix: an unrepairable defect is recorded in
-    /// [`plinth_mesh::RepairEvidence`] and left for the unchanged closed-solid
-    /// gate to judge, which is the whole shape of the 2026-08-10 ruling. Nor is
-    /// it the disposition of an input the pre-pass declines to work on: an
-    /// input over the shard strip's resource bound has that action **skipped
-    /// and recorded** (FU-45), and a plan that would empty the mesh is rolled
-    /// back with the input returned unchanged (FU-46) — a repair pass may
-    /// always decline, and may never refuse a model. This variant means the
-    /// stage itself failed: the topology would not build, or the constants
-    /// registry would not publish.
-    #[error("model {model} could not be repaired before the gates")]
-    Repair {
-        model: ModelId,
-        #[source]
-        source: plinth_mesh::RepairError,
-    },
+    // **There is deliberately no `Repair` variant.** The automatic repair
+    // pre-pass has no failure disposition at all: `plinth_mesh::repair_mesh`
+    // returns a mesh, not a `Result`. An unrepairable defect is recorded in
+    // [`plinth_mesh::RepairEvidence`] and left for the unchanged closed-solid
+    // gate to judge, which is the whole shape of the 2026-08-10 ruling; an
+    // input the pass cannot work on at all — over its resource bound (FU-45),
+    // or any internal failure below it — has every action **skipped and
+    // recorded** in `RepairEvidence::actions_skipped` with the mesh returned
+    // bit-identical; and a plan that would empty the mesh is rolled back the
+    // same way (FU-46). This enum used to carry a `Repair` variant, and it was
+    // reachable: it made a stage added to *help* a model into a stage that
+    // could refuse one, which is the inversion the ruling forbids.
     #[error("model {model} failed production decimation")]
     Decimate {
         model: ModelId,
@@ -706,9 +699,6 @@ impl PipelineError {
             | Self::OrientationBaselineMissing { .. }
             | Self::DegenerateExtent { .. }
             | Self::Decimate { .. }
-            // The pre-pass reads the loaded input and nothing else, so a
-            // failure of it is a failure to make sense of the input file.
-            | Self::Repair { .. }
             | Self::Orient { .. } => PipelineExitCode::Input,
             Self::Delicacy { .. } | Self::LayerPlan { .. } => PipelineExitCode::Supports,
             Self::Hollow { .. } => PipelineExitCode::Hollow,
