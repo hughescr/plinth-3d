@@ -601,3 +601,13 @@ are stated in full in 02-target-architecture.md; the short form:
 
 If a rule here ever seems to conflict with a commitment, the commitment wins and the
 conflict is a bug in this document — report it.
+
+## 12. Journal hygiene
+
+Closing an FU row moves it (and its narrative, verbatim) to the current archive file
+in the same commit; CURRENT-STATUS.md carries only open/blocked/in-progress rows,
+standing doctrine, and the system summary.
+
+Never cite CURRENT-STATUS.md by line number — cite the section anchor instead. The file
+is restructured periodically (rows archived, dated sections prepended), so a line number
+silently drifts onto unrelated content while still looking like a valid citation.
