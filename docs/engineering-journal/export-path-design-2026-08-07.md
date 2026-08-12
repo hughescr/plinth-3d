@@ -671,7 +671,7 @@ seals on the treant**, twice, under the standing memory protocol — 470.83 s an
 470.64 s of a 600 s box, exit code 0, `routed_contacts=306`,
 `final_live_members=1383`, `snapshot_digest=423276951048565625`, bit-identical
 counters across both runs. Record: *FU-32 phase J6 measured 2026-08-09*
-([`#fu32-j6-2026-08-09`](CURRENT-STATUS.md#fu32-j6-2026-08-09)). **A seal is a
+([`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09)). **A seal is a
 `SupportVerificationSnapshot`, not a file**: the census harness calls
 `verification_snapshot()`, while the artifact chain calls `into_supported_model()`
 and then the emit path, so lifting the exclusion, running `first_artifact_chain`
@@ -747,7 +747,7 @@ are `CURRENT-STATUS.md` `#fu32-j4-2026-08-09` and `#fu32-j3-2026-08-09`.
 
 **Nothing above is rewritten, retracted or amended.** Two sentences in this document have stopped
 being true, and this addendum records what replaced them. The full checkpoint record is
-`CURRENT-STATUS.md` [`#checkpoint-treant-artifact-2026-08-09`](CURRENT-STATUS.md#checkpoint-treant-artifact-2026-08-09).
+`CURRENT-STATUS.md` [`#checkpoint-treant-artifact-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#checkpoint-treant-artifact-2026-08-09).
 
 **1. "Except the Weeping Treant (its support tournament cannot yet complete)."** Written in the
 2026-08-07 corpus-sweep addendum, correct on its date, and **dead**: FU-32 phase J6 sealed the
@@ -790,6 +790,6 @@ sha256 with and without the change** — Sphere `d59044b8…`, `make_overhang_ta
 above is **stale at `063115f`** for three of its five rows: Sphere is now 899,664 bytes
 (`d59044b8…`, and `DrilledShellSealed` rather than the solid path), `make_toed_slab` 2,110,344 and
 `make_raking_blade` 904,848. Those movements are **FU-32 J1–J5's**, already attributed at
-[`#fu32-j4-2026-08-09`](CURRENT-STATUS.md#fu32-j4-2026-08-09), and are recorded here only so the
+[`#fu32-j4-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j4-2026-08-09), and are recorded here only so the
 table above is not read as current. **`make_overhang_table` and `make_thin_fin` are unmoved**, and
 the checked-in `exports/` copies in the main checkout still carry the 2026-08-07 bytes.

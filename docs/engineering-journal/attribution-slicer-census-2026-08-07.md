@@ -14,7 +14,7 @@
 > > (PR-1(a) precedent: sub-layer features are not resolvable).
 >
 > The ruling and its three discharged conditions are recorded in
-> [`CURRENT-STATUS.md`](CURRENT-STATUS.md#fu10-repin-2026-08-08). Two of this
+> [`CURRENT-STATUS.md`](archive/STATUS-ARCHIVE-2026-08-06-2026-08-08-part2.md#fu10-repin-2026-08-08). Two of this
 > report's own readings are superseded by more precise later measurement and are
 > **left uncorrected here** (this document is append-only/verbatim); the
 > corrections are recorded at the ruling site: the Finding 2 grid reading of
@@ -28,7 +28,7 @@
 > heights and ~38 X pixels), but **the ≥1.0 mm floor as stated is wrong and must
 > not be quoted**. Both corrections are recorded at
 > [`§8.6`](slicer-union-design-2026-08-07.md) of the design and at the ruling site
-> [`CURRENT-STATUS.md`](CURRENT-STATUS.md#fu10-repin-2026-08-08). Nothing else in
+> [`CURRENT-STATUS.md`](archive/STATUS-ARCHIVE-2026-08-06-2026-08-08-part2.md#fu10-repin-2026-08-08). Nothing else in
 > the body below is amended. Everything from the horizontal rule immediately below
 > this banner to the end of the file is the analyst's original, unedited text.
 
