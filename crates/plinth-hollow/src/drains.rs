@@ -95,6 +95,7 @@ pub struct PlannedShell {
     cavity: CavityEvidence,
     cavity_field: CavityField,
     drain_plan: DrainPlan,
+    planner_accounting: PlannerAccounting,
 }
 
 impl PlannedShell {
@@ -113,6 +114,11 @@ impl PlannedShell {
     #[must_use]
     pub const fn drain_plan(&self) -> &DrainPlan {
         &self.drain_plan
+    }
+    /// What H1a planning charged itself against the drain-planning cap.
+    #[must_use]
+    pub const fn planner_accounting(&self) -> &PlannerAccounting {
+        &self.planner_accounting
     }
     #[must_use]
     pub fn into_parts(self) -> (plinth_mesh::Mesh, CavityEvidence, CavityField, DrainPlan) {
@@ -225,6 +231,46 @@ struct PlannerPreflight {
     normalized_direction_bytes: usize,
 }
 
+/// What H1a planning charged itself against the retained H0 cap, so a caller
+/// can report the requirement beside the ceiling instead of only learning the
+/// number when the ceiling refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlannerAccounting {
+    requested_bytes: usize,
+    ray_query_bytes: usize,
+    ray_crossings: usize,
+    candidate_count: usize,
+}
+
+impl PlannerAccounting {
+    /// Everything H1a planning retains, including the measured ray-query
+    /// charge. This is the figure compared against the drain-planning cap.
+    #[must_use]
+    pub const fn requested_bytes(&self) -> usize {
+        self.requested_bytes
+    }
+
+    /// The single `cast_rays` batch's share of [`Self::requested_bytes`].
+    #[must_use]
+    pub const fn ray_query_bytes(&self) -> usize {
+        self.ray_query_bytes
+    }
+
+    /// Surface crossings the census counted across the whole batch, before
+    /// arc-location dedup. The ray-query charge scales with this, not with the
+    /// shell's triangle count.
+    #[must_use]
+    pub const fn ray_crossings(&self) -> usize {
+        self.ray_crossings
+    }
+
+    /// Drain and vent candidate rays in the batch.
+    #[must_use]
+    pub const fn candidate_count(&self) -> usize {
+        self.candidate_count
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PlannerPolicy {
     drain_direction_count: usize,
@@ -240,13 +286,14 @@ struct PlannerPolicy {
 /// ray query. On refusal it returns the untouched move-only candidate.
 pub fn plan_drains(candidate: ShellCandidate) -> Result<PlannedShell, DrainPlanningFailure> {
     match plan(&candidate) {
-        Ok(drain_plan) => {
+        Ok((drain_plan, planner_accounting)) => {
             let (shell, cavity, cavity_field) = candidate.into_parts();
             Ok(PlannedShell {
                 shell,
                 cavity,
                 cavity_field,
                 drain_plan,
+                planner_accounting,
             })
         }
         Err(reason) => Err(DrainPlanningFailure {
@@ -256,7 +303,9 @@ pub fn plan_drains(candidate: ShellCandidate) -> Result<PlannedShell, DrainPlann
     }
 }
 
-fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
+fn plan(
+    candidate: &ShellCandidate,
+) -> Result<(DrainPlan, PlannerAccounting), DrainPlanningRefusal> {
     let constants = m0_constants().map_err(|_| DrainPlanningRefusal::Constants)?;
     let policy = constants.placeholders();
     let mut extension_ladder = policy
@@ -397,11 +446,45 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         .iter()
         .map(|candidate| candidate.direction)
         .collect();
+    // Count before charging before allocating: the census walks each ray's
+    // BVH descent without storing a hit, so the batch's demand is a measured
+    // crossing count rather than the rays x faces ceiling. A ray through a
+    // closed hollow shell crosses the surface a handful of times no matter how
+    // finely that surface is tessellated.
+    let crossings = surface
+        .cast_rays_census(&origins, &directions, ceiling)
+        .map_err(|_| DrainPlanningRefusal::Kernel)?;
+    if crossings.len() != candidates.len() {
+        return Err(DrainPlanningRefusal::PreflightUnderestimated);
+    }
+    let ray_crossings = crossings
+        .iter()
+        .try_fold(0_usize, |total, value| total.checked_add(*value))
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let ray_query_bytes = ray_query_allocation_bytes(&crossings)?;
+    let requested_bytes = preflight
+        .requested_bytes
+        .checked_add(ray_query_bytes)
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let cap = candidate.cavity().drain_planning_cap_bytes();
+    if requested_bytes > cap {
+        return Err(DrainPlanningRefusal::ResourceLimitExceeded {
+            requested_bytes,
+            cap_bytes: cap,
+        });
+    }
+
     // One gathered batch covers every drain and vent candidate. Results are
     // scattered solely by the stable candidate ID below.
     let (offsets, ts, _faces) = surface
         .cast_rays(&origins, &directions, ceiling)
         .map_err(|_| DrainPlanningRefusal::Kernel)?;
+    // The census walk and the collecting walk are the same traversal, and
+    // dedup only merges neighbours, so the flattened array can never be longer
+    // than the counted crossings. Refuse rather than let a drift go unnoticed.
+    if ts.len() > ray_crossings {
+        return Err(DrainPlanningRefusal::PreflightUnderestimated);
+    }
 
     let mut paths = vec![None; candidates.len()];
     let mut unavailable_candidates = Vec::new();
@@ -451,10 +534,97 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         keepout_before_mm,
         vent_keepout_after_mm,
     )?);
-    Ok(DrainPlan {
-        holes,
-        unavailable_candidates,
-    })
+    Ok((
+        DrainPlan {
+            holes,
+            unavailable_candidates,
+        },
+        PlannerAccounting {
+            requested_bytes,
+            ray_query_bytes,
+            ray_crossings,
+            candidate_count,
+        },
+    ))
+}
+
+/// Measured charge for the single `cast_rays` batch, from the kernel's
+/// allocation-free census. `crossings[i]` is the number of `(t, face)` pairs
+/// ray `i` collects before arc-location dedup, which bounds from above every
+/// buffer that ray contributes to: its transient hit collection (and that
+/// collection's in-place sort scratch), its retained deduplicated `ts`/`fs`
+/// pair, and its slice of the two flattened arrays. Each ray's transient
+/// collection is really freed before the next ray's is built; charging all of
+/// them at once keeps the bound safely above the true peak.
+///
+/// This replaced a `rays x shell faces` product that assumed every ray crossed
+/// every triangle. That scaled with mesh density instead of with the crossings
+/// that exist, so a finely tessellated shell was charged thousands of times
+/// what it allocates.
+fn ray_query_allocation_bytes(crossings: &[usize]) -> Result<usize, DrainPlanningRefusal> {
+    let allocator = |count: usize, size: usize, align: usize| {
+        crate::allocator_allocation_bound(count, size, align)
+            .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)
+    };
+    // `cast_rays` retains one `(Vec<f64>, Vec<i64>)` header pair per ray while
+    // it serially builds both flattened arrays.
+    let mut total = allocator(
+        crossings.len(),
+        std::mem::size_of::<(Vec<f64>, Vec<i64>)>(),
+        std::mem::align_of::<(Vec<f64>, Vec<i64>)>(),
+    )?;
+    let mut flattened = 0_usize;
+    for &count in crossings {
+        let hits = allocator(
+            count,
+            std::mem::size_of::<(f64, u32)>(),
+            std::mem::align_of::<(f64, u32)>(),
+        )?;
+        let row = [
+            // the collected `(t, face)` pairs, and the merge scratch its
+            // stable sort may allocate alongside them
+            hits,
+            hits,
+            // the deduplicated `ts` and `fs` this ray retains
+            allocator(
+                count,
+                std::mem::size_of::<f64>(),
+                std::mem::align_of::<f64>(),
+            )?,
+            allocator(
+                count,
+                std::mem::size_of::<i64>(),
+                std::mem::align_of::<i64>(),
+            )?,
+        ]
+        .into_iter()
+        .try_fold(0_usize, |sum, value| sum.checked_add(value))
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+        total = total
+            .checked_add(row)
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+        flattened = flattened
+            .checked_add(count)
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    }
+    // the two flattened arrays the ragged rows are scanned into
+    for bytes in [
+        allocator(
+            flattened,
+            std::mem::size_of::<f64>(),
+            std::mem::align_of::<f64>(),
+        )?,
+        allocator(
+            flattened,
+            std::mem::size_of::<i64>(),
+            std::mem::align_of::<i64>(),
+        )?,
+    ] {
+        total = total
+            .checked_add(bytes)
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    }
+    Ok(total)
 }
 
 fn retain_candidate_path(
@@ -954,49 +1124,17 @@ fn planner_preflight(
         std::mem::align_of::<Option<f64>>(),
     )?)
     .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
-    // `cast_rays` retains one `(Vec<f64>, Vec<i64>)` header pair per ray while
-    // serially building both flattened arrays. During the parallel gather,
-    // each ray can also retain its `(t, face)` collection. Every deduplicated
-    // crossing can originate on a distinct face, so all ragged, transient and
-    // flattened payloads are charged with allocator/capacity slack.
-    let hit_values = candidate_capacity
-        .checked_mul(candidate.mesh().tris().len())
-        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
-    let ray_buffers = [
-        allocator(
-            candidate_capacity,
-            std::mem::size_of::<(Vec<f64>, Vec<i64>)>(),
-            std::mem::align_of::<(Vec<f64>, Vec<i64>)>(),
-        )?,
-        allocator(
-            hit_values,
-            std::mem::size_of::<(f64, usize)>(),
-            std::mem::align_of::<(f64, usize)>(),
-        )?,
-        allocator(
-            hit_values,
-            std::mem::size_of::<f64>(),
-            std::mem::align_of::<f64>(),
-        )?,
-        allocator(
-            hit_values,
-            std::mem::size_of::<i64>(),
-            std::mem::align_of::<i64>(),
-        )?,
-        allocator(
-            hit_values,
-            std::mem::size_of::<f64>(),
-            std::mem::align_of::<f64>(),
-        )?,
-        allocator(
-            hit_values,
-            std::mem::size_of::<i64>(),
-            std::mem::align_of::<i64>(),
-        )?,
-    ]
-    .into_iter()
-    .try_fold(0_usize, |total, value| total.checked_add(value))
-    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    // The `cast_rays` batch itself is NOT charged here. Its demand is a
+    // crossing count, not a face count, and no bound on it worth having exists
+    // before the query index does; `plan` charges it from the kernel's
+    // allocation-free census immediately before the batch allocates. What this
+    // preflight owes that step is the census's own result vector, which is one
+    // count per ray and is known here.
+    let ray_census_counts = allocator(
+        candidate_capacity,
+        std::mem::size_of::<usize>(),
+        std::mem::align_of::<usize>(),
+    )?;
     let requested = [
         retained_shell,
         retained_field,
@@ -1004,7 +1142,7 @@ fn planner_preflight(
         candidate_buffers,
         sampled_wall_buffers,
         native_peak_bytes,
-        ray_buffers,
+        ray_census_counts,
     ]
     .into_iter()
     .try_fold(0_usize, |total, value| total.checked_add(value))
@@ -1801,7 +1939,10 @@ mod tests {
         )
         .expect("unlimited preflight");
         assert_eq!(preflight.normalized_direction_bytes, 480);
-        let exact = preflight.requested_bytes;
+        // The whole charge, including the ray-query batch the census measures
+        // once the query index exists.
+        let exact = plan(&unlimited).expect("uncapped plan").1.requested_bytes();
+        assert!(exact > preflight.requested_bytes);
 
         let exact_candidate = frozen_candidate();
         let (mesh, mut cavity, field) = exact_candidate.into_parts();
@@ -1827,6 +1968,97 @@ mod tests {
             DrainPlanningRefusal::ResourceLimitExceeded { requested_bytes, cap_bytes }
                 if *requested_bytes == exact && *cap_bytes == exact - 1
         ));
+    }
+
+    /// The whole point of the census: the ray-query charge is a function of
+    /// the crossings that exist, not of how finely the shell is tessellated.
+    /// Restore the retired `candidate_capacity * tris` product and the closed
+    /// form below is wrong by three orders of magnitude.
+    #[test]
+    fn the_ray_query_charge_follows_counted_crossings_not_the_shell_face_count() {
+        let candidate = frozen_candidate();
+        let faces = candidate.mesh().tris().len();
+        let (_, accounting) = plan(&candidate).expect("frozen field must retain an enclosed plan");
+        let rays = accounting.candidate_count();
+        let crossings = accounting.ray_crossings();
+        assert!(rays > 0 && crossings > 0);
+
+        // A ray through a closed hollow shell crosses the surface a handful of
+        // times; the retired charge assumed it crossed every triangle.
+        assert!(
+            crossings * 100 < rays * faces,
+            "census counted {crossings} crossings against the {rays} rays x {faces} faces ceiling"
+        );
+
+        // Closed form of the honest charge: 128 bytes per counted crossing
+        // (the transient hit pair and its sort scratch, the retained ts/fs
+        // pair, and both flattened arrays, each doubled for allocator slack),
+        // plus per-allocation headers and rounding that depend only on the ray
+        // count. Nothing in it mentions a face.
+        assert!(
+            accounting.ray_query_bytes() >= 128 * crossings + 160 * rays + 48,
+            "charge {} fell under the closed-form floor",
+            accounting.ray_query_bytes()
+        );
+        assert!(
+            accounting.ray_query_bytes() <= 128 * crossings + 192 * rays + 80,
+            "charge {} rose above the closed-form ceiling",
+            accounting.ray_query_bytes()
+        );
+
+        // The retired shape billed 96 bytes per (ray, face) pair.
+        assert!(
+            accounting.ray_query_bytes() * 20 < rays * faces * 96,
+            "charge {} is not decisively under the rays x faces product",
+            accounting.ray_query_bytes()
+        );
+    }
+
+    /// The charge must never fall below what the batch really allocates, so
+    /// the counted crossings have to bound the deduplicated output they pay
+    /// for, ray by ray.
+    #[test]
+    fn the_ray_census_bounds_every_row_the_batch_actually_returns() {
+        let candidate = frozen_candidate();
+        let field = candidate.cavity_field();
+        let native = NativeSurface::estimate_index_memory_from_indexed(
+            candidate.mesh().verts(),
+            candidate.mesh().tris(),
+            field.pitch_mm().get(),
+        )
+        .expect("native preflight");
+        let surface = NativeSurface::from_indexed(
+            candidate.mesh().verts(),
+            candidate.mesh().tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: field.pitch_mm().get(),
+                max_grid_bytes: native.max_axis_grid_bytes(),
+            },
+        )
+        .expect("native surface");
+        let origins: Vec<V3> = field
+            .member_flats()
+            .step_by(97)
+            .map(|flat| field.world_at_flat(flat))
+            .collect();
+        assert!(origins.len() > 8);
+        let directions = vec![[0.0, 0.0, 1.0]; origins.len()];
+        let counts = surface
+            .cast_rays_census(&origins, &directions, 45.0)
+            .expect("census");
+        let (offsets, ts, _faces) = surface
+            .cast_rays(&origins, &directions, 45.0)
+            .expect("batch");
+        assert_eq!(counts.len(), origins.len());
+        assert!(counts.iter().any(|count| *count > 0));
+        for (ray, count) in counts.iter().enumerate() {
+            let deduplicated = (offsets[ray + 1] - offsets[ray]) as usize;
+            assert!(
+                deduplicated <= *count,
+                "ray {ray} returned {deduplicated} rows against {count} counted crossings"
+            );
+        }
+        assert!(ts.len() <= counts.iter().sum::<usize>());
     }
 
     #[test]
@@ -1867,7 +2099,11 @@ mod tests {
             },
         )
         .expect("unequal-capacity planner preflight");
-        let exact = preflight.requested_bytes;
+        let exact = plan(&unlimited)
+            .expect("uncapped unequal-capacity plan")
+            .1
+            .requested_bytes();
+        assert!(exact > preflight.requested_bytes);
 
         let (mesh, mut cavity, field) = unlimited.into_parts();
         cavity.drain_planning_cap_bytes = exact;
