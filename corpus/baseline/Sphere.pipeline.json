@@ -60,19 +60,19 @@
             "xyz": [
               0.0,
               0.0,
-              3.5
+              3.0
             ],
             "lobe_ml": 1.92,
-            "wall_mm": 4.0
+            "wall_mm": 3.5
           }
         ],
         "vent": {
           "xyz": [
-            -1.5,
-            -4.0,
-            15.0
+            -0.5,
+            -5.0,
+            15.5
           ],
-          "wall_mm": 5.0
+          "wall_mm": 4.0
         },
         "trapped_resin_ml": 0.0,
         "audit_added_drains": 0,

@@ -1855,15 +1855,19 @@ mod tests {
         // reads them, and reproducing them would mean re-running the retired
         // Python pipeline, which this project does not do.
         // `drilled_material_mm3` is the shell's own remaining plastic (the
-        // live equivalent of `final_ml`); the live engine now selects a
-        // smaller, honestly-walled cavity (exact distance plus
-        // HOLLOW_CAVITY_MARCH_MARGIN_MM), so it drills away LESS material and
-        // MORE remains: 2.1 -> 2.9 mL. That is the direction the fix
-        // promises -- a regression that walked this back toward 2.1 would be
-        // a thinner, under-walled shell again.
+        // live equivalent of `final_ml`). FU-53 moved it 2.1 -> 2.9 mL by
+        // selecting a smaller, honestly-walled cavity; the owner ruling of
+        // 2026-08-13 moved it 2.9 -> 2.4 mL by zeroing
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM, so the cavity is cut at the
+        // requested 2.5 mm rather than 3.366 mm and more material is drilled
+        // away again. This is NOT a walk back toward the 2.1 mL eggshell:
+        // 2.1 mL was a shell whose wall measured 1.85 mm against a 2.5 mm
+        // request, and what stops that recurring is now
+        // HOLLOW_WALL_MIN_MM, measured on the delivered surface, rather than
+        // this number.
         assert_eq!(
             (drilled.evidence().drilled_material_mm3.get() / 100.0).round() / 10.0,
-            2.9
+            2.4
         );
         let report = frozen_hollow_report();
         assert_eq!(report["bodies"], 1);
@@ -2459,11 +2463,21 @@ mod tests {
         // overestimate, so the honestly-walled Sphere cavity shrinks and the
         // slab this fixture severs is smaller again. Policy untouched; only
         // the field is smaller.
-        assert_eq!(refill.refilled_voxels, 4_609);
-        assert_eq!(refill.refilled_pockets, vec![4_609]);
-        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_606));
-        // Moved 59,842 -> 56,396 in the same 2026-08-12 FU-53 pass.
-        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(56_396));
+        //
+        // Moved 4,609 -> 6,646 on 2026-08-13 by the owner ruling, which
+        // zeroed HOLLOW_CAVITY_MARCH_MARGIN_MM: the same exact-distance
+        // selection now runs against the requested 2.5 mm rather than
+        // 3.366 mm, so the Sphere cavity grows and the severed slab grows
+        // with it. Policy untouched again; only the field is bigger.
+        assert_eq!(refill.refilled_voxels, 6_646);
+        assert_eq!(refill.refilled_pockets, vec![6_646]);
+        // First and last severed cell: moved with the field on 2026-08-13,
+        // 35,606 -> 35,562 and 56,396 -> 56,440, the cavity having grown at
+        // both ends when the march margin went to zero.
+        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_562));
+        // Moved 59,842 -> 56,396 in the 2026-08-12 FU-53 pass, then
+        // 56,396 -> 58,200 by the 2026-08-13 ruling.
+        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(58_200));
         let reconstructed =
             reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
                 .unwrap();
@@ -2607,8 +2621,12 @@ mod tests {
         // nearest-surface distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM, so the
         // honestly-walled Sphere cavity is smaller and the slab this fixture
         // severs is cut from less of it.
-        assert_eq!(audit.refilled_voxels, 21);
-        assert_eq!(audit.refilled_pockets, vec![21]);
+        //
+        // Moved 21 -> 266 on 2026-08-13 by the owner ruling zeroing that
+        // margin, for the same reason as the long-exit fixture above: the
+        // cavity is cut at the requested 2.5 mm and the severed slab grows.
+        assert_eq!(audit.refilled_voxels, 266);
+        assert_eq!(audit.refilled_pockets, vec![266]);
         for flat in 0..split.cavity_field().flat_count() {
             let expected = split.cavity_field().contains_flat(flat)
                 && split.cavity_field().flat_to_index(flat)[0] > 32;
@@ -2616,9 +2634,10 @@ mod tests {
         }
 
         let drilled = drill_planned_shell(split).expect("bounded production refill must drill");
-        // Moved 499 -> 21 on 2026-08-12 by FU-53, tracking `audit.refilled_voxels` above.
-        assert_eq!(drilled.evidence().refilled_voxels, 21);
-        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 21);
+        // Moved 499 -> 21 on 2026-08-12 by FU-53 and 21 -> 266 on 2026-08-13
+        // by the owner ruling, tracking `audit.refilled_voxels` above.
+        assert_eq!(drilled.evidence().refilled_voxels, 266);
+        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 266);
         assert_eq!(
             drilled.evidence().cavity_voxels,
             drilled.evidence().drainable_voxels
@@ -2643,12 +2662,17 @@ mod tests {
         // claim it is making. This is the only path that produces a hollowed
         // artifact, so it is the one that has to carry the realized figure
         // out to `seal_and_emit` for the run's own output to record it.
+        //
+        // Retargeted 2026-08-13: the bound a shipped shell must clear is
+        // HOLLOW_WALL_MIN_MM, not the requested wall. The requested wall is
+        // the target the cavity is cut at and the delivered surface lands a
+        // little inside it, exactly as ChituBox's own accepted output does.
         let realized = report
             .realized_wall()
             .expect("a drilled shell records what wall it realized");
         assert!(
-            realized.wall_mm().get() >= registered_settings().wall_thickness_mm().get(),
-            "a shipped shell never realizes less than the requested wall"
+            realized.wall_mm().get() >= registered_settings().minimum_wall_mm().get(),
+            "a shipped shell never realizes less than the registered minimum wall"
         );
         assert!(
             !realized.is_lower_bound(),

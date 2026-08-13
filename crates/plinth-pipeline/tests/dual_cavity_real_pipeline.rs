@@ -155,10 +155,28 @@ fn hollow_plan_drill_and_round_trip(name: &str, mesh: plinth_mesh::Mesh, drill: 
         cavity_mm3 >= required_fraction_mm3,
         "{name}: cavity {cavity_mm3} mm^3 did not clear the recomputed fraction floor {required_fraction_mm3} mm^3"
     );
+    // Retargeted 2026-08-13 onto `HOLLOW_WALL_MIN_MM` by the owner's ruling.
+    // The requested wall is a TARGET the cavity is cut at, and the
+    // surface-nets extractor lands the delivered boundary up to one voxel
+    // body diagonal inside it, so `realized >= requested` is no longer the
+    // claim and by ruling is not meant to be. What a delivered shell must
+    // clear is the registered minimum wall, and it is checked here on the
+    // REAL pipeline geometry — after repair, decimation and the dense
+    // orientation sweep, on an arbitrary lattice phase, which is the case
+    // most likely to produce a thin spot.
+    let realized_wall_mm = candidate.cavity().realized_wall().wall_mm().get();
     assert!(
-        candidate.cavity().realized_wall().wall_mm().get() >= settings.wall_thickness_mm().get(),
-        "{name}: realized wall {} is under the requested wall {}",
-        candidate.cavity().realized_wall().wall_mm().get(),
+        realized_wall_mm >= settings.minimum_wall_mm().get(),
+        "{name}: realized wall {realized_wall_mm} is under the registered minimum wall {}",
+        settings.minimum_wall_mm().get()
+    );
+    // And it is a target, not a licence to drift: the delivered minimum sits
+    // within one voxel body diagonal below what was asked for.
+    let body_diagonal_mm = settings.voxel_pitch_mm().get() * 3.0_f64.sqrt();
+    assert!(
+        realized_wall_mm > settings.wall_thickness_mm().get() - body_diagonal_mm,
+        "{name}: realized wall {realized_wall_mm} is more than one voxel body diagonal \
+         ({body_diagonal_mm} mm) under the {} mm target it was cut at",
         settings.wall_thickness_mm().get()
     );
     assert!(

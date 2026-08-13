@@ -849,8 +849,8 @@
         "crates/plinth-hollow/src/lib.rs:create_shell_recording_repair cavity selection margin",
         "crates/plinth-hollow/src/lib.rs:frozen_distance_transform module doc, the lemma edt(v) >= d_true(v)"
       ],
-      "normative": "docs/engineering-journal/CURRENT-STATUS.md FU-53 landing = HOLLOW_PITCH_MM x sqrt(3) = 0.8660254037844386 mm",
-      "provenance_detail": "Rust-era; no legacy Python source. FU-53 fix: the cavity is now selected from an exact BVH nearest-triangle distance to the source mesh, prefiltered by the existing frozen EDT (which the module doc proves is a sound upper bound: edt(v) >= d_true(v) for every material voxel), instead of from the EDT alone. The surface-nets extractor still emits the cavity boundary on the cell lattice, half a voxel diagonal from the outermost selected voxel centre in the worst case, so this margin -- one full voxel body diagonal, pitch x sqrt(3) -- is added to the requested wall before selection so the realised wall is provably >= the requested wall. Exact geometric identity, not an independently chosen number: it must be re-derived alongside HOLLOW_PITCH_MM if that pitch ever moves."
+      "normative": "docs/engineering-journal/CURRENT-STATUS.md 2026-08-13 owner ruling on the wall target and minimum = 0.0 mm",
+      "provenance_detail": "Rust-era; no legacy Python source. ZERO since the owner ruling of 2026-08-13: the requested wall is a TARGET, so the cavity is cut at exactly the wall the caller asked for and nothing is added to it. What guarantees a safe wall instead is HOLLOW_WALL_MIN_MM, measured on the delivered cavity surface by checked_realized_wall_mm. HISTORY (2026-08-12 to 2026-08-13, FU-53): this held one HOLLOW_PITCH_MM voxel body diagonal, pitch x sqrt(3) = 0.8660254037844386 mm. The cavity is selected from an exact BVH nearest-triangle distance to the source mesh, prefiltered by the frozen EDT (which the module doc proves is a sound upper bound: edt(v) >= d_true(v) for every material voxel); the surface-nets extractor still emits the cavity boundary on the cell lattice, up to one voxel body diagonal from the outermost selected voxel centre, so adding that diagonal before selection made the realised wall provably >= the requested wall. That construction was sound and cost more than half the Weeping Treant cavity (1556 mm^3 delivered against ChituBox 6060 mm^3 at the same requested wall), and the owner weighed the trade and chose the target. If this margin is ever made non-zero again it must be re-derived from HOLLOW_PITCH_MM by the same identity, never inherited: plinth-hollow asserts exactly that."
     },
     {
       "id": "HOLLOW_CONTAINMENT_MIN_FRACTION",
@@ -966,12 +966,12 @@
     {
       "id": "HOLLOW_SAVE_MIN_ML",
       "classification": "runtime_hollowing",
-      "normative": "03-physics-and-constants.md §3.10.1 = 15.0 mL",
+      "normative": "docs/engineering-journal/CURRENT-STATUS.md 2026-08-13 owner ruling on the savings gate = 1.5 mL",
       "source_locators": [
         "scripts/support_placement/hollow.py:SAVE_MIN_ML"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "Placeholder"
+      "provenance_detail": "1.5 mL since the owner ruling of 2026-08-13, from the legacy 15.0 mL. This is now THE savings gate: the owner ruled the hollowing decision is about total resin volume saved, not percentage, because a larger model has more surface area to absorb the drain-hole damage and benefits from a smaller percentage. Fixed by his own hand-hollowed ChituBox acceptance suite at a 2.5 mm wall -- GOOD at 12.39, 6.06, 5.24, 2.48 and 2.44 mL saved; NOT WORTH IT at 0.14 and 0.02 mL -- and 1.5 mL is the round value inside that gap, nearer the rejected end, reproducing all seven verdicts. The legacy 15.0 mL admitted nothing in that suite at all, so every model reaching this gate was in practice decided by HOLLOW_SAVE_MIN_FRAC alone, which is the percentage-only behaviour the ruling rejects."
     },
     {
       "id": "HOLLOW_SHARD_MAX_DIM_MM",
@@ -1078,6 +1078,17 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.3 = 3.0 mm",
       "provenance_detail": "The second value the legacy operator wall option was given: 2.5 mm ordinarily (HOLLOW_WALL_DEFAULT_MM) and 3.0 mm for a piece that gets handled. Registered here at the restoration of the operator wall knob, which the Rust port had hardcoded to the default alone. It carries EXACTLY the provenance the default carries and no more: the same unmeasured legacy CLI option, no cited measurement, no plate, no study -- a Placeholder in the strict sense, never an acceptance claim. It is offered, never inferred: nothing in the workspace classifies a model as handling-heavy, the caller states the wall on the request, and CavityEvidence::wall_thickness_mm records what was stated. No gate, cap or bound was raised, lowered or touched by this registration."
+    },
+    {
+      "id": "HOLLOW_WALL_MIN_MM",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-hollow/src/lib.rs:registered_minimum_wall_mm",
+        "crates/plinth-hollow/src/lib.rs:checked_realized_wall_mm"
+      ],
+      "normative": "docs/engineering-journal/CURRENT-STATUS.md 2026-08-13 owner ruling on the wall target and minimum = 2.0 mm",
+      "provenance_detail": "Rust-era; no legacy Python source. ADDED 2026-08-13 by owner ruling as the bound that makes the loosened wall target safe. Owner, verbatim in substance: 'matching what Chitubox does is fine -- allowing walls down to 2mm but aiming for 2.5mm seems correct. A 2mm thick wall in spots will still be entirely structurally stable, there should be no problem there; the 2.5mm target is playing it quite safe.' The same ruling set HOLLOW_CAVITY_MARCH_MARGIN_MM to zero, so the requested wall (HOLLOW_WALL_DEFAULT_MM, 2.5 mm) became a TARGET the engine cuts at exactly rather than a minimum inflated by a lattice margin. This constant is what is actually guaranteed, and it is guaranteed by MEASUREMENT, not by construction: checked_realized_wall_mm queries the exact distance from every vertex of the delivered cavity surface to the source surface and discards the shell if any of them falls below this number, before the Boolean difference. Corroborated by measuring the owner's own hand-hollowed ChituBox output at a 2.5 mm requested wall: the Weeping Treant's cavity surface minimum is 2.007 mm with ZERO area under 2.0 mm. Naming is deliberate -- MIN, never 'floor', per the owner's 2026-08-13 ruling that 'floor' means the bottom surface of a printed part and must never also mean a smallest allowed value."
     },
     {
       "id": "INITIAL_AXIS_MAJORITY_CAP",

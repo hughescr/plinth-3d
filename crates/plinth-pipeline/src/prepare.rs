@@ -1660,7 +1660,7 @@ mod tests {
         assert!(hollow_error_refuses_this_geometry(
             &HollowError::RealizedWallBelowSpec {
                 realized_wall_mm: 0.27,
-                requested_wall_mm: 2.5,
+                minimum_wall_mm: 2.0,
             }
         ));
     }

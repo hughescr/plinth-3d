@@ -107,6 +107,22 @@ pub fn registered_wall(
     })
 }
 
+/// Reads `HOLLOW_WALL_MIN_MM`, the hard minimum wall (2.0 mm) no hollowed
+/// shell may ship under. This is the one place it is read, so the stage's
+/// enforcement ([`checked_realized_wall_mm`], via [`HollowSettings`]) and any
+/// diagnostic that reports the bound cannot come to two different answers.
+///
+/// **A minimum, not a target.** [`registered_wall`] publishes what the engine
+/// aims at; this publishes what it guarantees. Since the owner ruling of
+/// 2026-08-13 the two are different numbers on purpose — see
+/// `HOLLOW_WALL_MIN_MM`'s registry provenance.
+pub fn registered_minimum_wall_mm() -> Result<PositiveFinite, &'static M0ConstantsError> {
+    Ok(*m0_constants()?
+        .placeholders()
+        .hollow_wall_min_mm()
+        .diagnostic())
+}
+
 /// The finest wall H0 can actually produce: the frozen `HOLLOW_PITCH_MM` voxel
 /// pitch the cavity is selected on.
 ///
@@ -967,12 +983,23 @@ pub struct HollowSettings {
     save_min_mm3: Finite,
     save_min_fraction: Finite,
     volume_balance_rel_tol: Finite,
-    /// FU-53: `HOLLOW_CAVITY_MARCH_MARGIN_MM`, registered as one voxel body
-    /// diagonal (`HOLLOW_PITCH_MM * sqrt(3)`). Added to the stated wall before
-    /// cavity selection so the realised wall is provably >= the requested one;
-    /// see [`create_shell_recording_repair`] and the module doc lemma above
-    /// [`frozen_distance_transform`].
+    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM`, added to the stated wall before cavity
+    /// selection. **Zero since the owner ruling of 2026-08-13**, which made
+    /// the requested wall a target rather than a minimum-plus-margin; it was one
+    /// voxel body diagonal (`HOLLOW_PITCH_MM * sqrt(3)`) under FU-53, bought a
+    /// realised wall provably `>=` the requested one, and cost more than half
+    /// the cavity. See [`create_shell_recording_repair`] and the module doc
+    /// lemma above [`frozen_distance_transform`]. Raising it is a tightening.
     cavity_march_margin_mm: Finite,
+    /// `HOLLOW_WALL_MIN_MM`, the hard minimum wall (2.0 mm). **This is the
+    /// bound that replaced the march margin's construction guarantee**: the
+    /// wall above is aimed at, this one is enforced, and it is enforced by
+    /// measuring the delivered cavity surface
+    /// ([`checked_realized_wall_mm`]) rather than by inflating the selection
+    /// threshold. Never above [`Self::wall_thickness_mm`] — a request that
+    /// would put it there is refused by [`checked_wall_mm`] before any
+    /// geometry is cut.
+    minimum_wall_mm: Finite,
 }
 
 impl HollowSettings {
@@ -1006,6 +1033,7 @@ impl HollowSettings {
                 .hollow_cavity_march_margin_mm()
                 .diagnostic()
                 .get(),
+            placeholders.hollow_wall_min_mm().diagnostic().get(),
         )
     }
 
@@ -1043,6 +1071,14 @@ impl HollowSettings {
     pub const fn cavity_march_margin_mm(self) -> Finite {
         self.cavity_march_margin_mm
     }
+
+    /// `HOLLOW_WALL_MIN_MM`. The hard minimum the delivered wall is measured
+    /// against; see [`Self::minimum_wall_mm`]'s field doc and
+    /// [`checked_realized_wall_mm`].
+    #[must_use]
+    pub const fn minimum_wall_mm(self) -> Finite {
+        self.minimum_wall_mm
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1054,6 +1090,7 @@ fn finite_settings(
     save_min_fraction: f64,
     volume_balance_rel_tol: f64,
     cavity_march_margin_mm: f64,
+    minimum_wall_mm: f64,
 ) -> Result<HollowSettings, HollowError> {
     let finite = |value| Finite::new(value).map_err(|_| HollowError::InvalidArithmetic);
     Ok(HollowSettings {
@@ -1064,6 +1101,7 @@ fn finite_settings(
         save_min_fraction: finite(save_min_fraction)?,
         volume_balance_rel_tol: finite(volume_balance_rel_tol)?,
         cavity_march_margin_mm: finite(cavity_march_margin_mm)?,
+        minimum_wall_mm: finite(minimum_wall_mm)?,
     })
 }
 
@@ -1633,10 +1671,22 @@ pub fn create_shell_recording_repair(
     }
     // Selection: `material[v] && d_true(v) > wall + margin`. The lemma above
     // ensures this can never select a voxel whose TRUE distance to the
-    // source surface is `<= wall + margin`, so the realised wall is provably
-    // `>=` the requested wall — see the margin's registry provenance
-    // (`HOLLOW_CAVITY_MARCH_MARGIN_MM`) for the surface-nets half-cell-offset
-    // argument that sizes it.
+    // source surface is `<= wall + margin`.
+    //
+    // **Owner ruling, 2026-08-13: the requested wall is a TARGET.**
+    // `HOLLOW_CAVITY_MARCH_MARGIN_MM` is zero, so the cavity is cut at
+    // exactly the wall the caller asked for, the way ChituBox does. The
+    // surface-nets vertex of a boundary cell can still sit up to one voxel
+    // body diagonal inside that threshold, so the realised wall is NO LONGER
+    // `>=` the requested wall by construction — it is a target that the
+    // delivered geometry lands near and may fall a little under, exactly as
+    // ChituBox's own accepted output does (45.4 % of its treant cavity
+    // surface measures below the 2.500 mm it was asked for, by 0.005-0.02 mm).
+    // What is guaranteed instead is `HOLLOW_WALL_MIN_MM`, a hard 2.0 mm
+    // minimum, and it is guaranteed by MEASURING the delivered cavity
+    // surface below (`checked_realized_wall_mm`) rather than by inflating
+    // the threshold here. Raising the margin above zero remains a
+    // tightening and needs no ruling; it only thickens walls.
     let cavity_mask = edt.mapv(|distance_mm| distance_mm > wall_plus_margin_mm);
     drop(edt);
     if !cavity_mask.iter().any(|value| *value) {
@@ -1776,7 +1826,8 @@ pub fn create_shell_recording_repair(
         drop(material);
         let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
         drop(main);
-        // FU-55. Never ship an under-walled shell: measure the realized
+        // FU-55, retargeted onto the minimum wall by the owner ruling of
+        // 2026-08-13. Never ship an under-walled shell: measure the realized
         // minimum wall against the SOURCE surface here, before this shell
         // pays for a Boolean difference at all. `distance_surface` is the
         // exact `NativeSurface` already built above for cavity selection —
@@ -1785,12 +1836,21 @@ pub fn create_shell_recording_repair(
         // voxel entered `exact_cavity_distance`'s candidate set, which is
         // exactly the condition that builds it.
         //
+        // **This measurement IS the minimum-wall guarantee.** With the march
+        // margin ruled to zero the selection above no longer makes the
+        // realized wall `>=` anything by construction, so the shell that
+        // ships is the shell this query has just measured at or above
+        // `HOLLOW_WALL_MIN_MM`. Deleting or weakening this check does not
+        // cost a diagnostic; it reopens FU-53's eggshell defect directly.
+        //
         // The query bound is `2 x (wall + margin)`: the extracted surface
         // sits on the boundary of the mask selected at `wall + margin`, so
         // its true distance is expected within about one voxel of that
         // threshold; doubling it is headroom for what the well-composedness
         // repair may have moved, not a tolerance on the check itself — the
         // check below compares the raw measurement, never the clamped one.
+        // It comfortably exceeds the minimum as long as the minimum is below the
+        // requested wall, which the registry pins.
         let distance_surface = distance_surface.ok_or(HollowError::Kernel)?;
         let realized_wall_query_bound_mm = 2.0 * wall_plus_margin_mm;
         let realized_wall_query_batch_points =
@@ -1803,7 +1863,7 @@ pub fn create_shell_recording_repair(
         );
         let realized_wall = checked_realized_wall_mm(
             raw_realized_wall_mm,
-            settings.wall_thickness_mm.get(),
+            settings.minimum_wall_mm.get(),
             realized_wall_query_bound_mm,
         )?;
         let (marching_vertex_upper_bound, marching_triangle_upper_bound) =
@@ -3245,12 +3305,32 @@ fn measure_realized_wall_mm(
     minimum
 }
 
-/// FU-55. The one refusal rule: a realized wall strictly below the wall the
-/// caller stated is never shipped. Strict `<`, **no epsilon** — an epsilon
-/// here would itself be a new tolerance, and FU-53's own margin
-/// (`HOLLOW_CAVITY_MARCH_MARGIN_MM`) already makes floating-point noise at
-/// the boundary irrelevant. `raw_realized_wall_mm == requested_wall_mm`
-/// passes.
+/// FU-55, **retargeted onto the minimum wall by the owner ruling of 2026-08-13**.
+/// The one refusal rule: a realized wall strictly below
+/// `HOLLOW_WALL_MIN_MM` is never shipped.
+///
+/// **Why the minimum and not the requested wall.** As written on 2026-08-12
+/// this compared against the wall the caller stated, which was safe only
+/// because `HOLLOW_CAVITY_MARCH_MARGIN_MM` inflated the cavity-selection
+/// threshold enough to make the comparison true by construction. The owner
+/// has ruled that the stated wall is a TARGET — the engine now cuts at
+/// exactly 2.5 mm and lands near it on both sides, the way ChituBox does —
+/// so testing the delivered geometry against the target would reject
+/// essentially every correct shell. It would have rejected the owner's own
+/// hand-hollowed treant, which he judged good and 45.4 % of whose cavity
+/// surface measures below the 2.500 mm it was asked for.
+///
+/// Testing against the minimum instead is not a weakening: it is the check
+/// moving onto the bound that is actually claimed. Nothing else stands
+/// between the engine and FU-53's eggshell defect (shipped walls of
+/// 0.27-0.70 mm against a requested 2.5 mm), and with the march margin at
+/// zero this measurement is the ONLY thing that stands there — the
+/// construction guarantee it used to double-check is gone.
+///
+/// Strict `<`, **no epsilon**. An epsilon here would itself be a new
+/// tolerance, and the minimum already sits 0.5 mm below the registered target,
+/// so floating-point noise at the boundary cannot reach it.
+/// `raw_realized_wall_mm == minimum_wall_mm` passes.
 ///
 /// On success, a measurement the query could only bound — every sampled
 /// vertex over-bound, so the raw minimum is [`f64::INFINITY`], which
@@ -3267,13 +3347,13 @@ fn measure_realized_wall_mm(
 /// "at least 6.73 mm".
 fn checked_realized_wall_mm(
     raw_realized_wall_mm: f64,
-    requested_wall_mm: f64,
+    minimum_wall_mm: f64,
     clamp_upper_bound_mm: f64,
 ) -> Result<RealizedWall, HollowError> {
-    if raw_realized_wall_mm < requested_wall_mm {
+    if raw_realized_wall_mm < minimum_wall_mm {
         return Err(HollowError::RealizedWallBelowSpec {
             realized_wall_mm: raw_realized_wall_mm,
-            requested_wall_mm,
+            minimum_wall_mm,
         });
     }
     // `NativeSurface::query` returns the true distance when it is within the
@@ -3571,18 +3651,23 @@ pub enum HollowError {
     /// FU-55. A shell was built, its cavity survived every other gate, and
     /// its realized minimum wall — measured directly against the source
     /// surface, on every vertex of the extracted cavity mesh — came in
-    /// strictly below the wall the caller stated. Never propagated as a
-    /// model failure: [`run`] converts this into
+    /// strictly below `HOLLOW_WALL_MIN_MM`, the hard 2.0 mm minimum.
+    /// Never propagated as a model failure: [`run`] converts this into
     /// [`SolidDecisionReason::ShellUnderWalled`] and the oriented solid
     /// ships instead, per the 2026-08-12 owner ruling on FU-55. The shell
     /// itself is discarded here, before it ever reaches the Boolean
     /// difference.
+    ///
+    /// **The bound moved on 2026-08-13, by owner ruling**, from the wall the
+    /// caller stated to the registered minimum — see
+    /// [`checked_realized_wall_mm`] for why testing the delivered geometry
+    /// against the target would reject correct shells, ChituBox's included.
     #[error(
-        "the realized minimum wall {realized_wall_mm} mm is below the requested {requested_wall_mm} mm"
+        "the realized minimum wall {realized_wall_mm} mm is below the registered minimum {minimum_wall_mm} mm"
     )]
     RealizedWallBelowSpec {
         realized_wall_mm: f64,
-        requested_wall_mm: f64,
+        minimum_wall_mm: f64,
     },
     #[error("plinth-solid mesh conversion failed: {0}")]
     SolidMesh(plinth_solid::MeshValidationError),
@@ -3859,14 +3944,20 @@ mod tests {
             "the inner surface must be a negative, contained cavity"
         );
         assert_eq!(candidate.cavity().source_volume_mm3().get(), 27_000.0);
-        // Moved 16,000-17,000 -> 12,800-13,100 mm3 by FU-53 (measured
-        // 12,977.875 mm3): selection now runs on the exact nearest-surface
-        // distance plus HOLLOW_CAVITY_MARCH_MARGIN_MM (2.5 + 0.866 mm) rather
-        // than the EDT's conservative overestimate, so a 30 mm cube leaves an
-        // inner cube of edge ~23.268 mm analytically (~12,597 mm3); the
-        // measured figure is the voxel-lattice quantization of that edge.
+        // Moved 16,000-17,000 -> 12,800-13,100 mm3 by FU-53, then
+        // 12,800-13,100 -> 14,600-14,800 mm3 by the owner ruling of
+        // 2026-08-13 (measured 14,706.125 mm3), which zeroed
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM. Selection still runs on the exact
+        // nearest-surface distance; what changed is that the threshold is
+        // now the requested 2.5 mm rather than 2.5 + 0.866 mm, so a 30 mm
+        // cube leaves an inner cube of edge 25 mm analytically (15,625 mm3)
+        // rather than ~23.268 mm (~12,597 mm3). The measured figure is the
+        // voxel-lattice quantization of that edge, and the gap to the
+        // analytic number is the half-voxel the surface-nets extractor sits
+        // inside the selected centres -- the same displacement the
+        // registered minimum wall now guards.
         assert!(
-            (12_800.0..=13_100.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            (14_600.0..=14_800.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
             "{:?}",
             candidate.cavity().cavity_volume_mm3()
         );
@@ -4808,16 +4899,24 @@ mod tests {
         );
         assert_eq!(candidate.cavity().wall_thickness_mm().get(), 2.5);
         assert_eq!(candidate.cavity().frozen_voxel_pitch_mm().get(), 0.5);
-        // Moved 1,900-2,300 -> 1,150-1,300 mm3 by FU-53 (measured 1,221.375
-        // mm3): the cavity is now selected on the EXACT nearest-surface
-        // distance plus the HOLLOW_CAVITY_MARCH_MARGIN_MM marching margin,
-        // not on the EDT's own conservative-rasterization overestimate, so
-        // the realised wall is honestly >= 2.5 mm rather than the 1.85 mm
-        // (74%) the pre-fix engine actually shipped — see
-        // docs/engineering-journal/CURRENT-STATUS.md's FU-53 landing entry.
+        // Moved 1,900-2,300 -> 1,150-1,300 mm3 by FU-53, then back up by the
+        // owner ruling of 2026-08-13, which zeroed
+        // HOLLOW_CAVITY_MARCH_MARGIN_MM so the cavity is cut at the
+        // requested 2.5 mm instead of 3.366 mm. The cavity is still
+        // selected on the EXACT nearest-surface distance -- FU-53's
+        // measurement is untouched and only the threshold moved -- and the
+        // delivered wall is guarded by HOLLOW_WALL_MIN_MM rather than by an
+        // inflated threshold. Analytically a 10.25 mm-radius sphere at a
+        // 2.5 mm wall leaves a 7.75 mm cavity radius, ~1,950 mm3; the
+        // measured 1,749 mm3 is that ball after the lattice, which selects
+        // on voxel CENTRES and then marches the boundary inside them --
+        // an effective radius of about 7.47 mm. The same 0.28 mm inward
+        // displacement is what the delivered wall gains over the target and
+        // what HOLLOW_WALL_MIN_MM is sized to absorb.
         assert!(
-            (1_150.0..=1_300.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
-            "the corrected exact-distance shell has the expected honestly-walled cavity range"
+            (1_700.0..=1_800.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            "the shell cut at the 2.5 mm target has an unexpected cavity volume: {:?}",
+            candidate.cavity().cavity_volume_mm3()
         );
         assert!(
             candidate.cavity().cavity_volume_mm3().get()
@@ -5044,17 +5143,27 @@ mod tests {
         );
     }
 
-    /// FU-53: the registered handling-heavy wall (3.0 mm) now correctly
-    /// removes the frozen Sphere from eligibility once the honest margin is
-    /// applied (3.866 mm effective threshold on a 10.25 mm-radius sphere
-    /// leaves a cavity of ~1,091 mm3 against a ~1,044 mm3 25%-of-source
-    /// floor) — the tightened savings gate the design's risk section
-    /// predicted, converted by [`run`] into a typed Solid decision rather
-    /// than a shipped shell. This is the "measured and recorded" the design
-    /// asked for on the committed Sphere: the default wall clears with
-    /// ~1,221 mm3 of ~4,175 mm3 (29.3%), and the heavier wall does not.
+    /// **Both registered walls clear the savings gate on the frozen Sphere,
+    /// and the heavier one costs real cavity.**
+    ///
+    /// **Rewritten 2026-08-13 by the owner's ruling; the previous claim is
+    /// recorded rather than deleted.** From FU-53 (2026-08-12) to that
+    /// ruling this test asserted the opposite of its second half: the
+    /// handling-heavy wall REMOVED the Sphere from eligibility, because the
+    /// 0.866 mm march margin turned a 3.0 mm request into a 3.866 mm
+    /// erosion, leaving ~1,091 mm3 of cavity against a ~1,044 mm3 25 %
+    /// fraction limb — a refusal manufactured by the margin, not by the
+    /// wall. The ruling zeroed the margin (3.0 mm is now cut at 3.0 mm) and
+    /// moved the savings gate onto total volume (`HOLLOW_SAVE_MIN_ML`, 15.0
+    /// -> 1.5 mL), and the heavy wall clears comfortably.
+    ///
+    /// What survives is the part that was always a property of the geometry
+    /// rather than of a margin: a heavier wall leaves less cavity, and the
+    /// outer solid does not move. Both are asserted, so a wall selection
+    /// that stopped reaching the erosion would still fail here.
     #[test]
-    fn the_committed_sphere_clears_savings_at_the_default_wall_but_not_the_handling_heavy_wall() {
+    fn both_registered_walls_clear_savings_on_the_committed_sphere_and_the_heavier_one_costs_cavity()
+    {
         let default = create_shell(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             HollowSettings::from_registered_constants().expect("M0 settings"),
@@ -5068,12 +5177,37 @@ mod tests {
             wall_mm: heavy_wall,
         })
         .expect("heavy wall settings");
-        let error = create_shell(
+        let heavy = create_shell(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             heavy_settings,
         )
-        .expect_err("the honest cavity at the heavier wall falls under the savings floor");
-        assert!(matches!(error, HollowError::IneligibleSavings));
+        .expect("the honest cavity at the heavier wall still clears the savings gate");
+
+        assert!(
+            heavy.cavity().cavity_volume_mm3().get()
+                < default.cavity().cavity_volume_mm3().get(),
+            "a heavier wall must leave less cavity: heavy {} mm^3 vs default {} mm^3",
+            heavy.cavity().cavity_volume_mm3().get(),
+            default.cavity().cavity_volume_mm3().get()
+        );
+        assert_eq!(
+            heavy.cavity().source_volume_mm3().get(),
+            default.cavity().source_volume_mm3().get(),
+            "the outer solid is untouched by the wall selection"
+        );
+        // Each shell clears the minimum against ITS OWN request: the minimum
+        // is a single registered bound, not a fraction of whatever was asked
+        // for, so a 3.0 mm request must clear it just as a 2.5 mm one does.
+        let minimum = registered_minimum_wall_mm()
+            .expect("the registered minimum wall must publish")
+            .get();
+        for (name, candidate) in [("default", &default), ("handling-heavy", &heavy)] {
+            assert!(
+                candidate.cavity().realized_wall_mm().get() >= minimum,
+                "the {name} shell's wall {} mm is under the registered minimum {minimum} mm",
+                candidate.cavity().realized_wall_mm().get()
+            );
+        }
     }
 
     #[test]
@@ -5514,46 +5648,83 @@ mod fu53_exact_cavity_distance {
         }
     }
 
-    /// **The margin's derivation is enforced, not merely written down.**
+    /// **The margin is zero by ruling, and if it ever comes back it must
+    /// come back derived.**
     ///
-    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM` is declared in the registry as the
-    /// literal `0.5 * 1.7320508075688772`, where the `0.5` duplicates
-    /// `HOLLOW_PITCH_MM`'s value rather than reading it, and its own prose
-    /// says it is DERIVED and MUST be re-derived if the pitch ever moves.
-    /// Nothing mechanical held those two together: the constants tests pin
-    /// each as an independent literal, and `HollowSettings::with_wall_mm`
-    /// reads each from the registry independently. Bumping the pitch to
-    /// 0.6 mm would leave the margin at 0.866 mm while a surface-nets vertex
-    /// could sit 0.6·√3 ≈ 1.039 mm from a selected cavity centre — the
-    /// realised wall undershooting the requested one by ~0.17 mm, silently
-    /// reopening the FU-53 shortfall with every constants test green.
+    /// This is the surviving half of FU-53's cross-constant assertion.
+    /// Until 2026-08-13 it asserted `margin == pitch * sqrt(3)`
+    /// unconditionally, because that identity was what made the realised
+    /// wall `>=` the requested wall by construction. The owner has ruled the
+    /// requested wall a target, the margin is zero, and there is no identity
+    /// left to pin — but the OBLIGATION behind it is still real: the margin
+    /// is a lattice quantity, and the only justified non-zero value it has
+    /// ever had is one voxel body diagonal of the pitch the same registry
+    /// publishes.
     ///
-    /// This is the cross-constant assertion that closes it: the margin is
-    /// exactly one voxel body diagonal of the pitch the same registry
-    /// publishes, checked against the settings the engine actually runs on.
-    /// Exact equality, no tolerance — the registered literal is the f64
-    /// nearest to `pitch * sqrt(3)` and a re-derivation that is not is a
-    /// re-derivation that was not done.
+    /// So the assertion becomes conditional rather than deleted. Zero is
+    /// admitted (the ruled value). Any other value must be exactly
+    /// `pitch * sqrt(3)`, exact equality and no tolerance, so that bumping
+    /// `HOLLOW_PITCH_MM` to 0.6 mm while leaving a stale 0.866 mm margin
+    /// behind still fails a test rather than silently shipping an
+    /// unprincipled number. A margin invented between the two — a "seems
+    /// safe enough" 0.4 mm — is refused by the same assertion; FU-75's bar
+    /// (only an airtight proof may set a tighter lattice bound) is not
+    /// lowered by this ruling, which moved the guarantee elsewhere rather
+    /// than tightening the margin's proof.
     #[test]
-    fn the_cavity_march_margin_is_one_body_diagonal_of_the_registered_pitch() {
+    fn the_cavity_march_margin_is_zero_or_one_body_diagonal_of_the_registered_pitch() {
         let settings = registered_settings();
         let pitch = settings.voxel_pitch_mm().get();
         let margin = settings.cavity_march_margin_mm().get();
-        assert_eq!(
-            margin,
-            pitch * 3.0_f64.sqrt(),
-            "HOLLOW_CAVITY_MARCH_MARGIN_MM ({margin}) is no longer HOLLOW_PITCH_MM \
-             ({pitch}) x sqrt(3): the FU-53 soundness margin's own prose says it is \
-             DERIVED from the pitch and must be re-derived whenever the pitch moves"
-        );
-        // The lemma the margin buys, restated as the inequality FU-53's
-        // selection math relies on: no surface-nets vertex of a boundary
-        // cavity cell can be further from that cell's centre than the margin.
-        let furthest_vertex_from_a_cell_centre = pitch * 3.0_f64.sqrt();
         assert!(
-            margin >= furthest_vertex_from_a_cell_centre,
-            "the margin no longer covers a full cell body diagonal"
+            margin >= 0.0,
+            "HOLLOW_CAVITY_MARCH_MARGIN_MM ({margin}) is negative: a negative margin \
+             would cut the cavity CLOSER to the surface than the wall the caller asked for"
         );
+        if margin != 0.0 {
+            assert_eq!(
+                margin,
+                pitch * 3.0_f64.sqrt(),
+                "HOLLOW_CAVITY_MARCH_MARGIN_MM ({margin}) is neither the ruled zero nor \
+                 HOLLOW_PITCH_MM ({pitch}) x sqrt(3): a non-zero margin is a lattice \
+                 quantity and must be DERIVED from the pitch, never chosen"
+            );
+        }
+    }
+
+    /// **The minimum wall sits below the target, and both are registered.**
+    ///
+    /// Named in `HOLLOW_WALL_MIN_MM`'s own registry provenance. Two ways
+    /// this can break and both are silent without it: a wall default that
+    /// dropped to or below the minimum would make every delivered shell fail
+    /// the minimum-wall check and every model ship solid, and a minimum
+    /// raised to or above the target would do the same from the other side.
+    /// Neither shows up as a compile error and neither shows up in the
+    /// constants tests, which pin each value as an independent literal.
+    ///
+    /// Both registered walls are checked, not only the default: the
+    /// handling-heavy option is a wall an operator can actually ask for.
+    #[test]
+    fn the_registered_minimum_wall_is_below_the_registered_wall_target() {
+        let minimum = registered_minimum_wall_mm()
+            .expect("the registered minimum wall must publish")
+            .get();
+        assert!(
+            minimum > 0.0,
+            "the minimum wall ({minimum} mm) must be positive"
+        );
+        for selection in [WallSelection::Default, WallSelection::HandlingHeavy] {
+            let target = registered_wall(selection).expect("registered wall").get();
+            assert!(
+                minimum < target,
+                "the minimum wall ({minimum} mm) is not below the {selection:?} wall \
+                 target ({target} mm): every shell cut at that target would be \
+                 discarded by the minimum-wall check and every model would ship solid"
+            );
+        }
+        // The settings the engine actually runs on carry the same number,
+        // rather than a second copy that could drift from the registry.
+        assert_eq!(registered_settings().minimum_wall_mm().get(), minimum);
     }
 
     /// **The analytic Sphere: the cavity radius and the realised minimum wall.**
@@ -5567,8 +5738,18 @@ mod fu53_exact_cavity_distance {
     /// source surface — is what the FU-53 diagnosis measured directly and is
     /// what this test re-measures against the fixed engine: the journal
     /// recorded 1.85 mm (74 % of the registered 2.5 mm) before this fix.
+    ///
+    /// **Retargeted 2026-08-13 onto the registered minimum wall.** The
+    /// assertion used to be `realised >= requested`, which held only because
+    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM` inflated the selection threshold above
+    /// the requested wall. The owner has ruled the requested wall a target,
+    /// so the guarantee is `HOLLOW_WALL_MIN_MM` and the target is checked as
+    /// a target: near 2.5 mm on both sides, never the 1.85 mm eggshell and
+    /// never the 3.366 mm the margin used to force. Both bounds are asserted,
+    /// because clearing the minimum alone would also be satisfied by an
+    /// engine that had quietly stopped aiming at anything.
     #[test]
-    fn the_analytic_sphere_reaches_its_requested_wall() {
+    fn the_analytic_sphere_reaches_its_registered_minimum_wall() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let settings = registered_settings();
         let candidate = create_shell(source.clone(), settings)
@@ -5642,9 +5823,19 @@ mod fu53_exact_cavity_distance {
             realised_wall_mm.is_finite(),
             "every cavity vertex must be within the 10.0mm query bound of the source surface"
         );
+        let minimum = registered_minimum_wall_mm()
+            .expect("the registered minimum wall must publish")
+            .get();
         assert!(
-            realised_wall_mm >= wall,
-            "realised wall {realised_wall_mm} mm fell below the requested {wall} mm -- FU-53 must guarantee realised >= requested"
+            realised_wall_mm >= minimum,
+            "realised wall {realised_wall_mm} mm fell below the registered minimum {minimum} mm -- \
+             the retargeted FU-55 check must guarantee realised >= the minimum wall"
+        );
+        let body_diagonal = registered_settings().voxel_pitch_mm().get() * 3.0_f64.sqrt();
+        assert!(
+            realised_wall_mm > wall - body_diagonal && realised_wall_mm <= wall,
+            "realised wall {realised_wall_mm} mm is not within one voxel body diagonal BELOW the \
+             {wall} mm target the cavity was cut at"
         );
     }
 
@@ -6045,7 +6236,7 @@ mod corpus_cavity_repair {
     /// here. `well_composed.rs`'s own direct unit tests exercise the repair
     /// mechanism on synthetic masks and are unaffected.
     #[test]
-    fn a_synthetic_pinched_dumbbell_stays_solid_because_its_waist_is_below_the_drain_bore() {
+    fn a_synthetic_pinched_dumbbells_far_lobe_stays_solid_because_its_waist_is_below_the_drain_bore() {
         let source = pinched_dumbbell_with_rod_radius(3.375);
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
 
@@ -6092,13 +6283,35 @@ mod corpus_cavity_repair {
             "excluding the sub-bore thread must also exclude the non-manifoldness it caused"
         );
 
-        // 3. Through the production entry point: one lobe's cavity is below
-        //    the registered savings threshold, so the model stays solid.
-        let error = create_shell(source, settings)
-            .expect_err("the two lobes are separate resin-flow interiors (FU-47); the larger one alone is below the registered savings threshold");
+        // 3. Through the production entry point.
+        //
+        // **The verdict here changed on 2026-08-13 and the doctrine did
+        // not.** Until then the near lobe alone fell under the savings gate
+        // and the whole model shipped solid. The owner's ruling moved the
+        // savings gate onto total volume (`HOLLOW_SAVE_MIN_ML`, 15.0 -> 1.5
+        // mL) and zeroed the march margin, and the near lobe alone is now
+        // worth hollowing on its own. What this test exists to prove is
+        // unchanged and is asserted below: the sub-bore waist means the FAR
+        // lobe is a separate interior and is NOT cut. The model hollows one
+        // lobe, not two.
+        let far_lobe_voxels = cavity_voxels - selected_voxels - stats.unreached_voxels;
         assert!(
-            matches!(error, HollowError::IneligibleSavings),
-            "expected IneligibleSavings, got {error}"
+            far_lobe_voxels > 0,
+            "the fixture no longer has a second lobe to leave behind"
+        );
+        let candidate = create_shell(source, settings)
+            .expect("the near lobe alone now clears the registered savings gate");
+        let pitch = settings.voxel_pitch_mm().get();
+        let shipped_voxels =
+            (candidate.cavity().cavity_volume_mm3().get() / pitch.powi(3)).round() as usize;
+        assert!(
+            shipped_voxels < cavity_voxels - far_lobe_voxels + 1,
+            "the shipped cavity ({shipped_voxels} voxels) is larger than the near lobe's own \
+             selection: the undrainable far lobe has been cut after all"
+        );
+        assert!(
+            candidate.cavity().realized_wall_mm().get() >= settings.minimum_wall_mm().get(),
+            "the shipped lobe is under the registered minimum wall"
         );
     }
 
@@ -6170,7 +6383,7 @@ mod corpus_cavity_repair {
         debug_assertions,
         ignore = "429,120-face corpus fixture; run under cargo test --release"
     )]
-    fn the_committed_treant_splits_into_thirteen_interiors_and_takes_the_solid_reserve() {
+    fn the_committed_treant_splits_into_thirteen_interiors_and_hollows_the_largest() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl");
         assert!(
@@ -6234,37 +6447,66 @@ mod corpus_cavity_repair {
         drop(selected);
         drop(cavity);
 
-        // 2. Through the production entry point: the retained interior is
-        //    below the registered savings fraction, and the model takes the
-        //    solid reserve carrying the repair's own measurement.
-        let error = create_shell(source, settings).expect_err(
-            "one of thirteen interiors is below the registered savings fraction; the model stays solid",
-        );
-        let HollowError::IneligibleSavingsAfterCavityRepair {
-            critical_cells,
-            repaired_voxels,
-            cell_visits,
-            full_grid_passes,
-        } = error
-        else {
-            panic!("expected IneligibleSavingsAfterCavityRepair, got {error}");
-        };
-        // Re-pinned 93 -> 79 critical cells, 759 -> 406 repaired voxels, same
-        // cause as cavity_voxels above: a different selected mask has a
-        // different local pinch pattern.
-        assert_eq!(critical_cells, 79);
-        assert_eq!(repaired_voxels, 406);
-        // Re-pinned 3 -> 4 full-grid passes, same cause.
-        assert_eq!(full_grid_passes, 4);
+        // 2. Through the production entry point.
+        //
+        // **THE VERDICT CHANGED ON 2026-08-13 AND THIS IS THE HEADLINE.**
+        // Until then this model reached a shell and then lost it: the
+        // 0.866 mm march margin cut the cavity at 3.366 mm instead of the
+        // 2.5 mm asked for, the retained interior fell under the savings
+        // gate, and the treant took the solid reserve
+        // (`IneligibleSavingsAfterCavityRepair` ->
+        // `SolidDecisionReason::BelowThresholdAfterRepair`). The owner's
+        // ruling zeroed the margin and moved the savings gate onto total
+        // volume, and **the committed Weeping Treant now hollows.**
+        //
+        // The FU-47 finding this test was written for is untouched: the
+        // thirteen interiors, the branch tips excluded, and the fact that
+        // only the largest is retained are all still asserted above, on the
+        // same numbers. What is no longer true is the consequence — a model
+        // that reaches a shell and cannot keep it. It keeps it now.
+        let candidate = create_shell(source, settings)
+            .expect("the retained interior now clears the registered savings gate");
+        let cavity = candidate.cavity();
+        let repair = cavity.resources().cavity_repair();
+        // Re-pinned 93 -> 79 critical cells, 759 -> 406 repaired voxels on
+        // the 2026-08-12 merge, then 79 -> 56, 406 -> 277 and 4 -> 3
+        // whole-grid passes by the 2026-08-13 owner ruling. Same cause each
+        // time and it is worth stating plainly: the repair runs on the mask
+        // PRODUCTION selects (`wall + margin`), not on the raw `edt > wall`
+        // mask the doctrine assertions above use, so zeroing the margin
+        // hands the repair a different, larger mask with a different local
+        // pinch pattern. Fewer critical cells on a fatter cavity is the
+        // expected direction: the pinches the repair fixes are where the
+        // eroded mask was thinnest, and it is less thin now.
+        assert_eq!(repair.critical_cells, 56);
+        assert_eq!(repair.repaired_voxels, 277);
+        assert_eq!(repair.full_grid_passes, 3);
 
         // 3. The work bound the module doc claims, checked against the grid the
         //    caller admitted rather than against a remembered number.
         let cells = 166 * 176 * 185;
-        assert_eq!(cell_visits, cells + 8 * repaired_voxels);
-        // Re-pinned 5,411,032 -> 5,408,208, same cause and same formula as
-        // the other counts above -- cells itself is unchanged (`spec.dims`
-        // does not move with the rasterizer), only `repaired_voxels` did.
-        assert_eq!(cell_visits, 5_408_208);
+        assert_eq!(repair.cell_visits, cells + 8 * repair.repaired_voxels);
+        // Re-pinned 5,411,032 -> 5,408,208 -> 5,407,176 by the same two
+        // changes, through the same formula: `cells` itself never moves
+        // (`spec.dims` is a property of the model's bounds), only
+        // `repaired_voxels` does.
+        assert_eq!(repair.cell_visits, 5_407_176);
+
+        // 4. The shell it now keeps, measured. The minimum wall is the
+        //    guarantee; the cavity volume is the point of the ruling and is
+        //    pinned as a range so a re-measurement on another toolchain does
+        //    not fail on the last significant figure.
+        assert!(
+            cavity.realized_wall_mm().get() >= settings.minimum_wall_mm().get(),
+            "the treant's shipped wall {} mm is under the registered minimum {} mm",
+            cavity.realized_wall_mm().get(),
+            settings.minimum_wall_mm().get()
+        );
+        assert!(
+            (3_200.0..=3_400.0).contains(&cavity.cavity_volume_mm3().get()),
+            "the treant's shipped cavity moved: {} mm^3",
+            cavity.cavity_volume_mm3().get()
+        );
     }
 }
 
@@ -6310,22 +6552,49 @@ mod fu55_realized_wall_check {
         )
     }
 
-    /// **No epsilon.** `raw_realized_wall_mm == requested_wall_mm` passes;
-    /// a hair under refuses with the refusal's own numbers, unrounded.
+    /// **No epsilon.** `raw_realized_wall_mm == minimum_wall_mm` passes; a hair
+    /// under refuses with the refusal's own numbers, unrounded.
+    ///
+    /// Retargeted 2026-08-13 from the requested wall onto the registered
+    /// minimum. The minimum is read off the registry, not written as a
+    /// literal, so this test cannot pass while the engine is checking a
+    /// different number from the one the registry publishes.
     #[test]
     fn the_check_has_no_epsilon() {
-        checked_realized_wall_mm(2.5, 2.5, 10.0).expect("exactly at the requested wall passes");
-        let error = checked_realized_wall_mm(2.5 - 1e-9, 2.5, 10.0)
-            .expect_err("a hair under the requested wall must refuse");
+        let minimum = registered_minimum_wall_mm()
+            .expect("the registered minimum wall must publish")
+            .get();
+        checked_realized_wall_mm(minimum, minimum, 10.0)
+            .expect("exactly at the minimum passes");
+        let error = checked_realized_wall_mm(minimum - 1e-9, minimum, 10.0)
+            .expect_err("a hair under the minimum must refuse");
         match error {
             HollowError::RealizedWallBelowSpec {
                 realized_wall_mm,
-                requested_wall_mm,
+                minimum_wall_mm,
             } => {
-                assert_eq!(requested_wall_mm, 2.5);
-                assert_eq!(realized_wall_mm, 2.5 - 1e-9);
+                assert_eq!(minimum_wall_mm, minimum);
+                assert_eq!(realized_wall_mm, minimum - 1e-9);
             }
             other => panic!("expected RealizedWallBelowSpec, got {other:?}"),
+        }
+
+        // The bound that MOVED, stated as its own assertion: a wall between
+        // the minimum and the requested target — where the overwhelming
+        // majority of a correct 2.5 mm hollowing's thin tail lives, and
+        // where every one of ChituBox's own sub-2.5 mm samples lives — now
+        // ships, and used to be discarded.
+        let target = registered_wall(WallSelection::Default)
+            .expect("registered wall default")
+            .get();
+        assert!(
+            minimum < target,
+            "the minimum must sit below the target it makes safe"
+        );
+        for between in [minimum, 2.007, 2.4, target - 1e-9] {
+            checked_realized_wall_mm(between, minimum, 10.0).unwrap_or_else(|error| {
+                panic!("{between} mm is at or above the minimum and must ship, got {error:?}")
+            });
         }
     }
 
@@ -6340,7 +6609,7 @@ mod fu55_realized_wall_check {
     /// them apart, which a bare `Option<Finite>` could not.
     #[test]
     fn an_over_bound_measurement_is_recorded_as_a_clamped_lower_bound() {
-        let recorded = checked_realized_wall_mm(f64::INFINITY, 2.5, 7.0)
+        let recorded = checked_realized_wall_mm(f64::INFINITY, 2.0, 7.0)
             .expect("an over-bound measurement still passes the check");
         assert_eq!(recorded.wall_mm().get(), 7.0);
         assert_eq!(recorded.claim(), RealizedWallClaim::AtLeast);
@@ -6350,13 +6619,13 @@ mod fu55_realized_wall_check {
         // A distance the query actually returned — including one exactly at
         // the bound, which `NativeSurface::query` reports as a distance and
         // not as the over-bound sentinel — is a measurement, and says so.
-        let measured = checked_realized_wall_mm(6.73, 2.5, 7.0).expect("in-bound measurement");
+        let measured = checked_realized_wall_mm(6.73, 2.0, 7.0).expect("in-bound measurement");
         assert_eq!(measured.wall_mm().get(), 6.73);
         assert_eq!(measured.claim(), RealizedWallClaim::Measured);
         assert!(!measured.is_lower_bound());
         assert_eq!(measured.to_string(), "6.73 mm");
         assert_eq!(
-            checked_realized_wall_mm(7.0, 2.5, 7.0)
+            checked_realized_wall_mm(7.0, 2.0, 7.0)
                 .expect("exactly at the bound")
                 .claim(),
             RealizedWallClaim::Measured
@@ -6424,34 +6693,67 @@ mod fu55_realized_wall_check {
 
     /// **Test 1 of the FU-55 ruling: the positive case.** The committed
     /// Sphere hollows at the registered wall, and the realized minimum wall
-    /// this shell measured is `>=` the requested 2.5 mm -- the guarantee the
-    /// ruling exists to enforce, read off the field the implementation
-    /// actually populates rather than a parallel recomputation of it.
+    /// this shell measured clears the guarantee the ruling exists to
+    /// enforce, read off the field the implementation actually populates
+    /// rather than a parallel recomputation of it.
+    ///
+    /// **Retargeted onto the minimum wall, 2026-08-13.** It used to assert the
+    /// realized wall reached the REQUESTED wall, which was true only because
+    /// the march margin made it true by construction. The owner has ruled
+    /// the requested wall a target, so what a delivered shell must clear is
+    /// `HOLLOW_WALL_MIN_MM` — asserted here on real committed geometry,
+    /// through the shipped path, on the registered settings, off the same
+    /// registry the engine reads.
+    ///
+    /// The second assertion is the target: a correct hollowing at 2.5 mm
+    /// lands NEAR 2.5 mm, not near the minimum, and not at the 3.366 mm the
+    /// margin used to force. A delivered wall that drifted to the minimum
+    /// would clear the first assertion and still be a defect, so both bounds
+    /// are stated.
     #[test]
-    fn the_committed_sphere_realizes_at_least_the_requested_wall() {
+    fn the_committed_sphere_realizes_at_least_the_registered_minimum_wall() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let settings = registered_settings();
         let candidate =
             create_shell(source, settings).expect("the frozen Sphere is hollow-eligible");
         let realized = candidate.cavity().realized_wall_mm().get();
+        let minimum = settings.minimum_wall_mm().get();
         assert!(
-            realized >= settings.wall_thickness_mm().get(),
-            "realized wall {realized} mm fell below the requested {} mm",
-            settings.wall_thickness_mm().get()
+            realized >= minimum,
+            "realized wall {realized} mm fell below the registered minimum {minimum} mm"
+        );
+        // Aimed at the target, and it is a target on both sides: the cavity
+        // is cut at exactly the requested wall, so the delivered minimum
+        // sits within one voxel body diagonal below it and can never sit
+        // above it at all.
+        let target = settings.wall_thickness_mm().get();
+        let body_diagonal = settings.voxel_pitch_mm().get() * 3.0_f64.sqrt();
+        assert!(
+            realized > target - body_diagonal && realized < target + body_diagonal,
+            "realized wall {realized} mm is not near the {target} mm target it was cut at"
         );
     }
 
-    /// **Test 2 of the FU-55 ruling: the check fires on real geometry,
-    /// before the Boolean.** FU-53's own margin is what keeps a real
-    /// production shell's realized wall above the requested one; force it to
-    /// zero here -- a purely locally-built `HollowSettings`, never a change
-    /// to the registered `HOLLOW_CAVITY_MARCH_MARGIN_MM` -- to reproduce the
-    /// exact defect FU-53 fixed (the surface-nets extractor emitting the
-    /// cavity boundary up to one voxel diagonal outside the selected voxel,
-    /// on smooth curved primitives specifically -- FU-53's own diagnosis) and
-    /// confirm FU-55's independent measurement catches it. `create_shell`'s
-    /// own doc names a locally-built `HollowSettings` the sanctioned way to
-    /// exercise non-registry settings in tests.
+    /// **Test 2 of the FU-55 ruling: the minimum wall fires on real geometry,
+    /// before the Boolean.**
+    ///
+    /// **The fixture had to change on 2026-08-13 and this is why.** The old
+    /// version forced the march margin to zero and asserted the sphere then
+    /// measured under the REQUESTED wall. Zero margin is now what production
+    /// does, so that construction no longer describes a defect — it
+    /// describes the shipped engine, and the shipped engine clears the
+    /// minimum. The defect the minimum exists to catch is a shell whose
+    /// delivered wall lands under 2.0 mm, and the honest way to build one is
+    /// to ASK for a wall at the minimum: the surface-nets extractor emits the
+    /// cavity boundary up to one voxel body diagonal inside the selected
+    /// voxel centres, so a cavity selected at exactly 2.0 mm is delivered at
+    /// less than 2.0 mm on the sphere's smooth curvature. That is FU-53's
+    /// own diagnosis, aimed at the bound that is now claimed.
+    ///
+    /// A locally-built `HollowSettings` is `create_shell`'s own sanctioned
+    /// way to exercise non-registry settings in a test; the registered
+    /// `HOLLOW_WALL_MIN_MM` is read, never overridden — the wall the
+    /// caller states is what moves.
     ///
     /// The Boolean stage's own admission limits are starved to zero
     /// alongside it: if the realized-wall check ran *after* the Boolean
@@ -6459,19 +6761,23 @@ mod fu55_realized_wall_check {
     /// resource refusal instead of `RealizedWallBelowSpec`, so a passing
     /// assertion on the refusal's own variant is also a proof of ordering.
     #[test]
-    fn a_zero_margin_shell_on_the_sphere_is_refused_before_the_starved_boolean_stage() {
+    fn a_shell_cut_at_the_minimum_wall_is_refused_before_the_starved_boolean_stage() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let registered = registered_settings();
+        let minimum = registered.minimum_wall_mm().get();
         let settings = finite_settings(
-            registered.wall_thickness_mm().get(),
+            // Ask for exactly the minimum. The lattice cannot deliver it, and
+            // the check must say so rather than ship the difference.
+            minimum,
             registered.voxel_pitch_mm().get(),
             registered.bulk_min_mm().get(),
             registered.save_min_mm3().get(),
             registered.save_min_fraction().get(),
             registered.volume_balance_rel_tol().get(),
-            0.0,
+            registered.cavity_march_margin_mm().get(),
+            minimum,
         )
-        .expect("locally built zero-margin settings");
+        .expect("locally built at-the-minimum settings");
 
         let mut limits = H0AdmissionLimits::production();
         limits.max_boolean_input_primitive_units = 0;
@@ -6479,18 +6785,19 @@ mod fu55_realized_wall_check {
         limits.max_boolean_output_vertices = 0;
         limits.max_boolean_output_triangles = 0;
 
-        let error = create_shell_with_admission_limits(source, settings, limits)
-            .expect_err("a zero-margin shell on the sphere's smooth curvature must measure under wall");
+        let error = create_shell_with_admission_limits(source, settings, limits).expect_err(
+            "a cavity selected at the minimum is delivered under it on the sphere's smooth curvature",
+        );
         match error {
             HollowError::RealizedWallBelowSpec {
                 realized_wall_mm,
-                requested_wall_mm,
+                minimum_wall_mm,
             } => {
-                assert_eq!(requested_wall_mm, registered.wall_thickness_mm().get());
+                assert_eq!(minimum_wall_mm, minimum);
                 assert!(
-                    realized_wall_mm < requested_wall_mm,
+                    realized_wall_mm < minimum_wall_mm,
                     "the refusal's own numbers must be inconsistent with shipping: \
-                     {realized_wall_mm} mm >= {requested_wall_mm} mm"
+                     {realized_wall_mm} mm >= {minimum_wall_mm} mm"
                 );
             }
             other => panic!(
@@ -6515,7 +6822,7 @@ mod fu55_realized_wall_check {
         let history = orientation_history();
         let failure = HollowStageFailure::before_cavity_repair(HollowError::RealizedWallBelowSpec {
             realized_wall_mm: 1.9,
-            requested_wall_mm: 2.5,
+            minimum_wall_mm: 2.0,
         });
         let requested_wall_mm = Finite::new(2.5).expect("finite");
 
@@ -6805,7 +7112,7 @@ mod fu37_wall_field {
             (
                 HollowError::RealizedWallBelowSpec {
                     realized_wall_mm: 1.9,
-                    requested_wall_mm: 2.5,
+                    minimum_wall_mm: 2.0,
                 },
                 SolidDecisionReason::ShellUnderWalled,
             ),
@@ -7003,11 +7310,23 @@ mod dual_cavity_doctrine {
             cavity.cavity_volume_mm3().get()
         );
 
-        // FU-53/FU-55: the realized wall is provably >= the requested wall.
+        // FU-55, retargeted 2026-08-13: the realized wall clears the
+        // registered MINIMUM. It is no longer >= the requested wall, and by
+        // owner ruling it is not meant to be -- the requested wall is the
+        // target the cavity is cut at, and the surface-nets extractor lands
+        // the delivered boundary a little inside it.
         let realized_wall = cavity.realized_wall();
         assert!(
-            realized_wall.wall_mm().get() >= settings.wall_thickness_mm().get(),
-            "realized wall {} did not clear the requested wall {}",
+            realized_wall.wall_mm().get() >= settings.minimum_wall_mm().get(),
+            "realized wall {} did not clear the registered minimum wall {}",
+            realized_wall.wall_mm().get(),
+            settings.minimum_wall_mm().get()
+        );
+        assert!(
+            realized_wall.wall_mm().get()
+                > settings.wall_thickness_mm().get()
+                    - settings.voxel_pitch_mm().get() * 3.0_f64.sqrt(),
+            "realized wall {} is more than one voxel body diagonal under the {} mm target",
             realized_wall.wall_mm().get(),
             settings.wall_thickness_mm().get()
         );
@@ -7036,12 +7355,12 @@ mod dual_cavity_doctrine {
         // pinched-dumbbell's own pins above -- re-pin if the registered
         // wall, margin, or pitch ever moves (test B7 catches that first).
         assert!(
-            (cavity.source_volume_mm3().get() - 10_180.584).abs() < 0.5,
+            (cavity.source_volume_mm3().get() - 10_082.795).abs() < 0.5,
             "source volume moved: {}",
             cavity.source_volume_mm3().get()
         );
         assert!(
-            (cavity.cavity_volume_mm3().get() - 3_530.875).abs() < 0.5,
+            (cavity.cavity_volume_mm3().get() - 4_678.125).abs() < 0.5,
             "cavity volume moved: {}",
             cavity.cavity_volume_mm3().get()
         );

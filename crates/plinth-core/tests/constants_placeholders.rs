@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 274] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -110,6 +110,7 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
     "HOLLOW_VOLUME_BALANCE_REL_TOL",
     "HOLLOW_WALL_DEFAULT_MM",
     "HOLLOW_WALL_HANDLING_HEAVY_MM",
+    "HOLLOW_WALL_MIN_MM",
     "INITIAL_AXIS_MAJORITY_CAP",
     "INITIAL_AXIS_MAJORITY_STEP_MM",
     "ISLAND_ATTACH_REACH_MM",
@@ -297,7 +298,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 274] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -376,7 +377,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "HOLLOW_ALLOW_OUTPUT_DEFAULT", "false", "1", "scalar";
     "HOLLOW_BREATHING_VOXEL_PITCH_MM", "0.4", "mm", "scalar";
     "HOLLOW_BULK_MIN_MM", "10.0", "mm", "scalar";
-    "HOLLOW_CAVITY_MARCH_MARGIN_MM", "0.8660254037844386", "mm", "scalar";
+    "HOLLOW_CAVITY_MARCH_MARGIN_MM", "0.0", "mm", "scalar";
     "HOLLOW_CONTAINMENT_MIN_FRACTION", "0.9", "1", "scalar";
     "HOLLOW_CONTAINMENT_SAMPLES", "32", "count", "scalar";
     "HOLLOW_DRAIN_DIRECTIONS", "[{x:0.0,y:0.0,z:-1.0},{x:0.5,y:0.0,z:-1.0},{x:-0.5,y:0.0,z:-1.0},{x:0.0,y:0.5,z:-1.0},{x:0.0,y:-0.5,z:-1.0}]", "1", "list[5]<record{x,y,z}>";
@@ -388,7 +389,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "HOLLOW_ORIENT_ENABLE_DEFAULT", "true", "1", "scalar";
     "HOLLOW_PITCH_MM", "0.5", "mm", "scalar";
     "HOLLOW_SAVE_MIN_FRAC", "0.25", "1", "scalar";
-    "HOLLOW_SAVE_MIN_ML", "15.0", "mL", "scalar";
+    "HOLLOW_SAVE_MIN_ML", "1.5", "mL", "scalar";
     "HOLLOW_SHARD_MAX_DIM_MM", "1.0", "mm", "scalar";
     "HOLLOW_SHARD_MAX_FACES", "64", "count", "scalar";
     "HOLLOW_SHARD_MAX_VOLUME_MM3", "0.01", "mm³", "scalar";
@@ -399,6 +400,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "0.02", "1", "scalar";
     "HOLLOW_WALL_DEFAULT_MM", "2.5", "mm", "scalar";
     "HOLLOW_WALL_HANDLING_HEAVY_MM", "3.0", "mm", "scalar";
+    "HOLLOW_WALL_MIN_MM", "2.0", "mm", "scalar";
     "INITIAL_AXIS_MAJORITY_CAP", "80", "count", "scalar";
     "INITIAL_AXIS_MAJORITY_STEP_MM", "0.12", "mm", "scalar";
     "ISLAND_ATTACH_REACH_MM", "0.2", "mm", "scalar";
@@ -585,7 +587,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 273);
+    assert_eq!(descriptors.len(), 274);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -676,7 +678,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_305_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -684,14 +686,14 @@ fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 304);
+    assert_eq!(registry.len(), 305);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        304
+        305
     );
 }
 
