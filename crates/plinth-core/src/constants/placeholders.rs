@@ -1156,8 +1156,8 @@ placeholder_declarations! {
         DrainDirection::new(0.0, -0.5, -1.0)?,
     ])?;
     "HOLLOW_DRAIN_DIRECTIONS", "1", "list[5]<record{x,y,z}>", "One ordered structured set of five downward drain-search directions.";
-    hollow_drain_r_mm: PositiveFinite = PositiveFinite::new(1.5)?;
-    "HOLLOW_DRAIN_R_MM", "mm", "scalar", "Drain-hole radius policy.";
+    hollow_drain_r_mm: PositiveFinite = PositiveFinite::new(1.25)?;
+    "HOLLOW_DRAIN_R_MM", "mm", "scalar", "Drain-hole radius policy. 2.5 mm bore, Craig 2026-08-13; proven in manual prints at 2.0-2.5 mm; 2.5 mm is exact on the clearance lattice (the flow rule quantizes clearances to 0.5*sqrt(n) mm and 2.5 is on that lattice, so the demanded passage equals the bore exactly -- a 3 mm bore would demand 3.106 mm).";
     hollow_exit_ray_max_mm: PositiveFinite = PositiveFinite::new(45.0)?;
     "HOLLOW_EXIT_RAY_MAX_MM", "mm", "scalar", "Drain and vent exit-search ceiling.";
     hollow_extra_drain_policy: HollowExtraDrainPolicy = HollowExtraDrainPolicy::new(0.5, 3, 8.0, &[4.0, 8.0, 9.0], 24)?;

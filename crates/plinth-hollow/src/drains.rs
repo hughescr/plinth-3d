@@ -1681,7 +1681,9 @@ mod tests {
         // both radii are the two registered values, all now read straight
         // off the re-recorded baseline rather than asserted as a divergence.
         assert_eq!(holes[0].direction, xyz(&keepouts[0]["axis"]));
-        assert_eq!(holes[0].radius_mm.get().to_bits(), 1.5_f64.to_bits());
+        // 2026-08-13: Craig ruled the drain bore to 2.5 mm (radius 1.25 mm);
+        // the vent bore is untouched. See HOLLOW_DRAIN_R_MM's provenance.
+        assert_eq!(holes[0].radius_mm.get().to_bits(), 1.25_f64.to_bits());
         assert_eq!(holes[1].direction, xyz(&keepouts[1]["axis"]));
         assert_eq!(holes[1].radius_mm.get().to_bits(), 1.25_f64.to_bits());
 

@@ -878,15 +878,6 @@ fn prepare_audit_plan(
     let mut audit_holes = Vec::new();
     let mut audit_components = vec![false; components.len()];
     if !candidates.is_empty() {
-        let result_upper_bound = candidates
-            .len()
-            .checked_mul(planned.shell().tris().len())
-            .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
-        admit_count(
-            "audit centerline result upper bound",
-            result_upper_bound,
-            limits.max_centerline_results,
-        )?;
         let estimate = NativeSurface::estimate_index_memory_from_indexed(
             planned.shell().verts(),
             planned.shell().tris(),
@@ -910,9 +901,33 @@ fn prepare_audit_plan(
             .iter()
             .map(|candidate| candidate.direction)
             .collect();
+        // Count before charge before allocate, mirroring drains.rs: the
+        // census walks each ray's BVH descent without storing a hit, so the
+        // batch's demand is a measured crossing count rather than the rays x
+        // faces ceiling a finely tessellated shell would otherwise be
+        // charged under.
+        let crossing_counts = surface
+            .cast_rays_census(&origins, &directions, audit_max_exit_mm)
+            .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+        let result_upper_bound = crossing_counts
+            .iter()
+            .try_fold(0_usize, |total, count| total.checked_add(*count))
+            .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
+        admit_count(
+            "audit centerline result upper bound",
+            result_upper_bound,
+            limits.max_centerline_results,
+        )?;
         let (offsets, ts, _) = surface
             .cast_rays(&origins, &directions, audit_max_exit_mm)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+        // The census walk and the collecting walk are the same traversal,
+        // and dedup only merges neighbours, so the flattened array can never
+        // be longer than the counted crossings. Refuse rather than let a
+        // drift go unnoticed.
+        if ts.len() > result_upper_bound {
+            return Err(DrillingRefusal::ResourceAccountingOverflow);
+        }
         for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
             if audit_holes.len() == audit_max_drains {
                 break;
@@ -1406,15 +1421,6 @@ fn prove_centerlines(
         holes.len(),
         limits.max_centerline_queries,
     )?;
-    let result_upper_bound = holes
-        .len()
-        .checked_mul(mesh.tris().len())
-        .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
-    admit_count(
-        "centerline result upper bound",
-        result_upper_bound,
-        limits.max_centerline_results,
-    )?;
     let estimate =
         NativeSurface::estimate_index_memory_from_indexed(mesh.verts(), mesh.tris(), pitch)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
@@ -1442,9 +1448,32 @@ fn prove_centerlines(
         })
         .fold(0.0_f64, f64::max)
         + PROOF_EPSILON_MM;
+    // Count before charge before allocate, mirroring drains.rs: the census
+    // walks each ray's BVH descent without storing a hit, so the batch's
+    // demand is a measured crossing count rather than the rays x faces
+    // ceiling a finely tessellated shell would otherwise be charged under.
+    let crossing_counts = surface
+        .cast_rays_census(&origins, &directions, ceiling)
+        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    let result_upper_bound = crossing_counts
+        .iter()
+        .try_fold(0_usize, |total, count| total.checked_add(*count))
+        .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
+    admit_count(
+        "centerline result upper bound",
+        result_upper_bound,
+        limits.max_centerline_results,
+    )?;
     let (offsets, ts, _) = surface
         .cast_rays(&origins, &directions, ceiling)
         .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    // The census walk and the collecting walk are the same traversal, and
+    // dedup only merges neighbours, so the flattened array can never be
+    // longer than the counted crossings. Refuse rather than let a drift go
+    // unnoticed.
+    if ts.len() > result_upper_bound {
+        return Err(DrillingRefusal::ResourceAccountingOverflow);
+    }
     let mut counts = Vec::with_capacity(holes.len());
     for hole in 0..holes.len() {
         let begin = usize::try_from(offsets[hole])
@@ -2340,31 +2369,32 @@ mod tests {
         ));
 
         let drilled = drill_planned_shell(sphere_plan()).unwrap();
-        let output_results = hole_count * drilled.mesh().tris().len();
         let output_edges = drilled.mesh().tris().len() * 3;
-        let query_exact = DrillingLimits::with_count_admissions(
-            boolean,
-            hole_count,
-            cutter_vertices,
-            cutter_triangles,
-            output_edges,
-            hole_count,
-            output_results,
-            cells,
+        // The retired `holes x shell faces` shape the result cap used to be
+        // charged under -- kept only as a scale reference for the comment
+        // below, not as a cap this test still expects to sit near.
+        let naive_results = hole_count * drilled.mesh().tris().len();
+        let query_limits = |queries: usize, results: usize| {
+            DrillingLimits::with_count_admissions(
+                boolean,
+                hole_count,
+                cutter_vertices,
+                cutter_triangles,
+                output_edges,
+                queries,
+                results,
+                cells,
+            )
+            .unwrap()
+        };
+        prove_centerlines(
+            drilled.mesh(),
+            plan.drain_plan().holes(),
+            0.5,
+            query_limits(hole_count, naive_results),
         )
         .unwrap();
-        prove_centerlines(drilled.mesh(), plan.drain_plan().holes(), 0.5, query_exact).unwrap();
-        let query_cap = DrillingLimits::with_count_admissions(
-            boolean,
-            hole_count,
-            cutter_vertices,
-            cutter_triangles,
-            output_edges,
-            hole_count - 1,
-            output_results,
-            cells,
-        )
-        .unwrap();
+        let query_cap = query_limits(hole_count - 1, naive_results);
         assert!(matches!(
             prove_centerlines(drilled.mesh(), plan.drain_plan().holes(), 0.5, query_cap),
             Err(DrillingRefusal::CountAdmission {
@@ -2372,24 +2402,73 @@ mod tests {
                 ..
             })
         ));
-        let result_cap = DrillingLimits::with_count_admissions(
-            boolean,
-            hole_count,
-            cutter_vertices,
-            cutter_triangles,
-            output_edges,
-            hole_count,
-            output_results - 1,
-            cells,
+        // The result cap is now charged from the census's counted crossings,
+        // not from `holes x shell faces`. A cleanly drilled, obstruction-free
+        // channel crosses the shell no further times along its proof path,
+        // so the smallest constructible cap (1) already admits it -- a
+        // result the retired `holes x faces` shape (`naive_results` above,
+        // orders of magnitude above 1) could never produce. Restore that
+        // retired shape and this refuses instead of succeeding.
+        prove_centerlines(
+            drilled.mesh(),
+            plan.drain_plan().holes(),
+            0.5,
+            query_limits(hole_count, 1),
         )
-        .unwrap();
-        assert!(matches!(
-            prove_centerlines(drilled.mesh(), plan.drain_plan().holes(), 0.5, result_cap),
-            Err(DrillingRefusal::CountAdmission {
-                resource: "centerline result upper bound",
-                ..
-            })
-        ));
+        .expect(
+            "a cleanly drilled channel crosses the shell no further times, so cap 1 admits it",
+        );
+    }
+
+    /// The audit-drain site's charge (`prepare_audit_plan`'s "audit
+    /// centerline result upper bound" admission) follows the same
+    /// counted-crossings discipline as `prove_centerlines` above, not the
+    /// retired `candidates x shell faces` shape. Uses the trapped-pocket
+    /// fixture from `frozen_trapped_pocket_policy_refills_a_long_exit`,
+    /// which is known (from that test's frozen assertions) to carry exactly
+    /// one qualifying trapped pocket, so it drives this admission's real,
+    /// non-empty ray batch.
+    #[test]
+    fn the_audit_centerline_charge_follows_counted_crossings_not_the_shell_face_count() {
+        let plan = sphere_plan();
+        let mut horizontal_gap = vec![false; plan.cavity_field().flat_count()];
+        for flat in plan.cavity_field().member_flats() {
+            if plan.cavity_field().flat_to_index(flat)[2] == 20 {
+                horizontal_gap[flat] = true;
+            }
+        }
+        let split = plan.with_test_refilled_field(&horizontal_gap);
+        let faces = split.shell().tris().len();
+        let boolean = DrillingLimits::production().boolean();
+        let audit_limits = |results: usize| {
+            DrillingLimits::with_count_admissions(
+                boolean,
+                DEFAULT_MAX_HOLES,
+                DEFAULT_MAX_CUTTER_VERTICES,
+                DEFAULT_MAX_CUTTER_TRIANGLES,
+                DEFAULT_MAX_TOPOLOGY_EDGE_OCCURRENCES,
+                DEFAULT_MAX_HOLES,
+                results,
+                DEFAULT_MAX_DRAINABILITY_CELLS,
+            )
+            .unwrap()
+        };
+        // This fixture's one qualifying trapped pocket yields at most
+        // `AUDIT_DIRECTIONS.len()` candidate rays (one component times the
+        // direction fan), so this is a valid, if generous, rays x faces
+        // ceiling for the retired charge shape -- kept only as the scale
+        // reference the comment below cites.
+        let naive_results = AUDIT_DIRECTIONS.len() * faces;
+        prepare_audit_plan(&split, audit_limits(naive_results)).unwrap();
+        // The result cap is now charged from the census's counted crossings,
+        // not from `candidates x shell faces`. This fixture's small candidate
+        // batch measures at 1 counted crossing in total (verified by direct
+        // run), so the smallest constructible cap already admits it -- a
+        // result the retired `candidates x faces` shape (`naive_results`
+        // above, tens of thousands here) could never produce. Restore that
+        // retired shape and this refuses instead of succeeding.
+        prepare_audit_plan(&split, audit_limits(1))
+            .expect("this fixture's audit batch measures 1 counted crossing, so cap 1 admits it");
     }
 
     #[test]
