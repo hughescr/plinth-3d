@@ -275,6 +275,67 @@ impl std::fmt::Display for RealizedWall {
     }
 }
 
+/// A savings-gate refusal's own measurement: what the cavity would have
+/// saved, and the registered minimum resin saving it fell short of.
+///
+/// Carried the same way [`RealizedWall`] is carried for a wall refusal —
+/// onto the solid decision that discarded the shell — so that a refusal is
+/// legible on its own: "saved 900.0 mm3 against a registered 1500.0 mm3
+/// minimum" rather than a bare "below threshold" a reader would have to
+/// re-derive by re-running the model. 2026-08-13, the owner's savings-gate
+/// ruling: the decision moved onto total volume
+/// ([`HOLLOW_SAVE_MIN_ML`](crate)), and this is what makes that decision's
+/// own refusal legible in the shipped report rather than only in a log line.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavingsShortfall {
+    saved_mm3: Finite,
+    threshold_mm3: Finite,
+}
+
+impl SavingsShortfall {
+    #[must_use]
+    pub const fn new(saved_mm3: Finite, threshold_mm3: Finite) -> Self {
+        Self {
+            saved_mm3,
+            threshold_mm3,
+        }
+    }
+
+    /// What the cavity actually would have saved.
+    #[must_use]
+    pub const fn saved_mm3(self) -> Finite {
+        self.saved_mm3
+    }
+
+    /// The registered [`HOLLOW_SAVE_MIN_ML`](crate)-derived minimum this
+    /// saving was judged against.
+    #[must_use]
+    pub const fn threshold_mm3(self) -> Finite {
+        self.threshold_mm3
+    }
+
+    /// How far short of the threshold the saving fell. Always `>= 0.0` by
+    /// construction — this type is only ever built from an actual refusal,
+    /// and a refusal means `saved_mm3 < threshold_mm3`.
+    #[must_use]
+    pub fn shortfall_mm3(self) -> f64 {
+        self.threshold_mm3.get() - self.saved_mm3.get()
+    }
+}
+
+impl std::fmt::Display for SavingsShortfall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "saved {:.3} mm3 against a registered {:.3} mm3 minimum resin saving (short by {:.3} mm3)",
+            self.saved_mm3.get(),
+            self.threshold_mm3.get(),
+            self.shortfall_mm3()
+        )
+    }
+}
+
 /// What the well-composedness repair did, carried into the record so that a
 /// repair-caused outcome is never reported as a property of the geometry.
 ///
@@ -408,6 +469,20 @@ pub struct HollowReport {
     /// before this field existed has to keep deserializing.
     #[serde(default)]
     realized_wall: Option<RealizedWall>,
+    /// The savings-gate refusal's own measurement, when this report's
+    /// disposition is [`SolidDecisionReason::BelowThreshold`] or
+    /// [`SolidDecisionReason::BelowThresholdAfterRepair`]. `None` on every
+    /// other report — including a hollowed one, and every solid decision for
+    /// an unrelated reason — because there is no shortfall to record. See
+    /// [`SavingsShortfall`] for why this is a typed pair rather than a bare
+    /// number: a reader must be able to see *how far* the refusal was from
+    /// qualifying, not just that it happened.
+    ///
+    /// `default` for the same reason `cavity_repair` and `realized_wall`
+    /// are: a report frozen before this field existed has to keep
+    /// deserializing.
+    #[serde(default)]
+    savings_shortfall: Option<SavingsShortfall>,
 }
 
 impl HollowReport {
@@ -422,6 +497,7 @@ impl HollowReport {
             cavity_repair: None,
             wall: None,
             realized_wall: None,
+            savings_shortfall: None,
         }
     }
 
@@ -456,6 +532,13 @@ impl HollowReport {
     #[must_use]
     pub fn realized_wall_mm(&self) -> Option<Finite> {
         self.realized_wall.map(RealizedWall::wall_mm)
+    }
+
+    /// The savings-gate refusal's own measurement, when this report's
+    /// disposition is a savings refusal. See the field's own doc.
+    #[must_use]
+    pub const fn savings_shortfall(&self) -> Option<SavingsShortfall> {
+        self.savings_shortfall
     }
 
     #[must_use]
@@ -570,6 +653,10 @@ impl HollowedModel {
             // every other solid decision (including this function's other
             // two callers) has no shell to have measured.
             realized_wall: None,
+            // The savings-gate refusal arms attach their own measurement the
+            // same way, via `with_savings_shortfall`, immediately after this
+            // constructor returns.
+            savings_shortfall: None,
         };
         Ok(Self {
             mesh,
@@ -628,6 +715,17 @@ impl HollowedModel {
     #[must_use]
     fn with_realized_wall(mut self, realized_wall: Option<RealizedWall>) -> Self {
         self.history.hollow.realized_wall = realized_wall;
+        self
+    }
+
+    /// Attaches a savings-gate refusal's own measurement to a just-built
+    /// solid decision. Crate-private — the only callers are `run`'s
+    /// `BelowThreshold` and `BelowThresholdAfterRepair` arms, immediately
+    /// after [`Self::solid_decision_recording_repair`] returns; every other
+    /// solid decision has no shortfall to attach.
+    #[must_use]
+    fn with_savings_shortfall(mut self, savings_shortfall: Option<SavingsShortfall>) -> Self {
+        self.history.hollow.savings_shortfall = savings_shortfall;
         self
     }
 
@@ -909,7 +1007,9 @@ fn convert_shell_failure_to_solid(
     requested_wall_mm: Finite,
 ) -> Result<HollowStageOutput, HollowStageFailure> {
     let cavity_repair = failure.cavity_repair();
-    let decided = |reason: SolidDecisionReason, realized_wall: Option<RealizedWall>| {
+    let decided = |reason: SolidDecisionReason,
+                   realized_wall: Option<RealizedWall>,
+                   savings_shortfall: Option<SavingsShortfall>| {
         HollowedModel::solid_decision_recording_repair(
             solid,
             orientation,
@@ -917,28 +1017,70 @@ fn convert_shell_failure_to_solid(
             cavity_repair,
             Some(requested_wall_mm),
         )
-        .map(|model| HollowStageOutput::Solid(Box::new(model.with_realized_wall(realized_wall))))
+        .map(|model| {
+            HollowStageOutput::Solid(Box::new(
+                model
+                    .with_realized_wall(realized_wall)
+                    .with_savings_shortfall(savings_shortfall),
+            ))
+        })
         .map_err(HollowStageFailure::from)
     };
     match failure.into_error() {
-        HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity, None),
+        HollowError::IneligibleNoCavity => decided(SolidDecisionReason::NoCavity, None, None),
         HollowError::IneligibleCavityBelowDrainThroat { .. } => {
-            decided(SolidDecisionReason::CavityBelowDrainThroat, None)
+            decided(SolidDecisionReason::CavityBelowDrainThroat, None, None)
         }
-        HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings => {
-            decided(SolidDecisionReason::BelowThreshold, None)
+        HollowError::IneligibleBelowBulk => {
+            decided(SolidDecisionReason::BelowThreshold, None, None)
         }
+        // 2026-08-13 owner ruling: the savings gate is judged on absolute
+        // resin saved, and the refusal's own measurement travels onto the
+        // solid decision — see `SavingsShortfall` — so a reader of the
+        // report can see how far the model was from qualifying without
+        // re-deriving it. The two numbers are already finite by
+        // construction (they came from a checked cavity volume and a
+        // registered `Finite` threshold in `create_shell_recording_repair`),
+        // but this is the one seam a caller holding only a `HollowError`
+        // could hand in anything, so it is checked the same defensive way
+        // `RealizedWallBelowSpec` below is.
+        HollowError::IneligibleSavings {
+            saved_mm3,
+            threshold_mm3,
+        } => match (finite(saved_mm3), finite(threshold_mm3)) {
+            (Ok(saved), Ok(threshold)) => decided(
+                SolidDecisionReason::BelowThreshold,
+                None,
+                Some(SavingsShortfall::new(saved, threshold)),
+            ),
+            _ => Err(HollowStageFailure {
+                error: HollowError::InvalidArithmetic,
+                cavity_repair,
+            }),
+        },
         // The two repair-caused decisions. They travel as their own
         // reasons because "the repair removed the cavity" and "this
         // shape has no cavity" are different findings and the record
         // has to be able to tell them apart; the numbers themselves
         // come from the same `cavity_repair` every other arm uses.
         HollowError::CavityRepairRemovedCavity { .. } => {
-            decided(SolidDecisionReason::NoCavityAfterRepair, None)
+            decided(SolidDecisionReason::NoCavityAfterRepair, None, None)
         }
-        HollowError::IneligibleSavingsAfterCavityRepair { .. } => {
-            decided(SolidDecisionReason::BelowThresholdAfterRepair, None)
-        }
+        HollowError::IneligibleSavingsAfterCavityRepair {
+            saved_mm3,
+            threshold_mm3,
+            ..
+        } => match (finite(saved_mm3), finite(threshold_mm3)) {
+            (Ok(saved), Ok(threshold)) => decided(
+                SolidDecisionReason::BelowThresholdAfterRepair,
+                None,
+                Some(SavingsShortfall::new(saved, threshold)),
+            ),
+            _ => Err(HollowStageFailure {
+                error: HollowError::InvalidArithmetic,
+                cavity_repair,
+            }),
+        },
         // FU-55, the ruling this whole function exists to carry: a shell
         // that measured under spec is discarded, never a model failure, and
         // the measurement that condemned it travels onto the solid decision
@@ -953,6 +1095,7 @@ fn convert_shell_failure_to_solid(
             Ok(value) => decided(
                 SolidDecisionReason::ShellUnderWalled,
                 Some(RealizedWall::measured(value)),
+                None,
             ),
             Err(error) => Err(HollowStageFailure {
                 error,
@@ -980,8 +1123,17 @@ pub struct HollowSettings {
     wall_thickness_mm: Finite,
     voxel_pitch_mm: Finite,
     bulk_min_mm: Finite,
+    /// `HOLLOW_SAVE_MIN_ML` (times 1000 for mm3). **The whole savings gate**
+    /// since the 2026-08-13 owner ruling: a cavity below this is refused
+    /// regardless of what fraction of the model's own volume it represents.
+    /// There used to be a second, percentage-based criterion here
+    /// (`HOLLOW_SAVE_MIN_FRAC`, an `OR` with this one) — removed rather than
+    /// kept as a secondary path, because keeping it as an `OR` would still
+    /// admit a small model on a high percentage of very little, which is
+    /// exactly the percentage-only behaviour the ruling rejects. See this
+    /// constant's own registry doc for the full derivation against the
+    /// owner's seven hand-hollowed verdicts.
     save_min_mm3: Finite,
-    save_min_fraction: Finite,
     volume_balance_rel_tol: Finite,
     /// `HOLLOW_CAVITY_MARCH_MARGIN_MM`, added to the stated wall before cavity
     /// selection. **Zero since the owner ruling of 2026-08-13**, which made
@@ -1024,7 +1176,6 @@ impl HollowSettings {
             placeholders.hollow_pitch_mm().diagnostic().get(),
             placeholders.hollow_bulk_min_mm().diagnostic().get(),
             placeholders.hollow_save_min_ml().diagnostic().get() * 1000.0,
-            placeholders.hollow_save_min_frac().diagnostic().get(),
             placeholders
                 .hollow_volume_balance_rel_tol()
                 .diagnostic()
@@ -1058,11 +1209,6 @@ impl HollowSettings {
     }
 
     #[must_use]
-    pub const fn save_min_fraction(self) -> Finite {
-        self.save_min_fraction
-    }
-
-    #[must_use]
     pub const fn volume_balance_rel_tol(self) -> Finite {
         self.volume_balance_rel_tol
     }
@@ -1087,7 +1233,6 @@ fn finite_settings(
     voxel_pitch_mm: f64,
     bulk_min_mm: f64,
     save_min_mm3: f64,
-    save_min_fraction: f64,
     volume_balance_rel_tol: f64,
     cavity_march_margin_mm: f64,
     minimum_wall_mm: f64,
@@ -1098,7 +1243,6 @@ fn finite_settings(
         voxel_pitch_mm: finite(voxel_pitch_mm)?,
         bulk_min_mm: finite(bulk_min_mm)?,
         save_min_mm3: finite(save_min_mm3)?,
-        save_min_fraction: finite(save_min_fraction)?,
         volume_balance_rel_tol: finite(volume_balance_rel_tol)?,
         cavity_march_margin_mm: finite(cavity_march_margin_mm)?,
         minimum_wall_mm: finite(minimum_wall_mm)?,
@@ -1795,13 +1939,17 @@ pub fn create_shell_recording_repair(
         if !cavity_volume_mm3.is_finite() {
             return Err(HollowError::InvalidArithmetic);
         }
-        let required_fraction_mm3 = source_volume_mm3 * settings.save_min_fraction.get();
-        if !required_fraction_mm3.is_finite() {
-            return Err(HollowError::InvalidArithmetic);
-        }
-        if cavity_volume_mm3 < settings.save_min_mm3.get()
-            && cavity_volume_mm3 < required_fraction_mm3
-        {
+        // 2026-08-13 owner ruling: the savings gate is judged on absolute
+        // resin saved, not on percentage of the model's own volume — see
+        // `HOLLOW_SAVE_MIN_ML`'s registry doc for the full derivation
+        // against the owner's seven hand-hollowed verdicts. The percentage
+        // branch (`HOLLOW_SAVE_MIN_FRAC`) that used to sit here as an `OR`
+        // is removed, not merely bypassed: an `OR` would have kept
+        // admitting small models on a high percentage of very little, which
+        // is exactly the percentage-only behaviour the ruling rejects, just
+        // relocated to the small-model end of the gate instead of removed
+        // from it.
+        if cavity_volume_mm3 < settings.save_min_mm3.get() {
             // A cavity the repair shrank and a cavity that was always this
             // small are the same number here and different findings. Say which
             // one this was in the error's own name, too, so a `create_shell`
@@ -1812,9 +1960,14 @@ pub fn create_shell_recording_repair(
                     repaired_voxels: repair_evidence.repaired_voxels,
                     cell_visits: repair_evidence.cell_visits,
                     full_grid_passes: repair_evidence.full_grid_passes,
+                    saved_mm3: cavity_volume_mm3,
+                    threshold_mm3: settings.save_min_mm3.get(),
                 });
             }
-            return Err(HollowError::IneligibleSavings);
+            return Err(HollowError::IneligibleSavings {
+                saved_mm3: cavity_volume_mm3,
+                threshold_mm3: settings.save_min_mm3.get(),
+            });
         }
 
         let cavity_field = CavityField::from_selected_mask_and_occupancy(
@@ -3585,8 +3738,16 @@ pub enum HollowError {
         "no cavity passage admits the registered {throat_radius_mm} mm drain bore radius"
     )]
     IneligibleCavityBelowDrainThroat { throat_radius_mm: f64 },
-    #[error("the largest cavity does not meet the registered resin-saving threshold")]
-    IneligibleSavings,
+    /// 2026-08-13 owner ruling: the savings gate is judged on absolute
+    /// resin saved ([`HOLLOW_SAVE_MIN_ML`](crate)), not on percentage. Both
+    /// numbers travel with the refusal so it is legible without re-deriving
+    /// anything — see [`SavingsShortfall`], which carries the same pair
+    /// onto the solid decision this becomes.
+    #[error(
+        "the largest cavity saves {saved_mm3:.3} mm3, short of the registered {threshold_mm3:.3} \
+         mm3 minimum resin saving"
+    )]
+    IneligibleSavings { saved_mm3: f64, threshold_mm3: f64 },
     /// The well-composedness repair consumed the whole selected component.
     ///
     /// Distinct from [`Self::IneligibleNoCavity`] on purpose: that one says the
@@ -3610,16 +3771,18 @@ pub enum HollowError {
     /// the repair is not claimed here — what is claimed is that a repair ran,
     /// how big it was, and that the gate was judged after it.
     #[error(
-        "the largest cavity does not meet the registered resin-saving threshold after the \
-         well-composedness repair returned {repaired_voxels} voxels to material \
-         ({critical_cells} critical cells, {cell_visits} cell visits, \
-         {full_grid_passes} whole-grid passes)"
+        "the largest cavity saves {saved_mm3:.3} mm3 after the well-composedness repair returned \
+         {repaired_voxels} voxels to material ({critical_cells} critical cells, {cell_visits} \
+         cell visits, {full_grid_passes} whole-grid passes), short of the registered \
+         {threshold_mm3:.3} mm3 minimum resin saving"
     )]
     IneligibleSavingsAfterCavityRepair {
         critical_cells: usize,
         repaired_voxels: usize,
         cell_visits: usize,
         full_grid_passes: usize,
+        saved_mm3: f64,
+        threshold_mm3: f64,
     },
     /// FU-54. The well-composedness repair's whole-grid re-selection loop
     /// hit its admitted ceiling ([`H0AdmissionLimits::max_cavity_repair_passes`],
@@ -5143,26 +5306,39 @@ mod tests {
         );
     }
 
-    /// **Both registered walls clear the savings gate on the frozen Sphere,
-    /// and the heavier one costs real cavity.**
+    /// **The default wall clears the registered savings gate on the frozen
+    /// Sphere; the heavier wall leaves genuinely less cavity, and — measured,
+    /// not assumed — that smaller cavity now falls just short of the
+    /// retired-percentage gate.**
     ///
-    /// **Rewritten 2026-08-13 by the owner's ruling; the previous claim is
-    /// recorded rather than deleted.** From FU-53 (2026-08-12) to that
-    /// ruling this test asserted the opposite of its second half: the
-    /// handling-heavy wall REMOVED the Sphere from eligibility, because the
-    /// 0.866 mm march margin turned a 3.0 mm request into a 3.866 mm
-    /// erosion, leaving ~1,091 mm3 of cavity against a ~1,044 mm3 25 %
-    /// fraction limb — a refusal manufactured by the margin, not by the
-    /// wall. The ruling zeroed the margin (3.0 mm is now cut at 3.0 mm) and
-    /// moved the savings gate onto total volume (`HOLLOW_SAVE_MIN_ML`, 15.0
-    /// -> 1.5 mL), and the heavy wall clears comfortably.
+    /// **Re-measured 2026-08-13 by the savings-gate ruling; the previous
+    /// claim is recorded rather than deleted.** From the wall-target ruling
+    /// earlier the same day to this one, this test asserted the heavy wall
+    /// "clears comfortably" — true at the time, but only because
+    /// `HOLLOW_SAVE_MIN_FRAC` (0.25) was still an `OR` limb: the heavy-wall
+    /// cavity (1,430.625 mm3) never cleared the 1.5 mL absolute bound, it
+    /// cleared on 25 % of the sphere's own volume instead. Retiring the
+    /// percentage limb (this landing; see `HOLLOW_SAVE_MIN_ML`'s registry
+    /// doc) removes exactly that path, and the honest consequence is that
+    /// the frozen Sphere's handling-heavy wall now refuses:
+    /// `IneligibleSavings { saved_mm3: 1430.625, threshold_mm3: 1500.0 }`,
+    /// short by 69.375 mm3 (4.6 %). This is not a defect to route around —
+    /// it is the registered gate doing exactly what the owner ruled it
+    /// should: judging a marginal cavity on absolute resin, not on the
+    /// fraction of a small-ish sphere it happens to represent.
     ///
-    /// What survives is the part that was always a property of the geometry
-    /// rather than of a margin: a heavier wall leaves less cavity, and the
-    /// outer solid does not move. Both are asserted, so a wall selection
-    /// that stopped reaching the erosion would still fail here.
+    /// What survives, checked two ways because the registered heavy request
+    /// no longer builds a candidate to inspect directly: **(1)** the
+    /// refusal's own `saved_mm3` is still the true cavity volume computed
+    /// before the gate runs, so it alone proves "a heavier wall leaves less
+    /// cavity" against `default`'s measured volume; **(2)** a second,
+    /// gate-relaxed `HollowSettings` (same heavy wall, `save_min_mm3` turned
+    /// down to 1.0 mm3, the same technique `the_ramped_box_breach_class_is_gone`
+    /// uses to inspect geometry independent of the gate) builds the real
+    /// candidate and confirms the outer solid is untouched by the wall
+    /// selection and both walls still clear the registered minimum wall.
     #[test]
-    fn both_registered_walls_clear_savings_on_the_committed_sphere_and_the_heavier_one_costs_cavity()
+    fn the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate()
     {
         let default = create_shell(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
@@ -5177,18 +5353,57 @@ mod tests {
             wall_mm: heavy_wall,
         })
         .expect("heavy wall settings");
-        let heavy = create_shell(
+
+        // (1) The registered gate itself: the heavy wall now refuses, and
+        // the refusal's own numbers are the proof, not an assumption.
+        let refusal = create_shell(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             heavy_settings,
         )
-        .expect("the honest cavity at the heavier wall still clears the savings gate");
-
+        .expect_err(
+            "2026-08-13: with the percentage limb retired, the heavy-wall Sphere's honest \
+             cavity (1,430.625 mm3) falls short of the sole 1.5 mL absolute threshold -- a \
+             measured consequence of the ruling, not a bug",
+        );
+        let HollowError::IneligibleSavings {
+            saved_mm3,
+            threshold_mm3,
+        } = refusal
+        else {
+            panic!("expected a savings refusal, got {refusal:?}");
+        };
         assert!(
-            heavy.cavity().cavity_volume_mm3().get()
-                < default.cavity().cavity_volume_mm3().get(),
-            "a heavier wall must leave less cavity: heavy {} mm^3 vs default {} mm^3",
-            heavy.cavity().cavity_volume_mm3().get(),
+            saved_mm3 < threshold_mm3,
+            "a refusal's own numbers must be inconsistent with qualifying: saved {saved_mm3} \
+             mm3 >= threshold {threshold_mm3} mm3"
+        );
+        assert_eq!(
+            threshold_mm3,
+            heavy_settings.save_min_mm3().get(),
+            "the refusal must carry the same registered threshold the settings publish"
+        );
+        assert!(
+            saved_mm3 < default.cavity().cavity_volume_mm3().get(),
+            "a heavier wall must leave less cavity: heavy {saved_mm3} mm^3 vs default {} mm^3",
             default.cavity().cavity_volume_mm3().get()
+        );
+
+        // (2) The geometry claim, independent of the gate: relax only
+        // `save_min_mm3` -- never the wall, never the minimum -- so the
+        // heavy candidate can be inspected directly.
+        let heavy_gate_relaxed_settings = HollowSettings {
+            save_min_mm3: Finite::new(1.0).expect("finite"),
+            ..heavy_settings
+        };
+        let heavy = create_shell(
+            frozen_mesh("Sphere.prepped.oriented-solid.stl"),
+            heavy_gate_relaxed_settings,
+        )
+        .expect("the honest cavity still builds once the gate is relaxed for inspection only");
+        assert_eq!(
+            heavy.cavity().cavity_volume_mm3().get(),
+            saved_mm3,
+            "the gate-relaxed candidate's cavity must match the refusal's own measurement"
         );
         assert_eq!(
             heavy.cavity().source_volume_mm3().get(),
@@ -5854,7 +6069,6 @@ mod fu53_exact_cavity_distance {
     fn the_ramped_box_breach_class_is_gone() {
         let settings = HollowSettings {
             save_min_mm3: Finite::new(1.0).expect("finite"),
-            save_min_fraction: Finite::new(0.0).expect("finite"),
             ..registered_settings()
         };
         let mut any_hollowed = false;
@@ -6772,7 +6986,6 @@ mod fu55_realized_wall_check {
             registered.voxel_pitch_mm().get(),
             registered.bulk_min_mm().get(),
             registered.save_min_mm3().get(),
-            registered.save_min_fraction().get(),
             registered.volume_balance_rel_tol().get(),
             registered.cavity_march_margin_mm().get(),
             minimum,
@@ -7088,7 +7301,10 @@ mod fu37_wall_field {
                 SolidDecisionReason::BelowThreshold,
             ),
             (
-                HollowError::IneligibleSavings,
+                HollowError::IneligibleSavings {
+                    saved_mm3: 100.0,
+                    threshold_mm3: 1500.0,
+                },
                 SolidDecisionReason::BelowThreshold,
             ),
             (
@@ -7106,6 +7322,8 @@ mod fu37_wall_field {
                     repaired_voxels: 1,
                     cell_visits: 1,
                     full_grid_passes: 1,
+                    saved_mm3: 100.0,
+                    threshold_mm3: 1500.0,
                 },
                 SolidDecisionReason::BelowThresholdAfterRepair,
             ),
@@ -7302,12 +7520,14 @@ mod dual_cavity_doctrine {
 
         // The gate it cleared, recomputed from the settings and the
         // candidate's own evidence -- never against a literal, so this
-        // cannot drift from the registered constant.
-        let required_fraction_mm3 = cavity.source_volume_mm3().get() * settings.save_min_fraction().get();
+        // cannot drift from the registered constant. 2026-08-13: the gate
+        // is absolute volume only (`HOLLOW_SAVE_MIN_ML`); the percentage
+        // criterion this used to recompute is retired, not merely relaxed.
         assert!(
-            cavity.cavity_volume_mm3().get() >= required_fraction_mm3,
-            "cavity {} did not clear the recomputed 25% fraction floor {required_fraction_mm3}",
-            cavity.cavity_volume_mm3().get()
+            cavity.cavity_volume_mm3().get() >= settings.save_min_mm3().get(),
+            "cavity {} did not clear the recomputed {} mm3 savings minimum",
+            cavity.cavity_volume_mm3().get(),
+            settings.save_min_mm3().get()
         );
 
         // FU-55, retargeted 2026-08-13: the realized wall clears the

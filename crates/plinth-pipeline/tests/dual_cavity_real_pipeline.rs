@@ -147,13 +147,14 @@ fn hollow_plan_drill_and_round_trip(name: &str, mesh: plinth_mesh::Mesh, drill: 
     });
 
     // The registered savings gate, recomputed from the candidate's own
-    // evidence and the live settings -- never against a literal.
+    // evidence and the live settings -- never against a literal. 2026-08-13:
+    // the gate is absolute volume only (`HOLLOW_SAVE_MIN_ML`); there is no
+    // percentage limb left to recompute.
     let cavity_mm3 = candidate.cavity().cavity_volume_mm3().get();
-    let required_fraction_mm3 =
-        candidate.cavity().source_volume_mm3().get() * settings.save_min_fraction().get();
+    let required_mm3 = settings.save_min_mm3().get();
     assert!(
-        cavity_mm3 >= required_fraction_mm3,
-        "{name}: cavity {cavity_mm3} mm^3 did not clear the recomputed fraction floor {required_fraction_mm3} mm^3"
+        cavity_mm3 >= required_mm3,
+        "{name}: cavity {cavity_mm3} mm^3 did not clear the registered {required_mm3} mm^3 savings minimum"
     );
     // Retargeted 2026-08-13 onto `HOLLOW_WALL_MIN_MM` by the owner's ruling.
     // The requested wall is a TARGET the cavity is cut at, and the

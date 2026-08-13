@@ -223,6 +223,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         cavity_repair,
         wall_mm,
         realized_wall,
+        savings_shortfall,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -263,6 +264,35 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // is no realized wall to state -- `None` is the claim "nothing was
     // measured", not "the measurement was dropped".
     assert_eq!(realized_wall, &None);
+    // 2026-08-13 owner ruling: `savings_shortfall` is populated ONLY when the
+    // refusal that produced this `BelowThreshold` disposition actually came
+    // from the savings gate (`HollowError::IneligibleSavings` /
+    // `IneligibleSavingsAfterCavityRepair`). `BelowThreshold` is itself a
+    // catch-all shared with the untouched bulk/feature-size gate (FU-79,
+    // pre-existing and out of scope): `HollowError::IneligibleBelowBulk` maps
+    // onto the same `SolidDecisionReason::BelowThreshold` with `None`, because
+    // there is no shortfall to record for a bulk refusal. **This fixture is
+    // the bulk case, not the savings case** -- measured directly:
+    // `make_toed_slab` (a 12x12x1.5 mm slab) refuses as `IneligibleBelowBulk`
+    // before a cavity is ever computed, the same way the owner's own
+    // `Myconid Adult` and `Vegepygmy` acceptance-suite rejects do (see
+    // [the savings-gate section](#savings-gate-absolute-volume-2026-08-13)).
+    // So the correct assertion here is `None`, not a populated shortfall --
+    // asserting the field's *absence* is exactly as load-bearing as asserting
+    // its presence elsewhere, because a `Some` here would mean the mapping
+    // conflated the two gates. The positive case (a real `IneligibleSavings`
+    // refusal's shortfall reaching the report) is proved end to end at the
+    // `create_shell` level in `plinth-hollow`'s own
+    // `the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate`
+    // and via the committed `corpus/models/make_box.stl` fixture (`cargo run
+    // -p plinth-hollow --example wall_distribution`), and at the mapping
+    // level in this crate's own `prepare::tests`.
+    assert_eq!(
+        savings_shortfall, &None,
+        "make_toed_slab refuses on the bulk gate (IneligibleBelowBulk), not the savings gate -- \
+         a populated shortfall here would mean the two refusal causes got conflated under the \
+         shared BelowThreshold disposition"
+    );
     assert!(
         emit.support_record_count > 0,
         "an artifact with no supports"

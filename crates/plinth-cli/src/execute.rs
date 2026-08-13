@@ -226,6 +226,7 @@ fn print_model(model: &ModelPreparationReport) {
             cavity_repair,
             wall_mm,
             realized_wall,
+            savings_shortfall,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -268,6 +269,14 @@ fn print_model(model: &ModelPreparationReport) {
                     repair.cell_visits,
                     repair.full_grid_passes
                 );
+            }
+            // 2026-08-13 owner ruling: when this model's disposition is a
+            // savings refusal, print the refusal's own measurement so it is
+            // legible without re-running the model. "saved 0.9 mm3 against
+            // a registered 1500.0 mm3 minimum" is useful; "below threshold"
+            // is not.
+            if let Some(shortfall) = savings_shortfall {
+                println!("  savings gate  {shortfall}");
             }
         }
         ModelPreparationOutcome::Refused {

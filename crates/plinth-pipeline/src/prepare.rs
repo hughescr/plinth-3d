@@ -485,6 +485,13 @@ pub struct ChainOutcome {
     /// shell was built and measured, with its
     /// [`plinth_hollow::RealizedWallClaim`] attached.
     pub realized_wall: Option<plinth_hollow::RealizedWall>,
+    /// 2026-08-13 owner ruling: when this model's hollow disposition is
+    /// `SolidDecisionReason::BelowThreshold` or
+    /// `BelowThresholdAfterRepair`, what the cavity would have saved and the
+    /// registered minimum it fell short of — read off the same
+    /// `HollowReport` as `wall` and `realized_wall`, and for the same
+    /// reason. `None` on every other disposition, including a hollowed one.
+    pub savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
     pub supported_geometry: SupportedGeometry,
     pub routed_contacts: usize,
     pub final_live_members: usize,
@@ -846,6 +853,11 @@ fn prepare_one(
                 // runs apart.
                 wall_mm: outcome.wall,
                 realized_wall: outcome.realized_wall,
+                // 2026-08-13 owner ruling: legible on disk without
+                // re-deriving it — "saved X mm3 against a registered Y mm3
+                // minimum" for any model whose disposition is a savings
+                // refusal.
+                savings_shortfall: outcome.savings_shortfall,
             },
         ),
         Ok(None) => report(
@@ -1320,7 +1332,7 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
         HollowError::IneligibleBelowBulk
         | HollowError::IneligibleNoCavity
         | HollowError::IneligibleCavityBelowDrainThroat { .. }
-        | HollowError::IneligibleSavings
+        | HollowError::IneligibleSavings { .. }
         | HollowError::CavityRepairRemovedCavity { .. }
         | HollowError::IneligibleSavingsAfterCavityRepair { .. }
         | HollowError::RealizedWallBelowSpec { .. } => true,
@@ -1355,6 +1367,7 @@ pub fn seal_and_emit(
     let cavity_repair = hollowed.history().hollow().cavity_repair();
     let wall = hollowed.history().hollow().wall();
     let realized_wall = hollowed.history().hollow().realized_wall();
+    let savings_shortfall = hollowed.history().hollow().savings_shortfall();
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -1529,6 +1542,7 @@ pub fn seal_and_emit(
         cavity_repair,
         wall,
         realized_wall,
+        savings_shortfall,
         hollow_disposition,
         supported_geometry,
         routed_contacts: gated.routed_contacts,
@@ -1651,6 +1665,8 @@ mod tests {
                 repaired_voxels: 2,
                 cell_visits: 27,
                 full_grid_passes: 2,
+                saved_mm3: 100.0,
+                threshold_mm3: 1500.0,
             }
         ));
         // FU-55: the realized-wall check's own refusal. `run` converts this

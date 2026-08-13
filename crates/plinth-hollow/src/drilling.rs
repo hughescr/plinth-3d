@@ -446,6 +446,9 @@ impl HollowedAndDrilled {
             // FU-55: the realized minimum wall this shell measured before it
             // was ever allowed to reach drain planning or drilling.
             realized_wall: Some(cavity.realized_wall()),
+            // A hollowed-and-drilled shell cleared the savings gate; there is
+            // no shortfall to record.
+            savings_shortfall: None,
         };
         HollowedModel::from_verified_hollow(
             mesh,

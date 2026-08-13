@@ -429,6 +429,16 @@ pub enum ModelPreparationOutcome {
         wall_mm: Option<Finite>,
         #[serde(default)]
         realized_wall: Option<plinth_hollow::RealizedWall>,
+        /// 2026-08-13 owner ruling: the savings-gate refusal's own
+        /// measurement, when `hollow_disposition` names one
+        /// (`SolidDecisionReason::BelowThreshold` /
+        /// `BelowThresholdAfterRepair`). `None` on every other disposition,
+        /// including a hollowed one — see
+        /// [`plinth_hollow::SavingsShortfall`]. `default` for the same
+        /// reason `realized_wall` is: a report frozen before this field
+        /// existed has to keep deserializing.
+        #[serde(default)]
+        savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
     },
     Stopped {
         after: StageStop,
@@ -1352,6 +1362,7 @@ mod tests {
                         cavity_repair: None,
                         wall_mm: None,
                         realized_wall: None,
+                        savings_shortfall: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1422,6 +1433,7 @@ mod tests {
                         cavity_repair: None,
                         wall_mm: None,
                         realized_wall: None,
+                        savings_shortfall: None,
                     },
                 ),
                 model("refused", refused),

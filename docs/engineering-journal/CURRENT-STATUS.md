@@ -103,9 +103,11 @@ the same requested wall. The owner weighed the trade and chose the target.
 | `HOLLOW_SAVE_MIN_ML` | 15.0 mL | **1.5 mL** |
 | `HOLLOW_WALL_MIN_MM` | *(did not exist)* | **2.0 mm** (new) |
 
-`HOLLOW_SAVE_MIN_FRAC` was **not** moved and stays at 0.25; the savings decision moved onto
-total volume, which is the axis the owner named, and leaving the fraction where it is keeps
-the small-model end of the OR exactly as strict as it was. `HOLLOW_WALL_DEFAULT_MM` (2.5 mm)
+`HOLLOW_SAVE_MIN_FRAC` was **not** moved and, at the time this section was written, stayed at
+0.25 as an `OR` limb beside `HOLLOW_SAVE_MIN_ML`. **Superseded the same day — see
+[the dated section immediately below](#savings-gate-absolute-volume-2026-08-13):** that `OR`
+was examined and rejected, not left standing; the percentage limb is now retired from the
+gate entirely, and `HOLLOW_SAVE_MIN_ML` alone decides. `HOLLOW_WALL_DEFAULT_MM` (2.5 mm)
 is untouched. **Nothing else was loosened.**
 
 **The guarantee moved from construction to measurement; it did not go away.** The cavity is
@@ -181,6 +183,140 @@ were reverted and the gates re-run.
 `crates/plinth-pipeline/tests/dual_cavity_real_pipeline.rs`,
 `corpus/baseline/Sphere.pipeline.json`, `docs/engineering-journal/constants.md`,
 `docs/engineering-journal/m0-constants-source-ledger.json`.
+
+
+## 2026-08-13 — the savings gate is judged on absolute resin saved, not percentage: the percentage limb is retired, not merely outvoted {#savings-gate-absolute-volume-2026-08-13}
+
+<a id="savings-gate-absolute-volume-2026-08-13"></a>
+
+**Owner ruling, landed, second half.** The same 2026-08-13 ruling that moved the wall to a
+target-plus-minimum ([the dated section](#wall-target-and-minimum-2026-08-13)) also ruled on
+the savings gate:
+
+> "it looks like the threshold is maybe around 10-15% savings, not 25% — and really it's
+> whether the savings is worth it versus the damage cost of the drain holes. So perhaps the
+> threshold is not PERCENTAGE but TOTAL VOLUME. Larger models will suffer less from the
+> drain holes (since they tend to have more surface area), and benefit more from smaller
+> percentages of total savings."
+
+That earlier landing already moved `HOLLOW_SAVE_MIN_ML` from 15.0 to 1.5 mL but left
+`HOLLOW_SAVE_MIN_FRAC` (0.25) sitting beside it as an `OR`, flagged as an open question:
+leaving it there would still admit a small model on a high percentage of very little — the
+exact percentage-based judgement the ruling rejects, just relocated to the small-model end
+of the gate. **This landing answers that question: the percentage limb is removed, not
+kept.**
+
+**The decision, and why.** `HollowSettings` no longer constructs or reads `save_min_fraction`
+at all; `create_shell_recording_repair`'s gate is now a single comparison against
+`HOLLOW_SAVE_MIN_ML`. `HOLLOW_SAVE_MIN_FRAC` stays **registered** — deregistering it would
+ripple through the golden inventory and ledger for no behavioural gain, since nothing reads
+it — but is now **inert**: its value has zero effect on which models hollow, and its own
+registry note says so.
+
+**Why 1.5 mL, restated with the full derivation in one place.** The owner's own seven
+hand-hollowed ChituBox verdicts, at his own 2.5 mm wall setting:
+
+| model | saved (mL) | his verdict |
+|---|---|---|
+| Giant Toad | 12.39 | good |
+| Weeping Treant | 6.06 | good |
+| Giant Bat | 5.24 | "looks valid" |
+| Warhorse | 2.48 | "reasonable hollowing" |
+| Rotting Warhorse | 2.44 | "still looks like a good hollowing" |
+| Myconid Adult | 0.14 | "not worth it" |
+| Vegepygmy | 0.02 | "definitely not worth the drill hole" |
+
+These separate **cleanly on volume** — a 17× gap between the cheapest keeper (2.44 mL) and
+the priciest reject (0.14 mL) — and **messily on percentage** (13.6% vs 5.5%, a 2.5× gap; the
+old 25% floor would have rejected four of his five good verdicts). 1.5 mL sits inside the
+0.14–2.44 mL gap, roughly 10× above the worst reject and 1.6× below the cheapest keeper,
+nearer the rejected end. The old 15.0 mL bound admitted **none** of the seven, not even the
+toad, so in practice every model was being judged on the fraction alone — the exact
+percentage-only behaviour the ruling now forbids.
+
+**A refusal now carries its own measurement.** `SavingsShortfall { saved_mm3, threshold_mm3 }`
+travels onto the solid decision the same way `RealizedWall` does for a wall refusal, and its
+`Display` reads `"saved X.XXX mm3 against a registered Y.YYY mm3 minimum resin saving (short
+by Z.ZZZ mm3)"`. `plinth prepare`'s CLI report prints it under `savings gate` whenever the
+disposition is a savings refusal. This makes a refusal legible without re-deriving anything
+— "saved 0.9 mm3 against a registered 1500.0 mm3 minimum" rather than a bare "below
+threshold."
+
+**Cross-check against the owner's seven verdicts, run through the real `create_shell` path at
+the registered 2.5 mm wall and 1.5 mL threshold** (the committed `plinth-hollow` example
+`wall_distribution`, which now surfaces `IneligibleSavings`'s own `{saved_mm3,
+threshold_mm3}` on refusal; models are the owner's own raw `minis-to-process/` files, READ
+ONLY, hashed unchanged before and after):
+
+| model | engine cavity | engine saved | engine verdict | owner saved | owner verdict | agree? |
+|---|---|---|---|---|---|---|
+| Giant Toad | 12,126.6 mm³ | 48.8% | **HOLLOWS** (12.13 mL » 1.5 mL) | 12.39 mL | good | ✓ |
+| Weeping Treant (`Awakened Tree.stl`) | 3,384.8 mm³ | 13.8% | **HOLLOWS** (3.38 mL > 1.5 mL) | 6.06 mL | good | ✓ (magnitude short — FU-47 leg-severing, out of scope and unchanged, not this gate) |
+| Giant Bat | 5,223.0 mm³ | 21.5% | **HOLLOWS** (5.22 mL > 1.5 mL) | 5.24 mL | "looks valid" | ✓ |
+| Warhorse | 2,430.8 mm³ | 22.6% | **HOLLOWS** (2.43 mL > 1.5 mL) | 2.48 mL | "reasonable" | ✓ |
+| Rotting Warhorse | 2,346.8 mm³ | 13.1% | **HOLLOWS** (2.35 mL > 1.5 mL) | 2.44 mL | "still good" | ✓ |
+| Myconid Adult | — | — | **REFUSED**, but `IneligibleBelowBulk` | 0.14 mL | "not worth it" | ✓ refused, wrong gate (see below) |
+| Vegepygmy (`Thorny Vegepygmy.stl`) | — | — | **REFUSED**, but `IneligibleBelowBulk` | 0.02 mL | "definitely not" | ✓ refused, wrong gate (see below) |
+
+**All seven directional verdicts agree** — five hollow, two refuse, matching the owner
+exactly. The five keepers land remarkably close to his own numbers (Giant Bat 5.22 vs 5.24
+mL, Warhorse 2.43 vs 2.48 mL, Rotting Warhorse 2.35 vs 2.44 mL) despite the engine's cavity
+selection and the owner's ChituBox hollowing being independent implementations.
+
+**A finding, reported loudly rather than smoothed over, exactly as instructed.** The two
+reject verdicts are **not exercised by the savings-volume gate this landing changed.**
+`Myconid Adult.stl` and `Thorny Vegepygmy.stl` both refuse with `HollowError::
+IneligibleBelowBulk` — the pre-existing, untouched 10 mm feature-size gate — before the
+engine ever computes a cavity to compare against `HOLLOW_SAVE_MIN_ML`. Both are small
+minis (owner's own solid volumes 2.54 mL and 0.93 mL) and evidently fail the bulk check on
+their own terms. **This means the owner's acceptance suite validates 1.5 mL only on the
+accept side** (five models, all comfortably above 1.5 mL); the reject side of his suite is
+decided by a gate this task was explicitly told not to touch. The only real exercise of the
+new gate's *refusal* path in this proof is the repo's synthetic `corpus/models/make_box.stl`
+fixture — 12 mm cube, cavity 91.125 mm³ (0.091 mL), refused as `IneligibleSavings {
+saved_mm3: 91.125, threshold_mm3: 1500.0 }` — which is real evidence the code path works,
+but is not itself an acceptance-suite verdict. **Not a disagreement with the ruling, and not
+a reason to move the threshold** (per instruction) — a genuine gap in what this proof run can
+claim, recorded rather than glossed over.
+
+**Repo corpus, same run, for completeness:** `Cylinder` and `Sphere` hollow (57.8% / 42.1%
+saved); `make_box` refuses on savings (above); `make_overhang_table`, `make_raking_blade`,
+`make_thin_fin`, `make_toed_slab` all refuse `IneligibleBelowBulk` (small synthetic
+fixtures, the same untouched gate); the committed `Weeping Treant v1.2.stl` matches
+`Awakened Tree.stl` exactly (byte-identical files, confirmed earlier).
+
+**A downstream test flipped, re-targeted rather than tuned to pass.**
+`both_registered_walls_clear_savings_on_the_committed_sphere_and_the_heavier_one_costs_cavity`
+asserted the frozen Sphere's handling-heavy wall (3.0 mm) request "clears comfortably" —
+true only because it cleared on the 25% fraction limb (its cavity, 1,430.625 mm³, has never
+cleared the 1.5 mL absolute bound). Retiring the fraction makes that request refuse:
+`IneligibleSavings { saved_mm3: 1430.625, threshold_mm3: 1500.0 }`, short by 69.375 mm³
+(4.6%). **Not a bug — the registered gate doing exactly what the ruling asks.** Renamed
+`the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate`
+and rewritten to assert the refusal's own numbers directly, plus (via a gate-relaxed
+`HollowSettings` copy, the same technique `the_ramped_box_breach_class_is_gone` uses) that
+the underlying geometry claims survive: the heavier wall still leaves genuinely less cavity,
+the outer solid is untouched by wall selection, and both walls still clear the registered
+minimum wall.
+
+**Gates**, foreground, on this tip: `cargo test --workspace --release` **1,355 passed, 0
+failed, 2 ignored**; `cargo clippy --workspace --all-targets -- -D warnings` **clean**.
+
+**Files**: `crates/plinth-core/src/constants/placeholders.rs`,
+`docs/engineering-journal/constants.md`, `crates/plinth-hollow/src/lib.rs` (the load-bearing
+change — `SavingsShortfall`, the retargeted `HollowError::IneligibleSavings` /
+`IneligibleSavingsAfterCavityRepair` struct variants, `save_min_fraction` removed from
+`HollowSettings`, and the retargeted Sphere test), `crates/plinth-hollow/src/drilling.rs`,
+`crates/plinth-hollow/tests/repair_gate.rs`, `crates/plinth-pipeline/src/lib.rs`,
+`crates/plinth-pipeline/src/prepare.rs`,
+`crates/plinth-pipeline/tests/dual_cavity_real_pipeline.rs`,
+`crates/plinth-pipeline/tests/prepare_folder.rs`, `crates/plinth-cli/src/execute.rs` (prints
+the shortfall).
+
+**Not touched, on purpose:** `HOLLOW_BULK_MIN_MM` (the separate 10 mm feature-size gate —
+see the finding above for why that matters); `HOLLOW_WALL_MIN_MM` / `HOLLOW_WALL_DEFAULT_MM`
+(the prior landing's constants); `crates/plinth-hollow/src/drains.rs` (a concurrent agent's
+file on a separate branch — untouched by this diff).
 
 
 ## 2026-08-12 — a synthetic that actually hollows: the dual-cavity pawn witnesses FU-53/FU-55/FU-47 end to end, and the FU-47 doctrine turns out to be pose-dependent {#dual-cavity-fixture-2026-08-12}
