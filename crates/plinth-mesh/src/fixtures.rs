@@ -657,22 +657,26 @@ pub fn make_dual_cavity_pawn() -> Result<Mesh, MeshError> {
 /// explainer described a ~35 mm pawn with a ~12 mm lower chamber, a ~10 mm
 /// upper chamber, and a ~1 mm throat. The silhouette sizes here are the
 /// smallest that clear the registered savings gate:
-/// - The gate weighs the **largest resin-flow component alone** (FU-47), so
-///   even the below-bore setting must clear it on the lower chamber by
-///   itself, against the **whole** model's volume — the upper sphere's
-///   material counts against the ratio while contributing no cavity of its
-///   own at that setting. With erosion
-///   `t = HOLLOW_WALL_DEFAULT_MM + HOLLOW_CAVITY_MARCH_MARGIN_MM ≈ 3.366 mm`,
-///   the 12.5 mm lower sphere keeps a 9.134 mm cavity radius and clears the
-///   25 % fraction limb with margin at every throat setting;
-///   `dual_cavity_pawn_analytic_volume_mm3` states the arithmetic in code and
-///   `plinth-hollow`'s `dual_cavity_doctrine` measures the realized figures.
+/// - The gate is the registered absolute-volume minimum
+///   (`HOLLOW_SAVE_MIN_ML`, 1.5 mL / 1,500 mm3), judged, since the
+///   2026-08-13 owner ruling, against **every retained chamber's cavity
+///   together** — selection keeps every flow-connected interior the flood
+///   reaches, not the largest alone (the FU-47 finding this fixture was
+///   built to probe). With erosion
+///   `t = HOLLOW_WALL_DEFAULT_MM + HOLLOW_CAVITY_MARCH_MARGIN_MM = 2.5 mm`
+///   (the margin term is zero, by the same 2026-08-13 ruling), the 12.5 mm
+///   lower sphere keeps a 10.0 mm cavity radius and the two chambers
+///   together clear the registered minimum with margin at every throat
+///   setting; `dual_cavity_pawn_analytic_volume_mm3` states the arithmetic
+///   in code and `plinth-hollow`'s `dual_cavity_doctrine` measures the
+///   realized figures (4,678.125 mm3 of cavity on the default ABOVE_BORE
+///   setting, against the 1,500 mm3 minimum).
 /// - That puts the model at 38 mm tall and 25 mm wide — the explainer's
-///   ~35 mm — with cavity chambers 18.3 mm and 9.3 mm across (the explainer's
-///   "~12 mm" and "~10 mm", after the ≈3.366 mm erosion the wall and march
-///   margin cost).
-/// - A cavity-level throat cannot exist at all below the eroded radius `t ≈
-///   3.366 mm`, so the explainer's "~1 mm throat" cannot become a *cavity*
+///   ~35 mm — with cavity chambers 20.0 mm and 11.0 mm across (the
+///   explainer's "~12 mm" and "~10 mm", after the 2.5 mm erosion the wall
+///   costs; the march margin costs nothing now).
+/// - A cavity-level throat cannot exist at all below the eroded radius `t =
+///   2.5 mm`, so the explainer's "~1 mm throat" cannot become a *cavity*
 ///   throat at any parameter value — it survives in spirit as
 ///   [`DUAL_CAVITY_THROAT_SEPARATED_MM`], the control where the two
 ///   interiors are genuinely separate cavities.

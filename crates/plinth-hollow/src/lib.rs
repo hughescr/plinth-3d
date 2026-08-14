@@ -5325,11 +5325,12 @@ mod tests {
     #[test]
     fn the_requested_wall_reaches_the_extraction_and_is_recorded_as_cavity_evidence() {
         // FU-53 moved this off the frozen Sphere: at the corrected exact-distance
-        // selection plus the new HOLLOW_CAVITY_MARCH_MARGIN_MM margin, the
-        // Sphere's cavity at the registered handling-heavy wall (3.0 mm + 0.866
-        // mm margin, cavity ~1,091 mm3 of a 4,175 mm3 source) falls under the
-        // 25% savings floor, which the frozen fixture's default wall (2.5 mm,
-        // cavity ~1,221 mm3, 29.3%) clears only narrowly itself — both are
+        // selection, the Sphere's cavity at the registered handling-heavy wall
+        // (3.0 mm, cavity 1,430.625 mm3 of a 4,175 mm3 source) falls under the
+        // registered absolute savings minimum (`HOLLOW_SAVE_MIN_ML`, 1.5 mL /
+        // 1,500 mm3; the percentage-based `HOLLOW_SAVE_MIN_FRAC` gate this
+        // comment used to name is retired, not merely relaxed), which the
+        // frozen fixture's default wall clears comfortably itself — both are
         // legitimate outcomes of the honestly-measured cavity (the whole point
         // of this fix), not a defect, but they make the Sphere too tight a
         // fixture for a test about wall-selection *plumbing*. A 40 mm box has
@@ -6688,17 +6689,24 @@ mod corpus_cavity_repair {
     /// keeping only the largest chamber was throwing away 44.2 % of the
     /// treant's available cavity.
     ///
-    /// **The model still takes the solid reserve, and that is the finding.**
-    /// The well-composedness repair (183 critical cells, 921 repaired voxels,
-    /// 3 whole-grid passes) leaves an honest, exact-distance-selected cavity
-    /// (FU-53) of about 2,883 mm³ against a source of 24,568 mm³ — 11.7 %,
-    /// still under the registered 25 % savings fraction — so the model takes
-    /// the **solid reserve**
+    /// **At the time of this finding the model still took the solid
+    /// reserve — that was FU-47's own verdict.** The well-composedness
+    /// repair (183 critical cells, 921 repaired voxels, 3 whole-grid passes)
+    /// left an honest, exact-distance-selected cavity (FU-53) of about
+    /// 2,883 mm³ against a source of 24,568 mm³ — 11.7 %, under the
+    /// then-registered 25 % savings fraction — so the model took the
+    /// **solid reserve**
     /// (`HollowError::IneligibleSavingsAfterCavityRepair` →
-    /// `SolidDecisionReason::BelowThresholdAfterRepair`). **It still prints.**
+    /// `SolidDecisionReason::BelowThresholdAfterRepair`). It still printed.
     /// Per-chamber drains nearly doubled this model's available cavity and
-    /// did not, on their own, get it past the gate. The gate is not this
-    /// test's to move.
+    /// did not, on their own, get it past that percentage gate.
+    ///
+    /// **That gate is retired.** The 2026-08-13 owner ruling replaced the
+    /// percentage gate with an absolute-volume minimum (`HOLLOW_SAVE_MIN_ML`)
+    /// and zeroed the march margin, making the requested wall a target
+    /// rather than a minimum-plus-margin. Part 2 below, through the
+    /// production entry point, is the current verdict: **the committed
+    /// Weeping Treant hollows.**
     #[test]
     #[cfg_attr(
         debug_assertions,
@@ -6801,27 +6809,36 @@ mod corpus_cavity_repair {
         let repair = cavity.resources().cavity_repair();
         // Re-pinned 93 -> 79 critical cells, 759 -> 406 repaired voxels on
         // the 2026-08-12 merge, then 79 -> 56, 406 -> 277 and 4 -> 3
-        // whole-grid passes by the 2026-08-13 owner ruling. Same cause each
-        // time and it is worth stating plainly: the repair runs on the mask
-        // PRODUCTION selects (`wall + margin`), not on the raw `edt > wall`
-        // mask the doctrine assertions above use, so zeroing the margin
-        // hands the repair a different, larger mask with a different local
-        // pinch pattern. Fewer critical cells on a fatter cavity is the
-        // expected direction: the pinches the repair fixes are where the
-        // eroded mask was thinnest, and it is less thin now.
-        assert_eq!(repair.critical_cells, 56);
-        assert_eq!(repair.repaired_voxels, 277);
+        // whole-grid passes by the 2026-08-13 owner ruling, then 56 -> 122,
+        // 277 -> 460 (full_grid_passes unmoved at 3) when the two rulings
+        // landed together at c91f722. This test is release-only, so that
+        // merge moved the numbers without anything failing; the pins are
+        // re-measured here, at 06147ab, and the gap is the finding, not the
+        // arithmetic. 56 was the wall-target branch's own number on its own
+        // (margin zeroed, savings gate moved to absolute volume, but still
+        // selecting only the largest interior); 183 was the drains branch's
+        // own number on its own (per-chamber selection landed, margin still
+        // 0.866 mm); 122 is neither — it is what the repair measures once
+        // both land together. The repair runs on the mask PRODUCTION selects
+        // (`wall + margin`), not on the raw `edt > wall` mask the doctrine
+        // assertions above use, so combining a zeroed margin with
+        // keep-every-chamber selection hands the repair a mask neither
+        // parent branch ever produced on its own, with its own local pinch
+        // pattern.
+        assert_eq!(repair.critical_cells, 122);
+        assert_eq!(repair.repaired_voxels, 460);
         assert_eq!(repair.full_grid_passes, 3);
 
         // 3. The work bound the module doc claims, checked against the grid the
         //    caller admitted rather than against a remembered number.
         let cells = 166 * 176 * 185;
         assert_eq!(repair.cell_visits, cells + 8 * repair.repaired_voxels);
-        // Re-pinned 5,411,032 -> 5,408,208 -> 5,407,176 by the same two
-        // changes, through the same formula: `cells` itself never moves
-        // (`spec.dims` is a property of the model's bounds), only
-        // `repaired_voxels` does.
-        assert_eq!(repair.cell_visits, 5_407_176);
+        // Re-pinned 5,411,032 -> 5,408,208 -> 5,407,176 -> 5,408,640, the
+        // last at c91f722 (same cause as critical_cells/repaired_voxels
+        // above: merged margin-0.0 + keep-every-chamber), through the same
+        // formula each time: `cells` itself never moves (`spec.dims` is a
+        // property of the model's bounds), only `repaired_voxels` does.
+        assert_eq!(repair.cell_visits, 5_408_640);
 
         // 4. The shell it now keeps, measured. The minimum wall is the
         //    guarantee; the cavity volume is the point of the ruling and is
@@ -6833,8 +6850,13 @@ mod corpus_cavity_repair {
             cavity.realized_wall_mm().get(),
             settings.minimum_wall_mm().get()
         );
+        // Re-pinned 3,200.0..=3,400.0 -> 5,800.0..=5,900.0 mm3 at c91f722:
+        // same cause as the repair counters above, merged margin-0.0 +
+        // keep-every-chamber — a materially fatter shipped cavity, not a
+        // fixture or arithmetic drift. Measured 5,856.75 mm3 on 2026-08-14
+        // at 06147ab, so the range brackets it by about 57 mm3 either way.
         assert!(
-            (3_200.0..=3_400.0).contains(&cavity.cavity_volume_mm3().get()),
+            (5_800.0..=5_900.0).contains(&cavity.cavity_volume_mm3().get()),
             "the treant's shipped cavity moved: {} mm^3",
             cavity.cavity_volume_mm3().get()
         );
