@@ -85,7 +85,7 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 17] = [
+const REQUIRED: [(&str, &str, &str); 20] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
@@ -163,6 +163,34 @@ const REQUIRED: [(&str, &str, &str); 17] = [
         "AnchorFootRefusal::seat_buried(",
         "OD-9 burial no longer refuses a model anchor; a buried seat would \
          re-enter the tournament",
+    ),
+    // --- FU-88: an unusable CANDIDATE costs the candidate, not the model ---
+    //
+    // Same argument as the F3 entries above, one step further. Measured on the
+    // seven large minis: the screen discards 6 candidates on the Giant Toad, 54
+    // on the swallowing Giant Toad and 576 on the Rotting Warhorse, and NOTHING
+    // on the other four; every shape that emits a file today emits a
+    // byte-identical one. So deleting either half of this moves no shipped
+    // geometry and no shipped digest — it only restores the abort that stopped
+    // those three from producing a file at all.
+    (
+        "designed_embed.rs",
+        "fn screen_seat_row(",
+        "candidate rows are no longer screened one at a time, so one unusable \
+         candidate refuses the whole batch again and the model dies for it",
+    ),
+    (
+        "designed_embed.rs",
+        "ContactAttestationRefusal::UnusableGeometry",
+        "an unusable candidate has no verdict of its own, so it can only be \
+         reported by failing the batch",
+    ),
+    (
+        "cco.rs",
+        "AnchorFootRefusal::seat_geometry_unusable(",
+        "an unusable model-anchor candidate no longer leaves the tournament \
+         through the refusal channel, so it would either be committed or take \
+         the model down with it",
     ),
     // --- TRIPWIRE: recorded during candidacy, ENFORCED at commit -------
     //

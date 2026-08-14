@@ -1277,6 +1277,21 @@ pub enum AnchorFootRefusalReason {
     /// When PR-7 seats this family, the witness refuses at candidacy like the
     /// other two contact families and this reason becomes unreachable.
     SeatNotAttached,
+    /// FU-88 — this candidate's own proposed geometry could not carry the seat
+    /// attestation, so there was nothing to measure. On the corpus it is an
+    /// anchor arm shorter than the one process resolution (0.050 mm) the
+    /// attestation claims, down to 0.002 mm.
+    ///
+    /// This REFUSES at candidacy, like [`Self::SeatBuriedSurface`] and unlike
+    /// [`Self::SeatNotAttached`], and the reason is that it is not a verdict
+    /// about the seating rule at all — it is a statement that the candidate is
+    /// not a printable strut. Before FU-88 one such candidate ended the whole
+    /// model: the scalar refusal was applied to the entire attestation batch, so
+    /// forty candidates died for one. Now the candidate leaves the tournament,
+    /// the terminal routes some other way, and a terminal that loses every
+    /// candidate goes `UnroutedNoWinner` and reappears as ordinary uncovered
+    /// area.
+    SeatGeometryUnusable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1317,6 +1332,19 @@ impl AnchorFootRefusal {
         Self {
             provenance,
             reason: AnchorFootRefusalReason::SeatNotAttached,
+        }
+    }
+
+    /// FU-88 — the candidacy refusal channel for a candidate whose own geometry
+    /// the seat attestation could not measure.
+    ///
+    /// Same narrowness as the two channels above: crate-private, mintable only
+    /// by the CCO stage, and able to carry only
+    /// [`AnchorFootRefusalReason::SeatGeometryUnusable`].
+    pub(crate) const fn seat_geometry_unusable(provenance: AnchorCandidateProvenance) -> Self {
+        Self {
+            provenance,
+            reason: AnchorFootRefusalReason::SeatGeometryUnusable,
         }
     }
 }

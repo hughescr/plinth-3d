@@ -1969,12 +1969,17 @@ impl CcoController {
                 ) {
                     unattested_seats.insert(*generation_index);
                 }
-                if !matches!(
-                    refusal,
-                    Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. })
-                ) {
-                    continue;
-                }
+                // FU-88 — an unusable candidate refuses here too, through the
+                // same channel; see the terminal-growth path for the argument.
+                let reason = match refusal {
+                    Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface {
+                        ..
+                    }) => crate::anchor::AnchorFootRefusalReason::SeatBuriedSurface,
+                    Some(
+                        crate::designed_embed::ContactAttestationRefusal::UnusableGeometry { .. },
+                    ) => crate::anchor::AnchorFootRefusalReason::SeatGeometryUnusable,
+                    _ => continue,
+                };
                 validated_anchors
                     .remove(generation_index)
                     .ok_or(CcoError::InvalidGeometry)?;
@@ -1982,9 +1987,7 @@ impl CcoController {
                 refusals.push(RewireCandidateRefusal {
                     generation_index: *generation_index,
                     family: descriptors[*generation_index].family(),
-                    reason: RewireCandidateRefusalReason::AnchorFoot(
-                        crate::anchor::AnchorFootRefusalReason::SeatBuriedSurface,
-                    ),
+                    reason: RewireCandidateRefusalReason::AnchorFoot(reason),
                 });
             }
             feasible.retain(|candidate| {
@@ -2758,6 +2761,7 @@ fn digest_anchor_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorFootRefu
             // geometry changing.
             AnchorFootRefusalReason::SeatBuriedSurface => 7,
             AnchorFootRefusalReason::SeatNotAttached => 8,
+            AnchorFootRefusalReason::SeatGeometryUnusable => 9,
         });
         word(provenance.physical_contact_id().unwrap_or(u64::MAX));
         word(provenance.sample_index() as u64);
@@ -3137,19 +3141,31 @@ fn grow_terminal_inner(
             ) {
                 unattested_seats.insert(*index);
             }
-            if !matches!(
-                refusal,
-                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. })
-            ) {
-                continue;
-            }
+            // FU-88 — an unusable candidate refuses HERE too, for a different
+            // reason than burial: it is not a verdict about the seating rule,
+            // it is a statement that this candidate is not a printable strut.
+            // It used to abort the whole model from inside the batch.
+            let unusable = match refusal {
+                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. }) => {
+                    false
+                }
+                Some(crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
+                    ..
+                }) => true,
+                _ => continue,
+            };
             // Same channel a breached foot ball uses: the candidate leaves the
             // tournament, the terminal routes some other way, nothing fails.
             let anchor = validated_anchors
                 .remove(index)
                 .ok_or(CcoError::InvalidGeometry)?;
             valid.remove(index);
-            anchor_refusals.push(AnchorFootRefusal::seat_buried(anchor.seat().provenance()));
+            let provenance = anchor.seat().provenance();
+            anchor_refusals.push(if unusable {
+                AnchorFootRefusal::seat_geometry_unusable(provenance)
+            } else {
+                AnchorFootRefusal::seat_buried(provenance)
+            });
         }
         evaluated.retain(|candidate| {
             candidate.anchor.is_none() || valid.contains(&candidate.generation_index)
@@ -5134,6 +5150,7 @@ mod tests {
                         AnchorFootRefusalReason::FootBallBreached => 6,
                         AnchorFootRefusalReason::SeatBuriedSurface => 7,
                         AnchorFootRefusalReason::SeatNotAttached => 8,
+                        AnchorFootRefusalReason::SeatGeometryUnusable => 9,
                     },
                     provenance.physical_contact_id().unwrap_or(u64::MAX),
                     provenance.sample_index(),
