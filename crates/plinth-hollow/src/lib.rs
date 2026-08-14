@@ -1433,6 +1433,12 @@ pub struct CavityEvidence {
     /// over-bound minimum from below, and that is a different claim from a
     /// measurement.
     realized_wall: RealizedWall,
+    /// Closed cavity surfaces in this shell: one per 6-connected region of
+    /// the selected mask. It was always one while the engine kept a single
+    /// chamber. Every stage that checks the shell's topology needs the real
+    /// number, and this is where the number the mask actually produced is
+    /// carried, rather than each stage assuming one.
+    cavity_components: usize,
 }
 
 impl CavityEvidence {
@@ -1468,6 +1474,12 @@ impl CavityEvidence {
     #[must_use]
     pub const fn drain_planning_cap_bytes(self) -> usize {
         self.drain_planning_cap_bytes
+    }
+
+    /// Closed cavity surfaces this shell carries — see the field's own doc.
+    #[must_use]
+    pub const fn cavity_components(self) -> usize {
+        self.cavity_components
     }
 
     /// FU-55: the realized minimum wall this shell measured, `>=`
@@ -1647,8 +1659,17 @@ pub fn create_shell_recording_repair(
     // passage whose free radius admits the registered drain bore. Plain
     // 6-connectivity would happily select a dumbbell through a needle-width
     // neck; the flow rule is what refuses to.
+    //
+    // **Every chamber the rule finds is kept.** The previous engine kept the
+    // largest one and discarded the rest -- about 35% of the treant's
+    // available cavity, left solid because the planner could only aim one
+    // drain. One drain per chamber is what `drains.rs` now plans, so a second
+    // interior is a second drain rather than a reason to leave resin in the
+    // print. A chamber that turns out to have no legal drill path is filled
+    // back to solid in `drilling.rs` and its volume is reported, so this
+    // never ships a sealed void.
     let throat_r_mm = flow::registered_throat_radius_mm()?;
-    let selected = match flow::select_largest_flow_component(&cavity_mask, grid_pitch, throat_r_mm)? {
+    let selected = match flow::select_all_flow_components(&cavity_mask, grid_pitch, throat_r_mm)? {
         Some((selected, _stats)) => selected,
         None => {
             return Err(HollowError::IneligibleCavityBelowDrainThroat {
@@ -1767,6 +1788,24 @@ pub fn create_shell_recording_repair(
             return Err(HollowError::IneligibleSavings);
         }
 
+        // How many closed cavity surfaces the extractor is about to emit: one
+        // per 6-connected region of the repaired mask. Counted here, once, in
+        // a single labelling pass over the mask already in hand, because
+        // every topology check downstream needs the number and none of them
+        // can honestly assume it is one any more.
+        //
+        // **This is not the chamber count.** Two chambers joined by a passage
+        // narrower than the drain bore are separate chambers to the flow rule
+        // -- resin cannot cross between them -- but one connected region of
+        // voxels, so the extractor emits one surface around both. The number
+        // wanted here is the surface count, so 6-connectivity is the right
+        // question to ask.
+        let cavity_components = scirs2_ndimage::morphology3d::label3d(main.view(), 6)
+            .map_err(|_| HollowError::VoxelStack)?
+            .1;
+        if cavity_components == 0 {
+            return Err(HollowError::IneligibleNoCavity);
+        }
         let cavity_field = CavityField::from_selected_mask_and_occupancy(
             &main,
             &material,
@@ -1826,6 +1865,7 @@ pub fn create_shell_recording_repair(
             source_volume_mm3,
             cavity_volume_mm3,
             settings.volume_balance_rel_tol.get(),
+            cavity_components,
         )?;
         validate_printable_bounds(&mesh)?;
         let retained_field_allocations = cavity_field.retained_allocations();
@@ -1862,6 +1902,7 @@ pub fn create_shell_recording_repair(
             resources,
             drain_planning_cap_bytes: limits.drain_planning_bytes,
             realized_wall,
+            cavity_components,
         };
         Ok(ShellCandidate {
             mesh,
@@ -1944,15 +1985,29 @@ fn triage_exact_with_measured_limits(mesh: &Mesh) -> Result<TriagedMesh, HollowE
         .map_err(HollowError::Triage)
 }
 
+/// Check the shell the Boolean produced against the cavity that was cut.
+///
+/// `expected_cavity_components` is how many closed cavity surfaces the caller
+/// counted in the mask it marched: one per 6-connected region. It used to be
+/// hard-coded as one, because the engine kept exactly one chamber. Now that
+/// every chamber is kept, the honest check is "the shell has the cavity
+/// surfaces the mask had", and that number comes from the mask rather than
+/// from an assumption. **This is a tightening, not a relaxation**: a shell
+/// whose cavity count disagrees with the mask's is still refused, and no
+/// threshold moves.
 fn validate_shell_topology(
     mesh: &Mesh,
     source_volume_mm3: f64,
     cavity_volume_mm3: f64,
     relative_tolerance: f64,
+    expected_cavity_components: usize,
 ) -> Result<(), HollowError> {
+    if expected_cavity_components == 0 {
+        return Err(HollowError::InvalidShellTopology);
+    }
     match triage_exact_with_measured_limits(mesh) {
         Err(HollowError::Triage(TriageError::PreHollowed(refusal)))
-            if refusal.cavity_components().len() == 1 => {}
+            if refusal.cavity_components().len() == expected_cavity_components => {}
         _ => return Err(HollowError::InvalidShellTopology),
     }
     validate_closed_mesh(mesh)?;
@@ -1964,8 +2019,12 @@ fn validate_shell_topology(
         .iter()
         .filter(|component| component.signed_volume_mm3() < 0.0)
         .count();
-    if negative != 1
-        || certificate.components().len() < 2
+    // The negative components ARE the cavities, so their count is pinned
+    // exactly. The positive components are the outer body plus any authored
+    // extra bodies the source carried in, which this stage neither creates nor
+    // removes, so the total is bounded from below and not from above.
+    if negative != expected_cavity_components
+        || certificate.components().len() < expected_cavity_components + 1
         || certificate
             .components()
             .iter()
@@ -1990,25 +2049,53 @@ fn validate_shell_topology(
     Ok(())
 }
 
+/// Flip every cavity surface of a Boolean result so it faces inward.
+///
+/// **All of them, not one.** A shell that keeps every chamber has one cavity
+/// surface per connected region, and leaving any of them wound the wrong way
+/// makes the whole mesh unprintable. The triage refusal names them all; this
+/// takes the whole list, and one 6-bit-per-triangle membership pass tags them
+/// rather than a lookup per triangle.
 pub(crate) fn orient_boolean_cavity(mesh: Mesh) -> Result<Mesh, HollowError> {
-    let cavity_component = match triage_exact_with_measured_limits(&mesh) {
+    let cavity_components: Vec<u32> = match triage_exact_with_measured_limits(&mesh) {
         Err(HollowError::Triage(TriageError::PreHollowed(refusal)))
-            if refusal.cavity_components().len() == 1 =>
+            if !refusal.cavity_components().is_empty() =>
         {
-            u32::try_from(refusal.cavity_components()[0].component_id())
-                .map_err(|_| HollowError::InvalidShellTopology)?
+            refusal
+                .cavity_components()
+                .iter()
+                .map(|component| {
+                    u32::try_from(component.component_id())
+                        .map_err(|_| HollowError::InvalidShellTopology)
+                })
+                .collect::<Result<_, _>>()?
         }
         _ => return Err(HollowError::InvalidShellTopology),
     };
     let topology =
         build_face_topology(&mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
     validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
+    // One flag per component id, built once, so the per-triangle step below is
+    // an index rather than a scan of the cavity list.
+    let component_count = topology
+        .component_ids()
+        .iter()
+        .copied()
+        .max()
+        .map_or(0_usize, |highest| highest as usize + 1);
+    let mut is_cavity = vec![false; component_count];
+    for component in &cavity_components {
+        let slot = is_cavity
+            .get_mut(*component as usize)
+            .ok_or(HollowError::InvalidShellTopology)?;
+        *slot = true;
+    }
     let triangles = mesh
         .tris()
         .iter()
         .zip(topology.component_ids())
         .map(|(triangle, component)| {
-            if *component == cavity_component {
+            if is_cavity[*component as usize] {
                 [triangle[0], triangle[2], triangle[1]]
             } else {
                 *triangle
@@ -2947,35 +3034,6 @@ fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<usize, H
     Ok(high_water)
 }
 
-pub(crate) fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
-    let mut counts = vec![
-        0_usize;
-        label_count
-            .checked_add(1)
-            .ok_or(HollowError::VoxelGridTooLarge)?
-    ];
-    for label in labels {
-        let label = usize::try_from(*label).map_err(|_| HollowError::VoxelStack)?;
-        if label > label_count {
-            return Err(HollowError::VoxelStack);
-        }
-        counts[label] = counts[label]
-            .checked_add(1)
-            .ok_or(HollowError::VoxelGridTooLarge)?;
-    }
-    let (label, count) = counts
-        .iter()
-        .enumerate()
-        .skip(1)
-        .max_by_key(|(_, count)| **count)
-        .ok_or(HollowError::VoxelStack)?;
-    if *count == 0 {
-        Err(HollowError::VoxelStack)
-    } else {
-        i32::try_from(label).map_err(|_| HollowError::VoxelGridTooLarge)
-    }
-}
-
 /// Interior distance on the occupancy grid, measured against a real exterior.
 ///
 /// **Why the grid is padded before the transform.** `grid_spec` spans exactly
@@ -3505,7 +3563,7 @@ pub enum HollowError {
         "no cavity passage admits the registered {throat_radius_mm} mm drain bore radius"
     )]
     IneligibleCavityBelowDrainThroat { throat_radius_mm: f64 },
-    #[error("the largest cavity does not meet the registered resin-saving threshold")]
+    #[error("the cavity does not meet the registered resin-saving threshold")]
     IneligibleSavings,
     /// The well-composedness repair consumed the whole selected component.
     ///
@@ -3530,7 +3588,7 @@ pub enum HollowError {
     /// the repair is not claimed here — what is claimed is that a repair ran,
     /// how big it was, and that the gate was judged after it.
     #[error(
-        "the largest cavity does not meet the registered resin-saving threshold after the \
+        "the cavity does not meet the registered resin-saving threshold after the \
          well-composedness repair returned {repaired_voxels} voxels to material \
          ({critical_cells} critical cells, {cell_visits} cell visits, \
          {full_grid_passes} whole-grid passes)"
@@ -3699,7 +3757,7 @@ mod tests {
         let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
         let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
-        let selected = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+        let selected = flow::select_all_flow_components(&cavity, grid.pitch, throat_r_mm)
             .expect("flow selection");
         // The interior count is the flow evidence itself, not a restatement
         // of "the cavity is nonempty": a regression that split one interior
@@ -5077,7 +5135,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_authored_extra_bodies_while_hollowing_only_the_largest_cavity() {
+    fn preserves_authored_extra_bodies_while_hollowing_every_chamber() {
         let main = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let detail = make_box([2.0, 2.0, 2.0], [14.0, 0.0, 1.0]).expect("detail fixture");
         let candidate = create_shell(join(&main, &detail), registered_settings())
@@ -5290,6 +5348,7 @@ mod tests {
             evidence.source_volume_mm3().get(),
             evidence.cavity_volume_mm3().get(),
             0.02,
+            evidence.cavity_components(),
         )
         .expect("measured Boolean balance");
         assert!(matches!(
@@ -5298,6 +5357,7 @@ mod tests {
                 evidence.source_volume_mm3().get(),
                 0.0,
                 0.02,
+                evidence.cavity_components(),
             ),
             Err(HollowError::BooleanVolumeMismatch { .. })
         ));
@@ -5921,7 +5981,7 @@ mod corpus_cavity_repair {
         let cavity_voxels = cavity.iter().filter(|value| **value).count();
         assert!(cavity_voxels > 0, "the fixture must select a cavity");
         let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
-        let (selected, stats) = flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+        let (selected, stats) = flow::select_all_flow_components(&cavity, grid.pitch, throat_r_mm)
             .expect("flow selection")
             .expect("the fixture must admit the registered drain bore somewhere");
         (selected, grid, stats, cavity_voxels)
@@ -5934,7 +5994,7 @@ mod corpus_cavity_repair {
     /// bound, the same voxelization, the same prefilter EDT, the same
     /// `exact_cavity_distance` refinement, the same `wall + margin`
     /// threshold — and stopping at exactly the line where production goes on
-    /// to `flow::select_largest_flow_component`.
+    /// to `flow::select_all_flow_components`.
     ///
     /// **What it deliberately does not do, and why that is sound.** It stops
     /// before flow selection because the dual-cavity doctrine's whole claim is
@@ -6142,29 +6202,32 @@ mod corpus_cavity_repair {
     /// - the `edt > wall` field holds **65,937** cavity voxels, of which plain
     ///   6-connectivity — what the pipeline selected before FU-47 — would take
     ///   **65,639** as one cavity;
-    /// - against the corrected (surface-offset) throat it is **13 interiors**,
-    ///   and the largest takes **62,835** (95.3 %) — most of the trunk and its
-    ///   limbs remain one flow-connected interior; the other 3,102 voxels
-    ///   split off into thinner branch tips whose realized aperture falls
-    ///   under the 3.0 mm bore the pipeline actually drills.
+    /// - against the corrected (surface-offset) throat it is **13 interiors**;
+    ///   the trunk and its main limbs are one of them and the rest are thinner
+    ///   branch tips whose realized aperture falls under the bore the pipeline
+    ///   actually drills.
     ///
     /// Under FU-47 those are separate cavities and **each needs its own
-    /// drain**. H0 retains exactly one — `select_largest_flow_component` — so
-    /// the other voxels are not cut. Even at 95.3 % retention the well-
-    /// composedness repair (79 critical cells, 406 repaired voxels, 4 whole-
-    /// grid passes) shrinks the honest, exact-distance-selected cavity
-    /// (FU-53) below the registered savings fraction, and the model takes the
-    /// **solid reserve** (`HollowError::IneligibleSavingsAfterCavityRepair` →
-    /// `SolidDecisionReason::BelowThresholdAfterRepair`). **It still prints.**
+    /// drain**. That is now what happens: H0 keeps every one of the thirteen,
+    /// so selection retains **64,128** voxels — every voxel the flood
+    /// labelled — where it used to retain the largest interior's 62,835. On
+    /// the field production really selects on (`edt > wall + margin`, the
+    /// coarser `edt > wall` field above is this test's own probe) the same
+    /// change takes the retained cavity from **12,878** voxels to **23,068**:
+    /// keeping only the largest chamber was throwing away 44.2 % of the
+    /// treant's available cavity.
     ///
-    /// **This is a recorded consequence, not a silent one.** Retaining and
-    /// draining every qualifying interior is what the ruling's own text asks
-    /// for and is the work that would give this model its cavity back; it is
-    /// an H0+H1b change (per-cavity drain planning, per-cavity drainability
-    /// proof) and is not this test's to make. FU-49's chain — repair, clean
-    /// shell, no cut face — is still proven, on the pinched-dumbbell and
-    /// well-composedness unit tests; what is no longer proven *here* is that
-    /// this particular model reaches a shell.
+    /// **The model still takes the solid reserve, and that is the finding.**
+    /// The well-composedness repair (183 critical cells, 921 repaired voxels,
+    /// 3 whole-grid passes) leaves an honest, exact-distance-selected cavity
+    /// (FU-53) of about 2,883 mm³ against a source of 24,568 mm³ — 11.7 %,
+    /// still under the registered 25 % savings fraction — so the model takes
+    /// the **solid reserve**
+    /// (`HollowError::IneligibleSavingsAfterCavityRepair` →
+    /// `SolidDecisionReason::BelowThresholdAfterRepair`). **It still prints.**
+    /// Per-chamber drains nearly doubled this model's available cavity and
+    /// did not, on their own, get it past the gate. The gate is not this
+    /// test's to move.
     #[test]
     #[cfg_attr(
         debug_assertions,
@@ -6218,19 +6281,29 @@ mod corpus_cavity_repair {
 
         let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
         let (selected, stats) =
-            flow::select_largest_flow_component(&cavity, grid.pitch, throat_r_mm)
+            flow::select_all_flow_components(&cavity, grid.pitch, throat_r_mm)
                 .expect("flow selection")
                 .expect("the treant admits the bore somewhere");
         // Re-pinned 9 -> 13 interiors, same cause as cavity_voxels above: a
         // different material grid moves the EDT, which moves exactly where
         // the corrected throat comparison draws each branch boundary.
         assert_eq!(stats.flow_components, 13, "{stats:?}");
-        assert_eq!(stats.core_voxels, 19_981, "{stats:?}");
-        assert_eq!(stats.unreached_voxels, 2_583, "{stats:?}");
-        // Re-pinned 40,982 (63%) -> 62,835 (95.3%): the corrected threshold
-        // still separates the treant's thin branch tips, but the trunk and
-        // its main limbs stay one interior on the new material grid.
-        assert_eq!(selected.iter().filter(|value| **value).count(), 62_835);
+        // Re-pinned 19,981 -> 26,708 core and 2,583 -> 1,809 unreached by the
+        // owner's 2.5 mm bore (2026-08-13): a smaller bore lowers the
+        // clearance a voxel must read to be core, so more voxels are core and
+        // fewer are out of the flood's reach. The interior COUNT did not move.
+        assert_eq!(stats.core_voxels, 26_708, "{stats:?}");
+        assert_eq!(stats.unreached_voxels, 1_809, "{stats:?}");
+        // Re-pinned 62,835 -> 64,128 by the per-chamber change: selection now
+        // keeps every one of the thirteen interiors, so it keeps every voxel
+        // the flood labelled — exactly `cavity_voxels - unreached_voxels`,
+        // `65,937 - 1,809`. It used to keep the largest interior only.
+        assert_eq!(selected.iter().filter(|value| **value).count(), 64_128);
+        assert_eq!(
+            selected.iter().filter(|value| **value).count(),
+            65_937 - stats.unreached_voxels,
+            "keeping every chamber means keeping every labelled voxel"
+        );
         drop(selected);
         drop(cavity);
 
@@ -6238,7 +6311,7 @@ mod corpus_cavity_repair {
         //    below the registered savings fraction, and the model takes the
         //    solid reserve carrying the repair's own measurement.
         let error = create_shell(source, settings).expect_err(
-            "one of thirteen interiors is below the registered savings fraction; the model stays solid",
+            "all thirteen interiors together are below the registered savings fraction; the model stays solid",
         );
         let HollowError::IneligibleSavingsAfterCavityRepair {
             critical_cells,
@@ -6249,22 +6322,23 @@ mod corpus_cavity_repair {
         else {
             panic!("expected IneligibleSavingsAfterCavityRepair, got {error}");
         };
-        // Re-pinned 93 -> 79 critical cells, 759 -> 406 repaired voxels, same
-        // cause as cavity_voxels above: a different selected mask has a
-        // different local pinch pattern.
-        assert_eq!(critical_cells, 79);
-        assert_eq!(repaired_voxels, 406);
-        // Re-pinned 3 -> 4 full-grid passes, same cause.
-        assert_eq!(full_grid_passes, 4);
+        // Re-pinned 79 -> 183 critical cells and 406 -> 921 repaired voxels by
+        // the per-chamber change: keeping thirteen interiors instead of one
+        // hands the repair a larger mask with more thin branch tips in it, and
+        // a thin branch tip is where the pinches are.
+        assert_eq!(critical_cells, 183);
+        assert_eq!(repaired_voxels, 921);
+        // Re-pinned 4 -> 3 full-grid passes, same cause.
+        assert_eq!(full_grid_passes, 3);
 
         // 3. The work bound the module doc claims, checked against the grid the
         //    caller admitted rather than against a remembered number.
         let cells = 166 * 176 * 185;
         assert_eq!(cell_visits, cells + 8 * repaired_voxels);
-        // Re-pinned 5,411,032 -> 5,408,208, same cause and same formula as
-        // the other counts above -- cells itself is unchanged (`spec.dims`
-        // does not move with the rasterizer), only `repaired_voxels` did.
-        assert_eq!(cell_visits, 5_408_208);
+        // Re-pinned 5,408,208 -> 5,412,328, same formula as above -- `cells`
+        // itself is unchanged (`spec.dims` does not move with the selection),
+        // only `repaired_voxels` did.
+        assert_eq!(cell_visits, 5_412_328);
     }
 }
 
@@ -7164,7 +7238,7 @@ mod dual_cavity_doctrine {
 
         let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
         let (selected, stats) =
-            flow::select_largest_flow_component(&cavity_mask, grid.pitch, throat_r_mm)
+            flow::select_all_flow_components(&cavity_mask, grid.pitch, throat_r_mm)
                 .expect("flow selection")
                 .expect("the lower chamber admits the registered bore");
         assert_eq!(
@@ -7267,7 +7341,7 @@ mod dual_cavity_doctrine {
             "ABOVE_BORE clearance {above_bore_measured} must be admitted by the corrected threshold {threshold}"
         );
 
-        let (selected, stats) = flow::select_largest_flow_component(
+        let (selected, stats) = flow::select_all_flow_components(
             &above_bore_mask,
             above_bore_grid.pitch,
             throat_r_mm,
@@ -7346,15 +7420,20 @@ mod dual_cavity_doctrine {
     /// (`plinth_mesh::dual_cavity_pawn_analytic_volume_mm3`,
     /// `near_chamber_reference_mm3`).
     ///
-    /// All three settings hollow. The claim about ABOVE_BORE is **not** the
-    /// bare inequality `above > at_bore` — that is satisfied by boundary
-    /// noise, and a measured real-pipeline run once satisfied it at +0.45 %
-    /// while the far chamber was entirely absent. It is a structural count:
-    /// the shipped ABOVE_BORE interior occupies two chambers, the other two
-    /// occupy one, and the volume difference is at least the far chamber's
-    /// own analytic size.
+    /// All three settings hollow, and — since the engine keeps every chamber
+    /// rather than the largest one — **all three ship both chambers**.
+    ///
+    /// **This is the sabotage check for the per-chamber change.** SEPARATED's
+    /// two chambers are not even voxel-connected: under the retired
+    /// keep-the-largest rule its shipped interior was one chamber and its
+    /// volume was the near chamber's alone. If the engine ever reverts to
+    /// keeping one chamber, the count below drops to 1 and the volume below
+    /// falls short of the two-chamber reference, and this test fails on both.
+    /// The numbers are fixed references derived from the fixture's published
+    /// silhouette constants — none of them is recomputed by re-running the
+    /// engine's own arithmetic.
     #[test]
-    fn both_sides_of_the_doctrine_boundary_still_clear_the_registered_savings_gate() {
+    fn every_chamber_of_the_fixture_ships_at_every_throat_setting() {
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let separated_source =
             make_dual_cavity_pawn_with_throat_radius(DUAL_CAVITY_THROAT_SEPARATED_MM)
@@ -7369,45 +7448,43 @@ mod dual_cavity_doctrine {
         let above_bore = create_shell(above_bore_source, settings).expect("above-bore hollows");
 
         let clearance = chamber_clearance_mm(settings);
-        for (name, candidate, chambers) in [
-            ("SEPARATED", &separated, 1),
-            ("AT_BORE", &at_bore, 1),
-            ("ABOVE_BORE", &above_bore, 2),
+        // Two chambers ship at every setting, including the SEPARATED control
+        // whose chambers share no voxel at all. Under keep-the-largest this
+        // read `1` for SEPARATED and AT_BORE.
+        for (name, candidate) in [
+            ("SEPARATED", &separated),
+            ("AT_BORE", &at_bore),
+            ("ABOVE_BORE", &above_bore),
         ] {
             assert_eq!(
                 candidate
                     .cavity_field()
                     .deep_lobe_count(clearance)
                     .expect("the cavity field admits its own distance transform"),
-                chambers,
-                "{name}'s shipped interior does not occupy {chambers} chamber(s)"
+                2,
+                "{name}'s shipped interior does not occupy both chambers"
             );
         }
 
-        // The magnitude, not just the sign: the far chamber is a ball of
-        // cavity radius `R2 - t`, and admitting it has to buy at least most
-        // of that ball. Half of it is the slack for the erosion's blend into
-        // the throat and for the voxel boundary.
+        // And the volume is there, not just the count. The far chamber is a
+        // ball of cavity radius `R2 - t`; half of it is the slack for the
+        // erosion's blend into the throat and for the voxel boundary, the
+        // same slack convention this fixture used before.
         let far_chamber_mm3 = 4.0 / 3.0
             * std::f64::consts::PI
             * (DUAL_CAVITY_UPPER_SPHERE_R_MM - registered_erosion_mm(settings)).powi(3);
-        let gained = above_bore.cavity().cavity_volume_mm3().get()
-            - at_bore.cavity().cavity_volume_mm3().get();
-        assert!(
-            gained > 0.5 * far_chamber_mm3,
-            "admitting the throat gained only {gained} mm^3, far short of the far chamber's own \
-             {far_chamber_mm3} mm^3 -- ABOVE_BORE is not carrying a second chamber"
-        );
-
-        let reference_mm3 = near_chamber_reference_mm3(settings);
+        let near_chamber_mm3 = near_chamber_reference_mm3(settings);
+        let minimum_two_chamber_mm3 = near_chamber_mm3 + 0.5 * far_chamber_mm3;
         for (name, measured) in [
-            ("AT_BORE", at_bore.cavity().cavity_volume_mm3().get()),
             ("SEPARATED", separated.cavity().cavity_volume_mm3().get()),
+            ("AT_BORE", at_bore.cavity().cavity_volume_mm3().get()),
+            ("ABOVE_BORE", above_bore.cavity().cavity_volume_mm3().get()),
         ] {
-            let relative_error = (measured - reference_mm3).abs() / reference_mm3;
             assert!(
-                relative_error < 0.05,
-                "{name} cavity {measured} mm^3 is not within 5% of the near-chamber reference {reference_mm3} mm^3"
+                measured > minimum_two_chamber_mm3,
+                "{name} cavity {measured} mm^3 is under the two-chamber reference \
+                 {minimum_two_chamber_mm3} mm^3 (near {near_chamber_mm3} + half of far \
+                 {far_chamber_mm3}) -- it is carrying one chamber, not both"
             );
         }
     }
@@ -7503,5 +7580,344 @@ mod dual_cavity_doctrine {
                 );
             }
         }
+    }
+}
+
+/// **One drain per chamber**, on synthetic geometry built for the purpose.
+///
+/// The engine used to keep the largest resin-flow chamber of a cavity and
+/// leave every other one solid; on the Weeping Treant that threw away about
+/// 35% of the cavity the wall thickness allows. It now keeps every chamber,
+/// drains each one at its own low point, vents each one at its own top, and
+/// fills back — visibly, with the volume stated — any chamber it cannot reach.
+///
+/// **The fixture.** A row of solid cubes, each one lifted 20 mm above the one
+/// before it, joined by 4 mm square bridges. The bridge is the whole trick: it
+/// is 4 mm thick, so no point inside it is more than 2 mm from its own
+/// surface, and the cavity threshold is `wall + margin` = 3.37 mm. No cavity
+/// voxel can lie in a bridge, so the cubes' cavities are separate chambers
+/// while the solid itself is one connected body — which is what the drilled
+/// output has to be.
+///
+/// **Why the 20 mm lift matters.** The registered lobe band is 15 mm. Lifting
+/// each cube 20 mm puts every chamber but the lowest one outside a band
+/// measured from the *model's* lowest point, so a planner that measures one
+/// low point for the whole cavity finds exactly one drain site no matter how
+/// many chambers there are. Every drain count below is therefore a direct
+/// test of per-chamber banding, and the explicit assertion at the end of the
+/// three-chamber test is the sabotage check: it fails if the engine ever goes
+/// back to one chamber or one band.
+#[cfg(test)]
+mod per_chamber_drains {
+    use super::*;
+    use plinth_mesh::make_box;
+
+    /// Cube side, in mm, for a chamber meant to be drained.
+    const DRAINED_CUBE_MM: f64 = 24.0;
+    /// Cube side, in mm, for the chamber meant to be too small to earn a
+    /// drain: its whole cavity is under the registered minimum lobe volume.
+    const UNDRILLABLE_CUBE_MM: f64 = 12.0;
+    /// Centre-to-centre spacing of the cubes along `x`.
+    const CUBE_PITCH_MM: f64 = 32.0;
+    /// How far each cube is lifted above the one before it.
+    const CUBE_LIFT_MM: f64 = 20.0;
+    /// Side of the square bridge that joins two cubes.
+    const BRIDGE_MM: f64 = 4.0;
+    /// How far the bridge reaches inside each cube it joins, so the union
+    /// really welds instead of leaving two bodies touching on a plane.
+    const BRIDGE_OVERLAP_MM: f64 = 1.0;
+
+    /// The registered erosion: a cavity voxel is one further than this from
+    /// the source surface. Read live, never restated.
+    fn erosion_mm(settings: HollowSettings) -> f64 {
+        settings.wall_thickness_mm().get() + settings.cavity_march_margin_mm().get()
+    }
+
+    /// The analytic cavity of one cube of side `side_mm`: the cube eroded by
+    /// the registered `wall + margin` on every face. A fixed reference the
+    /// test compares the engine against — it is the fixture's own geometry,
+    /// not a second copy of the engine's arithmetic.
+    fn cube_cavity_mm3(side_mm: f64, settings: HollowSettings) -> f64 {
+        (side_mm - 2.0 * erosion_mm(settings)).powi(3)
+    }
+
+    /// A row of `sides.len()` cubes, each lifted [`CUBE_LIFT_MM`] above the
+    /// last and joined to it by a square bridge, unioned into one closed
+    /// solid and moved into the positive octant.
+    ///
+    /// `make_box` takes `x` and `y` as **centres** and `z` as the bottom, so
+    /// each cube's extent is written out here rather than assumed.
+    ///
+    /// The bridge reaches [`BRIDGE_OVERLAP_MM`] inside each cube it joins, in
+    /// all three axes, instead of stopping on a face. Two solids that meet on
+    /// a coincident plane and nowhere else are not reliably welded by a union
+    /// — the first version of this fixture did exactly that and came out as
+    /// two separate bodies — and a fixture that quietly falls apart tests
+    /// nothing, because the drilled output has to be one connected solid.
+    fn chambered_bar(sides: &[f64]) -> Mesh {
+        assert!(sides.len() >= 2, "the fixture needs at least two chambers");
+        let centre_x = |index: usize| index as f64 * CUBE_PITCH_MM;
+        let bottom_z = |index: usize| index as f64 * CUBE_LIFT_MM;
+        let mut parts = Vec::new();
+        for (index, &side) in sides.iter().enumerate() {
+            parts.push(
+                make_box(
+                    [side, side, side],
+                    [centre_x(index), 0.0, bottom_z(index)],
+                )
+                .expect("cube fixture"),
+            );
+            if index + 1 == sides.len() {
+                continue;
+            }
+            let next_side = sides[index + 1];
+            // The bridge sits between this cube's right face and the next
+            // cube's left face, reaching one overlap inside each.
+            let left = centre_x(index) + 0.5 * side - BRIDGE_OVERLAP_MM;
+            let right = centre_x(index + 1) - 0.5 * next_side + BRIDGE_OVERLAP_MM;
+            assert!(
+                right > left,
+                "cubes {index} and {} overlap; the fixture needs a gap to bridge",
+                index + 1
+            );
+            // Vertically the bridge starts one overlap below the next cube's
+            // own base, so it is inside this cube there and inside the next
+            // cube above. Both cubes have to be tall enough to contain it.
+            let bridge_bottom = bottom_z(index + 1) - BRIDGE_OVERLAP_MM;
+            assert!(
+                bridge_bottom + BRIDGE_MM < bottom_z(index) + side,
+                "cube {index} of side {side} is too short to host the bridge to the next cube"
+            );
+            assert!(
+                bridge_bottom + BRIDGE_MM < bottom_z(index + 1) + next_side,
+                "cube {} of side {next_side} is too short to host the bridge from the last one",
+                index + 1
+            );
+            parts.push(
+                make_box(
+                    [right - left, BRIDGE_MM, BRIDGE_MM],
+                    [0.5 * (left + right), 0.0, bridge_bottom],
+                )
+                .expect("bridge fixture"),
+            );
+        }
+        let operands = parts
+            .iter()
+            .map(to_solid)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture operands");
+        let welded = ManifoldBackend
+            .union_limited(&operands, BooleanLimits::UNLIMITED)
+            .expect("fixture union");
+        let mesh = from_solid(welded).expect("fixture mesh");
+        let low = mesh.verts().iter().fold([f64::MAX; 3], |low, vertex| {
+            [
+                low[0].min(vertex[0]),
+                low[1].min(vertex[1]),
+                low[2].min(vertex[2]),
+            ]
+        });
+        Mesh::new(
+            mesh.verts()
+                .iter()
+                .map(|vertex| [vertex[0] - low[0], vertex[1] - low[1], vertex[2] - low[2]])
+                .collect(),
+            mesh.tris().to_vec(),
+        )
+        .expect("fixture in the positive octant")
+    }
+
+    fn drain_count(holes: &[drains::HoleGeometry]) -> usize {
+        holes
+            .iter()
+            .filter(|hole| hole.role == drains::HoleRole::Drain)
+            .count()
+    }
+
+    fn vent_count(holes: &[drains::HoleGeometry]) -> usize {
+        holes
+            .iter()
+            .filter(|hole| hole.role == drains::HoleRole::Vent)
+            .count()
+    }
+
+    /// Two chambers, two drains, two vents, and the whole cavity kept.
+    #[test]
+    fn two_chambers_each_get_their_own_drain_and_vent() {
+        let settings = registered_settings();
+        let candidate = create_shell(chambered_bar(&[DRAINED_CUBE_MM; 2]), settings)
+            .expect("the two-cube bar hollows");
+        assert_eq!(
+            candidate.cavity().cavity_components(),
+            2,
+            "both cubes' cavities must survive selection"
+        );
+        // The whole cavity, not the larger half of it: two cubes' worth,
+        // against the fixture's own analytic reference.
+        let expected_mm3 = 2.0 * cube_cavity_mm3(DRAINED_CUBE_MM, settings);
+        let measured_mm3 = candidate.cavity().cavity_volume_mm3().get();
+        assert!(
+            (measured_mm3 - expected_mm3).abs() / expected_mm3 < 0.10,
+            "cavity {measured_mm3} mm3 is not within 10% of the two-chamber reference \
+             {expected_mm3} mm3"
+        );
+
+        let planned = drains::plan_drains(candidate).expect("both chambers plan");
+        let holes = planned.drain_plan().holes();
+        assert_eq!(drain_count(holes), 2, "one drain per chamber: {holes:?}");
+        assert_eq!(vent_count(holes), 2, "one vent per chamber: {holes:?}");
+
+        let drilled = drilling::drill_planned_shell(planned).expect("both chambers drill");
+        assert_eq!(drilled.evidence().holes().len(), 4);
+        assert!(
+            drilled.evidence().refilled_pockets().is_empty(),
+            "nothing should have been given up: {:?}",
+            drilled.evidence().refilled_pockets()
+        );
+    }
+
+    /// Three chambers, three drains, three vents — **and the sabotage
+    /// check**. Two of the three drains sit above the lobe band measured from
+    /// the model's own lowest point, so an engine that keeps one chamber, or
+    /// that measures one low band for the whole cavity, cannot pass this.
+    #[test]
+    fn three_chambers_each_get_their_own_drain_and_vent() {
+        let settings = registered_settings();
+        let candidate = create_shell(chambered_bar(&[DRAINED_CUBE_MM; 3]), settings)
+            .expect("the three-cube bar hollows");
+        assert_eq!(candidate.cavity().cavity_components(), 3);
+        let expected_mm3 = 3.0 * cube_cavity_mm3(DRAINED_CUBE_MM, settings);
+        let measured_mm3 = candidate.cavity().cavity_volume_mm3().get();
+        assert!(
+            (measured_mm3 - expected_mm3).abs() / expected_mm3 < 0.10,
+            "cavity {measured_mm3} mm3 is not within 10% of the three-chamber reference \
+             {expected_mm3} mm3"
+        );
+
+        let field_low_z = candidate
+            .cavity_field()
+            .member_flats()
+            .map(|flat| candidate.cavity_field().world_at_flat(flat)[2])
+            .fold(f64::INFINITY, f64::min);
+        let lobe_band_mm = m0_constants()
+            .expect("M0 constants")
+            .placeholders()
+            .hollow_lobe_band_mm()
+            .diagnostic()
+            .get();
+
+        let planning_cap_bytes = candidate.cavity().drain_planning_cap_bytes();
+        assert_eq!(
+            planning_cap_bytes,
+            H0AdmissionLimits::production().drain_planning_bytes(),
+            "this test only means anything against the shipped ceiling"
+        );
+        let planned = drains::plan_drains(candidate).expect("all three chambers plan");
+        // The planner searches once per chamber, so its charge grows with the
+        // chambers -- and it is still charged against the same unmoved
+        // ceiling. A model with too many chambers refuses here; it does not
+        // get a bigger ceiling.
+        assert!(
+            planned.planner_accounting().requested_bytes() < planning_cap_bytes,
+            "three chambers charged {} bytes against the {planning_cap_bytes}-byte ceiling",
+            planned.planner_accounting().requested_bytes()
+        );
+        let holes = planned.drain_plan().holes();
+        assert_eq!(drain_count(holes), 3, "one drain per chamber: {holes:?}");
+        assert_eq!(vent_count(holes), 3, "one vent per chamber: {holes:?}");
+
+        // THE SABOTAGE CHECK. The cubes are lifted 20 mm apart and the
+        // registered lobe band is 15 mm, so a band measured once from the
+        // model's lowest cavity point contains only the lowest chamber. Two
+        // drains above that band can only come from two further chambers each
+        // measured on its own.
+        let above_the_global_band = holes
+            .iter()
+            .filter(|hole| hole.role == drains::HoleRole::Drain)
+            .filter(|hole| hole.center_mm[2].get() >= field_low_z + lobe_band_mm)
+            .count();
+        assert_eq!(
+            above_the_global_band, 2,
+            "two drains must sit above a band measured from the model's own low point \
+             {field_low_z} + {lobe_band_mm}; keeping the largest chamber, or banding the \
+             whole cavity at once, gives zero: {holes:?}"
+        );
+
+        let drilled = drilling::drill_planned_shell(planned).expect("all three chambers drill");
+        assert_eq!(drilled.evidence().holes().len(), 6);
+        assert!(drilled.evidence().refilled_pockets().is_empty());
+    }
+
+    /// A chamber the planner cannot give a drain to is filled back to solid,
+    /// and the volume it cost is on the record.
+    ///
+    /// The third cube is 12 mm on a side, so its whole cavity is about
+    /// 0.15 mL — under the registered 0.5 mL minimum lobe volume, and under
+    /// the registered 0.5 mL minimum pocket volume the drilling stage's own
+    /// repair pass uses. Neither will drill it, so it must come back as
+    /// material rather than ship as a sealed void full of resin.
+    #[test]
+    fn a_chamber_that_cannot_take_a_drain_is_filled_back_and_its_volume_reported() {
+        let settings = registered_settings();
+        let small_cavity_mm3 = cube_cavity_mm3(UNDRILLABLE_CUBE_MM, settings);
+        let minimum_lobe_ml = m0_constants()
+            .expect("M0 constants")
+            .placeholders()
+            .hollow_lobe_min_ml()
+            .diagnostic()
+            .get();
+        assert!(
+            small_cavity_mm3 / 1000.0 < minimum_lobe_ml,
+            "the small cube's cavity {small_cavity_mm3} mm3 is no longer under the registered \
+             {minimum_lobe_ml} mL minimum lobe volume -- the fixture has stopped testing what \
+             it claims to"
+        );
+
+        let candidate = create_shell(
+            chambered_bar(&[DRAINED_CUBE_MM, DRAINED_CUBE_MM, UNDRILLABLE_CUBE_MM]),
+            settings,
+        )
+        .expect("the mixed bar hollows");
+        assert_eq!(
+            candidate.cavity().cavity_components(),
+            3,
+            "the small cube is still a chamber at selection time"
+        );
+
+        let planned = drains::plan_drains(candidate).expect("the two big chambers plan");
+        let holes = planned.drain_plan().holes();
+        assert_eq!(
+            drain_count(holes),
+            2,
+            "the small chamber earns no drain: {holes:?}"
+        );
+        assert_eq!(
+            vent_count(holes),
+            2,
+            "and no vent either, because a vent without a drain is a hole that buys nothing: \
+             {holes:?}"
+        );
+
+        let drilled = drilling::drill_planned_shell(planned).expect("the mixed bar drills");
+        let filled_back = drilled.evidence().refilled_pockets();
+        assert_eq!(
+            filled_back.len(),
+            1,
+            "exactly one chamber was given up: {filled_back:?}"
+        );
+        let reported_mm3 = filled_back[0].volume_ml().get() * 1000.0;
+        assert!(
+            (reported_mm3 - small_cavity_mm3).abs() / small_cavity_mm3 < 0.25,
+            "the reported filled-back volume {reported_mm3} mm3 is not the small chamber's own \
+             {small_cavity_mm3} mm3"
+        );
+        // And the shipped cavity is the two big chambers, with the small one
+        // gone back to material.
+        let expected_mm3 = 2.0 * cube_cavity_mm3(DRAINED_CUBE_MM, settings);
+        let final_mm3 = drilled.evidence().final_cavity_mm3().get();
+        assert!(
+            (final_mm3 - expected_mm3).abs() / expected_mm3 < 0.10,
+            "final cavity {final_mm3} mm3 is not the two drained chambers' {expected_mm3} mm3"
+        );
     }
 }

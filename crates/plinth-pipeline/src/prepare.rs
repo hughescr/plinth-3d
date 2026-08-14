@@ -485,6 +485,12 @@ pub struct ChainOutcome {
     /// shell was built and measured, with its
     /// [`plinth_hollow::RealizedWallClaim`] attached.
     pub realized_wall: Option<plinth_hollow::RealizedWall>,
+    /// Every cavity pocket the drilling stage filled back to solid because no
+    /// legal drain reached it, in millilitres. Read off the same
+    /// `HollowReport` as `cavity_repair`, for the same reason: this is the
+    /// last place that report is in hand, and a loss nobody can see is a loss
+    /// nobody will fix.
+    pub filled_back_chambers_ml: Vec<plinth_core::Finite>,
     pub supported_geometry: SupportedGeometry,
     pub routed_contacts: usize,
     pub final_live_members: usize,
@@ -846,6 +852,7 @@ fn prepare_one(
                 // runs apart.
                 wall_mm: outcome.wall,
                 realized_wall: outcome.realized_wall,
+                filled_back_chambers_ml: outcome.filled_back_chambers_ml,
             },
         ),
         Ok(None) => report(
@@ -1355,6 +1362,22 @@ pub fn seal_and_emit(
     let cavity_repair = hollowed.history().hollow().cavity_repair();
     let wall = hollowed.history().hollow().wall();
     let realized_wall = hollowed.history().hollow().realized_wall();
+    // Chambers the drilling stage could not drain and filled back to solid.
+    // Same reason as the three lines above: this is the last place the hollow
+    // stage's report exists, and resin the engine gave up on has to reach the
+    // run report or nobody ever learns it was given up on.
+    let filled_back_chambers_ml: Vec<Finite> = hollowed
+        .history()
+        .hollow()
+        .drilling_evidence()
+        .map(|evidence| {
+            evidence
+                .refilled_pockets()
+                .iter()
+                .map(plinth_hollow::drilling::RefilledPocketEvidence::volume_ml)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -1529,6 +1552,7 @@ pub fn seal_and_emit(
         cavity_repair,
         wall,
         realized_wall,
+        filled_back_chambers_ml,
         hollow_disposition,
         supported_geometry,
         routed_contacts: gated.routed_contacts,

@@ -77,8 +77,10 @@
 //! traversals** — the EDT, the core build, its `label3d`, the seed scan, the
 //! flood, the unlabelled sweep that seeds stranding, the stranding fixpoint,
 //! the survivor-capture-and-reset pass, the re-flood, and the unreached
-//! sweep — and [`select_largest_flow_component`] adds the `largest_label`
-//! scan and the verdict `mapv`, **twelve in all**. No call in the flood is
+//! sweep — and [`select_all_flow_components`] adds the verdict `mapv`,
+//! **eleven in all**. It was twelve while that function also scanned for the
+//! largest label; keeping every chamber means there is nothing to compare.
+//! No call in the flood is
 //! per-voxel-scalar in the sense D-37 forbids — the frontier is carried as a
 //! batch (`Vec<u32>` of linear indices, mirroring `well_composed.rs`'s workset
 //! convention) and every voxel is finalized at most twice (once per flood).
@@ -98,7 +100,7 @@ use scirs2_ndimage::morphology3d::label3d;
 
 use plinth_core::m0_constants;
 
-use crate::{frozen_distance_transform, largest_label, HollowError};
+use crate::{frozen_distance_transform, HollowError};
 
 /// Evidence from one flow-connectivity pass, for the resource record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -322,9 +324,24 @@ fn unclaim_stranded(
     }
 }
 
-/// The largest resin-flow-connected interior, or `None` when nothing in
-/// `mask` admits the registered bore at all.
-pub(crate) fn select_largest_flow_component(
+/// **Every** resin-flow-connected interior the flood reached, or `None` when
+/// nothing in `mask` admits the registered bore at all.
+///
+/// **Why every one, and not the biggest one.** This function used to return
+/// the single largest labelled interior and throw the rest away. On the
+/// Weeping Treant that discarded about 35% of the cavity the wall thickness
+/// allows — resin that stays in the print, paid for at full price, for no
+/// reason other than that the engine could only aim one drain. The engine now
+/// drills one drain per chamber (`crate::drains`), so a second interior is a
+/// second drain, not a reason to leave the material solid. A chamber that
+/// turns out to have no legal drill path is filled back to solid downstream
+/// (`crate::drilling`'s refill) and its volume is reported, so nothing here
+/// can ship a sealed void full of resin.
+///
+/// A voxel still unlabelled after the flood (`0`) is left out, exactly as
+/// before: it cannot be drained, and leaving it uncut leaves solid material,
+/// which is always safe.
+pub(crate) fn select_all_flow_components(
     mask: &Array3<bool>,
     pitch_mm: f64,
     throat_r_mm: f64,
@@ -333,8 +350,7 @@ pub(crate) fn select_largest_flow_component(
     if stats.flow_components == 0 {
         return Ok(None);
     }
-    let largest = largest_label(&labels, stats.flow_components)?;
-    let selected = labels.mapv(|label| label == largest);
+    let selected = labels.mapv(|label| label != 0);
     Ok(Some((selected, stats)))
 }
 
@@ -393,7 +409,7 @@ mod tests {
         let throat = 1.5; // 3 voxel steps at 0.5 mm.
         let mask = wide_block(4);
         let (selected, stats) =
-            select_largest_flow_component(&mask, pitch, throat).expect("flow ok").expect("some");
+            select_all_flow_components(&mask, pitch, throat).expect("flow ok").expect("some");
         assert_eq!(stats.flow_components, 1);
         assert_eq!(stats.unreached_voxels, 0);
         assert_eq!(selected, mask, "not one voxel of the cavity was eroded");
@@ -530,7 +546,7 @@ mod tests {
         // A 1-voxel-thick sheet: free radius is at most half a voxel step
         // anywhere in it, far under a 1.5 mm throat.
         let mask = Array3::from_elem((1, 20, 20), true);
-        let selected = select_largest_flow_component(&mask, pitch, throat).expect("flow ok");
+        let selected = select_all_flow_components(&mask, pitch, throat).expect("flow ok");
         assert!(selected.is_none(), "{selected:?}");
     }
 

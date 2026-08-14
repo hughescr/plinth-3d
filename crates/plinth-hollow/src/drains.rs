@@ -202,6 +202,9 @@ struct Candidate {
     id: usize,
     role: HoleRole,
     lobe_id: Option<u32>,
+    /// Which chamber this candidate serves, `0`-based. Drains and the vent of
+    /// one chamber are accepted or dropped together — see `plan`.
+    chamber: usize,
     site: usize,
     origin: V3,
     direction: V3,
@@ -210,9 +213,48 @@ struct Candidate {
 #[derive(Clone)]
 struct Lobe {
     id: u32,
+    chamber: usize,
     voxels: usize,
     first_flat: usize,
     origin: V3,
+}
+
+/// The cavity's chambers: the 6-connected regions of the selected field, each
+/// with its **own** lowest and highest point.
+///
+/// **Why this exists.** The planner used to measure one lowest point for the
+/// whole cavity and drill in the band above it. That works for one chamber and
+/// silently abandons every other: a chamber sitting higher up never enters the
+/// band, so it never gets a drain, and its resin never leaves the print. Each
+/// chamber is its own vessel — resin in it falls to *its* lowest point, not to
+/// the model's — so each one is measured on its own here, once, in a single
+/// flood over the field's members.
+///
+/// **A chamber is not the same thing as a resin-flow interior.** Two interiors
+/// joined by a passage narrower than the drain bore cannot be drilled through
+/// to each other, but resin can still run downhill between them, so they are
+/// one vessel to drain and one chamber here. That is the same partition the
+/// drilling stage's gravity map uses, which is what keeps the two stages from
+/// disagreeing about what a drain serves.
+struct Chambers {
+    /// One entry per grid cell: `0` for a non-member, otherwise `1..=count`.
+    labels: Vec<u32>,
+    count: usize,
+    /// Indexed by chamber, `0`-based.
+    low_z_mm: Vec<f64>,
+    high_z_mm: Vec<f64>,
+    low_band_members: Vec<usize>,
+    high_band_members: Vec<usize>,
+}
+
+impl Chambers {
+    /// The chamber a member cell belongs to, `0`-based.
+    fn chamber_of(&self, flat: usize) -> Option<usize> {
+        match self.labels.get(flat).copied().unwrap_or(0) {
+            0 => None,
+            label => Some(label as usize - 1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -271,13 +313,15 @@ impl PlannerAccounting {
     }
 }
 
+/// The registered policy the preflight sizes against. The two band widths that
+/// used to live here moved into [`label_chambers`], which is now the one place
+/// that decides what a chamber's low band and top band are; the preflight
+/// reads the resulting member counts instead of re-deriving them.
 #[derive(Clone, Copy)]
 struct PlannerPolicy {
     drain_direction_count: usize,
     vent_direction_count: usize,
-    lobe_band_mm: f64,
     lobe_min_ml: f64,
-    vent_top_band_mm: f64,
     vent_sample_divisor: usize,
     exit_ceiling_mm: f64,
 }
@@ -345,17 +389,27 @@ fn plan(
         field.pitch_mm().get(),
     )
     .map_err(|_| DrainPlanningRefusal::Kernel)?;
+    let lobe_band_mm = policy.hollow_lobe_band_mm().diagnostic().get();
+    // Label the chambers first: every capacity below is a sum over them, and
+    // the site searches that follow are run once per chamber rather than once
+    // for the whole cavity. This is the single pass that serves them all --
+    // nothing here re-walks the grid per chamber.
+    let chambers = label_chambers(
+        field,
+        lobe_band_mm,
+        vent_top_band_mm,
+        candidate.cavity().drain_planning_cap_bytes(),
+    )?;
     let preflight = planner_preflight(
         candidate,
         field,
+        &chambers,
         resources,
         native.peak_bytes(),
         PlannerPolicy {
             drain_direction_count,
             vent_direction_count,
-            lobe_band_mm: policy.hollow_lobe_band_mm().diagnostic().get(),
             lobe_min_ml: policy.hollow_lobe_min_ml().diagnostic().get(),
-            vent_top_band_mm,
             vent_sample_divisor,
             exit_ceiling_mm: policy.hollow_exit_ray_max_mm().diagnostic().get(),
         },
@@ -364,12 +418,14 @@ fn plan(
     debug_assert!(preflight.normalized_direction_bytes > 0);
     let lobes = low_lobes(
         field,
-        policy.hollow_lobe_band_mm().diagnostic().get(),
+        &chambers,
+        lobe_band_mm,
         policy.hollow_lobe_min_ml().diagnostic().get(),
         candidate.cavity().drain_planning_cap_bytes(),
     )?;
     let vent_sites = high_sites(
         field,
+        &chambers,
         preflight.high_site_capacity,
         vent_top_band_mm,
         vent_sample_divisor,
@@ -406,19 +462,21 @@ fn plan(
                 id,
                 role: HoleRole::Drain,
                 lobe_id: Some(lobe.id),
+                chamber: lobe.chamber,
                 site,
                 origin: lobe.origin,
                 direction,
             });
         }
     }
-    for (site, &origin) in vent_sites.iter().enumerate() {
+    for (site, &(chamber, origin)) in vent_sites.iter().enumerate() {
         for &direction in &horizontal {
             let id = candidates.len();
             candidates.push(Candidate {
                 id,
                 role: HoleRole::Vent,
                 lobe_id: None,
+                chamber,
                 site,
                 origin,
                 direction,
@@ -506,34 +564,73 @@ fn plan(
         )?;
     }
 
-    let mut holes = Vec::with_capacity(lobes.len() + 1);
-    for (site, lobe) in lobes.iter().enumerate() {
-        let best = best_site(&candidates, &paths, HoleRole::Drain, site).ok_or_else(|| {
-            DrainPlanningRefusal::NoExit {
-                lobe_id: lobe.id,
-                diagnostics: std::mem::take(&mut unavailable_candidates),
+    // **One drain per lobe, one vent per chamber, and the pair travels
+    // together.**
+    //
+    // A chamber ships its drains only if it also got its vent. A drain with no
+    // air intake does not drain — the resin holds up behind a vacuum — so a
+    // hole drilled into an unvented chamber weakens the print and buys
+    // nothing, and the honest outcome is to leave that chamber solid. The
+    // reverse is dropped for the same reason: a vent with no drain below it is
+    // a hole in the model that no resin ever leaves through.
+    //
+    // **A chamber that cannot take a drain is not a refusal.** It contributes
+    // no holes here, so the drilling stage's gravity map finds every one of
+    // its voxels trapped, fills it back to solid, and reports the volume it
+    // gave up. That is the whole point: never ship a sealed void full of
+    // resin, and never throw away the rest of the model because one chamber
+    // could not be reached. The model as a whole is still refused when NO
+    // chamber produced a drained-and-vented pair, which is the single-chamber
+    // behaviour unchanged.
+    let mut holes = Vec::with_capacity(lobes.len() + chambers.count);
+    let mut first_lobe_without_exit: Option<u32> = None;
+    for chamber in 0..chambers.count {
+        let mut chamber_drains = Vec::new();
+        for (site, lobe) in lobes
+            .iter()
+            .enumerate()
+            .filter(|(_, lobe)| lobe.chamber == chamber)
+        {
+            match best_site(&candidates, &paths, HoleRole::Drain, site) {
+                Some(best) => chamber_drains.push(hole(
+                    best.0,
+                    best.1,
+                    policy.hollow_drain_r_mm().diagnostic().get(),
+                    keepout_before_mm,
+                    drain_keepout_after_mm,
+                )?),
+                None => first_lobe_without_exit = first_lobe_without_exit.or(Some(lobe.id)),
             }
-        })?;
+        }
+        if chamber_drains.is_empty() {
+            continue;
+        }
+        let Some(vent) = best_role(&candidates, &paths, HoleRole::Vent, chamber) else {
+            continue;
+        };
+        holes.append(&mut chamber_drains);
         holes.push(hole(
-            best.0,
-            best.1,
-            policy.hollow_drain_r_mm().diagnostic().get(),
+            vent.0,
+            vent.1,
+            policy.hollow_vent_r_mm().diagnostic().get(),
             keepout_before_mm,
-            drain_keepout_after_mm,
+            vent_keepout_after_mm,
         )?);
     }
-    let vent = best_role(&candidates, &paths, HoleRole::Vent).ok_or_else(|| {
-        DrainPlanningRefusal::NoVentSite {
-            diagnostics: std::mem::take(&mut unavailable_candidates),
-        }
-    })?;
-    holes.push(hole(
-        vent.0,
-        vent.1,
-        policy.hollow_vent_r_mm().diagnostic().get(),
-        keepout_before_mm,
-        vent_keepout_after_mm,
-    )?);
+    // A hole is only ever pushed above by a chamber that got both a drain and
+    // a vent, so an empty list means no chamber did — the whole model is
+    // refused, and the refusal names whichever of the two was missing.
+    if holes.is_empty() {
+        return Err(match first_lobe_without_exit {
+            Some(lobe_id) => DrainPlanningRefusal::NoExit {
+                lobe_id,
+                diagnostics: std::mem::take(&mut unavailable_candidates),
+            },
+            None => DrainPlanningRefusal::NoVentSite {
+                diagnostics: std::mem::take(&mut unavailable_candidates),
+            },
+        });
+    }
     Ok((
         DrainPlan {
             holes,
@@ -758,13 +855,23 @@ fn best_site<'a>(
     best
 }
 
+/// The shortest legal exit of one role **within one chamber**.
+///
+/// Chamber-scoped because the vent it picks has to open into the chamber it
+/// vents. A vent chosen from the whole cavity would let one chamber's air hole
+/// stand in for another's, and the second chamber would then be drilled and
+/// never drain.
 fn best_role<'a>(
     candidates: &'a [Candidate],
     paths: &[Option<RayPath>],
     role: HoleRole,
+    chamber: usize,
 ) -> Option<(&'a Candidate, RayPath)> {
     let mut best: Option<(&Candidate, RayPath)> = None;
-    for candidate in candidates.iter().filter(|candidate| candidate.role == role) {
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.role == role && candidate.chamber == chamber)
+    {
         let Some(path) = paths[candidate.id] else {
             continue;
         };
@@ -806,19 +913,120 @@ fn hole(
     })
 }
 
+/// Label the cavity's chambers and measure each one's own extent.
+///
+/// One flood over the members labels them; one further pass counts how many
+/// members of each chamber sit in that chamber's own low band and in its own
+/// top band, which is what sizes the planner's buffers. Two passes over the
+/// field, not two per chamber.
+fn label_chambers(
+    field: &CavityField,
+    low_band_mm: f64,
+    top_band_mm: f64,
+    cap: usize,
+) -> Result<Chambers, DrainPlanningRefusal> {
+    let cells = field.flat_count();
+    // Cell indices are carried as `u32` in the flood stack, four bytes each
+    // rather than eight, so this proves they fit before any of them is taken
+    // — the same admission `crate::flow` and `crate::well_composed` make for
+    // their own worksets.
+    u32::try_from(cells).map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    // Count before charging before allocating: the label array and the flood
+    // stack are both one `u32` per cell in the worst case, and both are named
+    // here before either exists.
+    let workspace = cells
+        .checked_mul(2 * std::mem::size_of::<u32>())
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    if workspace > cap {
+        return Err(DrainPlanningRefusal::ResourceLimitExceeded {
+            requested_bytes: workspace,
+            cap_bytes: cap,
+        });
+    }
+    let mut labels = vec![0_u32; cells];
+    let mut low_z_mm: Vec<f64> = Vec::new();
+    let mut high_z_mm: Vec<f64> = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut count = 0_usize;
+    for seed in field.member_flats() {
+        if labels[seed] != 0 {
+            continue;
+        }
+        count = count
+            .checked_add(1)
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+        let label =
+            u32::try_from(count).map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+        labels[seed] = label;
+        stack.clear();
+        stack.push(seed as u32);
+        let mut lowest = f64::INFINITY;
+        let mut highest = f64::NEG_INFINITY;
+        while let Some(current) = stack.pop() {
+            let current = current as usize;
+            let z = field.world_at_flat(current)[2];
+            lowest = lowest.min(z);
+            highest = highest.max(z);
+            for neighbor in neighbors(field, current) {
+                if labels[neighbor] == 0 && field.contains_flat(neighbor) {
+                    labels[neighbor] = label;
+                    stack.push(neighbor as u32);
+                }
+            }
+        }
+        if !lowest.is_finite() || !highest.is_finite() {
+            return Err(DrainPlanningRefusal::NonFinite {
+                role: HoleRole::Drain,
+            });
+        }
+        low_z_mm.push(lowest);
+        high_z_mm.push(highest);
+    }
+    if count == 0 {
+        return Err(DrainPlanningRefusal::NoVentSite {
+            diagnostics: Vec::new(),
+        });
+    }
+    let mut low_band_members = vec![0_usize; count];
+    let mut high_band_members = vec![0_usize; count];
+    for flat in field.member_flats() {
+        let chamber = labels[flat] as usize - 1;
+        let z = field.world_at_flat(flat)[2];
+        if z < low_z_mm[chamber] + low_band_mm {
+            low_band_members[chamber] += 1;
+        }
+        if z > high_z_mm[chamber] - top_band_mm {
+            high_band_members[chamber] += 1;
+        }
+    }
+    Ok(Chambers {
+        labels,
+        count,
+        low_z_mm,
+        high_z_mm,
+        low_band_members,
+        high_band_members,
+    })
+}
+
+/// The low lobes of every chamber: the drain sites.
+///
+/// A lobe is a connected piece of one chamber's **own** low band — the band
+/// `band_mm` above that chamber's lowest point, not above the model's. A
+/// chamber with two feet has two lobes and gets two drains, which is the
+/// behaviour the retired Python engine had and the reason it left 0.27 mL of
+/// resin in a model where a single drain left 14 mL.
 fn low_lobes(
     field: &CavityField,
+    chambers: &Chambers,
     band_mm: f64,
     min_ml: f64,
     cap: usize,
 ) -> Result<Vec<Lobe>, DrainPlanningRefusal> {
-    let low_z = field
-        .member_flats()
-        .map(|flat| field.world_at_flat(flat)[2])
-        .min_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite {
-            diagnostics: Vec::new(),
-        })?;
+    let in_low_band = |flat: usize| -> Option<usize> {
+        let chamber = chambers.chamber_of(flat)?;
+        (field.world_at_flat(flat)[2] < chambers.low_z_mm[chamber] + band_mm).then_some(chamber)
+    };
     let label_bytes = field
         .flat_count()
         .checked_mul(std::mem::size_of::<i32>())
@@ -847,7 +1055,10 @@ fn low_lobes(
     let mut lobes = Vec::new();
     let mut next_component_id = 1_u32;
     for flat in field.member_flats() {
-        if labels[flat] >= 0 || field.world_at_flat(flat)[2] >= low_z + band_mm {
+        let Some(chamber) = in_low_band(flat) else {
+            continue;
+        };
+        if labels[flat] >= 0 {
             continue;
         }
         let id = next_component_id;
@@ -862,7 +1073,7 @@ fn low_lobes(
             for neighbor in neighbors(field, current) {
                 if labels[neighbor] < 0
                     && field.contains_flat(neighbor)
-                    && field.world_at_flat(neighbor)[2] < low_z + band_mm
+                    && in_low_band(neighbor).is_some()
                 {
                     labels[neighbor] = id as i32;
                     stack.push(neighbor);
@@ -897,6 +1108,7 @@ fn low_lobes(
         origin[2] = lobe_low;
         lobes.push(Lobe {
             id,
+            chamber,
             voxels: members.len(),
             first_flat: flat,
             origin,
@@ -913,33 +1125,46 @@ fn low_lobes(
     Ok(lobes)
 }
 
+/// Air-intake sites in the top band of **each** chamber.
+///
+/// **Why per chamber.** A chamber with a drain and no air intake does not
+/// drain: the resin holds up under its own vacuum, exactly as a sealed can
+/// does. Air can be shared between chambers only where they connect above the
+/// resin line, and chambers that connect are one chamber here by construction
+/// — so "a vent for every chamber" is the same rule as "a shared vent where
+/// they connect", stated once. One vent site list per chamber is how the
+/// planner gets there, and `plan` refuses to keep a chamber's drains unless
+/// that chamber also got its vent.
+///
+/// Returns `(chamber, site)` pairs, in the field's own cell order, sampled at
+/// the registered divisor within each chamber's own band.
 fn high_sites(
     field: &CavityField,
+    chambers: &Chambers,
     capacity: usize,
     top_band_mm: f64,
     sample_divisor: usize,
-) -> Result<Vec<V3>, DrainPlanningRefusal> {
-    let high_z = field
-        .member_flats()
-        .map(|flat| field.world_at_flat(flat)[2])
-        .max_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite {
-            diagnostics: Vec::new(),
-        })?;
-    let high_count = field
-        .member_flats()
-        .filter(|flat| field.world_at_flat(*flat)[2] > high_z - top_band_mm)
-        .count();
-    let step = (high_count / sample_divisor).max(1);
+) -> Result<Vec<(usize, V3)>, DrainPlanningRefusal> {
+    let in_top_band = |flat: usize| -> Option<usize> {
+        let chamber = chambers.chamber_of(flat)?;
+        (field.world_at_flat(flat)[2] > chambers.high_z_mm[chamber] - top_band_mm)
+            .then_some(chamber)
+    };
+    let steps: Vec<usize> = chambers
+        .high_band_members
+        .iter()
+        .map(|members| (members / sample_divisor).max(1))
+        .collect();
+    let mut seen = vec![0_usize; chambers.count];
     let mut sites = Vec::with_capacity(capacity);
-    for (index, flat) in field
-        .member_flats()
-        .filter(|flat| field.world_at_flat(*flat)[2] > high_z - top_band_mm)
-        .enumerate()
-    {
-        if index % step == 0 {
-            sites.push(field.world_at_flat(flat));
+    for flat in field.member_flats() {
+        let Some(chamber) = in_top_band(flat) else {
+            continue;
+        };
+        if seen[chamber].is_multiple_of(steps[chamber]) {
+            sites.push((chamber, field.world_at_flat(flat)));
         }
+        seen[chamber] += 1;
     }
     if sites.len() > capacity {
         return Err(DrainPlanningRefusal::PreflightUnderestimated);
@@ -947,46 +1172,47 @@ fn high_sites(
     Ok(sites)
 }
 
+/// Size every planner buffer before any of them exists, from the chambers
+/// already labelled.
+///
+/// **The counts scale with the real work, and the caps do not move.** The
+/// planner now runs its site search once per chamber, so the capacities below
+/// are sums over chambers rather than one measurement of the whole cavity. A
+/// model with many chambers therefore asks for more, and if it asks for more
+/// than the drain-planning cap allows the answer is the same refusal it has
+/// always been.
 fn planner_preflight(
     candidate: &ShellCandidate,
     field: &CavityField,
+    chambers: &Chambers,
     resources: H0ResourceDiagnostics,
     native_peak_bytes: usize,
     policy: PlannerPolicy,
 ) -> Result<PlannerPreflight, DrainPlanningRefusal> {
     let cap = candidate.cavity().drain_planning_cap_bytes();
-    let low_z = field
-        .member_flats()
-        .map(|flat| field.world_at_flat(flat)[2])
-        .min_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite {
-            diagnostics: Vec::new(),
-        })?;
-    let low_members = field
-        .member_flats()
-        .filter(|flat| field.world_at_flat(*flat)[2] < low_z + policy.lobe_band_mm)
-        .count();
     let minimum_lobe_voxels =
         (policy.lobe_min_ml * 1000.0 / field.pitch_mm().get().powi(3)).ceil() as usize;
     if minimum_lobe_voxels == 0 {
         return Err(DrainPlanningRefusal::ResourceAccountingOverflow);
     }
-    let lobe_capacity = low_members / minimum_lobe_voxels;
-    let high_z = field
-        .member_flats()
-        .map(|flat| field.world_at_flat(flat)[2])
-        .max_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite {
-            diagnostics: Vec::new(),
-        })?;
-    let high_members = field
-        .member_flats()
-        .filter(|flat| field.world_at_flat(*flat)[2] > high_z - policy.vent_top_band_mm)
-        .count();
-    let high_step = (high_members / policy.vent_sample_divisor).max(1);
-    let high_site_capacity = high_members
-        .checked_add(high_step - 1)
-        .map(|value| value / high_step)
+    // A chamber's low band can hold at most `members / minimum` lobes that
+    // clear the registered minimum lobe volume, and a chamber whose whole low
+    // band is under that minimum can still hold none -- but the loop below
+    // walks it, so a chamber is never worth zero slots here.
+    let lobe_capacity = chambers
+        .low_band_members
+        .iter()
+        .try_fold(0_usize, |total, members| {
+            total.checked_add(members / minimum_lobe_voxels)
+        })
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let high_site_capacity = chambers
+        .high_band_members
+        .iter()
+        .try_fold(0_usize, |total, members| {
+            let step = (members / policy.vent_sample_divisor).max(1);
+            total.checked_add(members.div_ceil(step))
+        })
         .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     let candidate_capacity = lobe_capacity
         .checked_mul(policy.drain_direction_count)
@@ -1044,6 +1270,32 @@ fn planner_preflight(
             std::mem::size_of::<Lobe>(),
             std::mem::align_of::<Lobe>(),
         )?,
+        // The chamber labelling that sizes everything above: one `u32` per
+        // cell for the labels, one more for the flood stack, plus the four
+        // per-chamber vectors.
+        allocator(
+            field_cells
+                .checked_mul(2)
+                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+            std::mem::size_of::<u32>(),
+            std::mem::align_of::<u32>(),
+        )?,
+        allocator(
+            chambers
+                .count
+                .checked_mul(2)
+                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+            std::mem::size_of::<f64>(),
+            std::mem::align_of::<f64>(),
+        )?,
+        allocator(
+            chambers
+                .count
+                .checked_mul(3)
+                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+            std::mem::size_of::<usize>(),
+            std::mem::align_of::<usize>(),
+        )?,
     ]
     .into_iter()
     .try_fold(0_usize, |total, value| total.checked_add(value))
@@ -1088,12 +1340,13 @@ fn planner_preflight(
         normalized_direction_bytes,
         allocator(
             high_site_capacity,
-            std::mem::size_of::<V3>(),
-            std::mem::align_of::<V3>(),
+            std::mem::size_of::<(usize, V3)>(),
+            std::mem::align_of::<(usize, V3)>(),
         )?,
+        // One hole per lobe (drains) plus one per chamber (vents).
         allocator(
             lobe_capacity
-                .checked_add(1)
+                .checked_add(chambers.count)
                 .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
             std::mem::size_of::<HoleGeometry>(),
             std::mem::align_of::<HoleGeometry>(),
@@ -1258,6 +1511,13 @@ mod tests {
             .collect()
     }
 
+    /// The chambers of a field, at the registered band widths, with no
+    /// memory ceiling in the way. Tests that exercise one helper still have
+    /// to go through the same labelling production does.
+    fn test_chambers(field: &CavityField, low_band_mm: f64, top_band_mm: f64) -> Chambers {
+        label_chambers(field, low_band_mm, top_band_mm, usize::MAX).expect("field fits")
+    }
+
     fn frozen_candidate() -> ShellCandidate {
         let baseline =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/baseline");
@@ -1342,16 +1602,31 @@ mod tests {
         // 4,000 cells * 0.5^3 / 1000 = exactly 0.5 mL: frozen Python keeps
         // this because it refuses only values strictly below the threshold.
         let full = field(Array3::from_elem((10, 20, 20), true));
-        let lobes = low_lobes(&full, 15.0, 0.5, usize::MAX).expect("field fits");
+        let lobes = low_lobes(
+            &full,
+            &test_chambers(&full, 15.0, 15.0),
+            15.0,
+            0.5,
+            usize::MAX,
+        )
+        .expect("field fits");
         assert_eq!(lobes.len(), 1);
         assert_eq!(lobes[0].id, 1);
+        assert_eq!(lobes[0].chamber, 0);
         assert_eq!(lobes[0].voxels, 4_000);
 
         let mut under = Array3::from_elem((10, 20, 20), true);
         under[(0, 0, 0)] = false;
-        assert!(low_lobes(&field(under), 15.0, 0.5, usize::MAX)
-            .expect("field fits")
-            .is_empty());
+        let under = field(under);
+        assert!(low_lobes(
+            &under,
+            &test_chambers(&under, 15.0, 15.0),
+            15.0,
+            0.5,
+            usize::MAX
+        )
+        .expect("field fits")
+        .is_empty());
     }
 
     #[test]
@@ -1370,6 +1645,7 @@ mod tests {
                 id: 0,
                 role: HoleRole::Drain,
                 lobe_id: Some(1),
+                chamber: 0,
                 site: 0,
                 origin: [0.0; 3],
                 direction: [0.0, 0.0, -1.0],
@@ -1378,6 +1654,7 @@ mod tests {
                 id: 1,
                 role: HoleRole::Drain,
                 lobe_id: Some(1),
+                chamber: 0,
                 site: 0,
                 origin: [0.0; 3],
                 direction: [0.5, 0.0, -1.0],
@@ -1456,6 +1733,7 @@ mod tests {
                 id: 0,
                 role: HoleRole::Drain,
                 lobe_id: Some(7),
+                chamber: 0,
                 site: 0,
                 origin: [0.0; 3],
                 direction: [0.0, 0.0, -1.0],
@@ -1464,6 +1742,7 @@ mod tests {
                 id: 1,
                 role: HoleRole::Drain,
                 lobe_id: Some(7),
+                chamber: 0,
                 site: 0,
                 origin: [0.0; 3],
                 direction: [1.0, 0.0, -1.0],
@@ -1472,6 +1751,7 @@ mod tests {
                 id: 2,
                 role: HoleRole::Drain,
                 lobe_id: Some(7),
+                chamber: 0,
                 site: 0,
                 origin: [0.0; 3],
                 direction: [-1.0, 0.0, -1.0],
@@ -1521,6 +1801,7 @@ mod tests {
             id: 0,
             role: HoleRole::Drain,
             lobe_id: Some(1),
+            chamber: 0,
             site: 0,
             origin: [1.0, 1.0, 1.0],
             direction: normalize([1.0, 0.0, -1.0]).expect("diagonal"),
@@ -1547,6 +1828,7 @@ mod tests {
             id: 0,
             role: HoleRole::Vent,
             lobe_id: None,
+            chamber: 0,
             site: 0,
             origin: [0.0, 0.0, 0.0],
             direction: [1.0, 0.0, 0.0],
@@ -1816,6 +2098,7 @@ mod tests {
                 resources: resource,
                 drain_planning_cap_bytes: usize::MAX,
                 realized_wall: RealizedWall::measured(Finite::new(2.5).expect("finite")),
+                cavity_components: 1,
             },
             cavity_field: field(Array3::from_elem((10, 20, 20), true)),
         };
@@ -1913,9 +2196,15 @@ mod tests {
             unlimited.cavity_field().pitch_mm().get(),
         )
         .expect("native preflight");
+        let chambers = test_chambers(
+            unlimited.cavity_field(),
+            policy.hollow_lobe_band_mm().diagnostic().get(),
+            policy.hollow_vent_top_band_mm().diagnostic().get(),
+        );
         let preflight = planner_preflight(
             &unlimited,
             unlimited.cavity_field(),
+            &chambers,
             unlimited.cavity().resources(),
             native.peak_bytes(),
             PlannerPolicy {
@@ -1929,9 +2218,7 @@ mod tests {
                     .diagnostic()
                     .directions()
                     .len(),
-                lobe_band_mm: policy.hollow_lobe_band_mm().diagnostic().get(),
                 lobe_min_ml: policy.hollow_lobe_min_ml().diagnostic().get(),
-                vent_top_band_mm: policy.hollow_vent_top_band_mm().diagnostic().get(),
                 vent_sample_divisor: usize::try_from(
                     policy.hollow_vent_sample_divisor().diagnostic().get(),
                 )
@@ -2074,9 +2361,15 @@ mod tests {
             unlimited.cavity_field().pitch_mm().get(),
         )
         .expect("native preflight");
+        let chambers = test_chambers(
+            unlimited.cavity_field(),
+            policy.hollow_lobe_band_mm().diagnostic().get(),
+            policy.hollow_vent_top_band_mm().diagnostic().get(),
+        );
         let preflight = planner_preflight(
             &unlimited,
             unlimited.cavity_field(),
+            &chambers,
             unlimited.cavity().resources(),
             native.peak_bytes(),
             PlannerPolicy {
@@ -2090,9 +2383,7 @@ mod tests {
                     .diagnostic()
                     .directions()
                     .len(),
-                lobe_band_mm: policy.hollow_lobe_band_mm().diagnostic().get(),
                 lobe_min_ml: policy.hollow_lobe_min_ml().diagnostic().get(),
-                vent_top_band_mm: policy.hollow_vent_top_band_mm().diagnostic().get(),
                 vent_sample_divisor: usize::try_from(
                     policy.hollow_vent_sample_divisor().diagnostic().get(),
                 )

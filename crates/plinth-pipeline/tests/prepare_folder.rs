@@ -223,6 +223,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         cavity_repair,
         wall_mm,
         realized_wall,
+        filled_back_chambers_ml,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -263,6 +264,14 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     // is no realized wall to state -- `None` is the claim "nothing was
     // measured", not "the measurement was dropped".
     assert_eq!(realized_wall, &None);
+    // Nothing was hollowed, so no chamber was given up. An empty list is the
+    // claim "the engine gave up on nothing", which is what the run report
+    // needs in order to stay silent instead of printing a reassuring zero.
+    assert!(
+        filled_back_chambers_ml.is_empty(),
+        "a model that never hollowed cannot have filled a chamber back: \
+         {filled_back_chambers_ml:?}"
+    );
     assert!(
         emit.support_record_count > 0,
         "an artifact with no supports"

@@ -580,7 +580,8 @@ fn drill(
         return Err(DrillingRefusal::MissingRequiredRole);
     }
     validate_final_holes(&holes)?;
-    let reconstructed = reconstructed_source_if_refilled(planned, &audit, limits)?;
+    let (reconstructed, retained_cavity_components) =
+        reconstructed_source_if_refilled(planned, &audit, limits)?;
     let post_refill_mesh =
         from_solid(reconstructed.clone()).map_err(|_| DrillingRefusal::Boolean)?;
     let post_refill_mesh = if audit.refilled_voxels == 0 {
@@ -617,7 +618,16 @@ fn drill(
     let (source_volume, source_components, source_chi) =
         topology_evidence(&post_refill_mesh, limits)?;
     let (drilled_volume, drilled_components, drilled_chi) = topology_evidence(&mesh, limits)?;
-    if source_components != 2 || drilled_components != 1 {
+    // The pre-drill shell is the outer surface plus one closed surface per
+    // retained cavity. That count was hard-coded as one cavity while the
+    // engine kept a single chamber; it now comes from the cavity the refill
+    // actually left behind, so a shell that lost or gained a cavity surface is
+    // still refused. Drilling then has to merge every one of them into the
+    // outside: one component, or a chamber was left sealed.
+    let expected_source_components = retained_cavity_components
+        .checked_add(1)
+        .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
+    if source_components != expected_source_components || drilled_components != 1 {
         return Err(DrillingRefusal::InvalidDrilledTopology);
     }
     let expected_chi = source_chi
@@ -727,13 +737,23 @@ fn drill(
     Ok((mesh, evidence, audit))
 }
 
+/// The pre-drill shell, with everything the audit gave up filled back to
+/// solid, **and how many closed cavity surfaces it still has**.
+///
+/// The count is what the caller's topology check compares against. When
+/// nothing was refilled it is the count H0 measured on the mask it marched;
+/// when something was refilled it is re-counted from the retained mask,
+/// because filling a chamber back removes a whole surface and filling a neck
+/// back can split one surface into two.
 fn reconstructed_source_if_refilled(
     planned: &PlannedShell,
     audit: &AuditPlan,
     limits: DrillingLimits,
-) -> Result<SolidMesh, DrillingRefusal> {
+) -> Result<(SolidMesh, usize), DrillingRefusal> {
     if audit.refilled_voxels == 0 {
-        return to_solid(planned.shell()).map_err(|_| DrillingRefusal::Boolean);
+        return to_solid(planned.shell())
+            .map_err(|_| DrillingRefusal::Boolean)
+            .map(|solid| (solid, planned.cavity().cavity_components()));
     }
     admit_count(
         "drainability cell",
@@ -744,6 +764,10 @@ fn reconstructed_source_if_refilled(
         .cavity_field()
         .mask_excluding(&audit.refill)
         .map_err(|_| DrillingRefusal::Boolean)?;
+    let retained_cavity_components =
+        scirs2_ndimage::morphology3d::label3d(retained_mask.view(), 6)
+            .map_err(|_| DrillingRefusal::Boolean)?
+            .1;
     let retained_inner = marching_cavity(
         &retained_mask,
         planned.cavity_field().origin_mm().map(Finite::get),
@@ -767,6 +791,7 @@ fn reconstructed_source_if_refilled(
     ManifoldBackend
         .difference_limited(&operands, limits.boolean())
         .map_err(|_| DrillingRefusal::Boolean)
+        .map(|solid| (solid, retained_cavity_components))
 }
 
 fn outer_solid(shell: &Mesh, limits: DrillingLimits) -> Result<SolidMesh, DrillingRefusal> {
@@ -810,11 +835,13 @@ fn prepare_audit_plan(
     planned: &PlannedShell,
     limits: DrillingLimits,
 ) -> Result<AuditPlan, DrillingRefusal> {
-    let drain_policy = m0_constants()
+    let placeholders = m0_constants()
         .map_err(|_| DrillingRefusal::Constants)?
-        .placeholders()
-        .hollow_extra_drain_policy()
-        .diagnostic();
+        .placeholders();
+    // The registered drain bore, read once here and handed to every audit
+    // hole this call makes. Same constant the planner drills to.
+    let drain_radius_mm = placeholders.hollow_drain_r_mm().diagnostic().get();
+    let drain_policy = placeholders.hollow_extra_drain_policy().diagnostic();
     let audit_min_ml = drain_policy.min_pocket_ml();
     let audit_max_drains = usize::try_from(drain_policy.max_extra_drains().get())
         .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
@@ -940,6 +967,7 @@ fn prepare_audit_plan(
                 &ts,
                 component_id,
                 &accepted_holes,
+                drain_radius_mm,
             )?
             else {
                 continue;
@@ -993,6 +1021,7 @@ fn select_exact_audit_candidate(
     ts: &[f64],
     component_id: usize,
     accepted_holes: &[HoleGeometry],
+    drain_radius_mm: f64,
 ) -> Result<Option<(usize, HoleGeometry)>, DrillingRefusal> {
     if offsets.len() != candidates.len() + 1 {
         return Err(DrillingRefusal::ResourceAccountingOverflow);
@@ -1030,6 +1059,7 @@ fn select_exact_audit_candidate(
             hits[0],
             hits[1],
             candidate.sampled_mm,
+            drain_radius_mm,
         ) else {
             continue;
         };
@@ -1136,12 +1166,20 @@ fn sampled_exit_along(field: &CavityField, origin: V3, direction: V3, ceiling: f
     })
 }
 
+/// A drain the audit adds to a pocket the planned holes did not reach.
+///
+/// `radius_mm` is the registered drain radius, passed in by the caller that
+/// already read it. It used to be the literal `1.5` written here, which was
+/// the registered radius when this function was written and silently stopped
+/// being it the moment the owner set the bore to 2.5 mm. An audit drain is a
+/// drain; it gets the drain bore, from the registry, like every other one.
 fn audit_hole(
     origin: V3,
     direction: V3,
     inner_mm: f64,
     outer_mm: f64,
     sampled_mm: f64,
+    radius_mm: f64,
 ) -> Result<HoleGeometry, DrillingRefusal> {
     let finite_point = |point: V3| {
         point
@@ -1158,7 +1196,7 @@ fn audit_hole(
         center_mm: finite_point(origin)?,
         direction: finite_point(direction)?,
         outer_exit_mm: finite_point(add(origin, scale(direction, outer_mm)))?,
-        radius_mm: Finite::new(1.5).map_err(|_| DrillingRefusal::InvalidHoleGeometry)?,
+        radius_mm: Finite::new(radius_mm).map_err(|_| DrillingRefusal::InvalidHoleGeometry)?,
         inner_crossing_mm: Finite::new(inner_mm)
             .map_err(|_| DrillingRefusal::InvalidHoleGeometry)?,
         length_mm: Finite::new(outer_mm).map_err(|_| DrillingRefusal::InvalidHoleGeometry)?,
@@ -2543,15 +2581,19 @@ mod tests {
         assert_eq!(refill.refill.iter().position(|value| *value), Some(35_606));
         // Moved 59,842 -> 56,396 in the same 2026-08-12 FU-53 pass.
         assert_eq!(refill.refill.iter().rposition(|value| *value), Some(56_396));
-        let reconstructed =
+        let (reconstructed, retained_cavity_components) =
             reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
                 .unwrap();
+        // The refill left one cavity surface behind, and the pre-drill shell
+        // is that surface plus the outer one. Both numbers are asserted, so a
+        // change that lost a chamber here would fail rather than pass quietly.
+        assert_eq!(retained_cavity_components, 1);
         let reconstructed = orient_boolean_cavity(from_solid(reconstructed).unwrap()).unwrap();
         let (post_refill_volume, components, _) =
             topology_evidence(&reconstructed, DrillingLimits::production()).unwrap();
         let (original_volume, _, _) =
             topology_evidence(split.shell(), DrillingLimits::production()).unwrap();
-        assert_eq!(components, 2);
+        assert_eq!(components, retained_cavity_components + 1);
         assert!(post_refill_volume > original_volume);
     }
 
@@ -2644,14 +2686,14 @@ mod tests {
             0.5, 1.5, 0.5, 1.5,
         ];
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &offsets, &ts, 0, &[])
+            select_exact_audit_candidate(&candidates, &offsets, &ts, 0, &[], 1.25)
                 .unwrap()
                 .map(|(index, _)| index),
             Some(1),
             "a two-crossing ray with outer > sampled must fall through to the first fully valid tie"
         );
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &offsets, &ts, 1, &[])
+            select_exact_audit_candidate(&candidates, &offsets, &ts, 1, &[], 1.25)
                 .unwrap()
                 .map(|(index, _)| index),
             Some(3),

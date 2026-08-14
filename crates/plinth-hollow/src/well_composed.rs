@@ -58,9 +58,9 @@
 //!   into the cell-visit bound, which it is not covered by.
 //!
 //!   **Each counted re-selection pass was two whole-grid traversals before
-//!   FU-47 and is thirteen now**: `label3d` and the `indexed_iter` sweep that
-//!   applies its verdict, versus the twelve
-//!   `crate::flow::select_largest_flow_component` makes (its module doc names
+//!   FU-47 and is twelve now**: `label3d` and the `indexed_iter` sweep that
+//!   applies its verdict, versus the eleven
+//!   `crate::flow::select_all_flow_components` makes (its module doc names
 //!   them one by one) plus the `indexed_iter` sweep here that applies *its*
 //!   verdict. FU-47 §4 is why: a re-selection that silently rejoined two
 //!   interiors across a sub-bore throat would undo the doctrine at the one
@@ -70,9 +70,9 @@
 //!   stated here rather than left to be inferred from the count. An earlier
 //!   version of this doc wrote `cells × p + 8 × changed` for the
 //!   two-traversal accounting, which undercounted even that by about 2×; with
-//!   today's thirteen-traversal accounting the true total is
-//!   `cells × (13p − 12) + 8 × changed` — the opening cell scan, then
-//!   thirteen traversals per re-selection. Measured corpus-wide `p` is 2.
+//!   today's twelve-traversal accounting the true total is
+//!   `cells × (12p − 11) + 8 × changed` — the opening cell scan, then
+//!   twelve traversals per re-selection. Measured corpus-wide `p` is 2.
 //!
 //!   **This is a constant-factor cost on a pass count that has not moved.**
 //!   It buys the doctrine at the re-selection, and it is stated at its true
@@ -166,24 +166,30 @@ impl WellComposedRepair {
     /// re-selections, so this is what makes the second `O(cells)` domain
     /// visible.
     ///
-    /// **A re-selection pass costs thirteen whole-grid traversals** since
-    /// FU-47 — the twelve inside `crate::flow::select_largest_flow_component`
+    /// **A re-selection pass costs twelve whole-grid traversals** since
+    /// FU-47 — the eleven inside `crate::flow::select_all_flow_components`
     /// and the sweep here that applies its verdict — so `p` counted passes
-    /// are `13p − 12` traversals of the grid. It was two (`label3d` plus the
+    /// are `12p − 11` traversals of the grid. It was two (`label3d` plus the
     /// sweep) when re-selection was plain 6-connectivity.
     pub(crate) const fn full_grid_passes(self) -> usize {
         self.full_grid_passes
     }
 }
 
-/// Repair `mask` to a well-composed single 6-connected component.
+/// Repair `mask` to a well-composed cavity.
 ///
-/// The mask handed in is the largest 6-connected component of the `edt > wall`
-/// selection. Removing voxels can disconnect it, so the component is re-selected
-/// after any removal and the result is re-verified rather than assumed: the loop
-/// exits only on a round that finds nothing to remove and a re-selection that
-/// drops nothing. Each pass strictly shrinks the foreground, so the loop
-/// terminates.
+/// The mask handed in is **every** resin-flow chamber of the `edt > wall`
+/// selection, not just the biggest one. Removing voxels can strand part of a
+/// chamber, so the selection is re-run after any removal and the result is
+/// re-verified rather than assumed: the loop exits only on a round that finds
+/// nothing to remove and a re-selection that drops nothing. Each pass strictly
+/// shrinks the foreground, so the loop terminates.
+///
+/// **Re-selection keeps every chamber too.** It used to keep the largest and
+/// silently drop the rest, so a removal that split one chamber in two threw
+/// the smaller half away and the saving went with it. The engine now drills
+/// one drain per chamber, so the split is two chambers to drain, not a chamber
+/// to discard.
 ///
 /// [`HollowError::CavityRepairRemovedCavity`] is returned — carrying what the
 /// repair had done by then — when the fixpoint consumes the component entirely.
@@ -263,7 +269,7 @@ pub(crate) fn well_composed_cavity_component(
         }
         stats.full_grid_passes += 1;
         let Some((selected, _flow_stats)) =
-            crate::flow::select_largest_flow_component(&mask, pitch_mm, throat_r_mm)?
+            crate::flow::select_all_flow_components(&mask, pitch_mm, throat_r_mm)?
         else {
             return Err(HollowError::CavityRepairRemovedCavity {
                 critical_cells: stats.critical_cells,
@@ -707,10 +713,13 @@ mod tests {
         for (original, result) in mask.iter().zip(repaired.iter()) {
             assert!(*original || !*result, "repair added a cavity voxel");
         }
-        // The result is one 6-connected component: the pinch was cut and the
-        // smaller side dropped, or the bridge voxel went.
+        // The pinch is cut, and BOTH sides survive as their own chamber. The
+        // repair used to keep the larger side and drop the other, so this
+        // assertion read `1`; keeping every chamber is the change, and two
+        // cubes joined by one corner voxel are exactly two chambers once that
+        // corner is removed. Each will be drained on its own downstream.
         let (_, label_count) = label3d(repaired.view(), 6).expect("labels");
-        assert_eq!(label_count, 1);
+        assert_eq!(label_count, 2, "both sides of the cut pinch are kept");
         assert!(stats.rounds() >= 2);
     }
 
@@ -736,7 +745,7 @@ mod tests {
     /// The cell-visit bound above says nothing about the whole-grid work each
     /// component re-selection performs. This asserts the count exists, that it
     /// is what the doc claims — one opening scan plus one pass per
-    /// re-selection, each pass being thirteen whole-grid traversals since
+    /// re-selection, each pass being twelve whole-grid traversals since
     /// FU-47 — and that it obeys the *structural* bound the code guarantees,
     /// `2 + reselection_dropped_voxels`. That structural bound is `O(cells)`;
     /// the caller-owned admission limit (FU-54, `max_passes` below) is a

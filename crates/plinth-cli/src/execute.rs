@@ -224,6 +224,7 @@ fn print_model(model: &ModelPreparationReport) {
             geometry,
             hollow_disposition,
             cavity_repair,
+            filled_back_chambers_ml,
             wall_mm,
             realized_wall,
         } => {
@@ -268,6 +269,14 @@ fn print_model(model: &ModelPreparationReport) {
                     repair.cell_visits,
                     repair.full_grid_passes
                 );
+            }
+            // Resin the engine gave up on. Each line is a chamber the drilling
+            // stage could not reach with a legal drain, so it made it solid
+            // again rather than seal liquid resin inside the print. Printed
+            // one line per chamber, and silent when there were none, so the
+            // reader sees a loss only when there is one to see.
+            for volume_ml in filled_back_chambers_ml {
+                println!("  chamber filled back: {:.2} mL", volume_ml.get());
             }
         }
         ModelPreparationOutcome::Refused {
