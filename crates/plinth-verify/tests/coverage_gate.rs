@@ -106,6 +106,38 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // `plinth-support/tests/support_runner_integration.rs`, are recorded together
 // with this one in `docs/engineering-journal/CURRENT-STATUS.md` under the
 // FU-38 row and its dated section.
+//
+// **Refreshed a sixth time on 2026-08-14, by owner ruling, to honour the
+// WRITTEN 0.16 mm² A3 coverage censor** (SPEC-A3-A4-COVERAGE.md §4: "A patch
+// fails if and only if either: 1. its uncovered area is greater than
+// `voxel_pitch_mm**2` … Area at or below `voxel_pitch_mm**2` is **censored A3
+// uncertainty**"). `plinth_support::coverage_patch_is_blocking` used to block
+// on `uncovered_area_mm2 > 0.0` — any dust at all — and now blocks on
+// `> censor_area_mm2`, the censor taken off the live measurement request.
+//
+// **This golden is the change's own witness on a real measurement.** Its
+// `request.patch_area_floor_mm2` is 1.0 mm² (this file's own deliberately
+// coarse probe, NOT the registered production 0.16 mm²), and two of the toed
+// slab's nine patches — islands 5 and 8, each 0.48293112489274953… mm² —
+// measure below it. The measurement had ALWAYS stamped
+// `assessment_failed = false` on both; only the verdict disagreed. So exactly
+// two leaves changed here and both are removals: the `defects` array drops
+// from 9 entries to 7, losing island 5 and island 8. NOTHING ELSE MOVED —
+// `snapshot_digest` is unchanged at 15556275517430246244, every `request`
+// bound, all 11 `resources` counters, all 9 islands with their face ids, and
+// all 9 patches (`uncovered_area_mm2`, `cut_ambiguous`, `assessment_failed`,
+// `worst_gap`) are byte-identical. No evidence was lost: the two censored
+// patches are still present, in full, in `evidence.patches`; they simply no
+// longer raise a blocking defect. The report still REFUSES, with 7 defects.
+//
+// No cap, gate, radius or tolerance was raised. The one authorized limit change
+// in this job is this censor, and it moves a comparison onto the number the
+// spec already wrote down (registered `VOXEL_PITCH_MM` = 0.4 mm, squared) —
+// the code was stricter than the written rule, not the other way round. This
+// test's 1.0 mm probe radius and 1.0 mm² probe censor are themselves unchanged.
+// The golden was REGENERATED THROUGH THIS FILE'S OWN PRODUCER PATH (the
+// `THREAD_CHILD` arm of `public_coverage_report_is_frozen_without_evidence_loss`),
+// never hand-edited, exactly as every refresh above was.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
@@ -169,7 +201,11 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
         request(max_distance_work),
     )?;
     assert!(!report.accepted());
-    assert_eq!(report.defects().len(), 9);
+    // Nine patches, SEVEN blocking islands: two of the nine patches measure
+    // 0.48293 mm² against this test's 1.0 mm² censor and are censored A3
+    // uncertainty (SPEC-A3-A4-COVERAGE.md §4). The measurement always stamped
+    // `assessment_failed = false` on them; the verdict now agrees.
+    assert_eq!(report.defects().len(), 7);
     Ok(serde_json::to_string(&report).expect("serialize full coverage report"))
 }
 
@@ -238,25 +274,52 @@ fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
         .expect("frozen report has a patches array");
     assert_eq!(patches.len(), 9, "frozen fixture has nine real patches");
 
+    // The censor this report's own measurement used, read off the frozen
+    // report's request rather than written down here. On this fixture it is
+    // this test's deliberately coarse 1.0 mm² probe value, not the registered
+    // production 0.16 mm² — which is exactly why the fixture can show the
+    // censor doing real work on a real measurement.
+    let censor = parsed["request"]["patch_area_floor_mm2"]
+        .as_f64()
+        .expect("frozen report carries its own censor");
+
     let mut expected_islands: Vec<u32> = Vec::new();
     let mut expected_measure = std::collections::BTreeMap::<u32, f64>::new();
+    let mut censored = 0usize;
     for patch in patches {
         let island_id = patch["island_id"].as_u64().unwrap() as u32;
         let area = patch["uncovered_area_mm2"].as_f64().unwrap();
         let cut_ambiguous = patch["cut_ambiguous"].as_bool().unwrap();
         let assessment_failed = patch["assessment_failed"].as_bool().unwrap();
-        if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
-            expected_islands.push(island_id);
-        }
         // `defects_for_patches` sums area over an island's BLOCKING patches
-        // only (a non-blocking patch contributes nothing), so the
-        // reconstruction mirrors that. On this fixture every patch is
-        // blocking, which is why the difference is invisible here and is
-        // pinned by the unit test named in this function's doc instead.
-        if plinth_support::coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed) {
+        // only (a censored or otherwise non-blocking patch contributes
+        // nothing), so the reconstruction mirrors that in one pass.
+        if plinth_support::coverage_patch_is_blocking(
+            area,
+            cut_ambiguous,
+            assessment_failed,
+            censor,
+        ) {
+            expected_islands.push(island_id);
             *expected_measure.entry(island_id).or_insert(0.0) += area;
+        } else {
+            censored += 1;
+            assert!(
+                area > 0.0 && area <= censor,
+                "island {island_id} is non-blocking for some reason other than the censor"
+            );
         }
     }
+    // **The censor, witnessed on a real measurement, not a hand-built record.**
+    // Two of the toed slab's nine patches measure 0.48293 mm² of uncovered
+    // area against this test's 1.0 mm² probe censor. Before the censor was
+    // honoured they raised blocking defects on `area > 0.0` even though the
+    // measurement had already stamped `assessment_failed = false` on both, and
+    // the frozen golden recorded 9 defects. It now records 7.
+    assert_eq!(
+        censored, 2,
+        "the toed slab has exactly two sub-censor patches; if this moves, the fixture moved"
+    );
     expected_islands.sort_unstable();
     expected_islands.dedup();
 

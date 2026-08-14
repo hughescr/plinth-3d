@@ -260,7 +260,10 @@ fn coverage_report_from_projection(
     resources: CoverageResourceRecord,
     evidence: CoverageEvidenceRecord,
 ) -> Result<CoverageReport, CoverageVerificationError> {
-    let defects = defects_for_patches(&evidence.patches)?;
+    // The censor comes off the request this very report carries, so the verdict
+    // is censored at exactly the area the measurement that produced the evidence
+    // used. See `plinth_support::coverage_patch_is_blocking` for the spec text.
+    let defects = defects_for_patches(&evidence.patches, request.patch_area_floor_mm2.get())?;
     Ok(CoverageReport {
         artifact,
         snapshot_digest,
@@ -287,8 +290,18 @@ fn request_record(request: CoverageMeasurementRequest) -> CoverageRequestRecord 
     }
 }
 
+/// One blocking defect per island, measuring the summed area of that island's
+/// BLOCKING patches only.
+///
+/// `censor_area_mm2` is the request's own `voxel_pitch_mm²`. Per
+/// SPEC-A3-A4-COVERAGE.md §4 it bounds EACH PATCH, so a censored patch is not
+/// blocking and contributes nothing to its island's measure; an island whose
+/// every patch is censored raises no defect at all. See
+/// `plinth_support::coverage_patch_is_blocking` for the quoted spec text and
+/// the reason the bound is per patch rather than per island or per model.
 fn defects_for_patches(
     patches: &[CoveragePatchEvidenceRecord],
+    censor_area_mm2: f64,
 ) -> Result<Vec<Defect>, CoverageVerificationError> {
     let mut defects = Vec::new();
     let mut start = 0;
@@ -311,6 +324,7 @@ fn defects_for_patches(
                 patch.uncovered_area_mm2.get(),
                 patch.cut_ambiguous,
                 patch.assessment_failed,
+                censor_area_mm2,
             ) {
                 let next = area + patch.uncovered_area_mm2.get();
                 if !next.is_finite() {
@@ -604,13 +618,23 @@ fn serialization_failure(error: &ChituboxError) -> StructuralFormatFailure {
 mod tests {
     use super::*;
 
+    /// The registered production censor, `voxel_pitch_mm²` = 0.16 mm². Read,
+    /// never written down: a fixture that hardcoded 0.16 would keep passing if
+    /// the registered pitch moved and the gate stopped agreeing with it.
+    fn censor() -> f64 {
+        plinth_support::registered_coverage_censor_area_mm2().expect("registered censor")
+    }
+
     fn patch(
         island_id: u32,
         area: f64,
         cut_ambiguous: bool,
         no_route: bool,
     ) -> CoveragePatchEvidenceRecord {
-        let assessment_failed = area > 0.0 || cut_ambiguous;
+        // Exactly how a real measurement stamps the flag
+        // (`assess_coverage_with_mode`): area strictly greater than the censor,
+        // or an ambiguous cut.
+        let assessment_failed = area > censor() || cut_ambiguous;
         patch_exact(island_id, area, cut_ambiguous, assessment_failed, no_route)
     }
 
@@ -649,17 +673,18 @@ mod tests {
     /// and the FU-56 controller decides what it must close with the same
     /// call — so a drift is now impossible by construction. What is still
     /// worth pinning is the RULE, on each axis independently, because the
-    /// frozen fixture this crate's integration test walks has all nine
-    /// patches blocking on positive area with `cut_ambiguous` false
-    /// everywhere: a predicate that dropped the `cut_ambiguous` term, dropped
-    /// the `assessment_failed` term, or replaced `> 0.0` with `>= epsilon`
-    /// would leave that fixture completely unchanged.
+    /// frozen fixture this crate's integration test walks has seven of its nine
+    /// patches blocking on area with `cut_ambiguous` false everywhere: a
+    /// predicate that dropped the `cut_ambiguous` term or dropped the
+    /// `assessment_failed` term would leave that fixture unchanged.
     #[test]
     fn a_patch_blocks_on_each_axis_independently_and_only_blocking_area_is_summed() {
         // Axis 1: cut_ambiguous alone, zero area, assessment NOT failed.
         let ambiguous_only = vec![patch_exact(1, 0.0, true, false, false)];
         assert_eq!(
-            defects_for_patches(&ambiguous_only).expect("defects").len(),
+            defects_for_patches(&ambiguous_only, censor())
+                .expect("defects")
+                .len(),
             1,
             "a zero-area, assessment-passed, CUT-AMBIGUOUS patch must still block"
         );
@@ -667,26 +692,29 @@ mod tests {
         // Axis 2: assessment_failed alone, zero area, not ambiguous.
         let failed_only = vec![patch_exact(1, 0.0, false, true, false)];
         assert_eq!(
-            defects_for_patches(&failed_only).expect("defects").len(),
+            defects_for_patches(&failed_only, censor())
+                .expect("defects")
+                .len(),
             1,
             "a zero-area, unambiguous, ASSESSMENT-FAILED patch must still block"
         );
 
-        // Axis 3: area alone, far below any plausible epsilon. The floor lives
-        // in the measurement, never in this predicate.
-        let tiny_area_only = vec![patch_exact(1, 1e-12, false, false, false)];
-        let tiny = defects_for_patches(&tiny_area_only).expect("defects");
+        // Axis 3: area alone, ABOVE the censor.
+        let above_censor = vec![patch_exact(1, censor() * 2.0, false, false, false)];
+        let above = defects_for_patches(&above_censor, censor()).expect("defects");
         assert_eq!(
-            tiny.len(),
+            above.len(),
             1,
-            "the predicate is `> 0.0`, not `>= epsilon`: any positive uncovered area blocks"
+            "uncovered area above the censor blocks on its own"
         );
-        assert!((tiny[0].measure.get() - 1e-12).abs() < f64::EPSILON);
+        assert!((above[0].measure.get() - censor() * 2.0).abs() < f64::EPSILON);
 
         // Nothing on any axis: not a defect at all.
-        assert!(defects_for_patches(&[patch_exact(1, 0.0, false, false, false)])
-            .expect("defects")
-            .is_empty());
+        assert!(
+            defects_for_patches(&[patch_exact(1, 0.0, false, false, false)], censor())
+                .expect("defects")
+                .is_empty()
+        );
 
         // And the aggregation rule: on an island holding one blocking and one
         // NON-blocking patch, only the blocking patch's area is summed.
@@ -694,9 +722,72 @@ mod tests {
             patch_exact(4, 2.5, false, true, false),
             patch_exact(4, 0.0, false, false, false),
         ];
-        let defects = defects_for_patches(&mixed).expect("defects");
+        let defects = defects_for_patches(&mixed, censor()).expect("defects");
         assert_eq!(defects.len(), 1);
         assert!((defects[0].measure.get() - 2.5).abs() < f64::EPSILON);
+    }
+
+    /// **The censor, both ways, at the verdict layer.**
+    ///
+    /// SPEC-A3-A4-COVERAGE.md §4: "A patch fails if and only if either: 1. its
+    /// uncovered area is greater than `voxel_pitch_mm**2`; or 2. it touches an
+    /// ambiguous topology cut. Area at or below `voxel_pitch_mm**2` is
+    /// **censored A3 uncertainty**."
+    ///
+    /// This is the pair that would go red if the censor were removed (the dust
+    /// cases start raising defects again) or widened to swallow everything (the
+    /// real island stops raising one). The four asserts are deliberately on the
+    /// two sides of the same boundary, with a real measured area on each side.
+    #[test]
+    fn sub_censor_dust_raises_no_defect_and_a_real_uncovered_patch_still_does() {
+        // Deinonychus' one-triangle 0.00047 mm² patch: three orders of
+        // magnitude below one 0.4 mm voxel footprint. A real measurement stamps
+        // `assessment_failed = false` on it, and the verdict must agree.
+        let dust = vec![patch(11, 0.000_47, false, false)];
+        assert!(!dust[0].assessment_failed);
+        assert!(
+            defects_for_patches(&dust, censor())
+                .expect("defects")
+                .is_empty(),
+            "a 0.00047 mm² patch is censored A3 uncertainty, not a blocking defect"
+        );
+
+        // Thirteen separate sub-censor patches on thirteen islands are thirteen
+        // sub-resolution unknowns, never one 1.3 mm² hole: the spec bounds each
+        // patch, so summing them across islands must not manufacture a defect.
+        let scattered: Vec<_> = (0..13).map(|id| patch(id, 0.1, false, false)).collect();
+        assert!(
+            defects_for_patches(&scattered, censor())
+                .expect("defects")
+                .is_empty(),
+            "the censor bounds each patch; thirteen censored patches are still thirteen censored \
+             patches"
+        );
+
+        // Warhorse's whole 0.6505 mm² deficit landing on ONE patch is four
+        // voxel footprints of genuinely uncovered surface and must still fail.
+        let real = vec![patch(11, 0.650_5, false, false)];
+        assert!(real[0].assessment_failed);
+        let defects = defects_for_patches(&real, censor()).expect("defects");
+        assert_eq!(
+            defects.len(),
+            1,
+            "a genuinely uncovered patch above the censor must still be a blocking defect"
+        );
+        assert!((defects[0].measure.get() - 0.650_5).abs() < f64::EPSILON);
+
+        // The mixed case that matters most in the field: one island carrying a
+        // real hole AND dust. It fails, and its measure is the real hole alone.
+        let mixed = vec![
+            patch_exact(3, 0.650_5, false, true, false),
+            patch_exact(3, 0.000_47, false, false, false),
+        ];
+        let defects = defects_for_patches(&mixed, censor()).expect("defects");
+        assert_eq!(defects.len(), 1);
+        assert!(
+            (defects[0].measure.get() - 0.650_5).abs() < f64::EPSILON,
+            "censored dust must not inflate the blocking island's reported measure"
+        );
     }
 
     #[test]
@@ -722,7 +813,7 @@ mod tests {
             patch(2, 2.25, false, false),
             patch(7, 0.0, true, false),
         ];
-        let defects = defects_for_patches(&patches).expect("finite checked area sums");
+        let defects = defects_for_patches(&patches, censor()).expect("finite checked area sums");
         assert_eq!(defects.len(), 2);
         assert_eq!(defects[0].site, SiteId::Island(2));
         assert_eq!(defects[0].measure.get(), 3.75);

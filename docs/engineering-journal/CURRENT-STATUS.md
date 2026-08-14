@@ -115,6 +115,105 @@ defect — fix the defect), the git-flow convention (main+develop, feature/* bra
 never push without instruction), and the owner's 2026-08-03 clearance-mask architecture
 decision. See the Follow-ups ledger below for the full open-row list.
 
+## 2026-08-14 — the written 0.16 mm² coverage censor is honoured: the gate stops failing models on dust it cannot act on {#coverage-censor-honoured-2026-08-14}
+
+<a id="coverage-censor-honoured-2026-08-14"></a>
+
+**Owner ruling, landed.** `SPEC-A3-A4-COVERAGE.md` §4 has always said this, and the code
+did not do it:
+
+> A patch fails if and only if either:
+>
+> 1. its uncovered area is greater than `voxel_pitch_mm**2`; or
+> 2. it touches an ambiguous topology cut.
+>
+> Area at or below `voxel_pitch_mm**2` is **censored A3 uncertainty**. It is diagnostic
+> only: it is not a physical assertion that resin can bridge that area or shape, and it is
+> not permission for another hard gate to fail. Covered fraction is diagnostic only. At the
+> current 0.4 mm pitch the censor is 0.16 mm².
+
+**The defect.** The measurement layer (`assess_coverage_with_mode`, `plinth-support/src/lib.rs`)
+had implemented the rule correctly all along: it stamps `assessment_failed = patch_area >
+area_floor_mm2 || patch_ambiguous`, with `area_floor_mm2` = `voxel_pitch_mm²`. But the ONE
+shared blocking predicate that the pre-write gate, the FU-56 closure controller and the
+evidence render all call — `plinth_support::coverage_patch_is_blocking` — then re-failed the
+patch on `uncovered_area_mm2 > 0.0`. Any dust at all. The censored flag was computed,
+serialized into the evidence, and overruled one function later.
+
+**What changed.** `coverage_patch_is_blocking` gained a fourth parameter, `censor_area_mm2`,
+and compares `uncovered_area_mm2 > censor_area_mm2`. All four call sites pass the censor
+**off the live measurement request** (`CoverageMeasurementRequest::patch_area_floor_mm2`),
+so the gate censors at exactly the area the measurement that produced the evidence used —
+the two can no longer disagree. The value's one derivation is the new
+`registered_coverage_censor_area_mm2()`: the registered `VOXEL_PITCH_MM` placeholder
+(0.4 mm, "Legacy perception working scale inferred from one corpus run"), squared. **0.16
+is not written down as a literal anywhere in the change**; re-registering the pitch moves
+the censor with it, and a test pins that.
+
+**The granularity is per patch, and the spec is not ambiguous about it.** "A patch fails if
+and only if…" bounds each patch, not an island's total and not a model's total. A patch is
+one connected group of uncovered source faces — the physically motivated unit, since a patch
+smaller than one voxel footprint cannot seat a support, while a dozen such patches scattered
+over a model are a dozen independent sub-resolution unknowns rather than one large hole.
+Island aggregation still happens afterwards, in `plinth_verify::defects_for_patches`, and
+still sums BLOCKING patches only — so censored dust cannot inflate a blocking island's
+reported measure either. The reading and its reason are recorded on
+`coverage_patch_is_blocking` itself, where the choice is made.
+
+**Sabotage evidence, both ways, on a real measurement.** The frozen coverage-gate golden
+(`crates/plinth-verify/tests/coverage_gate_toed_slab.json`) turned out to have the defect
+baked into it. Its own probe censor is 1.0 mm² (this test's deliberately coarse value, not
+the registered 0.16), and two of the toed slab's nine patches measure 0.48293112489274953…
+mm² — below it, with `assessment_failed = false` already stamped on both — yet the golden
+recorded 9 blocking defects. It now records 7. The golden was regenerated through the test
+file's own producer path, never hand-edited, and diffed leaf by leaf: **127 leaves outside
+`defects` are byte-identical**, including `snapshot_digest` (unchanged at
+15556275517430246244), every `request` bound, all 11 `resources` counters, all 9 islands and
+all 9 patches. **No evidence was lost** — the two censored patches are still present in full
+in `evidence.patches`; they simply no longer raise a blocking defect, and the report still
+refuses. Every retained defect keeps its exact measure.
+
+**A second real witness, with both sides of the censor on ONE model.** The procedural
+`make_raking_blade` measures two uncovered islands: island 3 at **0.06000000000000172 mm²**
+(one patch, faces 15 and 20 — 0.375 of a single 0.4 mm voxel footprint) and island 5 at
+**5.135000000000005 mm²** (one patch, faces 14/15/20/21 — **32× the censor**). Island 3 is
+now censored; island 5 still refuses the model, with `attempts` still 8, reason still
+`AttemptsExhausted` and `history.len()` still 9. Same model, same run, one patch cleared and
+one patch fatal. `plinth-support/tests/support_runner_integration.rs` pins both.
+
+**The other direction was proved by sabotage.** `registered_coverage_censor_area_mm2` was
+temporarily made to return 1.0e9 mm² — censoring everything — and **11 tests went red**: 3
+in `plinth-support`'s unit suite, 2 in `plinth-verify`'s, 2 in the support runner
+integration suite (the raking blade emitted instead of refusing, tripping its own
+"32× the censor" panic), and the 4 refusal tests in `plinth-pipeline`'s `prepare_folder`.
+The frozen coverage-gate suite correctly stayed green throughout, because that report
+carries its own 1.0 mm² probe censor and never consults the registry — which is itself the
+evidence that the two censors are independent. The sabotage was then reverted.
+
+**One test fixture had to move, and the reason is the finding.** `prepare_folder.rs` used
+`make_raking_blade.prepped.stl` as its coverage-refusal fixture. That fixture's ENTIRE
+residual was one **0.0600 mm²** patch — the same sub-voxel island 3 above, measured off its
+own FU-57 sidecar. It was a "refusal" only because the predicate failed on any dust at all,
+and it now emits, correctly. **No checked-in `.prepped.stl` is a coverage refusal any
+more**, which restores that file's original 2026-08-10 finding word for word. The four
+refusal tests now use the PROCEDURAL blade, written out as a real binary `.stl` at test time
+by the new `Scratch::place_procedural` — no new binary fixture in the repo, and the
+fresh-clone guarantee is kept. It is a strictly better fixture: it refuses on 5.135 mm²,
+which no censor at the registered pitch can excuse, where the old one could not tell
+censored dust from a real hole. Its refusal evidence moved with it (`attempts` 5 →
+**8**, `NoEligibleRepairRows` → `AttemptsExhausted`), because the procedural blade has 14
+eligible repair rows for its island and burns every attempt on them.
+
+**No cap, gate, threshold or tolerance was raised anywhere else.** This one comparison moved
+onto the number the spec already wrote down: the code was STRICTER than the written rule,
+not looser, and the fix removes the excess strictness rather than granting new latitude.
+FU-8b's standing lesson is untouched.
+
+**Known beneficiaries.** Deinonychus stopped on a single 0.00047 mm² one-triangle patch —
+three orders of magnitude below one voxel footprint — and is now censored, not fatal.
+Warhorse's 0.6505 mm² over 13 islands is a legitimate remaining failure wherever a single
+patch exceeds 0.16 mm², and was not forced.
+
 ## 2026-08-13 — the requested wall becomes a TARGET and a 2.0 mm minimum wall becomes the guarantee: the Weeping Treant hollows for the first time {#wall-target-and-minimum-2026-08-13}
 
 <a id="wall-target-and-minimum-2026-08-13"></a>

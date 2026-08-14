@@ -242,6 +242,23 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// at the time. See `docs/engineering-journal/CURRENT-STATUS.md`'s FU-38 row
 /// and its dated section for the full from→to record, including the OD-8
 /// census septet and the coverage-gate golden.
+///
+/// **Amended 2026-08-14, when the written 0.16 mm² A3 censor was honoured**
+/// (SPEC-A3-A4-COVERAGE.md §4; `plinth_support::coverage_patch_is_blocking`).
+/// The two-island record above is now a record of its own date: the blade's
+/// islands are **0.0600 mm² (island 3)** and **5.1350 mm² (island 5)**, and the
+/// censor is `voxel_pitch_mm²` = 0.16 mm², so island 3 falls below one voxel
+/// footprint and is censored A3 uncertainty. This fixture therefore refuses on
+/// ONE island now, not two. Nothing about the blade or the pool changed —
+/// `attempts` is still 8, the reason is still `AttemptsExhausted`,
+/// `history.len()` is still 9, island 5 is byte-identical, and no digest is
+/// affected because a refusal has no sealed authority to digest. What changed
+/// is that a patch the measurement had ALWAYS stamped `assessment_failed =
+/// false` on stopped being re-failed one function later. **No cap, gate,
+/// radius, bound or tolerance was raised**: the comparison moved onto the
+/// number the spec already wrote down, and the code had been stricter than the
+/// written rule. See the assertion block below, which now pins both sides of
+/// the censor on this one model.
 #[test]
 fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure() {
     let hollowed = hollowed_corpus_model(
@@ -307,7 +324,9 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     let error = match error {
         Err(error) => error,
         Ok(_) => panic!(
-            "make_raking_blade has two islands the immutable repair pool cannot close at the registered radius"
+            "make_raking_blade has an island of 5.135 mm² the immutable repair pool cannot close \
+             at the registered radius — 32x the registered A3 censor, so no censor at the \
+             registered voxel pitch can excuse it"
         ),
     };
     let plinth_support::SupportRunError::CoverageClosure(refusal) = error else {
@@ -325,6 +344,28 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     );
     let mut islands = refusal.islands.clone();
     islands.sort_by_key(|island| island.island_id);
+    // **The 0.16 mm² A3 censor, both ways, on ONE real model (2026-08-14).**
+    //
+    // SPEC-A3-A4-COVERAGE.md §4: "A patch fails if and only if either: 1. its
+    // uncovered area is greater than `voxel_pitch_mm**2` … Area at or below
+    // `voxel_pitch_mm**2` is **censored A3 uncertainty**."
+    //
+    // This fixture measures two uncovered islands, and they sit on OPPOSITE
+    // sides of the censor — which is why it is the best witness in the suite:
+    //
+    //   * island 3: **0.06000000000000172 mm²**, one patch, faces [15, 20].
+    //     That is 0.375 of a single 0.4 mm voxel footprint — below the
+    //     resolution the pipeline can act on, so it is censored and is NOT in
+    //     the refusal. Until 2026-08-14 the blocking predicate failed on
+    //     `uncovered_area_mm2 > 0.0` and this island was listed here.
+    //   * island 5: **5.135000000000005 mm²**, one patch, faces
+    //     [14, 15, 20, 21] — 32x the censor. Still fatal, and the refusal
+    //     still names it.
+    //
+    // So a censor that stopped working would put island 3 back in this list,
+    // and a censor widened far enough to swallow island 5 would make
+    // `run_support` return Ok and trip the panic above. Both directions are
+    // load-bearing here.
     assert_eq!(
         islands
             .iter()
@@ -335,26 +376,31 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
                 island.worst_gap,
             ))
             .collect::<Vec<_>>(),
-        vec![
-            (
-                3,
-                1,
-                15,
-                plinth_support::CoverageClosureGap::NoRoutedContact
-            ),
-            (
-                5,
-                1,
-                14,
-                plinth_support::CoverageClosureGap::NoRoutedContact
-            ),
-        ]
+        vec![(
+            5,
+            1,
+            14,
+            plinth_support::CoverageClosureGap::NoRoutedContact
+        )],
+        "only the island genuinely above the censor may refuse this model"
+    );
+    let censor = plinth_support::registered_coverage_censor_area_mm2()
+        .expect("registered A3 coverage censor");
+    assert!(
+        islands[0].uncovered_area_mm2 > censor,
+        "the refusing island must be above the censor: {} mm² against {censor} mm²",
+        islands[0].uncovered_area_mm2
+    );
+    assert!(
+        (islands[0].uncovered_area_mm2 - 5.135).abs() < 1e-9,
+        "island 5 measures 5.135 mm²; if it moved, the fixture moved: {} mm²",
+        islands[0].uncovered_area_mm2
     );
     // FU-56 (2026-08-12 fix): the refusal says PER ISLAND whether it was ever
     // attempted. "Nominated N times and still blocking" is a router problem;
     // "zero eligible repair rows, ever" is a pool or mesh problem, and they
-    // need different actions from the owner. Both of this fixture's islands
-    // were nominated for and neither closed, which is the first of the two.
+    // need different actions from the owner. This fixture's island was
+    // nominated for and never closed, which is the first of the two.
     for island in &islands {
         assert!(
             island.nominated_repair_rows > 0,

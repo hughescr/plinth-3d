@@ -710,6 +710,11 @@ pub fn run_support<'a>(
                                 patch.uncovered_area_mm2().get(),
                                 patch.cut_ambiguous(),
                                 patch.assessment_failed(),
+                                // The censor the measurement itself just used,
+                                // read back off the live request rather than
+                                // re-derived, so the controller can never chase
+                                // a patch the gate will censor.
+                                coverage_request.patch_area_floor_mm2().get(),
                             )
                         })
                         .map(|patch| crate::coverage_closure::BlockingPatchKey {

@@ -242,7 +242,21 @@ fn rank_worst_first(islands: &mut [UncoveredIslandSummary]) {
 #[derive(Deserialize, Default)]
 struct WireReport {
     #[serde(default)]
+    request: WireRequest,
+    #[serde(default)]
     evidence: WireEvidence,
+}
+
+/// The one request field this render needs: the A3 censor the report's own
+/// measurement used, so the patch filter below censors at exactly the area the
+/// verdict censored at. Defaulting to 0.0 is the FAIL-CLOSED choice — a report
+/// whose request could not be read censors nothing, which can only ever admit
+/// MORE patch detail for islands the verifier already flagged, never fewer.
+/// This path renders evidence for an existing verdict; it never makes one.
+#[derive(Deserialize, Default)]
+struct WireRequest {
+    #[serde(default)]
+    patch_area_floor_mm2: f64,
 }
 
 #[derive(Deserialize, Default)]
@@ -313,6 +327,7 @@ pub fn islands_from_gate_report(report: &CoverageReport) -> Vec<UncoveredIslandS
             patch.uncovered_area_mm2,
             patch.cut_ambiguous,
             patch.assessment_failed,
+            wire.request.patch_area_floor_mm2,
         ) {
             continue;
         }
