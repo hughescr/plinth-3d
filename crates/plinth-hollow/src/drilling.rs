@@ -1522,9 +1522,32 @@ fn prove_centerlines(
         let end = usize::try_from(offsets[hole + 1])
             .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
         let intended_length = norm(sub(point(holes[hole].keepout_end_mm), origins[hole]));
+        // The window opens just AFTER the ray's own starting point.
+        //
+        // The ray starts at `keepout_start`, the rear end of the cutter, which
+        // is `HOLLOW_EXTRA_DRAIN_POLICY`'s first rung behind the hole centre.
+        // When that point lands inside wall material — and on a real model it
+        // does; the Rotting Warhorse's vent is one — the cutter's own rear end
+        // plane cuts that material, and the drilled shell carries a cap there.
+        // A cap at exactly `t = 0` is a surface this drilling created, at the
+        // back of a blind pocket 4 mm behind the opening. It cannot obstruct
+        // anything. Counting it refused a bore that measurement shows is clear
+        // along its whole 13 mm.
+        //
+        // Nothing else is conceded. Everything from just past the origin to
+        // `keepout_end` is still proven clear, which is the stronger of the two
+        // available readings: the cutter removed every scrap of material inside
+        // its own radius over that whole span, so a crossing anywhere in it is
+        // a real defect in the Boolean, not an artifact of where the ray began.
+        //
+        // `PROOF_EPSILON_MM` is untouched and is used here as it is used
+        // everywhere else in this file — to decide whether two positions are
+        // the same position. The kernel reports this cap as `-0.0`.
         let count = ts[begin..end]
             .iter()
-            .filter(|distance| **distance <= intended_length + PROOF_EPSILON_MM)
+            .filter(|distance| {
+                **distance > PROOF_EPSILON_MM && **distance <= intended_length + PROOF_EPSILON_MM
+            })
             .count();
         if count != 0 {
             return Err(DrillingRefusal::BlockedOpening { hole });
@@ -2812,5 +2835,108 @@ mod tests {
         assert_eq!(report.drains[0].entrance_mm, expected_drain.center_mm);
         assert_eq!(report.drains[0].exit_mm, expected_drain.exact_outer_exit_mm);
         assert_eq!(report.drains[0].radius_mm, expected_drain.radius_mm);
+    }
+}
+
+/// A surface at the ray's own starting point is not an obstruction.
+///
+/// **The defect this pins.** `prove_centerlines` casts from `keepout_start`,
+/// the rear end of the cutter, `HOLLOW_EXTRA_DRAIN_POLICY`'s first rung (4 mm)
+/// BEHIND the hole centre. On a real model that point can land inside wall
+/// material — the Rotting Warhorse's vent does, measured: on the undrilled
+/// shell a ray from it crosses once upward and three times downward, odd both
+/// ways, so it is inside the material. The cutter's own rear end plane then
+/// cuts that material and the drilled shell carries a cap exactly there. The
+/// proof counted its own cap and refused with `BlockedOpening`, on a bore
+/// that measurement shows is clear along its whole 13 mm: the only crossing
+/// the drilled shell reports over that span is the cap, at `t = -0.0`.
+///
+/// The blind pocket the cap closes is real, and whether the rear keepout
+/// should be clipped at the cavity boundary is an owner ruling, not this
+/// function's to make. What is certain is that a cap 4 mm behind the opening
+/// obstructs nothing.
+#[cfg(test)]
+mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
+    use super::*;
+    use plinth_core::Finite;
+
+    fn finite3(value: [f64; 3]) -> [Finite; 3] {
+        value.map(|axis| Finite::new(axis).expect("finite fixture coordinate"))
+    }
+
+    /// A 10 mm box, and a centerline that starts exactly on its bottom face
+    /// and travels straight down into open air. That is the Warhorse's
+    /// geometry with everything else stripped away: one crossing, at the ray's
+    /// own origin, and nothing anywhere along the rest of the proof path.
+    #[test]
+    fn a_single_crossing_at_the_rays_origin_does_not_block_the_bore() {
+        let box_mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
+            .expect("10 mm box fixture");
+        let hole = HoleGeometry {
+            role: HoleRole::Vent,
+            lobe_id: None,
+            center_mm: finite3([5.0, 5.0, -4.0]),
+            direction: finite3([0.0, 0.0, -1.0]),
+            outer_exit_mm: finite3([5.0, 5.0, -8.0]),
+            radius_mm: Finite::new(1.25).expect("finite"),
+            inner_crossing_mm: Finite::new(1.0).expect("finite"),
+            length_mm: Finite::new(3.0).expect("finite"),
+            sampled_exit_mm: Finite::new(4.0).expect("finite"),
+            // The cutter's rear end sits ON the box's bottom face, so the
+            // drilled surface has a cap exactly at `t = 0`.
+            keepout_start_mm: finite3([5.0, 5.0, 0.0]),
+            keepout_end_mm: finite3([5.0, 5.0, -13.0]),
+        };
+
+        // The fixture states the defect before the proof is asked about it:
+        // exactly one crossing, at the ray's own origin, and nothing else in
+        // the 13 mm the proof examines.
+        let surface = NativeSurface::from_indexed(
+            box_mesh.verts(),
+            box_mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: usize::MAX,
+            },
+        )
+        .expect("box indexes");
+        let (offsets, ts, _) = surface
+            .cast_rays(&[[5.0, 5.0, 0.0]], &[[0.0, 0.0, -1.0]], 45.0)
+            .expect("one ray");
+        let hits = &ts[offsets[0] as usize..offsets[1] as usize];
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].abs(), 0.0, "{hits:?}");
+
+        // Before the fix this returned `BlockedOpening { hole: 0 }`.
+        let counts = prove_centerlines(&box_mesh, &[hole], 0.5, DrillingLimits::production())
+            .expect("a cap at the ray's own origin is not an obstruction");
+        assert_eq!(counts, vec![0]);
+    }
+
+    /// And the proof still refuses when something really is in the way. The
+    /// same box, but the centerline starts 4 mm ABOVE it and runs down through
+    /// both faces, so there are two crossings and both are strictly inside the
+    /// window.
+    #[test]
+    fn material_anywhere_past_the_origin_still_blocks_the_bore() {
+        let box_mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
+            .expect("10 mm box fixture");
+        let hole = HoleGeometry {
+            role: HoleRole::Vent,
+            lobe_id: None,
+            center_mm: finite3([5.0, 5.0, 10.0]),
+            direction: finite3([0.0, 0.0, -1.0]),
+            outer_exit_mm: finite3([5.0, 5.0, 0.0]),
+            radius_mm: Finite::new(1.25).expect("finite"),
+            inner_crossing_mm: Finite::new(1.0).expect("finite"),
+            length_mm: Finite::new(10.0).expect("finite"),
+            sampled_exit_mm: Finite::new(10.0).expect("finite"),
+            keepout_start_mm: finite3([5.0, 5.0, 14.0]),
+            keepout_end_mm: finite3([5.0, 5.0, -1.0]),
+        };
+        assert!(matches!(
+            prove_centerlines(&box_mesh, &[hole], 0.5, DrillingLimits::production()),
+            Err(DrillingRefusal::BlockedOpening { hole: 0 })
+        ));
     }
 }
