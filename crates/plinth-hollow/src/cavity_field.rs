@@ -157,6 +157,44 @@ impl CavityField {
             .is_some_and(|word| word & (1_u64 << (flat % 64)) != 0)
     }
 
+    /// Is this world point in the selected cavity, or in the voxel shell
+    /// immediately around it?
+    ///
+    /// The cavity's own surface is marching-cubes over this membership, so it
+    /// sits about half a pitch outside the member voxel centres: a point that
+    /// is genuinely in the void can round to a non-member index. Widening the
+    /// question to the 26 neighbours removes that half-pitch fuzz. It is a
+    /// one-voxel widening, not a tolerance on any gate — the caller uses this
+    /// only to tell the void it is draining apart from the open air outside
+    /// the model, and those two are always separated by at least the realized
+    /// wall, which is several voxels thick.
+    #[must_use]
+    pub(crate) fn contains_point_neighbourhood(&self, point: [f64; 3]) -> bool {
+        let pitch = self.pitch_mm.get();
+        let base = [0, 1, 2].map(|axis| {
+            ((point[axis] - self.origin_mm[axis].get()) / pitch).round_ties_even() as isize
+        });
+        for dz in -1_isize..=1 {
+            for dy in -1_isize..=1 {
+                for dx in -1_isize..=1 {
+                    let q = [base[0] + dx, base[1] + dy, base[2] + dz];
+                    if q.iter().enumerate().any(|(axis, value)| {
+                        *value < 0 || *value as usize >= self.dims[axis]
+                    }) {
+                        continue;
+                    }
+                    let flat = q[0] as usize
+                        + q[1] as usize * self.dims[0]
+                        + q[2] as usize * self.dims[0] * self.dims[1];
+                    if self.contains_flat(flat) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     #[must_use]
     pub(crate) fn source_contains_flat(&self, flat: usize) -> bool {
         self.source_occupancy

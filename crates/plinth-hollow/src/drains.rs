@@ -72,7 +72,7 @@ impl DrainPlan {
                     Finite::new(0.0).expect("finite test direction"),
                     Finite::new(0.0).expect("finite test direction"),
                 ],
-                crossings: 3,
+                reason: CandidateUnavailable::CrossingCount { crossings: 3 },
             }));
     }
 }
@@ -84,7 +84,27 @@ pub struct CandidateDiagnostic {
     pub lobe_id: Option<u32>,
     pub site: usize,
     pub direction: [Finite; 3],
-    pub crossings: usize,
+    pub reason: CandidateUnavailable,
+}
+
+/// Why one direction out of one site was dropped.
+///
+/// A dropped direction is not a refusal: every other direction and site stays
+/// eligible. The reason is recorded so that a model which loses *every*
+/// direction can say which wall it ran into, rather than reporting one cause
+/// under the other's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateUnavailable {
+    /// The ray out of the site did not cross the shell exactly twice — inner
+    /// cavity wall, then outer skin. See [`DrainPlanningRefusal::NoExit`] for
+    /// what an odd count means.
+    CrossingCount { crossings: usize },
+    /// The cutter's rear over-travel breaks back out through the outer skin,
+    /// so this bore would cut two mouths in the model instead of one. The
+    /// count is how many sampled points of the cutter's rear boundary landed
+    /// in open air outside the model.
+    RearOverTravelBreachesSkin { outside_samples: usize },
 }
 
 /// Sole move-forward authority after H1a. There is still exactly one mesh and
@@ -171,11 +191,13 @@ pub enum DrainPlanningRefusal {
     PreflightUnderestimated,
     #[error("native surface construction or batch ray query failed")]
     Kernel,
-    /// **Read `diagnostics[].crossings` before believing the ceiling is the
-    /// problem.** This refusal fires when no direction from the lobe crossed
-    /// the shell exactly twice, and there are two very different reasons for
-    /// that. An EVEN count means the ray started in the void and genuinely
-    /// found no clean way out. An ODD count means the ray started inside the
+    /// **Read `diagnostics[].reason` before believing the ceiling is the
+    /// problem.** This refusal fires when no direction from the lobe survived,
+    /// and the reasons are very different from one another. A
+    /// `RearOverTravelBreachesSkin` reason means the exit was fine and the
+    /// bore's rear over-travel was not. For a `CrossingCount` reason there are
+    /// two further cases. An EVEN count means the ray started in the void and
+    /// genuinely found no clean way out. An ODD count means the ray started inside the
     /// material — a point on a closed surface's inside crosses it an even
     /// number of times, a point in the material an odd number — so the origin
     /// was misplaced and the cavity may drain perfectly well from elsewhere.
@@ -184,9 +206,10 @@ pub enum DrainPlanningRefusal {
     /// were the first: five directions, one crossing each, on a 12 mL cavity
     /// with a legal drain 2.85 mm away. See `drain_site`.
     #[error(
-        "cavity lobe {lobe_id} yielded no drillable drain: no direction crossed the shell \
-         exactly twice within 45mm (an ODD crossing count in `diagnostics` means the ray \
-         started inside the material, NOT that no exit exists)"
+        "cavity lobe {lobe_id} yielded no drillable drain: no direction both crossed the \
+         shell exactly twice within 45mm and kept its cutter's rear over-travel inside the \
+         model (an ODD crossing count in `diagnostics` means the ray started inside the \
+         material, NOT that no exit exists)"
     )]
     NoExit {
         lobe_id: u32,
@@ -296,6 +319,7 @@ struct PlannerPreflight {
 pub struct PlannerAccounting {
     requested_bytes: usize,
     ray_query_bytes: usize,
+    rear_query_bytes: usize,
     ray_crossings: usize,
     candidate_count: usize,
 }
@@ -312,6 +336,14 @@ impl PlannerAccounting {
     #[must_use]
     pub const fn ray_query_bytes(&self) -> usize {
         self.ray_query_bytes
+    }
+
+    /// One rear-over-travel point batch's share of [`Self::requested_bytes`].
+    /// The test looks at one candidate at a time, so this is the whole of its
+    /// charge however many candidates it ends up looking at.
+    #[must_use]
+    pub const fn rear_query_bytes(&self) -> usize {
+        self.rear_query_bytes
     }
 
     /// Surface crossings the census counted across the whole batch, before
@@ -536,9 +568,28 @@ fn plan(
         .try_fold(0_usize, |total, value| total.checked_add(*value))
         .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     let ray_query_bytes = ray_query_allocation_bytes(&crossings)?;
+    // Count before charging before allocating: the rear-over-travel test takes
+    // one bounded point batch per candidate it looks at, one at a time, and
+    // that batch is named here before the first of them exists.
+    let rear = RearOverTravel {
+        surface: &surface,
+        field,
+        before_mm: keepout_before_mm,
+        sections: usize::try_from(
+            policy
+                .hollow_extra_drain_policy()
+                .diagnostic()
+                .cylinder_sides()
+                .get(),
+        )
+        .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?,
+        station_step_mm: field.pitch_mm().get(),
+    };
+    let rear_query_bytes = rear.query_bytes()?;
     let requested_bytes = preflight
         .requested_bytes
         .checked_add(ray_query_bytes)
+        .and_then(|total| total.checked_add(rear_query_bytes))
         .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     let cap = candidate.cavity().drain_planning_cap_bytes();
     if requested_bytes > cap {
@@ -607,11 +658,19 @@ fn plan(
             .enumerate()
             .filter(|(_, lobe)| lobe.chamber == chamber)
         {
-            match best_site(&candidates, &paths, HoleRole::Drain, site) {
+            let drain_radius_mm = policy.hollow_drain_r_mm().diagnostic().get();
+            match best_buried(
+                &candidates,
+                &mut paths,
+                |candidates, paths| best_site(candidates, paths, HoleRole::Drain, site),
+                drain_radius_mm,
+                &rear,
+                &mut unavailable_candidates,
+            )? {
                 Some(best) => chamber_drains.push(hole(
                     best.0,
                     best.1,
-                    policy.hollow_drain_r_mm().diagnostic().get(),
+                    drain_radius_mm,
                     keepout_before_mm,
                     drain_keepout_after_mm,
                 )?),
@@ -621,7 +680,15 @@ fn plan(
         if chamber_drains.is_empty() {
             continue;
         }
-        let Some(vent) = best_role(&candidates, &paths, HoleRole::Vent, chamber) else {
+        let Some(vent) = best_buried(
+            &candidates,
+            &mut paths,
+            |candidates, paths| best_role(candidates, paths, HoleRole::Vent, chamber),
+            policy.hollow_vent_r_mm().diagnostic().get(),
+            &rear,
+            &mut unavailable_candidates,
+        )?
+        else {
             continue;
         };
         holes.append(&mut chamber_drains);
@@ -655,6 +722,7 @@ fn plan(
         PlannerAccounting {
             requested_bytes,
             ray_query_bytes,
+            rear_query_bytes,
             ray_crossings,
             candidate_count,
         },
@@ -757,11 +825,185 @@ fn retain_candidate_path(
                 direction: candidate.direction.map(|value| {
                     Finite::new(value).expect("normalized registered direction is finite")
                 }),
-                crossings,
+                reason: CandidateUnavailable::CrossingCount { crossings },
             });
             Ok(None)
         }
         result => result,
+    }
+}
+
+/// The two unit vectors across the bore, in the exact basis the H1b cutter
+/// prism is built in.
+///
+/// H1b's `cylinder()` calls this, so the points the planner tests below are
+/// points of the very prism that will be subtracted. Two copies of this rule
+/// would be two prisms, and the planner would be clearing a bore the driller
+/// never cuts.
+pub(crate) fn cutter_basis(direction: V3) -> Result<(V3, V3), DrainPlanningRefusal> {
+    let reference = if direction[0].abs() <= direction[1].abs()
+        && direction[0].abs() <= direction[2].abs()
+    {
+        [1.0, 0.0, 0.0]
+    } else if direction[1].abs() <= direction[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let across = normalize(cross(reference, direction))?;
+    Ok((across, cross(direction, across)))
+}
+
+/// Everything the rear-over-travel test needs, gathered once per plan.
+struct RearOverTravel<'a> {
+    /// The shell, as a parity surface: `inside` answers "is this point in the
+    /// material", exactly.
+    surface: &'a NativeSurface,
+    /// The selected cavity, which is the only void a bore is allowed to start
+    /// in.
+    field: &'a CavityField,
+    /// How far behind the hole centre the cutter starts — the first rung of
+    /// the registered extension ladder, passed in, never re-derived here.
+    before_mm: f64,
+    /// The cutter's own side count, from the registered policy.
+    sections: usize,
+    /// Stations are stepped at the cavity lattice pitch, the same lattice the
+    /// exit distance and the audit walk are stepped on.
+    station_step_mm: f64,
+}
+
+/// How many points along one cutter edge are tested, the edge's own ends
+/// aside. A breach shows up as a crescent across several of the prism's
+/// facets, so the corners alone would already find it; the interior points
+/// are there so a breach narrower than one facet is still seen.
+const REAR_EDGE_SAMPLES: usize = 4;
+/// Rings tested across the rear cap, which is a face of the cutter like any
+/// other and can break out of a limb on its own.
+const REAR_CAP_RINGS: usize = 3;
+
+impl RearOverTravel<'_> {
+    /// Points on the cutter's rear boundary: its side facets over the whole
+    /// over-travel, plus the rear cap.
+    ///
+    /// The cutter's boundary is where the drilled model's new surface comes
+    /// from, so this is the set that decides how many mouths the bore opens.
+    fn boundary_points(
+        &self,
+        origin: V3,
+        direction: V3,
+        radius: f64,
+    ) -> Result<Vec<V3>, DrainPlanningRefusal> {
+        let (across, up) = cutter_basis(direction)?;
+        let corner = |centre: V3, rho: f64, section: usize| {
+            let angle = std::f64::consts::TAU * section as f64 / self.sections as f64;
+            add(
+                centre,
+                scale(add(scale(across, angle.cos()), scale(up, angle.sin())), rho),
+            )
+        };
+        let stations = (self.before_mm / self.station_step_mm).ceil() as usize;
+        let mut points = Vec::with_capacity(self.points_per_candidate());
+        for station in 0..=stations {
+            // Walk back from the hole centre so the rearmost station is the
+            // cap plane exactly, whatever the step divides into.
+            let back = (station as f64 * self.station_step_mm).min(self.before_mm);
+            let centre = add(origin, scale(direction, -back));
+            for section in 0..self.sections {
+                let here = corner(centre, radius, section);
+                let next = corner(centre, radius, (section + 1) % self.sections);
+                points.push(here);
+                for step in 1..=REAR_EDGE_SAMPLES {
+                    let fraction = step as f64 / (REAR_EDGE_SAMPLES + 1) as f64;
+                    points.push(add(here, scale(sub(next, here), fraction)));
+                }
+            }
+            if back >= self.before_mm {
+                for ring in 1..=REAR_CAP_RINGS {
+                    let rho = radius * ring as f64 / (REAR_CAP_RINGS + 1) as f64;
+                    for section in 0..self.sections {
+                        points.push(corner(centre, rho, section));
+                    }
+                }
+                points.push(centre);
+            }
+        }
+        Ok(points)
+    }
+
+    /// The buffer this test allocates for one candidate, named before it is
+    /// taken. One candidate's batch is alive at a time.
+    fn points_per_candidate(&self) -> usize {
+        let stations = (self.before_mm / self.station_step_mm).ceil() as usize + 1;
+        stations * self.sections * (REAR_EDGE_SAMPLES + 1)
+            + REAR_CAP_RINGS * self.sections
+            + 1
+    }
+
+    fn query_bytes(&self) -> Result<usize, DrainPlanningRefusal> {
+        self.points_per_candidate()
+            .checked_mul(std::mem::size_of::<V3>() + std::mem::size_of::<bool>())
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)
+    }
+
+    /// Points of the cutter's rear boundary that are in open air outside the
+    /// model.
+    ///
+    /// A point is where it belongs if it is in the material, or in the cavity
+    /// this bore drains. Anything else is outside the model's skin, and
+    /// subtracting the cutter there opens a second mouth: one bore, two holes
+    /// in the mini. The drilled Euler count refuses exactly that downstream —
+    /// this is the same fact, asked while an alternate direction is still on
+    /// the table.
+    fn outside_samples(
+        &self,
+        origin: V3,
+        direction: V3,
+        radius: f64,
+    ) -> Result<usize, DrainPlanningRefusal> {
+        let points = self.boundary_points(origin, direction, radius)?;
+        let in_material = self.surface.inside(&points);
+        if in_material.len() != points.len() {
+            return Err(DrainPlanningRefusal::PreflightUnderestimated);
+        }
+        Ok(points
+            .iter()
+            .zip(in_material)
+            .filter(|(point, material)| {
+                !*material && !self.field.contains_point_neighbourhood(**point)
+            })
+            .count())
+    }
+}
+
+/// The shortest legal exit of one role whose cutter also stays inside the
+/// model behind the hole. Directions that breach are struck out of `paths`, so
+/// the next-shortest gets its turn exactly as if the ray had never crossed.
+fn best_buried<'a>(
+    candidates: &'a [Candidate],
+    paths: &mut [Option<RayPath>],
+    select: impl Fn(&'a [Candidate], &[Option<RayPath>]) -> Option<(&'a Candidate, RayPath)>,
+    radius: f64,
+    rear: &RearOverTravel<'_>,
+    diagnostics: &mut Vec<CandidateDiagnostic>,
+) -> Result<Option<(&'a Candidate, RayPath)>, DrainPlanningRefusal> {
+    loop {
+        let Some((candidate, path)) = select(candidates, paths) else {
+            return Ok(None);
+        };
+        let outside_samples = rear.outside_samples(candidate.origin, candidate.direction, radius)?;
+        if outside_samples == 0 {
+            return Ok(Some((candidate, path)));
+        }
+        paths[candidate.id] = None;
+        diagnostics.push(CandidateDiagnostic {
+            role: candidate.role,
+            lobe_id: candidate.lobe_id,
+            site: candidate.site,
+            direction: candidate.direction.map(|value| {
+                Finite::new(value).expect("normalized registered direction is finite")
+            }),
+            reason: CandidateUnavailable::RearOverTravelBreachesSkin { outside_samples },
+        });
     }
 }
 
@@ -1575,6 +1817,18 @@ fn add(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
+fn sub(a: V3, b: V3) -> V3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: V3, b: V3) -> V3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 fn scale(value: V3, amount: f64) -> V3 {
     [value[0] * amount, value[1] * amount, value[2] * amount]
 }
@@ -1877,8 +2131,14 @@ mod tests {
             .expect("crossing-count mismatch is candidate-local");
         }
         assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].crossings, 1);
-        assert_eq!(diagnostics[1].crossings, 3);
+        assert_eq!(
+            diagnostics[0].reason,
+            CandidateUnavailable::CrossingCount { crossings: 1 }
+        );
+        assert_eq!(
+            diagnostics[1].reason,
+            CandidateUnavailable::CrossingCount { crossings: 3 }
+        );
         assert_eq!(
             best_site(&candidates, &paths, HoleRole::Drain, 0)
                 .expect("valid alternate direction remains")
@@ -2210,6 +2470,171 @@ mod tests {
         }));
     }
 
+    /// A hollow slab: an outer box with a second box inside it, wound
+    /// inward, so a ray from the void crosses the cavity wall and then the
+    /// skin — the two crossings the planner requires.
+    fn hollow_slab(
+        outer_mm: [f64; 3],
+        outer_at: [f64; 3],
+        inner_mm: [f64; 3],
+        inner_at: [f64; 3],
+    ) -> plinth_mesh::Mesh {
+        let outer = make_box(outer_mm, outer_at).expect("outer box");
+        let inner = make_box(inner_mm, inner_at).expect("inner box");
+        let offset = u32::try_from(outer.verts().len()).expect("small fixture");
+        let mut verts = outer.verts().to_vec();
+        verts.extend_from_slice(inner.verts());
+        let mut tris = outer.tris().to_vec();
+        // Inward-wound, so the cavity surface faces the void exactly as the
+        // extractor leaves it.
+        tris.extend(
+            inner
+                .tris()
+                .iter()
+                .map(|tri| [tri[0] + offset, tri[2] + offset, tri[1] + offset]),
+        );
+        plinth_mesh::Mesh::new(verts, tris).expect("hollow slab")
+    }
+
+    /// **A bore whose rear over-travel leaves the model is not a shorter
+    /// exit, it is a second hole in the mini.**
+    ///
+    /// The slab here is 5.6 mm thick across x. From the cavity's low point
+    /// the two oblique registered drain directions reach the skin in 6.5 mm,
+    /// sooner than the 8.5 mm straight down, so the planner used to take one
+    /// of them. Their cutters start 4 mm behind the hole centre, and 4 mm
+    /// back along an oblique axis is 1.79 mm across the slab; add the bore's
+    /// own 1.12 mm half-width across x and the rear cap reaches x = 2.91 mm
+    /// on a slab whose skin is at 2.80 mm. That bore opens a mouth at the
+    /// drain and a second crescent out the far face, which is exactly what
+    /// H1b's Euler count refuses — the whole model lost, for a 1.5 mm saving
+    /// on the exit.
+    ///
+    /// This is the Awakened Tree's refusal in miniature: same directions,
+    /// same 4 mm over-travel, same razor-thin overshoot.
+    #[test]
+    fn a_bore_whose_rear_over_travel_leaves_the_model_is_not_chosen() {
+        // `make_box` centres x and y on the translate and stands the box on
+        // it in z, so these two share a centreline and the inner box floats
+        // 7 mm above the slab's underside.
+        let mesh = hollow_slab(
+            [5.6, 40.0, 40.0],
+            [0.0, 20.0, 0.0],
+            [2.0, 26.0, 26.0],
+            [0.0, 20.0, 7.0],
+        );
+        let pitch = 0.5;
+        let origin_mm = [-3.0, 0.0, 0.0];
+        let dims = [13_usize, 81, 81];
+        let world = |index: [usize; 3]| {
+            [
+                origin_mm[0] + index[0] as f64 * pitch,
+                origin_mm[1] + index[1] as f64 * pitch,
+                origin_mm[2] + index[2] as f64 * pitch,
+            ]
+        };
+        let mut occupancy = Array3::from_elem((dims[2], dims[1], dims[0]), false);
+        let mut cavity = Array3::from_elem((dims[2], dims[1], dims[0]), false);
+        let mut cavity_voxels = 0_usize;
+        for z in 0..dims[2] {
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    let point = world([x, y, z]);
+                    // The slab's own material, one voxel in from each face so
+                    // no sample sits on the skin itself.
+                    occupancy[(z, y, x)] = point[0].abs() <= 2.75
+                        && (0.25..=39.75).contains(&point[1])
+                        && (0.25..=39.75).contains(&point[2]);
+                    cavity[(z, y, x)] = point[0].abs() <= 0.5
+                        && (8.0..=32.0).contains(&point[1])
+                        && (8.0..=32.0).contains(&point[2]);
+                    if cavity[(z, y, x)] {
+                        cavity_voxels += 1;
+                    }
+                }
+            }
+        }
+        let field =
+            CavityField::from_selected_mask_and_occupancy(&cavity, &occupancy, origin_mm, pitch)
+                .expect("slab field");
+        assert_eq!(field.member_count(), cavity_voxels);
+        let candidate = ShellCandidate {
+            mesh,
+            cavity: CavityEvidence {
+                wall_thickness_mm: Finite::new(2.3).expect("finite"),
+                frozen_voxel_pitch_mm: Finite::new(pitch).expect("finite"),
+                cavity_volume_mm3: Finite::new(cavity_voxels as f64 * pitch.powi(3))
+                    .expect("finite"),
+                source_volume_mm3: Finite::new(5.6 * 40.0 * 40.0).expect("finite"),
+                resources: slab_resources(),
+                drain_planning_cap_bytes: usize::MAX,
+                realized_wall: RealizedWall::measured(Finite::new(2.3).expect("finite")),
+                cavity_components: 1,
+            },
+            cavity_field: field,
+        };
+        let planned = plan_drains(candidate).expect("the slab drains straight down");
+        let drains: Vec<&HoleGeometry> = planned
+            .drain_plan()
+            .holes()
+            .iter()
+            .filter(|hole| hole.role == HoleRole::Drain)
+            .collect();
+        assert_eq!(drains.len(), 1);
+        // Straight down, the direction the shorter oblique exits used to beat.
+        assert_eq!(drains[0].direction.map(Finite::get), [0.0, 0.0, -1.0]);
+        assert_eq!(drains[0].sampled_exit_mm.get(), 8.5);
+        let breached: Vec<&CandidateDiagnostic> = planned
+            .drain_plan()
+            .unavailable_candidates()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.role == HoleRole::Drain
+                    && matches!(
+                        diagnostic.reason,
+                        CandidateUnavailable::RearOverTravelBreachesSkin { .. }
+                    )
+            })
+            .collect();
+        // Both oblique drain directions across the slab, and only those.
+        assert_eq!(breached.len(), 2);
+        for diagnostic in &breached {
+            assert_eq!(diagnostic.direction[1].get(), 0.0);
+            let across = diagnostic.direction[0].get().abs();
+            assert!((across - 0.5_f64 / 1.25_f64.sqrt()).abs() < 1e-12, "{across}");
+        }
+        assert_ne!(
+            breached[0].direction[0].get(),
+            breached[1].direction[0].get()
+        );
+    }
+
+    fn slab_resources() -> H0ResourceDiagnostics {
+        H0ResourceDiagnostics {
+            voxel_count: 1,
+            query_batch_points: 1_000,
+            grid_coordinate_bytes: 0,
+            retained_raw_source_buffer_bytes: 0,
+            raster_work_items: 0,
+            retained_cavity_membership_bytes: 8,
+            retained_source_occupancy_bytes: 8,
+            marching_vertex_upper_bound: 0,
+            marching_triangle_upper_bound: 0,
+            boolean_input_primitive_units: 0,
+            boolean_marshaled_input_bytes: 0,
+            boolean_output_vertex_limit: 0,
+            boolean_output_triangle_limit: 0,
+            cavity_repair: crate::CavityRepairEvidence {
+                critical_cells: 0,
+                repaired_voxels: 0,
+                cell_visits: 0,
+                full_grid_passes: 0,
+            },
+            cavity_distance_index_bytes: 0,
+            cavity_distance_exact_query_points: 0,
+        }
+    }
+
     #[test]
     fn no_exit_is_a_typed_refusal_and_candidate_is_returned() {
         let mesh = make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("box");
@@ -2266,7 +2691,8 @@ mod tests {
         assert!(matches!(
             failure.reason(),
             DrainPlanningRefusal::NoExit { lobe_id: 1, diagnostics }
-                if !diagnostics.is_empty() && diagnostics.iter().all(|item| item.crossings == 0)
+                if !diagnostics.is_empty() && diagnostics.iter().all(|item| item.reason
+                        == CandidateUnavailable::CrossingCount { crossings: 0 })
         ));
         assert_eq!(
             failure.into_candidate().cavity_field().member_count(),

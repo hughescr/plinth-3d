@@ -1220,15 +1220,10 @@ fn cylinder(hole: &HoleGeometry) -> Result<SolidMesh, DrillingRefusal> {
         return Err(DrillingRefusal::InvalidHoleGeometry);
     }
     let w = scale(axis, 1.0 / length);
-    let reference = if w[0].abs() <= w[1].abs() && w[0].abs() <= w[2].abs() {
-        [1.0, 0.0, 0.0]
-    } else if w[1].abs() <= w[2].abs() {
-        [0.0, 1.0, 0.0]
-    } else {
-        [0.0, 0.0, 1.0]
-    };
-    let u = normalize(cross(reference, w))?;
-    let v = cross(w, u);
+    // The planner tests the rear of this very prism for a second mouth, so
+    // both stages read the cross-bore basis out of one function.
+    let (u, v) =
+        crate::drains::cutter_basis(w).map_err(|_| DrillingRefusal::InvalidHoleGeometry)?;
     let mut vertices = Vec::with_capacity(2 * CYLINDER_SECTIONS + 2);
     for center in [a, b] {
         for section in 0..CYLINDER_SECTIONS {

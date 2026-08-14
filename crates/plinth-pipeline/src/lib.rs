@@ -911,7 +911,7 @@ mod tests {
     use plinth_core::{m0_constants, Finite};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
     use plinth_hollow::{
-        drains::{CandidateDiagnostic, DrainPlanningRefusal, HoleRole},
+        drains::{CandidateDiagnostic, CandidateUnavailable, DrainPlanningRefusal, HoleRole},
         drilling::DrillingRefusal,
         HollowDisposition, HollowFailureCategory, HollowStageOutput, InternalSupportRefusalReason,
         SolidDecisionReason,
@@ -1330,7 +1330,7 @@ mod tests {
                 Finite::new(0.0).unwrap(),
                 Finite::new(0.0).unwrap(),
             ],
-            crossings: 3,
+            reason: CandidateUnavailable::CrossingCount { crossings: 3 },
         };
         let error = PipelineError::Hollow {
             model: ModelId::new("fixture"),
