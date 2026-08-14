@@ -468,9 +468,17 @@ fn slim_rewire_ancestors(
             .member(key)
             .ok_or(ForestError::InactiveKey(key))?
             .clone();
-        let carried =
-            Finite::new((member.carried_mm2().get() - removed_carried_mm2.get()).max(0.0))
-                .map_err(|_| CcoError::InvalidGeometry)?;
+        let existing_carried_mm2 = member.carried_mm2().get();
+        let removed_mm2 = removed_carried_mm2.get();
+        let carried = Finite::new((existing_carried_mm2 - removed_mm2).max(0.0)).map_err(
+            |error| {
+                CcoError::InvalidGeometry(format!(
+                    "slim_rewire_ancestors: reducing carried area at member {key:?} \
+                     (existing {existing_carried_mm2} mm2 minus removed {removed_mm2} mm2) \
+                     produced a non-finite value: {error}"
+                ))
+            },
+        )?;
         forest.set_carried_mm2(key, carried)?;
         let murray = forest
             .children_of(key)
@@ -491,8 +499,14 @@ fn slim_rewire_ancestors(
             kind_floor,
             carried,
         )?;
-        let radius = PositiveFinite::new(murray.max(own_floor.get()))
-            .map_err(|_| CcoError::InvalidGeometry)?;
+        let own_minimum_mm = own_floor.get();
+        let radius = PositiveFinite::new(murray.max(own_minimum_mm)).map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "slim_rewire_ancestors: Murray's-law radius blend at member {key:?} is not \
+                 positive-finite (murray-law radius {murray} mm, minimum radius \
+                 {own_minimum_mm} mm): {error}"
+            ))
+        })?;
         forest.set_radii(
             key,
             TerminalEndRadius::new(radius),
@@ -958,8 +972,19 @@ pub(crate) enum CcoError {
     TranscriptDispositionMismatch(u32),
     #[error("finalized CCO transcript headers or rows do not reproduce its sealed digest")]
     TranscriptDigestMismatch,
-    #[error("CCO input or derived geometry is not finite and positive where required")]
-    InvalidGeometry,
+    /// FU-truthful-errors: this variant used to be a bare unit value, so
+    /// every one of its 33 construction sites (15 of them `.map_err(|_| ..)`,
+    /// throwing the real underlying error away) collapsed to the same
+    /// message no matter which check failed or what number failed it. The
+    /// study that measured the seven large-mini failures found this was the
+    /// error hiding behind every one: never actually "not finite and
+    /// positive", always something specific (`ExtentOutOfSpan`,
+    /// `CorruptKernelResult`, an out-of-range index, a non-finite computed
+    /// price or volume). The `String` names the place, the check, and the
+    /// measured value or source error, the same way `BraceError::NativeQuery`
+    /// already does.
+    #[error("CCO input or derived geometry is not finite and positive where required: {0}")]
+    InvalidGeometry(String),
     #[error(transparent)]
     Forest(#[from] ForestError),
     #[error(transparent)]
@@ -1893,8 +1918,13 @@ impl CcoController {
         // "the attestation stopped running" are different values.
         let mut contact_attestation_digest = crate::designed_embed::seat_attestation_digest(
             crate::designed_embed::SEAT_TAG_CCO_MODEL_ANCHOR,
-            crate::designed_embed::PositiveFiniteMm::new(1.0)
-                .map_err(|_| CcoError::InvalidGeometry)?,
+            crate::designed_embed::PositiveFiniteMm::new(1.0).map_err(|error| {
+                CcoError::InvalidGeometry(format!(
+                    "evaluate_rewire_candidates: the empty-batch attestation digest seed \
+                     constant 1.0 mm failed PositiveFiniteMm::new, which should be \
+                     unreachable: {error}"
+                ))
+            })?,
             &[],
             &[],
         );
@@ -1904,10 +1934,18 @@ impl CcoController {
             let mut foot_requests = Vec::new();
             for candidate in &feasible {
                 if let Some((seat_index, final_radius)) = candidate.anchor {
-                    let seat = seats
-                        .get_mut(seat_index)
-                        .and_then(Option::take)
-                        .ok_or(CcoError::InvalidGeometry)?;
+                    let seats_len = seats.len();
+                    let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
+                        || {
+                            CcoError::InvalidGeometry(format!(
+                                "evaluate_rewire_candidates: candidate generation \
+                                 {} points at seat index {seat_index} of {seats_len}, but \
+                                 that slot is out of range or was already taken by an \
+                                 earlier candidate in this batch",
+                                candidate.generation_index
+                            ))
+                        },
+                    )?;
                     generation_indices.push(candidate.generation_index);
                     foot_requests.push(AnchorFootRequest::new(seat, final_radius));
                 }
@@ -1975,9 +2013,13 @@ impl CcoController {
                 ) {
                     continue;
                 }
-                validated_anchors
-                    .remove(generation_index)
-                    .ok_or(CcoError::InvalidGeometry)?;
+                validated_anchors.remove(generation_index).ok_or_else(|| {
+                    CcoError::InvalidGeometry(format!(
+                        "evaluate_rewire_candidates: burial refusal for candidate generation \
+                         {generation_index} names a seat attestation that was never validated \
+                         (not present in validated_anchors)"
+                    ))
+                })?;
                 valid.remove(generation_index);
                 refusals.push(RewireCandidateRefusal {
                     generation_index: *generation_index,
@@ -3066,21 +3108,39 @@ fn grow_terminal_inner(
     // different values.
     let mut contact_attestation_digest = crate::designed_embed::seat_attestation_digest(
         crate::designed_embed::SEAT_TAG_CCO_MODEL_ANCHOR,
-        crate::designed_embed::PositiveFiniteMm::new(1.0).map_err(|_| CcoError::InvalidGeometry)?,
+        crate::designed_embed::PositiveFiniteMm::new(1.0).map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "grow_terminal_inner: the empty-batch attestation digest seed constant \
+                 1.0 mm failed PositiveFiniteMm::new, which should be unreachable: {error}"
+            ))
+        })?,
         &[],
         &[],
     );
     if !seats.is_empty() {
-        let context = anchor_context.ok_or(CcoError::InvalidGeometry)?;
+        let seat_count = seats.len();
+        let context = anchor_context.ok_or_else(|| {
+            CcoError::InvalidGeometry(format!(
+                "grow_terminal_inner: {seat_count} model-anchor seat(s) require foot \
+                 validation but no finalized anchor validation context was supplied"
+            ))
+        })?;
         let mut seats: Vec<Option<QualifiedAnchorSeat>> = seats.drain(..).map(Some).collect();
         let mut generation_indices = Vec::new();
         let mut foot_requests = Vec::new();
         for candidate in &evaluated {
             if let Some((seat_index, final_radius)) = candidate.anchor {
-                let seat = seats
-                    .get_mut(seat_index)
-                    .and_then(Option::take)
-                    .ok_or(CcoError::InvalidGeometry)?;
+                let seats_len = seats.len();
+                let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
+                    || {
+                        CcoError::InvalidGeometry(format!(
+                            "grow_terminal_inner: candidate generation {} points at seat \
+                             index {seat_index} of {seats_len}, but that slot is out of \
+                             range or was already taken by an earlier candidate",
+                            candidate.generation_index
+                        ))
+                    },
+                )?;
                 generation_indices.push(candidate.generation_index);
                 foot_requests.push(AnchorFootRequest::new(seat, final_radius));
             }
@@ -3145,9 +3205,13 @@ fn grow_terminal_inner(
             }
             // Same channel a breached foot ball uses: the candidate leaves the
             // tournament, the terminal routes some other way, nothing fails.
-            let anchor = validated_anchors
-                .remove(index)
-                .ok_or(CcoError::InvalidGeometry)?;
+            let anchor = validated_anchors.remove(index).ok_or_else(|| {
+                CcoError::InvalidGeometry(format!(
+                    "grow_terminal_inner: burial refusal for candidate generation {index} \
+                     names a seat attestation that was never validated (not present in \
+                     validated_anchors)"
+                ))
+            })?;
             valid.remove(index);
             anchor_refusals.push(AnchorFootRefusal::seat_buried(anchor.seat().provenance()));
         }
@@ -3352,9 +3416,14 @@ fn elect_committable_winner<'a>(
         if !unattested_seats.contains(&candidate.generation_index) {
             return Ok(Some(candidate));
         }
-        let anchor = validated_anchors
-            .remove(&candidate.generation_index)
-            .ok_or(CcoError::InvalidGeometry)?;
+        let anchor = validated_anchors.remove(&candidate.generation_index).ok_or_else(|| {
+            CcoError::InvalidGeometry(format!(
+                "elect_committable_winner: winning candidate generation {} is flagged \
+                 unattested but names a seat attestation that was never validated (not \
+                 present in validated_anchors)",
+                candidate.generation_index
+            ))
+        })?;
         anchor_refusals.push(AnchorFootRefusal::seat_not_attached(
             anchor.seat().provenance(),
         ));
@@ -3615,14 +3684,24 @@ fn evaluate(
     let changed_delta_ml = changed_forest_volume_delta(snapshot, &candidate)?;
     let price_ml = candidate_price(descriptor, &candidate, request, config, changed_delta_ml)?;
     if !price_ml.is_finite() {
-        return Err(CcoError::InvalidGeometry);
+        return Err(CcoError::InvalidGeometry(format!(
+            "evaluate: candidate price is not finite (price_ml = {price_ml}) for family \
+             {:?}, generation {generation_index}",
+            descriptor.family()
+        )));
     }
     let rows = clearance_rows(&candidate, snapshot, config);
     let anchor = if let Descriptor::ModelAnchor { seat_index, .. } = descriptor {
         let parent = candidate
             .parent_of(request.stub)
             .and_then(|key| candidate.member(key))
-            .ok_or(CcoError::InvalidGeometry)?;
+            .ok_or_else(|| {
+                CcoError::InvalidGeometry(format!(
+                    "evaluate: model-anchor candidate (seat index {seat_index}) stub \
+                     {:?} has no live parent member in the candidate forest",
+                    request.stub
+                ))
+            })?;
         Some((*seat_index, parent.rootward_radius_mm().get()))
     } else {
         None
@@ -3675,9 +3754,13 @@ fn apply_and_size(
             if !apply_model_anchor(candidate, request, *point_mm, config)? {
                 return Ok(false);
             }
-            let strut = candidate
-                .parent_of(request.stub)
-                .ok_or(CcoError::InvalidGeometry)?;
+            let strut = candidate.parent_of(request.stub).ok_or_else(|| {
+                CcoError::InvalidGeometry(format!(
+                    "apply_and_size: model-anchor stub {:?} has no parent member after \
+                     apply_model_anchor placed it",
+                    request.stub
+                ))
+            })?;
             size_tapered_without_tree_fanin(candidate, strut)?;
         }
     }
@@ -3763,8 +3846,14 @@ fn attest_model_anchor_seats(
     process_resolution_mm: f64,
     anchors: &[&ValidatedModelAnchor],
 ) -> Result<ModelAnchorSeatAttestation, CcoError> {
-    let extent = crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm)
-        .map_err(|_| CcoError::InvalidGeometry)?;
+    let extent = crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm).map_err(
+        |error| {
+            CcoError::InvalidGeometry(format!(
+                "attest_model_anchor_seats: process resolution {process_resolution_mm} mm \
+                 is not a positive-finite attestation extent: {error}"
+            ))
+        },
+    )?;
     if anchors.is_empty() {
         return Ok(ModelAnchorSeatAttestation {
             refusals: Vec::new(),
@@ -3797,23 +3886,46 @@ fn attest_model_anchor_seats(
             }
         })
         .collect::<Vec<_>>();
-    let majority_step = crate::designed_embed::PositiveFiniteMm::new(extent.get() / 10.0)
-        .map_err(|_| CcoError::InvalidGeometry)?;
+    let majority_step_mm = extent.get() / 10.0;
+    let majority_step = crate::designed_embed::PositiveFiniteMm::new(majority_step_mm)
+        .map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "attest_model_anchor_seats: majority-vote sampling step {majority_step_mm} mm \
+                 (one tenth of extent {} mm) is not positive-finite: {error}",
+                extent.get()
+            ))
+        })?;
+    let seat_count = seats.len();
     let limits = crate::designed_embed::EndpointMaskValidationLimits::for_batch(
         surface,
-        seats.len(),
+        seat_count,
         majority_step,
         MODEL_ANCHOR_ATTESTATION_SAMPLES_PER_SUBSEGMENT,
     )
-    .map_err(|_| CcoError::InvalidGeometry)?;
+    .map_err(|error| {
+        CcoError::InvalidGeometry(format!(
+            "attest_model_anchor_seats: endpoint-mask validation limits for {seat_count} \
+             seat(s) at extent {} mm are invalid: {error}",
+            extent.get()
+        ))
+    })?;
     let policy = seat_contact_policy(process_resolution_mm)?;
-    let outcomes =
-        crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
-            .map_err(|_| CcoError::InvalidGeometry)?;
+    let outcomes = crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
+        .map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "attest_model_anchor_seats: native seat-attestation batch over {seat_count} \
+                 seat(s) at extent {} mm failed: {error}",
+                extent.get()
+            ))
+        })?;
     let mut refusals = vec![None; seats.len()];
     for outcome in &outcomes {
         if outcome.member >= seats.len() {
-            return Err(CcoError::InvalidGeometry);
+            return Err(CcoError::InvalidGeometry(format!(
+                "attest_model_anchor_seats: native batch returned outcome for member index \
+                 {} but only {seat_count} seat(s) were sent",
+                outcome.member
+            )));
         }
         refusals[outcome.member] = outcome.verdict.as_ref().err().copied();
         crate::census_record!(crate::census::record_seat_attestation(
@@ -4066,9 +4178,13 @@ fn apply_bifurcation(
 }
 
 fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Result<(), CcoError> {
-    let first = forest
-        .parent_of(request.stub)
-        .ok_or(CcoError::InvalidGeometry)?;
+    let first = forest.parent_of(request.stub).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "size_plate_candidate: stub {:?} has no parent member after plate descent \
+             was applied",
+            request.stub
+        ))
+    })?;
     let first_reaches_plate = forest
         .member(first)
         .is_some_and(|member| member.p1_mm()[2] == request.plate_z_mm());
@@ -4083,9 +4199,12 @@ fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Re
     }
 
     let diagonal = first;
-    let column = forest
-        .parent_of(diagonal)
-        .ok_or(CcoError::InvalidGeometry)?;
+    let column = forest.parent_of(diagonal).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "size_plate_candidate: diagonal member {diagonal:?} has no parent (column) \
+             after plate descent was applied"
+        ))
+    })?;
     let column_radius = required_rootward_without_tree_fanin(forest, column)?;
     let diagonal_radius = required_rootward_without_tree_fanin(forest, diagonal)?;
     let final_radius = if diagonal_radius.get() >= column_radius.get() {
@@ -4115,10 +4234,19 @@ fn size_bifurcation_candidate(
     request: &TerminalCcoRequest,
     host: MemberKey,
 ) -> Result<(), CcoError> {
-    let upper = forest.parent_of(host).ok_or(CcoError::InvalidGeometry)?;
-    let child = forest
-        .parent_of(request.stub)
-        .ok_or(CcoError::InvalidGeometry)?;
+    let upper = forest.parent_of(host).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "size_bifurcation_candidate: host member {host:?} has no parent (upper) after \
+             bifurcation was applied"
+        ))
+    })?;
+    let child = forest.parent_of(request.stub).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "size_bifurcation_candidate: stub {:?} has no parent (child) after \
+             bifurcation was applied",
+            request.stub
+        ))
+    })?;
 
     let junction_radius = required_rootward_without_tree_fanin(forest, host)?;
     let host_terminal = forest
@@ -4182,8 +4310,14 @@ fn uniformly_size_ancestor_path(
         let incoming = incoming_radius.get().get();
         let murray = (entry.powi(4) + incoming.powi(4)).powf(0.25);
         let no_fanin = required_rootward_without_tree_fanin(forest, key)?;
-        let radius = PositiveFinite::new(murray.max(no_fanin.get()))
-            .map_err(|_| CcoError::InvalidGeometry)?;
+        let no_fanin_mm = no_fanin.get();
+        let radius = PositiveFinite::new(murray.max(no_fanin_mm)).map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "uniformly_size_ancestor_path: Murray's-law radius blend at member {key:?} \
+                 is not positive-finite (murray-law radius {murray} mm, minimum radius \
+                 {no_fanin_mm} mm): {error}"
+            ))
+        })?;
         forest.set_radii(
             key,
             TerminalEndRadius::new(radius),
@@ -4205,8 +4339,15 @@ fn propagate_carried(
 ) -> Result<(), CcoError> {
     loop {
         let member = forest.member(key).ok_or(ForestError::InactiveKey(key))?;
-        let carried = Finite::new(member.carried_mm2().get() + added.get())
-            .map_err(|_| CcoError::InvalidGeometry)?;
+        let existing_carried_mm2 = member.carried_mm2().get();
+        let added_mm2 = added.get();
+        let carried = Finite::new(existing_carried_mm2 + added_mm2).map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "propagate_carried: adding carried area at member {key:?} (existing \
+                 {existing_carried_mm2} mm2 plus added {added_mm2} mm2) produced a \
+                 non-finite value: {error}"
+            ))
+        })?;
         forest.set_carried_mm2(key, carried)?;
         let Some(parent) = forest.parent_of(key) else {
             break;
@@ -4240,13 +4381,14 @@ fn cco_terminal_radius(
     request: &TerminalCcoRequest,
     config: &Config,
 ) -> Result<PositiveFinite, CcoError> {
-    PositiveFinite::new(
-        request
-            .tip_radius_mm()
-            .get()
-            .max(config.min_shoot_radius_mm.get()),
-    )
-    .map_err(|_| CcoError::InvalidGeometry)
+    let tip_radius_mm = request.tip_radius_mm().get();
+    let min_shoot_radius_mm = config.min_shoot_radius_mm.get();
+    PositiveFinite::new(tip_radius_mm.max(min_shoot_radius_mm)).map_err(|error| {
+        CcoError::InvalidGeometry(format!(
+            "cco_terminal_radius: tip radius {tip_radius_mm} mm blended with minimum shoot \
+             radius {min_shoot_radius_mm} mm is not positive-finite: {error}"
+        ))
+    })
 }
 
 fn clearance_rows(forest: &Forest, snapshot: &Forest, config: &Config) -> Vec<ClearanceRow> {
@@ -4306,15 +4448,24 @@ fn candidate_price(
             let strut = candidate
                 .parent_of(request.stub)
                 .and_then(|key| candidate.member(key))
-                .ok_or(CcoError::InvalidGeometry)?;
+                .ok_or_else(|| {
+                    CcoError::InvalidGeometry(format!(
+                        "candidate_price: model-anchor stub {:?} has no live parent \
+                         member to price",
+                        request.stub
+                    ))
+                })?;
             return member_volume(strut);
         }
         Descriptor::Bifurcate { .. } => return Ok(ordinary_delta_ml),
         Descriptor::Plate { .. } => {}
     }
-    let first = candidate
-        .parent_of(request.stub)
-        .ok_or(CcoError::InvalidGeometry)?;
+    let first = candidate.parent_of(request.stub).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "candidate_price: plate-descent stub {:?} has no parent member to price",
+            request.stub
+        ))
+    })?;
     let (diagonal, column) = if candidate
         .member(first)
         .is_some_and(|member| member.p1_mm()[2].get() == request.plate_z_mm().get())
@@ -4323,9 +4474,12 @@ fn candidate_price(
     } else {
         (
             Some(first),
-            candidate
-                .parent_of(first)
-                .ok_or(CcoError::InvalidGeometry)?,
+            candidate.parent_of(first).ok_or_else(|| {
+                CcoError::InvalidGeometry(format!(
+                    "candidate_price: plate-descent diagonal member {first:?} has no \
+                     parent (column) to price"
+                ))
+            })?,
         )
     };
     let diagonal_delta = diagonal.map_or(Ok(0.0), |key| {
@@ -4362,7 +4516,12 @@ fn candidate_price(
             [distance, 0.0, distance],
             MemberKind::Shoot,
             config.min_shoot_radius_mm,
-            Finite::new(0.0).map_err(|_| CcoError::InvalidGeometry)?,
+            Finite::new(0.0).map_err(|error| {
+                CcoError::InvalidGeometry(format!(
+                    "candidate_price: brace-rod pricing constant carried area 0.0 mm2 \
+                     failed Finite::new, which should be unreachable: {error}"
+                ))
+            })?,
         )?;
         let rod_radius = config.brace_radius_mm.max(raw.get() * 0.5_f64.powf(0.25));
         rung_count as f64 * 2.0 * std::f64::consts::PI * rod_radius.powi(2) * rod_length
@@ -4411,10 +4570,13 @@ fn member_volume(member: &Member) -> Result<f64, CcoError> {
     let r1 = member.rootward_radius_mm().get().get();
     let volume = std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
         / MILLIMETRES_PER_MILLILITRE;
-    volume
-        .is_finite()
-        .then_some(volume)
-        .ok_or(CcoError::InvalidGeometry)
+    volume.is_finite().then_some(volume).ok_or_else(|| {
+        CcoError::InvalidGeometry(format!(
+            "member_volume: computed volume is not finite (volume_ml = {volume}) for a \
+             member of length {length} mm, terminal radius {r0} mm, rootward radius \
+             {r1} mm"
+        ))
+    })
 }
 
 fn junction_feasible(
@@ -4472,7 +4634,14 @@ fn radius_along(host: &Member, point: [f64; 3]) -> Result<PositiveFinite, CcoErr
     };
     let r0 = host.terminal_radius_mm().get().get();
     let r1 = host.rootward_radius_mm().get().get();
-    PositiveFinite::new(r0 + t * (r1 - r0)).map_err(|_| CcoError::InvalidGeometry)
+    let interpolated = r0 + t * (r1 - r0);
+    PositiveFinite::new(interpolated).map_err(|error| {
+        CcoError::InvalidGeometry(format!(
+            "radius_along: radius interpolated at t={t} between terminal radius {r0} mm \
+             and rootward radius {r1} mm is not positive-finite (interpolated \
+             {interpolated} mm): {error}"
+        ))
+    })
 }
 
 fn finite3(values: [f64; 3]) -> Result<[Finite; 3], CcoError> {
@@ -4480,9 +4649,18 @@ fn finite3(values: [f64; 3]) -> Result<[Finite; 3], CcoError> {
         .map(Finite::new)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CcoError::InvalidGeometry)?
+        .map_err(|error| {
+            CcoError::InvalidGeometry(format!(
+                "finite3: point {values:?} has a non-finite coordinate: {error}"
+            ))
+        })?
         .try_into()
-        .map_err(|_| CcoError::InvalidGeometry)
+        .map_err(|_: Vec<Finite>| {
+            CcoError::InvalidGeometry(format!(
+                "finite3: converting the validated 3-coordinate Vec back to [Finite; 3] \
+                 for point {values:?} failed length invariant, which should be unreachable"
+            ))
+        })
 }
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]

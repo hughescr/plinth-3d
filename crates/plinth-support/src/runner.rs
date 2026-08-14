@@ -442,8 +442,18 @@ pub enum SupportRunError {
     InvalidDerivedFrame,
     #[error("support run requires non-zero explicit resource caps")]
     InvalidResourceCaps,
-    #[error("sealed support run failed during {0:?}")]
-    Failed(SupportRunPhase),
+    /// FU-truthful-errors: `detail` used to not exist. Every `Failed` was
+    /// constructed either by `.map_err(|_| ..)`, which threw the real
+    /// underlying error away, or (on the coverage-closure controller's first
+    /// attempt specifically) by discarding an error that WAS in hand — see
+    /// `repair_plan_or_stage_failure`. `detail` is that error's message,
+    /// so a `Failed` now says what actually happened instead of only which
+    /// phase it happened in.
+    #[error("sealed support run failed during {phase:?}: {detail}")]
+    Failed {
+        phase: SupportRunPhase,
+        detail: String,
+    },
     /// FU-56: the coverage-closure controller could not admit every measured
     /// island within the registered attempt bound. Boxed because
     /// [`crate::coverage_closure::CoverageClosureRefusal`] carries the whole
@@ -516,9 +526,13 @@ impl FinalSupportAuthority<'_> {
     }
 
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
-        self.lowered
-            .into_supported_model()
-            .map_err(|_| SupportRunError::Failed(SupportRunPhase::Lowering))
+        self.lowered.into_supported_model().map_err(|error| SupportRunError::Failed {
+            phase: SupportRunPhase::Lowering,
+            detail: format!(
+                "materializing the final emittable scene from the sealed authority failed: \
+                 {error:?}"
+            ),
+        })
     }
 }
 
@@ -576,14 +590,20 @@ pub fn run_support<'a>(
         input.max_grid_bytes,
         Some(input.delicacy_by_face),
     )
-    .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    .map_err(|error| SupportRunError::Failed {
+        phase: SupportRunPhase::Preparation,
+        detail: format!("binding registered perception thresholds failed: {error}"),
+    })?;
     let selection_config = ContactSelectionConfig::current(
         Some(input.delicacy_by_face),
         input.coverage_samples_max_virtual_cells,
         input.coverage_score_matrix_max_entries,
         input.max_grid_bytes,
     )
-    .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    .map_err(|error| SupportRunError::Failed {
+        phase: SupportRunPhase::Preparation,
+        detail: format!("binding registered contact-selection policy failed: {error}"),
+    })?;
     let max_attempts = selection_config.coverage_repair_max_attempts();
     let matrix_budget = selection_config.coverage_score_matrix_max_entries;
     let authority = SupportPreparationAuthority::new(
@@ -601,14 +621,21 @@ pub fn run_support<'a>(
         input.max_primitive_bytes,
     );
 
-    let coverage_request = crate::coverage_closure::registered_coverage_request()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let coverage_request = crate::coverage_closure::registered_coverage_request().map_err(
+        |error| SupportRunError::Failed {
+            phase: SupportRunPhase::Preparation,
+            detail: format!("binding the registered coverage-closure request failed: {error}"),
+        },
+    )?;
     let radius_mm = coverage_request.radius_mm().get();
 
     let (mut context, mut plan) =
         prepare_support_context(hollowed, request, authority).map_err(|error| {
             note_stage_failure("Preparation", &error);
-            SupportRunError::Failed(SupportRunPhase::Preparation)
+            SupportRunError::Failed {
+                phase: SupportRunPhase::Preparation,
+                detail: error.to_string(),
+            }
         })?;
 
     let mut failed: BTreeSet<RepairRowId> = BTreeSet::new();
@@ -840,7 +867,17 @@ fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
     history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
 ) -> SupportRunError {
     if attempt == 0 {
-        return SupportRunError::Failed(phase);
+        // FU-truthful-errors: this used to be `SupportRunError::Failed(phase)`,
+        // which threw `error` away entirely. The study that measured all
+        // seven large-mini failures found this was the run most likely to
+        // hold the real bug, because it is the one whose evidence never made
+        // it into the printed output: `error` carries the exact same detail
+        // the attempt >= 1 branch below already keeps, so there is no reason
+        // attempt 0 should be the one case that loses it.
+        return SupportRunError::Failed {
+            phase,
+            detail: format!("{error:?}"),
+        };
     }
     SupportRunError::CoverageClosure(Box::new(
         crate::coverage_closure::CoverageClosureRefusal {
@@ -7190,7 +7227,10 @@ mod tests {
                 support_request(),
                 production_input(&short_layers, &delicacy),
             ),
-            Err(SupportRunError::Failed(SupportRunPhase::Preparation))
+            Err(SupportRunError::Failed {
+                phase: SupportRunPhase::Preparation,
+                ..
+            })
         ));
 
         // Same model and same doomed layer plan, malformed caps: the cap
@@ -7203,5 +7243,59 @@ mod tests {
             run_support(hollowed, support_request(), input),
             Err(SupportRunError::InvalidResourceCaps)
         ));
+    }
+
+    /// FU-truthful-errors: `repair_plan_or_stage_failure` used to discard
+    /// `error` outright whenever `attempt == 0`, returning a bare
+    /// `SupportRunError::Failed(phase)` that could not say what actually
+    /// failed — exactly the attempt most likely to hold the real bug, per
+    /// the study's diagnosis, because every OTHER attempt already kept its
+    /// error via the `attempt >= 1` branch below. This pins that attempt 0
+    /// keeps the same detail attempt 1 does, so a future edit that
+    /// reintroduces the discard fails here instead of only being found by
+    /// re-running hours of instrumentation on real models.
+    #[test]
+    fn a_stage_error_is_not_discarded_at_attempt_zero() {
+        #[derive(Debug)]
+        struct DistinctiveError(&'static str);
+        let error = DistinctiveError("distinctive-marker-9f3c1e");
+
+        let attempt_zero = repair_plan_or_stage_failure(
+            0,
+            SupportRunPhase::Routing,
+            &error,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+        );
+        let SupportRunError::Failed { phase, detail } = attempt_zero else {
+            panic!("expected SupportRunError::Failed at attempt 0, got {attempt_zero:?}");
+        };
+        assert_eq!(phase, SupportRunPhase::Routing);
+        assert!(
+            detail.contains("distinctive-marker-9f3c1e"),
+            "attempt 0 must carry the real error in its detail, got: {detail:?}"
+        );
+
+        // Attempt 1 already kept this same detail before this fix; pinning
+        // both together is what makes "attempt 0 is the one that loses it"
+        // a checkable claim rather than an assertion about one branch only.
+        let attempt_one = repair_plan_or_stage_failure(
+            1,
+            SupportRunPhase::Routing,
+            &error,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+        );
+        let SupportRunError::CoverageClosure(refusal) = attempt_one else {
+            panic!("expected SupportRunError::CoverageClosure at attempt 1, got {attempt_one:?}");
+        };
+        let crate::coverage_closure::CoverageClosureReason::RepairPlanRefused { detail, .. } =
+            &refusal.reason
+        else {
+            panic!("expected RepairPlanRefused, got {:?}", refusal.reason);
+        };
+        assert!(detail.contains("distinctive-marker-9f3c1e"));
     }
 }
