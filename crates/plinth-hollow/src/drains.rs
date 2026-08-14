@@ -1016,6 +1016,10 @@ fn label_chambers(
 /// chamber with two feet has two lobes and gets two drains, which is the
 /// behaviour the retired Python engine had and the reason it left 0.27 mL of
 /// resin in a model where a single drain left 14 mL.
+///
+/// Each lobe's ray origin comes from [`drain_site`], which guarantees the one
+/// thing `plan` needs and cannot check for itself: the origin is inside the
+/// void of the extracted mesh, not inside wall material.
 fn low_lobes(
     field: &CavityField,
     chambers: &Chambers,
@@ -1096,16 +1100,16 @@ fn low_lobes(
             .map(|member| field.world_at_flat(*member))
             .filter(|point| point[2] < lobe_low + 1.0)
             .collect();
-        let mut origin = [0.0; 3];
+        let mut aim = [0.0; 3];
         for point in &low_points {
-            origin[0] += point[0];
-            origin[1] += point[1];
-            origin[2] += point[2];
+            aim[0] += point[0];
+            aim[1] += point[1];
         }
         let count = low_points.len() as f64;
-        origin[0] /= count;
-        origin[1] /= count;
-        origin[2] = lobe_low;
+        aim[0] /= count;
+        aim[1] /= count;
+        aim[2] = lobe_low;
+        let origin = drain_site(field, &members, aim)?;
         lobes.push(Lobe {
             id,
             chamber,
@@ -1123,6 +1127,89 @@ fn low_lobes(
             .then(left.first_flat.cmp(&right.first_flat))
     });
     Ok(lobes)
+}
+
+/// The one cell a lobe casts its drain rays from.
+///
+/// **The invariant.** A drain ray origin must be strictly inside the cavity of
+/// the **extracted triangle mesh**, not merely inside the cavity **voxel
+/// mask**. `plan` casts these rays against `candidate.mesh()` and keeps only
+/// the candidates that cross exactly twice — cavity wall, then outer shell. An
+/// origin that sits in wall material instead of in the void crosses an odd
+/// number of times in every direction, so every direction is discarded and the
+/// whole model is refused with `NoExit`, on a cavity that is in fact drainable.
+///
+/// **Why the two representations disagree.** The mask is voxel centres; the
+/// mesh is a surface-nets extraction of that mask. A surface-nets vertex for a
+/// boundary cell lies inside the closed cell whose corners include at least one
+/// selected voxel centre, so the extracted surface can pass within one voxel
+/// body diagonal of a selected centre. The retired
+/// `HOLLOW_CAVITY_MARCH_MARGIN_MM` (pitch x sqrt(3), 0.866 mm) was doing two
+/// jobs at once: it guaranteed the wall by construction, and it separately
+/// guaranteed that every selected centre sat at least one body diagonal inside
+/// the extracted surface. Only the first job was recorded when the margin
+/// became zero. This function carries the second job explicitly, so it no
+/// longer depends on the value of any registered constant.
+///
+/// **What is admitted.** Only a cell every one of whose 26 neighbours is also a
+/// mask member. The eight dual cells that have such a cell's centre as a corner
+/// then have all eight of their own corners selected, so none of them holds a
+/// surface-nets vertex, and no extracted triangle enters the pitch-wide cube
+/// around that centre. The origin is therefore at least half a pitch clear of
+/// the cavity surface in every axis direction — measured clearance for the one
+/// model that already worked, and the clearance the margin used to supply.
+/// This is a **tightening** of which cells may be aimed from.
+///
+/// **How one is chosen.** Lowest first, because a drain that is not at the
+/// bottom of the lobe leaves resin behind; ties broken by nearness to `aim`,
+/// the arithmetic mean of the lobe's lowest points, then by cell index so the
+/// plan does not depend on iteration order.
+///
+/// **When no cell qualifies** — a lobe one voxel thick, which no drain bore
+/// fits through anyway — the nearest real member centre to `aim` is returned
+/// instead. That is still a genuine cell centre rather than an average of
+/// several, and it fails, if it fails, with the same honest `NoExit` the caller
+/// reported before.
+fn drain_site(
+    field: &CavityField,
+    members: &[usize],
+    aim: V3,
+) -> Result<V3, DrainPlanningRefusal> {
+    members
+        .iter()
+        .map(|member| {
+            let point = field.world_at_flat(*member);
+            let reach = (point[0] - aim[0]).powi(2) + (point[1] - aim[1]).powi(2);
+            (!interior_to_mask(field, *member), point[2], reach, *member)
+        })
+        .min_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(left.1.total_cmp(&right.1))
+                .then(left.2.total_cmp(&right.2))
+                .then(left.3.cmp(&right.3))
+        })
+        .map(|(_, _, _, member)| field.world_at_flat(member))
+        .ok_or(DrainPlanningRefusal::NonFinite {
+            role: HoleRole::Drain,
+        })
+}
+
+/// Is every one of this cell's 26 neighbours also a member of the cavity mask?
+///
+/// A cell on the grid boundary answers `false`: it has fewer than 26 neighbours
+/// and an eroded cavity never reaches the boundary anyway.
+fn interior_to_mask(field: &CavityField, flat: usize) -> bool {
+    let [x, y, z] = field.flat_to_index(flat);
+    let [nx, ny, nz] = field.dimensions();
+    if x == 0 || y == 0 || z == 0 || x + 1 >= nx || y + 1 >= ny || z + 1 >= nz {
+        return false;
+    }
+    let plane = nx * ny;
+    let base = flat - plane - nx - 1;
+    (0..3).all(|dz| {
+        (0..3).all(|dy| (0..3).all(|dx| field.contains_flat(base + dz * plane + dy * nx + dx)))
+    })
 }
 
 /// Air-intake sites in the top band of **each** chamber.
@@ -1903,6 +1990,25 @@ mod tests {
     /// a shorter sampled exit is LESS wall to penetrate, not more. No margin
     /// constant was needed for this re-record either.
     ///
+    /// **Re-recorded a THIRD time, 2026-08-13, by the drain-origin fix.** The
+    /// second re-record above is exactly the defect it recorded. Zeroing the
+    /// march margin also removed the clearance that kept a drain ray origin
+    /// inside the void of the EXTRACTED mesh, so the drain moved down onto the
+    /// lowest cavity voxel centre — a centre the extracted surface cuts
+    /// through. On the Sphere the ray still found its two crossings and the
+    /// number looked plausible; on the Giant Toad the same 0.08 mm error put
+    /// the origin in solid wall and refused a 12 mL cavity outright. Drain
+    /// origins are now the lowest MASK-INTERIOR cell (see `drain_site`), which
+    /// puts the Sphere's drain back where the margin used to put it: `[0, 0,
+    /// 3.0]` -> `[0, 0, 3.5]`, `wall_mm` 3.5 -> 4.0. The vent does not move —
+    /// vent sites were never built from an average. The baseline's
+    /// `drain_keepouts[0].p0` of `[0, 0, 7.5]` was left behind by the second
+    /// re-record and is correct again at these values, so the artifact is
+    /// self-consistent for the first time since that record.
+    ///
+    /// **No registered constant moved for this re-record**, and the admission
+    /// only ever got tighter: fewer cells may be aimed from than before.
+    ///
     /// The `lobe_ml` field beside these is deliberately left as it was. It
     /// was not re-recorded by FU-51 and nothing in the engine reads it, so
     /// regenerating it here would be exactly the silent side-effect
@@ -1933,14 +2039,14 @@ mod tests {
             [
                 Finite::new(0.0).expect("finite"),
                 Finite::new(0.0).expect("finite"),
-                Finite::new(3.0).expect("finite"),
+                Finite::new(3.5).expect("finite"),
             ]
         );
         assert_eq!(
             baseline["drains"][0]["wall_mm"]
                 .as_f64()
                 .expect("drain wall_mm"),
-            3.5
+            4.0
         );
         assert_eq!(
             xyz(&baseline["vent"]["xyz"]),
@@ -1993,15 +2099,17 @@ mod tests {
         // engine's own, and they are pinned twice over. First as values, so a
         // moved keepout cannot pass silently:
         // holes[0]'s keepout moved 2026-08-12 with its centre, FU-53 (the
-        // note above holes[0].center_mm), and again on 2026-08-13 with the
-        // owner ruling that zeroed the march margin: 7.5 -> 7.0, tracking
-        // the centre's own 3.5 -> 3.0 exactly.
+        // note above holes[0].center_mm), again on 2026-08-13 with the owner
+        // ruling that zeroed the march margin (7.5 -> 7.0, tracking the
+        // centre's own 3.5 -> 3.0 exactly), and a third time the same day
+        // with the drain-origin fix that put the centre back at 3.5, so this
+        // is 7.0 -> 7.5 by the same relation.
         assert_eq!(
             holes[0].keepout_start_mm,
             [
                 Finite::new(0.0).expect("finite"),
                 Finite::new(0.0).expect("finite"),
-                Finite::new(7.0).expect("finite"),
+                Finite::new(7.5).expect("finite"),
             ]
         );
         assert_eq!(
@@ -2443,5 +2551,131 @@ mod tests {
             DrainPlanningRefusal::ResourceLimitExceeded { requested_bytes, cap_bytes }
                 if *requested_bytes == exact && *cap_bytes == exact - 1
         ));
+    }
+}
+
+/// The one invariant `plan` needs from `low_lobes` and cannot check for
+/// itself: a drain ray starts in the void, not in wall material.
+///
+/// **The defect this pins.** `low_lobes` used to aim from the arithmetic mean
+/// of a lobe's lowest voxel centres, held at the lobe's lowest z exactly. Two
+/// things are wrong with that point and both were measured on real models.
+/// The mean of a non-convex low band need not be in the band at all — on the
+/// Giant Bat it was not even a cavity mask member. And the lowest voxel plane
+/// is precisely where the surface-nets extraction cuts, so even a true member
+/// centre there can sit a fraction of a voxel INSIDE the wall of the extracted
+/// mesh: 0.083 mm on the Giant Toad, 0.25 mm on this treant. A ray from
+/// inside solid material crosses a closed surface an odd number of times, so
+/// `exit_length`'s "exactly two crossings" discarded every direction and the
+/// planner refused the whole model with `NoExit` — on a cavity that drains
+/// perfectly well from a point one voxel higher.
+///
+/// **Why a whole-model test and not a unit test on a hand-built mask.** The
+/// disagreement is between two representations of the same cavity, the voxel
+/// mask and the triangle mesh extracted from it. Only a real extraction has
+/// it. This one is the committed, frozen, post-orient Weeping Treant, so the
+/// test needs no file outside the repository.
+#[cfg(test)]
+mod drain_origins_start_in_the_void {
+    use super::*;
+    use crate::create_shell;
+    use plinth_mesh::{load_binary_stl, WeldPolicy};
+
+    /// Crossings of the shell along `direction` from `origin`, in order,
+    /// counted with the same kernel the planner itself casts with.
+    fn crossings(shell: &plinth_mesh::Mesh, pitch: f64, origin: V3, direction: V3) -> Vec<f64> {
+        let surface = NativeSurface::from_indexed(
+            shell.verts(),
+            shell.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: pitch,
+                max_grid_bytes: usize::MAX,
+            },
+        )
+        .expect("committed shell indexes");
+        let (offsets, ts, _) = surface
+            .cast_rays(&[origin], &[direction], 45.0)
+            .expect("one ray");
+        let begin = offsets[0] as usize;
+        let end = offsets[1] as usize;
+        ts[begin..end].to_vec()
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "429,120-face corpus fixture; run under cargo test --release"
+    )]
+    fn the_committed_treant_aims_its_drain_from_inside_the_cavity_not_from_the_wall() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl");
+        assert!(
+            path.is_file(),
+            "RequiredCorpusFixtureMissing: {} is committed evidence and must be present",
+            path.display()
+        );
+        let source = load_binary_stl(&path, WeldPolicy::None).expect("committed frozen STL");
+        assert_eq!(source.tris().len(), 429_120, "the fixture itself moved");
+        let settings = crate::HollowSettings::from_registered_constants().expect("M0 settings");
+        let candidate = create_shell(source, settings).expect("the treant hollows");
+        let pitch = candidate.cavity_field().pitch_mm().get();
+
+        // 1. **The refusal this fix removes.** Before it, this call returned
+        //    `NoExit { lobe_id: 1 }` with all five registered drain directions
+        //    reporting one crossing apiece — the signature of a ray that
+        //    started in solid.
+        let shell = candidate.mesh().clone();
+        let planned = plan_drains(candidate).expect("the treant plans its drains");
+        let holes = planned.drain_plan().holes();
+        let drains: Vec<&HoleGeometry> = holes
+            .iter()
+            .filter(|hole| hole.role == HoleRole::Drain)
+            .collect();
+        let vents = holes.len() - drains.len();
+        assert_eq!(drains.len(), 1, "{holes:?}");
+        assert_eq!(vents, 1, "{holes:?}");
+
+        // 2. **Where it aims from**, pinned: a real cell centre on the voxel
+        //    lattice (every coordinate a multiple of the 0.5 mm pitch, which
+        //    an average of 28 points is not), two pitches above the retired
+        //    mean.
+        let origin = drains[0].center_mm.map(|value| value.get());
+        assert_eq!(origin, [-20.0, -15.0, 8.5]);
+
+        // 3. **Why that point and not the old one**, measured against the
+        //    extracted shell with the planner's own caster rather than
+        //    recomputed here. A ray from a point strictly inside a closed
+        //    surface crosses it an even number of times in every direction; a
+        //    ray from inside the material crosses an odd number.
+        //
+        //    The retired mean for this same lobe was
+        //    `[-19.803571..., -14.892857..., 7.5]` — measured, by running the
+        //    retired expression once against this fixture. One crossing
+        //    downward and three upward: odd both ways, so that point was
+        //    inside the material, 0.25 mm below the cavity ceiling it was
+        //    supposed to be draining. That pair of counts IS the refusal
+        //    reported above.
+        let retired = [-19.803_571_428_571_427, -14.892_857_142_857_142, 7.5];
+        let retired_down = crossings(&shell, pitch, retired, [0.0, 0.0, -1.0]);
+        let retired_up = crossings(&shell, pitch, retired, [0.0, 0.0, 1.0]);
+        assert_eq!(
+            (retired_down.len(), retired_up.len()),
+            (1, 3),
+            "even counts here mean the fixture or the extraction moved, \
+             not that the defect is gone: down {retired_down:?} up {retired_up:?}"
+        );
+        assert_eq!(retired_up[0], 0.25, "{retired_up:?}");
+
+        //    The origin the planner uses now, from the same caster: two
+        //    crossings down and two up. The cavity wall below it is 0.75 mm
+        //    away and the ceiling 12.25 mm above — both clear of the half
+        //    pitch (0.25 mm) `drain_site` guarantees, where the retired mean
+        //    was 0.082 mm on the WRONG side of the same wall.
+        let down = crossings(&shell, pitch, origin, [0.0, 0.0, -1.0]);
+        let up = crossings(&shell, pitch, origin, [0.0, 0.0, 1.0]);
+        assert_eq!(down.len(), 2, "{down:?}");
+        assert_eq!(up.len(), 2, "{up:?}");
+        assert_eq!(down[0], 0.75, "{down:?}");
+        assert_eq!(up[0], 12.25, "{up:?}");
     }
 }
