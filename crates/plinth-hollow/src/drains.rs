@@ -1182,10 +1182,12 @@ fn low_lobes(
 /// plan does not depend on iteration order.
 ///
 /// **When no cell qualifies** — a lobe one voxel thick, which no drain bore
-/// fits through anyway — the nearest real member centre to `aim` is returned
-/// instead. That is still a genuine cell centre rather than an average of
-/// several, and it fails, if it fails, with the same honest `NoExit` the caller
-/// reported before.
+/// fits through anyway — the same ordering runs over every member instead, so
+/// the lowest member centre is returned, ties broken by nearness to `aim` and
+/// then by cell index. Note that this is the LOWEST member and not simply the
+/// nearest one: the first sort key falls away, the other three do not. That is
+/// still a genuine cell centre rather than an average of several, and it fails,
+/// if it fails, with the same honest `NoExit` the caller reported before.
 fn drain_site(
     field: &CavityField,
     members: &[usize],
