@@ -204,9 +204,19 @@ pub enum SupportedGeometry {
     ///
     /// The refusal string is the runner's own message plus the model-scaled
     /// caps it was measured against, because a refusal without its bound is
-    /// not a measurement.
+    /// not a measurement. `stage` is the same fact as a value rather than a
+    /// substring of that message, so a reader (or a downstream tool) can tell
+    /// "the planner never got started" from "the sealed run died in Lowering"
+    /// without parsing prose.
+    ///
+    /// `stage` is `Option` for wire compatibility only: a report or coverage
+    /// sidecar serialized before the field existed still deserializes, with
+    /// `None` meaning "this record predates the field", never "no stage
+    /// refused it". Every value this pipeline writes is `Some`.
     DrilledShellRefusedBySupport {
         drilled_faces: usize,
+        #[serde(default)]
+        stage: Option<ShellRefusalStage>,
         refusal: String,
     },
     /// The hollow stage itself **errored** -- it neither hollowed nor decided
@@ -241,11 +251,18 @@ pub enum SupportedGeometry {
     /// So
     /// the model handed to support planning is stamped `BelowThreshold` by a
     /// stage that never reached a threshold test, and that stamp is an
-    /// imprecision this seam knowingly inherits -- the same one the
-    /// support-refusal path above already carries, for the same reason: it is
-    /// the only handoff `plinth-hollow` exposes to a caller holding an
-    /// oriented solid, and it is the one every sealed-run gate and the whole
-    /// OD-8 census already travel. **This variant is where the truth lives.**
+    /// imprecision this seam knowingly inherits: it is the handoff
+    /// `plinth-hollow` exposes to a caller holding an oriented solid, and it
+    /// is the one every sealed-run gate and the whole OD-8 census already
+    /// travel.
+    ///
+    /// **The support-refusal path above no longer shares it, and this one
+    /// still does.** That path now records
+    /// [`plinth_hollow::SolidDecisionReason::DrilledShellRefused`], which says
+    /// what happened to it; the same remedy — a named reason for "the hollow
+    /// stage errored" — has not been applied here, so this stamp is a known
+    /// remaining gap rather than a settled design. **This variant is where the
+    /// truth lives.**
     /// `refusal` is the typed `HollowError`'s own `Display`, verbatim and
     /// unedited, so the artifact's real provenance is recoverable from the
     /// outcome even though the `HollowedModel`'s own reason field cannot
@@ -253,6 +270,95 @@ pub enum SupportedGeometry {
     /// retained-solid/below-threshold verdict and be misled; read this variant
     /// beside it.
     HollowStageRefused { refusal: String },
+}
+
+/// Which stage refused a drilled shell, as a value rather than a substring of
+/// a rendered message.
+///
+/// Only a support refusal ever reaches the oriented-solid reserve (see
+/// [`ChainStop::is_support_refusal`]), so these are the only two stages that
+/// can speak here, and a stop that is not a support refusal has no stage of
+/// this kind at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum ShellRefusalStage {
+    /// The support planner refused the shell — [`PipelineError::Support`].
+    SupportPlanning,
+    /// The sealed support run refused it — [`PipelineError::SealedRun`].
+    /// `phase` is the runner's own phase when the refusal named one; it is
+    /// `None` for the two setup refusals (`InvalidDerivedFrame`,
+    /// `InvalidResourceCaps`), which happen before any phase runs.
+    SealedRun {
+        #[serde(default)]
+        phase: Option<plinth_support::SupportRunPhase>,
+    },
+}
+
+impl std::fmt::Display for ShellRefusalStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SupportPlanning => formatter.write_str("support planning"),
+            Self::SealedRun { phase: Some(phase) } => {
+                write!(formatter, "the sealed support run during {phase:?}")
+            }
+            Self::SealedRun { phase: None } => formatter.write_str("the sealed support run"),
+        }
+    }
+}
+
+/// A drilled shell that **existed** and was refused, kept so the fact survives
+/// whatever happens to the oriented solid that replaced it.
+///
+/// The substitution succeeds far more often than it fails, and when it
+/// succeeds [`SupportedGeometry::DrilledShellRefusedBySupport`] carries this
+/// story into the report and the coverage sidecar. When it *fails* — the
+/// substituted solid refused or errored in its own right — that geometry
+/// record dies with the outcome, and without this the final error says only
+/// what the solid did. A reader of the Giant Bat's, the treant's or the
+/// swallowing toad's report then cannot tell whether a shell was ever built,
+/// which is the difference between "this model cannot be hollowed" and "this
+/// model was hollowed and the support engine could not carry it".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrilledShellRefusal {
+    /// The face count of the shell that was actually built and drilled.
+    pub drilled_faces: usize,
+    /// Where it was refused.
+    pub stage: ShellRefusalStage,
+    /// That refusal's own rendered detail, bounds included.
+    pub detail: String,
+}
+
+impl DrilledShellRefusal {
+    /// Read the record off the stop that refused the shell.
+    ///
+    /// # Panics
+    ///
+    /// Never in this pipeline: the only caller is the substitution seam, which
+    /// is reached only when [`ChainStop::is_support_refusal`] holds, and every
+    /// such stop has a stage. A stop without one would mean the guard and this
+    /// function disagree about what a support refusal is, and a record naming
+    /// the wrong stage is worse than no record.
+    #[must_use]
+    fn from_stop(drilled_faces: usize, stop: &ChainStop) -> Self {
+        let stage = stop
+            .shell_refusal_stage()
+            .expect("only a support refusal reaches the oriented-solid reserve");
+        Self {
+            drilled_faces,
+            stage,
+            detail: stop.detail(),
+        }
+    }
+
+    /// The sentence carried into a later failure's evidence.
+    #[must_use]
+    fn sentence(&self) -> String {
+        format!(
+            "a hollow shell was built and drilled ({} faces) and refused at {}: {}; \
+             the oriented solid was substituted for it and then failed as stated above",
+            self.drilled_faces, self.stage, self.detail
+        )
+    }
 }
 
 /// The refused gate attempt, carried whole rather than rendered.
@@ -303,6 +409,14 @@ pub struct ChainStop {
     /// that weight on every `ChainStop`, including the overwhelming majority
     /// that never carry one.
     evidence: Option<Box<crate::coverage_evidence::CoverageRefusalEvidence>>,
+    /// The drilled shell this model had, when a shell was built and refused
+    /// before the geometry behind this stop was tried. Attached by
+    /// [`Self::after_refused_shell`] on the substitution seam's own error
+    /// paths, and rendered by [`Self::detail`] so it reaches the report
+    /// whichever disposition the second failure lands in. Boxed for
+    /// [`Self::evidence`]'s reason: it carries a rendered refusal string, and
+    /// the overwhelming majority of stops never carry one.
+    refused_shell: Option<Box<DrilledShellRefusal>>,
 }
 
 impl ChainStop {
@@ -313,6 +427,7 @@ impl ChainStop {
             gate: None,
             measured_against: None,
             evidence: None,
+            refused_shell: None,
         }
     }
 
@@ -323,6 +438,7 @@ impl ChainStop {
             gate: Some(gate),
             measured_against: None,
             evidence: None,
+            refused_shell: None,
         }
     }
 
@@ -347,6 +463,51 @@ impl ChainStop {
     #[must_use]
     pub fn evidence(&self) -> Option<&crate::coverage_evidence::CoverageRefusalEvidence> {
         self.evidence.as_deref()
+    }
+
+    /// Record that a drilled shell was built and refused before the geometry
+    /// behind this stop was tried.
+    ///
+    /// Attached on **every** error path of the substitution seam, so a
+    /// substituted solid that fails in its own right cannot report as a model
+    /// that was never hollowed at all.
+    #[must_use]
+    pub fn after_refused_shell(mut self, refused_shell: DrilledShellRefusal) -> Self {
+        self.refused_shell = Some(Box::new(refused_shell));
+        self
+    }
+
+    /// The drilled shell that was built and refused before this stop's
+    /// geometry was tried, when there was one.
+    #[must_use]
+    pub fn refused_shell(&self) -> Option<&DrilledShellRefusal> {
+        self.refused_shell.as_deref()
+    }
+
+    /// Which stage refused this model, when the stop is a support refusal —
+    /// the only class the oriented-solid reserve answers.
+    ///
+    /// Derived from the typed error rather than from its rendered message, so
+    /// a reworded `Display` cannot silently change the recorded stage. `None`
+    /// for every other stop, which by [`Self::is_support_refusal`] cannot
+    /// reach the reserve at all.
+    #[must_use]
+    pub fn shell_refusal_stage(&self) -> Option<ShellRefusalStage> {
+        if !self.is_support_refusal() {
+            return None;
+        }
+        match &*self.error {
+            PipelineError::Support { .. } => Some(ShellRefusalStage::SupportPlanning),
+            PipelineError::SealedRun { source, .. } => Some(ShellRefusalStage::SealedRun {
+                phase: match source {
+                    plinth_support::SupportRunError::Failed { phase, .. } => Some(*phase),
+                    plinth_support::SupportRunError::InvalidDerivedFrame
+                    | plinth_support::SupportRunError::InvalidResourceCaps
+                    | plinth_support::SupportRunError::CoverageClosure(_) => None,
+                },
+            }),
+            _ => None,
+        }
     }
 
     /// The typed stage error behind this stop.
@@ -431,7 +592,14 @@ impl ChainStop {
     }
 
     /// The stop rendered with the source chain the `#[source]` attributes
-    /// carry, which `Display` alone drops.
+    /// carry, which `Display` alone drops — and, when a drilled shell was
+    /// built and refused before this geometry was tried, that fact beside it.
+    ///
+    /// The shell record is appended here rather than at the report boundary
+    /// because [`failure`] projects a stop into `Refused { violation }` or
+    /// `Failed { detail }` through this one function: appending it here is
+    /// what makes the record reach the run report on **both** dispositions,
+    /// and what makes it impossible to add a third and lose it again.
     #[must_use]
     pub fn detail(&self) -> String {
         let mut rendered = self.error.to_string();
@@ -445,6 +613,10 @@ impl ChainStop {
             rendered.push_str(" [");
             rendered.push_str(bounds);
             rendered.push(']');
+        }
+        if let Some(refused_shell) = &self.refused_shell {
+            rendered.push_str(" -- ");
+            rendered.push_str(&refused_shell.sentence());
         }
         rendered
     }
@@ -1066,12 +1238,16 @@ fn orient_model(
 ///    verdict nobody reached). Note that A5 internal-support planning does not
 ///    exist in this workspace, so this shell carries no internal supports.
 /// 3. If the sealed run refuses that shell, fall back to the oriented-solid
-///    reserve through the same `solid_decision…(BelowThreshold)` handoff that
-///    every sealed-run gate and the whole OD-8 census already use — the
-///    design record's F14 caveat, inherited deliberately and reported in
-///    [`SupportedGeometry`], not hidden. The **shell's** repair measurement
-///    travels onto that reserve: the shell is discarded here and it held the
-///    only other copy.
+///    reserve through `solid_decision…`, recording
+///    [`SolidDecisionReason::DrilledShellRefused`] — the reason that says what
+///    happened, where this used to stamp `BelowThreshold` and claim a savings
+///    measurement nobody took. The stage that refused the shell and its own
+///    detail are reported in [`SupportedGeometry`], not hidden. The **shell's**
+///    repair measurement travels onto that reserve: the shell is discarded here
+///    and it held the only other copy. If the substituted solid then fails or
+///    is refused in its own right, the shell's refusal travels on the failure
+///    too ([`ChainStop::after_refused_shell`]), so "was this model ever
+///    hollowed?" stays answerable from the report.
 ///
 /// **Cases 0 and 3 are fallbacks and say so.** Neither is the path the pipeline
 /// is meant to take; both exist so that a model the engine cannot yet hollow or
@@ -1111,11 +1287,11 @@ pub fn run_from_oriented(
         // Treant (FU-34, then FU-49 -- which is fixed, and the treant now
         // hollows, so this arm currently has no corpus model behind it and is
         // gated on a pre-hollowed fixture instead). Carry the oriented solid
-        // through the same
-        // `solid_decision(BelowThreshold)` handoff the support-refusal path
-        // below, `embed_incidence_census` and every sealed-run gate already
-        // use, and record the typed refusal verbatim in `SupportedGeometry`
-        // -- see `HollowStageRefused` for the provenance caveat this inherits.
+        // through the `solid_decision(BelowThreshold)` handoff
+        // `embed_incidence_census` and every sealed-run gate already use, and
+        // record the typed refusal verbatim in `SupportedGeometry` -- see
+        // `HollowStageRefused` for the provenance caveat this inherits, which
+        // the support-refusal path below no longer shares.
         // A hollow error that is *not* a refusal of this mesh's geometry is
         // this model's failure, full stop. The reserve says "the engine could
         // not hollow this shape"; it cannot say "the operator asked for a wall
@@ -1223,33 +1399,80 @@ pub fn run_from_oriented(
         // planner refusal is this model's `Failed` disposition, unchanged.
         Err(stop) if !stop.is_support_refusal() => Err(stop),
         Err(stop) => {
-            let solid = HollowedModel::solid_decision_recording_repair(
+            // **The shell existed, and everything after this line is about the
+            // solid.** Take the record of what happened to the shell first, as
+            // a value: this stop is the last thing that knows a shell was
+            // built at all, and both of the paths below can lose it -- the
+            // successful one by emitting a solid, the failing one by returning
+            // the solid's own error.
+            let refused_shell = DrilledShellRefusal::from_stop(drilled_faces, &stop);
+            let solid = substitute_solid_for_refused_shell(
+                model,
                 reserve_mesh,
                 reserve_history,
-                SolidDecisionReason::BelowThreshold,
                 reserve_cavity_repair,
                 reserve_wall,
-            )
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Hollow {
-                    model: model.clone(),
-                    source,
-                })
-            })?;
+                &refused_shell,
+            )?;
             seal_and_emit(
                 model,
                 source_faces,
                 solid,
                 SupportedGeometry::DrilledShellRefusedBySupport {
                     drilled_faces,
-                    refusal: stop.detail(),
+                    stage: Some(refused_shell.stage),
+                    refusal: refused_shell.detail.clone(),
                 },
                 policy,
                 target,
                 stop_after,
             )
+            // The substituted solid failed or was refused in its own right.
+            // Without this the report would say only what the *solid* did, and
+            // whether this model was ever hollowed would not be recoverable
+            // from the run at all.
+            .map_err(|stop| stop.after_refused_shell(refused_shell))
         }
     }
+}
+
+/// The oriented solid substituted for a drilled shell a later stage refused.
+///
+/// One function, so the reason recorded on the substitute cannot drift from
+/// the record of what actually happened to the shell: both come from here.
+///
+/// **The reason is [`SolidDecisionReason::DrilledShellRefused`], and it used
+/// to be `BelowThreshold`.** That older stamp said the savings gate had
+/// measured this model's cavity and found it under the registered minimum —
+/// next to a report line stating that the model's half-million-face drilled
+/// shell had just been refused. Nothing on this path measures a saving: the
+/// cavity passed every hollow-stage gate, the shell was built and drilled, and
+/// a later stage would not carry it. The stage that refused it and that
+/// refusal's own detail travel beside the reason, in
+/// [`SupportedGeometry::DrilledShellRefusedBySupport`] on the emitted record
+/// and in [`ChainStop::after_refused_shell`] when the solid fails too.
+fn substitute_solid_for_refused_shell(
+    model: &ModelId,
+    mesh: plinth_mesh::Mesh,
+    orientation: plinth_orient::OrientationHistory,
+    cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+    wall: Option<Finite>,
+    refused_shell: &DrilledShellRefusal,
+) -> Result<HollowedModel, ChainStop> {
+    HollowedModel::solid_decision_recording_repair(
+        mesh,
+        orientation,
+        SolidDecisionReason::DrilledShellRefused,
+        cavity_repair,
+        wall,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::Hollow {
+            model: model.clone(),
+            source,
+        })
+        .after_refused_shell(refused_shell.clone())
+    })
 }
 
 /// Whether a hollow-stage error is a refusal of **this mesh's geometry**, and
@@ -1770,6 +1993,188 @@ mod tests {
         assert!(
             !stop.is_support_refusal(),
             "a coverage-closure refusal must not be answered with a substitute geometry"
+        );
+    }
+
+    /// A shell that was built and drilled, and then refused, is a stop of a
+    /// known shape: the sealed run failed during `Lowering`. Used by both
+    /// tests below.
+    fn shell_refusal_stop(model: &ModelId) -> ChainStop {
+        ChainStop::new(PipelineError::SealedRun {
+            model: model.clone(),
+            source: SupportRunError::Failed {
+                phase: plinth_support::SupportRunPhase::Lowering,
+                detail: "root run 280 is shorter than the registered minimum".to_owned(),
+            },
+        })
+        .measured_against("faces=496052 max_grid_bytes=67108864 knn_max_work=4000000".to_owned())
+    }
+
+    /// A closed oriented solid to substitute, built the cheap procedural way.
+    fn oriented_solid_parts() -> (plinth_mesh::Mesh, plinth_orient::OrientationHistory) {
+        let mesh =
+            plinth_mesh::make_box([20.0, 20.0, 20.0], [0.0, 0.0, 0.0]).expect("procedural box");
+        let budget =
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+                .expect("ratified decimation budget");
+        let (mesh, decimation) = run_decimation(&mesh, budget)
+            .expect("decimate the procedural box")
+            .into_decimated_model()
+            .expect("print-scale procedural box")
+            .into_parts();
+        let orientation = plinth_orient::OrientationHistory::from_reports(
+            decimation,
+            plinth_orient::OrientationReport {
+                provenance: plinth_orient::OrientationProvenance::Pinned {
+                    pinned_report: PathBuf::from("substitution-fixture.pipeline.json"),
+                },
+                selection: plinth_orient::BaselineSelection::Identity,
+                transform: plinth_orient::RigidTransform::identity(),
+            },
+        );
+        (mesh, orientation)
+    }
+
+    /// **The substituted solid says what happened to the shell, and does not
+    /// claim a savings measurement nobody took.**
+    ///
+    /// This path used to hand `solid_decision_recording_repair` a hardcoded
+    /// `SolidDecisionReason::BelowThreshold`, so a model whose 496,052-face
+    /// drilled shell had just been refused reported `Solid { reason:
+    /// BelowThreshold }` — "the cavity would have saved too little" — beside
+    /// the line saying the shell existed and was refused. Nothing on this path
+    /// measures a saving.
+    #[test]
+    fn the_substituted_solid_records_the_shell_refusal_not_a_savings_verdict() {
+        let model = ModelId::new("fixture");
+        let stop = shell_refusal_stop(&model);
+        let refused_shell = DrilledShellRefusal::from_stop(496_052, &stop);
+        assert_eq!(
+            refused_shell.stage,
+            ShellRefusalStage::SealedRun {
+                phase: Some(plinth_support::SupportRunPhase::Lowering)
+            },
+            "the stage comes off the typed error, not out of the message"
+        );
+
+        let (mesh, orientation) = oriented_solid_parts();
+        let solid = substitute_solid_for_refused_shell(
+            &model,
+            mesh,
+            orientation,
+            None,
+            None,
+            &refused_shell,
+        )
+        .expect("the oriented solid substitutes");
+
+        let disposition = solid.history().hollow().disposition();
+        assert_eq!(
+            disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::DrilledShellRefused
+            },
+            "the substitution must record that a drilled shell was refused"
+        );
+        assert_ne!(
+            disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::BelowThreshold
+            },
+            "nothing on this path measured a saving, so nothing may report one"
+        );
+        // The savings-gate refusal's own measurement is `None` here, which is
+        // the same claim stated the other way: there was no savings verdict.
+        assert!(solid.history().hollow().savings_shortfall().is_none());
+    }
+
+    /// **A geometry record written before `stage` existed still reads.**
+    ///
+    /// The field is `#[serde(default)]` for exactly this: the coverage sidecar
+    /// and the serialized run report are both read by things this workspace
+    /// does not rebuild, and a required field would turn every stored record
+    /// into a parse error. `None` says the record predates the field; it never
+    /// says no stage refused the shell.
+    #[test]
+    fn a_geometry_record_written_before_the_stage_field_still_deserializes() {
+        let stored = r#"{"kind":"drilled_shell_refused_by_support",
+                         "drilled_faces":496052,"refusal":"an older run's message"}"#;
+        let geometry: SupportedGeometry =
+            serde_json::from_str(stored).expect("a stored record still reads");
+        assert_eq!(
+            geometry,
+            SupportedGeometry::DrilledShellRefusedBySupport {
+                drilled_faces: 496_052,
+                stage: None,
+                refusal: "an older run's message".to_owned(),
+            }
+        );
+
+        // And a record this pipeline writes round-trips with its stage.
+        let written = SupportedGeometry::DrilledShellRefusedBySupport {
+            drilled_faces: 496_052,
+            stage: Some(ShellRefusalStage::SealedRun {
+                phase: Some(plinth_support::SupportRunPhase::Preparation),
+            }),
+            refusal: "this run's message".to_owned(),
+        };
+        let json = serde_json::to_string(&written).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<SupportedGeometry>(&json).expect("round trip"),
+            written
+        );
+    }
+
+    /// **A shell that was built and refused stays on the record when the
+    /// solid substituted for it fails too.**
+    ///
+    /// The retry used to return the solid's own error and nothing else, so for
+    /// the Giant Bat, the treant and the swallowing toad it was not knowable
+    /// from the report whether a shell had ever been built. Both dispositions
+    /// `failure` can produce read the same `detail()`, so both are pinned.
+    #[test]
+    fn a_failure_after_substitution_keeps_the_shell_refusal_record() {
+        let model = ModelId::new("fixture");
+        let refused_shell = DrilledShellRefusal::from_stop(496_052, &shell_refusal_stop(&model));
+
+        // The substituted solid's own failure, at a different stage.
+        let stop = ChainStop::new(PipelineError::SealedRun {
+            model: model.clone(),
+            source: SupportRunError::Failed {
+                phase: plinth_support::SupportRunPhase::Routing,
+                detail: "the corrupt endpoint mask refused the route".to_owned(),
+            },
+        })
+        .after_refused_shell(refused_shell);
+
+        let detail = stop.detail();
+        assert!(
+            detail.contains("the corrupt endpoint mask refused the route"),
+            "the solid's own failure is still what this stop is about: {detail}"
+        );
+        assert!(
+            detail.contains(
+                "a hollow shell was built and drilled (496052 faces) and refused at \
+                 the sealed support run during Lowering"
+            ),
+            "the shell that was built and refused must survive the substitution: {detail}"
+        );
+        assert!(
+            detail.contains("root run 280 is shorter than the registered minimum"),
+            "the shell's own refusal detail travels with it: {detail}"
+        );
+        assert_eq!(
+            stop.refused_shell().map(|shell| shell.drilled_faces),
+            Some(496_052),
+            "the record is a value, not only a sentence"
+        );
+
+        let ModelPreparationOutcome::Failed { detail, .. } = failure(&stop) else {
+            panic!("a sealed-run failure is this model's Failed disposition");
+        };
+        assert!(
+            detail.contains("a hollow shell was built and drilled"),
+            "the run report is where the record has to arrive: {detail}"
         );
     }
 

@@ -481,10 +481,20 @@ fn describe(geometry: &SupportedGeometry) -> String {
         }
         SupportedGeometry::DrilledShellRefusedBySupport {
             drilled_faces,
+            stage,
             refusal,
-        } => format!(
-            "SUBSTITUTED solid -- support refused the {drilled_faces}-face drilled shell: {refusal}"
-        ),
+        } => {
+            // The stage as a value when the record has one; a record written
+            // before the field existed says so rather than inventing a stage.
+            let at = stage.map_or_else(
+                || "a support stage this record does not name".to_owned(),
+                |stage| stage.to_string(),
+            );
+            format!(
+                "SUBSTITUTED solid -- the {drilled_faces}-face drilled shell was built and \
+                 refused at {at}: {refusal}"
+            )
+        }
         SupportedGeometry::HollowStageRefused { refusal } => {
             format!("SUBSTITUTED solid -- the hollow stage refused this geometry: {refusal}")
         }

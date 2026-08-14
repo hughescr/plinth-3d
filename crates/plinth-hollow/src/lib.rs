@@ -189,6 +189,27 @@ pub enum SolidDecisionReason {
     /// wall it was asked to leave. [`HollowReport::realized_wall_mm`] carries
     /// the number.
     ShellUnderWalled,
+    /// A shell **was** built, drained and drilled, and a **later stage refused
+    /// it** — support planning or the sealed support run — so the caller
+    /// substituted the oriented solid it had held in reserve.
+    ///
+    /// **Not [`Self::BelowThreshold`], which this substitution used to be
+    /// stamped with.** `BelowThreshold` says the savings gate measured a
+    /// cavity and found it smaller than the registered minimum. On this path
+    /// nothing measured a saving at all: the cavity passed every hollow-stage
+    /// gate, the shell exists, and it was refused for a reason that is not
+    /// about the cavity's size. A reader who saw `BelowThreshold` beside a
+    /// line reporting a refused half-million-face shell was reading two
+    /// statements that cannot both be true.
+    ///
+    /// **This reason is never produced by [`run`]** — the hollow stage cannot
+    /// know what a later stage did with its shell, and no `HollowError`
+    /// converts into it. It is set by the pipeline's substitution seam
+    /// (`plinth_pipeline::prepare`), which is also where the stage that
+    /// refused the shell and that refusal's own detail are recorded, in
+    /// `SupportedGeometry::DrilledShellRefusedBySupport`. This enum names the
+    /// decision; that record carries the measurement.
+    DrilledShellRefused,
 }
 
 /// Whether a recorded realized wall is a **measurement** or only the **bound**

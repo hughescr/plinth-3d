@@ -992,7 +992,12 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
         panic!("mini must reach an artifact");
     };
     assert_eq!(geometry, &SupportedGeometry::HollowStageDecidedSolid);
-    let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "sphere") else {
+    let ModelPreparationOutcome::Artifact {
+        geometry,
+        hollow_disposition,
+        ..
+    } = outcome(&report, "sphere")
+    else {
         panic!(
             "sphere's drilled shell now falls back to the solid reserve, not a gate refusal: {:?}",
             outcome(&report, "sphere")
@@ -1004,6 +1009,26 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
             SupportedGeometry::DrilledShellRefusedBySupport { .. }
         ),
         "sphere must reach its artifact through the support-refusal reserve substitution: {geometry:?}"
+    );
+    // **The two lines of one report must not contradict each other.** The
+    // geometry line says a drilled shell was built and refused; the
+    // disposition beside it used to say `BelowThreshold`, which claims the
+    // savings gate measured this cavity and found it too small. The
+    // substitution measures no saving at all, so this is the real pipeline
+    // pinning the truthful reason on the model that actually takes the path.
+    assert_eq!(
+        hollow_disposition,
+        &plinth_hollow::HollowDisposition::Solid {
+            reason: plinth_hollow::SolidDecisionReason::DrilledShellRefused
+        },
+        "the substituted solid must report the shell refusal that produced it"
+    );
+    assert_ne!(
+        hollow_disposition,
+        &plinth_hollow::HollowDisposition::Solid {
+            reason: plinth_hollow::SolidDecisionReason::BelowThreshold
+        },
+        "a substituted solid may not report a savings verdict nobody measured"
     );
 }
 
