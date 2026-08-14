@@ -14,10 +14,18 @@
 //! are read from the SAME registry the pre-write gate reads
 //! ([`registered_coverage_request`], shared with
 //! `plinth_pipeline::gates::registered_coverage_request`), and
-//! [`coverage_patch_is_blocking`] mirrors `plinth_verify::defects_for_patches`'s
+//! [`coverage_patch_blocks_verdict`] mirrors `plinth_verify::defects_for_patches`'s
 //! blocking predicate exactly rather than restating it — see
 //! `plinth-verify/tests/coverage_gate.rs` for the drift alarm that keeps the
-//! two definitions from diverging silently. The one geometric measurement is
+//! two definitions from diverging silently.
+//!
+//! **The censor decides verdicts, never effort.** That predicate answers "is
+//! this model refused?"; the controller's repair worklist is chosen by the
+//! uncensored [`coverage_patch_needs_repair`] instead, because a contact
+//! nominated for a censored dust patch covers everything else inside the
+//! coverage radius, real holes included. The call-site table on
+//! [`coverage_patch_blocks_verdict`] classifies every use as one or the other.
+//! The one geometric measurement is
 //! made over ROUTED contacts, because that is what the gate itself measures;
 //! a contact this controller adds but the CCO transcript does not admit
 //! contributes zero coverage, which is exactly why closure iterates and
@@ -31,8 +39,9 @@
 //! do not need that machinery: the typed refusal evidence
 //! ([`CoverageClosureRefusal`]) FU-57 persists, the shared blocking predicate
 //! and registered request, and the batch-first nomination algorithm
-//! ([`nominate_repair_rows`]) that turns one attempt's blocking patches into a
-//! deterministic, deduplicated set of repair-row ids to append.
+//! ([`nominate_repair_rows`]) that turns one attempt's uncovered patches — the
+//! uncensored worklist — into a deterministic, deduplicated set of repair-row
+//! ids to append.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,12 +54,41 @@ use crate::{
     CoverageGap, CoverageMeasurementError, CoverageMeasurementRequest, SupportPreparationLimits,
 };
 
-/// Mirrors `plinth_verify::defects_for_patches`'s per-patch blocking predicate
-/// exactly: a patch blocks emission iff its assessment failed, its cut was
-/// ambiguous, or its uncovered area is GREATER THAN the censor. Kept as the ONE
-/// implementation rather than restated independently in the verifier and the
-/// controller — `plinth-verify/tests/coverage_gate.rs` proves the pairing
-/// stays exact.
+/// **The refusal verdict's** per-patch predicate, mirroring
+/// `plinth_verify::defects_for_patches` exactly: a patch blocks emission iff
+/// its assessment failed, its cut was ambiguous, or its uncovered area is
+/// GREATER THAN the censor. Kept as the ONE implementation rather than restated
+/// independently in the verifier and the controller —
+/// `plinth-verify/tests/coverage_gate.rs` proves the pairing stays exact.
+///
+/// # Verdict versus work selection: the four call sites, classified
+///
+/// The censor decides **whether a model is refused**. It must NOT decide
+/// **which patches the repair controller works on** — those are different
+/// questions, and answering the second one with the censor is a measured
+/// regression (`Skulker Zombie` 0.35 mm², `Tavey Badger` 0.21 mm² and
+/// `zombie-3-a` 12.65 mm² of REAL, above-censor uncovered area, all emitted
+/// before the censor reached the worklist and refused after it). The
+/// mechanism: a nominated contact covers everything within the coverage
+/// radius, so a repair nominated for a dust patch routinely closes a real
+/// hole beside it. Dropping the dust patch from the worklist drops that
+/// contact and leaves the real hole open. SPEC-A3-A4-COVERAGE.md §4 says this
+/// itself — censored area is "diagnostic only … **not permission for another
+/// hard gate to fail**" — so the censor is a rule about verdicts, not about
+/// effort.
+///
+/// Hence two named functions, and every call site is one or the other:
+///
+/// | call site | kind | predicate |
+/// | --- | --- | --- |
+/// | `plinth_verify::defects_for_patches` (the pre-write coverage gate) | **verdict** | this one |
+/// | `plinth_pipeline::coverage_evidence::islands_from_gate_report` (renders that verdict's islands) | **verdict** | this one |
+/// | `plinth_support::runner::run_support`, closure loop exit and refusal | **verdict** | this one |
+/// | `plinth_support::runner::run_support`, repair-row nomination worklist | **work selection** | [`coverage_patch_needs_repair`] |
+///
+/// The controller is BOTH, which is why it is listed twice: it decides when it
+/// may stop and what it must refuse (censored), and it decides what to try to
+/// fix (uncensored). Adding a call site means picking a row in that table.
 ///
 /// # The censor, and why it is per patch
 ///
@@ -86,13 +124,40 @@ use crate::{
 /// **The comparison is strictly greater-than**, exactly as written: an
 /// uncovered area of exactly `voxel_pitch_mm²` is censored, not fatal.
 #[must_use]
-pub const fn coverage_patch_is_blocking(
+pub const fn coverage_patch_blocks_verdict(
     uncovered_area_mm2: f64,
     cut_ambiguous: bool,
     assessment_failed: bool,
     censor_area_mm2: f64,
 ) -> bool {
     assessment_failed || cut_ambiguous || uncovered_area_mm2 > censor_area_mm2
+}
+
+/// **The repair controller's work-selection predicate: the same rule at a zero
+/// censor.** A patch needs repair iff the measurement found ANY uncovered area
+/// on it, its cut was ambiguous, or its assessment failed.
+///
+/// This takes no censor argument on purpose. Work selection is uncensored: the
+/// controller nominates a repair-pool row for every measured uncovered patch,
+/// censored or not, because a contact nominated for sub-censor dust covers
+/// everything else inside the coverage radius too, and censoring the worklist
+/// was measured to leave real, above-censor holes unrepaired (see the table on
+/// [`coverage_patch_blocks_verdict`]). Working a censored patch can only ADD
+/// coverage; it can never excuse a hole, because the verdict that decides
+/// refusal is [`coverage_patch_blocks_verdict`] and is censored.
+///
+/// It is one implementation with the verdict rule, called at a zero censor, so
+/// the two can never drift on the ambiguity and assessment axes — and
+/// `every_patch_that_blocks_the_verdict_also_needs_repair` pins the
+/// containment: the worklist is always a superset of the verdict's blocking
+/// set, so no refusal can name a patch the controller never tried to fix.
+#[must_use]
+pub const fn coverage_patch_needs_repair(
+    uncovered_area_mm2: f64,
+    cut_ambiguous: bool,
+    assessment_failed: bool,
+) -> bool {
+    coverage_patch_blocks_verdict(uncovered_area_mm2, cut_ambiguous, assessment_failed, 0.0)
 }
 
 /// Failures in assembling the registered coverage-closure/gate request.
@@ -150,7 +215,7 @@ pub fn registered_coverage_request(
 ///
 /// This is the ONE derivation. [`registered_coverage_request`] fills the
 /// measurement request from it, the measurement stamps `assessment_failed`
-/// with it, and [`coverage_patch_is_blocking`] is handed the same value back
+/// with it, and [`coverage_patch_blocks_verdict`] is handed the same value back
 /// out of the request — so the measurement and the gate can never censor at
 /// two different areas.
 ///
@@ -177,9 +242,12 @@ pub enum CoverageClosureReason {
     /// (`ContactSelectionConfig::coverage_repair_max_attempts`, registered
     /// value 8) was reached with blocking patches still measured.
     AttemptsExhausted,
-    /// **No** blocking patch anywhere had an unoccupied, unfailed repair-pool
-    /// row in its own `(island_id, component_id)`, so the attempt produced an
-    /// empty nomination set and closure could not shrink anything at all.
+    /// **No** patch on the worklist anywhere had an unoccupied, unfailed
+    /// repair-pool row in its own `(island_id, component_id)`, so the attempt
+    /// produced an empty nomination set and closure could not shrink anything
+    /// at all. The worklist is the UNCENSORED one
+    /// ([`coverage_patch_needs_repair`]), so a run reaches this only when even
+    /// the censored dust patches have no row left to try.
     ///
     /// This is deliberately the whole-attempt condition, not a per-patch one:
     /// a model with one row-less island and one island that still has rows
@@ -278,7 +346,18 @@ pub struct CoverageClosureIsland {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageClosureAttempt {
     pub attempt: usize,
+    /// Patches that would REFUSE the model on this attempt: the censored
+    /// verdict set ([`coverage_patch_blocks_verdict`]). Zero here is what ends
+    /// the loop with a sealed authority.
     pub blocking_patch_count: usize,
+    /// Patches this attempt was willing to WORK ON: every patch the
+    /// measurement found uncovered at all, censored or not
+    /// ([`coverage_patch_needs_repair`]). Always at least
+    /// [`Self::blocking_patch_count`]; the difference is the sub-censor dust
+    /// the controller repairs anyway, because a repair nominated for dust
+    /// covers the real hole beside it too.
+    #[serde(default)]
+    pub repair_target_patch_count: usize,
     pub nominated_rows: usize,
 }
 
@@ -294,10 +373,16 @@ pub struct CoverageClosureRefusal {
     pub history: Vec<CoverageClosureAttempt>,
 }
 
-/// One blocking patch's routing key and exact face membership, projected out
+/// One uncovered patch's routing key and exact face membership, projected out
 /// of a live `CoverageMeasurementPatchEvidence` so nomination can outlive the
 /// borrowed verification snapshot the measurement was taken against. Built
 /// only from a live measurement, never assembled as a planning input.
+///
+/// The controller builds TWO lists of these out of one measurement — the
+/// censored verdict set and the uncensored repair worklist — so a value of
+/// this type means "a measured uncovered patch", and whether it blocks
+/// anything depends on which list it is in. See
+/// [`coverage_patch_blocks_verdict`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BlockingPatchKey {
     pub(crate) island_id: u32,
@@ -389,7 +474,7 @@ pub(crate) struct Nominations {
 }
 
 /// Batch-first, deterministic nomination of repair-pool rows for one attempt's
-/// blocking patches.
+/// patches on the repair worklist.
 ///
 /// **Candidates are scored against the samples the measurement found
 /// UNCOVERED, never against every sample on a blocking patch's faces.** A
@@ -417,12 +502,18 @@ pub(crate) struct Nominations {
 /// same tie-break (score descending, then pool order ascending) — so ordering
 /// stays total and deterministic across repeated runs on the same plan.
 ///
-/// One row is nominated PER blocking patch (not one per attempt and not one
-/// per key), up to the number of eligible rows the key actually has, so a
-/// component with several simultaneous blocking patches can close more than
+/// One row is nominated PER patch on the worklist (not one per attempt and not
+/// one per key), up to the number of eligible rows the key actually has, so a
+/// component with several simultaneous uncovered patches can close more than
 /// one of them in a single attempt. Nominated rows are deduplicated by id
 /// AND by candidate seat point across the whole attempt, matching
 /// `append_regular_repair_row`'s own `DuplicateChildPhysicalSeat` refusal.
+///
+/// **`repair_targets` is the UNCENSORED worklist**, not the censored verdict
+/// set: the caller passes every patch the measurement found uncovered at all
+/// ([`coverage_patch_needs_repair`]), because a row nominated for sub-censor
+/// dust seats a contact that covers the real hole beside it too. See the
+/// call-site table on [`coverage_patch_blocks_verdict`].
 ///
 /// # Errors
 ///
@@ -430,7 +521,7 @@ pub(crate) struct Nominations {
 /// [`SpecializedContactPlan::occupied_repair_rows`].
 pub(crate) fn nominate_repair_rows(
     plan: &SpecializedContactPlan,
-    blocking: &[BlockingPatchKey],
+    repair_targets: &[BlockingPatchKey],
     uncovered_samples: &[usize],
     radius_mm: f64,
     matrix_budget: usize,
@@ -494,7 +585,7 @@ pub(crate) fn nominate_repair_rows(
     }
 
     let mut patches_by_key: BTreeMap<(u32, u32), Vec<&BlockingPatchKey>> = BTreeMap::new();
-    for patch in blocking {
+    for patch in repair_targets {
         patches_by_key
             .entry((patch.island_id, patch.component_id))
             .or_default()
@@ -615,6 +706,70 @@ mod tests {
         }
     }
 
+    /// The two predicates differ on EXACTLY the censored band and nowhere
+    /// else: sub-censor dust is not a verdict, and it IS work.
+    ///
+    /// This is the rule the co-owner ruled on 2026-08-14. Censoring the repair
+    /// worklist as well as the verdict was measured to lose three models that
+    /// had emitted the day before (`Skulker Zombie` 0.35 mm², `Tavey Badger`
+    /// 0.21 mm², `zombie-3-a` 12.65 mm² — every one of them REAL, above-censor
+    /// uncovered area), because the dust patches the censored worklist dropped
+    /// had been nominating contacts that incidentally closed those holes.
+    #[test]
+    fn work_selection_is_uncensored_where_the_verdict_is_censored() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        // Dust: below the censor, so no verdict — but still real measured
+        // uncovered area, so still work.
+        for area in [f64::MIN_POSITIVE, 0.000_47, 0.06, censor] {
+            assert!(
+                !coverage_patch_blocks_verdict(area, false, false, censor),
+                "{area} mm² is at or below the censor and must not refuse the model"
+            );
+            assert!(
+                coverage_patch_needs_repair(area, false, false),
+                "{area} mm² is measured uncovered area and must still be repaired"
+            );
+        }
+        // A patch with no uncovered area at all is neither.
+        assert!(!coverage_patch_blocks_verdict(0.0, false, false, censor));
+        assert!(!coverage_patch_needs_repair(0.0, false, false));
+    }
+
+    /// Containment, on every axis: the uncensored worklist is a SUPERSET of
+    /// the censored verdict set, so the controller can never refuse a model
+    /// over a patch it declined to work on.
+    #[test]
+    fn every_patch_that_blocks_the_verdict_also_needs_repair() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        for area in [
+            0.0,
+            f64::MIN_POSITIVE,
+            0.000_47,
+            censor,
+            f64::from_bits(censor.to_bits() + 1),
+            0.650_5,
+            12.65,
+        ] {
+            for cut_ambiguous in [false, true] {
+                for assessment_failed in [false, true] {
+                    if coverage_patch_blocks_verdict(
+                        area,
+                        cut_ambiguous,
+                        assessment_failed,
+                        censor,
+                    ) {
+                        assert!(
+                            coverage_patch_needs_repair(area, cut_ambiguous, assessment_failed),
+                            "area={area} cut_ambiguous={cut_ambiguous} \
+                             assessment_failed={assessment_failed} blocks the verdict but was \
+                             left off the repair worklist"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn blocking_predicate_matches_the_verifier_truth_table() {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
@@ -626,7 +781,7 @@ mod tests {
             (3.4, false, false, true),
         ] {
             assert_eq!(
-                coverage_patch_is_blocking(area, cut_ambiguous, assessment_failed, censor),
+                coverage_patch_blocks_verdict(area, cut_ambiguous, assessment_failed, censor),
                 expected,
                 "area={area} cut_ambiguous={cut_ambiguous} assessment_failed={assessment_failed}"
             );
@@ -667,11 +822,11 @@ mod tests {
     fn area_exactly_at_the_censor_is_censored_and_the_next_representable_step_is_not() {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
         assert!(
-            !coverage_patch_is_blocking(censor, false, false, censor),
+            !coverage_patch_blocks_verdict(censor, false, false, censor),
             "the spec censors area AT OR BELOW the censor, so equality must not block"
         );
         assert!(
-            coverage_patch_is_blocking(f64::from_bits(censor.to_bits() + 1), false, false, censor),
+            coverage_patch_blocks_verdict(f64::from_bits(censor.to_bits() + 1), false, false, censor),
             "one ULP above the censor is above it and must block"
         );
     }
@@ -688,17 +843,17 @@ mod tests {
     fn the_censor_clears_deinonychus_dust_and_still_fails_a_real_uncovered_patch() {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
         assert!(
-            !coverage_patch_is_blocking(0.000_47, false, false, censor),
+            !coverage_patch_blocks_verdict(0.000_47, false, false, censor),
             "Deinonychus' single 0.00047 mm² triangle is below one voxel footprint"
         );
         assert!(
-            coverage_patch_is_blocking(0.650_5, false, false, censor),
+            coverage_patch_blocks_verdict(0.650_5, false, false, censor),
             "a 0.6505 mm² uncovered patch is four voxel footprints and must still fail"
         );
         // Per patch, not per model: thirteen separate sub-censor patches are
         // thirteen sub-resolution unknowns, never one 1.3 mm² hole.
         for _ in 0..13 {
-            assert!(!coverage_patch_is_blocking(0.1, false, false, censor));
+            assert!(!coverage_patch_blocks_verdict(0.1, false, false, censor));
         }
     }
 

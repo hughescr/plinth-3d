@@ -128,8 +128,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use coverage_closure::{
-    coverage_patch_is_blocking, registered_coverage_censor_area_mm2, registered_coverage_request,
-    CoverageClosureAttempt,
+    coverage_patch_blocks_verdict, coverage_patch_needs_repair,
+    registered_coverage_censor_area_mm2, registered_coverage_request, CoverageClosureAttempt,
     CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason, CoverageClosureRefusal,
     CoverageClosureSetupError,
 };

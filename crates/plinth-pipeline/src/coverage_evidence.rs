@@ -323,7 +323,7 @@ pub fn islands_from_gate_report(report: &CoverageReport) -> Vec<UncoveredIslandS
         if !areas.contains_key(&patch.island_id) {
             continue;
         }
-        if !plinth_support::coverage_patch_is_blocking(
+        if !plinth_support::coverage_patch_blocks_verdict(
             patch.uncovered_area_mm2,
             patch.cut_ambiguous,
             patch.assessment_failed,

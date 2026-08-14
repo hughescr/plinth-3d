@@ -164,7 +164,7 @@ impl Scratch {
 ///
 /// **Moved off `make_raking_blade.prepped.stl` on 2026-08-14**, when the
 /// written 0.16 mm² A3 censor was honoured (SPEC-A3-A4-COVERAGE.md §4;
-/// `plinth_support::coverage_patch_is_blocking`). That fixture's entire
+/// `plinth_support::coverage_patch_blocks_verdict`). That fixture's entire
 /// residual was ONE patch of **0.0600 mm²** — 0.375 of a single 0.4 mm voxel
 /// footprint — measured off its own FU-57 sidecar. It was a "refusal" only
 /// because the blocking predicate failed on `uncovered_area_mm2 > 0.0`, i.e.
@@ -174,8 +174,14 @@ impl Scratch {
 /// The PROCEDURAL raking blade is: run through the same pinned baseline and the
 /// same registered decimation, it exhausts all 8 closure attempts on island 5 —
 /// four faces, one patch, `NoRoutedContact`, **5.135 mm² uncovered**, which is
-/// 32× the censor. Eight repair rows were nominated out of fourteen eligible
-/// and the CCO transcript admitted none of them. That is a genuinely uncovered
+/// 32× the censor. Repair rows were nominated for it on every attempt out of
+/// the fourteen its island had, and the CCO transcript admitted none of them.
+/// (The per-attempt row counts were first measured while the repair worklist
+/// was itself censored; from the same day's follow-up ruling the worklist is
+/// UNCENSORED, so the blade's censored island 3 is nominated for as well and
+/// the exact row counts are not pinned here. The refusal is unchanged:
+/// `attempts` 8, `AttemptsExhausted`, island 5 at 5.135 mm².) That is a
+/// genuinely uncovered
 /// island, and it is a STRICTLY better refusal fixture than the one it
 /// replaces: the old one could not tell a censored patch from a real hole, and
 /// this one fails on an area no censor at the registered pitch could reach.

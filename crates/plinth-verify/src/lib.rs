@@ -262,7 +262,7 @@ fn coverage_report_from_projection(
 ) -> Result<CoverageReport, CoverageVerificationError> {
     // The censor comes off the request this very report carries, so the verdict
     // is censored at exactly the area the measurement that produced the evidence
-    // used. See `plinth_support::coverage_patch_is_blocking` for the spec text.
+    // used. See `plinth_support::coverage_patch_blocks_verdict` for the spec text.
     let defects = defects_for_patches(&evidence.patches, request.patch_area_floor_mm2.get())?;
     Ok(CoverageReport {
         artifact,
@@ -297,7 +297,7 @@ fn request_record(request: CoverageMeasurementRequest) -> CoverageRequestRecord 
 /// SPEC-A3-A4-COVERAGE.md §4 it bounds EACH PATCH, so a censored patch is not
 /// blocking and contributes nothing to its island's measure; an island whose
 /// every patch is censored raises no defect at all. See
-/// `plinth_support::coverage_patch_is_blocking` for the quoted spec text and
+/// `plinth_support::coverage_patch_blocks_verdict` for the quoted spec text and
 /// the reason the bound is per patch rather than per island or per model.
 fn defects_for_patches(
     patches: &[CoveragePatchEvidenceRecord],
@@ -312,15 +312,22 @@ fn defects_for_patches(
         while end < patches.len() && patches[end].island_id == island_id {
             let patch = &patches[end];
             // **One implementation, called — not a second statement of the
-            // same rule.** The coverage-closure controller (FU-56) decides
-            // which patches it must close with exactly this predicate, and if
+            // same rule.** This is a VERDICT: it decides whether the model is
+            // refused, so it is censored, and the coverage-closure controller
+            // (FU-56) decides when it may stop with exactly this predicate. If
             // the two ever drifted the controller would close plans this gate
             // still refuses. It used to be restated here and guarded only by
             // a frozen fixture on which all nine patches were blocking for
             // the SAME reason, so two of the predicate's three axes were
             // unguarded; calling the shared function removes the drift rather
             // than watching for it.
-            if plinth_support::coverage_patch_is_blocking(
+            //
+            // The controller's REPAIR WORKLIST is a different question and
+            // uses the uncensored `plinth_support::coverage_patch_needs_repair`
+            // instead — censoring what to work on, rather than what to refuse,
+            // was measured to leave real above-censor holes unrepaired. See
+            // the call-site table on `coverage_patch_blocks_verdict`.
+            if plinth_support::coverage_patch_blocks_verdict(
                 patch.uncovered_area_mm2.get(),
                 patch.cut_ambiguous,
                 patch.assessment_failed,
@@ -669,9 +676,12 @@ mod tests {
 
     /// **The blocking predicate's three axes, exercised separately.**
     ///
-    /// `defects_for_patches` calls `plinth_support::coverage_patch_is_blocking`,
-    /// and the FU-56 controller decides what it must close with the same
-    /// call — so a drift is now impossible by construction. What is still
+    /// `defects_for_patches` calls `plinth_support::coverage_patch_blocks_verdict`,
+    /// and the FU-56 controller decides when it may STOP with the same call —
+    /// so a drift between this verdict and that one is impossible by
+    /// construction. (What the controller must WORK ON is a different
+    /// question, answered by the uncensored
+    /// `plinth_support::coverage_patch_needs_repair`.) What is still
     /// worth pinning is the RULE, on each axis independently, because the
     /// frozen fixture this crate's integration test walks has seven of its nine
     /// patches blocking on area with `cut_ambiguous` false everywhere: a

@@ -7,7 +7,10 @@ use plinth_mesh::{
     evaluate_delicacy, make_overhang_table, make_raking_blade, make_toed_slab, DelicacyBuildConfig,
     DelicacySettings, Mesh,
 };
-use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
+use plinth_orient::{
+    run as run_orientation, BaselineSelection, OrientRequest, OrientationHistory,
+    OrientationProvenance, OrientationReport, PinnedBaseline, RigidTransform,
+};
 use plinth_support::{
     run_support, CoverageGap, CoverageMeasurementLimits, CoverageMeasurementRequest,
     SupportPreparationInput, SupportPreparationLimits, SupportRequest,
@@ -244,7 +247,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// census septet and the coverage-gate golden.
 ///
 /// **Amended 2026-08-14, when the written 0.16 mm² A3 censor was honoured**
-/// (SPEC-A3-A4-COVERAGE.md §4; `plinth_support::coverage_patch_is_blocking`).
+/// (SPEC-A3-A4-COVERAGE.md §4; `plinth_support::coverage_patch_blocks_verdict`).
 /// The two-island record above is now a record of its own date: the blade's
 /// islands are **0.0600 mm² (island 3)** and **5.1350 mm² (island 5)**, and the
 /// censor is `voxel_pitch_mm²` = 0.16 mm², so island 3 falls below one voxel
@@ -770,4 +773,187 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             CoverageGap::NoRoutedContact => panic!("fixture has a finite routed gap"),
         }
     }
+}
+
+/// **The repair worklist is UNCENSORED, and this fixture is why** (co-owner
+/// ruling, 2026-08-14).
+///
+/// The 0.16 mm² A3 censor (`SPEC-A3-A4-COVERAGE.md` §4, `voxel_pitch_mm²`)
+/// decides **verdicts**: sub-censor area is "censored A3 uncertainty …
+/// diagnostic only … **not permission for another hard gate to fail**". When
+/// the same censor was also applied to the coverage-closure controller's
+/// repair worklist, three models that had emitted the day before started
+/// refusing with REAL, above-censor uncovered area — `Skulker Zombie`
+/// 0.35 mm², `Tavey Badger` 0.21 mm², `zombie-3-a` 12.65 mm² — because the
+/// dust patches the censored worklist dropped had been nominating contacts
+/// that incidentally closed those holes. A contact covers everything inside
+/// the 6.0 mm coverage radius; it does not care which patch nominated it.
+///
+/// **The fixture reproduces that mechanism in one procedural mesh.** A tall
+/// overhang table (legs 7 × 7 × 24 mm, top 42 × 26 × 4 mm) whose underside
+/// keeps ONE residual patch of **0.0999… mm²** — below the censor, so the
+/// verdict ignores it, and on an island with ~1,000 eligible repair rows —
+/// plus a 0.6 × 0.6 × 5 mm stub hanging from that underside at (10.0, 7.5).
+/// The stub's whole 0.36 mm² bottom face is uncovered: **2.25× the censor**,
+/// so it is a real hole and no censor can excuse it, and its island has
+/// **ZERO eligible repair rows of its own**. The only contact that can close
+/// it is one nominated for the dust patch beside it.
+///
+/// **Measured both ways, on this exact mesh:**
+///
+/// | repair worklist | attempts (blocking / worklist / rows) | outcome |
+/// | --- | --- | --- |
+/// | uncensored (ruled) | `0: 4/4/4`, `1: 3/4/3`, `2: 1/2/1`, `3: 0/1/0` | **seals**, residual is one 0.0999 mm² censored patch |
+/// | censored (the regression) | `0: 4/4/4`, `1: 3/4/2`, `2: 1/2/0` | **refuses** `NoEligibleRepairRows`, island 5 left **0.36 mm² uncovered** |
+///
+/// The censored column is not a hypothetical: it is what this fixture does
+/// when `run_support` nominates against the verdict set instead of the
+/// worklist, which is what the code did before this ruling.
+///
+/// **Nothing is loosened by passing.** The model seals with its every
+/// remaining patch below the registered censor, which the pre-write gate
+/// re-measures for itself, and the assertions below check exactly that rather
+/// than trusting the controller's own word.
+#[test]
+fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
+    let hollowed = identity_hollowed(shelf_with_dust_beside_a_row_less_hole());
+    let delicacy = real_delicacy(&hollowed);
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let authority = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        support_input(&delicacy, &layers),
+    )
+    .expect(
+        "the stub's 0.36 mm² hole closes from a contact nominated for the censored dust patch \
+         beside it; censoring the repair worklist is what refuses this model",
+    );
+
+    let history = authority.coverage_closure_history();
+    assert_eq!(
+        authority.coverage_repair_rounds(),
+        3,
+        "this fixture must close in three repair rounds: {history:?}"
+    );
+    // The fixture is only evidence if the controller really did work a patch
+    // the verdict had censored, WHILE a real hole was still open. If this
+    // stops being true the mesh has drifted and the test proves nothing.
+    assert!(
+        history
+            .iter()
+            .any(|attempt| attempt.blocking_patch_count > 0
+                && attempt.repair_target_patch_count > attempt.blocking_patch_count),
+        "the worklist must exceed the verdict set while a hole is still open: {history:?}"
+    );
+    assert_eq!(
+        history.last().expect("at least one attempt").blocking_patch_count,
+        0,
+        "the closing attempt measures no blocking patch: {history:?}"
+    );
+
+    // And the sealed model is judged by the gate's own rule, re-measured here
+    // rather than taken on the controller's word: every remaining patch is
+    // censored, and at least one remains — a fixture with nothing left would
+    // pass this test without exercising the censor at all.
+    let censor = plinth_support::registered_coverage_censor_area_mm2()
+        .expect("registered A3 coverage censor");
+    let request = plinth_support::registered_coverage_request().expect("registered request");
+    let snapshot = authority
+        .verification_snapshot()
+        .expect("borrow sealed verification snapshot");
+    snapshot.validate_integrity().expect("snapshot integrity");
+    let measurement = snapshot
+        .measure_coverage(request)
+        .expect("measure the sealed layout at the registered gate radius");
+    let patches = measurement.evidence().patches();
+    assert!(
+        !patches.is_empty(),
+        "the sealed model must still carry censored dust, or this fixture proves nothing"
+    );
+    for patch in patches {
+        assert!(
+            !plinth_support::coverage_patch_blocks_verdict(
+                patch.uncovered_area_mm2().get(),
+                patch.cut_ambiguous(),
+                patch.assessment_failed(),
+                censor,
+            ),
+            "island {} still blocks the verdict with {} mm²",
+            patch.island_id(),
+            patch.uncovered_area_mm2().get()
+        );
+        assert!(
+            plinth_support::coverage_patch_needs_repair(
+                patch.uncovered_area_mm2().get(),
+                patch.cut_ambiguous(),
+                patch.assessment_failed(),
+            ),
+            "a patch with no measured uncovered area would not be evidence of anything"
+        );
+    }
+    authority
+        .into_supported_model()
+        .expect("consume final support authority after verification");
+}
+
+/// The mesh behind the test above: an overhang table that keeps one sub-censor
+/// residual patch on its underside, with a thin stub hanging from that same
+/// underside whose bottom face is a real 0.36 mm² hole its own island has no
+/// repair row for.
+///
+/// Built here rather than in `plinth-mesh`'s fixture set because the geometry
+/// is chosen for what the COVERAGE CONTROLLER does with it, not for any mesh
+/// property; the two boxes are plain `plinth_mesh` primitives.
+fn shelf_with_dust_beside_a_row_less_hole() -> Mesh {
+    let table = plinth_mesh::make_overhang_table_with([7.0, 7.0, 24.0], [42.0, 26.0, 4.0], 0.0)
+        .expect("procedural overhang table");
+    let stub_size = [0.6, 0.6, 5.0];
+    let stub = plinth_mesh::make_box(stub_size, [0.0, 0.0, 0.0]).expect("procedural stub");
+    let mut verts: Vec<[f64; 3]> = table.verts().to_vec();
+    let mut tris: Vec<[u32; 3]> = table.tris().to_vec();
+    let base = u32::try_from(verts.len()).expect("vertex count fits u32");
+    // The stub hangs from the table's underside (legs 24 mm tall), so its
+    // bottom face sits 5 mm below it at (10.0, 7.5).
+    let lift = 24.0 - stub_size[2];
+    verts.extend(
+        stub.verts()
+            .iter()
+            .map(|vertex| [vertex[0] + 10.0, vertex[1] + 7.5, vertex[2] + lift]),
+    );
+    tris.extend(
+        stub.tris()
+            .iter()
+            .map(|triangle| [triangle[0] + base, triangle[1] + base, triangle[2] + base]),
+    );
+    Mesh::new(verts, tris).expect("table plus stub is one mesh")
+}
+
+/// A hollow hand-off for a mesh that has no checked-in corpus baseline: the
+/// same identity-orientation path `plinth-support`'s own unit tests use
+/// (`runner.rs`, `hollowed_fixture`). The fixture above is composed at test
+/// time, so there is no `corpus/baseline/*.pipeline.json` to pin it to, and
+/// the coverage question it asks does not depend on the orientation search.
+fn identity_hollowed(mesh: Mesh) -> HollowedModel {
+    let budget =
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("ratified decimation budget");
+    let decimated = run_decimation(&mesh, budget)
+        .expect("decimate the composed fixture")
+        .into_decimated_model()
+        .expect("print-scale composed fixture");
+    let (mesh, decimation) = decimated.into_parts();
+    let orientation = OrientationHistory::from_reports(
+        decimation,
+        OrientationReport {
+            provenance: OrientationProvenance::Pinned {
+                pinned_report: PathBuf::from("composed-coverage-fixture.pipeline.json"),
+            },
+            selection: BaselineSelection::Identity,
+            transform: RigidTransform::identity(),
+        },
+    );
+    HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
+        .expect("solid decision handoff")
 }

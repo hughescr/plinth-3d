@@ -115,9 +115,89 @@ defect — fix the defect), the git-flow convention (main+develop, feature/* bra
 never push without instruction), and the owner's 2026-08-03 clearance-mask architecture
 decision. See the Follow-ups ledger below for the full open-row list.
 
+## 2026-08-14 — the censor decides verdicts, never effort: the repair worklist goes back to uncensored {#censor-splits-verdict-from-worklist-2026-08-14}
+
+<a id="censor-splits-verdict-from-worklist-2026-08-14"></a>
+
+**Co-owner ruling, landed, on a regression the censor change below caused.** That change
+(`0f23a55`, the section that follows this one) was right about the verdict and wrong about the
+worklist. It gave the one shared blocking predicate a censor and then handed the same censored
+answer to all four call sites — including the FU-56 closure controller's **repair-nomination
+worklist**. Censoring what to REFUSE is the spec. Censoring what to WORK ON is not, and the
+spec says so in the same paragraph: censored area is "diagnostic only … **not permission for
+another hard gate to fail**."
+
+**The measured cost, from the judge who found it.** Three models emitted at `9298af2` and
+refused at `0f23a55` with REAL, above-censor uncovered area: **`Skulker Zombie` 0.35 mm²,
+`Tavey Badger` 0.21 mm², `zombie-3-a` 12.65 mm²** — every one of them larger than the
+0.16 mm² censor, so no censor at the registered pitch excuses any of them. The gain on the
+other side of that trade was real too and is kept: **`Deinonychus`** emits, its whole final
+residual being one 0.00047 mm² patch.
+
+**The mechanism, and it is not subtle.** A repair contact covers everything inside the 6.0 mm
+coverage radius; it does not care which patch nominated it. Nomination also allocates **one
+row per worklist patch per key**, so dropping a patch drops a row. A dust patch beside a real
+hole was therefore paying for a contact that closed the real hole — and censoring the worklist
+deleted that contact.
+
+**What changed.** One predicate became two named functions, and every call site now picks one:
+
+| call site | kind | predicate |
+| --- | --- | --- |
+| `plinth_verify::defects_for_patches` — the pre-write coverage gate | **verdict** | `coverage_patch_blocks_verdict` (censored) |
+| `plinth_pipeline::coverage_evidence::islands_from_gate_report` — renders that verdict's islands | **verdict** | `coverage_patch_blocks_verdict` (censored) |
+| `plinth_support::runner::run_support` — closure loop exit and refusal | **verdict** | `coverage_patch_blocks_verdict` (censored) |
+| `plinth_support::runner::run_support` — repair-row nomination worklist | **work selection** | `coverage_patch_needs_repair` (**uncensored**) |
+
+`coverage_patch_needs_repair` is the same rule at a zero censor — one implementation, not two —
+so the ambiguity and assessment axes can never drift apart, and the worklist is provably a
+SUPERSET of the verdict set (`every_patch_that_blocks_the_verdict_also_needs_repair`): no
+refusal can name a patch the controller declined to work on. The controller now builds both
+lists from ONE measurement pass and records both counts per attempt
+(`CoverageClosureAttempt::repair_target_patch_count`, new, `#[serde(default)]`).
+
+**The censor VALUE did not move.** It is still `registered_coverage_censor_area_mm2()` =
+`VOXEL_PITCH_MM²` = 0.16 mm², still read off the live measurement request, still strictly
+greater-than. No cap, gate, radius, bound or tolerance was raised, lowered or added. What moved
+is WHERE the censor applies.
+
+**Sabotage evidence, both ways.**
+
+* **Sub-censor dust must PASS the verdict.** Kept from `0f23a55`: the frozen coverage-gate
+  golden (7 defects from 9 patches, two censored at that test's own 1.0 mm² probe censor), the
+  raking blade's censored island 3 at 0.06 mm² beside its fatal island 5 at 5.135 mm², and the
+  unit truth tables including `Deinonychus`'s 0.00047 mm².
+* **Censoring the WORKLIST must not leave a real hole unrepaired.** NEW fixture,
+  `closure_repairs_censored_dust_because_that_repair_closes_a_real_hole`
+  (`plinth-support/tests/support_runner_integration.rs`): a tall overhang table (legs
+  7 × 7 × 24 mm, top 42 × 26 × 4 mm) whose underside keeps one **0.0999 mm²** residual patch —
+  below the censor, on an island with ~1,000 eligible repair rows — plus a 0.6 × 0.6 × 5 mm stub
+  hanging from that underside at (10.0, 7.5) whose entire **0.36 mm²** bottom face is uncovered
+  (**2.25× the censor**) on an island with **zero** eligible repair rows of its own. Measured on
+  that one mesh, `attempt: blocking / worklist / rows nominated`:
+
+  | repair worklist | attempts | outcome |
+  | --- | --- | --- |
+  | uncensored (ruled) | `0: 4/4/4`, `1: 3/4/3`, `2: 1/2/1`, `3: 0/1/0` | **seals**; residual is one 0.0999 mm² censored patch |
+  | censored (`0f23a55`) | `0: 4/4/4`, `1: 3/4/2`, `2: 1/2/0` | **refuses** `NoEligibleRepairRows`; island 5 left `0.3600000000000006` mm² uncovered, `worst_gap: NoRoutedContact` |
+
+  The censored row is not hypothetical: the fix was reverted to `0f23a55`'s one line, the test
+  was run, and that refusal is its recorded output. Three sibling parameterisations of the same
+  fixture flip the same way; the committed one is the smallest.
+
+**What is NOT claimed.** The three named minis were not re-run — `minis-to-process/` is not
+present in this checkout, so their restoration rests on the judge's measurement plus the code
+now provably nominating for the patches that were dropped. The fixture above is procedural, and
+it is the first committed evidence in this project that a repair nominated for a CENSORED patch
+is what closes a real one.
+
 ## 2026-08-14 — the written 0.16 mm² coverage censor is honoured: the gate stops failing models on dust it cannot act on {#coverage-censor-honoured-2026-08-14}
 
 <a id="coverage-censor-honoured-2026-08-14"></a>
+
+**Superseded in part, the same day, by [the section above](#censor-splits-verdict-from-worklist-2026-08-14):**
+"all four call sites" was one call site too many. The verdict half of this section stands
+unamended; the repair worklist is no longer censored.
 
 **Owner ruling, landed.** `SPEC-A3-A4-COVERAGE.md` §4 has always said this, and the code
 did not do it:

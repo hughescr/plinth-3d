@@ -566,6 +566,14 @@ fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
 /// never by relaxing the radius, the floor, or the tolerance, all three of
 /// which this function reads from the same registry the gate reads and never
 /// restates.
+///
+/// **The A3 censor applies to the verdict and not to the work.** Each attempt
+/// splits its one measurement into the censored set that decides stopping and
+/// refusing ([`crate::coverage_closure::coverage_patch_blocks_verdict`]) and
+/// the uncensored set this controller nominates repairs for
+/// ([`crate::coverage_closure::coverage_patch_needs_repair`]). Censoring the
+/// worklist as well was measured to leave real, above-censor holes unrepaired,
+/// because a contact nominated for sub-censor dust covers the hole beside it.
 pub fn run_support<'a>(
     hollowed: HollowedModel,
     request: SupportRequest,
@@ -693,7 +701,27 @@ pub fn run_support<'a>(
         let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
         let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
 
-        let (blocking, uncovered_samples) = {
+        // TWO sets out of ONE measurement, and the difference between them is
+        // the whole censor rule (`coverage_closure::coverage_patch_blocks_verdict`
+        // carries the four-call-site table):
+        //
+        // * `blocking` — the patches that would REFUSE this model, censored at
+        //   the registered A3 censor. It decides when this loop may stop and
+        //   what a refusal names. Sub-censor dust is not in it, so a model
+        //   whose whole residual is dust emits, which is the censor's point.
+        // * `repair_targets` — every patch the measurement found uncovered AT
+        //   ALL, uncensored. It is the repair worklist, and it is a superset
+        //   of `blocking`.
+        //
+        // Work selection is uncensored because a contact nominated for one
+        // patch covers everything inside the coverage radius, dust patch and
+        // real hole alike; censoring the worklist deletes contacts that were
+        // incidentally closing real, above-censor holes, which is a measured
+        // regression (`Skulker Zombie` 0.35 mm², `Tavey Badger` 0.21 mm²,
+        // `zombie-3-a` 12.65 mm²). Working a censored patch can only add
+        // coverage — it can never excuse one, because the stop/refuse decision
+        // below reads `blocking` and nothing else.
+        let (blocking, repair_targets, uncovered_samples) = {
             let snapshot = stage!(
                 lowered.verification_snapshot(),
                 "CoverageMeasurement",
@@ -701,38 +729,47 @@ pub fn run_support<'a>(
             );
             match snapshot.measure_coverage(coverage_request) {
                 Ok(measurement) => {
-                    let blocking = measurement
-                        .evidence()
-                        .patches()
-                        .iter()
-                        .filter(|patch| {
-                            crate::coverage_closure::coverage_patch_is_blocking(
-                                patch.uncovered_area_mm2().get(),
-                                patch.cut_ambiguous(),
-                                patch.assessment_failed(),
-                                // The censor the measurement itself just used,
-                                // read back off the live request rather than
-                                // re-derived, so the controller can never chase
-                                // a patch the gate will censor.
-                                coverage_request.patch_area_floor_mm2().get(),
-                            )
-                        })
-                        .map(|patch| crate::coverage_closure::BlockingPatchKey {
+                    let patches = measurement.evidence().patches();
+                    let mut blocking = Vec::new();
+                    let mut repair_targets = Vec::with_capacity(patches.len());
+                    // The censor the measurement itself just used, read back
+                    // off the live request rather than re-derived, so the
+                    // controller's VERDICT can never disagree with the gate's.
+                    let censor_area_mm2 = coverage_request.patch_area_floor_mm2().get();
+                    for patch in patches {
+                        let uncovered_area_mm2 = patch.uncovered_area_mm2().get();
+                        if !crate::coverage_closure::coverage_patch_needs_repair(
+                            uncovered_area_mm2,
+                            patch.cut_ambiguous(),
+                            patch.assessment_failed(),
+                        ) {
+                            continue;
+                        }
+                        let key = crate::coverage_closure::BlockingPatchKey {
                             island_id: patch.island_id(),
                             component_id: patch.component_id(),
                             representative_face_id: patch.representative_face_id(),
                             sorted_face_ids: patch.sorted_face_ids().to_vec(),
-                            uncovered_area_mm2_bits: patch.uncovered_area_mm2().get().to_bits(),
+                            uncovered_area_mm2_bits: uncovered_area_mm2.to_bits(),
                             worst_gap: patch.worst_gap().into(),
-                        })
-                        .collect::<Vec<_>>();
+                        };
+                        if crate::coverage_closure::coverage_patch_blocks_verdict(
+                            uncovered_area_mm2,
+                            patch.cut_ambiguous(),
+                            patch.assessment_failed(),
+                            censor_area_mm2,
+                        ) {
+                            blocking.push(key.clone());
+                        }
+                        repair_targets.push(key);
+                    }
                     // The measurement's own uncovered rows, indexed into the
                     // same `coverage_samples()` slice this plan owns. Moved
                     // out here so nomination can score against what still
                     // needs covering rather than re-deriving coverage beside
                     // the one measurement.
                     let uncovered = measurement.uncovered_sample_indices().to_vec();
-                    (blocking, uncovered)
+                    (blocking, repair_targets, uncovered)
                 }
                 Err(error) => {
                     note_stage_failure("CoverageMeasurement", &error);
@@ -756,9 +793,13 @@ pub fn run_support<'a>(
         history.push(crate::coverage_closure::CoverageClosureAttempt {
             attempt,
             blocking_patch_count: blocking.len(),
+            repair_target_patch_count: repair_targets.len(),
             nominated_rows: 0,
         });
 
+        // THE VERDICT, censored: only a blocking patch can keep this loop
+        // running or refuse the model. Dust left in `repair_targets` never
+        // does either.
         if blocking.is_empty() {
             return Ok(FinalSupportAuthority {
                 lowered,
@@ -780,9 +821,14 @@ pub fn run_support<'a>(
             )));
         }
 
+        // THE WORKLIST, uncensored: `repair_targets`, not `last_blocking`.
+        // The controller has already decided (above) that this model does not
+        // pass; from here it repairs every measured uncovered patch, so a
+        // repair that a censored dust patch nominates is still available to
+        // close the real hole beside it.
         let nominations = match crate::coverage_closure::nominate_repair_rows(
             &plan,
-            &last_blocking,
+            &repair_targets,
             &uncovered_samples,
             radius_mm,
             matrix_budget,

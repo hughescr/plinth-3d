@@ -111,7 +111,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // WRITTEN 0.16 mm² A3 coverage censor** (SPEC-A3-A4-COVERAGE.md §4: "A patch
 // fails if and only if either: 1. its uncovered area is greater than
 // `voxel_pitch_mm**2` … Area at or below `voxel_pitch_mm**2` is **censored A3
-// uncertainty**"). `plinth_support::coverage_patch_is_blocking` used to block
+// uncertainty**"). `plinth_support::coverage_patch_blocks_verdict` used to block
 // on `uncovered_area_mm2 > 0.0` — any dust at all — and now blocks on
 // `> censor_area_mm2`, the censor taken off the live measurement request.
 //
@@ -252,7 +252,7 @@ fn cap_minus_one_returns_a_typed_error_without_a_report() {
 /// FU-56 guard (design test #12): the same predicate, on a real measurement.
 ///
 /// **Scope, stated honestly (2026-08-12).** `defects_for_patches` now CALLS
-/// `plinth_support::coverage_patch_is_blocking` rather than restating it, so
+/// `plinth_support::coverage_patch_blocks_verdict` rather than restating it, so
 /// this is no longer the thing standing between the two definitions — the
 /// per-axis rule is pinned by `defects_for_patches`'s own unit test
 /// (`a_patch_blocks_on_each_axis_independently_and_only_blocking_area_is_summed`),
@@ -294,7 +294,7 @@ fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
         // `defects_for_patches` sums area over an island's BLOCKING patches
         // only (a censored or otherwise non-blocking patch contributes
         // nothing), so the reconstruction mirrors that in one pass.
-        if plinth_support::coverage_patch_is_blocking(
+        if plinth_support::coverage_patch_blocks_verdict(
             area,
             cut_ambiguous,
             assessment_failed,
