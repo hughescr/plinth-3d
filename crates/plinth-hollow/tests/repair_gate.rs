@@ -145,7 +145,7 @@ fn a_point_touch_model_is_judged_on_savings_not_refused_on_topology() {
     let mesh = make_pinched_boxes().expect("pinch fixture");
     let settings = HollowSettings::from_registered_constants().expect("registered M0 settings");
     match create_shell(mesh, settings) {
-        Err(HollowError::IneligibleSavings) => {}
+        Err(HollowError::IneligibleSavings { .. }) => {}
         Ok(_) => panic!("the fixture's cavities are below the savings threshold; it must not hollow"),
         Err(error @ (HollowError::Topology(_) | HollowError::NotClosedOrOriented)) => panic!(
             "a point-touch is not a closed-solid defect (FU-47), yet H0 refused it as {error}"

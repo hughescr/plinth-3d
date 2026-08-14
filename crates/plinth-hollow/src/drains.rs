@@ -1607,6 +1607,25 @@ mod tests {
     /// different equal-cost tie-break on this body of revolution than the
     /// frozen `+x`), `wall_mm = 5.0`. The old numbers are recorded here, not
     /// in the baseline file, which now states only what the engine does.
+    ///
+    /// **Re-recorded a SECOND time, 2026-08-13, by the owner ruling on the
+    /// wall target and minimum wall.** Zeroing
+    /// `HOLLOW_CAVITY_MARCH_MARGIN_MM` cuts the Sphere's cavity at the
+    /// requested 2.5 mm instead of 3.366 mm, so the void reaches further out
+    /// and both bores meet it sooner: drain `[0, 0, 3.5]` -> `[0, 0, 3.0]`
+    /// with `wall_mm` 4.0 -> 3.5, vent `[-1.5, -4.0, 15.0]` ->
+    /// `[-0.5, -5.0, 15.5]` with `wall_mm` 5.0 -> 4.0. **FU-61's
+    /// bore-penetration guarantee, which gated the first re-record, is not
+    /// weakened by this:** it rests on the registered
+    /// `HOLLOW_EXTRA_DRAIN_POLICY` extension ladder, which is untouched, and
+    /// a shorter sampled exit is LESS wall to penetrate, not more. No margin
+    /// constant was needed for this re-record either.
+    ///
+    /// The `lobe_ml` field beside these is deliberately left as it was. It
+    /// was not re-recorded by FU-51 and nothing in the engine reads it, so
+    /// regenerating it here would be exactly the silent side-effect
+    /// re-freeze this protocol exists to prevent; it is stale Python-era
+    /// data and is recorded as such rather than quietly refreshed.
     #[test]
     fn frozen_shell_field_has_an_enclosed_drain_and_vent_plan() {
         let baseline = frozen_hollow_report();
@@ -1632,26 +1651,26 @@ mod tests {
             [
                 Finite::new(0.0).expect("finite"),
                 Finite::new(0.0).expect("finite"),
-                Finite::new(3.5).expect("finite"),
+                Finite::new(3.0).expect("finite"),
             ]
         );
         assert_eq!(
             baseline["drains"][0]["wall_mm"]
                 .as_f64()
                 .expect("drain wall_mm"),
-            4.0
+            3.5
         );
         assert_eq!(
             xyz(&baseline["vent"]["xyz"]),
             [
-                Finite::new(-1.5).expect("finite"),
-                Finite::new(-4.0).expect("finite"),
-                Finite::new(15.0).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
+                Finite::new(-5.0).expect("finite"),
+                Finite::new(15.5).expect("finite"),
             ]
         );
         assert_eq!(
             baseline["vent"]["wall_mm"].as_f64().expect("vent wall_mm"),
-            5.0
+            4.0
         );
 
         // What the engine produces now, pinned **whole** and required to
@@ -1690,13 +1709,15 @@ mod tests {
         // engine's own, and they are pinned twice over. First as values, so a
         // moved keepout cannot pass silently:
         // holes[0]'s keepout moved 2026-08-12 with its centre, FU-53 (the
-        // note above holes[0].center_mm).
+        // note above holes[0].center_mm), and again on 2026-08-13 with the
+        // owner ruling that zeroed the march margin: 7.5 -> 7.0, tracking
+        // the centre's own 3.5 -> 3.0 exactly.
         assert_eq!(
             holes[0].keepout_start_mm,
             [
                 Finite::new(0.0).expect("finite"),
                 Finite::new(0.0).expect("finite"),
-                Finite::new(7.5).expect("finite"),
+                Finite::new(7.0).expect("finite"),
             ]
         );
         assert_eq!(
@@ -1708,21 +1729,22 @@ mod tests {
             ]
         );
         // holes[1]'s keepout moved with its centre and its realised exit wall
-        // (both noted above), 2026-08-12, FU-53.
+        // (both noted above), 2026-08-12 by FU-53 and again 2026-08-13 by
+        // the owner ruling, tracking the vent centre's own move.
         assert_eq!(
             holes[1].keepout_start_mm,
             [
-                Finite::new(-1.5).expect("finite"),
-                Finite::new(0.0).expect("finite"),
-                Finite::new(15.0).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
+                Finite::new(-1.0).expect("finite"),
+                Finite::new(15.5).expect("finite"),
             ]
         );
         assert_eq!(
             holes[1].keepout_end_mm,
             [
-                Finite::new(-1.5).expect("finite"),
+                Finite::new(-0.5).expect("finite"),
                 Finite::new(-14.0).expect("finite"),
-                Finite::new(15.0).expect("finite"),
+                Finite::new(15.5).expect("finite"),
             ]
         );
         // And then as the relation those values are supposed to satisfy, which

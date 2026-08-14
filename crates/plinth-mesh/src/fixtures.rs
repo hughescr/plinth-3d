@@ -494,13 +494,27 @@ pub const DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 2.45;
 /// SEPARATED: a physical throat radius under the registered erosion `t`, so
 /// the throat holds no cavity voxel at all and the two chambers are not even
 /// 6-connected. The control that proves the split is real.
-pub const DUAL_CAVITY_THROAT_SEPARATED_MM: f64 = 3.0;
+///
+/// **Re-derived 2026-08-13** from 3.0 mm, when the owner ruling zeroed
+/// `HOLLOW_CAVITY_MARCH_MARGIN_MM` and the erosion `t` fell from 3.366 mm to
+/// the requested wall itself, 2.5 mm. At 3.0 mm this throat would sit ABOVE
+/// the new erosion, grow a real cavity throat, and turn the control silently
+/// into a different experiment -- which is exactly what `plinth-hollow`'s
+/// B7 guard is there to catch, and did. 2.0 mm restores the control with
+/// MORE margin than it had: 0.5 mm under the erosion where it previously had
+/// 0.366 mm, comfortably clear of the 0.354 mm worst-case lattice phase
+/// error an off-phase run can introduce.
+pub const DUAL_CAVITY_THROAT_SEPARATED_MM: f64 = 2.0;
 /// ABOVE_BORE: the fixture's frozen default physical throat radius,
 /// `HOLLOW_WALL_DEFAULT_MM + HOLLOW_CAVITY_MARCH_MARGIN_MM + 2.45`
-/// = `2.5 + 0.5*sqrt(3) + 2.45`. A hollow-side test asserts this literal
-/// still equals that live-registry sum, so a wall or margin change fails a
-/// named test instead of silently invalidating this fixture.
-pub const DUAL_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 5.816_025_403_784_439;
+/// = `2.5 + 0.0 + 2.45`. A hollow-side test asserts this literal still
+/// equals that live-registry sum, so a wall or margin change fails a named
+/// test instead of silently invalidating this fixture.
+///
+/// **Re-derived 2026-08-13** from 5.816025403784439 mm, when the owner
+/// ruling zeroed `HOLLOW_CAVITY_MARCH_MARGIN_MM`. The formula did not
+/// change; the margin term in it went to zero.
+pub const DUAL_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 4.95;
 /// The smallest admitted `throat_radius_mm`.
 ///
 /// An **added** admission bound (FU-8b permits adding one; it never permits

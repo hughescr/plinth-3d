@@ -429,6 +429,16 @@ pub enum ModelPreparationOutcome {
         wall_mm: Option<Finite>,
         #[serde(default)]
         realized_wall: Option<plinth_hollow::RealizedWall>,
+        /// 2026-08-13 owner ruling: the savings-gate refusal's own
+        /// measurement, when `hollow_disposition` names one
+        /// (`SolidDecisionReason::BelowThreshold` /
+        /// `BelowThresholdAfterRepair`). `None` on every other disposition,
+        /// including a hollowed one — see
+        /// [`plinth_hollow::SavingsShortfall`]. `default` for the same
+        /// reason `realized_wall` is: a report frozen before this field
+        /// existed has to keep deserializing.
+        #[serde(default)]
+        savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
     },
     Stopped {
         after: StageStop,
@@ -1352,6 +1362,7 @@ mod tests {
                         cavity_repair: None,
                         wall_mm: None,
                         realized_wall: None,
+                        savings_shortfall: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1422,6 +1433,7 @@ mod tests {
                         cavity_repair: None,
                         wall_mm: None,
                         realized_wall: None,
+                        savings_shortfall: None,
                     },
                 ),
                 model("refused", refused),
@@ -1916,7 +1928,56 @@ mod tests {
                 // digest. No pinned digest anywhere is re-frozen by this
                 // line, and nothing here touches the coverage radius, the
                 // patch-area floor, or the zero-tolerance verdict.
-                "Sphere.prepped.stl" => false,
+                //
+                // Re-recorded a FIFTH time, 2026-08-13, by the owner ruling
+                // on the wall target and minimum wall, false -> true, with
+                // this attribution rather than an edited expectation.
+                //
+                // **What changed and what did not.** The Sphere did NOT seal
+                // before this ruling and does not seal after it — it has
+                // been refusing under BOTH fields since FU-56, and it still
+                // is. What the ruling moved is WHICH refusal. Measured on
+                // this fixture at `develop` (7f8e4dd) and at this tip, same
+                // process, same settings:
+                //
+                //   develop: measured -> Err("sealed support run failed
+                //            during Routing"), zeros -> Err("coverage
+                //            closure refused: ... RepairPlanRefused
+                //            { phase: Routing, detail: Cco(InvalidGeometry) }
+                //            ..."). Two refusals, DIFFERENT text, so the
+                //            outcomes compared unequal: divergent.
+                //   this tip: both fields -> Err("sealed support run failed
+                //            during Lowering"). One refusal, identical text
+                //            under both: neutral.
+                //
+                // The mechanism: `outcome` runs `prepared_hollow`, so it
+                // consumes the drilled shell, and zeroing
+                // `HOLLOW_CAVITY_MARCH_MARGIN_MM` cuts the Sphere's cavity at
+                // the requested 2.5 mm instead of 3.366 mm. That is a
+                // different shell — 1,749 mm3 of cavity against 1,221 — and
+                // the support chain on it now stops at Lowering, before it
+                // ever reaches the coverage-closure repair rounds where
+                // FU-38's contact-selection tie-break was the last thing
+                // still separating the two fields.
+                //
+                // **FU-38's finding is not contradicted and is not edited.**
+                // The tie-break is still measured, and still divergent, on
+                // both fixtures that reach that far — `make_toed_slab` and
+                // `make_overhang_table`, whose rows are untouched. What this
+                // row now records is that the Sphere stops earlier than the
+                // stage the tie-break lives in, so it can no longer witness
+                // it. That is the same kind of statement its THIRD re-record
+                // made, for a different reason.
+                //
+                // **The earlier refusal is recorded as an open question, not
+                // silently absorbed:** a shell that stops at Lowering where
+                // it used to reach Routing is a fact about the support chain
+                // on a thinner-walled sphere, and it belongs to whoever owns
+                // the Sphere's coverage closure. No pinned digest anywhere is
+                // re-frozen by this line, and nothing here touches the
+                // coverage radius, the patch-area floor, the zero-tolerance
+                // verdict, or any registered constant.
+                "Sphere.prepped.stl" => true,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
