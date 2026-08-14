@@ -28,8 +28,8 @@ use crate::{
     },
     perception::FrozenTipLoadPolicy,
     transient::{
-        resize_forest_current_parity, transient_report, TransientError, TransientReport,
-        TransientResizePlan, ZInterval,
+        resize_forest_current_parity, transient_report, MemberTransientEvidence, TransientError,
+        TransientReport, TransientResizePlan, ZInterval,
     },
 };
 
@@ -678,25 +678,28 @@ fn append_clearance_needs(
         let Some(evidence) = report.member(member) else {
             continue;
         };
-        let Some(gap) = largest_gap(&evidence.free_gaps_mm) else {
+        let Some(site) = clearance_relief_site(forest, evidence, config) else {
             continue;
         };
-        let z = (gap.lo_mm.get() + gap.hi_mm.get()) / 2.0;
-        if batch
-            .needs
-            .iter()
-            .any(|need| need.host == member && (need.z_mm - z).abs() <= config.ladder_z_mm / 2.0)
-        {
+        if batch.needs.iter().any(|need| {
+            need.host == site.host && (need.z_mm - site.z_mm).abs() <= config.ladder_z_mm / 2.0
+        }) {
             continue;
         }
         batch.requested += 1;
         batch.needs.push(Need {
-            host: member,
-            z_mm: z,
+            host: site.host,
+            z_mm: site.z_mm,
             rung_index: 0,
-            path_mapped: false,
-            triggers: Vec::new(),
-            alternatives: Vec::new(),
+            path_mapped: site.path_mapped,
+            // The violated member is this need's TRIGGER, not merely its host.
+            // An empty trigger list made the controller stop after the first
+            // rung it managed to place, whatever that rung did to the span; the
+            // trigger makes `pending_triggers_after_trial` re-measure the exact
+            // clearance and keep working the remaining sites until the member is
+            // actually back outside the standoff shell.
+            triggers: vec![member],
+            alternatives: site.alternatives,
         });
     }
     batch.needs.sort_by(|left, right| {
@@ -706,6 +709,65 @@ fn append_clearance_needs(
             .then_with(|| left.triggers.cmp(&right.triggers))
     });
     Ok(())
+}
+
+/// Where to ask for the rung that is supposed to relieve one negative-clearance
+/// member.
+struct ClearanceReliefSite {
+    host: MemberKey,
+    z_mm: f64,
+    alternatives: Vec<(MemberKey, f64)>,
+    path_mapped: bool,
+}
+
+/// Aim a clearance-triggered brace request at the span that actually sets the
+/// violated member's radius.
+///
+/// The radius that pushed the member inside the standoff shell is not a
+/// property of the member alone. `resize_forest_current_parity` sizes every
+/// member from `worst_span_mm`, which is the worst FREE SPAN along that
+/// member's root-to-terminal path, so the span to shorten generally lives on
+/// OTHER members of that path. Asking for a rung on the violated member is
+/// therefore asking the wrong member to change: on the Giant Bat, member 466's
+/// own largest free gap is 1.667 mm tall while the span driving its radius is
+/// 7.893 mm and lies elsewhere on its path, so no rung inside that gap could
+/// move the sizing driver at all.
+///
+/// This aims the request the same way `compute_needs` aims its
+/// activation-triggered ones: map the midpoint of the worst-span interval onto
+/// the path member that spans that height, and offer the rest of the interval
+/// as fallback sites. A path-mapped need is also the only kind
+/// `gather_candidates` will widen to the reach tiers for, which is the second
+/// half of why clearance needs used to gather nothing.
+///
+/// When the report carries no usable path span the old behaviour stands: aim at
+/// the middle of the member's own largest free gap, unmapped.
+fn clearance_relief_site(
+    forest: &Forest,
+    evidence: &MemberTransientEvidence,
+    config: &BraceConfig,
+) -> Option<ClearanceReliefSite> {
+    let path = &evidence.worst_span_path;
+    let lo = evidence.worst_span_interval_mm.lo_mm.get();
+    let hi = evidence.worst_span_interval_mm.hi_mm.get();
+    if path.len() > 1 && hi > lo {
+        let z = (lo + hi) / 2.0;
+        if let Some(host) = map_height_to_path_member(forest, path, z) {
+            return Some(ClearanceReliefSite {
+                host,
+                z_mm: z,
+                alternatives: path_fallbacks(forest, path, host, z, lo, hi, config),
+                path_mapped: true,
+            });
+        }
+    }
+    let gap = largest_gap(&evidence.free_gaps_mm)?;
+    Some(ClearanceReliefSite {
+        host: evidence.member,
+        z_mm: (gap.lo_mm.get() + gap.hi_mm.get()) / 2.0,
+        alternatives: Vec::new(),
+        path_mapped: false,
+    })
 }
 
 fn compute_needs(
@@ -2832,6 +2894,116 @@ mod tests {
         assert!(batch.needs[0].path_mapped);
         assert_eq!(batch.needs[0].triggers, vec![lower]);
         assert_eq!(batch.needs[0].z_mm, 10.0);
+    }
+
+    /// Task #25 — a clearance-triggered brace request must be aimed at the span
+    /// that sets the violated member's radius, not at the violated member.
+    ///
+    /// `resize_forest_current_parity` sizes a member from `worst_span_mm`, a
+    /// property of that member's whole root-to-terminal PATH. The span to
+    /// shorten therefore usually lies on some other member of the path, so a
+    /// rung placed inside the violated member's own free gap cannot move the
+    /// sizing driver — which is how the Giant Bat's member 466 asked three
+    /// times for relief and got a request no candidate could ever serve.
+    ///
+    /// The fixture separates the two answers by construction: the violated
+    /// member `upper` owns the free gap, and the worst-span interval lies
+    /// wholly inside `lower`. The old code hosted the need on `upper`; the
+    /// driver is on `lower`.
+    #[test]
+    fn a_clearance_need_is_hosted_on_the_span_that_sets_the_radius() {
+        // `remote_box` spans 100..110 on every axis. `lower` sits below it with
+        // room to spare, `upper` runs up into it, so exactly one member reads
+        // negative exact clearance.
+        let surface = remote_box();
+        let config = BraceConfig::current(0.05).unwrap();
+        let mut forest = Forest::new();
+        let lower = forest.add_member(member(
+            [105.0, 105.0, 98.5],
+            [105.0, 105.0, 95.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let upper = forest.add_member(member(
+            [105.0, 105.0, 105.0],
+            [105.0, 105.0, 98.5],
+            MemberKind::Shoot,
+            1,
+        ));
+        forest.set_parent(upper, Some(lower)).unwrap();
+
+        // Non-vacuity: the fixture really does violate, and only on `upper`.
+        assert_eq!(
+            exact_clearance_violated_members(&forest, &surface, &config, test_penetration_limits())
+                .unwrap(),
+            vec![upper],
+            "the fixture must put exactly the upper member inside the model"
+        );
+
+        let report = TransientReport {
+            members: vec![crate::transient::MemberTransientEvidence {
+                member: upper,
+                worst_span_mm: finite(10.0).unwrap(),
+                restraint_zs_mm: Vec::new(),
+                // The violated member's own free gap — the site the old code
+                // asked for, whose midpoint is 101.5.
+                free_gaps_mm: vec![ZInterval {
+                    lo_mm: finite(99.0).unwrap(),
+                    hi_mm: finite(104.0).unwrap(),
+                }],
+                n_terminals: 1,
+                // The span that actually sets the radius, lying wholly inside
+                // `lower`; its midpoint is 96.5.
+                worst_span_interval_mm: ZInterval {
+                    lo_mm: finite(95.0).unwrap(),
+                    hi_mm: finite(98.0).unwrap(),
+                },
+                worst_span_path: vec![lower, upper],
+            }],
+        };
+
+        let mut batch = NeedBatch {
+            requested: 0,
+            needs: Vec::new(),
+        };
+        append_clearance_needs(
+            &forest,
+            &surface,
+            &report,
+            &config,
+            test_penetration_limits(),
+            &mut batch,
+        )
+        .unwrap();
+
+        assert_eq!(batch.requested, 1);
+        assert_eq!(batch.needs.len(), 1);
+        let need = &batch.needs[0];
+        assert_eq!(
+            need.host, lower,
+            "the rung must be asked for on the member carrying the radius-driving span"
+        );
+        assert_eq!(need.z_mm, 96.5, "the midpoint of the worst-span interval");
+        assert!(
+            need.path_mapped,
+            "a path-mapped need is the only kind gather_candidates widens to the reach tiers for"
+        );
+        assert_eq!(
+            need.triggers,
+            vec![upper],
+            "the violated member is the trigger, so the controller keeps working \
+             sites until its clearance is non-negative again"
+        );
+        assert!(
+            !need.alternatives.is_empty(),
+            "the rest of the interval must be offered as fallback sites"
+        );
+        assert!(
+            need.alternatives
+                .iter()
+                .all(|(key, _)| *key == lower || *key == upper),
+            "every fallback site must lie on the worst-span path"
+        );
     }
 
     #[test]
