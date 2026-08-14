@@ -9,6 +9,7 @@ use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 use plinth_core::{m0_constants, Finite};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, validate_face_topology, Mesh, WeldPolicy,
+    TOPOLOGY_CUT_CLOSED_SOLID_MASK,
 };
 use plinth_orient::OrientationHistory;
 use plinth_solid::{BooleanInputEstimate, BooleanLimits, ManifoldBackend, Mesh as SolidMesh};
@@ -481,6 +482,29 @@ impl DrillingFailure {
     }
 }
 
+/// Which of H1b's two meshes a topology refusal is about.
+///
+/// H1b proves the shell it was handed and the mesh it drilled, in that order,
+/// through one function. The refusal used to name the drilled mesh whichever
+/// of the two had failed, which sent readers to look for a Boolean defect in a
+/// mesh the Boolean had not yet produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProvenMesh {
+    /// The shell as H1a planned it, after any audit refill — the input.
+    PreDrillShell,
+    /// What the Boolean difference returned — the output.
+    Drilled,
+}
+
+impl std::fmt::Display for ProvenMesh {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PreDrillShell => "the pre-drill shell",
+            Self::Drilled => "the drilled mesh",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Error)]
 pub enum DrillingRefusal {
     #[error("H1b requires finite non-zero Boolean limits")]
@@ -493,6 +517,15 @@ pub enum DrillingRefusal {
     Boolean,
     #[error("drilled mesh failed strict closed, wound, single-body validation")]
     InvalidDrilledTopology,
+    #[error("{subject} failed the closed-solid topology proof")]
+    InvalidTopology { subject: ProvenMesh },
+    #[error(
+        "the pre-drill shell has {found} closed surfaces, not the {expected} the retained \
+         cavity accounts for"
+    )]
+    SourceSurfaceCount { found: usize, expected: usize },
+    #[error("drilling left {found} bodies, not one: a chamber was never opened to the outside")]
+    DrilledBodyCount { found: usize },
     #[error("drilling changed the model bounds")]
     BoundsChanged,
     #[error("drilling shrank model bound axis {axis} side {side} by {shrinkage_mm}mm, beyond {max_shrinkage_mm}mm")]
@@ -590,8 +623,9 @@ fn drill(
     let post_refill_mesh = if audit.refilled_voxels == 0 {
         post_refill_mesh
     } else {
-        orient_boolean_cavity(post_refill_mesh)
-            .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?
+        orient_boolean_cavity(post_refill_mesh).map_err(|_| DrillingRefusal::InvalidTopology {
+            subject: ProvenMesh::PreDrillShell,
+        })?
     };
     let base = if audit.refilled_voxels == 0 {
         reconstructed
@@ -619,8 +653,9 @@ fn drill(
         .map_err(|_| DrillingRefusal::Boolean)?;
     let mesh = from_solid(drilled).map_err(|_| DrillingRefusal::Boolean)?;
     let (source_volume, source_components, source_chi) =
-        topology_evidence(&post_refill_mesh, limits)?;
-    let (drilled_volume, drilled_components, drilled_chi) = topology_evidence(&mesh, limits)?;
+        topology_evidence(&post_refill_mesh, limits, ProvenMesh::PreDrillShell)?;
+    let (drilled_volume, drilled_components, drilled_chi) =
+        topology_evidence(&mesh, limits, ProvenMesh::Drilled)?;
     // The pre-drill shell is the outer surface plus one closed surface per
     // retained cavity. That count was hard-coded as one cavity while the
     // engine kept a single chamber; it now comes from the cavity the refill
@@ -630,8 +665,16 @@ fn drill(
     let expected_source_components = retained_cavity_components
         .checked_add(1)
         .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
-    if source_components != expected_source_components || drilled_components != 1 {
-        return Err(DrillingRefusal::InvalidDrilledTopology);
+    if source_components != expected_source_components {
+        return Err(DrillingRefusal::SourceSurfaceCount {
+            found: source_components,
+            expected: expected_source_components,
+        });
+    }
+    if drilled_components != 1 {
+        return Err(DrillingRefusal::DrilledBodyCount {
+            found: drilled_components,
+        });
     }
     let expected_chi = source_chi
         .checked_sub(
@@ -808,20 +851,20 @@ fn outer_solid(shell: &Mesh, limits: DrillingLimits) -> Result<SolidMesh, Drilli
         edge_occurrences,
         limits.max_topology_edge_occurrences,
     )?;
-    let topology = build_face_topology(shell, WeldPolicy::ExactBits)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-    let certificate = certify_closed_components(shell, &topology)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    // Every refusal here is about the shell H1a handed in, not about anything
+    // the Boolean produced — it has not run yet.
+    let refuse = || DrillingRefusal::InvalidTopology {
+        subject: ProvenMesh::PreDrillShell,
+    };
+    let topology = build_face_topology(shell, WeldPolicy::ExactBits).map_err(|_| refuse())?;
+    let certificate = certify_closed_components(shell, &topology).map_err(|_| refuse())?;
     let mut positive = certificate
         .components()
         .iter()
         .filter(|component| component.signed_volume_mm3() > 0.0);
-    let outer = positive
-        .next()
-        .ok_or(DrillingRefusal::InvalidDrilledTopology)?
-        .component_id();
+    let outer = positive.next().ok_or_else(refuse)?.component_id();
     if positive.next().is_some() {
-        return Err(DrillingRefusal::InvalidDrilledTopology);
+        return Err(refuse());
     }
     let triangles = shell
         .tris()
@@ -1220,15 +1263,10 @@ fn cylinder(hole: &HoleGeometry) -> Result<SolidMesh, DrillingRefusal> {
         return Err(DrillingRefusal::InvalidHoleGeometry);
     }
     let w = scale(axis, 1.0 / length);
-    let reference = if w[0].abs() <= w[1].abs() && w[0].abs() <= w[2].abs() {
-        [1.0, 0.0, 0.0]
-    } else if w[1].abs() <= w[2].abs() {
-        [0.0, 1.0, 0.0]
-    } else {
-        [0.0, 0.0, 1.0]
-    };
-    let u = normalize(cross(reference, w))?;
-    let v = cross(w, u);
+    // The planner tests the rear of this very prism for a second mouth, so
+    // both stages read the cross-bore basis out of one function.
+    let (u, v) =
+        crate::drains::cutter_basis(w).map_err(|_| DrillingRefusal::InvalidHoleGeometry)?;
     let mut vertices = Vec::with_capacity(2 * CYLINDER_SECTIONS + 2);
     for center in [a, b] {
         for section in 0..CYLINDER_SECTIONS {
@@ -1403,7 +1441,9 @@ fn validate_frozen_hole_geometry(hole: &HoleGeometry) -> Result<(), DrillingRefu
 fn topology_evidence(
     mesh: &Mesh,
     limits: DrillingLimits,
+    subject: ProvenMesh,
 ) -> Result<(f64, usize, i64), DrillingRefusal> {
+    let refuse = || DrillingRefusal::InvalidTopology { subject };
     let edge_occurrences = mesh
         .tris()
         .len()
@@ -1414,23 +1454,36 @@ fn topology_evidence(
         edge_occurrences,
         limits.max_topology_edge_occurrences,
     )?;
-    mesh.audit_strict()
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-    let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-    validate_face_topology(&topology).map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-    if topology.cut_flags().iter().any(|flag| *flag != 0) {
-        return Err(DrillingRefusal::InvalidDrilledTopology);
+    mesh.audit_strict().map_err(|_| refuse())?;
+    let topology = build_face_topology(mesh, WeldPolicy::ExactBits).map_err(|_| refuse())?;
+    validate_face_topology(&topology).map_err(|_| refuse())?;
+    // The registered closed-solid cut mask, the same one
+    // `plinth_hollow::validate_closed_mesh`, `plinth-decimate` and
+    // `plinth-support` test against. It still refuses boundary, non-manifold,
+    // same-direction, duplicate and degenerate faces; it deliberately does not
+    // refuse `TOPOLOGY_CUT_POINT_ONLY`, per the owner ruling of 2026-08-12
+    // (§4, FU-47): resin cannot flow through a point, so two lobes of a sculpt
+    // touching at one vertex is a fingertip touch, not a hole in the solid.
+    //
+    // This line carried a raw `!= 0` — the very test that ruling deleted one
+    // layer down — and so re-refused a class the owner had ruled is not a
+    // defect. The Giant Bat's own sculpt has 14 such point-touches, none of
+    // them made by drilling.
+    if topology
+        .cut_flags()
+        .iter()
+        .any(|flag| *flag & TOPOLOGY_CUT_CLOSED_SOLID_MASK != 0)
+    {
+        return Err(refuse());
     }
-    let certificate = certify_closed_components(mesh, &topology)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    let certificate = certify_closed_components(mesh, &topology).map_err(|_| refuse())?;
     if certificate
         .components()
         .iter()
         .any(|component| component.signed_volume_mm3() <= 0.0)
         && certificate.components().len() == 1
     {
-        return Err(DrillingRefusal::InvalidDrilledTopology);
+        return Err(refuse());
     }
     let welded = topology.source_vertex_to_welded();
     let mut edges = HashSet::with_capacity(mesh.tris().len() * 3);
@@ -1857,6 +1910,108 @@ mod tests {
     use scirs2_core::ndarray::Array3;
     use std::path::PathBuf;
 
+    /// Two boxes that meet at exactly one vertex and share nothing else.
+    ///
+    /// Closed, outward wound, and non-manifold at that one vertex: the fan
+    /// there falls into two components, which is the point-touch class. The
+    /// Giant Bat's sculpt carries fourteen of these; this is the same defect
+    /// class in eight triangles' worth of fixture.
+    fn boxes_touching_at_one_vertex() -> Mesh {
+        let lower = plinth_mesh::make_box([10.0; 3], [-5.0, -5.0, -10.0]).expect("lower box");
+        let upper = plinth_mesh::make_box([10.0; 3], [5.0, 5.0, 0.0]).expect("upper box");
+        let offset = u32::try_from(lower.verts().len()).expect("small fixture");
+        let mut verts = lower.verts().to_vec();
+        verts.extend_from_slice(upper.verts());
+        let mut tris = lower.tris().to_vec();
+        tris.extend(
+            upper
+                .tris()
+                .iter()
+                .map(|tri| [tri[0] + offset, tri[1] + offset, tri[2] + offset]),
+        );
+        Mesh::new(verts, tris).expect("point-touching pair")
+    }
+
+    /// **A point-touch in the sculpt is not a drilling defect, and H1b must
+    /// stop treating it as one.**
+    ///
+    /// The owner ruled on 2026-08-12 (§4, FU-47) that a vertex where two
+    /// lobes meet is a legitimate fingertip touch: resin cannot flow through
+    /// a point, so nothing leaks and nothing is open. `validate_closed_mesh`
+    /// was changed to test the registered
+    /// [`TOPOLOGY_CUT_CLOSED_SOLID_MASK`] instead of any nonzero flag, and
+    /// this proof kept the raw `!= 0` one layer up — so it re-refused the
+    /// class, on the *pre-drill* shell, before the drilled mesh was measured
+    /// at all. The Giant Bat is closed, correctly wound, single-bodied and
+    /// drills to the exact expected Euler characteristic, and was refused for
+    /// fourteen point-touches its own sculptor put there.
+    #[test]
+    fn a_sculpt_point_touch_does_not_fail_the_closed_solid_topology_proof() {
+        let mesh = boxes_touching_at_one_vertex();
+        let topology =
+            build_face_topology(&mesh, WeldPolicy::ExactBits).expect("fixture topology builds");
+        // The fixture really is the class under test, and nothing else: a
+        // point-touch present, and no flag the closed-solid mask names.
+        assert!(topology
+            .cut_flags()
+            .iter()
+            .any(|flags| *flags & plinth_mesh::TOPOLOGY_CUT_POINT_ONLY != 0));
+        assert!(topology
+            .cut_flags()
+            .iter()
+            .all(|flags| *flags & TOPOLOGY_CUT_CLOSED_SOLID_MASK == 0));
+
+        let (volume_mm3, components, chi) = topology_evidence(
+            &mesh,
+            DrillingLimits::production(),
+            ProvenMesh::PreDrillShell,
+        )
+        .expect("a point-touch is not a closed-solid defect");
+        // Two 10 mm boxes, summed over 24 signed tetrahedra.
+        assert!((volume_mm3 - 2_000.0).abs() < 1.0e-9, "{volume_mm3}");
+        // Two closed surfaces: face adjacency never crosses a lone vertex.
+        assert_eq!(components, 2);
+        // 15 welded vertices - 36 edges + 24 faces: two chi-2 boxes sharing
+        // one vertex.
+        assert_eq!(chi, 3);
+    }
+
+    /// **A topology refusal must name the mesh it actually proved.**
+    ///
+    /// H1b proves the shell it was handed and then the mesh it drilled,
+    /// through one function. The refusal used to say "drilled mesh failed
+    /// strict closed, wound, single-body validation" either way, so a reader
+    /// went looking for a Boolean defect in a mesh the Boolean had not yet
+    /// produced — and, in the Giant Bat's case, in a mesh that was closed,
+    /// wound and single-bodied.
+    #[test]
+    fn a_topology_refusal_names_the_mesh_it_proved() {
+        let mut mesh = boxes_touching_at_one_vertex();
+        let mut tris = mesh.tris().to_vec();
+        tris.pop().expect("fixture has faces");
+        mesh = Mesh::new(mesh.verts().to_vec(), tris).expect("open fixture");
+        for subject in [ProvenMesh::PreDrillShell, ProvenMesh::Drilled] {
+            assert_eq!(
+                topology_evidence(&mesh, DrillingLimits::production(), subject),
+                Err(DrillingRefusal::InvalidTopology { subject })
+            );
+        }
+        assert_eq!(
+            DrillingRefusal::InvalidTopology {
+                subject: ProvenMesh::PreDrillShell
+            }
+            .to_string(),
+            "the pre-drill shell failed the closed-solid topology proof"
+        );
+        assert_eq!(
+            DrillingRefusal::InvalidTopology {
+                subject: ProvenMesh::Drilled
+            }
+            .to_string(),
+            "the drilled mesh failed the closed-solid topology proof"
+        );
+    }
+
     fn sphere_plan() -> PlannedShell {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/baseline/Sphere.prepped.oriented-solid.stl");
@@ -1908,7 +2063,12 @@ mod tests {
     fn frozen_sphere_is_drilled_once_and_every_voxel_drains() {
         let plan = sphere_plan();
         let (source_material_mm3, _, _) =
-            topology_evidence(plan.shell(), DrillingLimits::production()).unwrap();
+            topology_evidence(
+                plan.shell(),
+                DrillingLimits::production(),
+                ProvenMesh::PreDrillShell,
+            )
+            .unwrap();
         let drilled = drill_planned_shell(plan).expect("drilled Sphere");
         assert_eq!(drilled.evidence().holes.len(), 2);
         assert!(drilled
@@ -2189,8 +2349,14 @@ mod tests {
         )
         .unwrap();
         let (_, _, source_chi) =
-            topology_evidence(plan.shell(), DrillingLimits::production()).unwrap();
-        let (_, _, actual_chi) = topology_evidence(&mesh, DrillingLimits::production()).unwrap();
+            topology_evidence(
+                plan.shell(),
+                DrillingLimits::production(),
+                ProvenMesh::PreDrillShell,
+            )
+            .unwrap();
+        let (_, _, actual_chi) =
+            topology_evidence(&mesh, DrillingLimits::production(), ProvenMesh::Drilled).unwrap();
         let expected_two_openings = source_chi - 4;
         assert_ne!(
             actual_chi, expected_two_openings,
@@ -2356,7 +2522,7 @@ mod tests {
         )
         .unwrap();
         preflight_cutters(hole_count, exact).unwrap();
-        topology_evidence(plan.shell(), exact).unwrap();
+        topology_evidence(plan.shell(), exact, ProvenMesh::PreDrillShell).unwrap();
         drainability_map(plan.cavity_field(), plan.drain_plan().holes(), exact).unwrap();
         let fields = [
             (
@@ -2411,7 +2577,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            topology_evidence(plan.shell(), topology_cap),
+            topology_evidence(plan.shell(), topology_cap, ProvenMesh::PreDrillShell),
             Err(DrillingRefusal::CountAdmission {
                 resource: "topology edge occurrence",
                 ..
@@ -2630,9 +2796,19 @@ mod tests {
         assert_eq!(retained_cavity_components, 1);
         let reconstructed = orient_boolean_cavity(from_solid(reconstructed).unwrap()).unwrap();
         let (post_refill_volume, components, _) =
-            topology_evidence(&reconstructed, DrillingLimits::production()).unwrap();
+            topology_evidence(
+                &reconstructed,
+                DrillingLimits::production(),
+                ProvenMesh::PreDrillShell,
+            )
+            .unwrap();
         let (original_volume, _, _) =
-            topology_evidence(split.shell(), DrillingLimits::production()).unwrap();
+            topology_evidence(
+                split.shell(),
+                DrillingLimits::production(),
+                ProvenMesh::PreDrillShell,
+            )
+            .unwrap();
         assert_eq!(components, retained_cavity_components + 1);
         assert!(post_refill_volume > original_volume);
     }
