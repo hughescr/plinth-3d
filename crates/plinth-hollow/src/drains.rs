@@ -2308,7 +2308,7 @@ mod tests {
         // count. Nothing in it mentions a face.
         assert!(
             accounting.ray_query_bytes() >= 128 * crossings + 160 * rays + 48,
-            "charge {} fell under the closed-form floor",
+            "charge {} fell under the closed-form minimum",
             accounting.ray_query_bytes()
         );
         assert!(

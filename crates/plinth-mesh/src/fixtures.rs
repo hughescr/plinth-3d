@@ -470,12 +470,80 @@ pub const DUAL_CAVITY_UPPER_ARC_STEPS: usize = 60;
 /// physical passage directly.
 ///
 /// AT_BORE: the cavity-side throat radius that pins the throat's axis
-/// clearance to exactly 1.5 mm (`= HOLLOW_DRAIN_R_MM`, three 0.5 mm voxel
-/// steps) — refused by the FU-47 core threshold (1.75 mm) on real geometry.
-pub const DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM: f64 = 1.45;
+/// clearance to exactly `0.5*sqrt(8)` = 1.4142135623730951 mm — the widest
+/// passage the FU-47 core threshold still refuses — and that a comparison
+/// against the raw bore radius alone would wrongly admit.
+///
+/// **Re-derived 2026-08-13 from 1.45 mm, when the registered drill went from
+/// 3.0 mm across to 2.5 mm.** The engine did not change and was not meant to:
+/// the flow rule's minimum passage width is defined by what the chosen drill
+/// can pass through, so it moves with the drill by design. The fixture is what
+/// recalibrates.
+///
+/// **The line, and which lattice rung it lands on.** `HOLLOW_DRAIN_R_MM` is
+/// now 1.25 mm and `flow::core_clearance_threshold_mm` adds half a voxel
+/// pitch, so the clearance line is `1.25 + 0.25` = **1.5 mm**, where it used
+/// to be 1.75 mm. On this fixture's own lattice phase a cavity-side throat
+/// radius `r` reads a clearance of `0.5*sqrt(k)` mm, `k` the smallest sum of
+/// two squares with `0.5*sqrt(k) > r`. The reachable rungs around the line
+/// are `k = 5` (1.1180), `k = 8` (1.4142), `k = 9` (1.5) and `k = 10`
+/// (1.5811); `k = 6` and `k = 7` are not sums of two squares, so 1.2247 and
+/// 1.3229 are not readings any lattice offset can produce.
+///
+/// The new line lands **exactly on rung `k = 9`** — the offset `(3, 0)`,
+/// three whole pitches. The retired 1.75 mm line landed between rungs 9 and
+/// 13 and no offset could equal it, which is why the old fixture could sit on
+/// rung 9 and still be refused. That is no longer available: the core test is
+/// `clearance >= threshold`, so a throat that reads 1.5 mm is now **admitted**
+/// and the refused side of the line begins one rung lower, at
+/// `0.5*sqrt(8)` = 1.4142135623730951 mm.
+///
+/// **Why rung 8 and not a lower one.** Rung 8 is the only choice that keeps
+/// this setting's whole claim alive. B4 asserts that a comparison against the
+/// *raw* bore radius would wrongly admit AT_BORE and only the half-voxel
+/// correction refuses it: 1.4142 >= 1.25, so the raw comparison does admit it.
+/// Rung 5 (1.1180) is under the raw bore and would be refused with or without
+/// the correction, which would prove nothing.
+///
+/// **Why 1.25 and not another radius on that rung.** Rung 8 is read by any
+/// cavity radius in `(0.5*sqrt(5), 0.5*sqrt(8)]` =
+/// `(1.1180339887498949, 1.4142135623730951]`. 1.25 sits 0.1320 mm above the
+/// bottom of that bracket and 0.1642 mm below the top — near the middle,
+/// farthest from either mistake, and about 3.7x the margin the retired 1.45 mm
+/// had at the tight end of its own bracket (0.0358 mm). It is also exactly
+/// representable in binary (`5/4`), as is the physical throat it produces
+/// (`t + 1.25` = 3.75 mm = `30/8`), so the mandatory f32 snap and every
+/// platform's `sin`/`cos` decide the rung identically. That it also equals
+/// today's `HOLLOW_DRAIN_R_MM` makes the setting's name literal — the cavity
+/// throat is exactly one bore radius wide — but the binding requirement is the
+/// bracket, not that coincidence.
+///
+/// **Arbitrary lattice phase.** Decimation and the dense orientation sweep put
+/// the throat on an arbitrary phase, where the worst-case in-plane distance
+/// from a line to the nearest 0.5 mm lattice sample is `0.5/sqrt(2)` ~
+/// 0.354 mm. That error costs a reading clearance; it does not manufacture it,
+/// so for a setting whose job is to be **refused** it works in the safe
+/// direction — the opposite of
+/// [`DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM`], which had to be pushed up the
+/// bracket to survive the same error. The claim is not left to that argument
+/// either. It is measured twice, both times off this fixture's own phase:
+/// `plinth-hollow`'s
+/// `dual_cavity_doctrine::the_flow_rule_still_splits_at_bore_and_joins_above_bore_off_the_lattice`
+/// shifts the fixture a quarter pitch and requires the flow rule to still
+/// report **two** resin-flow interiors here against one at ABOVE_BORE; and
+/// `plinth-pipeline/tests/dual_cavity_real_pipeline.rs` runs the real
+/// `repair -> decimate -> dense orientation sweep` chain and requires the far
+/// chamber to be handed back to solid, within 5% of its own analytic volume.
+/// On the quarter-pitch pose that second claim does **not** hold today — the
+/// flow rule splits the chambers and the drilling stage's reachability flood
+/// then crosses the same sub-bore throat — and that gap is recorded as an open
+/// finding in that test rather than hidden behind a weaker assertion. It is a
+/// drilling-stage question; it does not move this number.
+pub const DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM: f64 = 1.25;
 /// ABOVE_BORE: the cavity-side throat radius that pins the throat's axis
 /// clearance to exactly 2.5 mm — five 0.5 mm lattice steps, comfortably
-/// admitted by the FU-47 core threshold (1.75 mm).
+/// admitted by the FU-47 core threshold (1.5 mm since the 2026-08-13 drill
+/// change; 1.75 mm when this value was derived).
 ///
 /// **Why 2.45 and not the smallest admitted value.** The clearance the flow
 /// rule reads is quantized onto the lattice, so *any* cavity radius in
@@ -486,10 +554,14 @@ pub const DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM: f64 = 1.45;
 /// lands the throat on an arbitrary lattice phase: the worst-case in-plane
 /// distance from an arbitrary line to the nearest 0.5 mm lattice sample is
 /// `0.5/sqrt(2) ~ 0.354 mm`, so an off-phase throat still reads at least
-/// `2.45 - 0.354 = 2.096 mm > 1.75 mm`. At the pre-2026-08-12 value of
-/// 1.90 mm that margin was `1.90 - 0.354 = 1.546 mm < 1.75 mm`, and the
-/// doctrine measurably failed after decimation and re-orientation — which is
-/// the defect this number's current value fixes.
+/// `2.45 - 0.354 = 2.096 mm`, clear of the 1.5 mm line today and of the
+/// 1.75 mm line it was sized against. At the pre-2026-08-12 value of 1.90 mm
+/// that margin was `1.90 - 0.354 = 1.546 mm < 1.75 mm`, and the doctrine
+/// measurably failed after decimation and re-orientation — which is the
+/// defect this number's current value fixes. That failure was measured
+/// against the retired 1.75 mm line and is left standing as the record of
+/// **why** the value is 2.45; it has not been re-measured against the 1.5 mm
+/// line, and 2.45 is retained on its own merits rather than re-derived down.
 pub const DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM: f64 = 2.45;
 /// SEPARATED: a physical throat radius under the registered erosion `t`, so
 /// the throat holds no cavity voxel at all and the two chambers are not even
@@ -570,7 +642,8 @@ pub fn make_dual_cavity_pawn() -> Result<Mesh, MeshError> {
 /// **The exact clearances belong to that phase; the doctrine does not.**
 /// Translating the fixture off the 0.5 mm lattice, decimating it, or running
 /// it through an orientation sweep all move it to an arbitrary phase, and the
-/// *exact* equalities (`clearance == 1.5`, `clearance == 2.5`) are only
+/// *exact* equalities (`clearance == 0.5*sqrt(8)` at AT_BORE, `clearance ==
+/// 2.5` at ABOVE_BORE) are only
 /// claimed on the fixture's own phase. The *doctrine* — AT_BORE refused,
 /// ABOVE_BORE admitted as one flow-connected interior spanning both chambers
 /// — is claimed on **both**, and

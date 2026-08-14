@@ -112,7 +112,9 @@ fn mesh_and_fixture_input_validation_is_typed() {
 
 /// The registered erosion `t = HOLLOW_WALL_DEFAULT_MM +
 /// HOLLOW_CAVITY_MARCH_MARGIN_MM`, read live from the registry rather than
-/// restated — the AT_BORE physical throat radius is `t + 1.45`.
+/// restated — the AT_BORE physical throat radius is `t + 1.25`
+/// (re-derived from `t + 1.45` on 2026-08-13, when the drill went from 3.0 mm
+/// to 2.5 mm across; see [`DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM`]).
 fn registered_erosion_mm() -> f64 {
     let constants = plinth_core::m0_constants().expect("M0 constants");
     let placeholders = constants.placeholders();
