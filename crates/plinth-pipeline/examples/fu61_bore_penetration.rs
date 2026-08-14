@@ -210,6 +210,15 @@ struct ModelRecord {
     wall_requested_mm: f64,
     pitch_mm: f64,
     cavity_voxels: usize,
+    cavity_volume_mm3: f64,
+    source_volume_mm3: f64,
+    /// What the drain planner charged itself, beside the ceiling it was
+    /// charged against.
+    drain_planning_cap_bytes: usize,
+    planner_requested_bytes: usize,
+    planner_ray_query_bytes: usize,
+    planner_ray_crossings: usize,
+    planner_candidate_rays: usize,
     holes: Vec<HoleRecord>,
 }
 
@@ -223,6 +232,13 @@ impl ModelRecord {
             wall_requested_mm: 0.0,
             pitch_mm: 0.0,
             cavity_voxels: 0,
+            cavity_volume_mm3: 0.0,
+            source_volume_mm3: 0.0,
+            drain_planning_cap_bytes: 0,
+            planner_requested_bytes: 0,
+            planner_ray_query_bytes: 0,
+            planner_ray_crossings: 0,
+            planner_candidate_rays: 0,
             holes: Vec::new(),
         }
     }
@@ -265,7 +281,9 @@ fn measure_model(
     let candidate = create_shell_recording_repair(solid, settings, H0AdmissionLimits::production())
         .map_err(|e| format!("create_shell: {}", e.into_error()))?;
     let pitch_mm = candidate.cavity_field().pitch_mm().get();
+    let cavity = *candidate.cavity();
     let planned = plan_drains(candidate).map_err(|e| format!("plan_drains: {:?}", e.reason()))?;
+    let accounting = *planned.planner_accounting();
     let shell = planned.shell().clone();
     let drilled =
         drill_planned_shell(planned).map_err(|e| format!("drill: {:?}", e.into_reason()))?;
@@ -338,6 +356,13 @@ fn measure_model(
         wall_requested_mm: settings.wall_thickness_mm().get(),
         pitch_mm,
         cavity_voxels: evidence.cavity_voxels(),
+        cavity_volume_mm3: cavity.cavity_volume_mm3().get(),
+        source_volume_mm3: cavity.source_volume_mm3().get(),
+        drain_planning_cap_bytes: cavity.drain_planning_cap_bytes(),
+        planner_requested_bytes: accounting.requested_bytes(),
+        planner_ray_query_bytes: accounting.ray_query_bytes(),
+        planner_ray_crossings: accounting.ray_crossings(),
+        planner_candidate_rays: accounting.candidate_count(),
         holes,
     })
 }
@@ -697,6 +722,21 @@ fn print_model(record: &ModelRecord) {
         record.cavity_voxels
     );
     println!(
+        "cavity {:.1} mm3 of {:.1} mm3 solid   savings {:.2}%",
+        record.cavity_volume_mm3,
+        record.source_volume_mm3,
+        100.0 * record.cavity_volume_mm3 / record.source_volume_mm3
+    );
+    println!(
+        "drain planning charged {} B of {} B cap ({:.1}%); ray query {} B over {} counted crossings on {} rays",
+        record.planner_requested_bytes,
+        record.drain_planning_cap_bytes,
+        100.0 * record.planner_requested_bytes as f64 / record.drain_planning_cap_bytes as f64,
+        record.planner_ray_query_bytes,
+        record.planner_ray_crossings,
+        record.planner_candidate_rays
+    );
+    println!(
         "{:<3} {:<8} {:<6} {:>6} {:>7} {:>8} {:>8} {:>8} {:>9} {:>9} {:>9} {:>8} {:>6}",
         "#",
         "source",
@@ -747,6 +787,51 @@ fn print_model(record: &ModelRecord) {
 }
 
 fn json_of(record: &ModelRecord) -> serde_json::Value {
+    let mut value = json_body(record);
+    // Grafted on rather than inlined: one more key in the literal below blows
+    // `serde_json::json!`'s expansion recursion limit.
+    for (key, number) in [
+        (
+            "cavity_volume_mm3",
+            serde_json::json!(record.cavity_volume_mm3),
+        ),
+        (
+            "source_volume_mm3",
+            serde_json::json!(record.source_volume_mm3),
+        ),
+        (
+            "savings_fraction",
+            serde_json::json!(record.cavity_volume_mm3 / record.source_volume_mm3),
+        ),
+        (
+            "drain_planning_cap_bytes",
+            serde_json::json!(record.drain_planning_cap_bytes),
+        ),
+        (
+            "planner_requested_bytes",
+            serde_json::json!(record.planner_requested_bytes),
+        ),
+        (
+            "planner_ray_query_bytes",
+            serde_json::json!(record.planner_ray_query_bytes),
+        ),
+        (
+            "planner_ray_crossings",
+            serde_json::json!(record.planner_ray_crossings),
+        ),
+        (
+            "planner_candidate_rays",
+            serde_json::json!(record.planner_candidate_rays),
+        ),
+    ] {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(key.to_owned(), number);
+        }
+    }
+    value
+}
+
+fn json_body(record: &ModelRecord) -> serde_json::Value {
     serde_json::json!({
         "model": record.model,
         "error": record.error,

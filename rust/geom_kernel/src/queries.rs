@@ -1596,6 +1596,44 @@ impl NativeSurface {
         (ts, fs)
     }
 
+    /// Allocation-free crossing census for [`Self::cast_rays`]: the same BVH
+    /// walk that call's collecting pass performs, counting instead of pushing,
+    /// so it needs the `O(depth)` traversal stack per worker and nothing else.
+    ///
+    /// Element `i` is exactly the number of `(t, face)` pairs [`Self::cast_rays`]
+    /// collects for ray `i` BEFORE arc-location dedup. Dedup only merges
+    /// neighbours, so the same figure also bounds that ray's retained `ts`/`fs`
+    /// pair and its contribution to the two flattened arrays.
+    ///
+    /// This is the COUNT of count-before-charge-before-allocate for ray
+    /// casting, the same discipline [`Self::penetration_census_batch`] gives
+    /// the penetration path. The conservative every-ray-crosses-every-face
+    /// shape is a mesh-density ceiling, not a charge: a ray through a closed
+    /// hollow shell crosses the surface a handful of times however finely that
+    /// surface is tessellated.
+    pub fn cast_rays_census(
+        &self,
+        origins: &[V3],
+        dirs: &[V3],
+        t_max: f64,
+    ) -> Result<Vec<usize>, BatchInputError> {
+        let n = origins.len();
+        BatchInputError::require_len("cast_rays_census", "dirs", n, dirs.len())?;
+        let mut per = vec![0usize; n];
+        par::run(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let (crossings, _tests) = STACK.with(|s| {
+                        self.count_hits_with_stack(origins[i], dirs[i], t_max, &mut s.borrow_mut())
+                    });
+                    crossings
+                })
+                .collect_into_vec(&mut per);
+        });
+        Ok(per)
+    }
+
     /// Batched cast_rays -> ragged (offsets, t_all, face_all).
     pub fn cast_rays(
         &self,
