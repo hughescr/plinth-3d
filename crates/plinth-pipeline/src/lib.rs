@@ -419,6 +419,19 @@ pub enum ModelPreparationOutcome {
     /// would describe a shell that is not in the file — and it carries its
     /// own [`plinth_hollow::RealizedWallClaim`] so a query bound is never
     /// read as a measurement.
+    ///
+    /// `filled_back_chambers_ml` is every cavity pocket the drilling stage
+    /// turned back into solid material because no legal drain reached it,
+    /// each stated in millilitres. It exists so that giving up on a chamber
+    /// is a number in the report rather than a silence. An empty list means
+    /// nothing was given up; a list with entries means that much resin volume
+    /// the wall thickness would have allowed is still solid in the printed
+    /// model, and the run report prints one line per entry.
+    ///
+    /// The alternative to filling a chamber back is shipping a sealed void
+    /// full of liquid resin, which is never acceptable, so this is a loss the
+    /// engine takes deliberately — and a loss taken deliberately has to be
+    /// stated.
     Artifact {
         emit: EmitReport,
         geometry: prepare::SupportedGeometry,
@@ -439,6 +452,8 @@ pub enum ModelPreparationOutcome {
         /// existed has to keep deserializing.
         #[serde(default)]
         savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
+        #[serde(default)]
+        filled_back_chambers_ml: Vec<Finite>,
     },
     Stopped {
         after: StageStop,
@@ -1363,6 +1378,7 @@ mod tests {
                         wall_mm: None,
                         realized_wall: None,
                         savings_shortfall: None,
+                        filled_back_chambers_ml: Vec::new(),
                     },
                 },
                 ModelPreparationReport {
@@ -1434,6 +1450,7 @@ mod tests {
                         wall_mm: None,
                         realized_wall: None,
                         savings_shortfall: None,
+                        filled_back_chambers_ml: Vec::new(),
                     },
                 ),
                 model("refused", refused),

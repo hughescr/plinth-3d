@@ -381,7 +381,7 @@ static EXPECTED_ROWS: [ExpectedRow; 274] = rows! {
     "HOLLOW_CONTAINMENT_MIN_FRACTION", "0.9", "1", "scalar";
     "HOLLOW_CONTAINMENT_SAMPLES", "32", "count", "scalar";
     "HOLLOW_DRAIN_DIRECTIONS", "[{x:0.0,y:0.0,z:-1.0},{x:0.5,y:0.0,z:-1.0},{x:-0.5,y:0.0,z:-1.0},{x:0.0,y:0.5,z:-1.0},{x:0.0,y:-0.5,z:-1.0}]", "1", "list[5]<record{x,y,z}>";
-    "HOLLOW_DRAIN_R_MM", "1.5", "mm", "scalar";
+    "HOLLOW_DRAIN_R_MM", "1.25", "mm", "scalar";
     "HOLLOW_EXIT_RAY_MAX_MM", "45.0", "mm", "scalar";
     "HOLLOW_EXTRA_DRAIN_POLICY", "{cylinder_sides:24,exit_max_mm:8.0,extensions_mm:[4.0,8.0,9.0],max_extra_drains:3,min_pocket_ml:0.5}", "mixed", "record{cylinder_sides,exit_max_mm,extensions_mm,max_extra_drains,min_pocket_ml}";
     "HOLLOW_LOBE_BAND_MM", "15.0", "mm", "scalar";

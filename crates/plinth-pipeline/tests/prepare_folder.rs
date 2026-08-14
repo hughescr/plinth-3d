@@ -224,6 +224,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         wall_mm,
         realized_wall,
         savings_shortfall,
+        filled_back_chambers_ml,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -292,6 +293,14 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "make_toed_slab refuses on the bulk gate (IneligibleBelowBulk), not the savings gate -- \
          a populated shortfall here would mean the two refusal causes got conflated under the \
          shared BelowThreshold disposition"
+    );
+    // Nothing was hollowed, so no chamber was given up. An empty list is the
+    // claim "the engine gave up on nothing", which is what the run report
+    // needs in order to stay silent instead of printing a reassuring zero.
+    assert!(
+        filled_back_chambers_ml.is_empty(),
+        "a model that never hollowed cannot have filled a chamber back: \
+         {filled_back_chambers_ml:?}"
     );
     assert!(
         emit.support_record_count > 0,
