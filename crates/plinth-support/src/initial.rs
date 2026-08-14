@@ -914,6 +914,12 @@ fn attestation_digest(
             None => 0,
             Some(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
             Some(ContactAttestationRefusal::NotAttached { .. }) => 2,
+            // FU-88 — this family attests PLACED members through
+            // `attest_members_batch`, which still applies every scalar refusal
+            // to the whole batch, so it can never produce this verdict. The arm
+            // exists so that if it ever does, the transcript says so instead of
+            // the compiler being told to look away.
+            Some(ContactAttestationRefusal::UnusableGeometry { .. }) => 3,
         });
         // The deficit's measured radius is digested, not just its presence, so
         // an interface that quietly shrinks is visible even while it stays on

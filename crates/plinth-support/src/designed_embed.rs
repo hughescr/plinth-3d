@@ -541,13 +541,37 @@ pub(crate) enum ContactAttestationRefusal {
     /// process resolution. There is no interface here at all, so there is
     /// nothing for the area law to grade.
     NotAttached { end: ContactEnd },
+    /// FU-88 — this CANDIDATE's own proposed geometry cannot carry the
+    /// attestation it asks for, so there is nothing to measure. The
+    /// [`DesignedMaskError`] names which scalar check failed; in practice on the
+    /// corpus it is [`DesignedMaskError::ExtentOutOfSpan`], a proposed arm
+    /// shorter than the one process resolution the attestation claims.
+    ///
+    /// **The check is unchanged; only who pays for it moved.** These are
+    /// exactly the scalar refusals [`prepare_rows`] applies, evaluated per row
+    /// instead of over the whole batch. Applying them batch-wide is right for
+    /// PLACED members — a caller that hands `validate_members_batch` a bad row
+    /// has a defect, and nothing can be concluded about the batch. It is wrong
+    /// for CANDIDATES: one unusable candidate out of forty used to abort the
+    /// whole model, where the other thirty-nine were fine and one of them was
+    /// going to win. So [`attest_seats_batch`] screens each candidate row on its
+    /// own, refuses the ones that fail, and sends the survivors to the kernel.
+    /// A refused candidate leaves the tournament exactly like a buried seat
+    /// does (OD-4/PR-9), and if a spot loses EVERY candidate the terminal goes
+    /// unrouted and its area reappears as ordinary uncovered area.
+    UnusableGeometry {
+        end: ContactEnd,
+        cause: DesignedMaskError,
+    },
 }
 
 impl ContactAttestationRefusal {
     #[must_use]
     pub(crate) const fn end(self) -> ContactEnd {
         match self {
-            Self::BuriedSurface { end } | Self::NotAttached { end } => end,
+            Self::BuriedSurface { end }
+            | Self::NotAttached { end }
+            | Self::UnusableGeometry { end, .. } => end,
         }
     }
 }
@@ -828,6 +852,23 @@ const SEAT_ATTESTATION_FAMILY: &str = "seat_attestation_provisional";
 /// Callers must issue this ONCE per stage over the whole candidate set. Calling
 /// it per candidate would restore exactly the per-item native call the batched
 /// verifier exists to prevent, and the structural gate counts the call sites.
+///
+/// **FU-88 — a candidate this batch cannot measure costs the CANDIDATE, not the
+/// model.** `attest_members_batch` applies every scalar refusal to the whole
+/// batch, which is right for PLACED members and wrong here. One unusable
+/// candidate — on the corpus, a proposed arm shorter than the one process
+/// resolution the attestation claims — used to abort the whole model with the
+/// other thirty-nine candidates untested. Each row is now screened on its own by
+/// [`screen_seat_row`], which runs exactly the checks [`prepare_rows`] runs and
+/// no others; a row that fails leaves the batch as an ordinary
+/// [`ContactAttestationRefusal::UnusableGeometry`] verdict, and only the
+/// survivors reach the kernel.
+///
+/// Cost is unchanged: still exactly one screened pass and one delegated pair of
+/// native calls for the whole stage, whatever the candidate count.
+///
+/// The returned rows stay index-aligned with `seats` — [`ContactAttestation::member`]
+/// is the caller's seat index, not the index of the compacted survivor set.
 pub(crate) fn attest_seats_batch(
     surface: &NativeSurface,
     seats: &[SeatAttestationRow],
@@ -838,32 +879,121 @@ pub(crate) fn attest_seats_batch(
     if seats.is_empty() {
         return Ok(Vec::new());
     }
-    let members = seats
-        .iter()
-        .map(SeatAttestationRow::provisional_member)
-        .collect::<Result<Vec<_>, _>>()?;
+    // Screen every candidate on its own BEFORE any native work, so an unusable
+    // one is discarded at zero kernel cost and the rest still get measured.
+    let mut members = Vec::with_capacity(seats.len());
+    let mut survivor_seat_index = Vec::with_capacity(seats.len());
+    let mut unusable = vec![None; seats.len()];
+    for (index, seat) in seats.iter().enumerate() {
+        match screen_seat_row(seat, extent) {
+            Ok(member) => {
+                survivor_seat_index.push(index);
+                members.push(member);
+            }
+            Err(cause) => unusable[index] = Some(cause),
+        }
+    }
     let borrowed = members.iter().collect::<Vec<_>>();
-    let requests = seats
+    let requests = survivor_seat_index
         .iter()
         .enumerate()
-        .map(|(index, seat)| ContactAttestationRequest {
-            member: index,
-            end: seat.end,
-            extent,
-            exterior_probe: seat.exterior_probe,
-            end_radius_mm: seat.end_radius_mm(),
-            carried_mm2: seat.carried_mm2,
-            // A candidate seat has no tip-sizing clamp to suppress: the clamp
-            // clause exists for `initial.rs`'s load-derived tip radii, and
-            // neither touching family derives its end radius from a load.
-            tip_clamped_at_max: false,
+        .map(|(row, seat_index)| {
+            let seat = &seats[*seat_index];
+            ContactAttestationRequest {
+                member: row,
+                end: seat.end,
+                extent,
+                exterior_probe: seat.exterior_probe,
+                end_radius_mm: seat.end_radius_mm(),
+                carried_mm2: seat.carried_mm2,
+                // A candidate seat has no tip-sizing clamp to suppress: the clamp
+                // clause exists for `initial.rs`'s load-derived tip radii, and
+                // neither touching family derives its end radius from a load.
+                tip_clamped_at_max: false,
+            }
         })
         .collect::<Vec<_>>();
-    let outcomes = attest_members_batch(surface, &borrowed, &requests, limits, policy)?;
-    if outcomes.len() != seats.len() {
-        return Err(DesignedMaskError::CorruptKernelResult);
+    let mut attested = vec![None; seats.len()];
+    if !borrowed.is_empty() {
+        let outcomes = attest_members_batch(surface, &borrowed, &requests, limits, policy)?;
+        if outcomes.len() != borrowed.len() {
+            return Err(DesignedMaskError::CorruptKernelResult);
+        }
+        for mut outcome in outcomes {
+            // Re-key from the compacted survivor row back to the caller's seat
+            // index, so a caller that indexes by `member` cannot be handed a
+            // verdict about a different candidate.
+            let seat_index = *survivor_seat_index
+                .get(outcome.member)
+                .ok_or(DesignedMaskError::CorruptKernelResult)?;
+            outcome.member = seat_index;
+            if attested[seat_index].replace(outcome).is_some() {
+                return Err(DesignedMaskError::CorruptKernelResult);
+            }
+        }
     }
-    Ok(outcomes)
+    seats
+        .iter()
+        .enumerate()
+        .map(|(index, seat)| match (attested[index].take(), unusable[index]) {
+            (Some(outcome), None) => Ok(outcome),
+            (None, Some(cause)) => Ok(unusable_attestation(index, seat, cause)),
+            _ => Err(DesignedMaskError::CorruptKernelResult),
+        })
+        .collect()
+}
+
+/// Every scalar refusal [`prepare_rows`] and [`attest_members_batch`] apply,
+/// evaluated for ONE candidate row.
+///
+/// This is a re-evaluation of the same checks, not a new or stricter one. The
+/// cases `prepare_rows` screens that cannot arise here are named rather than
+/// silently dropped: a provisional member declares exactly the one end its seat
+/// row names, so `EndNotDesigned`, `MissingRequiredExtent`, `DuplicateRequest`,
+/// `OverlappingExtents` and `UnknownMember` are all unreachable for a seat row.
+fn screen_seat_row(
+    seat: &SeatAttestationRow,
+    extent: PositiveFiniteMm,
+) -> Result<Member, DesignedMaskError> {
+    let member = seat.provisional_member()?;
+    if !seat.exterior_probe.iter().all(|value| value.is_finite())
+        || !seat.end_radius_mm().is_finite()
+        || seat.end_radius_mm() <= 0.0
+        || !seat.carried_mm2.is_finite()
+        || seat.carried_mm2 < 0.0
+    {
+        return Err(DesignedMaskError::InvalidExtent);
+    }
+    let length = member_length_mm(&member)?;
+    validate_extent(extent, length)?;
+    Ok(member)
+}
+
+/// The row a screened-out candidate contributes: nothing was measured, so
+/// nothing is claimed. Zero engaged rays and a zero attested radius are the
+/// honest report for geometry the kernel was never asked about, and PR-4 is not
+/// graded on a refused row for the same reason it is not graded on a buried one.
+fn unusable_attestation(
+    index: usize,
+    seat: &SeatAttestationRow,
+    cause: DesignedMaskError,
+) -> ContactAttestation {
+    ContactAttestation {
+        member: index,
+        end: seat.end,
+        engagement: EndpointEngagement {
+            centreline: false,
+            rim_engaged: 0,
+            rim_total: 0,
+            witness: 0,
+        },
+        attested_radius_mm: 0.0,
+        area_deficit: None,
+        verdict: Err(ContactAttestationRefusal::UnusableGeometry {
+            end: seat.end,
+            cause,
+        }),
+    }
 }
 
 /// One stage's seat-attestation transcript, folded to a digest.
@@ -900,7 +1030,14 @@ pub(crate) fn seat_attestation_digest(
             Ok(_) => 0,
             Err(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
             Err(ContactAttestationRefusal::NotAttached { .. }) => 2,
+            Err(ContactAttestationRefusal::UnusableGeometry { .. }) => 3,
         });
+        // FU-88 — a discarded candidate carries WHICH check discarded it into
+        // the transcript, so a screen that starts firing for a different reason
+        // is visible rather than folded into one tag.
+        if let Err(ContactAttestationRefusal::UnusableGeometry { cause, .. }) = &outcome.verdict {
+            digest.tag(cause.tag());
+        }
         match outcome.area_deficit {
             None => digest.tag(0),
             Some(deficit) => {
@@ -1172,6 +1309,31 @@ pub(crate) enum DesignedMaskError {
     CorruptKernelResult,
     #[error("designed embed geometry is not connected to its endpoint: {end:?}")]
     DisconnectedGeometry { end: ContactEnd },
+}
+
+impl DesignedMaskError {
+    /// Stable per-variant byte for the seat-attestation transcript. Values are
+    /// frozen: append new variants, never renumber an existing one, or every
+    /// recorded digest moves without the geometry moving.
+    #[must_use]
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::InvalidExtent => 1,
+            Self::ExtentOutOfSpan => 2,
+            Self::InvalidMemberSpan => 3,
+            Self::OverlappingExtents => 4,
+            Self::StaleBinding => 5,
+            Self::MissingRequiredExtent { .. } => 6,
+            Self::EndNotDesigned { .. } => 7,
+            Self::DuplicateRequest { .. } => 8,
+            Self::UnknownMember => 9,
+            Self::InvalidValidationLimits => 10,
+            Self::ResourceLimit => 11,
+            Self::KernelRefusal => 12,
+            Self::CorruptKernelResult => 13,
+            Self::DisconnectedGeometry { .. } => 14,
+        }
+    }
 }
 
 fn validate_extent(
@@ -2252,6 +2414,173 @@ mod tests {
                 end: ContactEnd::Rootward
             }),
             "a buried seat is refused whichever family proposed it"
+        );
+    }
+
+    /// **FU-88 acceptance — one bad candidate out of forty costs that candidate
+    /// and nothing else.**
+    ///
+    /// The numbers are the Giant Toad's, measured: a batch of 40 model-anchor
+    /// seats, one of them proposing a 0.049966772 mm arm against the 0.050 mm
+    /// process resolution the attestation claims — 33 NANOMETRES short. Before
+    /// this change that single row aborted the whole model with the other 39
+    /// candidates never measured, and the model fell back to solid.
+    ///
+    /// Four things are pinned together, because any one of them alone could be
+    /// satisfied by a wrong fix:
+    ///
+    /// 1. the 39 good candidates still attest;
+    /// 2. the bad one is refused, with the check that refused it named;
+    /// 3. the 0.050 mm requirement was NOT lowered — an arm 33 nanometres
+    ///    LONGER than the extent attests, so the boundary is exactly where it
+    ///    was and only the blast radius moved;
+    /// 4. the PLACED-member entry point still fails the whole batch on the very
+    ///    same row, because a caller that hands `validate_members_batch` an
+    ///    unusable member has a defect and nothing can be concluded from it.
+    #[test]
+    fn one_unusable_candidate_is_discarded_and_the_other_thirty_nine_still_attest() {
+        const DEPTH: f64 = 0.3;
+        const RADIUS: f64 = 0.2;
+        const EXTENT_MM: f64 = 0.05;
+        /// The Giant Toad's measured anchor arm: 33 nanometres under the extent.
+        const TOO_SHORT_MM: f64 = 0.049_966_772;
+        const BAD_ROW: usize = 17;
+        const ROWS: usize = 40;
+
+        let surface = interpenetrating_pair();
+        // Every seat sits on B's EXTERIOR +x face, so nothing here is refused
+        // for burial and the only thing under test is the length screen.
+        let seat_x = 6.0 - DEPTH;
+        let stub_row = |y: f64, length_mm: f64| SeatAttestationRow {
+            p0_mm: [seat_x + length_mm, y, 1.0],
+            p1_mm: [seat_x, y, 1.0],
+            r0_mm: RADIUS,
+            r1_mm: RADIUS,
+            end: ContactEnd::Rootward,
+            exterior_probe: [6.05, y, 1.0],
+            carried_mm2: 0.1,
+        };
+        let ys = |row: usize| 0.05 + 1.9 * (row as f64) / (ROWS as f64);
+        let seats = (0..ROWS)
+            .map(|row| {
+                if row == BAD_ROW {
+                    stub_row(ys(row), TOO_SHORT_MM)
+                } else {
+                    touching_seat_row(6.0, ys(row), DEPTH, RADIUS, 6.05, 0.1)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        reset_endpoint_validation_kernel_calls();
+        let outcomes = attest_seats_batch(
+            &surface,
+            &seats,
+            extent(EXTENT_MM),
+            validation_limits(&surface, seats.len()),
+            &attestation_policy(),
+        )
+        .expect("one unusable candidate must not refuse the batch");
+
+        // Batch-first is preserved: screening the rows individually must not
+        // turn one native call into forty.
+        assert_eq!(endpoint_validation_kernel_calls(), 1);
+        assert_eq!(outcomes.len(), ROWS);
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_eq!(
+                outcome.member, index,
+                "row {index} must keep the caller's seat index after the \
+                 survivors were compacted for the kernel"
+            );
+        }
+        assert_eq!(
+            outcomes[BAD_ROW].verdict,
+            Err(ContactAttestationRefusal::UnusableGeometry {
+                end: ContactEnd::Rootward,
+                cause: DesignedMaskError::ExtentOutOfSpan,
+            }),
+            "the sub-resolution arm is the candidate that must be discarded"
+        );
+        let attested = outcomes
+            .iter()
+            .filter(|outcome| outcome.verdict.is_ok())
+            .count();
+        assert_eq!(
+            attested,
+            ROWS - 1,
+            "the other thirty-nine candidates must still be measured and attest"
+        );
+        // A discarded candidate claims nothing it did not measure.
+        assert_eq!(outcomes[BAD_ROW].attested_radius_mm, 0.0);
+        assert_eq!(outcomes[BAD_ROW].engagement.rim_engaged, 0);
+        assert!(!outcomes[BAD_ROW].engagement.centreline);
+        assert_eq!(outcomes[BAD_ROW].area_deficit, None);
+
+        // (3) THE REQUIREMENT DID NOT MOVE. The same row, 33 nanometres LONGER
+        // than the extent instead of 33 shorter, attests. Anything that passed
+        // this batch before still passes it.
+        let mut just_long_enough = seats.clone();
+        just_long_enough[BAD_ROW] = stub_row(ys(BAD_ROW), EXTENT_MM + 33e-9);
+        let widened = attest_seats_batch(
+            &surface,
+            &just_long_enough,
+            extent(EXTENT_MM),
+            validation_limits(&surface, ROWS),
+            &attestation_policy(),
+        )
+        .expect("a long-enough batch is unaffected");
+        assert!(
+            widened[BAD_ROW].verdict.is_ok(),
+            "an arm 33 nanometres LONGER than the claimed extent must still \
+             attest -- the screen is the pre-existing one, not a new minimum: \
+             {:?}",
+            widened[BAD_ROW].verdict
+        );
+        assert_eq!(
+            widened
+                .iter()
+                .filter(|outcome| outcome.verdict.is_ok())
+                .count(),
+            ROWS
+        );
+
+        // (4) The PLACED-member entry point is deliberately UNCHANGED: the very
+        // same row still refuses the whole batch there, before any kernel call.
+        let members = seats
+            .iter()
+            .map(SeatAttestationRow::provisional_member)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every provisional member is well formed on its own");
+        let borrowed = members.iter().collect::<Vec<_>>();
+        let requests = seats
+            .iter()
+            .enumerate()
+            .map(|(index, seat)| ContactAttestationRequest {
+                member: index,
+                end: seat.end,
+                extent: extent(EXTENT_MM),
+                exterior_probe: seat.exterior_probe,
+                end_radius_mm: seat.end_radius_mm(),
+                carried_mm2: seat.carried_mm2,
+                tip_clamped_at_max: false,
+            })
+            .collect::<Vec<_>>();
+        reset_endpoint_validation_kernel_calls();
+        assert_eq!(
+            attest_members_batch(
+                &surface,
+                &borrowed,
+                &requests,
+                validation_limits(&surface, ROWS),
+                &attestation_policy(),
+            ),
+            Err(DesignedMaskError::ExtentOutOfSpan),
+            "a PLACED member that cannot carry its extent is still a caller \
+             defect and still refuses the whole batch"
+        );
+        assert_eq!(
+            endpoint_validation_kernel_calls(),
+            0,
+            "and it still costs nothing to find out"
         );
     }
 
