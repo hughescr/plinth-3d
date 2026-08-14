@@ -171,7 +171,23 @@ pub enum DrainPlanningRefusal {
     PreflightUnderestimated,
     #[error("native surface construction or batch ray query failed")]
     Kernel,
-    #[error("cavity lobe {lobe_id} has no legal outward exit within 45mm")]
+    /// **Read `diagnostics[].crossings` before believing the ceiling is the
+    /// problem.** This refusal fires when no direction from the lobe crossed
+    /// the shell exactly twice, and there are two very different reasons for
+    /// that. An EVEN count means the ray started in the void and genuinely
+    /// found no clean way out. An ODD count means the ray started inside the
+    /// material — a point on a closed surface's inside crosses it an even
+    /// number of times, a point in the material an odd number — so the origin
+    /// was misplaced and the cavity may drain perfectly well from elsewhere.
+    ///
+    /// The whole Giant Toad regression was the second case reported as if it
+    /// were the first: five directions, one crossing each, on a 12 mL cavity
+    /// with a legal drain 2.85 mm away. See `drain_site`.
+    #[error(
+        "cavity lobe {lobe_id} yielded no drillable drain: no direction crossed the shell \
+         exactly twice within 45mm (an ODD crossing count in `diagnostics` means the ray \
+         started inside the material, NOT that no exit exists)"
+    )]
     NoExit {
         lobe_id: u32,
         diagnostics: Vec<CandidateDiagnostic>,
