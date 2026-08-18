@@ -250,7 +250,16 @@ exact integer arithmetic inside, one dequantization out.**
   loop that cannot be oriented), fall back to even-odd union over the unoriented loops for
   that layer and record it in the result as a typed, per-layer diagnostic (not a silent
   fallback, not an abort). The degree-2 `OpenSliceSeam` check stays as-is for genuinely open
-  seams.
+  seams. **[Superseded 2026-08-18 by task #32.** The degree-2 check was itself the defect: it is a
+  simple-loops-only rule, strictly stronger than closure, and correct closed geometry violates it
+  where a slice plane meets a coplanar facet corner or contains a tangent keel edge. `OpenSliceSeam`
+  now fires on the closure invariant instead — the directed segment multiset must balance,
+  out-degree == in-degree at every point key — and the loops come out of a Hierholzer decomposition
+  with a pinned edge order rather than a permutation walk. A genuine hole or a flipped face is still
+  refused, at every plane it spans. Two consequences for the degraded path described just above: an
+  unbalanced vertex is now a refusal rather than a degradation, so the only thing that still degrades
+  a layer is an abstaining direction vote (measured: 0 across 4,049 corpus planes), and that path
+  must stay narrow because its even-odd union is **not** inert to how a pinch is paired.]**
 
 ### 3.4 Placement in the pipeline, batch shape, resource limits
 
