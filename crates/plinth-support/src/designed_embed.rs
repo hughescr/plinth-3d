@@ -394,10 +394,27 @@ fn prepare_rows(
 /// cannot be graded costs itself and nothing else. Grading was whole-batch here
 /// until #28 — one ungradable row out of forty took the other thirty-nine down
 /// with it, and on the Warhorse and the Giant Bat that is exactly what happened
-/// 1803 times, never once because the whole batch was bad. Callers that hand in
-/// already-PLACED geometry ([`validate_members_batch`]) collect the inner
-/// results back into a total refusal, because a caller with bad placed geometry
-/// has a defect and the mint must not proceed.
+/// 1803 times, never once because the whole batch was bad.
+///
+/// **Per-row grading is for CANDIDATE geometry only, and the split is by
+/// CALLER, not by entry point.** Both entry points below reach this witness:
+///
+/// * `attest_seats_batch` (brace model rungs, CCO model anchors) grades
+///   candidates competing in a tournament. A row it cannot measure leaves the
+///   tournament and costs nothing else. This is the case #28 exists for.
+/// * [`validate_members_batch`] and `initial.rs`'s `attest_initial_contacts`
+///   both hand in already-PLACED geometry, and both collect the inner results
+///   back into a TOTAL refusal — the first refusing the mint, the second
+///   refusing the whole initial-contact build. A caller with placed geometry
+///   this witness cannot grade has a defect, and the alternative is worse than
+///   an error: the placed callers dispose of a refusal by DELETING the member
+///   (a mask withheld, a stub quarantined), so a per-row verdict there would
+///   silently delete a load-carrying member on a measurement nobody made.
+///
+/// Note that `attest_initial_contacts` reaches this witness through
+/// `attest_members_batch`, which `attest_seats_batch` also uses; that shared
+/// entry point therefore stays per-row and the totality lives in the placed
+/// caller.
 fn witness_batch(
     surface: &NativeSurface,
     rows: &[EndpointValidationRow],
@@ -1117,8 +1134,9 @@ thread_local! {
 /// Test-only evidence injection, so the two DIVERGENT per-row policies can be
 /// driven through the real path on the SAME row.
 ///
-/// `attest_members_batch` must discard an ungradable row and grade the rest;
-/// `validate_members_batch` must refuse the whole mint on it. Getting that
+/// `attest_seats_batch` must discard an ungradable CANDIDATE row and grade the
+/// rest; the PLACED callers — `validate_members_batch` and `initial.rs`'s
+/// `attest_initial_contacts` — must refuse totally on it. Getting that
 /// divergence wrong is the specific defect #28 is about, and no fixture can
 /// make a real kernel emit an out-of-span boundary on demand — the values that
 /// actually occur are all a few ULP out, i.e. INSIDE what the fix admits.
@@ -1138,7 +1156,7 @@ fn sabotage_endpoint_intervals(
 /// thread-local, so a panicking `body` leaves it armed only on the thread that
 /// is already failing.
 #[cfg(test)]
-fn with_sabotaged_interval<T>(row: usize, s_a: f64, body: impl FnOnce() -> T) -> T {
+pub(crate) fn with_sabotaged_interval<T>(row: usize, s_a: f64, body: impl FnOnce() -> T) -> T {
     ENDPOINT_INTERVAL_SABOTAGE.with(|cell| cell.set(Some((row, s_a))));
     let outcome = body();
     ENDPOINT_INTERVAL_SABOTAGE.with(|cell| cell.set(None));

@@ -854,6 +854,29 @@ fn attest_initial_contacts(
             DesignedMaskError::CorruptKernelResult,
         ));
     }
+    // #28 — this family attests PLACED members. Every entry in `members` was
+    // read straight out of the forest above, so an ungradable row here is not a
+    // candidate proposal that can leave the tournament: it is evidence about a
+    // load-carrying member that could not be graded AT ALL — an orphan or
+    // out-of-order kernel interval, a non-finite target, a boundary outside the
+    // span the producer is entitled to. Nothing can be said about such a row.
+    //
+    // `witness_batch` grades PER ROW so a CANDIDATE family
+    // (`attest_seats_batch`) can discard one unmeasurable proposal and still
+    // measure the other thirty-nine, and that is the whole point of #28. Left
+    // unhandled here, the same per-row verdict would reach this caller's
+    // quarantine (`refusal.is_some()` in `build_initial_contacts`) and delete a
+    // placed stub on a measurement nobody made, while the run carried on
+    // quietly — a silent deletion where this path used to stop loudly. So the
+    // inner result is collected back into a TOTAL refusal, for the same reason
+    // `validate_members_batch` is total and with the same failure this path
+    // produced before grading went per-row.
+    if let Some(cause) = outcomes.iter().find_map(|outcome| match &outcome.verdict {
+        Err(ContactAttestationRefusal::UnusableGeometry { cause, .. }) => Some(*cause),
+        _ => None,
+    }) {
+        return Err(InitialContactError::Attestation(cause));
+    }
     for outcome in &outcomes {
         // `member` is the request index, which is the seed index.
         if outcome.member >= seeds.len() {
@@ -914,11 +937,14 @@ fn attestation_digest(
             None => 0,
             Some(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
             Some(ContactAttestationRefusal::NotAttached { .. }) => 2,
-            // FU-88 — this family attests PLACED members through
-            // `attest_members_batch`, which still applies every scalar refusal
-            // to the whole batch, so it can never produce this verdict. The arm
-            // exists so that if it ever does, the transcript says so instead of
-            // the compiler being told to look away.
+            // #28 — this family attests PLACED members, so `attest_initial_contacts`
+            // collects an ungradable row back into a batch-level
+            // `InitialContactError::Attestation` BEFORE any transcript is
+            // written. No verdict that reaches this digest can therefore carry
+            // this variant. The arm exists so that if that collection is ever
+            // removed, the transcript says so instead of the compiler being
+            // told to look away. The collection itself is pinned by test
+            // `ungradable_evidence_on_a_placed_stub_refuses_the_build`.
             Some(ContactAttestationRefusal::UnusableGeometry { .. }) => 3,
         });
         // The deficit's measured radius is digested, not just its presence, so
@@ -1676,6 +1702,59 @@ mod tests {
                 TerminalLedgerState::Live | TerminalLedgerState::Quarantined
             ));
         }
+    }
+
+    /// **#28 — evidence that cannot be graded stops the build; it does not
+    /// quietly quarantine a PLACED stub.**
+    ///
+    /// `witness_batch` grades per row so a CANDIDATE tournament can discard one
+    /// unmeasurable proposal and keep the rest. This family is the other kind
+    /// of caller: its members are already in the forest, and the way it
+    /// disposes of a refusal is to DELETE the member. So an ungradable row must
+    /// reach the caller as a batch-level error. Left per-row, a corrupt kernel
+    /// interval would delete a load-carrying stub on a measurement nobody made
+    /// and let the run continue — the silent deletion the loud pre-#28 failure
+    /// at least made visible.
+    ///
+    /// The evidence is injected because no fixture can make a real kernel emit
+    /// an out-of-span boundary on demand; the values that actually occur are a
+    /// few ULP out, i.e. inside what #28 admits.
+    #[test]
+    fn ungradable_evidence_on_a_placed_stub_refuses_the_build() {
+        /// Far outside anything `MOLLER_EPS` could excuse — a whole millimetre
+        /// of negative arc length, not the 1e-16 the kernel legitimately emits.
+        const OUT_OF_SPAN_S_A: f64 = -1.0;
+
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        // Baseline: this fixture grades every row, so the refusal below is the
+        // injected evidence and not the fixture.
+        let clean = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(!fixture.plan.contacts().is_empty());
+        assert!(
+            clean.unattested().iter().all(|stub| !matches!(
+                stub.refusal,
+                ContactAttestationRefusal::UnusableGeometry { .. }
+            )),
+            "no row is ungradable before anything is injected"
+        );
+
+        let sabotaged = crate::designed_embed::with_sabotaged_interval(0, OUT_OF_SPAN_S_A, || {
+            fixture.build(ContactConstructionLimits::production())
+        });
+        let Err(InitialContactError::Attestation(cause)) = sabotaged else {
+            panic!(
+                "an ungradable PLACED stub must refuse the whole build, not be \
+                 quarantined with the run carrying on: {sabotaged:?}"
+            );
+        };
+        let DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan { s_a, .. } = cause else {
+            panic!("the refusal must name the span check, not {cause:?}");
+        };
+        assert_eq!(s_a, OUT_OF_SPAN_S_A);
+        // There is no `InitialContactBuild` at all, so no forest carrying a
+        // stub quarantined on evidence that was never graded ever exists.
     }
 
     #[test]
