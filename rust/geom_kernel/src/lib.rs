@@ -29,6 +29,20 @@ use std::borrow::Cow;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
+/// The Möller acceptance slack every ray result of this kernel carries BY
+/// CONTRACT.
+///
+/// `moller::moller` accepts a hit for `t in [-EPS, t_max + EPS]`, ported
+/// verbatim from the oracle, so an arc length derived from an accepted hit may
+/// legitimately land up to `MOLLER_EPS * length` outside `[0, length]`. That is
+/// not an error state: it is the routine result for a ray whose ORIGIN sits
+/// exactly on a triangle, where the triangle under the origin is hit at a `t`
+/// of a few ULP either side of zero.
+///
+/// Published so a consumer validates an interval against the producer's real
+/// acceptance region instead of inventing a stricter one and then reporting the
+/// difference between them as corruption.
+pub use consts::EPS as MOLLER_EPS;
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
