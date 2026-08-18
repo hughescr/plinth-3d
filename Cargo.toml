@@ -32,3 +32,19 @@ lto = "thin"
 inherits = "dev"
 opt-level = 2
 debug-assertions = true
+
+# Cheap-but-honest test gate: release SEMANTICS (debug-assertions off,
+# overflow-checks matching release) at a much cheaper compile cost.
+# Used by lane gates; the merge gate to develop stays full --release.
+# Note: `lto` and `incremental` are top-level-only profile keys and cannot
+# be overridden per package, so dependency crates cannot be pinned to reuse
+# release's cached artifacts here — the `lto = "off"` vs release's
+# `lto = "thin"` setting alone changes the rustc invocation (embed-bitcode)
+# for every crate in the graph, including dependencies. Dependencies rebuild
+# once into target/gate, then stay warm for subsequent gate builds.
+[profile.gate]
+inherits = "release"
+incremental = true
+lto = "off"
+codegen-units = 16
+opt-level = 2
