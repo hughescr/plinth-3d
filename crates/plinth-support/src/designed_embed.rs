@@ -1412,9 +1412,13 @@ fn endpoint_engagement(
 /// Returns the CLAMPED `(s_a, s_b)`. Clamping is load-bearing, not cosmetic:
 /// see the exact `s_a == 0.0` test in [`endpoint_engagement`].
 fn admit_endpoint_interval(interval: &geom_kernel::Interval, length: f64) -> Option<(f64, f64)> {
-    // The kernel's slack is stated on `t`, which is normalized to the
-    // SUB-segment being tested; a sub-segment is never longer than the ray, so
-    // `MOLLER_EPS * length` is the tightest bound that still covers it.
+    // `MOLLER_EPS * length` is the producer's own acceptance width in
+    // millimetres, not a widening chosen here. The kernel casts each ray with
+    // `t_max = 1.0`, so its `t` is parametric over the WHOLE ray, and it
+    // converts a hit back to arc length as `t * ray_length`. A hit admitted at
+    // the extreme of `t in [-MOLLER_EPS, 1 + MOLLER_EPS]` therefore lands at
+    // most `MOLLER_EPS * length` outside `[0, length]`, and this bound is
+    // exact rather than generous.
     let slack = geom_kernel::MOLLER_EPS * length;
     if !interval.s_a.is_finite()
         || !interval.s_b.is_finite()
