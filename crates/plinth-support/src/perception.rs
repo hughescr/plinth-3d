@@ -1303,7 +1303,7 @@ impl SliceStitchSpace {
 /// `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3.4 ("both
 /// stitch sites consume normalized output") and phase table row C. The
 /// pipeline is exactly the three stages sec 3.4 prescribes -- stitch (the
-/// legacy undirected walk, semantics unchanged, inside
+/// balanced directed walk inside
 /// [`orientation::orient_layer`]) -> orient (the phase-A `z_hat x n`
 /// derivation) -> normalize (the phase-B per-layer union) -- and it is
 /// batch-first at every stage: one `slice_z_batch` upstream, one
@@ -1495,8 +1495,13 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 /// Everything here is consumer-side: `geom_kernel::slicing` and its frozen
 /// Trimesh vectors are untouched. Since the phase-C cutover
 /// ([`normalized_slice_layers`]) this is the ONLY stitch in perception -- the
-/// legacy undirected walk survives inside it as the degraded path, not as a
-/// second copy.
+/// undirected walk survives inside it as the degraded path, not as a second
+/// copy.
+///
+/// Task #32 replaced this stitcher's seam guard and its walk: the segment
+/// multiset is now directed and uncollapsed, the guard is directed balance,
+/// and the walk is a Hierholzer decomposition. See [`orientation::orient_layer`]
+/// for the invariant and why the old one was wrong.
 mod orientation {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1525,38 +1530,33 @@ mod orientation {
     /// derived winding was locally inconsistent and loop direction reverted
     /// to the raw undirected walk (even-odd fallback territory for the
     /// phase-B union). "Not a silent fallback, not an abort."
+    ///
+    /// Only one thing degrades a layer now: a segment whose direction vote
+    /// abstained, which leaves that segment with no direction to walk. The
+    /// two vote-bookkeeping counts this carried before (`unvoted_edges` and
+    /// `conflicting_edges`) belonged to the collapsed undirected edge map and
+    /// died with it -- one directed edge per emitted segment has nothing to
+    /// conflict with -- and an unbalanced vertex is no longer a degradation
+    /// at all: it is the refusal below.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub(super) struct WindingDegradation {
         /// Segments whose alignment vote abstained: the segment lies closer
         /// to perpendicular to `z_hat x n` than parallel, as happens on a
         /// near-horizontal face or a degenerate normal.
         pub(super) ambiguous_segments: usize,
-        /// Undirected edges left with no usable vote at all.
-        pub(super) unvoted_edges: usize,
-        /// Undirected edges whose duplicate owners voted both ways (shared
-        /// positive-edge owners across a tangent crease genuinely disagree).
-        pub(super) conflicting_edges: usize,
-        /// Vertices whose directed degree is not exactly one-in one-out.
-        pub(super) unbalanced_vertices: usize,
     }
 
     /// All stitched loops of one slice plane plus the winding verdict.
     #[derive(Clone, Debug, PartialEq)]
     pub(super) struct OrientedLayer {
         /// Deterministic order: ascending [`point_key`] of each loop's first
-        /// (minimum-key) vertex. Vertices belong to exactly one loop each,
-        /// so the order is total.
+        /// (minimum-key) vertex. A vertex may appear in more than one loop
+        /// (a pinch), so the order is made total by the walk's own start
+        /// order rather than by vertex ownership.
         pub(super) loops: Vec<OrientedLoop>,
         /// `None` when every loop carries a consistent derived winding;
         /// `Some` says exactly why orientation degraded for this layer.
         pub(super) degraded: Option<WindingDegradation>,
-    }
-
-    /// Per-edge direction tally. "Forward" means minimum key -> maximum key.
-    #[derive(Clone, Copy, Debug, Default)]
-    struct EdgeVotes {
-        forward: usize,
-        backward: usize,
     }
 
     /// The `z_hat x n` alignment vote for one segment: `Some(true)` keeps
@@ -1565,7 +1565,7 @@ mod orientation {
     /// derived direction than parallel (near-horizontal face, degenerate
     /// normal, or non-finite input -- NaN comparisons abstain rather than
     /// guess).
-    fn direction_vote(a: [f64; 2], b: [f64; 2], normal: [f64; 3]) -> Option<bool> {
+    pub(super) fn direction_vote(a: [f64; 2], b: [f64; 2], normal: [f64; 3]) -> Option<bool> {
         let segment = [b[0] - a[0], b[1] - a[1]];
         // d = z_hat x n projected to the slice plane.
         let derived = [-normal[1], normal[0]];
@@ -1577,19 +1577,46 @@ mod orientation {
 
     /// Stitch one plane's segments into closed loops with derived winding.
     ///
-    /// Endpoint snapping, exact-duplicate dedup, and the degree-2 seam guard
-    /// mirror the legacy [`super::stitch_layer`] exactly; a genuinely open or
-    /// branched seam still raises the site's seam error. Unlike the legacy
-    /// path there is NO area filter here: the phase-B union must see every
-    /// loop, including large self-cancelling ones (spec sec 3.2), so
-    /// degenerate-output filtering happens after the union, never before it.
+    /// # The seam invariant is directed balance, not degree two
+    ///
+    /// This used to collapse coincident segments into one undirected edge and
+    /// demand undirected degree exactly two at every snapped vertex. That is a
+    /// *simple-loops-only* rule, strictly stronger than closure, and correct
+    /// closed geometry violates it in two measured ways (task #32 diagnosis,
+    /// secs 3 and 7): the plane meets a coplanar facet corner, where four
+    /// geometrically distinct contour edges genuinely meet at one point key;
+    /// and the plane contains a tangent keel edge whose two owner faces are
+    /// both above it, so the frozen kernel emits that edge twice.
+    ///
+    /// What a closed, consistently wound mesh actually guarantees is that the
+    /// DIRECTED segment multiset balances: at every point key, out-degree
+    /// equals in-degree. So each emitted segment now becomes one directed
+    /// edge -- coincident segments are kept, not collapsed -- balance is the
+    /// guard, and the loops come out of a Hierholzer decomposition that
+    /// consumes every edge exactly once. A genuine hole or a flipped face
+    /// still fails balance and still raises the site's seam error, at every
+    /// plane the defect spans.
+    ///
+    /// Unlike the legacy path there is NO area filter here: the phase-B union
+    /// must see every loop, including large self-cancelling ones (spec sec
+    /// 3.2), so degenerate-output filtering happens after the union, never
+    /// before it. The one exception is structural rather than metric: a walk
+    /// that closes on fewer than three distinct point keys is not a polygon at
+    /// all (a doubly-emitted tangent edge can close as A->B->A), carries no
+    /// area to lose, and is dropped before the union -- which would discard it
+    /// anyway, since `plinth_layers::normalize_layers_batch` feeds the overlay
+    /// only loops of three points or more.
     pub(super) fn orient_layer(
         site: SliceStitchSite,
         intersections: &[PlaneIntersection],
         normals: &[[f64; 3]],
     ) -> Result<OrientedLayer, GenericPerceptionError> {
         let mut points = BTreeMap::<PointKey, [f64; 2]>::new();
-        let mut edges = BTreeMap::<(PointKey, PointKey), EdgeVotes>::new();
+        // One directed edge per emitted segment, bucketed by source. Nothing
+        // is deduplicated: multiplicity is the whole point of the invariant.
+        let mut out_edges = BTreeMap::<PointKey, Vec<PointKey>>::new();
+        // The same multiset with direction discarded, for the degraded walk.
+        let mut undirected = Vec::<(PointKey, PointKey)>::with_capacity(intersections.len());
         let mut ambiguous_segments = 0usize;
         for event in intersections {
             let a = [event.segment[0][0], event.segment[0][1]];
@@ -1607,157 +1634,174 @@ mod orientation {
             };
             points.entry(ka).or_insert(a);
             points.entry(kb).or_insert(b);
-            let (key, forward_is_ab) = if ka < kb {
-                ((ka, kb), true)
-            } else {
-                ((kb, ka), false)
-            };
-            let votes = edges.entry(key).or_default();
+            undirected.push(if ka < kb { (ka, kb) } else { (kb, ka) });
             match direction_vote(a, b, normal) {
-                Some(ab) if ab == forward_is_ab => votes.forward += 1,
-                Some(_) => votes.backward += 1,
+                Some(true) => out_edges.entry(ka).or_default().push(kb),
+                Some(false) => out_edges.entry(kb).or_default().push(ka),
                 None => ambiguous_segments += 1,
             }
         }
 
-        // Legacy seam guard, verbatim semantics: every snapped vertex must
-        // have undirected degree exactly two.
-        let mut adjacency = BTreeMap::<PointKey, Vec<PointKey>>::new();
-        for &(a, b) in edges.keys() {
-            adjacency.entry(a).or_default().push(b);
-            adjacency.entry(b).or_default().push(a);
-        }
-        if adjacency.values().any(|neighbors| neighbors.len() != 2) {
-            return Err(site.open_seam());
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable();
-        }
-
-        let mut unvoted_edges = 0usize;
-        let mut conflicting_edges = 0usize;
-        // One (source, destination) pair per undirected edge.
-        let mut directed = Vec::with_capacity(edges.len());
-        for (&(a, b), votes) in &edges {
-            match (votes.forward > 0, votes.backward > 0) {
-                (true, false) => directed.push((a, b)),
-                (false, true) => directed.push((b, a)),
-                (false, false) => unvoted_edges += 1,
-                (true, true) => conflicting_edges += 1,
-            }
-        }
-
-        let mut next = BTreeMap::<PointKey, PointKey>::new();
-        let mut unbalanced_vertices = 0usize;
-        if unvoted_edges == 0 && conflicting_edges == 0 {
+        // An abstaining segment contributes no directed edge, so directed
+        // balance cannot be asked of a layer that has one: the missing edge
+        // would look exactly like a hole. Such a layer degrades to the
+        // direction-free walk, which checks balance's undirected consequence
+        // (even degree everywhere) instead. Measured across the whole corpus:
+        // 0 abstaining votes on 4,049 planes, so this path stays narrow --
+        // which matters, because the union runs it under EvenOdd, and EvenOdd
+        // is not inert to how a pinch is paired.
+        let consistent = ambiguous_segments == 0;
+        let key_loops = if consistent {
             let mut in_degree = BTreeMap::<PointKey, usize>::new();
-            for &(source, destination) in &directed {
-                next.insert(source, destination);
-                *in_degree.entry(destination).or_default() += 1;
+            for destinations in out_edges.values() {
+                for &destination in destinations {
+                    *in_degree.entry(destination).or_default() += 1;
+                }
             }
-            // Degree two everywhere means edge count equals vertex count, so
-            // any doubled out-edge starves another vertex of its `next` entry
-            // and is counted here as well.
-            unbalanced_vertices = adjacency
-                .keys()
-                .filter(|key| in_degree.get(*key) != Some(&1) || !next.contains_key(*key))
-                .count();
-        }
-
-        let consistent = unvoted_edges == 0 && conflicting_edges == 0 && unbalanced_vertices == 0;
-        let raw = if consistent {
-            walk_directed(&next, &points)
+            // The seam guard: out-degree == in-degree at every point key.
+            let balanced = points.keys().all(|key| {
+                out_edges.get(key).map_or(0, Vec::len) == in_degree.get(key).copied().unwrap_or(0)
+            });
+            if !balanced {
+                return Err(site.open_seam());
+            }
+            walk_directed(&mut out_edges, site)?
         } else {
-            walk_undirected(&edges, &adjacency, &points, site)?
+            walk_undirected(&undirected, site)?
         };
-        let mut loops = raw
+
+        let mut loops = key_loops
             .into_iter()
-            .map(|loop_points| {
-                let canonical = canonicalize_loop(loop_points, false);
+            .filter(|keys| keys.iter().copied().collect::<BTreeSet<_>>().len() >= 3)
+            .map(|keys| {
+                let canonical =
+                    canonicalize_loop(keys.into_iter().map(|key| points[&key]).collect(), false);
                 OrientedLoop {
                     signed_area_mm2: signed_area(&canonical),
                     points_xy_mm: canonical,
                 }
             })
             .collect::<Vec<_>>();
+        // Two loops can now share a minimum point key -- that is what a pinch
+        // is -- so this key alone is no longer a total order. The sort is
+        // stable, so ties keep the walk's own pinned order and the result stays
+        // deterministic.
         loops.sort_by(|left, right| {
             point_key(left.points_xy_mm[0]).cmp(&point_key(right.points_xy_mm[0]))
         });
         Ok(OrientedLayer {
             loops,
-            degraded: (!consistent).then_some(WindingDegradation {
-                ambiguous_segments,
-                unvoted_edges,
-                conflicting_edges,
-                unbalanced_vertices,
-            }),
+            degraded: (!consistent).then_some(WindingDegradation { ambiguous_segments }),
         })
     }
 
-    /// Walk the successor map into its cycles, smallest start key first.
-    /// Winding consistency guarantees one-in one-out at every vertex, so
-    /// `next` is a permutation of the stitched vertices and every walk
-    /// returns to its start.
+    /// Decompose the balanced directed multigraph into closed walks
+    /// (Hierholzer), consuming every edge exactly once.
+    ///
+    /// # Determinism is pinned, not incidental
+    ///
+    /// Any Eulerian decomposition of a multigraph depends on the order edges
+    /// are taken, and that order reaches the frozen slice digests. The rule is
+    /// therefore fixed here and must not be "tidied": start keys ascending,
+    /// each out-edge list sorted ascending, and the NEXT edge popped from the
+    /// END of that list. Measured (diagnosis secs 9 and 11): that exact
+    /// ordering reproduced all 8,099 passing layers of the parity corpus
+    /// byte-for-byte. On the degree-two graphs that make up almost every layer
+    /// each list holds one entry, so the walk is the same permutation walk it
+    /// replaces.
+    ///
+    /// Balance guarantees a walk leaving `start` can always leave any vertex
+    /// it enters, so it must return to `start`. The starved arm cannot be
+    /// reached from a balanced multiset; it refuses rather than emit an open
+    /// chain as if it were a loop.
     fn walk_directed(
-        next: &BTreeMap<PointKey, PointKey>,
-        points: &BTreeMap<PointKey, [f64; 2]>,
-    ) -> Vec<Vec<[f64; 2]>> {
-        let mut visited = BTreeSet::<PointKey>::new();
-        let mut loops = Vec::new();
-        for &start in next.keys() {
-            if !visited.insert(start) {
-                continue;
-            }
-            let mut keys = vec![start];
-            let mut current = next[&start];
-            while current != start {
-                visited.insert(current);
-                keys.push(current);
-                current = next[&current];
-            }
-            loops.push(keys.into_iter().map(|key| points[&key]).collect());
+        out_edges: &mut BTreeMap<PointKey, Vec<PointKey>>,
+        site: SliceStitchSite,
+    ) -> Result<Vec<Vec<PointKey>>, GenericPerceptionError> {
+        for destinations in out_edges.values_mut() {
+            destinations.sort_unstable();
         }
-        loops
+        let starts = out_edges.keys().copied().collect::<Vec<_>>();
+        let mut loops = Vec::new();
+        for start in starts {
+            while let Some(first) = out_edges.get_mut(&start).and_then(Vec::pop) {
+                let mut keys = vec![start];
+                let mut current = first;
+                while current != start {
+                    keys.push(current);
+                    let Some(next) = out_edges.get_mut(&current).and_then(Vec::pop) else {
+                        return Err(site.open_seam());
+                    };
+                    current = next;
+                }
+                loops.push(keys);
+            }
+        }
+        Ok(loops)
     }
 
-    /// The legacy undirected walk, duplicated verbatim from
-    /// [`super::stitch_layer`] so the frozen digest path stays untouched;
-    /// the phase-C cutover collapses the two copies.
+    /// The direction-free walk for a degraded layer, over the same segment
+    /// multiset.
+    ///
+    /// Multigraph-safe: edges are consumed by identity, so a doubly-emitted
+    /// tangent edge is traversed twice rather than mistaken for one edge, and
+    /// a pinch vertex of degree four is walked through twice rather than
+    /// indexed as `neighbors[0]`/`neighbors[1]`. The guard it can apply is the
+    /// direction-free consequence of directed balance -- every point key must
+    /// have even degree -- which still refuses a hole; it cannot see a flipped
+    /// face, because without a direction vote there is no direction to
+    /// contradict. Same pinned ordering as [`walk_directed`].
     fn walk_undirected(
-        edges: &BTreeMap<(PointKey, PointKey), EdgeVotes>,
-        adjacency: &BTreeMap<PointKey, Vec<PointKey>>,
-        points: &BTreeMap<PointKey, [f64; 2]>,
+        undirected: &[(PointKey, PointKey)],
         site: SliceStitchSite,
-    ) -> Result<Vec<Vec<[f64; 2]>>, GenericPerceptionError> {
-        let mut unused = edges.keys().copied().collect::<BTreeSet<_>>();
-        let mut raw = Vec::<Vec<[f64; 2]>>::new();
-        while let Some(&(start, next)) = unused.first() {
-            let mut keys = vec![start];
-            let mut previous = start;
-            let mut current = next;
-            unused.remove(&(start, next));
-            while current != start {
-                keys.push(current);
-                let neighbors = &adjacency[&current];
-                let following = if neighbors[0] == previous {
-                    neighbors[1]
-                } else {
-                    neighbors[0]
-                };
-                let edge = if current < following {
-                    (current, following)
-                } else {
-                    (following, current)
-                };
-                if !unused.remove(&edge) {
-                    return Err(site.open_seam());
-                }
-                previous = current;
-                current = following;
-            }
-            raw.push(keys.into_iter().map(|key| points[&key]).collect());
+    ) -> Result<Vec<Vec<PointKey>>, GenericPerceptionError> {
+        let mut incidence = BTreeMap::<PointKey, Vec<(PointKey, usize)>>::new();
+        for (index, &(a, b)) in undirected.iter().enumerate() {
+            incidence.entry(a).or_default().push((b, index));
+            incidence.entry(b).or_default().push((a, index));
         }
-        Ok(raw)
+        for incident in incidence.values_mut() {
+            incident.sort_unstable();
+        }
+        if incidence.values().any(|incident| incident.len() % 2 != 0) {
+            return Err(site.open_seam());
+        }
+        let mut used = vec![false; undirected.len()];
+        let starts = incidence.keys().copied().collect::<Vec<_>>();
+        let mut loops = Vec::new();
+        for start in starts {
+            while let Some((first, edge)) = pop_unused(&mut incidence, &used, start) {
+                used[edge] = true;
+                let mut keys = vec![start];
+                let mut current = first;
+                while current != start {
+                    keys.push(current);
+                    let Some((next, edge)) = pop_unused(&mut incidence, &used, current) else {
+                        return Err(site.open_seam());
+                    };
+                    used[edge] = true;
+                    current = next;
+                }
+                loops.push(keys);
+            }
+        }
+        Ok(loops)
+    }
+
+    /// Take one unused incident edge of `vertex`, newest first, discarding
+    /// entries already consumed from their other endpoint.
+    fn pop_unused(
+        incidence: &mut BTreeMap<PointKey, Vec<(PointKey, usize)>>,
+        used: &[bool],
+        vertex: PointKey,
+    ) -> Option<(PointKey, usize)> {
+        let incident = incidence.get_mut(&vertex)?;
+        while let Some((neighbor, edge)) = incident.pop() {
+            if !used[edge] {
+                return Some((neighbor, edge));
+            }
+        }
+        None
     }
 
     /// Orient every layer of a kernel slice batch in one call.
@@ -6148,20 +6192,28 @@ mod tests {
         .map(|mut layers| layers.remove(0))
     }
 
-    /// V3 disposition (FU-10 phase C): this test used to call the legacy
-    /// `stitch_layer`; it now asserts the same frozen result through the
-    /// normalized path, unchanged in every value.
+    /// V3 disposition (FU-10 phase C, re-aimed by task #32): this test used to
+    /// call the legacy `stitch_layer`, then the normalized path, and it pinned
+    /// a DEDUPLICATION -- two owners of one on-plane edge collapsing into a
+    /// single undirected edge.
     ///
-    /// The duplicate positive-edge owner is the design's D4 case, and what
-    /// happens to it is worth naming. Faces 0 and 4 own the same on-plane edge
-    /// and the kernel hands their segments in OPPOSITE endpoint order, yet
-    /// both `z_hat x n` votes are cast in that edge's canonical
-    /// minimum-key-to-maximum-key frame, so they agree instead of conflicting.
-    /// The layer is therefore NOT degraded: it unions under nonzero with the
-    /// derived winding, and the duplicate is deduplicated by the undirected
-    /// edge set exactly as before.
+    /// That dedup is gone, and with it this fixture's premise. The frozen
+    /// kernel does retain duplicate positive-edge owners (the design's D4
+    /// case), but for a consistently wound mesh the two owners can never vote
+    /// the same way. Let the shared on-plane edge run `P -> Q`, let each owner
+    /// keep its third vertex above the plane (the only way both emit), and let
+    /// `w` and `v` be those two vertices' offsets. Consistent winding makes
+    /// the faces `(P, Q, R)` and `(Q, P, S)`, so their in-plane derived
+    /// directions are `w.z * (Q - P)` and `-v.z * (Q - P)` with both `z`
+    /// components positive: exactly opposite, always. That is the measured
+    /// tangent-keel case M2, covered by
+    /// [`a_doubly_emitted_tangent_keel_edge_sections_and_leaves_no_spur`].
+    ///
+    /// So a duplicate whose owners agree is not a real mesh's D4 case -- it is
+    /// an inconsistently wound one, and it is now refused by name instead of
+    /// being averaged away. Same fixture, opposite verdict, stated mechanism.
     #[test]
-    fn frozen_segment_vector_deduplicates_shared_owner_and_stitches_one_loop() {
+    fn duplicate_owners_that_vote_alike_are_an_inconsistent_winding_and_are_refused() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let edge = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
             face_id,
@@ -6173,19 +6225,28 @@ mod tests {
             [1.0, 0.0, 0.0],  // x = 2 wall, outward +x
             [0.0, 1.0, 0.0],  // y = 2 wall, outward +y
             [-1.0, 0.0, 0.0], // x = 0 wall, outward -x
-            [0.0, -1.0, 0.0], // the second positive-side owner of the y = 0 wall
+            [0.0, -1.0, 0.0], // a second owner of the y = 0 wall, voting alike
         ];
         let events = vec![
             edge(0, [0.0, 0.0], [2.0, 0.0]),
             edge(1, [2.0, 0.0], [2.0, 2.0]),
             edge(2, [2.0, 2.0], [0.0, 2.0]),
             edge(3, [0.0, 2.0], [0.0, 0.0]),
-            // Frozen native slicing deliberately retains duplicate positive
-            // edge owners. Loop assembly owns this deterministic dedup.
             edge(4, [2.0, 0.0], [0.0, 0.0]),
         ];
-        let loops =
-            normalized_test_layer(SliceStitchSpace::PrintLayer, events.clone(), &normals).unwrap();
+        // (0,0) leaves twice and is entered once: unbalanced, so refused.
+        assert_eq!(
+            orientation::orient_layer(SliceStitchSite::PrintLayer(7), &events, &normals),
+            Err(GenericPerceptionError::OpenSliceSeam { layer: 7 })
+        );
+        // Drop the duplicate and the same four walls stitch as they always
+        // did, values unchanged, through the normalized path.
+        let loops = normalized_test_layer(
+            SliceStitchSpace::PrintLayer,
+            events[..4].to_vec(),
+            &normals,
+        )
+        .unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(
             loops[0].outer().points_xy_mm(),
@@ -6193,12 +6254,6 @@ mod tests {
         );
         assert_eq!(loops[0].area_mm2(), 4.0);
         assert!(loops[0].holes().is_empty());
-
-        // State the mechanism rather than leave it implied: a duplicate owner
-        // handed back-to-front does not cost this layer its derived winding.
-        let oriented =
-            orientation::orient_layer(SliceStitchSite::PrintLayer(7), &events, &normals).unwrap();
-        assert_eq!(oriented.degraded, None);
     }
 
     /// FU-10 phase A: the `z_hat x n` rule must impose counter-clockwise
@@ -6290,11 +6345,14 @@ mod tests {
         );
     }
 
-    /// FU-10 phase A degraded path: locally inconsistent winding (here one
-    /// flipped face normal) is never silently guessed away. The layer keeps
-    /// the legacy undirected walk and the diagnostic says exactly why.
+    /// Task #32: locally inconsistent winding (here one flipped face normal)
+    /// used to degrade to the undirected walk and carry on under even-odd.
+    /// It is now what the balance guard exists to catch -- one face pointing
+    /// the wrong way makes two vertices unbalanced -- so the layer is refused
+    /// by name instead of filled with a guess. This is the synthetic twin of
+    /// the flipped-winding mesh sabotage.
     #[test]
-    fn inconsistent_winding_degrades_to_the_undirected_walk_with_a_typed_diagnostic() {
+    fn one_flipped_face_normal_is_refused_by_the_balance_guard() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
             face_id,
@@ -6314,27 +6372,27 @@ mod tests {
             wall(2, [2.0, 2.0], [0.0, 2.0]),
             wall(3, [0.0, 2.0], [0.0, 0.0]),
         ];
-        let layer =
-            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &normals).unwrap();
         assert_eq!(
-            layer.degraded,
-            Some(orientation::WindingDegradation {
-                ambiguous_segments: 0,
-                unvoted_edges: 0,
-                conflicting_edges: 0,
-                unbalanced_vertices: 2,
-            })
+            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &normals),
+            Err(GenericPerceptionError::OpenSliceSeam { layer: 0 })
         );
-        // The loop itself survives via the legacy walk; its direction is a
-        // walk artifact, so only the magnitude is meaningful here.
-        assert_eq!(layer.loops.len(), 1);
-        assert_eq!(layer.loops[0].points_xy_mm.len(), 4);
-        assert_eq!(layer.loops[0].signed_area_mm2.abs(), 4.0);
+        // Restore that one normal and the same four walls stitch cleanly, so
+        // the refusal is the flip and nothing else.
+        let repaired = [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ];
+        let layer =
+            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &repaired).unwrap();
+        assert_eq!(layer.degraded, None);
+        assert_eq!(layer.loops[0].signed_area_mm2, 4.0);
     }
 
     /// FU-10 phase A degraded path: a near-horizontal face has no reliable
     /// in-plane direction, so its segment abstains rather than guesses, and
-    /// an edge with no usable vote degrades the layer.
+    /// a segment with no usable vote degrades the layer.
     #[test]
     fn an_ambiguous_direction_vote_degrades_rather_than_guesses() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
@@ -6362,16 +6420,13 @@ mod tests {
             layer.degraded,
             Some(orientation::WindingDegradation {
                 ambiguous_segments: 1,
-                unvoted_edges: 1,
-                conflicting_edges: 0,
-                unbalanced_vertices: 0,
             })
         );
         assert_eq!(layer.loops.len(), 1);
     }
 
-    /// FU-10 phase A: the oriented stitch keeps the legacy degree-2 seam
-    /// guard, naming the caller's own index space.
+    /// FU-10 phase A: the oriented stitch still raises a seam error for a
+    /// genuinely open seam, naming the caller's own index space.
     #[test]
     fn oriented_stitch_still_raises_the_site_seam_error_for_open_seams() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
@@ -6460,6 +6515,458 @@ mod tests {
                 "expected +80 mm^2 counter-clockwise, got {area}"
             );
         }
+    }
+
+    // -- task #32: the seam invariant is directed balance -----------------
+
+    /// Every directed half-edge appears exactly once and every one has its
+    /// reverse: the triangle soup is closed and consistently wound. This is
+    /// the hypothesis the balance guard rests on, so the seam fixtures state
+    /// it about themselves rather than assume it -- and the sabotage fixtures
+    /// use it to prove the sabotage really broke the mesh.
+    fn closed_and_consistently_wound(tris: &[[u32; 3]]) -> bool {
+        let mut directed = BTreeSet::<(u32, u32)>::new();
+        for triangle in tris {
+            for &(a, b) in &[
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                if !directed.insert((a, b)) {
+                    return false;
+                }
+            }
+        }
+        directed.iter().all(|&(a, b)| directed.contains(&(b, a)))
+    }
+
+    /// Slice one triangle soup at `planes` through the frozen kernel, keeping
+    /// the raw per-plane events and the face normals.
+    fn stitch_events(
+        verts: &[[f64; 3]],
+        tris: &[[u32; 3]],
+        planes: &[f64],
+    ) -> (Vec<Vec<geom_kernel::PlaneIntersection>>, Vec<[f64; 3]>) {
+        let surface = NativeSurface::from_indexed(
+            verts,
+            tris,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let batch = surface
+            .slice_z_batch(
+                planes,
+                PlaneSliceLimits {
+                    max_planes: usize::MAX,
+                    max_triangle_plane_tests: usize::MAX,
+                    max_intersections: usize::MAX,
+                    max_output_bytes: usize::MAX,
+                },
+            )
+            .unwrap();
+        let events = (0..planes.len())
+            .map(|index| batch.plane(index).to_vec())
+            .collect();
+        (events, surface.geometry().normals().to_vec())
+    }
+
+    /// Slice one triangle soup at `planes` and return the per-plane stitch
+    /// verdict, so a test can say WHICH planes refuse rather than only that
+    /// some plane did.
+    fn stitch_verdicts(
+        verts: &[[f64; 3]],
+        tris: &[[u32; 3]],
+        planes: &[f64],
+    ) -> Vec<Result<orientation::OrientedLayer, GenericPerceptionError>> {
+        let (events, normals) = stitch_events(verts, tris, planes);
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, plane)| {
+                orientation::orient_layer(SliceStitchSite::PrintLayer(index), &plane, &normals)
+            })
+            .collect()
+    }
+
+    /// M1, as a closed manifold: a solid whose top surface is a saddle whose
+    /// pass sits EXACTLY on the slice plane.
+    ///
+    /// `V` is on the plane; its four link neighbours alternate above, below,
+    /// above, below, so the surface crosses the plane four times around one
+    /// vertex and four contour edges meet at that one point key. The section
+    /// is two unit squares that touch at `V` -- a legitimate section of a
+    /// perfectly closed, consistently wound, manifold solid, and exactly the
+    /// shape the old degree-two guard called a branched seam.
+    fn saddle_pinch_mesh() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let verts = vec![
+            [0.0, 0.0, 1.0],    // 0  V, the saddle pass, exactly on z = 1
+            [1.0, 1.0, 2.0],    // 1  A, above
+            [1.0, -1.0, 0.0],   // 2  B, below
+            [-1.0, -1.0, 2.0],  // 3  C, above
+            [-1.0, 1.0, 0.0],   // 4  D, below
+            [1.0, 1.0, -1.0],   // 5  A'
+            [1.0, -1.0, -1.0],  // 6  B'
+            [-1.0, -1.0, -1.0], // 7  C'
+            [-1.0, 1.0, -1.0],  // 8  D'
+        ];
+        let tris = vec![
+            // Top: a four-triangle fan around V, normals up.
+            [0, 1, 4],
+            [0, 4, 3],
+            [0, 3, 2],
+            [0, 2, 1],
+            // Bottom, normals down.
+            [5, 6, 7],
+            [5, 7, 8],
+            // Four planar side walls.
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 4, 8],
+            [3, 8, 7],
+            [4, 1, 5],
+            [4, 5, 8],
+        ];
+        (verts, tris)
+    }
+
+    /// Task #32 mechanism M1: four contour edges meeting at one point key is
+    /// correct closed geometry, not a branched seam.
+    ///
+    /// Pre-fix this refused with `OpenSliceSeam`, because the pinch vertex has
+    /// undirected degree four. Post-fix it balances -- two edges in, two out --
+    /// and sections into the two unit squares the solid actually has there.
+    #[test]
+    fn a_saddle_pass_on_the_plane_pinches_the_contour_and_still_sections() {
+        let (verts, tris) = saddle_pinch_mesh();
+        assert!(closed_and_consistently_wound(&tris));
+        let verdicts = stitch_verdicts(&verts, &tris, &[1.0]);
+        let layer = verdicts[0].as_ref().expect("a saddle pass is not a seam");
+        assert_eq!(layer.degraded, None);
+        // One closed walk that passes through the pinch twice: 10 vertices,
+        // (0,0) among them twice, both unit squares in one stroke.
+        assert_eq!(layer.loops.len(), 1);
+        assert_eq!(
+            layer.loops[0].points_xy_mm,
+            vec![
+                [-1.0, -1.0],
+                [0.0, -1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.333_333_333_333_333_26],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [-1.0, 0.0],
+                [-1.0, -0.333_333_333_333_333_26],
+            ]
+        );
+        assert_eq!(layer.loops[0].signed_area_mm2, 2.0);
+
+        // The adequacy probes stitch through this same code, so they gain the
+        // same section rather than a probe-shaped seam refusal.
+        let (events, normals) = stitch_events(&verts, &tris, &[1.0]);
+        let probe =
+            orientation::orient_layer(SliceStitchSite::AdequacyProbe(4), &events[0], &normals)
+                .expect("the probe path is the same path");
+        assert_eq!(probe.loops, layer.loops);
+
+        // And through the union: 2 mm^2 of solid, in two squares.
+        let solids = normalized_test_layer(
+            SliceStitchSpace::PrintLayer,
+            events[0].clone(),
+            &normals,
+        )
+        .unwrap();
+        assert_eq!(
+            solids
+                .iter()
+                .map(|solid| round6(solid.area_mm2()))
+                .collect::<Vec<_>>(),
+            vec![1.0, 1.0]
+        );
+    }
+
+    /// M2, as a closed manifold: a prism with a keel -- a horizontal ridge
+    /// edge lying exactly on the plane with BOTH of its owner faces above it.
+    ///
+    /// The frozen kernel's positive-side-owner rule therefore emits that one
+    /// mesh edge twice, and consistent winding makes the two emissions point
+    /// opposite ways. Profile in (y, z): (0,3) (4,3) (4,2) (2,1) (0,2),
+    /// extruded along x from 0 to 4; the keel is the extruded (2,1) corner.
+    fn tangent_keel_mesh() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let verts = vec![
+            [0.0, 0.0, 3.0], // 0 P0
+            [0.0, 4.0, 3.0], // 1 P1
+            [0.0, 4.0, 2.0], // 2 P2
+            [0.0, 2.0, 1.0], // 3 P3, the keel's front end, exactly on z = 1
+            [0.0, 0.0, 2.0], // 4 P4
+            [4.0, 0.0, 3.0], // 5 P0'
+            [4.0, 4.0, 3.0], // 6 P1'
+            [4.0, 4.0, 2.0], // 7 P2'
+            [4.0, 2.0, 1.0], // 8 P3', the keel's back end
+            [4.0, 0.0, 2.0], // 9 P4'
+        ];
+        let tris = vec![
+            // Front cap (x = 0, normals -x) and back cap (x = 4, normals +x).
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 4],
+            [5, 7, 6],
+            [5, 8, 7],
+            [5, 9, 8],
+            // The five extruded profile edges, two triangles each.
+            [0, 5, 6],
+            [0, 6, 1],
+            [1, 6, 7],
+            [1, 7, 2],
+            [2, 7, 8],
+            [2, 8, 3],
+            [3, 8, 9],
+            [3, 9, 4],
+            [4, 9, 5],
+            [4, 5, 0],
+        ];
+        (verts, tris)
+    }
+
+    /// Task #32 mechanism M2: a doubly-emitted tangent edge sections cleanly,
+    /// and the zero-area walk it closes as is dropped rather than shipped.
+    ///
+    /// Pre-fix this refused with `OpenSliceSeam`: the two emissions collapsed
+    /// into one undirected edge, leaving both keel ends at degree one.
+    /// Post-fix the two directed copies balance each other, Hierholzer closes
+    /// them as the two-vertex walk `P3 -> P3' -> P3`, and that walk is dropped
+    /// for having fewer than three distinct point keys -- it is not a polygon
+    /// and carries no area. The plane touches the solid along a line only, so
+    /// an empty layer is the right answer.
+    #[test]
+    fn a_doubly_emitted_tangent_keel_edge_sections_and_leaves_no_spur() {
+        let (verts, tris) = tangent_keel_mesh();
+        assert!(closed_and_consistently_wound(&tris));
+        // The keel really is emitted twice, and the two emissions really do
+        // point opposite ways -- the premise, measured rather than assumed.
+        let (events, normals) = stitch_events(&verts, &tris, &[1.0]);
+        assert_eq!(events[0].len(), 2);
+        let directed = events[0]
+            .iter()
+            .map(|event| {
+                let a = [event.segment[0][0], event.segment[0][1]];
+                let b = [event.segment[1][0], event.segment[1][1]];
+                match orientation::direction_vote(a, b, normals[event.face_id as usize]) {
+                    Some(true) => (a, b),
+                    Some(false) => (b, a),
+                    None => panic!("a keel owner's vote must not abstain"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            directed,
+            vec![
+                ([4.0, 2.0], [0.0, 2.0]),
+                ([0.0, 2.0], [4.0, 2.0]),
+            ]
+        );
+
+        let verdicts = stitch_verdicts(&verts, &tris, &[1.0, 1.5]);
+        let keel_layer = verdicts[0].as_ref().expect("a tangent keel is not a seam");
+        assert_eq!(keel_layer.degraded, None);
+        assert!(keel_layer.loops.is_empty());
+        // One layer higher the same solid sections normally: y from 1 to 3
+        // over the full 4 mm of x.
+        let above = verdicts[1].as_ref().unwrap();
+        assert_eq!(above.loops.len(), 1);
+        assert_eq!(above.loops[0].signed_area_mm2, 8.0);
+    }
+
+    /// Task #32, determinism pin. The Hierholzer decomposition of a multigraph
+    /// is only well defined once an edge order is fixed, and that order
+    /// reaches the frozen slice digests. The rule -- out-edge lists sorted
+    /// ascending, next edge popped from the END -- is what reproduced all
+    /// 8,099 passing corpus layers byte-for-byte, so it is pinned here on a
+    /// fixture that actually exercises the choice: two counter-clockwise unit
+    /// squares sharing the corner (2,2), where the walk must pick one of two
+    /// out-edges. Every value below is fixed, not re-derived.
+    #[test]
+    fn the_hierholzer_walk_is_pinned_to_one_deterministic_loop_set() {
+        use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
+        let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
+            face_id,
+            kind: PlaneIntersectionKind::Basic,
+            segment: [[a[0], a[1], 0.5], [b[0], b[1], 0.5]],
+        };
+        let normals = [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ];
+        let events = vec![
+            wall(0, [0.0, 0.0], [2.0, 0.0]),
+            wall(1, [2.0, 0.0], [2.0, 2.0]),
+            wall(2, [2.0, 2.0], [0.0, 2.0]),
+            wall(3, [0.0, 2.0], [0.0, 0.0]),
+            wall(4, [2.0, 2.0], [4.0, 2.0]),
+            wall(5, [4.0, 2.0], [4.0, 4.0]),
+            wall(6, [4.0, 4.0], [2.0, 4.0]),
+            wall(7, [2.0, 4.0], [2.0, 2.0]),
+        ];
+        let layer =
+            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &normals).unwrap();
+        assert_eq!(layer.degraded, None);
+        assert_eq!(layer.loops.len(), 1);
+        assert_eq!(
+            layer.loops[0].points_xy_mm,
+            vec![
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 2.0],
+                [4.0, 2.0],
+                [4.0, 4.0],
+                [2.0, 4.0],
+                [2.0, 2.0],
+                [0.0, 2.0],
+            ]
+        );
+        assert_eq!(layer.loops[0].signed_area_mm2, 8.0);
+    }
+
+    /// Task #32: a two-vertex walk is dropped, and dropping it changes no
+    /// area. The fixture is a 4 mm square contour plus a doubly-emitted keel
+    /// edge inside it -- the cavity-surface shape the corpus actually hits --
+    /// and the layer comes out identical to the same square with no keel at
+    /// all, through the union as well as at the stitcher.
+    #[test]
+    fn a_two_vertex_spur_is_dropped_and_the_areas_do_not_move() {
+        use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
+        let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
+            face_id,
+            kind: PlaneIntersectionKind::Basic,
+            segment: [[a[0], a[1], 0.5], [b[0], b[1], 0.5]],
+        };
+        let normals = [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            // The keel's two owners, leaning opposite ways as consistent
+            // winding forces them to.
+            [0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let square = vec![
+            wall(0, [0.0, 0.0], [4.0, 0.0]),
+            wall(1, [4.0, 0.0], [4.0, 4.0]),
+            wall(2, [4.0, 4.0], [0.0, 4.0]),
+            wall(3, [0.0, 4.0], [0.0, 0.0]),
+        ];
+        let mut with_keel = square.clone();
+        with_keel.push(wall(4, [1.0, 2.0], [3.0, 2.0]));
+        with_keel.push(wall(5, [1.0, 2.0], [3.0, 2.0]));
+
+        let plain =
+            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &square, &normals).unwrap();
+        let keeled =
+            orientation::orient_layer(SliceStitchSite::PrintLayer(0), &with_keel, &normals)
+                .unwrap();
+        assert_eq!(keeled.degraded, None);
+        assert_eq!(keeled.loops, plain.loops);
+        assert_eq!(keeled.loops.len(), 1);
+        assert_eq!(keeled.loops[0].signed_area_mm2, 16.0);
+
+        let plain_solids =
+            normalized_test_layer(SliceStitchSpace::PrintLayer, square, &normals).unwrap();
+        let keeled_solids =
+            normalized_test_layer(SliceStitchSpace::PrintLayer, with_keel, &normals).unwrap();
+        assert_eq!(
+            keeled_solids
+                .iter()
+                .map(|solid| round6(solid.area_mm2()))
+                .collect::<Vec<_>>(),
+            vec![16.0]
+        );
+        assert_eq!(
+            keeled_solids
+                .iter()
+                .map(|solid| solid.outer().points_xy_mm().to_vec())
+                .collect::<Vec<_>>(),
+            plain_solids
+                .iter()
+                .map(|solid| solid.outer().points_xy_mm().to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Task #32 sabotage, both ways: the guard is narrowed to the correct
+    /// invariant, NOT weakened. Delete one triangle from a closed box, or
+    /// reverse one triangle's winding, and every plane that triangle spans
+    /// must still be refused by name -- for every triangle in the mesh, not a
+    /// hand-picked one. The intact box passes all of the same planes, so the
+    /// refusals are the sabotage and nothing else.
+    #[test]
+    fn a_deleted_or_flipped_triangle_is_still_refused_at_every_plane_it_spans() {
+        let mesh = make_box([10.0, 8.0, 6.0], [0.0, 0.0, 0.0]).unwrap();
+        let verts = mesh.verts().to_vec();
+        let tris = mesh.tris().to_vec();
+        assert!(closed_and_consistently_wound(&tris));
+        let planes = [0.75, 1.5, 3.0, 4.5, 5.25];
+        for verdict in stitch_verdicts(&verts, &tris, &planes) {
+            assert!(verdict.is_ok(), "the intact box must section at every plane");
+        }
+
+        let mut checked = 0usize;
+        for victim in 0..tris.len() {
+            let zs = tris[victim].map(|index| verts[index as usize][2]);
+            let low = zs.iter().copied().fold(f64::INFINITY, f64::min);
+            let high = zs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let spanned = planes
+                .iter()
+                .copied()
+                .filter(|z| *z > low && *z < high)
+                .collect::<Vec<_>>();
+            if spanned.is_empty() {
+                continue;
+            }
+
+            let mut dropped = tris.clone();
+            dropped.remove(victim);
+            assert!(
+                !closed_and_consistently_wound(&dropped),
+                "deleting triangle {victim} must really open the mesh"
+            );
+            let mut flipped = tris.clone();
+            flipped[victim] = [tris[victim][0], tris[victim][2], tris[victim][1]];
+            assert!(
+                !closed_and_consistently_wound(&flipped),
+                "flipping triangle {victim} must really break the winding"
+            );
+
+            for (label, sabotaged) in [("deleted", &dropped), ("flipped", &flipped)] {
+                for (offset, verdict) in stitch_verdicts(&verts, sabotaged, &spanned)
+                    .into_iter()
+                    .enumerate()
+                {
+                    assert_eq!(
+                        verdict.err(),
+                        Some(GenericPerceptionError::OpenSliceSeam { layer: offset }),
+                        "{label} triangle {victim} must be refused at z = {}",
+                        spanned[offset]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // Every side triangle of the box spans all five planes; the two caps
+        // span none. 8 side triangles x 5 planes x 2 sabotages.
+        assert_eq!(checked, 80);
     }
 
     /// The three-ring self-crossing fixture of the D2/D1 cases: an outer
