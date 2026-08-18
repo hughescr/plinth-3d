@@ -989,7 +989,16 @@ pub(crate) enum CcoError {
     Forest(#[from] ForestError),
     #[error(transparent)]
     Sizing(#[from] LegacyCompatibilityError),
-    #[error("native clearance batch failed: {0}")]
+    /// A batched native geometry call this stage issued did not return a
+    /// usable result.
+    ///
+    /// The message used to say "clearance batch" because clearance was the only
+    /// caller. It is not: seat attestation routes here too (`brace.rs` already
+    /// routes the identical error to `BraceError::NativeQuery`), and naming
+    /// every native batch after one of them made the seat-attestation site the
+    /// outlier that reached for `InvalidGeometry` instead. The `String` names
+    /// which batch and which check, so nothing is lost by widening the variant.
+    #[error("native geometry batch failed: {0}")]
     Native(String),
     #[error("serial winner re-application did not reproduce its evaluated forest")]
     NonDeterministicWinner,
@@ -3927,10 +3936,16 @@ fn attest_model_anchor_seats(
         ))
     })?;
     let policy = seat_contact_policy(process_resolution_mm)?;
+    // NOT `InvalidGeometry`. That variant reads "CCO input or derived geometry
+    // is not finite and positive where required", and no batch-level refusal
+    // this call can return means that: the numbers are finite, positive and
+    // this model's own. `brace.rs` already routes the identical error to
+    // `BraceError::NativeQuery`; this site was the outlier. #31 owns giving
+    // these failures a topology name; this is the honest channel until then.
     let outcomes = crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
         .map_err(|error| {
-            CcoError::InvalidGeometry(format!(
-                "attest_model_anchor_seats: native seat-attestation batch over {seat_count} \
+            CcoError::Native(format!(
+                "attest_model_anchor_seats: seat-attestation batch over {seat_count} \
                  seat(s) at extent {} mm failed: {error}",
                 extent.get()
             ))

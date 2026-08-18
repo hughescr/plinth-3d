@@ -384,16 +384,25 @@ fn prepare_rows(
 /// Exactly one native `penetration_intervals_batch_bounded` for the whole row
 /// set, scattered back to a PER-ROW engagement measurement.
 ///
-/// `Err` here is always a BATCH-level integrity failure — a starved resource
-/// admission, a kernel refusal, or a result whose shape does not match the rows
-/// that were sent. Nothing can be concluded about any row from it. Geometry
-/// verdicts are values in the returned rows, which is what lets PR-8 route a
-/// refusal to quarantine instead of failing a pipeline (OD-4).
+/// The outer `Err` is always a BATCH-level integrity failure — a starved
+/// resource admission, a kernel refusal, or a result whose shape does not match
+/// the rows that were sent. Nothing can be concluded about any row from it.
+/// Geometry verdicts are values in the returned rows, which is what lets PR-8
+/// route a refusal to quarantine instead of failing a pipeline (OD-4).
+///
+/// The INNER `Err` is FU-88's lesson one layer down: a row whose evidence
+/// cannot be graded costs itself and nothing else. Grading was whole-batch here
+/// until #28 — one ungradable row out of forty took the other thirty-nine down
+/// with it, and on the Warhorse and the Giant Bat that is exactly what happened
+/// 1803 times, never once because the whole batch was bad. Callers that hand in
+/// already-PLACED geometry ([`validate_members_batch`]) collect the inner
+/// results back into a total refusal, because a caller with bad placed geometry
+/// has a defect and the mint must not proceed.
 fn witness_batch(
     surface: &NativeSurface,
     rows: &[EndpointValidationRow],
     limits: EndpointMaskValidationLimits,
-) -> Result<Vec<EndpointEngagement>, DesignedMaskError> {
+) -> Result<Vec<Result<EndpointEngagement, DesignedMaskError>>, DesignedMaskError> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -430,10 +439,13 @@ fn witness_batch(
     if interval_rows.len() != rows.len() {
         return Err(DesignedMaskError::CorruptKernelResult);
     }
-    rows.iter()
+    #[cfg(test)]
+    let interval_rows = sabotage_endpoint_intervals(interval_rows);
+    Ok(rows
+        .iter()
         .zip(interval_rows)
         .map(|(row, intervals)| endpoint_engagement(row, &intervals))
-        .collect()
+        .collect())
 }
 
 fn mint_mask(
@@ -472,6 +484,11 @@ pub(crate) fn validate_members_batch(
     let engagements = witness_batch(surface, &rows, limits)?;
     let surface_identity = surface.source_triangle_soup_digest();
     for (row, engagement) in rows.iter().zip(engagements) {
+        // TOTAL by design. `witness_batch` grades per row so a CANDIDATE can be
+        // discarded alone, but this entry point mints masks for PLACED members:
+        // a row here that cannot be graded is a caller defect, and the mint
+        // must not proceed on the strength of the rows that happened to grade.
+        let engagement = engagement?;
         // TOTALITY, not mere attachment. A mask tells the distance check to
         // ignore this extent of the member; any ray that leaves the solid
         // inside it is geometry that would then go unchecked.
@@ -715,23 +732,18 @@ pub(crate) fn attest_members_batch(
         .zip(buried)
         .zip(keyed)
         .map(|(((row, engagement), is_buried), request)| {
+            let refusal = screen_attestation(row.end, is_buried, &engagement);
+            let engagement = engagement.unwrap_or(EndpointEngagement::UNGRADABLE);
             let attested_radius_mm = engagement.effective_radius_mm(request.end_radius_mm);
-            let verdict = if is_buried {
-                // OD-9 is evaluated FIRST and reported as its own refusal, so a
-                // buried contact can never be laundered into an attested one by
-                // the connectivity evidence it trivially satisfies.
-                Err(ContactAttestationRefusal::BuriedSurface { end: row.end })
-            } else if !engagement.is_attached() {
-                Err(ContactAttestationRefusal::NotAttached { end: row.end })
-            } else if engagement.is_total() {
-                Ok(Some(mint_mask(
+            let verdict = match refusal {
+                Some(refusal) => Err(refusal),
+                None if engagement.is_total() => Ok(Some(mint_mask(
                     members[row.member],
                     row,
                     engagement.witness,
                     surface_identity,
-                )))
-            } else {
-                Ok(None)
+                ))),
+                None => Ok(None),
             };
             // PR-4 is graded on every ATTESTED row. It is not evaluated on a
             // refused one: a buried or unattached contact has no interface, and
@@ -760,6 +772,35 @@ pub(crate) fn attest_members_batch(
             }
         })
         .collect())
+}
+
+/// The three ways one row can fail to attest, in the one order that is
+/// defensible, stated once so no caller can reorder them by accident.
+///
+/// 1. **Buried (OD-9) first.** The parity probe is INDEPENDENT of the
+///    connectivity evidence and it is the screen the connectivity proof passes
+///    trivially, so it is reported first or it can be laundered away.
+/// 2. **Ungradable next.** Nothing was measured on this row, so there is no
+///    finding about attachment to report. Calling it `NotAttached` would be a
+///    claim about geometry that was never examined — and it is the claim the
+///    zero-valued [`EndpointEngagement::UNGRADABLE`] would otherwise produce,
+///    silently, which is precisely the trap this arm exists to close.
+/// 3. **Not attached last**, on evidence that was actually graded.
+fn screen_attestation(
+    end: ContactEnd,
+    is_buried: bool,
+    engagement: &Result<EndpointEngagement, DesignedMaskError>,
+) -> Option<ContactAttestationRefusal> {
+    if is_buried {
+        return Some(ContactAttestationRefusal::BuriedSurface { end });
+    }
+    match engagement {
+        Err(cause) => Some(ContactAttestationRefusal::UnusableGeometry { end, cause: *cause }),
+        Ok(engagement) if !engagement.is_attached() => {
+            Some(ContactAttestationRefusal::NotAttached { end })
+        }
+        Ok(_) => None,
+    }
 }
 
 /// One proposed model contact belonging to a family that attests CANDIDATE
@@ -981,12 +1022,7 @@ fn unusable_attestation(
     ContactAttestation {
         member: index,
         end: seat.end,
-        engagement: EndpointEngagement {
-            centreline: false,
-            rim_engaged: 0,
-            rim_total: 0,
-            witness: 0,
-        },
+        engagement: EndpointEngagement::UNGRADABLE,
         attested_radius_mm: 0.0,
         area_deficit: None,
         verdict: Err(ContactAttestationRefusal::UnusableGeometry {
@@ -1069,6 +1105,44 @@ fn record_endpoint_validation_kernel_call() {
 #[cfg(test)]
 fn reset_endpoint_validation_kernel_calls() {
     ENDPOINT_VALIDATION_KERNEL_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `(row, s_a)` — overwrite the first interval of one row's evidence.
+    static ENDPOINT_INTERVAL_SABOTAGE: std::cell::Cell<Option<(usize, f64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only evidence injection, so the two DIVERGENT per-row policies can be
+/// driven through the real path on the SAME row.
+///
+/// `attest_members_batch` must discard an ungradable row and grade the rest;
+/// `validate_members_batch` must refuse the whole mint on it. Getting that
+/// divergence wrong is the specific defect #28 is about, and no fixture can
+/// make a real kernel emit an out-of-span boundary on demand — the values that
+/// actually occur are all a few ULP out, i.e. INSIDE what the fix admits.
+#[cfg(test)]
+fn sabotage_endpoint_intervals(
+    mut interval_rows: Vec<Vec<geom_kernel::Interval>>,
+) -> Vec<Vec<geom_kernel::Interval>> {
+    if let Some((row, s_a)) = ENDPOINT_INTERVAL_SABOTAGE.with(std::cell::Cell::get) {
+        if let Some(interval) = interval_rows.get_mut(row).and_then(|row| row.first_mut()) {
+            interval.s_a = s_a;
+        }
+    }
+    interval_rows
+}
+
+/// Arm the injection for the duration of `body`, then disarm it. The state is
+/// thread-local, so a panicking `body` leaves it armed only on the thread that
+/// is already failing.
+#[cfg(test)]
+fn with_sabotaged_interval<T>(row: usize, s_a: f64, body: impl FnOnce() -> T) -> T {
+    ENDPOINT_INTERVAL_SABOTAGE.with(|cell| cell.set(Some((row, s_a))));
+    let outcome = body();
+    ENDPOINT_INTERVAL_SABOTAGE.with(|cell| cell.set(None));
+    outcome
 }
 
 #[cfg(test)]
@@ -1157,6 +1231,19 @@ pub(crate) struct EndpointEngagement {
 }
 
 impl EndpointEngagement {
+    /// The honest report for a row nothing was measured on: no ray reached
+    /// anything because no ray was graded. Zero engaged of zero sampled also
+    /// makes [`Self::effective_radius_mm`] return 0.0 rather than crediting an
+    /// interface, and it is deliberately NOT usable as a verdict — a refusal
+    /// must accompany it, or `is_attached()` would read as `NotAttached`, which
+    /// is a claim about geometry that was never examined.
+    pub(crate) const UNGRADABLE: Self = Self {
+        centreline: false,
+        rim_engaged: 0,
+        rim_total: 0,
+        witness: 0,
+    };
+
     /// Every sampled ray reached the claimed extent — the totality the mask
     /// proof requires.
     #[must_use]
@@ -1237,21 +1324,34 @@ fn endpoint_engagement(
             if interval.ray != ray.label() {
                 break;
             }
-            if !valid_endpoint_interval(interval, ray.length_mm())
-                || prior_s_b.is_some_and(|s_b| interval.s_a < s_b)
-            {
+            let (s_a, s_b) = admit_endpoint_interval(interval, ray.length_mm()).ok_or(
+                DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan {
+                    ray: interval.ray,
+                    s_a: interval.s_a,
+                    s_b: interval.s_b,
+                    ray_length_mm: ray.length_mm(),
+                },
+            )?;
+            if prior_s_b.is_some_and(|prior| s_a < prior) {
                 return Err(DesignedMaskError::CorruptKernelResult);
             }
             if prior_s_b.is_none() {
                 // Contiguity from the endpoint is what makes this evidence of
                 // ATTACHMENT rather than of the member merely passing through
                 // the model somewhere further along.
-                engaged = interval.s_a == 0.0 && interval.s_b >= target;
+                //
+                // `s_a == 0.0` is an EXACT test, which is why
+                // `admit_endpoint_interval` normalizes rather than merely
+                // admitting: a boundary the kernel is entitled to report at
+                // -8.5e-16 mm is the start of the ray, and comparing the raw
+                // value here would silently downgrade a fully engaged end to
+                // `NotAttached` instead of crediting it.
+                engaged = s_a == 0.0 && s_b >= target;
             }
             digest.u64(u64::from_ne_bytes(i64::from(interval.ray).to_ne_bytes()));
-            digest.f64(interval.s_a);
-            digest.f64(interval.s_b);
-            prior_s_b = Some(interval.s_b);
+            digest.f64(s_a);
+            digest.f64(s_b);
+            prior_s_b = Some(s_b);
             interval_index += 1;
         }
         if is_centreline {
@@ -1271,15 +1371,52 @@ fn endpoint_engagement(
     })
 }
 
-fn valid_endpoint_interval(interval: &geom_kernel::Interval, length: f64) -> bool {
-    interval.s_a.is_finite()
-        && interval.s_b.is_finite()
-        && interval.s_a >= 0.0
-        && interval.s_a <= interval.s_b
-        && interval.s_b <= length
+/// Admit one kernel interval against the PRODUCER's acceptance region, and
+/// normalize it into the span the grader compares against.
+///
+/// The kernel's Möller test accepts a hit for `t in [-EPS, t_max + EPS]`
+/// ([`geom_kernel::MOLLER_EPS`], ported verbatim from the oracle), so an
+/// arc-length boundary may legitimately land up to `MOLLER_EPS * length`
+/// outside `[0, length]`. That is not a rare pathology: a Rootward row's rays
+/// start AT the snapped seat point, which lies exactly on a mesh triangle by
+/// construction, so the triangle under the origin is hit at a `t` of a couple
+/// of ULP either side of zero on essentially every such row.
+///
+/// This predicate used to demand `s_a >= 0.0 && s_b <= length` exactly — the
+/// consumer holding the producer to a contract the producer never offered.
+/// Measured on the Warhorse and the Giant Bat before the fix: 14355 rows over
+/// 1803 batches were reported as corrupt kernel evidence for `s_a` between
+/// -7.1e-13 mm and -5.2e-18 mm and `s_b` up to 2.6e-14 mm past the ray, i.e.
+/// seven orders of magnitude INSIDE the slack the kernel is allowed. Every one
+/// of them was a fully engaged end, and each one aborted a whole batch of
+/// 33-40 candidates that had no fault at all.
+///
+/// Returns the CLAMPED `(s_a, s_b)`. Clamping is load-bearing, not cosmetic:
+/// see the exact `s_a == 0.0` test in [`endpoint_engagement`].
+fn admit_endpoint_interval(interval: &geom_kernel::Interval, length: f64) -> Option<(f64, f64)> {
+    // The kernel's slack is stated on `t`, which is normalized to the
+    // SUB-segment being tested; a sub-segment is never longer than the ray, so
+    // `MOLLER_EPS * length` is the tightest bound that still covers it.
+    let slack = geom_kernel::MOLLER_EPS * length;
+    if !interval.s_a.is_finite()
+        || !interval.s_b.is_finite()
+        || interval.s_a < -slack
+        || interval.s_a > interval.s_b
+        || interval.s_b > length + slack
+    {
+        return None;
+    }
+    // Clamping is monotone, so it cannot invert an ordered pair.
+    Some((
+        interval.s_a.clamp(0.0, length),
+        interval.s_b.clamp(0.0, length),
+    ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+// No `Eq`: `EndpointEvidenceOutsideAdmittedSpan` carries the measured
+// millimetres that decide whether the producer or the consumer is at fault, and
+// a measurement is worth more here than a total equality that nothing uses.
+#[derive(Clone, Copy, Debug, PartialEq, Error)]
 pub(crate) enum DesignedMaskError {
     #[error("designed extent must be positive and finite millimetres")]
     InvalidExtent,
@@ -1305,8 +1442,37 @@ pub(crate) enum DesignedMaskError {
     ResourceLimit,
     #[error("geometry kernel refused endpoint mask validation")]
     KernelRefusal,
+    /// Genuinely unattributable evidence: an interval left over after every ray
+    /// was matched, an out-of-order interval, or a result whose row count does
+    /// not match the rows that were sent. Nothing can be said about the row.
+    ///
+    /// This variant used to cover
+    /// [`Self::EndpointEvidenceOutsideAdmittedSpan`] too, which is how a
+    /// validator that was stricter than the kernel's own contract came to be
+    /// reported as the kernel being broken.
     #[error("geometry kernel returned corrupt endpoint mask evidence")]
     CorruptKernelResult,
+    /// The kernel's evidence is well formed but one interval boundary lies
+    /// outside the span this validator admits — which is the kernel's own
+    /// Möller acceptance region, `[-MOLLER_EPS * length, length * (1 +
+    /// MOLLER_EPS)]`, not a stricter one of the validator's own invention.
+    ///
+    /// It carries the measured numbers because the distinguishing fact about
+    /// this refusal is HOW FAR outside, and the answer decides whether the
+    /// producer or the consumer is at fault.
+    #[error(
+        "endpoint interval [{s_a}, {s_b}] mm on ray {ray} lies outside the admitted span of its \
+         {ray_length_mm} mm ray, which already allows the geometry kernel's own {} mm of Moller \
+         slack at each end",
+        .ray_length_mm * geom_kernel::MOLLER_EPS
+    )]
+    EndpointEvidenceOutsideAdmittedSpan {
+        /// -1 for the centreline, `k >= 0` for rim ray `k`.
+        ray: i32,
+        s_a: f64,
+        s_b: f64,
+        ray_length_mm: f64,
+    },
     #[error("designed embed geometry is not connected to its endpoint: {end:?}")]
     DisconnectedGeometry { end: ContactEnd },
 }
@@ -1332,6 +1498,7 @@ impl DesignedMaskError {
             Self::KernelRefusal => 12,
             Self::CorruptKernelResult => 13,
             Self::DisconnectedGeometry { .. } => 14,
+            Self::EndpointEvidenceOutsideAdmittedSpan { .. } => 15,
         }
     }
 }
@@ -2848,5 +3015,342 @@ mod tests {
         // FU-CONTACT-1: a tip already at the registered clamp cannot be
         // charged for a deficiency the clamp caused.
         assert_eq!(attest(carried_over, true).area_deficit, None);
+    }
+
+    // ------------------------------------------------------------------
+    // #28 — the endpoint validator was STRICTER than the kernel's own
+    // acceptance region, and reported the difference as kernel corruption.
+    // ------------------------------------------------------------------
+
+    /// The straight 4.0 mm cylinder every #28 unit test grades.
+    ///
+    /// Equal end radii make all nine rays exactly 4.0 mm long — the centreline
+    /// runs `p0 -> p1`, and each rim ray is that same axis translated sideways
+    /// by `r` — so every arc length below is an exact millimetre value a reader
+    /// can check by eye rather than a number re-derived from production code.
+    const ULP_RAY_LENGTH_MM: f64 = 4.0;
+    /// `MOLLER_EPS * 4.0 mm`: the slack the kernel is entitled to on this ray.
+    /// Written out, not computed, so widening the tolerance in production
+    /// cannot widen the test with it.
+    const ULP_ADMITTED_SLACK_MM: f64 = 4e-6;
+
+    /// A 0.2 mm rootward extent claimed on that member (`fraction = 0.05`).
+    fn ulp_row() -> EndpointValidationRow {
+        EndpointValidationRow {
+            member: 0,
+            end: ContactEnd::Rootward,
+            extent: extent(0.2),
+            fraction: 0.05,
+            p0: [0.0, 0.0, 0.0],
+            p1: [0.0, 0.0, ULP_RAY_LENGTH_MM],
+            r0: 0.5,
+            r1: 0.5,
+        }
+    }
+
+    fn ulp_interval(ray: i32, s_a: f64, s_b: f64) -> geom_kernel::Interval {
+        geom_kernel::Interval {
+            s_a,
+            s_b,
+            entered: true,
+            exited: true,
+            max_depth: 0.5,
+            ray,
+        }
+    }
+
+    /// Nine rays engaged end to end, with the CENTRELINE's own boundaries
+    /// substituted. This is the shape of every row that failed in production:
+    /// fully in the solid from `s = 0` to the end of the ray, with one boundary
+    /// a couple of ULP off the exact end.
+    fn ulp_fully_engaged(centreline_s_a: f64, centreline_s_b: f64) -> Vec<geom_kernel::Interval> {
+        let mut intervals = vec![ulp_interval(-1, centreline_s_a, centreline_s_b)];
+        intervals.extend((0..8).map(|k| ulp_interval(k, 0.0, ULP_RAY_LENGTH_MM)));
+        intervals
+    }
+
+    /// **#28 acceptance — the first failing Warhorse row, verbatim.**
+    ///
+    /// `s_a = -8.481941181155805e-16 mm`, about 1.5 ULP of negative arc length,
+    /// on a ray whose `s_b` is the full ray length: the end is engaged from end
+    /// to end. Before the fix this was `CorruptKernelResult`, and it took the
+    /// other 32 healthy candidates in its batch down with it. Measured across
+    /// two models: 14355 such rows over 1803 batches, and NOT ONE of those
+    /// batches was entirely bad.
+    #[test]
+    fn a_ulp_negative_interval_start_is_a_fully_engaged_end_not_corruption() {
+        let engagement = endpoint_engagement(
+            &ulp_row(),
+            &ulp_fully_engaged(-8.481_941_181_155_805e-16, ULP_RAY_LENGTH_MM),
+        )
+        .expect("evidence inside the kernel's own Moller slack must be gradable");
+        // THE TRAP. Admitting the row without NORMALIZING it leaves the exact
+        // `s_a == 0.0` engagement test false, which converts a loud batch abort
+        // into a silent `NotAttached` and deletes the best candidates instead
+        // of crediting them.
+        assert!(
+            engagement.centreline,
+            "the centreline ray is in the solid from end to end; admitting the \
+             row without clamping would report it as not attached"
+        );
+        assert_eq!((engagement.rim_engaged, engagement.rim_total), (8, 8));
+        assert!(engagement.is_total());
+
+        // The same thing at the far end: `s_b` past the ray by 2.6e-14 mm, the
+        // magnitude measured on the Giant Bat's 40 rim-ray rows.
+        let overshoot =
+            endpoint_engagement(&ulp_row(), &ulp_fully_engaged(0.0, 4.000_000_000_000_026))
+                .expect("an overshoot inside the kernel's slack must be gradable");
+        assert!(overshoot.is_total());
+    }
+
+    /// Normalization is real, not an admission that leaves the numbers alone.
+    ///
+    /// The witness digests every interval boundary the grader used, so a row
+    /// clamped into `[0, length]` must produce the SAME witness as the row that
+    /// arrived exactly on the boundary. That also pins the other direction: no
+    /// currently-passing row's digest can move, because clamping only touches
+    /// values that used to be refused outright.
+    #[test]
+    fn a_ulp_boundary_is_normalized_into_the_span_not_merely_admitted() {
+        let exact =
+            endpoint_engagement(&ulp_row(), &ulp_fully_engaged(0.0, ULP_RAY_LENGTH_MM)).unwrap();
+        let below = endpoint_engagement(
+            &ulp_row(),
+            &ulp_fully_engaged(-8.481_941_181_155_805e-16, ULP_RAY_LENGTH_MM),
+        )
+        .unwrap();
+        let above = endpoint_engagement(&ulp_row(), &ulp_fully_engaged(0.0, 4.000_000_000_000_026))
+            .unwrap();
+        assert_eq!(below, exact);
+        assert_eq!(above, exact);
+        assert_eq!(below.witness, exact.witness);
+        assert_eq!(above.witness, exact.witness);
+    }
+
+    /// **The sabotage.** The admitted span is the kernel's slack and nothing
+    /// wider, and stepping one nanometre past it still refuses — by a name that
+    /// says which check fired and what it measured.
+    #[test]
+    fn the_admitted_span_is_the_kernels_own_slack_and_nothing_wider() {
+        let inside = endpoint_engagement(
+            &ulp_row(),
+            &ulp_fully_engaged(-(ULP_ADMITTED_SLACK_MM - 1e-9), ULP_RAY_LENGTH_MM),
+        )
+        .expect("a boundary inside the kernel's documented slack is gradable");
+        assert!(inside.is_total());
+
+        let past = -(ULP_ADMITTED_SLACK_MM + 1e-9);
+        let outside = endpoint_engagement(&ulp_row(), &ulp_fully_engaged(past, ULP_RAY_LENGTH_MM))
+            .expect_err("a boundary past the kernel's slack is not the kernel's own");
+        assert_eq!(
+            outside,
+            DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan {
+                ray: -1,
+                s_a: past,
+                s_b: ULP_RAY_LENGTH_MM,
+                ray_length_mm: ULP_RAY_LENGTH_MM,
+            }
+        );
+        // Truthful naming (aac205b): the refusal names the real check and
+        // carries the measured value, and it does NOT accuse the producer.
+        let message = outside.to_string();
+        assert!(message.contains("on ray -1"), "{message}");
+        assert!(
+            message.contains("lies outside the admitted span"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("corrupt"),
+            "well-formed evidence outside a consumer's admitted span is a \
+             disagreement, not corruption: {message}"
+        );
+    }
+
+    /// The `CorruptKernelResult` name survives for what it was always for:
+    /// evidence that cannot be attributed to a ray at all.
+    #[test]
+    fn genuinely_unattributable_evidence_is_still_named_corrupt() {
+        // A tenth rim ray, on a member that has eight.
+        let mut orphan = ulp_fully_engaged(0.0, ULP_RAY_LENGTH_MM);
+        orphan.push(ulp_interval(9, 0.0, ULP_RAY_LENGTH_MM));
+        assert_eq!(
+            endpoint_engagement(&ulp_row(), &orphan),
+            Err(DesignedMaskError::CorruptKernelResult)
+        );
+
+        // Two intervals on one ray, out of order.
+        let mut backwards = vec![ulp_interval(-1, 2.0, 3.0), ulp_interval(-1, 0.5, 1.0)];
+        backwards.extend((0..8).map(|k| ulp_interval(k, 0.0, ULP_RAY_LENGTH_MM)));
+        assert_eq!(
+            endpoint_engagement(&ulp_row(), &backwards),
+            Err(DesignedMaskError::CorruptKernelResult)
+        );
+    }
+
+    /// An ungradable row is refused as UNUSABLE GEOMETRY, never as
+    /// `NotAttached` — and OD-9 still outranks both.
+    ///
+    /// The trap this closes: an ungradable row has no engagement, so it carries
+    /// [`EndpointEngagement::UNGRADABLE`], and zero engaged rays read exactly
+    /// like a detached tip. Deleting the ungradable arm would therefore not
+    /// fail to compile and not fail any count-based assertion — it would just
+    /// start making a claim about geometry nobody measured.
+    #[test]
+    fn an_ungradable_row_refuses_as_unusable_geometry_not_as_unattached() {
+        let cause = DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan {
+            ray: -1,
+            s_a: -1.0,
+            s_b: ULP_RAY_LENGTH_MM,
+            ray_length_mm: ULP_RAY_LENGTH_MM,
+        };
+        assert_eq!(
+            screen_attestation(ContactEnd::Rootward, false, &Err(cause)),
+            Some(ContactAttestationRefusal::UnusableGeometry {
+                end: ContactEnd::Rootward,
+                cause,
+            })
+        );
+        // OD-9 first: the parity probe is independent evidence, and it is the
+        // screen the connectivity proof passes trivially.
+        assert_eq!(
+            screen_attestation(ContactEnd::Rootward, true, &Err(cause)),
+            Some(ContactAttestationRefusal::BuriedSurface {
+                end: ContactEnd::Rootward
+            })
+        );
+        // The SAME zero-valued engagement, arriving as a GRADED result, is a
+        // genuine `NotAttached` — which is the reading the ungradable arm has
+        // to intercept.
+        assert_eq!(
+            screen_attestation(
+                ContactEnd::Rootward,
+                false,
+                &Ok(EndpointEngagement::UNGRADABLE)
+            ),
+            Some(ContactAttestationRefusal::NotAttached {
+                end: ContactEnd::Rootward
+            })
+        );
+        let engaged =
+            endpoint_engagement(&ulp_row(), &ulp_fully_engaged(0.0, ULP_RAY_LENGTH_MM)).unwrap();
+        assert_eq!(
+            screen_attestation(ContactEnd::Rootward, false, &Ok(engaged)),
+            None
+        );
+    }
+
+    /// **#28 acceptance, whole path — one ungradable row out of eight costs
+    /// that row, and the PLACED-member entry point still refuses everything.**
+    ///
+    /// This is FU-88's argument one layer down, and the two halves are pinned
+    /// together because either alone can be satisfied by a wrong fix: making
+    /// the witness per-row without keeping `validate_members_batch` total would
+    /// let a defective PLACED member mint a mask, and keeping totality without
+    /// the per-row split leaves #28 exactly where it was.
+    #[test]
+    fn one_ungradable_row_is_discarded_while_the_placed_entry_point_stays_total() {
+        const DEPTH: f64 = 0.3;
+        const RADIUS: f64 = 0.2;
+        const EXTENT_MM: f64 = 0.05;
+        const ROWS: usize = 8;
+        const BAD_ROW: usize = 3;
+        /// Far outside anything `MOLLER_EPS` could excuse — a whole millimetre
+        /// of negative arc length, not the 1e-16 the kernel legitimately emits.
+        const OUT_OF_SPAN_S_A: f64 = -1.0;
+
+        let surface = interpenetrating_pair();
+        // Kept clear of the box's y and z walls by more than one radius, so
+        // every rim ray starts inside the solid and the engagement is TOTAL —
+        // which is what the placed-member half of this test needs.
+        let ys = |row: usize| 0.4 + 1.2 * (row as f64) / (ROWS as f64);
+        let seats = (0..ROWS)
+            .map(|row| touching_seat_row(6.0, ys(row), DEPTH, RADIUS, 6.05, 0.1))
+            .collect::<Vec<_>>();
+
+        // Baseline: with nothing injected every seat attests, so the discard
+        // below is caused by the injected evidence and nothing else.
+        let clean = attest_seats_batch(
+            &surface,
+            &seats,
+            extent(EXTENT_MM),
+            validation_limits(&surface, ROWS),
+            &attestation_policy(),
+        )
+        .expect("the uninjected batch attests");
+        assert_eq!(
+            clean.iter().filter(|row| row.verdict.is_ok()).count(),
+            ROWS,
+            "every seat in this fixture attests before anything is injected"
+        );
+
+        reset_endpoint_validation_kernel_calls();
+        let outcomes = with_sabotaged_interval(BAD_ROW, OUT_OF_SPAN_S_A, || {
+            attest_seats_batch(
+                &surface,
+                &seats,
+                extent(EXTENT_MM),
+                validation_limits(&surface, ROWS),
+                &attestation_policy(),
+            )
+        })
+        .expect("one ungradable row must not refuse the whole batch");
+
+        // Batch-first is untouched: still exactly one native penetration call.
+        assert_eq!(endpoint_validation_kernel_calls(), 1);
+        let Err(ContactAttestationRefusal::UnusableGeometry { end, cause }) =
+            outcomes[BAD_ROW].verdict
+        else {
+            panic!(
+                "row {BAD_ROW} must be discarded on its own: {:?}",
+                outcomes[BAD_ROW].verdict
+            );
+        };
+        assert_eq!(end, ContactEnd::Rootward);
+        let DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan { ray, s_a, .. } = cause else {
+            panic!("the discard must name the span check, not {cause:?}");
+        };
+        assert_eq!(ray, -1);
+        assert_eq!(s_a, OUT_OF_SPAN_S_A);
+        assert_eq!(
+            outcomes.iter().filter(|row| row.verdict.is_ok()).count(),
+            ROWS - 1,
+            "the other seven rows must still be measured and attest"
+        );
+        // A discarded row claims nothing it did not measure.
+        assert_eq!(outcomes[BAD_ROW].attested_radius_mm, 0.0);
+        assert_eq!(outcomes[BAD_ROW].engagement, EndpointEngagement::UNGRADABLE);
+        assert_eq!(outcomes[BAD_ROW].area_deficit, None);
+
+        // The PLACED-member entry point is deliberately TOTAL on the very same
+        // evidence: a caller that hands it a row this validator cannot grade
+        // has a defect, and no mask may be minted from the rows that happened
+        // to grade beside it.
+        let members = seats
+            .iter()
+            .map(SeatAttestationRow::provisional_member)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every provisional member is well formed on its own");
+        let borrowed = members.iter().collect::<Vec<_>>();
+        let requests = (0..ROWS)
+            .map(|index| (index, ContactEnd::Rootward, extent(EXTENT_MM)))
+            .collect::<Vec<_>>();
+        let mint = |limits| validate_members_batch(&surface, &borrowed, &requests, limits);
+        assert!(
+            mint(validation_limits(&surface, ROWS)).is_ok(),
+            "the same members mint cleanly with nothing injected, so the \
+             refusal below is the injected row and not the fixture"
+        );
+        let minted = with_sabotaged_interval(BAD_ROW, OUT_OF_SPAN_S_A, || {
+            mint(validation_limits(&surface, ROWS))
+        });
+        assert!(
+            matches!(
+                minted,
+                Err(DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan { .. })
+            ),
+            "the placed-member mint must refuse the whole batch, naming the \
+             check that refused it: {minted:?}"
+        );
     }
 }
