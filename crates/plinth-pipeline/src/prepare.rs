@@ -1013,30 +1013,7 @@ fn prepare_one(
         // it planned and substituted another", and a report that dropped them
         // would make a substituted artifact indistinguishable from the intended
         // drilled shell.
-        Ok(Some(outcome)) => report(
-            &repair,
-            assumed,
-            ModelPreparationOutcome::Artifact {
-                emit: outcome.emit,
-                geometry: outcome.supported_geometry,
-                hollow_disposition: outcome.hollow_disposition,
-                cavity_repair: outcome.cavity_repair,
-                // FU-37 / FU-55: the wall the run asked for and the wall it
-                // got, so the report on disk can tell two otherwise identical
-                // runs apart.
-                wall_mm: outcome.wall,
-                realized_wall: outcome.realized_wall,
-                // 2026-08-13 owner ruling: legible on disk without
-                // re-deriving it — "saved X mm3 against a registered Y mm3
-                // minimum" for any model whose disposition is a savings
-                // refusal.
-                savings_shortfall: outcome.savings_shortfall,
-                filled_back_chambers_ml: outcome.filled_back_chambers_ml,
-                // Task #49: the artifact emitted, and this is the list of
-                // islands nothing is charged to carry under it.
-                ownerless_islands: outcome.ownerless_islands,
-            },
-        ),
+        Ok(Some(outcome)) => report(&repair, assumed, artifact_outcome(outcome)),
         Ok(None) => report(
             &repair,
             assumed,
@@ -1837,6 +1814,35 @@ pub fn seal_and_emit(
     }))
 }
 
+/// The last hop of a successful chain: everything the run measured, moved into
+/// the outcome the run report serializes and the CLI prints.
+///
+/// Split out of `run_model`'s match arm by task #49 so this hop can be pinned
+/// on constructed inputs. It is a pure move — every field the chain measured
+/// has to arrive at the report, and a field quietly replaced by an empty or
+/// defaulted value here is invisible in a run log but changes what the report
+/// claims. `a_chain_outcomes_disclosure_reaches_the_run_report` is the guard.
+fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
+    ModelPreparationOutcome::Artifact {
+        emit: outcome.emit,
+        geometry: outcome.supported_geometry,
+        hollow_disposition: outcome.hollow_disposition,
+        cavity_repair: outcome.cavity_repair,
+        // FU-37 / FU-55: the wall the run asked for and the wall it got, so
+        // the report on disk can tell two otherwise identical runs apart.
+        wall_mm: outcome.wall,
+        realized_wall: outcome.realized_wall,
+        // 2026-08-13 owner ruling: legible on disk without re-deriving it —
+        // "saved X mm3 against a registered Y mm3 minimum" for any model whose
+        // disposition is a savings refusal.
+        savings_shortfall: outcome.savings_shortfall,
+        filled_back_chambers_ml: outcome.filled_back_chambers_ml,
+        // Task #49: the artifact emitted, and this is the list of islands
+        // nothing is charged to carry under it.
+        ownerless_islands: outcome.ownerless_islands,
+    }
+}
+
 impl From<ScaleSanity> for AssumedPrintSize {
     fn from(scale: ScaleSanity) -> Self {
         Self {
@@ -2283,5 +2289,86 @@ mod tests {
         assert!(clear_stale_artifact(&occupied).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Task #49 — **an ownerless-island disclosure the chain measured reaches
+    /// the run report the operator reads.**
+    ///
+    /// The ruling this branch implements is "the run report must DISCLOSE
+    /// ownerless islands so nothing is hidden". The producer is pinned in
+    /// `plinth-support`; this pins the last hop, where the measurement becomes
+    /// the reported outcome. Without it, `ownerless_islands: Vec::new()` here
+    /// would emit an artifact that silently claims every face it covers has
+    /// something sized to carry it — and every existing assertion, which is
+    /// `is_empty()` on a healthy fixture, would still pass.
+    ///
+    /// The disclosure is deserialized rather than constructed because its
+    /// fields are private to `plinth-support`, and that is the same route a
+    /// frozen report on disk takes back in, so the numbers below are the
+    /// numbers a reader sees.
+    #[test]
+    fn a_chain_outcomes_disclosure_reaches_the_run_report() {
+        let disclosure: plinth_support::OwnerlessIslandDisclosure = serde_json::from_str(
+            r#"{"island_id":3,"ownerless_face_count":1,
+                "ownerless_face_area_mm2":0.00046970077,
+                "measured_uncovered_area_mm2":0.00046970077}"#,
+        )
+        .expect("a disclosure deserializes exactly as a frozen report carries it");
+        let islandless: plinth_support::OwnerlessIslandDisclosure = serde_json::from_str(
+            r#"{"island_id":null,"ownerless_face_count":2,
+                "ownerless_face_area_mm2":0.5,
+                "measured_uncovered_area_mm2":null}"#,
+        )
+        .expect("an islandless disclosure states that it has no measurement");
+
+        let outcome = ChainOutcome {
+            model: ModelId::new("deinonychus"),
+            source_faces: 1,
+            prepared_faces: 1,
+            hollow_disposition: HollowDisposition::Solid {
+                reason: plinth_hollow::SolidDecisionReason::BelowThreshold,
+            },
+            cavity_repair: None,
+            wall: None,
+            realized_wall: None,
+            savings_shortfall: None,
+            filled_back_chambers_ml: Vec::new(),
+            supported_geometry: SupportedGeometry::HollowStageDecidedSolid,
+            ownerless_islands: vec![disclosure, islandless],
+            routed_contacts: 0,
+            final_live_members: 0,
+            snapshot_digest: 0,
+            pending_gates: Vec::new(),
+            primitive_count: 0,
+            lift_mm: 5.0,
+            plate_z_mm: 0.0,
+            emit: plinth_emit::EmitReport {
+                artifact_path: std::path::PathBuf::from("deinonychus.chitubox"),
+                support_record_count: 0,
+                artifact_bytes: 0,
+            },
+        };
+
+        let ModelPreparationOutcome::Artifact {
+            ownerless_islands, ..
+        } = artifact_outcome(outcome)
+        else {
+            panic!("a completed chain reports an artifact");
+        };
+        assert_eq!(
+            ownerless_islands,
+            vec![disclosure, islandless],
+            "the report must carry the run's own disclosure, unedited and in order"
+        );
+        // Both numbers, and the difference between "measured nothing" and "no
+        // measurement exists", survive the hop. These are what the CLI prints.
+        assert_eq!(ownerless_islands[0].island_id(), Some(3));
+        assert_eq!(ownerless_islands[0].ownerless_face_count(), 1);
+        assert_eq!(
+            ownerless_islands[0].measured_uncovered_area_mm2(),
+            Some(0.000_469_700_77)
+        );
+        assert_eq!(ownerless_islands[1].island_id(), None);
+        assert_eq!(ownerless_islands[1].measured_uncovered_area_mm2(), None);
     }
 }
