@@ -859,13 +859,28 @@ pub fn run_support<'a>(
         // what measures it, and the A4 repair loop below is what closes it.
         //
         // Refusing on it instead was MEASURED, release binary, one model per
-        // process, 2026-08-19, and cost three corpus models their artifacts —
-        // Deinonychus (9,915,864 B), Skeleton_2 (5,587,800 B) and Tavey
-        // (8,412,216 B) all emit on `develop` and all refused. In each case the
-        // ownerless island's true uncovered area was dust the verdict already
-        // forgives: 0.000469700770 mm² on Deinonychus face 8357, 0.004024703349
-        // mm² on Tavey face 1691. Hard ENFORCEMENT of §6's "hard failure"
-        // sentence is deferred behind tasks #51/#52/#24 by owner ruling.
+        // process, 2026-08-19, and cost four corpus models their artifacts.
+        // Measured again after this arm was written, same binary discipline,
+        // against `develop` @ 06cf21b — every one is back, and every artifact
+        // is BYTE-IDENTICAL to develop's:
+        //
+        // | model | develop | 9a9b459 | here | ownerless island disclosed |
+        // | --- | --- | --- | --- | --- |
+        // | Deinonychus | 9,915,864 B | refused | 9,915,864 B, identical | 3: 1 face, 0.000470 mm² |
+        // | Skeleton_2 | 5,587,800 B | refused | 5,587,800 B, identical | 2: 8 faces, 0.050891 mm² |
+        // | Tavey | 8,412,216 B | refused | 8,412,216 B, identical | 4: 1 face, 0.004025 mm² |
+        // | Crawler Zombie | 3,768,936 B | refused | 3,768,936 B, identical | 1: 1 face, 0.002363 mm² |
+        // | Plague Zombie | 4,283,952 B | emitted | 4,283,952 B, identical | none |
+        // | zombie-3-a | 4,052,976 B | emitted | 4,052,976 B, identical | none |
+        //
+        // On every one of the four, the disclosed ownerless area EQUALS the
+        // coverage measurement's own uncovered area for that island to six
+        // decimals — dust the registered A3 censor forgives, an order of
+        // magnitude below it. That is the whole case: the refusal was taking
+        // out models over an area the verdict was already choosing to forgive.
+        //
+        // Hard ENFORCEMENT of §6's "hard failure" sentence is deferred behind
+        // tasks #51/#52/#24 by owner ruling.
         let routed = match prepared.route_initial_cco() {
             Ok(value) => value,
             Err(error) => {
