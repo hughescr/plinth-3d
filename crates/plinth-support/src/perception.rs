@@ -548,8 +548,23 @@ impl FinalizedContactLoads {
 /// `pub(crate)` so `crate::contact` can DELEGATE PR-4's area-sufficiency check
 /// to [`FrozenTipLoadPolicy::violates_safety_factor`] rather than duplicate the
 /// inequality.  Delegation inherits the 1e-6 safety-factor tolerance and makes
-/// the contact check agree with the tip-sizing check at the `[0.2, 1.0]` clamp
-/// boundaries by construction instead of by inspection.
+/// the contact check agree with the tip-sizing check at the `[0.05, 1.0]`
+/// mm-RADIUS clamp boundaries (`[0.1, 2.0]` mm DIAMETER) by construction
+/// instead of by inspection.
+///
+/// UNITS: every radius on this struct is a RADIUS in mm.  The owner and the
+/// ChituBox UI speak DIAMETER, so a number transcribed from either lands 2x
+/// wrong unless it is halved first.  The minimum is `TIP_RADIUS_DEFAULT_MM`
+/// = 0.05 mm radius (0.1 mm diameter) since the owner ruling of 2026-08-19,
+/// from 0.2 mm radius (0.4 mm diameter); the maximum is
+/// `TIP_RADIUS_MAX_LEGACY_MM` = 1.0 mm radius (2.0 mm diameter), which that
+/// same ruling deliberately left alone.
+///
+/// The minimum is a PERMISSION, not a target.  `tip_radius_mm` still sizes
+/// every tip from the load law, so the minimum can only bind where the
+/// carried area is at or below `implied_area_ratio() * pi * 0.05^2`
+/// = 0.0942 mm2.  A large carried area is sized up, and refused by
+/// `violates_safety_factor`, exactly as it was at 0.2 mm radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FrozenTipLoadPolicy {
     pressure_pa: f64,
@@ -577,13 +592,19 @@ impl FrozenTipLoadPolicy {
         }
     }
 
+    /// Hand-built mirror of the production policy for `crate::contact`'s
+    /// tests.  It is a MIRROR: when a registry value moves, this moves with
+    /// it, or the contact tests quietly start testing a policy that no
+    /// longer ships.  `min_radius_mm` is 0.05 mm RADIUS (0.1 mm DIAMETER)
+    /// to match `TIP_RADIUS_DEFAULT_MM` after the owner ruling of
+    /// 2026-08-19; it was 0.2 mm radius (0.4 mm diameter).
     #[cfg(test)]
     pub(crate) fn for_contact_tests() -> Self {
         Self {
             pressure_pa: 3000.0,
             tensile_pa: 0.288 * 1.0e6,
             required_safety_factor: 8.0,
-            min_radius_mm: 0.200,
+            min_radius_mm: 0.050,
             max_radius_mm: 1.0,
         }
     }
@@ -5850,7 +5871,10 @@ mod tests {
                 .iter()
                 .map(|radius| radius.get())
                 .collect::<Vec<_>>(),
-            vec![0.2, 0.2, 0.2]
+            // A zero-carried-area contact takes the clamp minimum: 0.05 mm
+            // RADIUS (0.1 mm DIAMETER) since the owner ruling of 2026-08-19,
+            // re-pinned here from 0.2 mm radius (0.4 mm diameter).
+            vec![0.05, 0.05, 0.05]
         );
 
         let policy = m0_constants().unwrap().placeholders();

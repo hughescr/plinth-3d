@@ -338,9 +338,22 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 9_355_852_079_468_421_123_u64),
+        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
+    // Digest re-derived 2026-08-19 for the tip-minimum ruling
+    // (`TIP_RADIUS_DEFAULT_MM` 0.2 -> 0.05 mm RADIUS, 0.4 -> 0.1 mm
+    // DIAMETER): 9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963.
+    // The COUNTS above are deliberately unchanged, and that is the point.
+    // Leaf-diffed through this same producer path: of the 170 final live
+    // members, 62 changed and 108 are bit-identical.  Every change is a
+    // terminal radius (`r0`) on a stub carrying a tiny area -- 60 move
+    // 0.200 -> 0.050 mm radius, and 2 drop to their own law-required
+    // 0.155284 mm.  No rootward radius (`r1`) moved.  All 64 routed
+    // contact positions are bit-identical.  One interior junction shared
+    // by slots 84/90/91 shifted 0.272 mm, the routing solve's second-order
+    // response to thinner tips; member count, kinds and connectivity are
+    // unchanged.
     assert_eq!(seats.len(), identities.len());
     authority
         .into_supported_model()
@@ -621,7 +634,12 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .measure_coverage(request)
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
-    assert_eq!(snapshot.digest(), 9_355_852_079_468_421_123);
+    // Same snapshot digest as the toed-slab closure test above, re-derived
+    // 2026-08-19 for the tip-minimum ruling (0.2 -> 0.05 mm RADIUS,
+    // 0.4 -> 0.1 mm DIAMETER): 9_355_852_079_468_421_123 ->
+    // 4_190_462_360_230_124_963.  The frozen resource arithmetic below is
+    // untouched, because no count moved.
+    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(

@@ -562,7 +562,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "TARGET_SPACING_MM", "4.0", "mm", "scalar";
     "TENSILE_GREEN_MPA", "0.288", "MPa", "scalar";
     "THIN_FEATURE_MM", "1.5", "mm", "scalar";
-    "TIP_RADIUS_DEFAULT_MM", "0.2", "mm", "scalar";
+    "TIP_RADIUS_DEFAULT_MM", "0.05", "mm", "scalar";
     "TIP_RADIUS_MAX_LEGACY_MM", "1.0", "mm", "scalar";
     "TIP_SAFETY_FACTOR", "8.0", "1", "scalar";
     "TOL_MM", "0.05", "mm", "scalar";
@@ -997,7 +997,7 @@ fn named_accessors_preserve_lift_contact_bridge_and_search_distinctions() {
             .section_mm(),
         0.3
     );
-    assert_eq!(constants.tip_radius_default_mm().diagnostic().get(), 0.2);
+    assert_eq!(constants.tip_radius_default_mm().diagnostic().get(), 0.05);
     assert_eq!(
         constants.cco_split_slide_policy().diagnostic().cap().get(),
         40

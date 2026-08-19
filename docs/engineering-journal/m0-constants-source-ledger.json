@@ -2326,7 +2326,7 @@
     {
       "id": "TIP_RADIUS_DEFAULT_MM",
       "classification": "runtime_generation_profile",
-      "normative": "03-physics-and-constants.md §3.2 = 0.200 mm",
+      "normative": "03-physics-and-constants.md §3.2; 0.050 mm RADIUS (0.100 mm DIAMETER) by owner ruling 2026-08-19, from 0.200 mm radius (0.400 mm diameter). Evidence: the owner's ChituBox field practice -- 0.1 mm diameter cylindrical tips on tiny islands in narrow gaps, short runs only. This is the tip-sizing clamp MINIMUM and a permission, not a target: the load law still sizes every tip, so it binds only where carried area <= X*pi*0.05^2 = 0.0942 mm2, and refuses larger areas exactly as before. UNITS: registry speaks RADIUS, the owner speaks DIAMETER. NOTE an unreconciled conflict with TIP_DIAMETER_MIN_ALLOWED_MM = 0.150 mm diameter (0.075 mm radius), an older owner-authorized hard minimum with no production reader.",
       "source_locators": [
         "scripts/support_placement/config.py:tip_r_min_mm"
       ],

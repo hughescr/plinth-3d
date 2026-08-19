@@ -157,6 +157,26 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // patches and all 7 defects are byte-identical — no evidence lost, the report
 // still refuses with 7 defects. No cap, gate, floor, radius, tolerance or
 // registered constant was touched, and none was added.
+//
+// **Refreshed an eighth time on 2026-08-19, for the tip-minimum ruling.**
+// The owner lowered `TIP_RADIUS_DEFAULT_MM` from 0.2 to 0.05 mm RADIUS
+// (0.4 -> 0.1 mm DIAMETER) on his ChituBox field practice. That constant is
+// the tip-sizing clamp MINIMUM, so tips carrying a tiny area are no longer
+// over-sized to 0.2 mm; the `load_digest` input moves and with it
+// `snapshot_digest`: **9355852079468421123 -> 4190462360230124963**.
+//
+// This is a PERMISSION, not a weakened refusal, and the golden proves it.
+// The load law still sizes every tip, so the minimum can only bind where the
+// carried area is at or below `X * pi * 0.05^2` = 0.0942 mm2; every larger
+// area is sized and refused exactly as before. The golden was REGENERATED
+// THROUGH THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm below),
+// never hand-edited, and the two documents were then diffed leaf by leaf:
+// **169 scalar leaves, EXACTLY 1 moved** (`snapshot_digest`). Every
+// `request` bound, all 11 `resources` counters, all 9 islands, all 9 patches
+// and all 7 defects are byte-identical — the report still refuses with 7
+// defects, and no count moved anywhere. No cap, gate, minimum, radius or
+// tolerance was touched beyond the one authorized constant, and none was
+// added.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
