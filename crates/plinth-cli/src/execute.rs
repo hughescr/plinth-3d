@@ -228,6 +228,7 @@ fn print_model(model: &ModelPreparationReport) {
             wall_mm,
             realized_wall,
             savings_shortfall,
+            ownerless_islands,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -286,6 +287,31 @@ fn print_model(model: &ModelPreparationReport) {
             // reader sees a loss only when there is one to see.
             for volume_ml in filled_back_chambers_ml {
                 println!("  chamber filled back: {:.2} mL", volume_ml.get());
+            }
+            // Task #49 (SPEC-A3-A4 §6). Islands whose every contact went
+            // unrouted, so the accepted contact set charges their faces to no
+            // support at all. The model still emitted, which is the whole
+            // reason this has to be said out loud: the coverage verdict
+            // FORGAVE the island under the registered censor, and a
+            // forgiveness nobody can see is a forgiveness nobody can audit.
+            //
+            // Both numbers, because they answer different questions. The
+            // ownerless area is what no arm is sized to carry. The measured
+            // area is what the routed layout actually leaves uncovered — much
+            // smaller, because a neighbouring island's arm can stand under a
+            // face it was never *eligible* to be charged for. Silent when
+            // there are none, so the reader sees a loss only when there is one.
+            for island in ownerless_islands {
+                println!(
+                    "  ownerless island  {}  {} face(s), {:.6} mm² charged to no support; \
+                     measured uncovered {:.6} mm²",
+                    island
+                        .island_id()
+                        .map_or_else(|| "(no island)".to_owned(), |id| id.to_string()),
+                    island.ownerless_face_count(),
+                    island.ownerless_face_area_mm2(),
+                    island.measured_uncovered_area_mm2(),
+                );
             }
         }
         ModelPreparationOutcome::Refused {

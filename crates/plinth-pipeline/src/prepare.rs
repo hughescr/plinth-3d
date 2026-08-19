@@ -662,6 +662,10 @@ pub struct ChainOutcome {
     /// nobody will fix.
     pub filled_back_chambers_ml: Vec<plinth_core::Finite>,
     pub supported_geometry: SupportedGeometry,
+    /// Task #49: the islands this run's accepted contact set left with no
+    /// owning contact, carried out to the run report rather than left inside
+    /// the support crate where nothing could print it.
+    pub ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -1028,6 +1032,9 @@ fn prepare_one(
                 // refusal.
                 savings_shortfall: outcome.savings_shortfall,
                 filled_back_chambers_ml: outcome.filled_back_chambers_ml,
+                // Task #49: the artifact emitted, and this is the list of
+                // islands nothing is charged to carry under it.
+                ownerless_islands: outcome.ownerless_islands,
             },
         ),
         Ok(None) => report(
@@ -1818,6 +1825,7 @@ pub fn seal_and_emit(
         filled_back_chambers_ml,
         hollow_disposition,
         supported_geometry,
+        ownerless_islands: gated.ownerless_islands,
         routed_contacts: gated.routed_contacts,
         final_live_members: gated.final_live_members,
         snapshot_digest: gated.snapshot_digest,

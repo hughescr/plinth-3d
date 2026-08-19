@@ -368,6 +368,12 @@ fn judge_pre_write_gates(
 #[derive(Clone, Debug)]
 pub struct GatedEmission {
     pub gates: PreWriteGateReport,
+    /// Task #49. Every island this run's accepted contact set leaves with no
+    /// owning contact, read off the authority before it is consumed. Empty on
+    /// the ordinary model; non-empty means the artifact below covers an island
+    /// nothing is charged to carry, forgiven by the registered censor on the
+    /// measurement this same run took.
+    pub ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -441,6 +447,9 @@ fn judged_emission(
     // The snapshot borrows the authority, so this scope must close before the
     // authority can be consumed below. That ordering is the whole point: the
     // verdict is reached while the run is still un-lowered and un-written.
+    // Task #49: read while the authority is still alive — `into_supported_model`
+    // below consumes it, and the supported scene carries no §6 ledger.
+    let ownerless_islands = authority.ownerless_islands().to_vec();
     let (gates, routed_contacts, final_live_members, snapshot_digest) = {
         let snapshot =
             authority
@@ -477,6 +486,7 @@ fn judged_emission(
 
     Ok(GatedEmission {
         gates,
+        ownerless_islands,
         routed_contacts,
         final_live_members,
         snapshot_digest,

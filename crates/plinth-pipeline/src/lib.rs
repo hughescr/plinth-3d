@@ -454,6 +454,16 @@ pub enum ModelPreparationOutcome {
         savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
         #[serde(default)]
         filled_back_chambers_ml: Vec<Finite>,
+        /// Task #49. Islands this run's accepted contact set left with no
+        /// owning contact, each with its ownerless face count and area and
+        /// what the run's own coverage measurement found uncovered there.
+        /// Empty on the ordinary model; a non-empty list says this artifact
+        /// covers an island nothing is charged to carry, which the registered
+        /// censor forgave rather than nobody noticed. `default` for the same
+        /// reason the fields above are: a report frozen before this field
+        /// existed has to keep deserializing.
+        #[serde(default)]
+        ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
     },
     Stopped {
         after: StageStop,
@@ -1379,6 +1389,7 @@ mod tests {
                         realized_wall: None,
                         savings_shortfall: None,
                         filled_back_chambers_ml: Vec::new(),
+                        ownerless_islands: Vec::new(),
                     },
                 },
                 ModelPreparationReport {
@@ -1451,6 +1462,7 @@ mod tests {
                         realized_wall: None,
                         savings_shortfall: None,
                         filled_back_chambers_ml: Vec::new(),
+                        ownerless_islands: Vec::new(),
                     },
                 ),
                 model("refused", refused),

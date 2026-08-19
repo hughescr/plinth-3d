@@ -305,6 +305,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         realized_wall,
         savings_shortfall,
         filled_back_chambers_ml,
+        ownerless_islands,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -313,6 +314,17 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         );
     };
     assert_eq!(emit.artifact_path, artifact);
+    // Task #49. This fixture's every island keeps a routed contact, so the
+    // accepted contact set charges no face to nobody and the disclosure is
+    // empty. Asserted rather than ignored: an empty list here is the claim
+    // "every face this artifact covers has something sized to carry it", and
+    // if that ever stops being true on the healthy fixture the run report has
+    // to say so before anyone reads the byte count.
+    assert!(
+        ownerless_islands.is_empty(),
+        "the healthy fixture must leave no island without an owning contact; got \
+         {ownerless_islands:?}"
+    );
     // **What is in the file, not merely that there is one.** Two of the four
     // geometries are substitutions the chain fell back to, and a report that
     // said only "emitted" could not tell them from the intended shell.
@@ -984,68 +996,65 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     // honestly-walled shell newly approaches on this doubly-processed fixture
     // is measured and recorded here, not raised.
     //
-    // **2026-08-19, task #49: the sphere's route moved a THIRD time, and this
-    // time it stopped being a substitution.** SPEC-A3-A4 §6's unrouted-regular
-    // removal is now wired at the point the clause names, so before rewire,
-    // bracing, the carried-load repartition or the coverage judgment, every
-    // regular contact the cadence did not route leaves the accepted contact
-    // set. On this fixture the repartition over the survivors then has a face
-    // it cannot place: **`sphere` face 2108 has no eligible contact left at
-    // all — its area was being carried by nothing.** That is a support
-    // adequacy verdict, so it is reported as a coverage refusal
-    // (`CoverageClosureReason::MeasurementRefused`, attempts 0) and is
-    // therefore ineligible for the OQ-1/FU-34 oriented-solid reserve.
-    //
-    // **Measured from→to on this exact fixture pair, release binary:**
-    //
-    // | | before (`develop` @ 06cf21b) | after |
-    // | --- | --- | --- |
-    // | `report.artifacts().count()` | 2 | **1** |
-    // | `report.exit_code()` | `Ok` | **`Supports`** |
-    // | `outcome(.., "mini")` | `Artifact { HollowStageDecidedSolid }` | unchanged |
-    // | `outcome(.., "sphere")` | `Artifact { DrilledShellRefusedBySupport }`, a SUBSTITUTED solid on disk | **`Failed`**, nothing on disk |
-    //
-    // **The artifact that stopped being written was a substituted solid, not
-    // the shell anyone asked for**, emitted after the engine had already said
-    // it could not support the drilled shell. Losing it is the fix, not the
-    // cost: `first_artifact.rs`'s
-    // `corpus_sphere_drilled_plan_is_refused_before_any_file_exists` states the
-    // rule this fixture had been the exception to — a support-adequacy verdict
-    // is never answered by substituting a different geometry. No cap, gate,
-    // bound, tolerance or registered constant was touched, and none was added.
+    // **2026-08-19, task #49, the split landing: the sphere's route moved a
+    // THIRD time and then moved back.** The intermediate commit `9a9b459`
+    // wired SPEC-A3-A4 §6's unrouted-regular removal AND refused when the
+    // carried-load repartition was left with `sphere` face 2108 owned by
+    // nobody, which took this fixture from 2 artifacts to 1. The removal
+    // stays; the refusal does not. An ownerless face is now disclosed
+    // (`FinalSupportAuthority::ownerless_islands`) and the coverage judgment
+    // §6 sequences after the removal is what rules on it, so this pin is back
+    // where `develop` @ 06cf21b had it. Measured from→to on this exact fixture
+    // pair: `artifacts().count()` 1 → **2**, `exit_code()` `Supports` → **`Ok`**,
+    // `outcome(.., "sphere")` `Failed` → **`Artifact { DrilledShellRefusedBySupport }`**.
     //
     // **The per-model baseline map is still proved either way:** both models
     // resolved their own baseline and both reached a stage that could only be
-    // reached with it — `sphere` reached Routing, which needs the orientation
-    // its own baseline pins.
-    assert_eq!(report.artifacts().count(), 1);
-    assert_eq!(report.exit_code(), PipelineExitCode::Supports);
+    // reached with it.
+    assert_eq!(report.artifacts().count(), 2);
+    assert_eq!(report.exit_code(), PipelineExitCode::Ok);
     let ModelPreparationOutcome::Artifact { geometry, .. } = outcome(&report, "mini") else {
         panic!("mini must reach an artifact");
     };
     assert_eq!(geometry, &SupportedGeometry::HollowStageDecidedSolid);
-    let ModelPreparationOutcome::Failed {
-        exit_code, detail, ..
+    let ModelPreparationOutcome::Artifact {
+        geometry,
+        hollow_disposition,
+        ..
     } = outcome(&report, "sphere")
     else {
         panic!(
-            "sphere's drilled shell is refused on support adequacy and must NOT be answered \
-             with a substituted solid: {:?}",
+            "sphere's drilled shell now falls back to the solid reserve, not a gate refusal: {:?}",
             outcome(&report, "sphere")
         );
     };
-    assert_eq!(exit_code, &PipelineExitCode::Supports);
-    // The refusal names the face whose area was carried by nothing, which is
-    // the whole value of wiring §6: the report says WHICH face, not merely
-    // that something was wrong.
     assert!(
-        detail.contains("SPEC-A4 §6's removal leaves model face 2108")
-            && detail.contains("no eligible carrier")
-            && detail.contains("MeasurementRefused"),
-        "the §6 refusal must name the face that lost every owner and stay a coverage \
-         verdict: {detail}"
+        matches!(
+            geometry,
+            SupportedGeometry::DrilledShellRefusedBySupport { .. }
+        ),
+        "sphere must reach its artifact through the support-refusal reserve substitution: {geometry:?}"
     );
-    assert!(!scratch.output().join("sphere.chitubox").exists());
+    // **The two lines of one report must not contradict each other.** The
+    // geometry line says a drilled shell was built and refused; the
+    // disposition beside it used to say `BelowThreshold`, which claims the
+    // savings gate measured this cavity and found it too small. The
+    // substitution measures no saving at all, so this is the real pipeline
+    // pinning the truthful reason on the model that actually takes the path.
+    assert_eq!(
+        hollow_disposition,
+        &plinth_hollow::HollowDisposition::Solid {
+            reason: plinth_hollow::SolidDecisionReason::DrilledShellRefused
+        },
+        "the substituted solid must report the shell refusal that produced it"
+    );
+    assert_ne!(
+        hollow_disposition,
+        &plinth_hollow::HollowDisposition::Solid {
+            reason: plinth_hollow::SolidDecisionReason::BelowThreshold
+        },
+        "a substituted solid may not report a savings verdict nobody measured"
+    );
 }
 
 /// **A coverage refusal is not masked by an earlier unrelated failure.**
@@ -1146,58 +1155,35 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 
             let report =
                 prepare(request).expect("a stage stop is a disposition, not a run failure");
-            // **A refusal that happens BEFORE the stop still wins, and must.**
-            // The `Support` stop is checked after `run_support` returns, so a
-            // model whose support run refuses never reaches it. That used to
-            // be a rule with no case: measured on this tree, every fixture
-            // stopped cleanly at every stage, `sphere` included.
+            // **A refusal that happens BEFORE the stop still wins, and must —
+            // but this fixture, run alone, never hits one.** The `Support`
+            // stop is checked after `run_support` returns, so a model whose
+            // support run refuses never reaches it. Measured directly: every
+            // fixture stops cleanly at every stage, `sphere` included, so no
+            // special case is needed.
             //
-            // **2026-08-19, task #49: the rule acquired its case, and the case
-            // is `sphere` at the `Support` stop.** With SPEC-A3-A4 §6's
-            // unrouted-regular removal wired, `sphere`'s carried-load
-            // repartition over the surviving contacts cannot place face 2108 —
-            // no eligible contact is left for it, so its area was being
-            // carried by nothing — and `run_support` refuses on coverage
-            // (`MeasurementRefused`, attempts 0) before returning. Measured
-            // from→to on this fixture: `Stopped { after: Support }` →
-            // `Failed { exit_code: Supports, .. }`. Every other (stem, stop)
-            // pair is unchanged, which is why the expectation is narrowed to
-            // exactly this one cell rather than loosened for all of them.
-            let refuses_before_the_stop = stem == "sphere" && after == StageStop::Support;
-            if refuses_before_the_stop {
-                let ModelPreparationOutcome::Failed { exit_code, .. } = outcome(&report, stem)
-                else {
-                    panic!(
-                        "sphere's support run refuses before the Support stop is reached: {:?}",
-                        outcome(&report, stem)
-                    );
-                };
-                assert_eq!(exit_code, &PipelineExitCode::Supports);
-            } else {
-                assert_eq!(
-                    outcome(&report, stem),
-                    &ModelPreparationOutcome::Stopped { after },
-                    "stop_after {after:?} did not stop {stem} where it was told to"
-                );
-            }
-            // The claim this test exists for holds either way, and holds for
-            // the refusing cell too: nothing is written.
+            // **2026-08-19, task #49, the split landing: this pin moved and
+            // moved back.** The intermediate commit `9a9b459` refused
+            // `sphere` at Routing when SPEC-A3-A4 §6's removal left face 2108
+            // owned by nobody, and this cell became
+            // `Failed { exit_code: Supports, .. }`. The removal stays; the
+            // refusal does not — an ownerless face is disclosed and the
+            // coverage judgment rules on it — so the measured from→to here is
+            // `Failed { exit_code: Supports, .. }` → **`Stopped { after: Support }`**,
+            // back to `develop` @ 06cf21b's reading, and the special case is
+            // gone with it.
+            assert_eq!(
+                outcome(&report, stem),
+                &ModelPreparationOutcome::Stopped { after },
+                "stop_after {after:?} did not stop {stem} where it was told to"
+            );
             assert!(
                 !scratch.output().join(format!("{stem}.chitubox")).exists(),
                 "stop_after {after:?} still wrote an artifact for {stem}"
             );
             assert_eq!(report.artifacts().count(), 0);
-            // A stop is not a failure: the run's exit status stays clean —
-            // except in the one cell above, where a real refusal preempted the
-            // stop and must be visible in the run's status.
-            assert_eq!(
-                report.exit_code(),
-                if refuses_before_the_stop {
-                    PipelineExitCode::Supports
-                } else {
-                    PipelineExitCode::Ok
-                }
-            );
+            // A stop is not a failure: the run's exit status stays clean.
+            assert_eq!(report.exit_code(), PipelineExitCode::Ok);
 
             // The model was measured before it stopped, at every stop this
             // executor has, so the assumed print size is reported either way.
@@ -1208,12 +1194,18 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
     // Without a stop, the same models run to their own end — so the assertions
     // above are about `stop_after` and not about models that never get there.
     // This is the same two-model batch as the per-model-baseline test above
-    // (both fixtures together): `mini` emits, and `sphere` is refused on
-    // coverage by SPEC-A3-A4 §6's unrouted-regular removal (task #49, face
-    // 2108 carried by nothing) — terminally, with no substituted solid.
-    // Measured from→to here: `artifacts().count()` 2 → **1**, and
-    // `has_coverage_refusal()` false → **true**. Both endings are ones a stage
-    // `stop_after` never reached, which is what this block discriminates.
+    // (both fixtures together): `mini` emits, and `sphere`'s attempt 0 fails
+    // during `Routing` before the coverage-closure controller ever gets a
+    // look, so it reaches its artifact through the existing
+    // `DrilledShellRefusedBySupport` reserve substitution — unmoved by
+    // FU-56/FU-57. Both endings are ones a stage `stop_after` never reached,
+    // which is what this block discriminates.
+    //
+    // **2026-08-19, task #49, the split landing: moved and moved back.**
+    // `9a9b459` took these to `artifacts().count()` 1 and
+    // `has_coverage_refusal()` true by refusing on an ownerless face; the
+    // refusal is withdrawn, so the measured from→to is 1 → **2** and
+    // true → **false**, back to `develop` @ 06cf21b's reading.
     let scratch = Scratch::new("stop-none");
     for (stem, fixture, _) in fixtures {
         scratch.place(fixture, stem);
@@ -1226,9 +1218,9 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
         ],
     ))
     .expect("run");
-    assert_eq!(report.artifacts().count(), 1);
+    assert_eq!(report.artifacts().count(), 2);
     assert!(!report.has_gate_refusal());
-    assert!(report.has_coverage_refusal());
+    assert!(!report.has_coverage_refusal());
 }
 
 /// **FU-37, end to end: two runs at different walls are distinguishable in
