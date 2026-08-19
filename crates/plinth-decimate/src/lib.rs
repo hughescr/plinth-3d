@@ -2044,8 +2044,11 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 ///   collapsed twig. An absent `max_mm` is a refusal, never a pass.
 /// - **U4 — structural invariants downstream stages assume.**
 ///   `topology_not_increased`, the same predicate the search gate uses — now
-///   over every canonical count, because `stitch_layer` genuinely requires
-///   degree-2 adjacency. This clause no longer rests on `validate_closed_mesh`
+///   over every canonical count, because the slicer's seam guard
+///   (`orientation::orient_layer` in `perception.rs`, task #32) refuses any
+///   layer whose directed segment multiset fails to balance at a point key —
+///   a non-manifold edge or an inconsistently wound face is exactly what
+///   breaks that balance. This clause no longer rests on `validate_closed_mesh`
 ///   refusing any nonzero cut flag — per the owner ruling of 2026-08-12
 ///   (FU-47), that gate now admits `TOPOLOGY_CUT_POINT_ONLY` and refuses only
 ///   `TOPOLOGY_CUT_CLOSED_SOLID_MASK` — so this predicate stands on its own
@@ -2090,8 +2093,10 @@ fn assess_downstream_utility(
         // already satisfied this clause and it can never be the clause that
         // refuses. It is kept deliberately rather than deleted as dead code:
         // it is the only place the *witness* — as opposed to the search — takes
-        // responsibility for the invariant `stitch_layer` needs, the unit tests
-        // pin it in isolation, and a future reordering that probed before it
+        // responsibility for the invariant the slicer's directed-balance seam
+        // guard needs (`orientation::orient_layer`, `perception.rs`, task
+        // #32), the unit tests pin it in isolation, and a future reordering
+        // that probed before it
         // gated topology (or a second caller of this predicate) would otherwise
         // silently lose the guard rather than fail a test. Since FU-26 the
         // counter it reads is a count rather than a floor: `nonmanifold_edges`

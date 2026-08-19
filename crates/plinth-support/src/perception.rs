@@ -1615,8 +1615,6 @@ mod orientation {
         // One directed edge per emitted segment, bucketed by source. Nothing
         // is deduplicated: multiplicity is the whole point of the invariant.
         let mut out_edges = BTreeMap::<PointKey, Vec<PointKey>>::new();
-        // The same multiset with direction discarded, for the degraded walk.
-        let mut undirected = Vec::<(PointKey, PointKey)>::with_capacity(intersections.len());
         let mut ambiguous_segments = 0usize;
         for event in intersections {
             let a = [event.segment[0][0], event.segment[0][1]];
@@ -1634,7 +1632,6 @@ mod orientation {
             };
             points.entry(ka).or_insert(a);
             points.entry(kb).or_insert(b);
-            undirected.push(if ka < kb { (ka, kb) } else { (kb, ka) });
             match direction_vote(a, b, normal) {
                 Some(true) => out_edges.entry(ka).or_default().push(kb),
                 Some(false) => out_edges.entry(kb).or_default().push(ka),
@@ -1662,11 +1659,29 @@ mod orientation {
             let balanced = points.keys().all(|key| {
                 out_edges.get(key).map_or(0, Vec::len) == in_degree.get(key).copied().unwrap_or(0)
             });
+            // Early exit, not the only guard: an unbalanced multiset would
+            // also be refused by `walk_directed`'s starved arm below, since
+            // no walk leaving an unbalanced vertex can return to its start.
+            // This check just says so up front, without running a walk first.
             if !balanced {
                 return Err(site.open_seam());
             }
             walk_directed(&mut out_edges, site)?
         } else {
+            // The same multiset the main loop built above, with direction
+            // discarded, rebuilt here rather than accumulated on every
+            // layer: measured 0 abstains across 4,049 corpus planes, so this
+            // branch — and the allocation it needs — is cold in practice.
+            let undirected = intersections
+                .iter()
+                .filter_map(|event| {
+                    let a = [event.segment[0][0], event.segment[0][1]];
+                    let b = [event.segment[1][0], event.segment[1][1]];
+                    let ka = point_key(a);
+                    let kb = point_key(b);
+                    (ka != kb).then(|| if ka < kb { (ka, kb) } else { (kb, ka) })
+                })
+                .collect::<Vec<_>>();
             walk_undirected(&undirected, site)?
         };
 
@@ -6967,6 +6982,126 @@ mod tests {
         // Every side triangle of the box spans all five planes; the two caps
         // span none. 8 side triangles x 5 planes x 2 sabotages.
         assert_eq!(checked, 80);
+    }
+
+    /// Two unit-ish squares sharing exactly the point `(0, 0)`: undirected
+    /// degree four there (two edges from each square), degree two everywhere
+    /// else -- the same M1 pinch mechanism as [`saddle_pinch_mesh`], minimal
+    /// and built directly on the plane rather than sliced out of a real mesh,
+    /// so it exercises `orientation`'s walk in isolation.
+    fn pinch_two_squares_fixture() -> Vec<geom_kernel::PlaneIntersection> {
+        use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
+        let mut face_id = 0u32;
+        let mut ring = |points: &[[f64; 2]]| {
+            (0..points.len())
+                .map(|index| {
+                    let a = points[index];
+                    let b = points[(index + 1) % points.len()];
+                    let event = PlaneIntersection {
+                        face_id,
+                        kind: PlaneIntersectionKind::Basic,
+                        segment: [[a[0], a[1], 0.5], [b[0], b[1], 0.5]],
+                    };
+                    face_id += 1;
+                    event
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut events = ring(&[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
+        events.extend(ring(&[[0.0, 0.0], [-2.0, 0.0], [-2.0, -2.0], [0.0, -2.0]]));
+        events
+    }
+
+    /// FU-45 follow-up #3 -- CHARACTERIZATION, not a spec. The degraded
+    /// path's guard (`walk_undirected`, above) is even-degree: strictly
+    /// weaker than the directed path's balance guard, and weaker still than
+    /// the pre-task-#32 degree-2-only stitcher. A degree-four pinch is EVEN,
+    /// so nothing in the degraded path refuses it. That gap is disclosed in
+    /// `walk_undirected`'s own doc comment ("it cannot see a flipped face"),
+    /// measured unreachable today -- 0 abstains across the corpus's 4,049
+    /// planes, so the degraded path never meets a real pinch in production --
+    /// and until this test, never pinned.
+    ///
+    /// This records what today's code actually does when the two coincide:
+    /// it walks the pinch and lets EvenOdd fill it, exactly what the old
+    /// degree-2 rule refused (contrast
+    /// `a_saddle_pass_on_the_plane_pinches_the_contour_and_still_sections`,
+    /// where the directed path meets the identical geometric mechanism and
+    /// sections it correctly instead of guessing). This is not an
+    /// endorsement -- the risk is real, only currently unreachable. The day
+    /// the degraded path becomes reachable on a genuinely pinched layer,
+    /// this test is the tripwire: a changed value here means the risk went
+    /// live, and it needs a real fix, not a quiet re-pin.
+    #[test]
+    fn a_degree_four_pinch_on_the_degraded_path_is_walked_not_refused() {
+        let events = pinch_two_squares_fixture();
+        let normals = degenerate_normals(events.len());
+        let layer = orientation::orient_layer(SliceStitchSite::PrintLayer(0), &events, &normals)
+            .expect("even degree everywhere: the degraded-path guard cannot see the pinch");
+        assert_eq!(
+            layer.degraded,
+            Some(orientation::WindingDegradation {
+                ambiguous_segments: events.len(),
+            })
+        );
+        // PIN: the walk does not keep the two squares apart. `pop_unused`
+        // pairs the pinch's four incident edges LIFO by point key, so the
+        // Hierholzer-style decomposition comes out as ONE eight-vertex
+        // stroke through `(0, 0)` twice -- both squares stitched into a
+        // single connected loop -- rather than the two four-vertex loops the
+        // directed path would derive from the same geometry (compare
+        // `a_saddle_pass_on_the_plane_pinches_the_contour_and_still_sections`).
+        // That pairing is exactly the "how a pinch is paired" sensitivity
+        // `orient_layer`'s doc comment warns EvenOdd is not inert to.
+        assert_eq!(layer.loops.len(), 1, "PIN: today's pairing at the pinch");
+        assert_eq!(
+            layer.loops[0].points_xy_mm,
+            vec![
+                [-2.0, -2.0],
+                [0.0, -2.0],
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 2.0],
+                [0.0, 2.0],
+                [0.0, 0.0],
+                [-2.0, 0.0],
+            ],
+            "PIN: today's walk order through the pinch"
+        );
+        assert_eq!(
+            layer.loops[0].signed_area_mm2, 8.0,
+            "PIN: raw shoelace of the merged stroke"
+        );
+
+        // The union still recovers the two disjoint 2x2 squares here, because
+        // this fixture is symmetric enough that EvenOdd's crossing count
+        // happens to land right. That is a property of THIS geometry, not a
+        // guarantee: the walk's arbitrary pairing at the pinch is the thing
+        // that is unreachable-but-live, and a less symmetric pinch could pair
+        // the same way and have EvenOdd disagree with the true answer. This
+        // assertion pins today's output; it is not evidence the mechanism is
+        // safe in general.
+        let solids = normalized_test_layer(SliceStitchSpace::PrintLayer, events, &normals)
+            .expect("the walk closes, so the union runs, EvenOdd and all");
+        assert_eq!(
+            solids
+                .iter()
+                .map(|solid| (
+                    solid.outer().points_xy_mm().to_vec(),
+                    round6(solid.area_mm2())
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    vec![[-2.0, -2.0], [0.0, -2.0], [0.0, 0.0], [-2.0, 0.0]],
+                    4.0
+                ),
+                (vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]], 4.0),
+            ],
+            "PIN: today's EvenOdd-filled solids"
+        );
+        let filled = solids.iter().map(SliceSolid::area_mm2).sum::<f64>();
+        assert_eq!(round6(filled), 8.0, "PIN: today's EvenOdd-filled area");
     }
 
     /// The three-ring self-crossing fixture of the D2/D1 cases: an outer
