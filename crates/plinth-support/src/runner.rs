@@ -491,6 +491,116 @@ pub enum SupportRunPhase {
 pub struct FinalSupportAuthority<'a> {
     lowered: LoweredSupportRun<'a>,
     closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+    ownerless_islands: Vec<OwnerlessIslandDisclosure>,
+}
+
+/// Task #49 — one island the sealing attempt's ACCEPTED contact set leaves with
+/// no owning contact, disclosed beside what the run's own coverage measurement
+/// says that island actually leaves uncovered.
+///
+/// **Why both numbers, and why neither is the other.**
+/// [`Self::ownerless_face_area_mm2`] is provenance arithmetic: the total area of
+/// the faces whose every eligible load owner lost every contact, so nothing is
+/// sized to carry them. [`Self::measured_uncovered_area_mm2`] is a measurement:
+/// what the routed layout, arms and all, leaves uncovered on this island under
+/// the registered coverage request — and it is small precisely because a
+/// surviving contact of a neighbouring island can stand a millimetre away and
+/// hold a face it was never *eligible* to be charged for. A reader who sees a
+/// large ownerless area and a near-zero measured area is seeing that gap
+/// between eligibility and reach, which is the reason this is a disclosure
+/// rather than a refusal.
+///
+/// This model still EMITTED: the measured area was below the registered A3
+/// censor, so the verdict forgave it. The disclosure exists so that "forgave
+/// it" is a thing the run says out loud.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerlessIslandDisclosure {
+    island_id: Option<u32>,
+    ownerless_face_count: usize,
+    ownerless_face_area_mm2: f64,
+    measured_uncovered_area_mm2: f64,
+}
+
+impl OwnerlessIslandDisclosure {
+    /// The named island these faces belong to, or `None` for a face that
+    /// belongs to no island at all — a face reached only through a specialized
+    /// reservation. Reported rather than dropped, so no area goes missing.
+    #[must_use]
+    pub const fn island_id(&self) -> Option<u32> {
+        self.island_id
+    }
+    /// How many of this island's faces the accepted partition charges to
+    /// nobody. Never the island's whole face count unless every one of its
+    /// contacts went unrouted.
+    #[must_use]
+    pub const fn ownerless_face_count(&self) -> usize {
+        self.ownerless_face_count
+    }
+    /// Their total area, summed from the load eligibility's own per-face areas.
+    #[must_use]
+    pub const fn ownerless_face_area_mm2(&self) -> f64 {
+        self.ownerless_face_area_mm2
+    }
+    /// What the sealing attempt's routed-coverage measurement reports uncovered
+    /// for this island, summed over its patches, UNCENSORED. Zero when the
+    /// measurement found nothing uncovered here at all.
+    #[must_use]
+    pub const fn measured_uncovered_area_mm2(&self) -> f64 {
+        self.measured_uncovered_area_mm2
+    }
+}
+
+/// Join the accepted set's ownerless faces to the sealing attempt's own
+/// coverage measurement, one island per row.
+///
+/// Batch-first: the island membership is inverted ONCE into a face -> island
+/// map and the measurement is summed ONCE into an island -> area map, so this
+/// is linear in the plan's face count plus the patch face count, never a scan
+/// per ownerless face.
+fn ownerless_island_disclosures(
+    lowered: &LoweredSupportRun<'_>,
+    repair_targets: &[crate::coverage_closure::BlockingPatchKey],
+) -> Vec<OwnerlessIslandDisclosure> {
+    let routed = &lowered.structured.braced.rewired.routed;
+    let ownerless = &routed.accepted.ownerless_faces;
+    if ownerless.is_empty() {
+        return Vec::new();
+    }
+    let plan = routed.accepted.plan(&routed.plan);
+    let mut island_of_face: BTreeMap<u32, u32> = BTreeMap::new();
+    for island in plan.islands() {
+        for &face_id in &island.face_ids {
+            island_of_face.insert(face_id, island.id);
+        }
+    }
+    let mut measured: BTreeMap<u32, f64> = BTreeMap::new();
+    for key in repair_targets {
+        *measured.entry(key.island_id).or_insert(0.0) +=
+            f64::from_bits(key.uncovered_area_mm2_bits);
+    }
+    let mut rows: BTreeMap<Option<u32>, (usize, f64)> = BTreeMap::new();
+    for face in ownerless {
+        let entry = rows
+            .entry(island_of_face.get(&face.face_id).copied())
+            .or_insert((0, 0.0));
+        entry.0 += 1;
+        entry.1 += face.area_mm2;
+    }
+    rows.into_iter()
+        .map(
+            |(island_id, (ownerless_face_count, ownerless_face_area_mm2))| {
+                OwnerlessIslandDisclosure {
+                    island_id,
+                    ownerless_face_count,
+                    ownerless_face_area_mm2,
+                    measured_uncovered_area_mm2: island_id
+                        .and_then(|id| measured.get(&id).copied())
+                        .unwrap_or(0.0),
+                }
+            },
+        )
+        .collect()
 }
 
 impl FinalSupportAuthority<'_> {
@@ -559,6 +669,20 @@ impl FinalSupportAuthority<'_> {
             .routed
             .accepted
             .specialized_unrouted
+    }
+
+    /// Task #49 — every island the accepted contact set leaves with no owning
+    /// contact, with what the run's own coverage measurement says that island
+    /// actually leaves uncovered. See [`OwnerlessIslandDisclosure`].
+    ///
+    /// **Empty on the ordinary model, and that is the point.** A non-empty list
+    /// means this run emitted an artifact over an island nothing is charged to
+    /// carry, and the run report prints it for exactly that reason: the verdict
+    /// forgave it under the registered censor, and a forgiveness nobody can see
+    /// is a forgiveness nobody can audit.
+    #[must_use]
+    pub fn ownerless_islands(&self) -> &[OwnerlessIslandDisclosure] {
+        &self.ownerless_islands
     }
 
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
@@ -727,75 +851,25 @@ pub fn run_support<'a>(
             "Preparation",
             SupportRunPhase::Preparation
         );
+        // SPEC-A3-A4 §6, task #49 — the split landing. Routing applies §6's
+        // removal, and the removal can leave an island with no owning contact.
+        // That is DISCLOSED (`AcceptedContactSet::ownerless_faces`), never
+        // refused here, so this arm has no §6 special case: the condition is
+        // `CoverageGap::NoRoutedContact`, the coverage judgment downstream is
+        // what measures it, and the A4 repair loop below is what closes it.
+        //
+        // Refusing on it instead was MEASURED, release binary, one model per
+        // process, 2026-08-19, and cost three corpus models their artifacts —
+        // Deinonychus (9,915,864 B), Skeleton_2 (5,587,800 B) and Tavey
+        // (8,412,216 B) all emit on `develop` and all refused. In each case the
+        // ownerless island's true uncovered area was dust the verdict already
+        // forgives: 0.000469700770 mm² on Deinonychus face 8357, 0.004024703349
+        // mm² on Tavey face 1691. Hard ENFORCEMENT of §6's "hard failure"
+        // sentence is deferred behind tasks #51/#52/#24 by owner ruling.
         let routed = match prepared.route_initial_cco() {
             Ok(value) => value,
             Err(error) => {
                 note_stage_failure("Routing", &error);
-                // SPEC-A3-A4 §6, task #49. One routing refusal is NOT a
-                // routing failure. Applying §6's removal left a face whose
-                // every eligible load owner lost all its contacts, so the
-                // accepted plan cannot be built and no coverage verdict can
-                // be measured over it. It is a support-adequacy verdict, so
-                // it is a coverage refusal on every attempt, attempt 0
-                // included.
-                //
-                // **Classifying it as `Failed { phase: Routing }` is a
-                // MEASURED regression, not a cosmetic one.**
-                // `PreparationStop::is_support_refusal`
-                // (`plinth-pipeline/src/prepare.rs:541`) treats every
-                // sealed-run error EXCEPT `CoverageClosure` as eligible for
-                // the oriented-solid reserve. Measured with this arm written
-                // as a plain stage failure: the corpus Sphere's drilled shell
-                // — refused on coverage on `develop` — fell back and EMITTED
-                // a substituted 486,240-byte artifact after the engine had
-                // just refused its plan. That is precisely the substitution
-                // `corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
-                // exists to prevent.
-                //
-                // **AND THIS ARM IS ITSELF AN OPEN DEFECT — read
-                // `UnownedFaceAfterUnroutedRemoval` before touching it.** The
-                // condition it catches is "an island has no routed contact",
-                // which is `CoverageGap::NoRoutedContact` — the exact class A4
-                // repair exists to close. Refusing here short-circuits the
-                // repair loop at attempt 0 on models the controller is meant
-                // to serve. Measured emission cost, release binary, one model
-                // per process, 2026-08-19:
-                //
-                // | model | develop @ 06cf21b | here |
-                // | --- | --- | --- |
-                // | Deinonychus | emits, 9,915,864 B | refuses, face 8357 |
-                // | Skeleton_2 | emits, 5,587,800 B | refuses, face 88 |
-                // | Tavey | emits, 8,412,216 B | refuses, face 1691 |
-                // | Plague Zombie | emits | emits |
-                // | zombie-3-a | emits | emits |
-                // | Zombie Cat | refuses (AttemptsExhausted, 8) | unchanged |
-                //
-                // The truthful fix is for the carried-load repartition to be
-                // able to say "these faces have no owner left" instead of
-                // refusing, and to let the coverage judgment §6 sequences
-                // after the removal rule on them. That changes what a
-                // `FinalizedLoadPartition` means and is an owner-level
-                // decision this lane did not take.
-                if matches!(
-                    error,
-                    SupportRoutingError::UnownedFaceAfterUnroutedRemoval { .. }
-                ) {
-                    let islands = crate::coverage_closure::islands_from_blocking(
-                        &last_blocking,
-                        &tally,
-                    );
-                    return Err(SupportRunError::CoverageClosure(Box::new(
-                        crate::coverage_closure::CoverageClosureRefusal {
-                            attempts: attempt,
-                            reason:
-                                crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
-                                    error.to_string(),
-                                ),
-                            islands,
-                            history,
-                        },
-                    )));
-                }
                 return Err(repair_plan_or_stage_failure(
                     attempt,
                     SupportRunPhase::Routing,
@@ -911,9 +985,17 @@ pub fn run_support<'a>(
         // running or refuse the model. Dust left in `repair_targets` never
         // does either.
         if blocking.is_empty() {
+            // Task #49. Built HERE, at the one point both halves are in hand:
+            // the accepted set knows which faces it charges to nobody, and
+            // `repair_targets` is this same attempt's uncensored measurement of
+            // how much area each island truly leaves uncovered. Joining them
+            // anywhere else would pair a disclosure with a different run's
+            // measurement.
+            let ownerless_islands = ownerless_island_disclosures(&lowered, &repair_targets);
             return Ok(FinalSupportAuthority {
                 lowered,
                 closure_history: history,
+                ownerless_islands,
             });
         }
         last_blocking = blocking;
@@ -2555,6 +2637,25 @@ struct AcceptedContactSet {
     reduced: Option<SpecializedContactPlan>,
     removals: Vec<UnroutedRegularRemoval>,
     specialized_unrouted: Vec<UnroutedSpecializedContact>,
+    /// Task #49, the split landing. Every model face the ACCEPTED set's own
+    /// carried-load repartition charges to no contact — the faces of an island
+    /// whose every contact went unrouted.
+    ///
+    /// **This is a disclosure, not a refusal, and the distinction is the whole
+    /// ruling.** Load eligibility is provenance, not reach, so "no eligible
+    /// owner has a contact" is not a measurement that the face is unsupported;
+    /// the measurement that decides that is the routed-coverage judgment §6
+    /// sequences AFTER this removal, which reports each island's uncovered area
+    /// and rules on it under the registered A3 censor. Refusing here would
+    /// pre-empt that measurement with a set-membership count — a bare tally
+    /// deciding an outcome, which the physics-first doctrine forbids.
+    ///
+    /// Read beside `UnroutedRegularRemoval::carried_area_mm2`: that is area the
+    /// PRE-removal partition charged to a contact with no support under it.
+    /// Removing the contact moves that area onto whichever surviving contact is
+    /// nearest and eligible, or — for these faces — onto nothing at all. Both
+    /// directions size the surviving arms for what they truly carry.
+    ownerless_faces: Vec<crate::perception::OwnerlessLoadFace>,
     /// The accepted plan's digest, sealed at derivation and re-checked at
     /// every preflight below.
     digest: u64,
@@ -2748,6 +2849,7 @@ fn accepted_contact_set_after_routing(
     }
     if removals.is_empty() {
         return Ok(AcceptedContactSet {
+            ownerless_faces: plan.load_partition().ownerless_faces().to_vec(),
             reduced: None,
             removals,
             specialized_unrouted,
@@ -2761,22 +2863,18 @@ fn accepted_contact_set_after_routing(
         .iter()
         .map(|removal| removal.contact_id)
         .collect::<Vec<_>>();
+    // The repartition can now leave a face with no owning contact at all —
+    // every load owner eligible for it lost every contact it had. That is not
+    // an error: the face is charged to nobody, the survivors are sized for
+    // what they truly carry, and `perception::OwnerlessLoadFace` carries the
+    // disclosure out. See `AcceptedContactSet::ownerless_faces`.
     let reduced = plan
         .begin_regular_edit()?
         .remove_demand_free_regular_rows(&ids)
-        .map_err(|error| match error {
-            // The repartition found a face whose every eligible load owner
-            // lost all its contacts. Say so by name rather than as a stale
-            // digest or a malformed edit — but say only what was measured:
-            // see `UnownedFaceAfterUnroutedRemoval` for why this is NOT a
-            // claim that the face is unsupported.
-            SpecializedError::Generic(GenericPerceptionError::MissingPhysicalContact {
-                face_id,
-            }) => SupportRoutingError::UnownedFaceAfterUnroutedRemoval { face_id },
-            other => SupportRoutingError::Specialized(other),
-        })?;
+        .map_err(SupportRoutingError::Specialized)?;
     let digest = reduced.digest();
     Ok(AcceptedContactSet {
+        ownerless_faces: reduced.load_partition().ownerless_faces().to_vec(),
         reduced: Some(reduced),
         removals,
         specialized_unrouted,
@@ -2855,6 +2953,13 @@ impl<'a> RoutedSupportRun<'a> {
     #[must_use]
     pub(crate) fn unrouted_regular_removals(&self) -> &[UnroutedRegularRemoval] {
         &self.state.accepted.removals
+    }
+
+    /// Task #49: the faces the accepted set charges to NO contact — see
+    /// [`AcceptedContactSet::ownerless_faces`].
+    #[must_use]
+    pub(crate) fn ownerless_faces(&self) -> &[crate::perception::OwnerlessLoadFace] {
+        &self.state.accepted.ownerless_faces
     }
 
     /// Every unrouted DEMAND-BEARING contact this run found.
@@ -4003,31 +4108,6 @@ pub(crate) enum SupportRoutingError {
     TerminalEvidenceMismatch { terminal: u32 },
     #[error("finalized transcript and final forest have different terminal namespaces")]
     TerminalLedgerCardinalityMismatch,
-    /// SPEC-A3-A4 §6, task #49. Removing the unrouted regular contacts left
-    /// model face `face_id` with no **eligible** carrier, so the carried-load
-    /// repartition cannot place its area.
-    ///
-    /// **Read the word "eligible" exactly.** Load eligibility is a *provenance*
-    /// relation, not a reach test: `perception::build_load_eligibility` makes a
-    /// face eligible for `LoadOwner::GenericIsland(id)` iff the face is IN that
-    /// island, and for `LoadOwner::Specialized(owner)` iff a reservation names
-    /// it. Distance never enters. So this variant says one thing and only one
-    /// thing: **every contact of every load owner eligible for this face went
-    /// unrouted.** It does NOT say the face is unsupported — a surviving
-    /// contact of a neighbouring island may sit a millimetre away and hold it —
-    /// and nothing here has measured that.
-    ///
-    /// The condition it really names is the coverage measurement's own
-    /// `CoverageGap::NoRoutedContact`: an island with no routed contact. That
-    /// is the class A4 repair exists to close, which is why this is reported as
-    /// a coverage refusal rather than a routing failure — see `run_support`'s
-    /// Routing arm, and the open defect recorded there.
-    #[error(
-        "SPEC-A4 §6's removal leaves model face {face_id} with no eligible carrier: every \
-         contact of every load owner eligible for it went unrouted, so the carried-load \
-         repartition cannot place its area"
-    )]
-    UnownedFaceAfterUnroutedRemoval { face_id: u32 },
     /// FU-32 J5 (design D3). The routing cadence's demand exceeds a registered
     /// routing cap. The first typed resource refusal this stage has ever had:
     /// before FU-32 it was entirely uncharged (design F8), so an over-large
@@ -6308,24 +6388,32 @@ mod tests {
         });
     }
 
-    /// SPEC-A3-A4 §6, task #49. A model half buried under a blocker has every
-    /// one of that half's terminals quarantined, so after the §6 removal the
-    /// buried islands have no contact left and the carried-load repartition
-    /// has faces it cannot place.
+    /// SPEC-A3-A4 §6, task #49 — **the split landing's first half.** A model
+    /// half buried under a blocker has every one of that half's terminals
+    /// quarantined, so after the §6 removal the buried islands have no contact
+    /// left at all and the carried-load repartition has faces no owner can
+    /// carry.
     ///
-    /// **Before this clause was wired this fixture sealed**, with the buried
-    /// half's area still charged to quarantined contacts that no support
-    /// stands under.
+    /// **That is not an error, and this test is what pins it.** The routing
+    /// stage completes, the accepted contact set is built, and the faces the
+    /// repartition cannot place are DISCLOSED — each with the area the load
+    /// eligibility gave it — instead of taking the model out. Refusing here
+    /// would decide a support-adequacy question from a set-membership tally:
+    /// eligibility is provenance, not reach, so "every eligible owner lost its
+    /// contacts" is not a measurement that these faces are unsupported. The
+    /// measurement that rules on them is the routed-coverage judgment §6
+    /// sequences AFTER this removal.
     ///
-    /// **What this test pins, and what it deliberately does not.** It pins
-    /// that the removal happens and that the resulting condition is reported
-    /// by name, with the face id. It does NOT pin that refusing is the right
-    /// answer — see `UnownedFaceAfterUnroutedRemoval`, whose whole doc comment
-    /// is the argument that this condition is `NoRoutedContact` in disguise
-    /// and belongs to the repair loop rather than ahead of it. The measured
-    /// emission cost of refusing is recorded at `run_support`'s Routing arm.
+    /// **Revert-proof.** At `9a9b459` this same fixture returned
+    /// `Err(SupportRoutingError::UnownedFaceAfterUnroutedRemoval { .. })`, so
+    /// the `expect` below fails on the pre-change tree; and the disclosure
+    /// assertion fails on any tree that completes routing without recording
+    /// what it could not place.
+    ///
+    /// The measured emission cost of the refusal — three corpus models — is
+    /// recorded at `run_support`'s Routing arm.
     #[test]
-    fn a_fully_buried_half_refuses_by_name_once_its_unrouted_contacts_leave_the_accepted_set() {
+    fn a_fully_buried_half_discloses_its_ownerless_faces_instead_of_refusing() {
         let buried = make_overhang_table().expect("buried table fixture");
         let blocker =
             make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).expect("burial blocker fixture");
@@ -6337,10 +6425,39 @@ mod tests {
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
-            assert!(matches!(
-                prepared.route_initial_cco(),
-                Err(SupportRoutingError::UnownedFaceAfterUnroutedRemoval { .. })
-            ));
+            let routed = prepared
+                .route_initial_cco()
+                .expect("a buried half no longer takes the routing stage out");
+            let ownerless = routed.ownerless_faces();
+            assert!(
+                !ownerless.is_empty(),
+                "the buried half's islands lost every contact, so the repartition had faces \
+                 it could not place; they must be disclosed, not silently dropped"
+            );
+            // The disclosure carries a real measurement, not a bare count: each
+            // face keeps the eligibility's own area, which is the quantity a
+            // reader needs to weigh it against the coverage verdict.
+            assert!(
+                ownerless
+                    .iter()
+                    .all(|face| face.area_mm2.is_finite() && face.area_mm2 > 0.0),
+                "every disclosed face must carry its own finite, positive area: {ownerless:?}"
+            );
+            // Nothing is double-counted: a face is charged to a contact or to
+            // nobody, never both.
+            let charged = routed
+                .accepted_plan()
+                .load_partition()
+                .rows()
+                .iter()
+                .map(|row| row.face_id)
+                .collect::<BTreeSet<_>>();
+            assert!(
+                ownerless
+                    .iter()
+                    .all(|face| !charged.contains(&face.face_id)),
+                "a disclosed face must appear in no partition row"
+            );
         });
     }
 

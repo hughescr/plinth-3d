@@ -261,17 +261,13 @@ pub enum CoverageClosureReason {
     NoEligibleRepairRows,
     /// The routed-contact coverage measurement itself could not be completed.
     ///
-    /// **Two producers, not one (task #49, 2026-08-19).** The second is
-    /// SPEC-A3-A4 §6's removal: when taking every unrouted regular contact out
-    /// of the accepted contact set leaves a model face with no eligible
-    /// carrier, the accepted plan the measurement must project cannot be built
-    /// at all, so there is no coverage verdict to be had. It is reported here,
-    /// with the routing stage's own `UnownedFaceAfterUnroutedRemoval`
-    /// message (face id included) as the detail, rather than as
-    /// [`crate::SupportRunError::Failed`] — because a support-adequacy verdict
-    /// must never be answered with a substituted geometry, and
-    /// `PreparationStop::is_support_refusal` excludes exactly this variant's
-    /// enclosing error from the oriented-solid reserve.
+    /// **One producer (task #49 split landing, 2026-08-19).** A short-lived
+    /// second producer was withdrawn: SPEC-A3-A4 §6's removal used to refuse
+    /// when it left a model face with no eligible carrier, and that refusal was
+    /// funnelled here. It no longer refuses — the ownerless faces are disclosed
+    /// (`perception::OwnerlessLoadFace`) and the measurement below rules on the
+    /// island's real uncovered area — so this variant is again exactly what its
+    /// name says: the measurement ran and failed.
     MeasurementRefused(String),
     /// A plan the controller had ALREADY extended with repair-pool contacts
     /// could not be re-planned: one of routing, rewire, brace, structure,

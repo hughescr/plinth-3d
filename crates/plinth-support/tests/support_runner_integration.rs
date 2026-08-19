@@ -1038,70 +1038,89 @@ fn half_buried_table() -> Mesh {
     Mesh::new(verts, tris).expect("the composed half-buried fixture is one mesh")
 }
 
-/// **A SPEC-A3-A4 §6 refusal is a COVERAGE refusal, and must never be
-/// answerable with a substituted geometry.**
+/// **SPEC-A3-A4 §6's removal never pre-empts the measurement it feeds — it
+/// DISCLOSES what it could not place and lets the coverage judgment rule.**
 ///
-/// This is the revert-proof guard for the classification, and the defect it
-/// guards against was measured, not imagined. `plinth-pipeline`'s
-/// `PreparationStop::is_support_refusal` (`prepare.rs:541`) hands every sealed
-/// run error EXCEPT `SupportRunError::CoverageClosure` to the OQ-1/FU-34
-/// oriented-solid reserve. With §6's removal reported as a plain
-/// `Failed { phase: Routing }`, the corpus Sphere's drilled shell — a
-/// terminal coverage refusal on `develop` — fell through the reserve and
-/// EMITTED a substituted 486,240-byte artifact, breaking
-/// `first_artifact.rs`'s
-/// `corpus_sphere_drilled_plan_is_refused_before_any_file_exists` and
-/// `a_coverage_refusal_removes_a_stale_artifact_already_at_the_target`.
+/// End to end through `run_support`, on a fixture built to make the condition
+/// happen: half the model is buried under a blocker, every one of that half's
+/// terminals is quarantined, and §6's removal therefore takes every contact of
+/// the buried islands out of the accepted contact set. The carried-load
+/// repartition is then left with faces no owner can carry.
 ///
-/// So the assertion below is not "the error is nicer to read". It is the one
-/// property that keeps a support-adequacy verdict from being answered with a
-/// different object than the one that was judged.
+/// **Revert-proof, and it guards the whole ruling.** The intermediate commit
+/// `9a9b459` refused here, and the assertions below fail on that tree: the
+/// `Ok` arm cannot be taken at all, and the `MeasurementRefused` detail it
+/// produced contains "no eligible carrier", which the `Err` arm rejects by
+/// name.
 ///
-/// The refusal names the face, and the detail is carried verbatim into the
-/// FU-57 sidecar's `measurement_error`, so the report says WHICH face lost
-/// every owner rather than only that something was wrong.
+/// **Why refusing was wrong, in one sentence.** Load eligibility is a
+/// provenance relation, not a reach test, so "every eligible owner lost its
+/// contacts" is not a measurement that these faces are unsupported — a
+/// surviving contact of a neighbouring island can stand a millimetre away and
+/// hold them — and the routed-coverage measurement §6 sequences AFTER the
+/// removal is the thing that can tell. Refusing ahead of it decided a
+/// support-adequacy question from a set-membership tally.
+///
+/// The measured cost of that refusal was three corpus models' artifacts
+/// (Deinonychus, Skeleton_2, Tavey), each one whose ownerless island's true
+/// uncovered area was dust the registered A3 censor already forgives.
 #[test]
-fn a_spec6_removal_refusal_is_a_coverage_refusal_and_never_a_substitutable_support_failure() {
+fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule() {
     let hollowed = identity_hollowed(half_buried_table());
     let delicacy = vec![0.0; hollowed.mesh().tris().len()];
     let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
-    let error = match run_support(
+    let outcome = run_support(
         hollowed,
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
         },
         support_input(&delicacy, &layers),
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "the buried half's islands lose every contact to SPEC-A4 §6's removal, so this \
-             fixture cannot seal"
+    );
+    match outcome {
+        Ok(authority) => {
+            // The whole point of the split landing. Routing completed, so
+            // whatever verdict this fixture reaches is reached by the coverage
+            // measurement over the routed layout — and the islands the
+            // repartition could not place are named, counted and quantified.
+            let disclosed = authority.ownerless_islands();
+            assert!(
+                !disclosed.is_empty(),
+                "the buried half's islands lost every contact; a run that seals over them \
+                 MUST say so"
+            );
+            for island in disclosed {
+                assert!(
+                    island.ownerless_face_count() > 0
+                        && island.ownerless_face_area_mm2().is_finite()
+                        && island.ownerless_face_area_mm2() > 0.0,
+                    "a disclosure with no faces or no area discloses nothing: {island:?}"
+                );
+                assert!(
+                    island.measured_uncovered_area_mm2().is_finite()
+                        && island.measured_uncovered_area_mm2() >= 0.0,
+                    "the measured half of the disclosure must be a real measurement: {island:?}"
+                );
+            }
+        }
+        Err(plinth_support::SupportRunError::CoverageClosure(refusal)) => {
+            // The other honest ending: the coverage measurement RAN over the
+            // routed layout and refused on what it found. That is a verdict
+            // from the measurement, which is exactly what the ruling asks for.
+            // What it must never again be is `MeasurementRefused` carrying a
+            // §6 removal message, because that was the removal pre-empting the
+            // measurement instead of feeding it.
+            if let plinth_support::CoverageClosureReason::MeasurementRefused(detail) =
+                &refusal.reason
+            {
+                assert!(
+                    !detail.contains("no eligible carrier"),
+                    "the §6 removal must not refuse ahead of the measurement it is supposed \
+                     to feed: {detail}"
+                );
+            }
+        }
+        Err(other) => panic!(
+            "a buried half must reach the coverage judgment, not a stage failure: {other:?}"
         ),
-    };
-
-    let plinth_support::SupportRunError::CoverageClosure(refusal) = error else {
-        panic!(
-            "a §6 removal refusal MUST be a CoverageClosure — anything else is handed to the \
-             oriented-solid reserve and substituted: {error:?}"
-        );
-    };
-    // Attempt 0: the plan that lost its owners is the model's own, and the
-    // refusal is spoken before a single repair row exists.
-    assert_eq!(refusal.attempts, 0);
-    let plinth_support::CoverageClosureReason::MeasurementRefused(detail) = &refusal.reason else {
-        panic!("expected the §6 removal's MeasurementRefused: {:?}", refusal.reason);
-    };
-    assert!(
-        detail.contains("SPEC-A4 §6's removal leaves model face")
-            && detail.contains("no eligible carrier")
-            && detail.contains("went unrouted"),
-        "the refusal must name the face and say only what was measured: {detail}"
-    );
-    // And it must NOT claim the face is physically unsupported. Load
-    // eligibility is a provenance relation, not a reach test; a surviving
-    // contact of a neighbouring island may hold this face perfectly well.
-    assert!(
-        !detail.contains("carried by nothing"),
-        "the refusal must not assert a physics fact nothing measured: {detail}"
-    );
+    }
 }
