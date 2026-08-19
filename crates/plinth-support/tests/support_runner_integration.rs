@@ -346,14 +346,28 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     // DIAMETER): 9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963.
     // The COUNTS above are deliberately unchanged, and that is the point.
     // Leaf-diffed through this same producer path: of the 170 final live
-    // members, 62 changed and 108 are bit-identical.  Every change is a
-    // terminal radius (`r0`) on a stub carrying a tiny area -- 60 move
-    // 0.200 -> 0.050 mm radius, and 2 drop to their own law-required
-    // 0.155284 mm.  No rootward radius (`r1`) moved.  All 64 routed
-    // contact positions are bit-identical.  One interior junction shared
-    // by slots 84/90/91 shifted 0.272 mm, the routing solve's second-order
-    // response to thinner tips; member count, kinds and connectivity are
-    // unchanged.
+    // members, 65 changed and 105 are bit-identical.  The 65 are three
+    // disjoint groups, 60 + 2 + 3:
+    //   * 60 stubs move their terminal radius (`r0`) 0.200 -> 0.050 mm
+    //     RADIUS (0.400 -> 0.100 mm DIAMETER).  These carry so little area
+    //     that the minimum still binds; it is simply lower now.
+    //   * 2 stubs (slots 56, 59) drop `r0` 0.200 -> 0.155284 mm RADIUS
+    //     (0.400 -> 0.310568 mm DIAMETER).  The OLD minimum was clamping
+    //     these ABOVE their own law-required radius; the law sizes them
+    //     now.  This is the band the ruling actually freed.
+    //   * 3 members (slots 84, 90, 91) keep every radius bit-identical and
+    //     move an ENDPOINT instead.  They share one interior junction,
+    //     which shifted 0.272 mm: `rewire.rs::junction_geometry` slides the
+    //     junction to minimise frustum volume and `frustum_raw` reads the
+    //     child's terminal radius, so thinner tips move that optimum.  The
+    //     junction radius is `max(required_radius, terminal_radius)`, so a
+    //     thinner terminal can only lower it, and the unconditional
+    //     `MIN_SHOOT_R_MM` = 0.35 mm radius (0.7 mm diameter) bounds it
+    //     from below regardless.
+    // Counting these 3 as unchanged is the mistake to avoid: their radii
+    // are identical but their lines are not.  No rootward radius (`r1`)
+    // moved anywhere, all 64 routed contact positions are bit-identical,
+    // and member count, kinds and connectivity are unchanged.
     assert_eq!(seats.len(), identities.len());
     authority
         .into_supported_model()
