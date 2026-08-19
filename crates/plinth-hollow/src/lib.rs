@@ -210,6 +210,34 @@ pub enum SolidDecisionReason {
     /// `SupportedGeometry::DrilledShellRefusedBySupport`. This enum names the
     /// decision; that record carries the measurement.
     DrilledShellRefused,
+    /// The hollow stage **never produced a shell at all** — `run` itself
+    /// returned an `Err` that refuses this mesh's geometry (`InvalidShellTopology`
+    /// and its relatives) rather than deciding solid on typed grounds — so the
+    /// caller substituted the oriented solid it had held in reserve.
+    ///
+    /// **Not [`Self::BelowThreshold`], which this substitution used to be
+    /// stamped with.** `BelowThreshold` says the savings gate measured a
+    /// cavity and found it smaller than the registered minimum. On this path
+    /// no gate ever ran: the stage errored before it could produce a cavity to
+    /// measure at all. A reader who saw `BelowThreshold` beside a line
+    /// reporting the stage's own typed refusal was reading two statements
+    /// that cannot both be true.
+    ///
+    /// **Distinct from [`Self::DrilledShellRefused`]**, which also used to
+    /// share `BelowThreshold`: that reason requires a shell to have existed
+    /// (built, drained and drilled) before a *later* stage refused it. This
+    /// one requires that no shell ever existed — the hollow stage's own `run`
+    /// call is what failed.
+    ///
+    /// **This reason is never produced by [`run`]** — same as
+    /// [`Self::DrilledShellRefused`], `run` cannot know that its own error
+    /// return is what a caller decided to substitute for; no `HollowError`
+    /// converts into it. It is set by the pipeline's hollow-error fallback
+    /// seam (`plinth_pipeline::prepare::run_from_oriented`, case 0), which
+    /// records the typed error's own `Display` verbatim in
+    /// `SupportedGeometry::HollowStageRefused`. This enum names the decision;
+    /// that record carries the detail.
+    HollowStageRefused,
 }
 
 /// Whether a recorded realized wall is a **measurement** or only the **bound**

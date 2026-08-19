@@ -238,37 +238,28 @@ pub enum SupportedGeometry {
     /// permanent rather than a defect waiting to be fixed; see the test in
     /// `tests/first_artifact.rs`.
     ///
-    /// **The provenance caveat, stated rather than hidden (the F14 pattern).**
-    /// The reserve is taken through
-    /// `HollowedModel::solid_decision_recording_repair`, whose
-    /// `SolidDecisionReason` names why a *decision* was made and has no value
-    /// meaning "the hollow stage errored" — `NoCavityAfterRepair` and
-    /// `BelowThresholdAfterRepair`, added with the repair, distinguish a
-    /// repair-caused decision from a property of the geometry, but none of the
-    /// five covers an error. (What the constructor *does* carry across the
-    /// error is the repair's own measurement, taken off the
-    /// `HollowStageFailure`, so this record cannot claim a repair never ran.)
-    /// So
-    /// the model handed to support planning is stamped `BelowThreshold` by a
-    /// stage that never reached a threshold test, and that stamp is an
-    /// imprecision this seam knowingly inherits: it is the handoff
-    /// `plinth-hollow` exposes to a caller holding an oriented solid, and it
-    /// is the one every sealed-run gate and the whole OD-8 census already
-    /// travel.
+    /// **The provenance caveat, stated rather than hidden (the F14 pattern),
+    /// and now closed.** The reserve is taken through
+    /// `HollowedModel::solid_decision_recording_repair`, recording
+    /// [`plinth_hollow::SolidDecisionReason::HollowStageRefused`] — the
+    /// reason that says what happened, where this used to stamp
+    /// `BelowThreshold` and claim a savings measurement nobody took. (The
+    /// constructor still carries the repair's own measurement across the
+    /// error, taken off the `HollowStageFailure`, so this record cannot claim
+    /// a repair never ran.)
     ///
-    /// **The support-refusal path above no longer shares it, and this one
-    /// still does.** That path now records
-    /// [`plinth_hollow::SolidDecisionReason::DrilledShellRefused`], which says
-    /// what happened to it; the same remedy — a named reason for "the hollow
-    /// stage errored" — has not been applied here, so this stamp is a known
-    /// remaining gap rather than a settled design. **This variant is where the
-    /// truth lives.**
+    /// **This path now shares the remedy the support-refusal path above
+    /// carries.** That path records
+    /// [`plinth_hollow::SolidDecisionReason::DrilledShellRefused`] for a shell
+    /// that existed and was refused later; this one records
+    /// [`plinth_hollow::SolidDecisionReason::HollowStageRefused`] for a shell
+    /// that never existed at all, because the hollow stage's own `run` call
+    /// errored. Distinct reasons for distinct facts, so a reader (or a
+    /// downstream tool) matching on `SolidDecisionReason` alone can no longer
+    /// conflate the two. **This variant is where the detail lives.**
     /// `refusal` is the typed `HollowError`'s own `Display`, verbatim and
     /// unedited, so the artifact's real provenance is recoverable from the
-    /// outcome even though the `HollowedModel`'s own reason field cannot
-    /// express it. Anyone reading `hollow_disposition` alone will read a
-    /// retained-solid/below-threshold verdict and be misled; read this variant
-    /// beside it.
+    /// outcome even though `HollowStageRefused` alone has no room for it.
     HollowStageRefused { refusal: String },
 }
 
@@ -1228,9 +1219,12 @@ fn orient_model(
 /// So this seam tries the real thing and records what happened:
 ///
 /// 0. `Err` — the hollow stage neither hollowed nor decided solid. Fall back to
-///    the pre-cloned oriented solid and report the typed refusal verbatim in
-///    [`SupportedGeometry::HollowStageRefused`], which carries the provenance
-///    caveat this inherits. The refusal itself is FU-34, not this seam's to fix.
+///    the pre-cloned oriented solid through `solid_decision…`, recording
+///    [`SolidDecisionReason::HollowStageRefused`] — the reason that says what
+///    happened, where this used to stamp `BelowThreshold` and claim a savings
+///    measurement nobody took — and report the typed refusal verbatim in
+///    [`SupportedGeometry::HollowStageRefused`]. The refusal itself is FU-34,
+///    not this seam's to fix.
 /// 1. `Solid` — support planning consumes the hollow stage's own output.
 /// 2. `AwaitingInternalSupport` — `approve_hollow` yields the drilled shell
 ///    with its true `HollowedAndDrilled` disposition (the two alternatives,
@@ -1287,11 +1281,11 @@ pub fn run_from_oriented(
         // Treant (FU-34, then FU-49 -- which is fixed, and the treant now
         // hollows, so this arm currently has no corpus model behind it and is
         // gated on a pre-hollowed fixture instead). Carry the oriented solid
-        // through the `solid_decision(BelowThreshold)` handoff
-        // `embed_incidence_census` and every sealed-run gate already use, and
-        // record the typed refusal verbatim in `SupportedGeometry` -- see
-        // `HollowStageRefused` for the provenance caveat this inherits, which
-        // the support-refusal path below no longer shares.
+        // through `solid_decision(HollowStageRefused)`, recording the typed
+        // refusal verbatim in `SupportedGeometry::HollowStageRefused` --
+        // where this used to stamp `BelowThreshold` and claim a savings
+        // measurement nobody took, the same imprecision the support-refusal
+        // path below no longer carries either.
         // A hollow error that is *not* a refusal of this mesh's geometry is
         // this model's failure, full stop. The reserve says "the engine could
         // not hollow this shape"; it cannot say "the operator asked for a wall
@@ -1317,19 +1311,13 @@ pub fn run_from_oriented(
                 Finite::new(policy.hollow.wall_mm.get())
                     .expect("a PositiveFinite wall is always finite"),
             );
-            let solid = HollowedModel::solid_decision_recording_repair(
+            let solid = substitute_solid_for_hollow_stage_failure(
+                model,
                 hollow_error_reserve_mesh,
                 hollow_error_reserve_history,
-                SolidDecisionReason::BelowThreshold,
                 cavity_repair,
                 wall,
-            )
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Hollow {
-                    model: model.clone(),
-                    source,
-                })
-            })?;
+            )?;
             if stop_after == Some(StageStop::Hollow) {
                 return Ok(None);
             }
@@ -1472,6 +1460,44 @@ fn substitute_solid_for_refused_shell(
             source,
         })
         .after_refused_shell(refused_shell.clone())
+    })
+}
+
+/// The oriented solid substituted for a hollow stage that errored out
+/// entirely -- case 0, never a shell.
+///
+/// The counterpart to [`substitute_solid_for_refused_shell`] for the path
+/// where no shell was ever built: `hollow_stage` itself returned an `Err`
+/// that refuses this mesh's geometry, so there is no [`DrilledShellRefusal`]
+/// to carry -- only the pre-cloned oriented solid and the typed error's own
+/// detail, which the caller records verbatim in
+/// [`SupportedGeometry::HollowStageRefused`].
+///
+/// **The reason is [`SolidDecisionReason::HollowStageRefused`], and it used
+/// to be `BelowThreshold`.** That older stamp said the savings gate had
+/// measured this model's cavity and found it under the registered minimum --
+/// next to a report line stating that the hollow stage itself had errored
+/// before it ever produced a cavity to measure. Nothing on this path measures
+/// a saving: the stage never got that far.
+fn substitute_solid_for_hollow_stage_failure(
+    model: &ModelId,
+    mesh: plinth_mesh::Mesh,
+    orientation: plinth_orient::OrientationHistory,
+    cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+    wall: Option<Finite>,
+) -> Result<HollowedModel, ChainStop> {
+    HollowedModel::solid_decision_recording_repair(
+        mesh,
+        orientation,
+        SolidDecisionReason::HollowStageRefused,
+        cavity_repair,
+        wall,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::Hollow {
+            model: model.clone(),
+            source,
+        })
     })
 }
 
@@ -2085,6 +2111,51 @@ mod tests {
         );
         // The savings-gate refusal's own measurement is `None` here, which is
         // the same claim stated the other way: there was no savings verdict.
+        assert!(solid.history().hollow().savings_shortfall().is_none());
+    }
+
+    /// **The hollow-stage-error fallback (case 0) says the stage failed, and
+    /// does not claim a savings measurement nobody took.**
+    ///
+    /// The #33 fix (`5d5b249`) closed this imprecision for the support-refusal
+    /// path (case 3) and named this one -- "the hollow stage erroring out
+    /// entirely" -- a known remaining gap in `SupportedGeometry::
+    /// HollowStageRefused`'s own doc. This test closes it: no shell is ever
+    /// built on this path, so `Solid { reason: BelowThreshold }` -- "the
+    /// savings gate measured this cavity and found it under the registered
+    /// minimum" -- was never true here either.
+    #[test]
+    fn the_hollow_stage_error_fallback_records_the_stage_failed_not_a_savings_verdict() {
+        let model = ModelId::new("fixture");
+        let (mesh, orientation) = oriented_solid_parts();
+        let solid =
+            substitute_solid_for_hollow_stage_failure(&model, mesh, orientation, None, None)
+                .expect("the oriented solid substitutes");
+
+        let disposition = solid.history().hollow().disposition();
+        assert_eq!(
+            disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::HollowStageRefused
+            },
+            "the fallback must record that the hollow stage itself failed"
+        );
+        assert_ne!(
+            disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::BelowThreshold
+            },
+            "nothing on this path measured a saving, so nothing may report one"
+        );
+        // Distinct from case 3's reason too: no shell ever existed here for a
+        // later stage to refuse.
+        assert_ne!(
+            disposition,
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::DrilledShellRefused
+            },
+            "this path never built a shell at all, so it is not the shell-refusal case"
+        );
         assert!(solid.history().hollow().savings_shortfall().is_none());
     }
 
