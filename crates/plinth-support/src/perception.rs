@@ -4078,6 +4078,13 @@ impl RetainedLoadTranspose {
             .map(|bounds| (bounds[0], bounds[1] - bounds[0]))
             .collect::<Vec<_>>();
         debug_assert_eq!(buckets.len(), contacts.len());
+        // Task #49. This equality holds only because the merge gate refuses a
+        // partition with any ownerless row before absorbing it: `rows()` is one
+        // row per OWNED face while `row_centroid_mm` is one per eligibility
+        // row, and those two counts diverge by exactly the ownerless count. If
+        // that refusal is ever lifted — see the note at the gate — the retained
+        // transpose would silently drop the ownerless rows instead of failing
+        // here, so the two must move together.
         debug_assert_eq!(partition.rows().len(), baseline.row_centroid_mm.len());
         let cells = rows.len();
         *slot = Some(Self {
@@ -5229,8 +5236,18 @@ impl SpecializedLoadBaseline {
         let mut won_counts = vec![0u32; contacts.len()];
         for slots in &witnesses {
             if slots[0].contact == NO_LOAD_WITNESS {
-                // `finalize_load_rows` has already refused this case with
-                // `MissingPhysicalContact`, so it cannot be reached here.
+                // Unreachable, and the guard that makes it so is the merge
+                // gate's own early return ~30 lines above: a partition with
+                // any `ownerless` row is refused with `MissingPhysicalContact`
+                // before this loop runs, and a witness with no contact is
+                // exactly an ownerless row.
+                //
+                // Task #49 corrected this rationale. It used to name
+                // `finalize_load_rows` as the thing that had already refused.
+                // `finalize_load_rows` no longer refuses at all — it discloses
+                // ownerless faces (`OwnerlessLoadFace`) and returns — so if
+                // that early return is ever lifted, this is a live path and
+                // this comment is the notice.
                 return Err(GenericPerceptionError::LoadResourceOverflow);
             }
             winner.push(slots[0].contact);
