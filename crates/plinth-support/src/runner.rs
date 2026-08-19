@@ -6570,6 +6570,99 @@ mod tests {
         });
     }
 
+    /// SPEC-A3-A4 §6, task #49 — **the strip re-sizes arms in the SAFE
+    /// direction, and member sizing sees it.**
+    ///
+    /// This is the load-safety half of the ruling, and it is the reason the
+    /// removal is worth having on its own merits, independently of §6's text.
+    ///
+    /// **The defect it pins.** Before the removal was wired, the carried-load
+    /// repartition charged model area to contacts the cadence never routed —
+    /// contacts with no arm under them at all. On the procedural toed slab,
+    /// measured 2026-08-19, that was **93% of the whole load area**. Every
+    /// surviving arm was therefore sized against a share of the model it was
+    /// not the one actually holding: the phantom credit made the real
+    /// carriers look LIGHTLY loaded, and an arm sized for less load than it
+    /// carries is the unsafe direction of the error.
+    ///
+    /// **The invariant, and why it is an invariant rather than a number that
+    /// happens to hold.** A face is charged to the nearest contact eligible
+    /// for it. Deleting contacts cannot unseat a winner — if survivor `S` was
+    /// nearest among the whole set it is still nearest among any subset
+    /// containing it — so no survivor can LOSE a face to the strip, and every
+    /// face whose winner was struck goes to a surviving eligible contact or to
+    /// nobody. Hence: every survivor's carried area is non-decreasing, and the
+    /// removed contacts' area (whatever is not ownerless) lands on survivors.
+    /// Both are asserted below, together with the strict increase that proves
+    /// the fixture exercises the path at all.
+    ///
+    /// **And member sizing reads the increase**, not merely the plan: the
+    /// assertion runs over `finalized_loads()`, the tip-sized fold the arm
+    /// sizer consumes, and checks the frozen tip radius moves with it — never
+    /// down.
+    ///
+    /// Revert-proof: at `9a9b459` and on `develop` the accepted plan is the
+    /// routed plan (no removal, or a removal that refused), so no survivor
+    /// increases and the strict-increase assertion fails.
+    #[test]
+    fn stripping_phantom_credit_only_ever_raises_a_survivors_load_and_its_tip_radius() {
+        let table = load_required_runner_corpus();
+        let boundary_blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.55]).expect("no-winner blocker fixture");
+        let hollowed = hollowed_fixture(merge_meshes(&[table, boundary_blocker]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("no-winner fixture seals through CCO");
+            assert!(
+                !routed.unrouted_regular_removals().is_empty(),
+                "the fixture must actually strip something for this to mean anything"
+            );
+
+            let before = routed
+                .plan()
+                .finalized_loads()
+                .expect("the routed plan's own tip-sized load fold");
+            let accepted = routed.accepted_plan();
+            let after = accepted
+                .finalized_loads()
+                .expect("the accepted plan's own tip-sized load fold");
+
+            let mut raised = 0usize;
+            for contact in accepted.contacts() {
+                let id = contact.contact_id();
+                let before_leaf = before
+                    .leaf_for(id)
+                    .expect("a survivor was in the routed fold too");
+                let after_leaf = after.leaf_for(id).expect("a survivor is in the accepted fold");
+                // The sizing INPUT never falls. This is the whole safety
+                // claim: an arm may learn it carries more, never less.
+                assert!(
+                    after_leaf.carried_area_mm2() >= before_leaf.carried_area_mm2(),
+                    "survivor {id} lost load to the strip: {} -> {}",
+                    before_leaf.carried_area_mm2(),
+                    after_leaf.carried_area_mm2()
+                );
+                // And the sizing OUTPUT moves with it, never against it.
+                assert!(
+                    after_leaf.tip_radius_mm().get() >= before_leaf.tip_radius_mm().get(),
+                    "survivor {id}'s tip shrank while its load grew: {} -> {}",
+                    before_leaf.tip_radius_mm().get(),
+                    after_leaf.tip_radius_mm().get()
+                );
+                if after_leaf.carried_area_mm2() > before_leaf.carried_area_mm2() {
+                    raised += 1;
+                }
+            }
+            assert!(
+                raised > 0,
+                "the stripped contacts' area has to land on a survivor; no survivor's load rose"
+            );
+        });
+    }
+
     fn carried_area_total(plan: &SpecializedContactPlan) -> f64 {
         plan.contacts()
             .iter()
