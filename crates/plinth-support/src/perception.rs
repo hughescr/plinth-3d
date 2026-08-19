@@ -6056,6 +6056,188 @@ mod tests {
         assert_eq!(digests, [digests[0]; 3]);
     }
 
+    /// **The 2026-08-19 tip minimum binds ONLY where the carried area is
+    /// tiny, and weakens no refusal anywhere else.**
+    ///
+    /// This is the revert guard for the owner's ruling lowering
+    /// `TIP_RADIUS_DEFAULT_MM` from 0.2 mm radius (0.4 mm diameter) to
+    /// 0.05 mm radius (0.1 mm diameter).  It has two halves that fail in
+    /// opposite directions, which is the whole point:
+    ///
+    /// - The BINDING half asserts the clamp minimum is 0.05 mm radius and
+    ///   that a zero-area contact takes it.  On `develop` (0.2 mm radius)
+    ///   this half is RED.  That is the sabotage direction: reverting the
+    ///   constant re-breaks it.
+    /// - The INVARIANCE half asserts that every LARGE carried area is sized
+    ///   by the load law and NOT by the clamp, against radii computed from
+    ///   the law rather than from the constant.  This half is GREEN both
+    ///   before and after the ruling, and it is what proves the ruling did
+    ///   not weaken a single refusal.  If a future edit lets the minimum
+    ///   reach a large area, this half goes red instead.
+    ///
+    /// UNITS: radii here are RADII in mm.  The owner and ChituBox speak
+    /// DIAMETER; every radius below is half the diameter he would quote.
+    #[test]
+    fn tip_minimum_binds_only_tiny_areas_and_leaves_every_large_area_refusal_identical() {
+        let policy = FrozenTipLoadPolicy::from_placeholders(m0_constants().unwrap().placeholders());
+
+        // BINDING half -- RED on develop, where the minimum is 0.2 mm radius.
+        assert_eq!(
+            policy.min_radius_mm, 0.05,
+            "the tip clamp minimum is 0.05 mm RADIUS (0.1 mm DIAMETER) by the owner ruling of \
+             2026-08-19; it was 0.2 mm radius (0.4 mm diameter)"
+        );
+        assert_eq!(
+            policy.tip_radius_mm(0.0).unwrap().get(),
+            0.05,
+            "a contact carrying no area takes the clamp minimum"
+        );
+        // The maximum is deliberately untouched by that ruling.
+        assert_eq!(
+            policy.max_radius_mm, 1.0,
+            "the tip clamp maximum stays 1.0 mm RADIUS (2.0 mm DIAMETER)"
+        );
+
+        // INVARIANCE half -- GREEN on develop AND here.  `x` is the area
+        // ratio the engine implies; the law says r = sqrt(area / (x * pi)).
+        let x = policy.implied_area_ratio();
+        let law_radius_mm = |area_mm2: f64| (area_mm2 / (x * std::f64::consts::PI)).sqrt();
+
+        // These areas are all ABOVE the largest area the OLD 0.2 mm-radius
+        // minimum could reach (x * pi * 0.2^2 = 1.50796 mm2), so the law --
+        // not either clamp -- sized them before this ruling and sizes them
+        // now.  Their radii are therefore bit-identical pre- and
+        // post-ruling, which is exactly what "no refusal was weakened"
+        // means.  They are also below the area at which the untouched
+        // 1.0 mm-radius maximum starts clamping.
+        let old_minimum_max_area_mm2 = x * std::f64::consts::PI * 0.2_f64.powi(2);
+        for area_mm2 in [1.6_f64, 2.0, 5.0, 12.0, 30.0, 37.0] {
+            assert!(
+                area_mm2 > old_minimum_max_area_mm2,
+                "this group must sit above the OLD minimum's reach, or it proves nothing about \
+                 invariance"
+            );
+            let sized = policy.tip_radius_mm(area_mm2).unwrap().get();
+            assert!(
+                (sized - law_radius_mm(area_mm2)).abs() < 1.0e-12,
+                "a {area_mm2} mm2 carried area must be sized by the load law, not by either \
+                 clamp: got {sized} mm radius"
+            );
+            assert!(
+                sized > policy.min_radius_mm,
+                "the clamp minimum must not reach a {area_mm2} mm2 carried area"
+            );
+            // The refusal predicate is unchanged on large areas: the
+            // law-sized tip is accepted, and a tip one ULP thinner is not.
+            assert!(
+                !policy.violates_safety_factor(area_mm2, PositiveFinite::new(sized).unwrap()),
+                "the law-sized tip for {area_mm2} mm2 must still be accepted"
+            );
+            // One ULP under is deliberately still accepted -- the predicate
+            // carries a 1e-6 safety-factor tolerance (see
+            // `shared_load_gate_pins_the_live_one_e_minus_six_tolerance`).
+            // A tip meaningfully under the law-required radius is not.
+            let clearly_thinner = sized * 0.99;
+            assert!(
+                policy.violates_safety_factor(
+                    area_mm2,
+                    PositiveFinite::new(clearly_thinner).unwrap()
+                ),
+                "a tip 1% under the law-required radius for {area_mm2} mm2 must still be \
+                 refused -- this ruling lowered a minimum, it did not move the law"
+            );
+            // And the new minimum itself is nowhere near sufficient here:
+            // a large area on a 0.05 mm tip is still refused outright.
+            assert!(
+                policy.violates_safety_factor(
+                    area_mm2,
+                    PositiveFinite::new(policy.min_radius_mm).unwrap()
+                ),
+                "a {area_mm2} mm2 carried area on a minimum-radius tip must still be refused"
+            );
+        }
+
+        // THE BAND THAT MOVED, stated explicitly so the change is legible
+        // rather than implied.  Between the new minimum's reach
+        // (0.09425 mm2) and the old one's (1.50796 mm2), a tip used to be
+        // clamped up to 0.2 mm radius against its own physics; now the law
+        // sizes it.  This is the ruling's entire effect on output.
+        let new_minimum_max_area_mm2 = x * std::f64::consts::PI * policy.min_radius_mm.powi(2);
+        for area_mm2 in [0.1_f64, 0.25, 0.5, 1.0, 1.5] {
+            assert!(area_mm2 > new_minimum_max_area_mm2 && area_mm2 < old_minimum_max_area_mm2);
+            let sized = policy.tip_radius_mm(area_mm2).unwrap().get();
+            assert!(
+                (sized - law_radius_mm(area_mm2)).abs() < 1.0e-12,
+                "a {area_mm2} mm2 carried area is now sized by the law, not clamped to 0.2 mm"
+            );
+            assert!(
+                sized < 0.2,
+                "a {area_mm2} mm2 carried area used to be over-sized to 0.2 mm radius; it is now \
+                 {sized} mm radius"
+            );
+            // Still legal: the law-sized tip carries this area safely.
+            assert!(
+                !policy.violates_safety_factor(area_mm2, PositiveFinite::new(sized).unwrap()),
+                "the law-sized tip must be accepted -- thinner here is correct, not permissive"
+            );
+        }
+    }
+
+    /// **The smallest legal tip is 0.05 mm RADIUS (0.1 mm DIAMETER), and the
+    /// most it may legally carry is `X * pi * 0.05^2` = 0.09425 mm2.**
+    ///
+    /// That area is the whole span over which the 2026-08-19 minimum can
+    /// bind at all.  Above it the load law sizes the tip; the old 0.2 mm
+    /// radius (0.4 mm diameter) minimum bound everything under
+    /// `X * pi * 0.2^2` = 1.50796 mm2, so the ruling narrowed the
+    /// over-sizing band by exactly 16x (the square of the 4x radius drop),
+    /// and changed nothing else.
+    #[test]
+    fn smallest_legal_tip_is_0_05_mm_radius_0_1_mm_diameter_carrying_at_most_0_09425_mm2() {
+        let policy = FrozenTipLoadPolicy::from_placeholders(m0_constants().unwrap().placeholders());
+        let x = policy.implied_area_ratio();
+        assert_eq!(x, 12.0, "the engine's implied area ratio X");
+
+        let smallest_tip_radius_mm = policy.min_radius_mm;
+        assert_eq!(smallest_tip_radius_mm, 0.05);
+        assert_eq!(
+            smallest_tip_radius_mm * 2.0,
+            0.1,
+            "stated as the owner states it: 0.1 mm DIAMETER"
+        );
+
+        // The area at which the law asks for exactly the minimum radius.
+        let max_area_mm2 = x * std::f64::consts::PI * smallest_tip_radius_mm.powi(2);
+        assert!(
+            (max_area_mm2 - 0.094_247_779_607_693_8).abs() < 1.0e-15,
+            "the smallest legal tip carries at most {max_area_mm2} mm2"
+        );
+
+        // At that area the law and the clamp agree exactly.
+        assert!(
+            (policy.tip_radius_mm(max_area_mm2).unwrap().get() - smallest_tip_radius_mm).abs()
+                < 1.0e-15
+        );
+        // At that area the minimum-radius tip is legal ...
+        assert!(!policy.violates_safety_factor(
+            max_area_mm2,
+            PositiveFinite::new(smallest_tip_radius_mm).unwrap()
+        ));
+        // ... and just above it, it is not: the law takes over and refuses.
+        let just_over_mm2 = max_area_mm2 * 1.01;
+        assert!(policy.violates_safety_factor(
+            just_over_mm2,
+            PositiveFinite::new(smallest_tip_radius_mm).unwrap()
+        ));
+        assert!(policy.tip_radius_mm(just_over_mm2).unwrap().get() > smallest_tip_radius_mm);
+
+        // The band this ruling narrowed, stated in both radii and areas.
+        let old_minimum_radius_mm: f64 = 0.2;
+        let old_max_area_mm2 = x * std::f64::consts::PI * old_minimum_radius_mm.powi(2);
+        assert!((old_max_area_mm2 - 1.507_964_473_723_100_5).abs() < 1.0e-12);
+        assert!((old_max_area_mm2 / max_area_mm2 - 16.0).abs() < 1.0e-12);
+    }
+
     #[test]
     fn shared_load_gate_pins_the_live_one_e_minus_six_tolerance() {
         let policy = m0_constants().unwrap().placeholders();
