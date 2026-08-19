@@ -435,15 +435,17 @@ fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
          this artifact is made of"
     );
 
-    // The provenance caveat this fallback knowingly inherits, asserted rather
-    // than described: the model carries a `BelowThreshold` solid stamp that no
-    // stage actually reached, because `SolidDecisionReason` cannot express
-    // "the hollow stage errored". The `SupportedGeometry` above is the only
-    // place the truth is recorded, which is why it is pinned first.
+    // FU-34-mirrors-#33 (task #34): this used to pin `BelowThreshold` -- "the
+    // savings gate measured this cavity and found it under the registered
+    // minimum" -- next to a `SupportedGeometry` line that had just said the
+    // hollow stage itself errored and never reached a threshold test. Moved
+    // to `HollowStageRefused`, the reason that says what actually happened:
+    // no shell was ever built, so there was nothing to measure a saving
+    // against.
     assert_eq!(
         outcome.hollow_disposition,
         HollowDisposition::Solid {
-            reason: SolidDecisionReason::BelowThreshold
+            reason: SolidDecisionReason::HollowStageRefused
         },
         "the fallback's solid handoff changed shape; the caveat documented on \
          SupportedGeometry::HollowStageRefused needs re-deriving with it"
