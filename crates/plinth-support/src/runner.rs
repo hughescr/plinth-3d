@@ -525,6 +525,42 @@ impl FinalSupportAuthority<'_> {
         self.closure_history.len().saturating_sub(1)
     }
 
+    /// SPEC-A3-A4 §6's removal ledger for the attempt that sealed: every
+    /// regular contact the cadence did not route, with its exact
+    /// candidate-pool row, its reason, and the carried area the pre-removal
+    /// partition was charging it.
+    ///
+    /// This is what makes the clause observable from outside the crate. It is
+    /// **not** empty on a healthy corpus model — see the task #49 record for
+    /// the measured share of each model's carried area that was being charged
+    /// to contacts with no support at all.
+    #[must_use]
+    pub fn unrouted_regular_removals(&self) -> &[UnroutedRegularRemoval] {
+        &self
+            .lowered
+            .structured
+            .braced
+            .rewired
+            .routed
+            .accepted
+            .removals
+    }
+
+    /// Every unrouted demand-bearing (specialized minimum or island-birth)
+    /// contact the sealing attempt found. §6 calls this case a hard failure;
+    /// this change measures and ledgers it without refusing on it.
+    #[must_use]
+    pub fn unrouted_specialized_contacts(&self) -> &[UnroutedSpecializedContact] {
+        &self
+            .lowered
+            .structured
+            .braced
+            .rewired
+            .routed
+            .accepted
+            .specialized_unrouted
+    }
+
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
         self.lowered.into_supported_model().map_err(|error| SupportRunError::Failed {
             phase: SupportRunPhase::Lowering,
@@ -691,11 +727,85 @@ pub fn run_support<'a>(
             "Preparation",
             SupportRunPhase::Preparation
         );
-        let routed = stage!(
-            prepared.route_initial_cco(),
-            "Routing",
-            SupportRunPhase::Routing
-        );
+        let routed = match prepared.route_initial_cco() {
+            Ok(value) => value,
+            Err(error) => {
+                note_stage_failure("Routing", &error);
+                // SPEC-A3-A4 §6, task #49. One routing refusal is NOT a
+                // routing failure. Applying §6's removal left a face whose
+                // every eligible load owner lost all its contacts, so the
+                // accepted plan cannot be built and no coverage verdict can
+                // be measured over it. It is a support-adequacy verdict, so
+                // it is a coverage refusal on every attempt, attempt 0
+                // included.
+                //
+                // **Classifying it as `Failed { phase: Routing }` is a
+                // MEASURED regression, not a cosmetic one.**
+                // `PreparationStop::is_support_refusal`
+                // (`plinth-pipeline/src/prepare.rs:541`) treats every
+                // sealed-run error EXCEPT `CoverageClosure` as eligible for
+                // the oriented-solid reserve. Measured with this arm written
+                // as a plain stage failure: the corpus Sphere's drilled shell
+                // — refused on coverage on `develop` — fell back and EMITTED
+                // a substituted 486,240-byte artifact after the engine had
+                // just refused its plan. That is precisely the substitution
+                // `corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
+                // exists to prevent.
+                //
+                // **AND THIS ARM IS ITSELF AN OPEN DEFECT — read
+                // `UnownedFaceAfterUnroutedRemoval` before touching it.** The
+                // condition it catches is "an island has no routed contact",
+                // which is `CoverageGap::NoRoutedContact` — the exact class A4
+                // repair exists to close. Refusing here short-circuits the
+                // repair loop at attempt 0 on models the controller is meant
+                // to serve. Measured emission cost, release binary, one model
+                // per process, 2026-08-19:
+                //
+                // | model | develop @ 06cf21b | here |
+                // | --- | --- | --- |
+                // | Deinonychus | emits, 9,915,864 B | refuses, face 8357 |
+                // | Skeleton_2 | emits, 5,587,800 B | refuses, face 88 |
+                // | Tavey | emits, 8,412,216 B | refuses, face 1691 |
+                // | Plague Zombie | emits | emits |
+                // | zombie-3-a | emits | emits |
+                // | Zombie Cat | refuses (AttemptsExhausted, 8) | unchanged |
+                //
+                // The truthful fix is for the carried-load repartition to be
+                // able to say "these faces have no owner left" instead of
+                // refusing, and to let the coverage judgment §6 sequences
+                // after the removal rule on them. That changes what a
+                // `FinalizedLoadPartition` means and is an owner-level
+                // decision this lane did not take.
+                if matches!(
+                    error,
+                    SupportRoutingError::UnownedFaceAfterUnroutedRemoval { .. }
+                ) {
+                    let islands = crate::coverage_closure::islands_from_blocking(
+                        &last_blocking,
+                        &tally,
+                    );
+                    return Err(SupportRunError::CoverageClosure(Box::new(
+                        crate::coverage_closure::CoverageClosureRefusal {
+                            attempts: attempt,
+                            reason:
+                                crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
+                                    error.to_string(),
+                                ),
+                            islands,
+                            history,
+                        },
+                    )));
+                }
+                return Err(repair_plan_or_stage_failure(
+                    attempt,
+                    SupportRunPhase::Routing,
+                    &error,
+                    &last_blocking,
+                    &tally,
+                    history,
+                ));
+            }
+        };
         let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
         let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
         let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
@@ -2185,10 +2295,17 @@ impl<'a> PreparedSupportRun<'a> {
             CONTACT_ATTESTATION_STAGE_ROUTE_CCO,
             controller.contact_attestation_digest(),
         );
+        // SPEC-A3-A4 §6, at the point the clause names: the cadence has
+        // sealed its transcript and NOTHING downstream has run, so this is
+        // the last moment before "rewire, bracing, carried-load repartition,
+        // or coverage judgment".
+        let accepted =
+            accepted_contact_set_after_routing(&plan, &transcript, initial.forest())?;
         Ok(RoutedSupportRun {
             context,
             state: RoutedPlanState {
                 plan,
+                accepted,
                 initial,
                 controller,
                 transcript,
@@ -2311,7 +2428,14 @@ impl SupportRunContext<'_> {
 /// generic preparation and retained native geometry stay in `SupportRunContext`, while routing
 /// owns the specialized plan, initial forest, controller, and finalized transcript.
 struct RoutedPlanState {
+    /// The plan the cadence ROUTED. It is the authority the sealed transcript
+    /// and the initial construction are pinned to, and it never changes after
+    /// routing — `accepted` is derived from it, not in place of it.
     plan: SpecializedContactPlan,
+    /// SPEC-A3-A4 §6's accepted contact set: `plan` minus every unrouted
+    /// regular contact, with the carried load repartitioned over the
+    /// survivors.
+    accepted: AcceptedContactSet,
     initial: InitialContactBuild,
     controller: CcoController,
     transcript: FinalizedCcoTranscript,
@@ -2319,6 +2443,345 @@ struct RoutedPlanState {
     /// stage: the stub family's sealed head extended by the CCO model-anchor
     /// seat transcript.
     contact_attestation_chain: u64,
+}
+
+/// Why a contact is not in the accepted contact set: the reason half of the
+/// row/reason pair SPEC-A3-A4 §6 requires be ledgered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnroutedContactReason {
+    /// Quarantined before the cadence ran. The initial quarantine record is
+    /// its complete evidence; the transcript deliberately keeps no route.
+    Quarantined,
+    /// The cadence ran the terminal and no seat won, so the stub was retired.
+    NoWinner,
+}
+
+/// One regular contact removed from the accepted contact set by SPEC-A3-A4
+/// §6, ledgered with its exact row and reason.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnroutedRegularRemoval {
+    contact_id: u64,
+    terminal_id: u32,
+    /// The exact candidate-pool row identity this contact occupied. §6 opens
+    /// with "A4 preserves exact candidate-pool row identity throughout", so
+    /// the ledger names the row rather than only the physical contact.
+    route: crate::specialized::RegularContactRoute,
+    reason: UnroutedContactReason,
+    /// What the PRE-removal load partition was charging this contact — the
+    /// model area that no support was carrying, and that the repartition over
+    /// the survivors now has to place somewhere else.
+    carried_area_mm2: f64,
+}
+
+impl UnroutedRegularRemoval {
+    #[must_use]
+    pub const fn contact_id(&self) -> u64 {
+        self.contact_id
+    }
+    #[must_use]
+    pub const fn terminal_id(&self) -> u32 {
+        self.terminal_id
+    }
+    #[must_use]
+    pub const fn route(&self) -> crate::specialized::RegularContactRoute {
+        self.route
+    }
+    #[must_use]
+    pub const fn reason(&self) -> UnroutedContactReason {
+        self.reason
+    }
+    #[must_use]
+    pub const fn carried_area_mm2(&self) -> f64 {
+        self.carried_area_mm2
+    }
+}
+
+/// One unrouted DEMAND-BEARING contact — a specialized minimum or an
+/// island-birth obligation that the cadence did not route.
+///
+/// §6's next sentence says such a contact "is a hard failure". It is detected
+/// and ledgered here, and it is deliberately NOT converted into a refusal in
+/// this change; see [`AcceptedContactSet`] for the measurement that decides
+/// that, which is an owner's call rather than this lane's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnroutedSpecializedContact {
+    contact_id: u64,
+    terminal_id: u32,
+    reason: UnroutedContactReason,
+    kinds: Vec<crate::specialized::SpecializedDemandKind>,
+}
+
+impl UnroutedSpecializedContact {
+    #[must_use]
+    pub const fn contact_id(&self) -> u64 {
+        self.contact_id
+    }
+    #[must_use]
+    pub const fn terminal_id(&self) -> u32 {
+        self.terminal_id
+    }
+    #[must_use]
+    pub const fn reason(&self) -> UnroutedContactReason {
+        self.reason
+    }
+    #[must_use]
+    pub fn kinds(&self) -> &[crate::specialized::SpecializedDemandKind] {
+        &self.kinds
+    }
+}
+
+/// SPEC-A3-A4 §6's accepted contact set, derived once at the end of routing.
+///
+/// > Before rewire, bracing, carried-load repartition, or coverage judgment,
+/// > every unrouted regular contact is ledgered with its exact row/reason and
+/// > removed from the accepted contact set. An unrouted specialized minimum or
+/// > island-birth contact is a hard failure.
+///
+/// **What this type carries and why it is not simply the routed plan.** The
+/// routed plan is the authority the sealed transcript, the initial
+/// construction and the forest are all pinned to; re-deriving it in place
+/// would break every one of those seals, which is what they are for. So the
+/// removal produces a CHILD plan — the accepted contact set — and both are
+/// kept: `RoutedPlanState::plan` answers "what was routed", this answers
+/// "what is accepted". Every downstream consumer that §6 names (rewire and
+/// brace preflight binding, the carried-load repartition, and the coverage
+/// judgment's snapshot) reads this one.
+///
+/// `reduced` is `None` exactly when nothing was removed. That is not an
+/// optimisation of convenience: `begin_regular_edit` builds its own
+/// `NativeSurface`, and a model with no unrouted regular contact must pay
+/// nothing and move no digest.
+struct AcceptedContactSet {
+    reduced: Option<SpecializedContactPlan>,
+    removals: Vec<UnroutedRegularRemoval>,
+    specialized_unrouted: Vec<UnroutedSpecializedContact>,
+    /// The accepted plan's digest, sealed at derivation and re-checked at
+    /// every preflight below.
+    digest: u64,
+}
+
+impl AcceptedContactSet {
+    /// The accepted contact set itself: the reduced child when anything was
+    /// removed, otherwise the routed plan unchanged.
+    fn plan<'p>(&'p self, routed: &'p SpecializedContactPlan) -> &'p SpecializedContactPlan {
+        self.reduced.as_ref().unwrap_or(routed)
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum AcceptedContactSetError {
+    #[error(transparent)]
+    Specialized(#[from] SpecializedError),
+    #[error(transparent)]
+    Unrouted(#[from] UnroutedTerminalError),
+    #[error("the SPEC-A4 §6 accepted contact set's sealed digest is stale")]
+    DigestMismatch,
+    #[error("the SPEC-A4 §6 removal ledger does not reproduce from the sealed transcript")]
+    LedgerMismatch,
+    #[error("the SPEC-A4 §6 accepted contact set is not the routed plan minus its ledgered rows")]
+    ContactSetMismatch,
+}
+
+/// Recompute-from-state tripwire for the accepted contact set (the F6 idiom
+/// used at the transcript and controller boundaries).
+///
+/// It never trusts the stored value: the removal ledger is re-derived from
+/// the sealed transcript and the live forest ledger, and the accepted plan is
+/// re-checked to be exactly the routed plan minus those rows, contact by
+/// contact. Only `carried_area_mm2` is allowed to differ, because the
+/// repartition over the survivors is precisely what §6 orders after the
+/// removal.
+fn validate_accepted_contact_set(
+    state: &RoutedPlanState,
+    forest: &Forest,
+) -> Result<(), AcceptedContactSetError> {
+    let accepted = state.accepted.plan(&state.plan);
+    if accepted.digest() != state.accepted.digest
+        || accepted.finalized_load_plan_digest() != accepted.digest()
+    {
+        return Err(AcceptedContactSetError::DigestMismatch);
+    }
+    accepted.finalized_loads()?;
+
+    let unrouted = finalized_unrouted_terminals(&state.transcript, forest)?;
+    let routed_by_id = state
+        .plan
+        .contacts()
+        .iter()
+        .map(|contact| (contact.contact_id(), contact))
+        .collect::<BTreeMap<_, _>>();
+    let mut expected_removals = Vec::new();
+    let mut expected_specialized = Vec::new();
+    for terminal in unrouted {
+        let contact = routed_by_id
+            .get(&terminal.contact_id)
+            .copied()
+            .ok_or(AcceptedContactSetError::LedgerMismatch)?;
+        if contact.demands().is_empty() {
+            let route = contact
+                .primary_regular()
+                .ok_or(AcceptedContactSetError::LedgerMismatch)?
+                .route();
+            expected_removals.push(UnroutedRegularRemoval {
+                contact_id: terminal.contact_id,
+                terminal_id: terminal.terminal_id,
+                route,
+                reason: terminal.reason,
+                carried_area_mm2: contact.carried_area_mm2(),
+            });
+        } else {
+            expected_specialized.push(UnroutedSpecializedContact {
+                contact_id: terminal.contact_id,
+                terminal_id: terminal.terminal_id,
+                reason: terminal.reason,
+                kinds: contact
+                    .demands()
+                    .iter()
+                    .map(crate::specialized::SpecializedDemand::kind)
+                    .collect(),
+            });
+        }
+    }
+    if expected_removals != state.accepted.removals
+        || expected_specialized != state.accepted.specialized_unrouted
+    {
+        return Err(AcceptedContactSetError::LedgerMismatch);
+    }
+
+    let removed = state
+        .accepted
+        .removals
+        .iter()
+        .map(|removal| removal.contact_id)
+        .collect::<BTreeSet<_>>();
+    if removed.len() != state.accepted.removals.len()
+        || accepted.contacts().len() + removed.len() != state.plan.contacts().len()
+    {
+        return Err(AcceptedContactSetError::ContactSetMismatch);
+    }
+    let mut survivors = state
+        .plan
+        .contacts()
+        .iter()
+        .filter(|contact| !removed.contains(&contact.contact_id()));
+    for kept in accepted.contacts() {
+        let original = survivors
+            .next()
+            .ok_or(AcceptedContactSetError::ContactSetMismatch)?;
+        if kept.contact_id() != original.contact_id()
+            || kept.position_mm() != original.position_mm()
+            || kept.normal() != original.normal()
+            || kept.seat_provenance() != original.seat_provenance()
+            || kept.primary_regular() != original.primary_regular()
+            || kept.regular_routes() != original.regular_routes()
+            || kept.demands() != original.demands()
+        {
+            return Err(AcceptedContactSetError::ContactSetMismatch);
+        }
+    }
+    if survivors.next().is_some() {
+        return Err(AcceptedContactSetError::ContactSetMismatch);
+    }
+    Ok(())
+}
+
+/// Apply SPEC-A3-A4 §6's removal clause at the one point the clause names.
+///
+/// Called from the routing stage after the transcript is sealed and before
+/// anything downstream runs, so no rewire, brace, load repartition or
+/// coverage judgment has yet seen a contact that never routed.
+///
+/// The unrouted set is read from [`finalized_unrouted_terminals`] — the same
+/// function the structure stage's live-view filter reads — so the accepted
+/// contact set and the live view can never disagree about which terminals
+/// routed.
+fn accepted_contact_set_after_routing(
+    plan: &SpecializedContactPlan,
+    transcript: &FinalizedCcoTranscript,
+    forest: &Forest,
+) -> Result<AcceptedContactSet, SupportRoutingError> {
+    let unrouted = finalized_unrouted_terminals(transcript, forest)?;
+    // One pass over the contacts, indexed once: the classification below is
+    // O(unrouted log contacts), never O(unrouted x contacts).
+    let contacts_by_id = plan
+        .contacts()
+        .iter()
+        .map(|contact| (contact.contact_id(), contact))
+        .collect::<BTreeMap<_, _>>();
+    if contacts_by_id.len() != plan.contacts().len() {
+        return Err(SupportRoutingError::TerminalNamespaceCardinalityMismatch);
+    }
+    let mut removals = Vec::new();
+    let mut specialized_unrouted = Vec::new();
+    for terminal in unrouted {
+        let contact = contacts_by_id.get(&terminal.contact_id).copied().ok_or(
+            SupportRoutingError::MissingPhysicalContact {
+                terminal: terminal.terminal_id,
+            },
+        )?;
+        if !contact.demands().is_empty() {
+            specialized_unrouted.push(UnroutedSpecializedContact {
+                contact_id: terminal.contact_id,
+                terminal_id: terminal.terminal_id,
+                reason: terminal.reason,
+                kinds: contact
+                    .demands()
+                    .iter()
+                    .map(crate::specialized::SpecializedDemand::kind)
+                    .collect(),
+            });
+            continue;
+        }
+        let route = contact
+            .primary_regular()
+            .ok_or(SupportRoutingError::MissingPhysicalContact {
+                terminal: terminal.terminal_id,
+            })?
+            .route();
+        removals.push(UnroutedRegularRemoval {
+            contact_id: terminal.contact_id,
+            terminal_id: terminal.terminal_id,
+            route,
+            reason: terminal.reason,
+            carried_area_mm2: contact.carried_area_mm2(),
+        });
+    }
+    if removals.is_empty() {
+        return Ok(AcceptedContactSet {
+            reduced: None,
+            removals,
+            specialized_unrouted,
+            digest: plan.digest(),
+        });
+    }
+    // ONE edit for the whole unrouted set: `derive_child` replays the load
+    // finalizer once, so the carried-load repartition §6 sequences after the
+    // removal happens exactly once per run.
+    let ids = removals
+        .iter()
+        .map(|removal| removal.contact_id)
+        .collect::<Vec<_>>();
+    let reduced = plan
+        .begin_regular_edit()?
+        .remove_demand_free_regular_rows(&ids)
+        .map_err(|error| match error {
+            // The repartition found a face whose every eligible load owner
+            // lost all its contacts. Say so by name rather than as a stale
+            // digest or a malformed edit — but say only what was measured:
+            // see `UnownedFaceAfterUnroutedRemoval` for why this is NOT a
+            // claim that the face is unsupported.
+            SpecializedError::Generic(GenericPerceptionError::MissingPhysicalContact {
+                face_id,
+            }) => SupportRoutingError::UnownedFaceAfterUnroutedRemoval { face_id },
+            other => SupportRoutingError::Specialized(other),
+        })?;
+    let digest = reduced.digest();
+    Ok(AcceptedContactSet {
+        reduced: Some(reduced),
+        removals,
+        specialized_unrouted,
+        digest,
+    })
 }
 
 /// Opaque route-stage authority for the normalizer. It retains the exact prepared context and
@@ -2377,6 +2840,27 @@ impl<'a> RoutedSupportRun<'a> {
     #[must_use]
     pub(crate) const fn transcript(&self) -> &FinalizedCcoTranscript {
         &self.state.transcript
+    }
+
+    /// SPEC-A4 §6's accepted contact set — the routed plan minus every
+    /// unrouted regular contact, with the load repartitioned over the
+    /// survivors.
+    #[must_use]
+    pub(crate) fn accepted_plan(&self) -> &SpecializedContactPlan {
+        self.state.accepted.plan(&self.state.plan)
+    }
+
+    /// The §6 ledger: every removed regular contact, with its exact row and
+    /// reason.
+    #[must_use]
+    pub(crate) fn unrouted_regular_removals(&self) -> &[UnroutedRegularRemoval] {
+        &self.state.accepted.removals
+    }
+
+    /// Every unrouted DEMAND-BEARING contact this run found.
+    #[must_use]
+    pub(crate) fn unrouted_specialized_contacts(&self) -> &[UnroutedSpecializedContact] {
+        &self.state.accepted.specialized_unrouted
     }
 
     /// Consume the sealed CCO route state in the one deterministic rewire
@@ -2947,8 +3431,22 @@ impl<'a> LoweredSupportRun<'a> {
         validate_lowered_output(&self.structured, &self.lowered, config)?;
 
         let context = &self.structured.context;
-        let plan = &self.structured.braced.rewired.routed.plan;
-        let transcript = &self.structured.braced.rewired.routed.transcript;
+        let routed = &self.structured.braced.rewired.routed;
+        // SPEC-A4 §6: coverage judgment is the last of the four consumers the
+        // clause names, and the snapshot is its input, so the snapshot
+        // projects the ACCEPTED contact set. `routed_plan` stays beside it
+        // because the transcript, the initial construction and the forest are
+        // all sealed to the plan that was ROUTED; comparing those seals
+        // against the accepted set would compare a seal to something it was
+        // never taken over.
+        validate_accepted_contact_set(routed, &self.structured.braced.plan.forest)
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
+        let routed_plan = &routed.plan;
+        let plan = routed.accepted.plan(routed_plan);
+        let transcript = &routed.transcript;
+        let routed_loads = routed_plan
+            .finalized_loads()
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
         let loads = plan
             .finalized_loads()
             .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
@@ -2958,11 +3456,11 @@ impl<'a> LoweredSupportRun<'a> {
         transcript
             .validate_integrity()
             .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
-        if plan.digest() != context.digests.plan()
-            || loads.digest() != context.digests.loads()
+        if routed_plan.digest() != context.digests.plan()
+            || routed_loads.digest() != context.digests.loads()
             || geometry.digest() != context.digests.geometry()
-            || transcript.plan_digest() != plan.digest()
-            || transcript.finalized_load_digest() != loads.digest()
+            || transcript.plan_digest() != routed_plan.digest()
+            || transcript.finalized_load_digest() != routed_loads.digest()
             || transcript.geometry_digest() != geometry.digest()
         {
             return Err(SupportLoweringError::Verification(
@@ -3167,6 +3665,25 @@ fn finalized_unrouted_terminal_ids(
     transcript: &FinalizedCcoTranscript,
     forest: &Forest,
 ) -> Result<Vec<u32>, SupportStructureError> {
+    Ok(finalized_unrouted_terminals(transcript, forest)?
+        .into_iter()
+        .map(|unrouted| unrouted.terminal_id)
+        .collect())
+}
+
+/// Every terminal the sealed cadence did NOT route, with the reason, in
+/// transcript order.
+///
+/// The single source of truth for "unrouted", used twice and deliberately not
+/// implemented twice: the structure stage filters these terminals out of the
+/// live view, and the routing stage removes their regular contacts from the
+/// accepted contact set (SPEC-A3-A4 §6). Two implementations could disagree
+/// about which terminals those are, which is exactly the class of divergence
+/// the transcript/ledger cross-checks below exist to catch.
+fn finalized_unrouted_terminals(
+    transcript: &FinalizedCcoTranscript,
+    forest: &Forest,
+) -> Result<Vec<UnroutedTerminal>, UnroutedTerminalError> {
     transcript.validate_integrity()?;
     let mut transcript_terminals = BTreeSet::new();
     let mut unrouted = Vec::new();
@@ -3174,35 +3691,91 @@ fn finalized_unrouted_terminal_ids(
         let terminal = row.terminal_id();
         let ledger = forest
             .terminal_ledger(terminal)
-            .ok_or(SupportStructureError::TerminalEvidenceMismatch { terminal })?;
+            .ok_or(UnroutedTerminalError::TerminalEvidenceMismatch { terminal })?;
         if !transcript_terminals.insert(terminal)
             || ledger.original_key != row.original_key()
             || row.physical_contact_id() != u64::from(terminal)
         {
-            return Err(SupportStructureError::TerminalEvidenceMismatch { terminal });
+            return Err(UnroutedTerminalError::TerminalEvidenceMismatch { terminal });
         }
         match row.kind() {
             FinalizedDispositionKind::Routed if ledger.state == TerminalLedgerState::Consumed => {}
             FinalizedDispositionKind::SkippedQuarantined
                 if ledger.state == TerminalLedgerState::Quarantined =>
             {
-                unrouted.push(terminal);
+                unrouted.push(UnroutedTerminal {
+                    terminal_id: terminal,
+                    contact_id: row.physical_contact_id(),
+                    reason: UnroutedContactReason::Quarantined,
+                });
             }
             FinalizedDispositionKind::UnroutedNoWinner
                 if ledger.state == TerminalLedgerState::Retired =>
             {
-                unrouted.push(terminal);
+                unrouted.push(UnroutedTerminal {
+                    terminal_id: terminal,
+                    contact_id: row.physical_contact_id(),
+                    reason: UnroutedContactReason::NoWinner,
+                });
             }
-            _ => return Err(SupportStructureError::TerminalEvidenceMismatch { terminal }),
+            _ => return Err(UnroutedTerminalError::TerminalEvidenceMismatch { terminal }),
         }
     }
     if forest
         .terminal_ledger_iter()
         .any(|entry| !transcript_terminals.contains(&entry.contact))
     {
-        return Err(SupportStructureError::TerminalLedgerCardinalityMismatch);
+        return Err(UnroutedTerminalError::TerminalLedgerCardinalityMismatch);
     }
     Ok(unrouted)
+}
+
+/// One terminal the sealed cadence did not route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnroutedTerminal {
+    terminal_id: u32,
+    contact_id: u64,
+    reason: UnroutedContactReason,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum UnroutedTerminalError {
+    #[error(transparent)]
+    Cco(#[from] CcoError),
+    #[error(
+        "finalized transcript terminal {terminal} does not match final forest lifecycle evidence"
+    )]
+    TerminalEvidenceMismatch { terminal: u32 },
+    #[error("finalized transcript and final forest have different terminal namespaces")]
+    TerminalLedgerCardinalityMismatch,
+}
+
+impl From<UnroutedTerminalError> for SupportStructureError {
+    fn from(error: UnroutedTerminalError) -> Self {
+        match error {
+            UnroutedTerminalError::Cco(cco) => Self::Cco(cco),
+            UnroutedTerminalError::TerminalEvidenceMismatch { terminal } => {
+                Self::TerminalEvidenceMismatch { terminal }
+            }
+            UnroutedTerminalError::TerminalLedgerCardinalityMismatch => {
+                Self::TerminalLedgerCardinalityMismatch
+            }
+        }
+    }
+}
+
+impl From<UnroutedTerminalError> for SupportRoutingError {
+    fn from(error: UnroutedTerminalError) -> Self {
+        match error {
+            UnroutedTerminalError::Cco(cco) => Self::Cco(cco),
+            UnroutedTerminalError::TerminalEvidenceMismatch { terminal } => {
+                Self::TerminalEvidenceMismatch { terminal }
+            }
+            UnroutedTerminalError::TerminalLedgerCardinalityMismatch => {
+                Self::TerminalLedgerCardinalityMismatch
+            }
+        }
+    }
 }
 
 impl SupportRunContext<'_> {
@@ -3288,6 +3861,8 @@ impl SupportRunContext<'_> {
         {
             return Err(SupportBraceError::RewireDigestMismatch);
         }
+        // SPEC-A4 §6: bracing is the second stage the clause names.
+        validate_accepted_contact_set(&state.routed, state.routed.initial.forest())?;
         Ok(())
     }
 
@@ -3355,6 +3930,9 @@ impl SupportRunContext<'_> {
             .forest()
             .validate()
             .map_err(RewireError::from)?;
+        // SPEC-A4 §6: rewire is the first stage the clause names, so the
+        // accepted contact set is proved here before it runs.
+        validate_accepted_contact_set(state, state.initial.forest())?;
         Ok(())
     }
 }
@@ -3419,6 +3997,37 @@ pub(crate) enum SupportRoutingError {
     MissingTerminalLedger { terminal: u32 },
     #[error("sealed CCO routing terminal {terminal} lacks its exact physical contact")]
     MissingPhysicalContact { terminal: u32 },
+    #[error(
+        "finalized transcript terminal {terminal} does not match final forest lifecycle evidence"
+    )]
+    TerminalEvidenceMismatch { terminal: u32 },
+    #[error("finalized transcript and final forest have different terminal namespaces")]
+    TerminalLedgerCardinalityMismatch,
+    /// SPEC-A3-A4 §6, task #49. Removing the unrouted regular contacts left
+    /// model face `face_id` with no **eligible** carrier, so the carried-load
+    /// repartition cannot place its area.
+    ///
+    /// **Read the word "eligible" exactly.** Load eligibility is a *provenance*
+    /// relation, not a reach test: `perception::build_load_eligibility` makes a
+    /// face eligible for `LoadOwner::GenericIsland(id)` iff the face is IN that
+    /// island, and for `LoadOwner::Specialized(owner)` iff a reservation names
+    /// it. Distance never enters. So this variant says one thing and only one
+    /// thing: **every contact of every load owner eligible for this face went
+    /// unrouted.** It does NOT say the face is unsupported — a surviving
+    /// contact of a neighbouring island may sit a millimetre away and hold it —
+    /// and nothing here has measured that.
+    ///
+    /// The condition it really names is the coverage measurement's own
+    /// `CoverageGap::NoRoutedContact`: an island with no routed contact. That
+    /// is the class A4 repair exists to close, which is why this is reported as
+    /// a coverage refusal rather than a routing failure — see `run_support`'s
+    /// Routing arm, and the open defect recorded there.
+    #[error(
+        "SPEC-A4 §6's removal leaves model face {face_id} with no eligible carrier: every \
+         contact of every load owner eligible for it went unrouted, so the carried-load \
+         repartition cannot place its area"
+    )]
+    UnownedFaceAfterUnroutedRemoval { face_id: u32 },
     /// FU-32 J5 (design D3). The routing cadence's demand exceeds a registered
     /// routing cap. The first typed resource refusal this stage has ever had:
     /// before FU-32 it was entirely uncharged (design F8), so an over-large
@@ -3642,6 +4251,8 @@ pub(crate) enum SupportRewireError {
     InitialAuthorityMismatch,
     #[error("sealed rewire found stale finalized CCO transcript authority")]
     TranscriptDigestMismatch,
+    #[error(transparent)]
+    AcceptedContactSet(#[from] AcceptedContactSetError),
 }
 
 #[derive(Debug, Error)]
@@ -3668,6 +4279,8 @@ pub(crate) enum SupportBraceError {
     TranscriptDigestMismatch,
     #[error("sealed brace found stale rewire forest or report digest authority")]
     RewireDigestMismatch,
+    #[error(transparent)]
+    AcceptedContactSet(#[from] AcceptedContactSetError),
     #[error("sealed brace plan's final forest digest is stale")]
     FinalForestDigestMismatch,
     #[error(
@@ -5695,8 +6308,24 @@ mod tests {
         });
     }
 
+    /// SPEC-A3-A4 §6, task #49. A model half buried under a blocker has every
+    /// one of that half's terminals quarantined, so after the §6 removal the
+    /// buried islands have no contact left and the carried-load repartition
+    /// has faces it cannot place.
+    ///
+    /// **Before this clause was wired this fixture sealed**, with the buried
+    /// half's area still charged to quarantined contacts that no support
+    /// stands under.
+    ///
+    /// **What this test pins, and what it deliberately does not.** It pins
+    /// that the removal happens and that the resulting condition is reported
+    /// by name, with the face id. It does NOT pin that refusing is the right
+    /// answer — see `UnownedFaceAfterUnroutedRemoval`, whose whole doc comment
+    /// is the argument that this condition is `NoRoutedContact` in disguise
+    /// and belongs to the repair loop rather than ahead of it. The measured
+    /// emission cost of refusing is recorded at `run_support`'s Routing arm.
     #[test]
-    fn routes_real_mixed_quarantine_and_retained_terminals() {
+    fn a_fully_buried_half_refuses_by_name_once_its_unrouted_contacts_leave_the_accepted_set() {
         let buried = make_overhang_table().expect("buried table fixture");
         let blocker =
             make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).expect("burial blocker fixture");
@@ -5708,18 +6337,163 @@ mod tests {
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            assert!(matches!(
+                prepared.route_initial_cco(),
+                Err(SupportRoutingError::UnownedFaceAfterUnroutedRemoval { .. })
+            ));
+        });
+    }
+
+    /// SPEC-A3-A4 §6, task #49 — the removal clause, end to end on a fixture
+    /// that keeps both unrouted dispositions and still seals.
+    ///
+    /// Every assertion here is on the MECHANISM, not on a value that happens
+    /// to hold today: the ledger is exactly the transcript's unrouted regular
+    /// rows with their reasons; the accepted contact set is the routed plan
+    /// minus exactly those ids; no removed id survives; and the carried area
+    /// they held is repartitioned onto the survivors rather than dropped.
+    #[test]
+    fn unrouted_regular_contacts_leave_the_accepted_contact_set_with_their_load_repartitioned() {
+        let table = load_required_runner_corpus();
+        let boundary_blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.55]).expect("no-winner blocker fixture");
+        let hollowed = hollowed_fixture(merge_meshes(&[table, boundary_blocker]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
                 .route_initial_cco()
-                .expect("mixed fixture seals through CCO");
-            let braced = routed
-                .rewire()
-                .expect("mixed fixture rewires")
-                .brace()
-                .expect("mixed fixture braces");
-            assert_mixed_snapshot_projects_only_routed(
-                braced,
-                FinalizedDispositionKind::SkippedQuarantined,
+                .expect("no-winner fixture seals through CCO");
+
+            let expected: Vec<(u64, UnroutedContactReason)> = routed
+                .transcript()
+                .rows()
+                .iter()
+                .filter_map(|row| match row.kind() {
+                    FinalizedDispositionKind::Routed => None,
+                    FinalizedDispositionKind::SkippedQuarantined => {
+                        Some((row.physical_contact_id(), UnroutedContactReason::Quarantined))
+                    }
+                    FinalizedDispositionKind::UnroutedNoWinner => {
+                        Some((row.physical_contact_id(), UnroutedContactReason::NoWinner))
+                    }
+                })
+                .filter(|(contact_id, _)| {
+                    routed
+                        .plan()
+                        .contacts()
+                        .iter()
+                        .find(|contact| contact.contact_id() == *contact_id)
+                        .is_some_and(|contact| contact.demands().is_empty())
+                })
+                .collect();
+            assert!(
+                expected
+                    .iter()
+                    .any(|(_, reason)| *reason == UnroutedContactReason::NoWinner),
+                "fixture must retain a real no-winner regular terminal"
             );
+
+            let ledgered = routed
+                .unrouted_regular_removals()
+                .iter()
+                .map(|removal| (removal.contact_id(), removal.reason()))
+                .collect::<Vec<_>>();
+            assert_eq!(ledgered, expected);
+
+            // Every ledgered row names the exact candidate-pool row the
+            // removed contact occupied, as §6's first sentence requires.
+            for removal in routed.unrouted_regular_removals() {
+                let contact = routed
+                    .plan()
+                    .contacts()
+                    .iter()
+                    .find(|contact| contact.contact_id() == removal.contact_id())
+                    .expect("ledgered contact is in the routed plan");
+                assert_eq!(
+                    Some(removal.route()),
+                    contact.primary_regular().map(|primary| primary.route())
+                );
+            }
+
+            let removed_ids = routed
+                .unrouted_regular_removals()
+                .iter()
+                .map(UnroutedRegularRemoval::contact_id)
+                .collect::<BTreeSet<_>>();
+            let accepted = routed.accepted_plan();
+            assert_eq!(
+                accepted.contacts().len() + removed_ids.len(),
+                routed.plan().contacts().len()
+            );
+            assert!(accepted
+                .contacts()
+                .iter()
+                .all(|contact| !removed_ids.contains(&contact.contact_id())));
+            assert_ne!(accepted.digest(), routed.plan().digest());
+
+            // The load is repartitioned, not discarded: the removed contacts
+            // were holding real model area and the survivors now hold it.
+            let routed_total = carried_area_total(routed.plan());
+            let accepted_total = carried_area_total(accepted);
+            let removed_area = routed
+                .unrouted_regular_removals()
+                .iter()
+                .map(UnroutedRegularRemoval::carried_area_mm2)
+                .sum::<f64>();
+            assert!(
+                removed_area > 0.0,
+                "the fixture's unrouted contacts were charged real model area"
+            );
+            assert!(
+                (routed_total - accepted_total).abs() < 1e-9,
+                "carried area is repartitioned over the survivors, not dropped: \
+                 {routed_total} vs {accepted_total}"
+            );
+        });
+    }
+
+    fn carried_area_total(plan: &SpecializedContactPlan) -> f64 {
+        plan.contacts()
+            .iter()
+            .map(crate::specialized::SpecializedPhysicalContact::carried_area_mm2)
+            .sum()
+    }
+
+    /// The snapshot the coverage judgment reads is taken over the ACCEPTED
+    /// contact set, which is what puts §6's removal ahead of "coverage
+    /// judgment" as the clause orders it.
+    #[test]
+    fn the_verification_snapshot_projects_the_accepted_contact_set() {
+        let table = load_required_runner_corpus();
+        let boundary_blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.55]).expect("no-winner blocker fixture");
+        let hollowed = hollowed_fixture(merge_meshes(&[table, boundary_blocker]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("no-winner fixture seals through CCO");
+            let accepted_digest = routed.accepted_plan().digest();
+            let routed_digest = routed.plan().digest();
+            assert_ne!(accepted_digest, routed_digest);
+            let lowered = routed
+                .rewire()
+                .expect("fixture rewires")
+                .brace()
+                .expect("fixture braces")
+                .structure()
+                .expect("fixture structures")
+                .lower()
+                .expect("fixture lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("fixture snapshots");
+            assert_eq!(snapshot.plan_digest, accepted_digest);
+            snapshot
+                .validate_integrity()
+                .expect("snapshot rebinds over the accepted contact set");
         });
     }
 

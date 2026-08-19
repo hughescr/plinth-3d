@@ -143,6 +143,7 @@ pub use runner::{
     run_support, FinalLiveMemberEvidence, FinalSupportAuthority, RoutedPhysicalContactEvidence,
     SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
     SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
+    UnroutedContactReason, UnroutedRegularRemoval, UnroutedSpecializedContact,
 };
 
 /// Request data shared by the support and raft pass.
