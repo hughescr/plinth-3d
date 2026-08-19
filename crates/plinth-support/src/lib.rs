@@ -140,9 +140,11 @@ pub use coverage_measurement::{
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, FinalLiveMemberEvidence, FinalSupportAuthority, RoutedPhysicalContactEvidence,
-    SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
-    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
+    run_support, FinalLiveMemberEvidence, FinalSupportAuthority, OwnerlessIslandDisclosure,
+    RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
+    SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,
+    SupportVerificationSnapshot, UnroutedContactReason, UnroutedRegularRemoval,
+    UnroutedSpecializedContact,
 };
 
 /// Request data shared by the support and raft pass.

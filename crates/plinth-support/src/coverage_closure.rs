@@ -260,6 +260,14 @@ pub enum CoverageClosureReason {
     /// refusal reason including [`Self::AttemptsExhausted`].
     NoEligibleRepairRows,
     /// The routed-contact coverage measurement itself could not be completed.
+    ///
+    /// **One producer (task #49 split landing, 2026-08-19).** A short-lived
+    /// second producer was withdrawn: SPEC-A3-A4 §6's removal used to refuse
+    /// when it left a model face with no eligible carrier, and that refusal was
+    /// funnelled here. It no longer refuses — the ownerless faces are disclosed
+    /// (`perception::OwnerlessLoadFace`) and the measurement below rules on the
+    /// island's real uncovered area — so this variant is again exactly what its
+    /// name says: the measurement ran and failed.
     MeasurementRefused(String),
     /// A plan the controller had ALREADY extended with repair-pool contacts
     /// could not be re-planned: one of routing, rewire, brace, structure,

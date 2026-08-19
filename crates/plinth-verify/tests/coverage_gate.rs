@@ -138,6 +138,25 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // The golden was REGENERATED THROUGH THIS FILE'S OWN PRODUCER PATH (the
 // `THREAD_CHILD` arm of `public_coverage_report_is_frozen_without_evidence_loss`),
 // never hand-edited, exactly as every refresh above was.
+//
+// **Refreshed a seventh time on 2026-08-19, for task #49** — SPEC-A3-A4 §6's
+// unrouted-regular removal, which production had never performed (the sole
+// caller of `remove_demand_free_regular` was a test). The verification
+// snapshot is now taken over the ACCEPTED contact set — the routed plan minus
+// every contact the cadence did not route, with the carried load repartitioned
+// over the survivors — so its `plan_digest` and `load_digest` inputs move, and
+// with them `snapshot_digest`: **15556275517430246244 -> 9355852079468421123**.
+//
+// On this fixture the cause is measured, not inferred: 3 of the toed slab's 68
+// accepted contacts never route, and two of them were charged 450.000 mm² each
+// — **900 of the model's 967.689 mm², 93.0 %, was charged to contacts with no
+// support under them.** The golden was REGENERATED THROUGH THIS FILE'S OWN
+// PRODUCER PATH, never hand-edited, and the two documents were then diffed
+// leaf by leaf: **169 scalar leaves, EXACTLY 1 moved** (`snapshot_digest`).
+// Every `request` bound, all 11 `resources` counters, all 9 islands, all 9
+// patches and all 7 defects are byte-identical — no evidence lost, the report
+// still refuses with 7 defects. No cap, gate, floor, radius, tolerance or
+// registered constant was touched, and none was added.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {

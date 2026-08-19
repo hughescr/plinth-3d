@@ -147,17 +147,54 @@ pub struct FinalizedFaceLoad {
     pub carried_area_mm2: f64,
 }
 
+/// One model face this partition charges to **no** physical contact.
+///
+/// SPEC-A3-A4 §6, task #49. Load eligibility is a *provenance* relation, not a
+/// reach test: [`build_load_eligibility`] makes a face eligible for
+/// `LoadOwner::GenericIsland(id)` iff the face is IN that island, and for
+/// `LoadOwner::Specialized(owner)` iff a reservation names it. So a face
+/// arrives here with no eligible contact exactly when every contact of every
+/// owner eligible for it is gone — after §6's removal, when every such contact
+/// went unrouted.
+///
+/// **The honest answer is that nothing carries it, and the finalizer says so.**
+/// The predecessor refused instead, which asserted more than it had measured:
+/// eligibility is not reach, so "no eligible owner has a contact" is not "no
+/// support stands under this face", and the quantity that decides whether the
+/// face is a problem — how much of it the routed layout actually leaves
+/// uncovered — is measured downstream by the coverage judgment, over its own
+/// samples, and forgiven or refused there under the registered A3 censor. This
+/// row is the disclosure that makes the two legible side by side.
+///
+/// The area is the eligibility row's own `area_mm2`, bit for bit — the same
+/// number a row that DID find an owner would have carried.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnerlessLoadFace {
+    pub face_id: u32,
+    pub area_mm2: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FinalizedLoadPartition {
     authority: AuthorityFingerprint,
     contacts_fingerprint: u64,
     rows: Vec<FinalizedFaceLoad>,
+    /// Every eligibility row that found no contact, ascending by the order the
+    /// eligibility itself was walked. Empty on every model that has a contact
+    /// for each of its eligible owners, which is the ordinary case.
+    ownerless: Vec<OwnerlessLoadFace>,
 }
 
 impl FinalizedLoadPartition {
     #[must_use]
     pub fn rows(&self) -> &[FinalizedFaceLoad] {
         &self.rows
+    }
+
+    /// The faces this partition charges to nobody — see [`OwnerlessLoadFace`].
+    #[must_use]
+    pub fn ownerless_faces(&self) -> &[OwnerlessLoadFace] {
+        &self.ownerless
     }
 }
 
@@ -3965,9 +4002,18 @@ impl RetainedLoadTranspose {
             );
         }
         let mut rows = Vec::with_capacity(self.row_face_id.len());
+        // Task #49: the same disclosure the full build makes, over the same
+        // retained quantities, so a retained round and a rebuilt one cannot
+        // disagree about what carries a face.
+        let mut ownerless = Vec::new();
         for (row_index, &face_id) in self.row_face_id.iter().enumerate() {
-            let (contact_index, _) = nearest[row_index]
-                .ok_or(GenericPerceptionError::MissingPhysicalContact { face_id })?;
+            let Some((contact_index, _)) = nearest[row_index] else {
+                ownerless.push(OwnerlessLoadFace {
+                    face_id,
+                    area_mm2: self.row_area_mm2[row_index],
+                });
+                continue;
+            };
             let contact = &contacts[contact_index];
             rows.push(FinalizedFaceLoad {
                 face_id,
@@ -3990,6 +4036,7 @@ impl RetainedLoadTranspose {
             authority: plan.authority.clone(),
             contacts_fingerprint: contact_hash.finish(),
             rows,
+            ownerless,
         };
         let baseline = SpecializedLoadBaseline::assemble(
             &partition,
@@ -4031,6 +4078,13 @@ impl RetainedLoadTranspose {
             .map(|bounds| (bounds[0], bounds[1] - bounds[0]))
             .collect::<Vec<_>>();
         debug_assert_eq!(buckets.len(), contacts.len());
+        // Task #49. This equality holds only because the merge gate refuses a
+        // partition with any ownerless row before absorbing it: `rows()` is one
+        // row per OWNED face while `row_centroid_mm` is one per eligibility
+        // row, and those two counts diverge by exactly the ownerless count. If
+        // that refusal is ever lifted — see the note at the gate — the retained
+        // transpose would silently drop the ownerless rows instead of failing
+        // here, so the two must move together.
         debug_assert_eq!(partition.rows().len(), baseline.row_centroid_mm.len());
         let cells = rows.len();
         *slot = Some(Self {
@@ -4319,11 +4373,19 @@ fn finalize_load_rows(
         // the caller instead of dropping it — see `LoadRowRetention::transpose`.
         retention.transpose = Some(transpose);
     }
+    // SPEC-A3-A4 §6, task #49. A row with no eligible contact is DISCLOSED,
+    // not refused: see `OwnerlessLoadFace`. Nothing is fabricated and nothing
+    // is hidden — the face gets no row, so no contact is sized as if carrying
+    // it, and the face itself is listed with its own area.
+    let mut ownerless = Vec::new();
     for (face_index, eligibility) in load_eligibility.iter().enumerate() {
-        let (contact_index, _) =
-            nearest[face_index].ok_or(GenericPerceptionError::MissingPhysicalContact {
+        let Some((contact_index, _)) = nearest[face_index] else {
+            ownerless.push(OwnerlessLoadFace {
                 face_id: eligibility.face_id,
-            })?;
+                area_mm2: eligibility.area_mm2,
+            });
+            continue;
+        };
         let contact = &contacts[contact_index];
         rows.push(FinalizedFaceLoad {
             face_id: eligibility.face_id,
@@ -4345,6 +4407,7 @@ fn finalize_load_rows(
         authority: plan.authority.clone(),
         contacts_fingerprint: contact_hash.finish(),
         rows,
+        ownerless,
     })
 }
 
@@ -5126,6 +5189,26 @@ impl SpecializedLoadBaseline {
         witnesses: Vec<[LoadWitness; LOAD_WITNESS_SLOTS]>,
         centroids_mm: Vec<[f64; 3]>,
     ) -> Result<Self, GenericPerceptionError> {
+        // Task #49, stated where the limitation actually is. The finalizer now
+        // DISCLOSES a face with no eligible contact instead of refusing on it
+        // (`OwnerlessLoadFace`), but this baseline's arrays are indexed by
+        // ELIGIBILITY ROW — `row_centroid_mm`, `witnesses` and `row_area_mm2`
+        // are read at the same index by `merged_violation_count`, whose
+        // `merged_rows` are row indices the caller derives from its own
+        // `(owner, face)` pair list. A partition with fewer rows than
+        // eligibility rows would silently shear that alignment.
+        //
+        // So the merge gate keeps the refusal it has always had, with the same
+        // variant and the same face id, and it keeps it for a reason it can
+        // state: this representation cannot express "carried by nobody". It is
+        // NOT the §6 site — the gate's tournament runs before routing, over the
+        // full candidate set, where an owner with no contact at all means the
+        // selection stage produced one, not that a contact failed to route.
+        if let Some(face) = partition.ownerless.first() {
+            return Err(GenericPerceptionError::MissingPhysicalContact {
+                face_id: face.face_id,
+            });
+        }
         let loads = FinalizedContactLoads::from_physical_contacts(
             partition,
             contacts,
@@ -5153,8 +5236,18 @@ impl SpecializedLoadBaseline {
         let mut won_counts = vec![0u32; contacts.len()];
         for slots in &witnesses {
             if slots[0].contact == NO_LOAD_WITNESS {
-                // `finalize_load_rows` has already refused this case with
-                // `MissingPhysicalContact`, so it cannot be reached here.
+                // Unreachable, and the guard that makes it so is the merge
+                // gate's own early return ~30 lines above: a partition with
+                // any `ownerless` row is refused with `MissingPhysicalContact`
+                // before this loop runs, and a witness with no contact is
+                // exactly an ownerless row.
+                //
+                // Task #49 corrected this rationale. It used to name
+                // `finalize_load_rows` as the thing that had already refused.
+                // `finalize_load_rows` no longer refuses at all — it discloses
+                // ownerless faces (`OwnerlessLoadFace`) and returns — so if
+                // that early return is ever lifted, this is a live path and
+                // this comment is the notice.
                 return Err(GenericPerceptionError::LoadResourceOverflow);
             }
             winner.push(slots[0].contact);
@@ -5606,6 +5699,7 @@ mod tests {
             },
             contacts_fingerprint: 0,
             rows,
+            ownerless: Vec::new(),
         }
     }
 

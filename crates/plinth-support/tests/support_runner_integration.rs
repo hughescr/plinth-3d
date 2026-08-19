@@ -262,6 +262,42 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// number the spec already wrote down, and the code had been stricter than the
 /// written rule. See the assertion block below, which now pins both sides of
 /// the censor on this one model.
+///
+/// **Re-pinned a fifth time on 2026-08-19, for task #49** — SPEC-A3-A4
+/// §6's unrouted-regular removal, which had never been wired: the sole
+/// caller of `remove_demand_free_regular` was a test. Every paragraph above
+/// stands unamended as the record of its own date.
+///
+/// - `make_toed_slab`: `15_556_275_517_430_246_244 -> 9_355_852_079_468_421_123`.
+///   **The counts did not move and must not**: still 64 physical contact
+///   identities, 170 final live members, 69 distinct seats, and
+///   `coverage_repair_rounds()` still **0**. The same discriminator the third
+///   and fourth re-pins used therefore says the same thing here: the model
+///   still closes on its baseline layout, routes the same 64 contacts, and
+///   lowers the same 170 members.
+/// - **The cause, measured on this fixture.** Of the toed slab's 68 accepted
+///   contacts, **three regular contacts never route** (contact 25 quarantined,
+///   contacts 32 and 54 with no CCO winner) and one demand-bearing contact is
+///   quarantined. Contacts 32 and 54 were each charged **450.000 mm²** of
+///   carried area — **900 of the model's 967.689 mm², 93.0 %, was charged to
+///   contacts with no support under them.** Removing them repartitions that
+///   area onto the survivors, which moves `plan_digest` and `load_digest`,
+///   which are two of `verification_snapshot_digest`'s inputs. The digest
+///   movement is that repartition and nothing else.
+/// - **Only the digest moves.** The routed contact identities, the seat set,
+///   the final live members and the closure history are all unchanged, because
+///   the snapshot has always projected the transcript's ROUTED rows — the
+///   removed contacts were never in the projection. What changes is which plan
+///   the projection is taken over.
+/// - **The frozen coverage-gate golden moved with it**, to the same value:
+///   `crates/plinth-verify/tests/coverage_gate_toed_slab.json`,
+///   `snapshot_digest 15556275517430246244 -> 9355852079468421123`,
+///   regenerated through that test's own `THREAD_CHILD` producer path and
+///   diffed leaf by leaf afterwards — **169 scalar leaves, EXACTLY 1 moved**,
+///   no evidence lost, still 9 islands, 9 patches and 7 blocking defects, and
+///   all 11 resource counters identical.
+/// - **No cap, gate, bound, tolerance or registered constant was touched**, and
+///   no new one was added.
 #[test]
 fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure() {
     let hollowed = hollowed_corpus_model(
@@ -302,8 +338,8 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 15_556_275_517_430_246_244_u64),
-        "make_toed_slab's digest must not move: it takes zero repair rounds"
+        (64_usize, 170_usize, 9_355_852_079_468_421_123_u64),
+        "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
     assert_eq!(seats.len(), identities.len());
     authority
@@ -541,6 +577,14 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// this measurement can see. No cap, ceiling, radius or floor in this test was
 /// touched: the explicit request is still (1.0 mm, 1.0 mm²) against the same
 /// six frozen ceilings.
+///
+/// **Task #49, 2026-08-19 — the same one number moved again, and again only
+/// that one.** SPEC-A3-A4 §6's unrouted-regular removal is now wired, so the
+/// snapshot is taken over the ACCEPTED contact set rather than the routed
+/// plan: `snapshot_digest 15_556_275_517_430_246_244 ->
+/// 9_355_852_079_468_421_123`. The 11-tuple resource plan, all 9 frozen
+/// islands and all 9 frozen patches are UNCHANGED — re-derived at this tip,
+/// not assumed. The paragraph above stands as the record of its own date.
 #[test]
 fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let hollowed = hollowed_corpus_model(
@@ -577,7 +621,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .measure_coverage(request)
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
-    assert_eq!(snapshot.digest(), 15_556_275_517_430_246_244);
+    assert_eq!(snapshot.digest(), 9_355_852_079_468_421_123);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
@@ -956,4 +1000,136 @@ fn identity_hollowed(mesh: Mesh) -> HollowedModel {
     );
     HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
         .expect("solid decision handoff")
+}
+
+/// A model half buried under a blocker, composed at test time: the buried
+/// half's terminals are all quarantined, so SPEC-A3-A4 §6's removal takes
+/// every contact of the buried islands out of the accepted contact set and
+/// the carried-load repartition is left with faces it cannot place.
+fn half_buried_table() -> Mesh {
+    let buried = make_overhang_table().expect("buried table fixture");
+    let blocker =
+        plinth_mesh::make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).expect("burial blocker");
+    let live = make_overhang_table().expect("live table fixture");
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    // The live copy is translated clear of the blocker so the fixture keeps a
+    // routing half as well as a buried one — the point is a PARTIAL loss of
+    // owners, not an empty plan.
+    for (part, shift) in [
+        (&buried, [0.0, 0.0, 0.0]),
+        (&blocker, [0.0, 0.0, 0.0]),
+        (&live, [100.0, 0.0, 0.0]),
+    ] {
+        let base = u32::try_from(verts.len()).expect("vertex namespace fits u32");
+        verts.extend(part.verts().iter().map(|vertex| {
+            [
+                vertex[0] + shift[0],
+                vertex[1] + shift[1],
+                vertex[2] + shift[2],
+            ]
+        }));
+        tris.extend(
+            part.tris()
+                .iter()
+                .map(|triangle| triangle.map(|vertex| vertex + base)),
+        );
+    }
+    Mesh::new(verts, tris).expect("the composed half-buried fixture is one mesh")
+}
+
+/// **SPEC-A3-A4 §6's removal never pre-empts the measurement it feeds — it
+/// DISCLOSES what it could not place and lets the coverage judgment rule.**
+///
+/// End to end through `run_support`, on a fixture built to make the condition
+/// happen: half the model is buried under a blocker, every one of that half's
+/// terminals is quarantined, and §6's removal therefore takes every contact of
+/// the buried islands out of the accepted contact set. The carried-load
+/// repartition is then left with faces no owner can carry.
+///
+/// **Revert-proof, and it guards the whole ruling.** The intermediate commit
+/// `9a9b459` refused here, and the assertions below fail on that tree: the
+/// `Ok` arm cannot be taken at all, and the `MeasurementRefused` detail it
+/// produced contains "no eligible carrier", which the `Err` arm rejects by
+/// name.
+///
+/// **Why refusing was wrong, in one sentence.** Load eligibility is a
+/// provenance relation, not a reach test, so "every eligible owner lost its
+/// contacts" is not a measurement that these faces are unsupported — an arm
+/// belonging to a DIFFERENT OWNER on the same island can stand a millimetre
+/// away and hold them — and the routed-coverage measurement §6 sequences AFTER
+/// the removal is the thing that can tell. Refusing ahead of it decided a
+/// support-adequacy question from a set-membership tally.
+///
+/// Corrected 2026-08-19: this used to say "a neighbouring ISLAND's contact",
+/// which the measurement does not support. `fill_route_points_nearest` matches
+/// a coverage sample only against routed contacts of its own
+/// `(island_id, component_id)` route, so another island's arm is never counted
+/// as coverage however close it stands. One island can carry several load
+/// owners, and that is where the eligibility/reach gap actually lives.
+///
+/// The measured cost of that refusal was three corpus models' artifacts
+/// (Deinonychus, Skeleton_2, Tavey), each one whose ownerless island's true
+/// uncovered area was dust the registered A3 censor already forgives.
+#[test]
+fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule() {
+    let hollowed = identity_hollowed(half_buried_table());
+    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let outcome = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        support_input(&delicacy, &layers),
+    );
+    match outcome {
+        Ok(authority) => {
+            // The whole point of the split landing. Routing completed, so
+            // whatever verdict this fixture reaches is reached by the coverage
+            // measurement over the routed layout — and the islands the
+            // repartition could not place are named, counted and quantified.
+            let disclosed = authority.ownerless_islands();
+            assert!(
+                !disclosed.is_empty(),
+                "the buried half's islands lost every contact; a run that seals over them \
+                 MUST say so"
+            );
+            for island in disclosed {
+                assert!(
+                    island.ownerless_face_count() > 0
+                        && island.ownerless_face_area_mm2().is_finite()
+                        && island.ownerless_face_area_mm2() > 0.0,
+                    "a disclosure with no faces or no area discloses nothing: {island:?}"
+                );
+                assert!(
+                    island
+                        .measured_uncovered_area_mm2()
+                        .is_none_or(|area| area.is_finite() && area >= 0.0),
+                    "when the disclosure states a measured area it must be a real one, and \
+                     when it has none it must say so rather than report a zero: {island:?}"
+                );
+            }
+        }
+        Err(plinth_support::SupportRunError::CoverageClosure(refusal)) => {
+            // The other honest ending: the coverage measurement RAN over the
+            // routed layout and refused on what it found. That is a verdict
+            // from the measurement, which is exactly what the ruling asks for.
+            // What it must never again be is `MeasurementRefused` carrying a
+            // §6 removal message, because that was the removal pre-empting the
+            // measurement instead of feeding it.
+            if let plinth_support::CoverageClosureReason::MeasurementRefused(detail) =
+                &refusal.reason
+            {
+                assert!(
+                    !detail.contains("no eligible carrier"),
+                    "the §6 removal must not refuse ahead of the measurement it is supposed \
+                     to feed: {detail}"
+                );
+            }
+        }
+        Err(other) => panic!(
+            "a buried half must reach the coverage judgment, not a stage failure: {other:?}"
+        ),
+    }
 }

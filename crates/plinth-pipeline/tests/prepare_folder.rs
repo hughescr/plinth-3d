@@ -305,6 +305,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         realized_wall,
         savings_shortfall,
         filled_back_chambers_ml,
+        ownerless_islands,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -313,6 +314,17 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         );
     };
     assert_eq!(emit.artifact_path, artifact);
+    // Task #49. This fixture's every island keeps a routed contact, so the
+    // accepted contact set charges no face to nobody and the disclosure is
+    // empty. Asserted rather than ignored: an empty list here is the claim
+    // "every face this artifact covers has something sized to carry it", and
+    // if that ever stops being true on the healthy fixture the run report has
+    // to say so before anyone reads the byte count.
+    assert!(
+        ownerless_islands.is_empty(),
+        "the healthy fixture must leave no island without an owning contact; got \
+         {ownerless_islands:?}"
+    );
     // **What is in the file, not merely that there is one.** Two of the four
     // geometries are substitutions the chain fell back to, and a report that
     // said only "emitted" could not tell them from the intended shell.
@@ -983,6 +995,19 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     // of this: the geometry moved, and a resource ceiling this smaller,
     // honestly-walled shell newly approaches on this doubly-processed fixture
     // is measured and recorded here, not raised.
+    //
+    // **2026-08-19, task #49, the split landing: the sphere's route moved a
+    // THIRD time and then moved back.** The intermediate commit `9a9b459`
+    // wired SPEC-A3-A4 §6's unrouted-regular removal AND refused when the
+    // carried-load repartition was left with `sphere` face 2108 owned by
+    // nobody, which took this fixture from 2 artifacts to 1. The removal
+    // stays; the refusal does not. An ownerless face is now disclosed
+    // (`FinalSupportAuthority::ownerless_islands`) and the coverage judgment
+    // §6 sequences after the removal is what rules on it, so this pin is back
+    // where `develop` @ 06cf21b had it. Measured from→to on this exact fixture
+    // pair: `artifacts().count()` 1 → **2**, `exit_code()` `Supports` → **`Ok`**,
+    // `outcome(.., "sphere")` `Failed` → **`Artifact { DrilledShellRefusedBySupport }`**.
+    //
     // **The per-model baseline map is still proved either way:** both models
     // resolved their own baseline and both reached a stage that could only be
     // reached with it.
@@ -1133,14 +1158,20 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
             // **A refusal that happens BEFORE the stop still wins, and must —
             // but this fixture, run alone, never hits one.** The `Support`
             // stop is checked after `run_support` returns, so a model whose
-            // support run refuses never reaches it. The coverage-closure
-            // controller (FU-56) only gets a look on `sphere` from attempt 1
-            // onward and in this per-model-baseline batch (see the
-            // per-model-baseline test above) it never does, because attempt 0
-            // fails during `Routing` — a two-model-batch resource-demand
-            // effect, not present when `sphere` is prepared alone as it is
-            // here. Measured directly: every fixture stops cleanly at every
-            // stage, `sphere` included, so no special case is needed.
+            // support run refuses never reaches it. Measured directly: every
+            // fixture stops cleanly at every stage, `sphere` included, so no
+            // special case is needed.
+            //
+            // **2026-08-19, task #49, the split landing: this pin moved and
+            // moved back.** The intermediate commit `9a9b459` refused
+            // `sphere` at Routing when SPEC-A3-A4 §6's removal left face 2108
+            // owned by nobody, and this cell became
+            // `Failed { exit_code: Supports, .. }`. The removal stays; the
+            // refusal does not — an ownerless face is disclosed and the
+            // coverage judgment rules on it — so the measured from→to here is
+            // `Failed { exit_code: Supports, .. }` → **`Stopped { after: Support }`**,
+            // back to `develop` @ 06cf21b's reading, and the special case is
+            // gone with it.
             assert_eq!(
                 outcome(&report, stem),
                 &ModelPreparationOutcome::Stopped { after },
@@ -1169,6 +1200,12 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
     // `DrilledShellRefusedBySupport` reserve substitution — unmoved by
     // FU-56/FU-57. Both endings are ones a stage `stop_after` never reached,
     // which is what this block discriminates.
+    //
+    // **2026-08-19, task #49, the split landing: moved and moved back.**
+    // `9a9b459` took these to `artifacts().count()` 1 and
+    // `has_coverage_refusal()` true by refusing on an ownerless face; the
+    // refusal is withdrawn, so the measured from→to is 1 → **2** and
+    // true → **false**, back to `develop` @ 06cf21b's reading.
     let scratch = Scratch::new("stop-none");
     for (stem, fixture, _) in fixtures {
         scratch.place(fixture, stem);

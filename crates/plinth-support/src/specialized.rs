@@ -1256,27 +1256,63 @@ impl<'a> SpecializedContactPlanEdit<'a> {
     /// contact.  The original contact vector is cloned and filtered; surviving
     /// records are never reconsolidated, re-numbered, or rebuilt from a
     /// candidate.  Consequently removed ids leave observable holes.
+    ///
+    /// A one-element delegation to [`Self::remove_demand_free_regular_rows`],
+    /// mirroring the append pair: one implementation, not two that could
+    /// drift.
     pub fn remove_demand_free_regular(
         &self,
         contact_id: u64,
     ) -> Result<SpecializedContactPlan, SpecializedError> {
-        let contact = self
-            .plan
-            .contacts
-            .iter()
-            .find(|contact| contact.contact_id == contact_id)
-            .ok_or(SpecializedError::UnknownPhysicalContact { contact_id })?;
-        if !contact.demands.is_empty() {
-            return Err(SpecializedError::DemandBearingContactEdit { contact_id });
-        }
-        if contact.primary_regular.is_none() || contact.regular_routes.is_empty() {
-            return Err(SpecializedError::NonRegularContactEdit { contact_id });
+        self.remove_demand_free_regular_rows(&[contact_id])
+    }
+
+    /// Derive a child that omits every named demand-free regular physical
+    /// contact in one replay of the load finalizer.
+    ///
+    /// This is the seam SPEC-A3-A4 §6 names: *"Before rewire, bracing,
+    /// carried-load repartition, or coverage judgment, every unrouted regular
+    /// contact is ledgered with its exact row/reason and removed from the
+    /// accepted contact set."*  The routing stage learns the whole unrouted
+    /// set at once, so the removal is one batch.
+    ///
+    /// Batch-first (D-37): every id is validated — unknown, demand-bearing,
+    /// non-regular, or named twice in the same batch — BEFORE any contact is
+    /// dropped, so a batch containing one bad id removes nothing.  The
+    /// surviving contacts are then committed through exactly one
+    /// [`Self::derive_child`], which replays
+    /// `finalize_specialized_load_partition` over the complete surviving
+    /// contact set; `N` sequential single-contact removals would replay it
+    /// `N` times, which is the scalar-per-item defect this method exists to
+    /// avoid.  Surviving records are never reconsolidated, re-numbered, or
+    /// rebuilt from a candidate, so removed ids leave observable holes.
+    pub fn remove_demand_free_regular_rows(
+        &self,
+        contact_ids: &[u64],
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        let mut named: BTreeSet<u64> = BTreeSet::new();
+        for &contact_id in contact_ids {
+            let contact = self
+                .plan
+                .contacts
+                .iter()
+                .find(|contact| contact.contact_id == contact_id)
+                .ok_or(SpecializedError::UnknownPhysicalContact { contact_id })?;
+            if !contact.demands.is_empty() {
+                return Err(SpecializedError::DemandBearingContactEdit { contact_id });
+            }
+            if contact.primary_regular.is_none() || contact.regular_routes.is_empty() {
+                return Err(SpecializedError::NonRegularContactEdit { contact_id });
+            }
+            if !named.insert(contact_id) {
+                return Err(SpecializedError::RepeatedRemovedContact { contact_id });
+            }
         }
         let contacts = self
             .plan
             .contacts
             .iter()
-            .filter(|contact| contact.contact_id != contact_id)
+            .filter(|contact| !named.contains(&contact.contact_id))
             .cloned()
             .collect();
         self.derive_child(contacts, self.plan.next_contact_id)
@@ -1777,6 +1813,8 @@ pub enum SpecializedError {
         "specialized plan edit may only remove a regular contact; {contact_id} is not regular"
     )]
     NonRegularContactEdit { contact_id: u64 },
+    #[error("specialized plan edit names physical contact {contact_id} for removal twice")]
+    RepeatedRemovedContact { contact_id: u64 },
     #[error("specialized plan edit names unknown repair row {row_id:?}")]
     UnknownRepairRow { row_id: RepairRowId },
     #[error("specialized plan edit may not reuse occupied repair row {row_id:?}")]
