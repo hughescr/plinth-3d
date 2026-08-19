@@ -1055,11 +1055,18 @@ fn half_buried_table() -> Mesh {
 ///
 /// **Why refusing was wrong, in one sentence.** Load eligibility is a
 /// provenance relation, not a reach test, so "every eligible owner lost its
-/// contacts" is not a measurement that these faces are unsupported — a
-/// surviving contact of a neighbouring island can stand a millimetre away and
-/// hold them — and the routed-coverage measurement §6 sequences AFTER the
-/// removal is the thing that can tell. Refusing ahead of it decided a
+/// contacts" is not a measurement that these faces are unsupported — an arm
+/// belonging to a DIFFERENT OWNER on the same island can stand a millimetre
+/// away and hold them — and the routed-coverage measurement §6 sequences AFTER
+/// the removal is the thing that can tell. Refusing ahead of it decided a
 /// support-adequacy question from a set-membership tally.
+///
+/// Corrected 2026-08-19: this used to say "a neighbouring ISLAND's contact",
+/// which the measurement does not support. `fill_route_points_nearest` matches
+/// a coverage sample only against routed contacts of its own
+/// `(island_id, component_id)` route, so another island's arm is never counted
+/// as coverage however close it stands. One island can carry several load
+/// owners, and that is where the eligibility/reach gap actually lives.
 ///
 /// The measured cost of that refusal was three corpus models' artifacts
 /// (Deinonychus, Skeleton_2, Tavey), each one whose ownerless island's true
@@ -1096,9 +1103,11 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
                     "a disclosure with no faces or no area discloses nothing: {island:?}"
                 );
                 assert!(
-                    island.measured_uncovered_area_mm2().is_finite()
-                        && island.measured_uncovered_area_mm2() >= 0.0,
-                    "the measured half of the disclosure must be a real measurement: {island:?}"
+                    island
+                        .measured_uncovered_area_mm2()
+                        .is_none_or(|area| area.is_finite() && area >= 0.0),
+                    "when the disclosure states a measured area it must be a real one, and \
+                     when it has none it must say so rather than report a zero: {island:?}"
                 );
             }
         }

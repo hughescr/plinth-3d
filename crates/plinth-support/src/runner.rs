@@ -503,23 +503,32 @@ pub struct FinalSupportAuthority<'a> {
 /// the faces whose every eligible load owner lost every contact, so nothing is
 /// sized to carry them. [`Self::measured_uncovered_area_mm2`] is a measurement:
 /// what the routed layout, arms and all, leaves uncovered on this island under
-/// the registered coverage request — and it is small precisely because a
-/// surviving contact of a neighbouring island can stand a millimetre away and
-/// hold a face it was never *eligible* to be charged for. A reader who sees a
-/// large ownerless area and a near-zero measured area is seeing that gap
-/// between eligibility and reach, which is the reason this is a disclosure
-/// rather than a refusal.
+/// the registered coverage request. They answer different questions and they
+/// are computed from different relations — eligibility is `(owner, face)`
+/// provenance, coverage is distance — so neither bounds the other.
 ///
-/// This model still EMITTED: the measured area was below the registered A3
-/// censor, so the verdict forgave it. The disclosure exists so that "forgave
-/// it" is a thing the run says out loud.
+/// **What CAN close the gap between them, measured rather than assumed.** The
+/// coverage measurement matches a sample only against routed contacts of its
+/// OWN `(island_id, component_id)` route (`specialized.rs`,
+/// `fill_route_points_nearest`), so a *neighbouring island's* arm never counts
+/// as coverage here, however close it stands. What can cover an ownerless face
+/// is a surviving contact of a DIFFERENT OWNER on the SAME island and
+/// component: one island carries several load owners, and only the owners a
+/// face is eligible for can be charged for it.
+///
+/// On the four corpus models measured 2026-08-19 the two numbers were EQUAL to
+/// six decimals — the ownerless faces were also entirely uncovered — so do not
+/// read a small measured area as evidence that something else is holding the
+/// face. Read it as what it is: an area small enough that the registered A3
+/// censor forgave it, which is why the model still EMITTED. The disclosure
+/// exists so that "forgave it" is a thing the run says out loud.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerlessIslandDisclosure {
     island_id: Option<u32>,
     ownerless_face_count: usize,
     ownerless_face_area_mm2: f64,
-    measured_uncovered_area_mm2: f64,
+    measured_uncovered_area_mm2: Option<f64>,
 }
 
 impl OwnerlessIslandDisclosure {
@@ -543,10 +552,17 @@ impl OwnerlessIslandDisclosure {
         self.ownerless_face_area_mm2
     }
     /// What the sealing attempt's routed-coverage measurement reports uncovered
-    /// for this island, summed over its patches, UNCENSORED. Zero when the
-    /// measurement found nothing uncovered here at all.
+    /// for this island, summed over its patches, UNCENSORED.
+    ///
+    /// `Some(0.0)` means the measurement ran over this island and found nothing
+    /// uncovered. `None` means no measurement of this island exists to report:
+    /// the ownerless faces belong to no named island, so the coverage
+    /// measurement — which groups its patches BY island — has no row that could
+    /// be attributed to them. Those are different facts and a run report that
+    /// printed `0.000000` for both would be claiming a measurement it never
+    /// took.
     #[must_use]
-    pub const fn measured_uncovered_area_mm2(&self) -> f64 {
+    pub const fn measured_uncovered_area_mm2(&self) -> Option<f64> {
         self.measured_uncovered_area_mm2
     }
 }
@@ -558,18 +574,27 @@ impl OwnerlessIslandDisclosure {
 /// map and the measurement is summed ONCE into an island -> area map, so this
 /// is linear in the plan's face count plus the patch face count, never a scan
 /// per ownerless face.
-fn ownerless_island_disclosures(
-    lowered: &LoweredSupportRun<'_>,
+///
+/// Split from [`ownerless_island_disclosures`] so the join itself can be
+/// exercised on constructed inputs: the caller below gathers three real slices
+/// out of the run and this decides every number the report prints.
+///
+/// **Known imprecision, in the conservative direction.** `repair_targets` keys
+/// its patches by `(island_id, component_id)` while an ownerless face carries
+/// only its island, so an island split over several components sums ALL its
+/// components' uncovered area into the one disclosure row. That over-states the
+/// measured figure — it can never hide uncovered area — and is recorded here
+/// rather than papered over.
+fn join_ownerless_island_disclosures(
+    ownerless: &[crate::perception::OwnerlessLoadFace],
+    islands: &[crate::SupportIsland],
     repair_targets: &[crate::coverage_closure::BlockingPatchKey],
 ) -> Vec<OwnerlessIslandDisclosure> {
-    let routed = &lowered.structured.braced.rewired.routed;
-    let ownerless = &routed.accepted.ownerless_faces;
     if ownerless.is_empty() {
         return Vec::new();
     }
-    let plan = routed.accepted.plan(&routed.plan);
     let mut island_of_face: BTreeMap<u32, u32> = BTreeMap::new();
-    for island in plan.islands() {
+    for island in islands {
         for &face_id in &island.face_ids {
             island_of_face.insert(face_id, island.id);
         }
@@ -594,13 +619,31 @@ fn ownerless_island_disclosures(
                     island_id,
                     ownerless_face_count,
                     ownerless_face_area_mm2,
+                    // `Some(0.0)` and `None` are different claims: the first is
+                    // "the measurement covers this island and found nothing",
+                    // the second is "this island is not a thing the
+                    // measurement grouped by, so no figure exists".
                     measured_uncovered_area_mm2: island_id
-                        .and_then(|id| measured.get(&id).copied())
-                        .unwrap_or(0.0),
+                        .map(|id| measured.get(&id).copied().unwrap_or(0.0)),
                 }
             },
         )
         .collect()
+}
+
+/// Gather the three real slices the disclosure joins, out of the run that is
+/// about to seal.
+fn ownerless_island_disclosures(
+    lowered: &LoweredSupportRun<'_>,
+    repair_targets: &[crate::coverage_closure::BlockingPatchKey],
+) -> Vec<OwnerlessIslandDisclosure> {
+    let routed = &lowered.structured.braced.rewired.routed;
+    let ownerless = &routed.accepted.ownerless_faces;
+    if ownerless.is_empty() {
+        return Vec::new();
+    }
+    let plan = routed.accepted.plan(&routed.plan);
+    join_ownerless_island_disclosures(ownerless, plan.islands(), repair_targets)
 }
 
 impl FinalSupportAuthority<'_> {
@@ -6476,6 +6519,264 @@ mod tests {
         });
     }
 
+    /// Task #49 — **the run report's disclosure is BUILT, on real run data,
+    /// and it accounts for every ownerless face.**
+    ///
+    /// `ownerless_island_disclosures` is the only producer of the list the
+    /// chain carries out to the run report and the CLI prints. Before this
+    /// test, no test anywhere asserted a NON-EMPTY disclosure: forcing the
+    /// function to `return Vec::new()` left the whole suite green, because the
+    /// one end-to-end fixture that reaches it takes the coverage-refusal arm
+    /// and never looks at the list. That made the ruling's actual deliverable
+    /// — "the run report must DISCLOSE ownerless islands so nothing is hidden"
+    /// — a behaviour with no guard at all.
+    ///
+    /// So this drives the REAL fixture to a REAL `LoweredSupportRun` and calls
+    /// the production join on it. Sabotage measured, not asserted: with the
+    /// body replaced by `Vec::new()`, this fails on the first assertion.
+    ///
+    /// **Why the fixture stops at `lower` instead of sealing.** A sealing run
+    /// with a non-empty disclosure is not constructible from a procedural
+    /// fixture, and the reason is a measurement, not an inconvenience. The
+    /// coverage measurement matches a sample only against routed contacts of
+    /// its own `(island_id, component_id)` route (`specialized.rs`,
+    /// `fill_route_points_nearest`), so an island that loses EVERY owner
+    /// measures fully uncovered — its whole area is blocking, and the run
+    /// refuses at the coverage judgment rather than sealing. Only an island
+    /// whose ownerless area is dust below the registered censor seals, and on
+    /// the four corpus models that dust is 0.0005–0.05 mm², an area no
+    /// procedural mesh feature survives decimation at. The corpus models are
+    /// the fixture for the sealing case; this is the fixture for the join.
+    #[test]
+    fn the_ownerless_disclosure_is_built_from_the_run_and_accounts_for_every_face() {
+        let buried = make_overhang_table().expect("buried table fixture");
+        let blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).expect("burial blocker fixture");
+        let live = translated_mesh(
+            make_overhang_table().expect("live table fixture"),
+            [100.0, 0.0, 0.0],
+        );
+        let hollowed = hollowed_fixture(merge_meshes(&[buried, blocker, live]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            let lowered = prepared
+                .route_initial_cco()
+                .expect("a buried half no longer takes the routing stage out")
+                .rewire()
+                .expect("fixture rewires")
+                .brace()
+                .expect("fixture braces")
+                .structure()
+                .expect("fixture structures")
+                .lower()
+                .expect("fixture lowers");
+            let ownerless = lowered
+                .structured
+                .braced
+                .rewired
+                .routed
+                .accepted
+                .ownerless_faces
+                .clone();
+            assert!(
+                !ownerless.is_empty(),
+                "the fixture must actually leave faces ownerless for this to mean anything"
+            );
+
+            // No measurement supplied: the disclosure still has to be made,
+            // because the provenance half of it does not depend on coverage.
+            let disclosed = ownerless_island_disclosures(&lowered, &[]);
+            assert!(
+                !disclosed.is_empty(),
+                "the run charges {} face(s) to nobody and disclosed none of them",
+                ownerless.len()
+            );
+            // Every ownerless face lands in exactly one row, and its area
+            // lands with it. This is the "nothing is hidden" claim as
+            // arithmetic: counts and areas must reconcile to the bit.
+            let disclosed_faces: usize =
+                disclosed.iter().map(|row| row.ownerless_face_count()).sum();
+            assert_eq!(
+                disclosed_faces,
+                ownerless.len(),
+                "every ownerless face must appear in exactly one disclosure row"
+            );
+            let disclosed_area: f64 = disclosed
+                .iter()
+                .map(|row| row.ownerless_face_area_mm2())
+                .sum();
+            let true_area: f64 = ownerless.iter().map(|face| face.area_mm2).sum();
+            assert!(
+                (disclosed_area - true_area).abs() < 1e-9,
+                "the disclosed area must be the faces' own area: {disclosed_area} vs {true_area}"
+            );
+            // A row that names an island really does name the island those
+            // faces belong to — the join is not attributing area to whatever
+            // island sorts first.
+            let plan = lowered
+                .structured
+                .braced
+                .rewired
+                .routed
+                .accepted
+                .plan(&lowered.structured.braced.rewired.routed.plan);
+            let ownerless_ids = ownerless
+                .iter()
+                .map(|face| face.face_id)
+                .collect::<BTreeSet<_>>();
+            for row in &disclosed {
+                let Some(island_id) = row.island_id() else {
+                    // No island, so no coverage row exists to report. `None`,
+                    // never a zero that would read as a clean measurement.
+                    assert_eq!(
+                        row.measured_uncovered_area_mm2(),
+                        None,
+                        "an islandless row has no measurement to state: {row:?}"
+                    );
+                    continue;
+                };
+                let island = plan
+                    .islands()
+                    .iter()
+                    .find(|island| island.id == island_id)
+                    .expect("a disclosed island id is one of the plan's islands");
+                let counted = island
+                    .face_ids
+                    .iter()
+                    .filter(|face_id| ownerless_ids.contains(face_id))
+                    .count();
+                assert_eq!(
+                    counted,
+                    row.ownerless_face_count(),
+                    "island {island_id}'s row must count that island's own ownerless faces"
+                );
+                assert_eq!(
+                    row.measured_uncovered_area_mm2(),
+                    Some(0.0),
+                    "with no patches supplied the measurement found nothing, which is a \
+                     different claim from having taken no measurement: {row:?}"
+                );
+            }
+
+            // And the measured half is joined from the attempt's own patches,
+            // not invented: hand the join one uncensored patch on a disclosed
+            // island and the row must carry exactly that area.
+            let target_island = disclosed
+                .iter()
+                .find_map(OwnerlessIslandDisclosure::island_id)
+                .expect("the fixture's ownerless faces belong to a named island");
+            let patch = crate::coverage_closure::BlockingPatchKey {
+                island_id: target_island,
+                component_id: 0,
+                representative_face_id: 0,
+                sorted_face_ids: Vec::new(),
+                uncovered_area_mm2_bits: 0.004_024_703_349_f64.to_bits(),
+                worst_gap: crate::coverage_closure::CoverageClosureGap::NoRoutedContact,
+            };
+            let joined = ownerless_island_disclosures(&lowered, std::slice::from_ref(&patch));
+            let row = joined
+                .iter()
+                .find(|row| row.island_id() == Some(target_island))
+                .expect("the same island is disclosed either way");
+            assert_eq!(
+                row.measured_uncovered_area_mm2(),
+                Some(0.004_024_703_349),
+                "the measured half must be the attempt's own uncovered area, to the bit"
+            );
+        });
+    }
+
+    /// Task #49 — the disclosure join itself, on constructed inputs, so every
+    /// rule it applies is pinned without needing a run that exhibits all of
+    /// them at once: grouping by island, the islandless row, the summed
+    /// measurement, and `None` versus `Some(0.0)`.
+    #[test]
+    fn the_disclosure_join_groups_by_island_and_states_what_it_did_not_measure() {
+        let ownerless = vec![
+            crate::perception::OwnerlessLoadFace {
+                face_id: 7,
+                area_mm2: 0.25,
+            },
+            crate::perception::OwnerlessLoadFace {
+                face_id: 9,
+                area_mm2: 0.5,
+            },
+            // Belongs to no island at all.
+            crate::perception::OwnerlessLoadFace {
+                face_id: 99,
+                area_mm2: 1.5,
+            },
+            crate::perception::OwnerlessLoadFace {
+                face_id: 11,
+                area_mm2: 2.0,
+            },
+        ];
+        let islands = vec![
+            crate::SupportIsland {
+                id: 3,
+                face_ids: vec![7, 9, 12],
+            },
+            crate::SupportIsland {
+                id: 4,
+                face_ids: vec![11],
+            },
+        ];
+        let patch =
+            |island_id, component_id, area: f64| crate::coverage_closure::BlockingPatchKey {
+                island_id,
+                component_id,
+                representative_face_id: 0,
+                sorted_face_ids: Vec::new(),
+                uncovered_area_mm2_bits: area.to_bits(),
+                worst_gap: crate::coverage_closure::CoverageClosureGap::NoRoutedContact,
+            };
+        // Island 3 is measured over two components; island 4 has no patch at
+        // all, which is a measurement that found nothing.
+        let targets = vec![patch(3, 0, 0.125), patch(3, 1, 0.375)];
+        let rows = join_ownerless_island_disclosures(&ownerless, &islands, &targets);
+
+        assert_eq!(rows.len(), 3, "one row per island, plus the islandless row");
+        let row = |island_id| {
+            *rows
+                .iter()
+                .find(|row| row.island_id() == island_id)
+                .unwrap_or_else(|| panic!("a row for {island_id:?}"))
+        };
+
+        let three = row(Some(3));
+        assert_eq!(three.ownerless_face_count(), 2);
+        assert!((three.ownerless_face_area_mm2() - 0.75).abs() < 1e-12);
+        // Both components' uncovered area, summed. Over-attributing across
+        // components is the known imprecision recorded on the join; it can
+        // only ever report MORE uncovered area, never less.
+        assert_eq!(three.measured_uncovered_area_mm2(), Some(0.5));
+
+        let four = row(Some(4));
+        assert_eq!(four.ownerless_face_count(), 1);
+        assert!((four.ownerless_face_area_mm2() - 2.0).abs() < 1e-12);
+        assert_eq!(
+            four.measured_uncovered_area_mm2(),
+            Some(0.0),
+            "an island the measurement covered and found clean says so with a zero"
+        );
+
+        let islandless = row(None);
+        assert_eq!(islandless.ownerless_face_count(), 1);
+        assert!((islandless.ownerless_face_area_mm2() - 1.5).abs() < 1e-12);
+        assert_eq!(
+            islandless.measured_uncovered_area_mm2(),
+            None,
+            "no island means no coverage row; a zero here would claim a measurement \
+             that was never taken"
+        );
+
+        assert!(
+            join_ownerless_island_disclosures(&[], &islands, &targets).is_empty(),
+            "no ownerless face means nothing to disclose"
+        );
+    }
+
     /// SPEC-A3-A4 §6, task #49 — the removal clause, end to end on a fixture
     /// that keeps both unrouted dispositions and still seals.
     ///
@@ -6585,8 +6886,8 @@ mod tests {
         });
     }
 
-    /// SPEC-A3-A4 §6, task #49 — **the strip re-sizes arms in the SAFE
-    /// direction, and member sizing sees it.**
+    /// SPEC-A3-A4 §6, task #49 — **the strip moves the sizing INPUT in the
+    /// safe direction. Nothing in production reads that input yet.**
     ///
     /// This is the load-safety half of the ruling, and it is the reason the
     /// removal is worth having on its own merits, independently of §6's text.
@@ -6611,10 +6912,31 @@ mod tests {
     /// Both are asserted below, together with the strict increase that proves
     /// the fixture exercises the path at all.
     ///
-    /// **And member sizing reads the increase**, not merely the plan: the
-    /// assertion runs over `finalized_loads()`, the tip-sized fold the arm
-    /// sizer consumes, and checks the frozen tip radius moves with it — never
-    /// down.
+    /// **What this does NOT claim, withdrawn 2026-08-19 after review.** An
+    /// earlier version of this doc and of `b048acd`'s commit message said
+    /// "member sizing sees the increase". That is false, and this branch's own
+    /// measurement says so: all four models with non-empty removals emit
+    /// BYTE-IDENTICAL artifacts to `develop`, and `develop` has no accepted
+    /// contact set at all. No printed geometry moved, so no arm was re-sized.
+    ///
+    /// The reason is the read order, and it is worth naming the lines. Every
+    /// geometric stage reads the ROUTED plan's fold: `route_initial_cco` sets
+    /// the terminal radii from `plan.finalized_loads()` BEFORE the accepted set
+    /// is derived at the end of that same transaction; `rewire` reads
+    /// `state.plan.finalized_loads()`; `brace` and its re-validation read
+    /// `state.routed.plan.finalized_loads()`. The ACCEPTED plan's fold is read
+    /// in exactly two places — `validate_accepted_contact_set`, a tripwire, and
+    /// the verification snapshot the coverage judgment projects. Neither sizes
+    /// anything.
+    ///
+    /// So the safety benefit is real at PLAN level and LATENT in production: it
+    /// reaches a printed part only when `PreWriteGate::Load` is ported (task
+    /// #59) or when a sizing stage is moved onto the accepted fold. Wiring that
+    /// is explicitly not this lane's work. What this test does is pin the INPUT
+    /// so that whichever of those lands, it lands on a quantity that is already
+    /// correct: the assertion runs over `finalized_loads()`, the tip-sized
+    /// fold, so the tip radius a sizer WOULD compute is checked beside the area
+    /// and neither is allowed to fall.
     ///
     /// Revert-proof: at `9a9b459` and on `develop` the accepted plan is the
     /// routed plan (no removal, or a removal that refused), so no survivor
@@ -6653,14 +6975,19 @@ mod tests {
                     .expect("a survivor was in the routed fold too");
                 let after_leaf = after.leaf_for(id).expect("a survivor is in the accepted fold");
                 // The sizing INPUT never falls. This is the whole safety
-                // claim: an arm may learn it carries more, never less.
+                // claim, and its whole extent: an arm may learn it carries
+                // more, never less. Nothing in production reads this fold yet
+                // — see the doc above.
                 assert!(
                     after_leaf.carried_area_mm2() >= before_leaf.carried_area_mm2(),
                     "survivor {id} lost load to the strip: {} -> {}",
                     before_leaf.carried_area_mm2(),
                     after_leaf.carried_area_mm2()
                 );
-                // And the sizing OUTPUT moves with it, never against it.
+                // And the tip radius this fold already carries moves with it,
+                // never against it. That is the sizing OUTPUT a consumer of
+                // this fold would get — not one any production stage reads
+                // today.
                 assert!(
                     after_leaf.tip_radius_mm().get() >= before_leaf.tip_radius_mm().get(),
                     "survivor {id}'s tip shrank while its load grew: {} -> {}",

@@ -297,20 +297,31 @@ fn print_model(model: &ModelPreparationReport) {
             //
             // Both numbers, because they answer different questions. The
             // ownerless area is what no arm is sized to carry. The measured
-            // area is what the routed layout actually leaves uncovered — much
-            // smaller, because a neighbouring island's arm can stand under a
-            // face it was never *eligible* to be charged for. Silent when
-            // there are none, so the reader sees a loss only when there is one.
+            // area is what the routed layout actually leaves uncovered, which
+            // is a distance question and not a provenance one. On the four
+            // corpus models measured 2026-08-19 the two were EQUAL to six
+            // decimals, so the second is printed as its own figure and not as
+            // a reassurance about the first.
+            //
+            // "not measured" is printed, never `0.000000`, when the ownerless
+            // faces belong to no named island: the coverage measurement groups
+            // its patches by island, so for those faces there is no measured
+            // figure at all — and a zero would read as a measurement that was
+            // taken and came back clean. Silent when there are no ownerless
+            // islands, so the reader sees a loss only when there is one.
             for island in ownerless_islands {
+                let measured = island.measured_uncovered_area_mm2().map_or_else(
+                    || "not measured".to_owned(),
+                    |area| format!("{area:.6} mm²"),
+                );
                 println!(
                     "  ownerless island  {}  {} face(s), {:.6} mm² charged to no support; \
-                     measured uncovered {:.6} mm²",
+                     measured uncovered {measured}",
                     island
                         .island_id()
                         .map_or_else(|| "(no island)".to_owned(), |id| id.to_string()),
                     island.ownerless_face_count(),
                     island.ownerless_face_area_mm2(),
-                    island.measured_uncovered_area_mm2(),
                 );
             }
         }
