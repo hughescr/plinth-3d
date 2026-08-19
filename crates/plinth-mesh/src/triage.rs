@@ -1401,4 +1401,288 @@ mod tests {
         assert_eq!(first.len(), settings.containment_samples());
         assert_eq!(first, second);
     }
+
+    // -----------------------------------------------------------------
+    // FU-43 characterization: the local ray classifier's half-ray semantics.
+    //
+    // `ray_triangle_distance` (this file) treats *every* `distance <= 1e-9`
+    // as `RayHit::Ambiguous` -- not only genuine near-origin degeneracies,
+    // but any real intersection strictly behind the ray origin, however far
+    // behind. `ContainmentClassifier::classify_ray` then short-circuits on
+    // the first `Ambiguous` face it meets, discarding every hit already
+    // gathered (including a genuine forward crossing) and reporting the
+    // whole ray `Ambiguous`.
+    //
+    // The three tests below establish, in increasing scope, what that
+    // produces *today*:
+    //   1. one intersection, isolated: a real hit 5 mm behind the origin
+    //      reads `Ambiguous`, not `Miss`.
+    //   2. a full ray against a real closed shell: a point at a symmetric
+    //      octahedron's own centroid -- unambiguously interior material --
+    //      reads `Ambiguous` on all three fixed sampling directions, because
+    //      each direction's forward crossing has a mirror-image face behind
+    //      the origin on the same infinite line.
+    //   3. the pipeline's actual verdict: nesting a small box at that same
+    //      centroid, `triage_components` returns `Ok` (accepts the mesh)
+    //      where the geometry is a genuine sealed cavity and the intended
+    //      half-ray semantics would refuse it as `TriageError::PreHollowed`.
+    //      This is a confirmed final-verdict divergence, not only a
+    //      helper-level one -- see that test's doc comment for the exact
+    //      arithmetic and for why this change does not touch the consumer.
+    //
+    // None of this touches `geom_kernel`: that crate's finite-segment
+    // negative-epsilon and parity handling is a separate, intentional
+    // contract and is out of scope here. This module's ray-triangle test is
+    // its own independent implementation.
+
+    /// A regular octahedron -- the L1 ball `|x| + |y| + |z| <= r` -- centred
+    /// on the origin, with every face wound outward. Not a corpus shape; it
+    /// is the smallest closed mesh whose faces are *not* axis-aligned, which
+    /// is exactly the property that lets a face's loose bounding-box filter
+    /// (`ray_can_reach_bbox`) admit a face that sits behind the ray origin.
+    /// An axis-aligned box does not have this problem: each face's bounding
+    /// box is degenerate along its own normal axis, so the same filter
+    /// rejects every face behind the origin exactly rather than loosely (see
+    /// `triage_batches_bounded_samples_and_refuses_a_pre_hollowed_shell` in
+    /// `tests/topology_triage.rs`, which is the axis-aligned control this
+    /// module's own octahedron tests are contrasted against).
+    fn octahedron_faces(r: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let verts = vec![
+            [r, 0.0, 0.0],
+            [-r, 0.0, 0.0],
+            [0.0, r, 0.0],
+            [0.0, -r, 0.0],
+            [0.0, 0.0, r],
+            [0.0, 0.0, -r],
+        ];
+        let raw = [
+            [0u32, 2, 4],
+            [2, 1, 4],
+            [1, 3, 4],
+            [3, 0, 4],
+            [2, 0, 5],
+            [1, 2, 5],
+            [3, 1, 5],
+            [0, 3, 5],
+        ];
+        // Orient every face outward: for a convex polytope centred at the
+        // origin, the outward normal always makes an acute angle with its
+        // own vertices.
+        let tris = raw
+            .into_iter()
+            .map(|face| {
+                let [a, b, c] = face.map(|index| verts[index as usize]);
+                let normal = cross(subtract(b, a), subtract(c, a));
+                if dot(normal, a) > 0.0 {
+                    face
+                } else {
+                    [face[0], face[2], face[1]]
+                }
+            })
+            .collect();
+        (verts, tris)
+    }
+
+    /// Appends a `box_size`-mm cube centred on the origin to an existing
+    /// vertex/face soup and welds the result into a `Mesh`. Corner order
+    /// (`x` outer, `y`, `z` inner) and face winding mirror
+    /// `fixtures::BOX_FACES` exactly, so this is the same box shape those
+    /// fixtures use, just centred at the origin instead of on top of another
+    /// solid.
+    fn join_centered_box(
+        mut verts: Vec<[f64; 3]>,
+        mut faces: Vec<[u32; 3]>,
+        box_size: f64,
+    ) -> Mesh {
+        let box_base = u32::try_from(verts.len()).expect("small fixture");
+        let half = box_size / 2.0;
+        for x in [-half, half] {
+            for y in [-half, half] {
+                for z in [-half, half] {
+                    verts.push([x, y, z]);
+                }
+            }
+        }
+        const BOX_FACES: [[u32; 3]; 12] = [
+            [1, 3, 0],
+            [4, 1, 0],
+            [0, 3, 2],
+            [2, 4, 0],
+            [1, 7, 3],
+            [5, 1, 4],
+            [5, 7, 1],
+            [3, 7, 2],
+            [6, 4, 2],
+            [2, 7, 6],
+            [6, 5, 4],
+            [7, 5, 6],
+        ];
+        faces.extend(BOX_FACES.map(|face| {
+            [
+                box_base + face[0],
+                box_base + face[1],
+                box_base + face[2],
+            ]
+        }));
+        Mesh::new(verts, faces).expect("closed octahedron + nested box")
+    }
+
+    /// Tier 1: one intersection, isolated from the classifier entirely.
+    ///
+    /// The triangle sits on the plane `x = -5`; the ray starts at the origin
+    /// and points along `+x`. The intersection is real (the triangle spans
+    /// `y` and `z` well past where the ray crosses the plane, so `u`, `v`,
+    /// and `1 - u - v` all sit far above `EDGE_EPS`) and lies exactly 5 mm
+    /// *behind* the ray's origin.
+    #[test]
+    fn ray_triangle_distance_reports_ambiguous_for_a_real_hit_behind_the_origin() {
+        let origin = [0.0, 0.0, 0.0];
+        let direction = [1.0, 0.0, 0.0];
+        let a = [-5.0, -5.0, -5.0];
+        let b = [-5.0, 5.0, -5.0];
+        let c = [-5.0, 0.0, 5.0];
+
+        // Ground truth from the plane equation alone, independent of
+        // `ray_triangle_distance`'s own epsilon handling: this triangle's
+        // plane is only ever reached at `t = -5`.
+        let normal = cross(subtract(b, a), subtract(c, a));
+        let plane_t = -dot(subtract(origin, a), normal) / dot(direction, normal);
+        assert!(
+            (plane_t + 5.0).abs() < 1e-9,
+            "hand-derived intersection parameter must be -5 (5 mm behind the origin)"
+        );
+
+        // Intended half-ray semantics: a ray only tests intersections ahead
+        // of its own origin, so a hit 5 mm behind it is not a crossing at
+        // all and should read `Miss` (or be excluded before ever reaching
+        // this function), the same as a triangle the ray can never reach.
+        //
+        // Today's actual behavior: the `distance <= 1e-9` guard at line
+        // ~1131 catches this real, far-behind hit exactly as it would catch
+        // a genuine near-origin degeneracy, so it is reported `Ambiguous`.
+        assert_eq!(
+            ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
+            RayHit::Ambiguous,
+            "a real intersection 5 mm behind the ray origin reads Ambiguous today; intended \
+             half-ray semantics would treat it as no crossing (Miss)"
+        );
+    }
+
+    /// Tier 2: a full closed shell, and today's actual parity consequence.
+    ///
+    /// The three fixed sampling directions in `ContainmentClassifier::
+    /// classify` all have strictly positive `x`, `y`, and `z` components.
+    /// For the octahedron's own centroid, each direction's forward crossing
+    /// (the near face, in the direction's own positive octant) has a
+    /// mirror-image triangle in the *opposite* octant sitting on the same
+    /// infinite line -- a real intersection, behind the origin -- because
+    /// the octahedron is centrally symmetric.
+    #[test]
+    fn octahedron_centroid_reads_ambiguous_though_every_direction_has_exactly_one_forward_crossing(
+    ) {
+        let (verts, faces) = octahedron_faces(10.0);
+        let face_ids = (0..faces.len()).collect::<Vec<_>>();
+        let classifier = ContainmentClassifier::build(&verts, &faces, &face_ids).expect("build");
+
+        const DIRECTIONS: [[f64; 3]; 3] = [
+            [1.0, 0.371_390_676_354_103_7, 0.137_503_523_749_935_02],
+            [0.211_324_865_405_187_1, 1.0, 0.109_381_654_230_983_1],
+            [0.127_412_352_941_232_4, 0.333_333_333_333_333_3, 1.0],
+        ];
+        for direction in DIRECTIONS {
+            // Intended half-ray semantics: exactly one forward crossing (the
+            // near face) per direction, an odd count, so each direction
+            // alone would report `Inside`.
+            //
+            // Today's actual behavior: the mirror face's behind-origin hit
+            // is visited in the same `classify_ray` loop as the real
+            // forward crossing, and the first `Ambiguous` face short-
+            // circuits the whole ray before the forward hit's parity can be
+            // used.
+            assert_eq!(
+                classifier
+                    .classify_ray([0.0, 0.0, 0.0], direction)
+                    .expect("finite"),
+                ContainmentClass::Ambiguous,
+                "direction {direction:?}: the mirror face's behind-origin hit pre-empts the \
+                 real forward crossing"
+            );
+        }
+
+        // The classifier's own majority rule needs 2 of 3 directions to
+        // agree; with all three individually Ambiguous the vote is 0 Inside
+        // / 0 Outside, so the octahedron's own centroid -- 10 mm from the
+        // nearest face along every axis, unambiguously interior material --
+        // reads Ambiguous rather than Inside.
+        assert_eq!(
+            classifier.classify([0.0, 0.0, 0.0]).expect("finite"),
+            ContainmentClass::Ambiguous,
+            "a point deep inside a closed, watertight shell reads Ambiguous, not Inside"
+        );
+    }
+
+    /// Tier 3: the actual triage verdict, and the confirmed divergence.
+    ///
+    /// A 2 mm box is nested at the octahedron's centroid. It is provably,
+    /// deeply interior: every box corner satisfies `|x| + |y| + |z| <= 3`,
+    /// against the octahedron's own boundary at `|x| + |y| + |z| = 10` --
+    /// 7 mm of clearance on the tightest direction, and no sample point sits
+    /// within any triangle's `EDGE_EPS` of an edge. This is exactly the
+    /// "sealed cavity" shape triage exists to refuse; compare
+    /// `triage_batches_bounded_samples_and_refuses_a_pre_hollowed_shell` in
+    /// `tests/topology_triage.rs`, the axis-aligned version of this same
+    /// scenario, which the classifier gets right today because an
+    /// axis-aligned box's own bounding-box filter rejects its behind-origin
+    /// faces exactly rather than loosely.
+    ///
+    /// The box is 2 mm across (`hollow_shard_max_dim_mm` is 1.0 mm) and does
+    /// not touch the octahedron's vertex set, so it cannot be, and is not,
+    /// classified as a shard; it reaches the containment/cavity check.
+    ///
+    /// Two of the box's eight corners (`[-1,-1,-1]` and `[-1,-1,1]`,
+    /// confirmed by direct probing of `ContainmentClassifier::classify`
+    /// during characterization) land on the same behind-origin-hit failure
+    /// as the two tests above and read `Ambiguous` instead of `Inside`.
+    /// `hollow_containment_samples` is 32 but the box only contributes 8
+    /// vertices, so all 8 are sampled, and today's containment fraction is
+    /// 6/8 = 0.75 -- under `hollow_containment_min_fraction` (0.9). Because
+    /// the fraction misses the threshold, `triage_components` returns `Ok`:
+    /// it silently accepts the shell.
+    ///
+    /// Intended half-ray semantics would count all 8 corners `Inside` (each
+    /// several millimetres clear of both the octahedron's boundary and any
+    /// triangle edge), a fraction of 1.0, and triage would refuse with
+    /// `TriageError::PreHollowed` -- the same outcome the axis-aligned
+    /// control case already gets. **This is the final-verdict-level
+    /// divergence FU-43 asked this characterization pass to look for, and it
+    /// is real**: an already-hollow model shaped like this would be
+    /// silently admitted and re-hollowed downstream, which is exactly the
+    /// wall-destroying, resin-trapping failure this module's own doc
+    /// comment says triage exists to prevent.
+    ///
+    /// Per FU-43 scoping, fixing `triage_admitted`'s consumer path for this
+    /// is a separate, reviewed change and is deliberately **not** made
+    /// here; this test only pins down today's actual (wrong) behavior so
+    /// that change has a fixture to work from.
+    #[test]
+    fn triage_accepts_a_pre_hollowed_octahedron_shell_the_containment_fraction_should_refuse() {
+        let (verts, faces) = octahedron_faces(10.0);
+        let mesh = join_centered_box(verts, faces, 2.0);
+        let limits = TriageTopologyLimits::new(
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+        );
+        let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, limits).expect("admits");
+        let result = triage_components(admission, WeldPolicy::ExactBits);
+        assert!(
+            result.is_ok(),
+            "characterizes today's actual behavior: this closed mesh is a genuine sealed \
+             cavity that intended half-ray semantics would refuse as PreHollowed; see this \
+             test's doc comment for the containment-fraction arithmetic"
+        );
+    }
 }
