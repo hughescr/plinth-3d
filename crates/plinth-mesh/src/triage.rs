@@ -1128,8 +1128,19 @@ fn ray_triangle_distance(
     if !distance.is_finite() {
         return Err(TriageError::RayArithmetic);
     }
-    if distance <= 1e-9 {
+    // Half-ray semantics: only a genuine near-origin degeneracy is
+    // `Ambiguous`. The band is symmetric around zero and reuses this
+    // function's own existing magnitude (previously applied, wrongly, as a
+    // one-sided `distance <= 1e-9`) so a hit within 1e-9 mm of the origin on
+    // either side still reads as too close to trust the sign of, but a real
+    // intersection strictly outside that band is a definite forward `Hit` or
+    // a definite behind-the-origin `Miss` -- not a coin flip.
+    const ORIGIN_EPS: f64 = 1e-9;
+    if distance.abs() <= ORIGIN_EPS {
         return Ok(RayHit::Ambiguous);
+    }
+    if distance < 0.0 {
+        return Ok(RayHit::Miss);
     }
     const EDGE_EPS: f64 = 1e-10;
     if u <= EDGE_EPS || v <= EDGE_EPS || 1.0 - u - v <= EDGE_EPS {
@@ -1403,32 +1414,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // FU-43 characterization: the local ray classifier's half-ray semantics.
+    // FU-43: the local ray classifier's half-ray semantics.
     //
-    // `ray_triangle_distance` (this file) treats *every* `distance <= 1e-9`
-    // as `RayHit::Ambiguous` -- not only genuine near-origin degeneracies,
-    // but any real intersection strictly behind the ray origin, however far
-    // behind. `ContainmentClassifier::classify_ray` then short-circuits on
-    // the first `Ambiguous` face it meets, discarding every hit already
-    // gathered (including a genuine forward crossing) and reporting the
-    // whole ray `Ambiguous`.
+    // Characterization (commit ee58444) pinned a defect in
+    // `ray_triangle_distance` (this file): it treated *every*
+    // `distance <= 1e-9` as `RayHit::Ambiguous` -- not only genuine
+    // near-origin degeneracies, but any real intersection strictly behind
+    // the ray origin, however far behind. `ContainmentClassifier::
+    // classify_ray` then short-circuited on the first `Ambiguous` face it
+    // met, discarding every hit already gathered (including a genuine
+    // forward crossing) and reporting the whole ray `Ambiguous`.
     //
-    // The three tests below establish, in increasing scope, what that
-    // produces *today*:
+    // The consumer fix (this commit) narrows the guard to a symmetric band,
+    // `|distance| <= 1e-9`, and treats a hit strictly behind the origin
+    // outside that band as a definite `Miss`. The three tests below, now
+    // updated from the ground truth they characterized to the fixed
+    // behavior, establish the fix's effect in increasing scope:
     //   1. one intersection, isolated: a real hit 5 mm behind the origin
-    //      reads `Ambiguous`, not `Miss`.
+    //      reads `Miss`, not `Ambiguous`.
     //   2. a full ray against a real closed shell: a point at a symmetric
     //      octahedron's own centroid -- unambiguously interior material --
-    //      reads `Ambiguous` on all three fixed sampling directions, because
-    //      each direction's forward crossing has a mirror-image face behind
-    //      the origin on the same infinite line.
+    //      now reads `Inside` on all three fixed sampling directions,
+    //      because each direction's mirror-image behind-origin face now
+    //      reads `Miss` instead of pre-empting the real forward crossing.
     //   3. the pipeline's actual verdict: nesting a small box at that same
-    //      centroid, `triage_components` returns `Ok` (accepts the mesh)
-    //      where the geometry is a genuine sealed cavity and the intended
-    //      half-ray semantics would refuse it as `TriageError::PreHollowed`.
-    //      This is a confirmed final-verdict divergence, not only a
+    //      centroid, `triage_components` now returns `Err(TriageError::
+    //      PreHollowed(_))` for the genuine sealed cavity it used to admit
+    //      silently. This is the final-verdict-level fix, not only a
     //      helper-level one -- see that test's doc comment for the exact
-    //      arithmetic and for why this change does not touch the consumer.
+    //      arithmetic.
     //
     // None of this touches `geom_kernel`: that crate's finite-segment
     // negative-epsilon and parity handling is a separate, intentional
@@ -1552,19 +1566,22 @@ mod tests {
             "hand-derived intersection parameter must be -5 (5 mm behind the origin)"
         );
 
-        // Intended half-ray semantics: a ray only tests intersections ahead
-        // of its own origin, so a hit 5 mm behind it is not a crossing at
-        // all and should read `Miss` (or be excluded before ever reaching
-        // this function), the same as a triangle the ray can never reach.
+        // Half-ray semantics: a ray only tests intersections ahead of its
+        // own origin, so a hit 5 mm behind it is not a crossing at all.
         //
-        // Today's actual behavior: the `distance <= 1e-9` guard at line
-        // ~1131 catches this real, far-behind hit exactly as it would catch
-        // a genuine near-origin degeneracy, so it is reported `Ambiguous`.
+        // FROM (pinned by FU-43 characterization, commit ee58444): the
+        // `distance <= 1e-9` guard caught this real, far-behind hit exactly
+        // as it would catch a genuine near-origin degeneracy, so it read
+        // `Ambiguous`.
+        // TO (this fix): `ray_triangle_distance` now only treats
+        // `|distance| <= 1e-9` as a near-origin degeneracy; a hit 5 mm
+        // behind the origin is well outside that band and reads as a
+        // definite `Miss`.
         assert_eq!(
             ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
-            RayHit::Ambiguous,
-            "a real intersection 5 mm behind the ray origin reads Ambiguous today; intended \
-             half-ray semantics would treat it as no crossing (Miss)"
+            RayHit::Miss,
+            "a real intersection 5 mm behind the ray origin is not a crossing; half-ray \
+             semantics read it as Miss"
         );
     }
 
@@ -1590,38 +1607,44 @@ mod tests {
             [0.127_412_352_941_232_4, 0.333_333_333_333_333_3, 1.0],
         ];
         for direction in DIRECTIONS {
-            // Intended half-ray semantics: exactly one forward crossing (the
-            // near face) per direction, an odd count, so each direction
-            // alone would report `Inside`.
+            // Half-ray semantics: exactly one forward crossing (the near
+            // face) per direction, an odd count, so each direction alone
+            // reports `Inside`.
             //
-            // Today's actual behavior: the mirror face's behind-origin hit
-            // is visited in the same `classify_ray` loop as the real
-            // forward crossing, and the first `Ambiguous` face short-
-            // circuits the whole ray before the forward hit's parity can be
-            // used.
+            // FROM (pinned by FU-43 characterization, commit ee58444): the
+            // mirror face's behind-origin hit was visited in the same
+            // `classify_ray` loop as the real forward crossing, and the
+            // first `Ambiguous` face short-circuited the whole ray before
+            // the forward hit's parity could be used.
+            // TO (this fix): the mirror face's hit is strictly behind the
+            // origin, so `ray_triangle_distance` now reports it `Miss`
+            // instead of `Ambiguous`; `classify_ray` never short-circuits,
+            // and the one real forward crossing gives an odd parity count.
             assert_eq!(
                 classifier
                     .classify_ray([0.0, 0.0, 0.0], direction)
                     .expect("finite"),
-                ContainmentClass::Ambiguous,
-                "direction {direction:?}: the mirror face's behind-origin hit pre-empts the \
-                 real forward crossing"
+                ContainmentClass::Inside,
+                "direction {direction:?}: the mirror face's behind-origin hit is now Miss, so \
+                 only the real forward crossing counts"
             );
         }
 
-        // The classifier's own majority rule needs 2 of 3 directions to
-        // agree; with all three individually Ambiguous the vote is 0 Inside
-        // / 0 Outside, so the octahedron's own centroid -- 10 mm from the
-        // nearest face along every axis, unambiguously interior material --
-        // reads Ambiguous rather than Inside.
+        // FROM: the classifier's own majority rule needs 2 of 3 directions
+        // to agree; with all three individually Ambiguous the vote was 0
+        // Inside / 0 Outside, so the octahedron's own centroid -- 10 mm
+        // from the nearest face along every axis, unambiguously interior
+        // material -- read Ambiguous rather than Inside.
+        // TO: all three directions now agree Inside, so the majority vote
+        // is unanimous.
         assert_eq!(
             classifier.classify([0.0, 0.0, 0.0]).expect("finite"),
-            ContainmentClass::Ambiguous,
-            "a point deep inside a closed, watertight shell reads Ambiguous, not Inside"
+            ContainmentClass::Inside,
+            "a point deep inside a closed, watertight shell reads Inside"
         );
     }
 
-    /// Tier 3: the actual triage verdict, and the confirmed divergence.
+    /// Tier 3: the actual triage verdict, and the load-bearing consequence.
     ///
     /// A 2 mm box is nested at the octahedron's centroid. It is provably,
     /// deeply interior: every box corner satisfies `|x| + |y| + |z| <= 3`,
@@ -1631,39 +1654,35 @@ mod tests {
     /// "sealed cavity" shape triage exists to refuse; compare
     /// `triage_batches_bounded_samples_and_refuses_a_pre_hollowed_shell` in
     /// `tests/topology_triage.rs`, the axis-aligned version of this same
-    /// scenario, which the classifier gets right today because an
-    /// axis-aligned box's own bounding-box filter rejects its behind-origin
-    /// faces exactly rather than loosely.
+    /// scenario, which the classifier already got right before this fix
+    /// because an axis-aligned box's own bounding-box filter rejects its
+    /// behind-origin faces exactly rather than loosely.
     ///
     /// The box is 2 mm across (`hollow_shard_max_dim_mm` is 1.0 mm) and does
     /// not touch the octahedron's vertex set, so it cannot be, and is not,
     /// classified as a shard; it reaches the containment/cavity check.
     ///
-    /// Two of the box's eight corners (`[-1,-1,-1]` and `[-1,-1,1]`,
-    /// confirmed by direct probing of `ContainmentClassifier::classify`
-    /// during characterization) land on the same behind-origin-hit failure
-    /// as the two tests above and read `Ambiguous` instead of `Inside`.
+    /// FROM (pinned by FU-43 characterization, commit ee58444): two of the
+    /// box's eight corners (`[-1,-1,-1]` and `[-1,-1,1]`, confirmed by
+    /// direct probing of `ContainmentClassifier::classify` during
+    /// characterization) landed on the behind-origin-hit failure the two
+    /// tests above pin and read `Ambiguous` instead of `Inside`.
     /// `hollow_containment_samples` is 32 but the box only contributes 8
-    /// vertices, so all 8 are sampled, and today's containment fraction is
+    /// vertices, so all 8 are sampled, and the containment fraction was
     /// 6/8 = 0.75 -- under `hollow_containment_min_fraction` (0.9). Because
-    /// the fraction misses the threshold, `triage_components` returns `Ok`:
-    /// it silently accepts the shell.
+    /// the fraction missed the threshold, `triage_components` returned
+    /// `Ok`: it silently accepted the shell.
     ///
-    /// Intended half-ray semantics would count all 8 corners `Inside` (each
-    /// several millimetres clear of both the octahedron's boundary and any
-    /// triangle edge), a fraction of 1.0, and triage would refuse with
+    /// TO (this fix): all 8 corners now read `Inside` (each several
+    /// millimetres clear of both the octahedron's boundary and any triangle
+    /// edge), a fraction of 8/8 = 1.0 >= 0.9, and triage refuses with
     /// `TriageError::PreHollowed` -- the same outcome the axis-aligned
-    /// control case already gets. **This is the final-verdict-level
-    /// divergence FU-43 asked this characterization pass to look for, and it
-    /// is real**: an already-hollow model shaped like this would be
-    /// silently admitted and re-hollowed downstream, which is exactly the
-    /// wall-destroying, resin-trapping failure this module's own doc
-    /// comment says triage exists to prevent.
-    ///
-    /// Per FU-43 scoping, fixing `triage_admitted`'s consumer path for this
-    /// is a separate, reviewed change and is deliberately **not** made
-    /// here; this test only pins down today's actual (wrong) behavior so
-    /// that change has a fixture to work from.
+    /// control case already got. This is the final-verdict-level fix FU-43's
+    /// characterization pass identified: an already-hollow model shaped like
+    /// this is now refused instead of being silently admitted and
+    /// re-hollowed downstream, which is exactly the wall-destroying,
+    /// resin-trapping failure this module's own doc comment says triage
+    /// exists to prevent.
     #[test]
     fn triage_accepts_a_pre_hollowed_octahedron_shell_the_containment_fraction_should_refuse() {
         let (verts, faces) = octahedron_faces(10.0);
@@ -1679,9 +1698,12 @@ mod tests {
         let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, limits).expect("admits");
         let result = triage_components(admission, WeldPolicy::ExactBits);
         assert!(
-            result.is_ok(),
-            "characterizes today's actual behavior: this closed mesh is a genuine sealed \
-             cavity that intended half-ray semantics would refuse as PreHollowed; see this \
+            matches!(
+                &result,
+                Err(TriageError::PreHollowed(refusal)) if refusal.cavity_components().len() == 1
+            ),
+            "this closed mesh is a genuine sealed cavity (containment fraction 8/8 = 1.0 >= \
+             0.9) and half-ray semantics now refuse it as PreHollowed; got {result:?}; see this \
              test's doc comment for the containment-fraction arithmetic"
         );
     }
