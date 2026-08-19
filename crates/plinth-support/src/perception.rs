@@ -6075,6 +6075,16 @@ mod tests {
     ///   not weaken a single refusal.  If a future edit lets the minimum
     ///   reach a large area, this half goes red instead.
     ///
+    /// ORDERING CAVEAT, so the claim above is not read as more than it is:
+    /// in the RED state the binding half aborts this test at its first
+    /// assertion, so the invariance half never executes there.  Its "green
+    /// at both values" was MEASURED by reverting the constant in isolation
+    /// and running it, not observed during a revert of this test.  It also
+    /// holds STRUCTURALLY: `violates_safety_factor` never reads
+    /// `min_radius_mm` at all -- the constant's only behavioural reader is
+    /// the `clamp` in `tip_radius_mm` -- so no value of the minimum can
+    /// move a refusal on an area the minimum does not reach.
+    ///
     /// UNITS: radii here are RADII in mm.  The owner and ChituBox speak
     /// DIAMETER; every radius below is half the diameter he would quote.
     #[test]
