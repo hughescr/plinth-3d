@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::coverage_closure::CoverageScoreShare;
+use crate::coverage_closure::{CoverageClosureGap, CoverageScoreShare};
 use crate::specialized::{
     coverage_key, FrozenSpecializedGateVector, RepairRowId, SpecializedContactPlan,
 };
@@ -385,14 +385,38 @@ pub struct CoverageRepairStep {
 }
 
 /// One route's before/after evidence across a single transaction.
+///
+/// **Both quantities, deliberately.** `failing_*` is the CENSORED verdict set —
+/// what SPEC §4 will refuse the model for — and `uncensored_*` is the task #27
+/// worklist, a superset. §D.2's line "closed island 5's 0.36 mm² patch" is a
+/// statement about the failing area, and it cannot be produced from the
+/// uncensored area alone. The pair is also what makes the patch-splitting move
+/// (§B.5 clause 3) VISIBLE even when it is rejected: a step whose failing area
+/// fell to zero while the uncensored area did not move is a split caught in the
+/// act.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RouteDelta {
     pub island_id: u32,
     pub component_id: u32,
+    /// The CENSORED verdict area on this route, before and after.
+    pub failing_area_before_mm2: f64,
+    pub failing_area_after_mm2: f64,
+    /// The UNCENSORED worklist area on this route, before and after.
     pub uncensored_area_before_mm2: f64,
     pub uncensored_area_after_mm2: f64,
+    /// How many CENSORED verdict patches this route carried, before and after.
+    pub failing_patches_before: usize,
+    pub failing_patches_after: usize,
+    /// How many UNCENSORED worklist patches this route carried, before and
+    /// after. A step that halves one patch into two without covering anything
+    /// moves this and not the area.
     pub patches_before: usize,
     pub patches_after: usize,
+    /// The worst routed-contact gap over this route's UNCENSORED patches, on
+    /// both sides. `None` when the route carried no patch on that side, which
+    /// is a different statement from "the gap was zero" and is recorded as one.
+    pub worst_gap_before: Option<CoverageClosureGap>,
+    pub worst_gap_after: Option<CoverageClosureGap>,
 }
 
 /// **SPEC-A4 §A.8 — the loud per-run report, which is the price of having no

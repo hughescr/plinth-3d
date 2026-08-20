@@ -328,6 +328,23 @@ fn a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered
         !committing.route_deltas.is_empty(),
         "a committed step moved the measurement, so at least one route's evidence must have moved"
     );
+    // §D.1 names FOUR quantity pairs per route and the first landing carried
+    // only two of them, so §D.2's promised sentence — "closed island 5's
+    // 0.36 mm² patch" — could not be produced from the record at all. The
+    // censored side is what says a hole CLOSED.
+    let closed = committing
+        .route_deltas
+        .iter()
+        .find(|delta| delta.failing_area_after_mm2 < delta.failing_area_before_mm2)
+        .expect("the committing step closed a failing patch, and the record must say so");
+    assert!(
+        closed.failing_patches_after < closed.failing_patches_before,
+        "the censored patch count must fall with the censored area: {closed:?}"
+    );
+    assert!(
+        closed.worst_gap_before.is_some(),
+        "a route that carried a patch before the step must carry its worst gap too: {closed:?}"
+    );
     // Ownerless faces travel as EVIDENCE and decide nothing (§C.1). What is
     // asserted is only that they are recorded on both sides.
     assert!(
@@ -493,4 +510,34 @@ fn every_run_reports_its_trials_and_its_wall_time_on_the_sealed_path() {
             "the one operator-visible line must carry {field}: {line}"
         );
     }
+}
+
+/// **Rule N1, through the production door.**
+///
+/// `make_overhang_table` carries ONE worklist route and 1,011 eligible repair
+/// rows, and it seals on its first trial — so every one of the other 1,010 rows
+/// is still ranked and untried when the loop stops. That number is the rule:
+/// the batch loop's `picked >= patches.len()` throttle would leave a handful,
+/// which is how the Rotting Warhorse's single-patch 11.879 mm² island got 8
+/// seats out of 377 and refused with 361 never tried.
+///
+/// The direct revert proof lives on `rank_eligible_candidates`; this is the
+/// same rule read off the shipped controller, so a cap re-added anywhere on the
+/// path — including in `rank_repair_candidates` itself, where the sabotage was
+/// demonstrated — collapses this count and fails here.
+#[test]
+fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
+    let authority = run(
+        make_overhang_table().expect("procedural overhang table"),
+        "make_overhang_table",
+    )
+    .expect("make_overhang_table closes through repair");
+    let report = authority.repair_report().expect("a §A.8 report");
+
+    assert!(
+        report.candidates_remaining > 100,
+        "the ranking must hold every eligible row, measured at 1,011 on this fixture; \
+         {} remaining is a per-patch or per-route cap by another name: {report:?}",
+        report.candidates_remaining
+    );
 }
