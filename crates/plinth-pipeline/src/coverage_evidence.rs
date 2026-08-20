@@ -49,7 +49,22 @@ use crate::{PreWriteGate, SupportedGeometry};
 
 /// The wire schema tag written into every sidecar. Bumped only if the shape
 /// changes in a way an old reader could misparse.
-const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v1";
+///
+/// **v1 -> v2, SPEC-A4 design §G.1 stage 4 and §G.2.** The shape is unchanged;
+/// the MEANING of one field is not. `attempts` is named for the registered
+/// `coverage_repair_max_attempts` bound, and under ruling R6 that bound counts
+/// **committed repair steps**, not passes of a batch loop. A v1 sidecar's
+/// `attempts: 8` says "the loop ran eight times and appended a batch each
+/// time"; a v2 sidecar's `attempts: 0` says "no repair row ever earned its
+/// place". Those are different facts in the same field, which is exactly the
+/// misparse a schema tag exists to prevent — a reader that could not tell them
+/// apart would read a refusal that spent 45 trials as one that never tried.
+///
+/// **The field is not renamed**, at v2 or here. It stays the name of the bound
+/// it counts against, as `CoverageClosureRefusal::attempts` does in
+/// `plinth-support`; renaming it at its four struct sites is a separate,
+/// larger API break and is not in this change.
+const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v2";
 
 /// Whole-mesh face bound above which a render degrades to a bounding-box
 /// silhouette plus the highlighted island faces only, rather than drawing

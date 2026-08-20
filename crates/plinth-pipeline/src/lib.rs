@@ -506,6 +506,25 @@ pub enum ModelPreparationOutcome {
         /// existed keeps deserializing.
         #[serde(default)]
         contacts: Box<ContactAttestationDisclosure>,
+        /// **SPEC-A4 §A.8's third destination — what the one-winner coverage
+        /// repair controller spent to produce this artifact.** Trials,
+        /// commits, the rejection histogram by class, the per-trial wall-time
+        /// order statistics, and rule N4's demotion pair.
+        ///
+        /// It is here because ruling R10 deleted the failed-tries cap and put
+        /// loud reporting in its place. A cost that only ever reaches stderr
+        /// is a cost nobody can compare between two runs, and the trade R10
+        /// made would not hold. `trials=0 commits=0` is the ordinary model
+        /// that covered on its baseline layout and paid nothing.
+        ///
+        /// `None` means the sealed run kept no repair ledger. Since §G.1
+        /// stage 4 no production path produces that; `default` for the same
+        /// reason the fields above are, so a report frozen before this field
+        /// existed keeps deserializing. Boxed for the same reason `contacts`
+        /// is: inline it is over a hundred bytes that every other variant of
+        /// this enum has to be moved with.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
     },
     Stopped {
         after: StageStop,
@@ -1433,6 +1452,7 @@ mod tests {
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
+                        repair_report: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1507,6 +1527,7 @@ mod tests {
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
+                        repair_report: None,
                     },
                 ),
                 model("refused", refused),
@@ -1906,7 +1927,7 @@ mod tests {
             // sealed run under either field, and production answers that with
             // its reserve solid rather than with a different support plan.
             let outcome = |field: &[f64]| -> Result<u64, String> {
-                let authority = plinth_support::run_support(
+                let authority = plinth_support::run_support_transactional(
                     prepared_hollow(&mesh, baseline_report),
                     support.clone(),
                     limits.input(&layers, field, &[]),

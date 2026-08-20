@@ -316,14 +316,14 @@ pub fn repair_step_outcome(
 /// rows and moved the area by 0.4 mm² could not say which row did it, or that
 /// 265 rows did nothing.
 ///
-/// **Deliberately NOT `Serialize` in this lane, and it is a disclosed
-/// deviation from §D.2.** Putting the stream on the wire is the FU-57 sidecar
-/// format change §G.1 sequences at stage 4 — the schema string moves to
-/// `plinth.coverage-refusal.v2`, `attempts` is re-meant at five struct sites,
-/// and `RepairRowId` would have to gain a public wire encoding it has never
-/// had. All of that must be re-frozen against measured corpus values, which is
-/// a model-run obligation, not a code one. The stream is produced, ledgered and
-/// PRINTED here; persisting it travels with the format change.
+/// **Deliberately NOT `Serialize`, and it is a disclosed deviation from
+/// §D.2.** Stage 4 landed the half of the FU-57 format change the door forced
+/// — the schema string is `plinth.coverage-refusal.v2` and `attempts` now
+/// carries committed steps — but putting this STREAM on the wire needs
+/// `RepairRowId` to gain a public wire encoding it has never had, and needs the
+/// resulting payload re-frozen against measured corpus values. That is a
+/// model-run obligation, not a code one. The stream is produced, ledgered,
+/// PRINTED, and exposed on the sealed authority; persisting it is still owed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoverageRepairStep {
     /// Every transaction attempted, committed or not, from 1.

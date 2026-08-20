@@ -56,7 +56,7 @@ use plinth_hollow::{
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
-use plinth_support::{run_support, SupportRequest, SupportRunError};
+use plinth_support::{run_support_transactional, SupportRequest, SupportRunError};
 
 use crate::coverage_evidence::{self, RenderMesh};
 use crate::{
@@ -666,6 +666,18 @@ pub struct ChainOutcome {
     /// owning contact, carried out to the run report rather than left inside
     /// the support crate where nothing could print it.
     pub ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
+    /// **SPEC-A4 §A.8's third destination, and §G.1 stage 4's pipeline
+    /// wiring.** What the one-winner coverage-repair controller spent on this
+    /// model: trials, commits, the rejection histogram by class, the wall time,
+    /// and rule N4's demotion pair. Carried out for the same reason as the
+    /// field above — the trade ruling R10 made (no failed-tries cap, loud
+    /// reporting instead) only holds while the cost reaches a reader.
+    ///
+    /// **`Some` on every model the production door seals**, including one that
+    /// needed no repair at all, whose report reads `trials=0 commits=0`. That
+    /// is the marker: `None` here means the sealed run came from a controller
+    /// that keeps no repair ledger, which since stage 4 is no production path.
+    pub repair_report: Option<plinth_support::RepairRunReport>,
     /// PR-8 grow-to-attest: the contacts this run refused with the load each
     /// abandons, and the contacts whose tips it grew to keep them. Carried out
     /// to the run report for the same reason as the field above -- a support
@@ -1605,7 +1617,7 @@ pub fn seal_and_emit(
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
     // Read here, beside the disposition, because the hollowed model is the
-    // last place the hollow stage's own report is in hand — `run_support`
+    // last place the hollow stage's own report is in hand — the sealed run
     // consumes it a few lines below and the report is gone with it. FU-37's
     // requested wall and FU-55's realized wall come off the same report for
     // exactly that reason: leaving them there is how a landed, ruled
@@ -1679,13 +1691,21 @@ pub fn seal_and_emit(
     );
 
     // FU-57: a coverage-closure refusal (FU-56) is only knowable from
-    // `run_support`'s `Err`, by which point the consumed `HollowedModel` and
-    // its mesh are gone. The render evidence needs the mesh, so this is the
-    // last point it can be captured -- see [`RenderMesh`]'s own doc for why
-    // this is a real, documented per-model cost rather than a lazy one.
+    // `run_support_transactional`'s `Err`, by which point the consumed
+    // `HollowedModel` and its mesh are gone. The render evidence needs the
+    // mesh, so this is the last point it can be captured -- see
+    // [`RenderMesh`]'s own doc for why this is a real, documented per-model
+    // cost rather than a lazy one.
     let render_mesh = RenderMesh::from_mesh(hollowed.mesh());
 
-    let authority = run_support(hollowed, policy.support.clone(), input).map_err(|source| {
+    // **SPEC-A4 design §G.1 stage 4 — the production door.** This is the one
+    // production call site of the sealed support run, and from here it is the
+    // one-winner transactional controller: one repair-pool row per step, taken
+    // all the way through the pipeline and either committed or rolled back,
+    // with the §A.8 report carried out below. The batch loop
+    // (`plinth_support::run_support`) is no longer reachable from production.
+    let sealed = run_support_transactional(hollowed, policy.support.clone(), input);
+    let authority = sealed.map_err(|source| {
         // FU-57: only the coverage-closure refusal carries evidence this row
         // persists. Every other `SupportRunError` is a stage failure with
         // nothing coverage-shaped to rank.
@@ -1809,6 +1829,7 @@ pub fn seal_and_emit(
         hollow_disposition,
         supported_geometry,
         ownerless_islands: gated.ownerless_islands,
+        repair_report: gated.repair_report,
         abandoned_contacts: gated.abandoned_contacts,
         grown_contact_tips: gated.grown_contact_tips,
         routed_contacts: gated.routed_contacts,
@@ -1848,6 +1869,9 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // Task #49: the artifact emitted, and this is the list of islands
         // nothing is charged to carry under it.
         ownerless_islands: outcome.ownerless_islands,
+        // SPEC-A4 §A.8: the artifact emitted, and this is what the repair
+        // controller spent to get it there.
+        repair_report: outcome.repair_report.map(Box::new),
         // PR-8: the artifact emitted, and these are the loads it does not
         // carry and the tips it grew in order to carry the rest.
         contacts: Box::new(crate::ContactAttestationDisclosure {
@@ -2385,6 +2409,18 @@ mod tests {
             filled_back_chambers_ml: Vec::new(),
             supported_geometry: SupportedGeometry::HollowStageDecidedSolid,
             ownerless_islands: vec![disclosure, islandless],
+            // SPEC-A4 §A.8: what the one-winner controller spent. Distinct,
+            // non-default numbers so a field quietly replaced by `None` or by
+            // `Default::default()` on the hop below is visible rather than
+            // indistinguishable from a model that paid nothing.
+            repair_report: Some(plinth_support::RepairRunReport {
+                trials: 45,
+                commits: 3,
+                candidates_remaining: 1_008,
+                diversity_demotions: 44,
+                diversity_demotions_tried: 44,
+                ..plinth_support::RepairRunReport::default()
+            }),
             abandoned_contacts: vec![abandoned.clone()],
             grown_contact_tips: vec![grown.clone()],
             routed_contacts: 0,
@@ -2404,11 +2440,28 @@ mod tests {
         let ModelPreparationOutcome::Artifact {
             ownerless_islands,
             contacts,
+            repair_report,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // SPEC-A4 §A.8's third destination. Ruling R10 traded the failed-tries
+        // cap for loud reporting, and a report that is dropped on this hop is
+        // exactly the silence the ruling refused. Asserted as the whole value,
+        // so a hop that kept `trials` and forgot the diversity pair fails here.
+        assert_eq!(
+            repair_report.as_deref(),
+            Some(&plinth_support::RepairRunReport {
+                trials: 45,
+                commits: 3,
+                candidates_remaining: 1_008,
+                diversity_demotions: 44,
+                diversity_demotions_tried: 44,
+                ..plinth_support::RepairRunReport::default()
+            }),
+            "what the repair controller spent must reach the run report unchanged"
+        );
         // PR-8. The refused contact's ABANDONED LOAD and the ladder that failed
         // to save it must both survive the hop: an operator who cannot see the
         // 2.98 mm² cannot tell a refused support from one that vanished.

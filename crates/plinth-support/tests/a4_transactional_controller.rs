@@ -13,7 +13,7 @@
 //! | `toed_slab…zero_trials…` | design §E.5 case 6 and §G.3: a model that closes at attempt 0 never enters a transaction, so its digest CANNOT move under this change. The regression pin for the whole controller. |
 //! | `overhang_table…three_clauses…` | design §G.2's strengthened assertion: every committed step proved all three accept clauses, and the proof is re-run through the production predicate rather than restated here. |
 //! | `overhang_table…attribution…` | design §D.1: one step, one row, one delta. The batch loop could not produce this at all. |
-//! | `raking_blade…measured_class…` | design §E.1 and rulings R7/R14: the refusal names a MEASURED defect class per route, never a distance claim, and it names the same island at the same area the batch controller does. |
+//! | `raking_blade…measured_class…` | design §E.1 and rulings R7/R14: the refusal names a MEASURED defect class per route, never a distance claim, and it names the same island at the same area the batch controller does. The class is pinned EXACTLY — see the test's own note on why "one of six" proved nothing. |
 //! | `every_run_reports…` | design §A.8 and ruling R10: no failed-tries cap, so the trial count and the wall time are LOUD on every path. |
 
 use std::path::PathBuf;
@@ -382,21 +382,27 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
     };
 
     // Ruling R6: the field named for the registered bound now carries what that
-    // bound bounds — COMMITTED steps.
-    assert!(
-        refusal.attempts <= 8,
-        "the registered bound counts committed steps and its value is unmoved at 8: {}",
-        refusal.attempts
+    // bound bounds — COMMITTED steps. **Measured on this fixture, 2026-08-20,
+    // at the stage-4 door swap: ZERO.** Not "at most 8" — this model spends 45
+    // trials and not one row earns its place, which is a different statement
+    // from "it ran out of budget" and the two must not be confusable here.
+    assert_eq!(
+        refusal.attempts, 0,
+        "the raking blade commits nothing: every one of its trials is rolled back, so the field \
+         the registered bound counts must read zero rather than the bound"
     );
-    assert!(
-        matches!(
-            refusal.reason,
-            CoverageClosureReason::NoImprovingRepair { .. }
-                | CoverageClosureReason::NothingToTry
-                | CoverageClosureReason::CommitBudgetExhausted { .. }
-        ),
-        "the stop reason must be one of §B.7's measured ends, not a retired counter name: {:?}",
-        refusal.reason
+    // **The stop reason is pinned exactly, not to a set of three.** A refusal
+    // that stopped for a different measured end is a different fact about this
+    // model and must be re-derived, not absorbed by an `|`.
+    assert_eq!(
+        refusal.reason,
+        CoverageClosureReason::NoImprovingRepair {
+            candidates_tried: 45,
+            best_remaining_score_mm2: 0.0,
+        },
+        "measured 2026-08-20: the blade's search ends because every remaining candidate scores \
+         0.00 mm² against the uncovered set (§B.3's guard), after 45 trials — not because a \
+         budget ran out and not because there was nothing to try"
     );
 
     let censor = plinth_support::registered_coverage_censor_area_mm2()
@@ -428,30 +434,33 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         .outcome
         .clone()
         .expect("§E.1: every still-uncovered route reports its own measured outcome");
-    match &outcome {
-        RouteRepairOutcome::Blocked(cause) => match cause {
-            // Each of these IS a counter the run kept. `NoCandidateCoversAnything`
-            // carries a distance, and that is allowed and deliberate: the class
-            // is decided by the SCORE being 0.00 mm², and the distance rides
-            // along as context. A distance in a measured class is not a
-            // distance claim.
-            BlockedCause::PoolExhausted { .. }
-            | BlockedCause::NoCandidateCoversAnything { .. }
-            | BlockedCause::NoPoolRows
-            | BlockedCause::ClearanceMaskUnsatisfiable { .. }
-            | BlockedCause::StubReentry { .. } => {}
-        },
-        RouteRepairOutcome::TriedNoImprovement { rows_tried, .. } => {
-            assert!(
-                *rows_tried > 0,
-                "'tried and none improved' must have actually tried something"
-            );
-        }
-        RouteRepairOutcome::NotReached { .. } => panic!(
-            "under ruling R10 there is no failed-tries cap, so this route cannot end the run \
-             un-reached unless the commit bound stopped the search first: {outcome:?}"
-        ),
-    }
+
+    // **The exact class, not one of six.** The version of this assertion that
+    // shipped with the Core stage accepted any `Blocked` cause and any
+    // `TriedNoImprovement`, which is five of the six outcomes — it proved that
+    // the island reports *something* measured, and would have stayed green if
+    // the class silently changed from "the pool ran out" to "task #51 is
+    // blocking it". Those are different instructions to whoever reads the
+    // refusal, so the class is pinned, with the counters that decided it.
+    //
+    // **Measured 2026-08-20**, at the §G.1 stage-4 door swap: island 5's route
+    // holds 33 repair-pool rows; 2 are already occupied by contacts in the
+    // accepted plan; the remaining 31 were each tried and each rolled back, so
+    // nothing eligible is left to try. That is `PoolExhausted` by measurement —
+    // it is not `NoCandidateCoversAnything` (which would mean nothing scored
+    // above 0.00 mm² before anything was tried), and it is neither of the two
+    // defect classes, whose fixtures live in `runner.rs`'s own `mod tests`
+    // because no procedural geometry reproduces task #51 or task #52.
+    assert_eq!(
+        outcome,
+        RouteRepairOutcome::Blocked(BlockedCause::PoolExhausted {
+            pool_rows: 33,
+            occupied: 2,
+            ledgered: 31,
+        }),
+        "the blade's refusing island reports the class its own counters measured; a different \
+         class here is a different diagnosis and has to be re-derived rather than re-accepted"
+    );
 
     let report = refusal
         .repair

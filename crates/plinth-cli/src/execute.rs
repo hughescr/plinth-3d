@@ -230,6 +230,7 @@ fn print_model(model: &ModelPreparationReport) {
             savings_shortfall,
             ownerless_islands,
             contacts,
+            repair_report,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -244,6 +245,19 @@ fn print_model(model: &ModelPreparationReport) {
             // exactly like the intended one.
             println!("  geometry  {}", describe(geometry));
             println!("  hollow disposition  {hollow_disposition:?}");
+            // SPEC-A4 §A.8's third destination, and the reason ruling R10 was
+            // allowed to delete the failed-tries cap: what the one-winner
+            // coverage-repair controller SPENT to produce this artifact.
+            //
+            // Printed unconditionally, and deliberately not behind a verbosity
+            // switch. R10 traded the cap for visibility; a cost printed only
+            // when someone asks for it is a cost that is hidden, and the trade
+            // would not hold. `trials=0 commits=0` is the ordinary model that
+            // covered on its baseline layout and paid nothing, and saying so
+            // is what makes the expensive model legible beside it.
+            if let Some(repair) = repair_report {
+                println!("  coverage repair  {}", repair.summary_line());
+            }
             // FU-37 and FU-55, on the same line: what the run asked the shell
             // to leave, and what the engine measured it actually left. Two
             // runs at different `--wall-mm` used to print identically; this

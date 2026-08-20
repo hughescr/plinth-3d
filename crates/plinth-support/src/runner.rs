@@ -1122,8 +1122,26 @@ fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
     let _ = (stage, error);
 }
 
-/// Run the sealed preparation pipeline through the coverage-closure
+/// Run the sealed preparation pipeline through the BATCH coverage-closure
 /// controller (FU-56) and return only its final authority.
+///
+/// **NOT A PRODUCTION DOOR ANY MORE — SPEC-A4 design §G.1 stage 4.** The one
+/// production call site, `plinth_pipeline::prepare::seal_and_emit`, now calls
+/// [`run_support_transactional`]. This function is retained as the batch
+/// comparison loop the frozen fixtures in
+/// `plinth-support/tests/support_runner_integration.rs`,
+/// `plinth-verify/tests/coverage_gate.rs` and
+/// `plinth-support/examples/embed_incidence_census.rs` still measure against.
+///
+/// **What is still owed before it can be deleted**, so nobody reads its
+/// survival as a decision that it stays: a deliberate corpus-wide digest
+/// re-freeze **with the measurement beside it** (§G.3), and the migration of
+/// the frozen fixtures listed above onto the new vocabulary. Design §M.4
+/// records the re-freeze as a corpus-run obligation, not a code one, so the
+/// deletion waits on a measured corpus run rather than on an opinion. The
+/// FU-57 sidecar schema string has already moved to
+/// `plinth.coverage-refusal.v2` with the door, because the wire meaning of
+/// `attempts` changed the moment production started producing it.
 ///
 /// **The controller.** `prepare_support_context` builds the mesh/topology/
 /// `NativeSurface`/generic/baseline-regular authority ONCE. Each attempt then
@@ -2645,6 +2663,56 @@ fn refuse(
     }))
 }
 
+/// **SPEC-A4 §E.1's two MEASURED defect classes, decided from one route's own
+/// search record and nothing else.**
+///
+/// These two `return`s are the only construction sites of
+/// [`crate::coverage_closure::BlockedCause::ClearanceMaskUnsatisfiable`] (task
+/// #51) and [`crate::coverage_closure::BlockedCause::StubReentry`] (task #52)
+/// in the workspace, and they are split out of [`route_outcome`] so they can be
+/// PROVEN. Reaching them through the loop needs geometry that reproduces #51 or
+/// #52 — real minis do, no procedural fixture does, and a class that decides
+/// how a refusal reads must not wait on a defect being reproducible before
+/// anybody can pin which class it names. Everything the decision reads is in the
+/// two arguments, so `mod tests` builds the record that
+/// [`record_disposition`] would build from a run's own
+/// [`TrialContactDisposition`] values and asserts WHICH class comes back.
+///
+/// **A class is claimed only when EVERY trial the route spent landed in it.**
+/// `None` means the route's trials did not all land in one class — including
+/// the route that spent no trial at all, and the quarantine whose re-entry
+/// depth was never measured — and the caller then reports the search outcome
+/// rather than picking a favourite. Splitting this out does not move that rule:
+/// the two equality tests below are the ones that were inline, unchanged.
+fn measured_defect_class(
+    record: &RouteSearchRecord,
+    scales: BlockedCauseScales,
+) -> Option<crate::coverage_closure::BlockedCause> {
+    use crate::coverage_closure::BlockedCause;
+
+    if record.rows_tried == 0 {
+        return None;
+    }
+    if u32::try_from(record.rows_tried).unwrap_or(u32::MAX) == record.clearance_refused_terminals {
+        return Some(BlockedCause::ClearanceMaskUnsatisfiable {
+            terminals: record.clearance_refused_terminals,
+            standoff_mm: scales.standoff_mm,
+        });
+    }
+    if record.stub_reentry_depths_mm.len() == record.rows_tried {
+        let mut depths = record.stub_reentry_depths_mm.clone();
+        depths.sort_by(f64::total_cmp);
+        return Some(BlockedCause::StubReentry {
+            terminals_quarantined: u32::try_from(depths.len()).unwrap_or(u32::MAX),
+            depth_min_mm: depths[0],
+            depth_median_mm: depths[depths.len() / 2],
+            depth_max_mm: depths[depths.len() - 1],
+            allowance_mm: scales.allowance_mm,
+        });
+    }
+    None
+}
+
 /// **SPEC-A4 §E.1, rulings R7 and R14 — why THIS route is still uncovered.**
 ///
 /// Every branch reads a counter this run already kept. None of them is a
@@ -2690,29 +2758,11 @@ fn route_outcome(
         .count();
     let record = route_records.get(&key).cloned().unwrap_or_default();
 
-    // The two measured defect classes, and each is claimed only when EVERY
-    // trial this route spent landed in it. A route that mixed causes reports
-    // the search outcome instead of picking a favourite.
-    if record.rows_tried > 0 {
-        if u32::try_from(record.rows_tried).unwrap_or(u32::MAX)
-            == record.clearance_refused_terminals
-        {
-            return RouteRepairOutcome::Blocked(BlockedCause::ClearanceMaskUnsatisfiable {
-                terminals: record.clearance_refused_terminals,
-                standoff_mm: scales.standoff_mm,
-            });
-        }
-        if record.stub_reentry_depths_mm.len() == record.rows_tried {
-            let mut depths = record.stub_reentry_depths_mm.clone();
-            depths.sort_by(f64::total_cmp);
-            return RouteRepairOutcome::Blocked(BlockedCause::StubReentry {
-                terminals_quarantined: u32::try_from(depths.len()).unwrap_or(u32::MAX),
-                depth_min_mm: depths[0],
-                depth_median_mm: depths[depths.len() / 2],
-                depth_max_mm: depths[depths.len() - 1],
-                allowance_mm: scales.allowance_mm,
-            });
-        }
+    // The two measured defect classes, each claimed only when EVERY trial this
+    // route spent landed in it. A route that mixed causes reports the search
+    // outcome instead of picking a favourite.
+    if let Some(cause) = measured_defect_class(&record, scales) {
+        return RouteRepairOutcome::Blocked(cause);
     }
 
     // The zero-score class. It IS a measurement — the score — and the distance
@@ -10852,6 +10902,231 @@ mod tests {
         assert_eq!(
             delta.worst_gap_after,
             Some(crate::coverage_closure::CoverageClosureGap::Finite(0.4))
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // SPEC-A4 §E.1 — the two MEASURED defect classes, each pinned to the exact
+    // class it names.
+    //
+    // `ClearanceMaskUnsatisfiable` (task #51) and `StubReentry` (task #52) had
+    // no fixture at all: their construction sites were reachable only through a
+    // model whose geometry reproduces #51 or #52, and no procedural fixture
+    // does. A refusal's class is what a reader acts on — "#51 is blocking this
+    // island" is a different instruction from "the pool ran out" — so the class
+    // is pinned here from the same per-trial evidence the loop folds, rather
+    // than left to the day a mini reproduces the defect.
+    //
+    // The chain under test is the production one end to end minus the CCO:
+    // `TrialContactDisposition` (what the finalized transcript said the trial's
+    // OWN appended contact did) -> `record_disposition` -> `RouteSearchRecord`
+    // -> `measured_defect_class`. Nothing below re-implements the rule; the
+    // rule is called.
+    // ---------------------------------------------------------------------
+
+    /// The route key every case below uses. It is the raking blade's refusing
+    /// island, so the two files talk about the same shape of thing.
+    const CLASS_ROUTE: (u32, u32) = (5, 1);
+
+    /// Fold a run's per-trial dispositions exactly as the loop folds them: the
+    /// loop counts EVERY trial it spends — `rows_tried` is incremented before
+    /// the stage chain runs — and then, only for a trial that reached a lowered
+    /// run, records what the cadence did with that trial's own contact. A
+    /// `None` here is a trial that never got that far (a stage refusal), which
+    /// is exactly what the production path passes.
+    fn folded_route_record(dispositions: &[Option<TrialContactDisposition>]) -> RouteSearchRecord {
+        let mut records: BTreeMap<(u32, u32), RouteSearchRecord> = BTreeMap::new();
+        for disposition in dispositions {
+            records.entry(CLASS_ROUTE).or_default().rows_tried += 1;
+            record_disposition(&mut records, CLASS_ROUTE, *disposition);
+        }
+        records.remove(&CLASS_ROUTE).unwrap_or_default()
+    }
+
+    fn clearance_refused() -> Option<TrialContactDisposition> {
+        Some(TrialContactDisposition::UnroutedNoWinner {
+            every_feasible_arm_refused_by_clearance: true,
+        })
+    }
+
+    fn quarantined_at(depth_mm: f64) -> Option<TrialContactDisposition> {
+        Some(TrialContactDisposition::Quarantined {
+            remaining_inside_axis_mm: Some(depth_mm),
+        })
+    }
+
+    /// **Task #51's class, named.** Every trial this route spent ended with its
+    /// contact unrouted because every feasible arm the router proposed was
+    /// refused by the clearance standoff. The route reports
+    /// `ClearanceMaskUnsatisfiable` and nothing else, it carries the count of
+    /// terminals that were refused, and it carries the REGISTERED standoff it
+    /// was measured against rather than a restated number.
+    #[test]
+    fn a_route_whose_every_trial_was_clearance_refused_reports_task_51s_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+        let record = folded_route_record(&[clearance_refused(); 3]);
+        assert_eq!(record.rows_tried, 3);
+
+        assert_eq!(
+            measured_defect_class(&record, scales),
+            Some(
+                crate::coverage_closure::BlockedCause::ClearanceMaskUnsatisfiable {
+                    terminals: 3,
+                    standoff_mm: scales.standoff_mm,
+                }
+            ),
+            "three trials, three clearance refusals: this island reports task #51's class \
+             exactly, not 'one of the six'"
+        );
+        assert!(
+            scales.standoff_mm > 0.0,
+            "a class carrying a zero standoff would be carrying a default, not a registered \
+             scale: {scales:?}"
+        );
+    }
+
+    /// **Task #52's class, named — and its three depths are the sorted
+    /// order statistics, not the arrival order.** The depths are fed out of
+    /// order on purpose: a class that reported them as they arrived would pass
+    /// a same-order fixture and mislabel every real one.
+    #[test]
+    fn a_route_whose_every_trial_was_quarantined_reports_task_52s_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+        let record = folded_route_record(&[
+            quarantined_at(0.90),
+            quarantined_at(0.20),
+            quarantined_at(0.50),
+        ]);
+        assert_eq!(record.rows_tried, 3);
+
+        assert_eq!(
+            measured_defect_class(&record, scales),
+            Some(crate::coverage_closure::BlockedCause::StubReentry {
+                terminals_quarantined: 3,
+                depth_min_mm: 0.20,
+                depth_median_mm: 0.50,
+                depth_max_mm: 0.90,
+                allowance_mm: scales.allowance_mm,
+            }),
+            "three trials, three measured re-entry depths: this island reports task #52's class \
+             exactly, with the depths ordered smallest / median / largest"
+        );
+        assert!(
+            scales.allowance_mm > 0.0,
+            "the allowance the depths are read against must be the registered one: {scales:?}"
+        );
+    }
+
+    /// **A route that mixed causes reports NO defect class.** One clearance
+    /// refusal and one quarantine is not "mostly #51": neither cause accounts
+    /// for the whole search, so the route falls through to the search outcome
+    /// the caller computes from the pool. Without this, the first `if` would
+    /// happily claim #51 on a route where it explained half the trials.
+    #[test]
+    fn a_route_that_mixed_causes_claims_neither_defect_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+        let record = folded_route_record(&[clearance_refused(), quarantined_at(0.30)]);
+        assert_eq!(
+            (record.rows_tried, record.clearance_refused_terminals),
+            (2, 1)
+        );
+        assert_eq!(record.stub_reentry_depths_mm.len(), 1);
+
+        assert_eq!(
+            measured_defect_class(&record, scales),
+            None,
+            "two trials, two different causes: neither class may be claimed, because neither \
+             one is what stopped this route"
+        );
+    }
+
+    /// **A quarantine whose re-entry depth was never measured is not task
+    /// #52.** `trial_contact_disposition` returns `Quarantined { None }` when
+    /// the initial build's condemned ledger holds no row for that terminal —
+    /// the contact was quarantined for something other than stub re-entry.
+    /// Naming #52 there would be inventing a cause, and the depths the class
+    /// carries would have nothing behind them.
+    #[test]
+    fn a_quarantine_with_no_measured_depth_does_not_become_task_52s_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+        let record = folded_route_record(&[
+            Some(TrialContactDisposition::Quarantined {
+                remaining_inside_axis_mm: None,
+            }),
+            Some(TrialContactDisposition::Quarantined {
+                remaining_inside_axis_mm: None,
+            }),
+        ]);
+        assert_eq!(record.rows_tried, 2);
+        assert!(
+            record.stub_reentry_depths_mm.is_empty(),
+            "a quarantine with no condemned-stub row records no depth"
+        );
+
+        assert_eq!(
+            measured_defect_class(&record, scales),
+            None,
+            "these contacts were quarantined for a reason this run did not measure; #52 is a \
+             claim about stub-axis re-entry and there is no re-entry depth here to make it with"
+        );
+    }
+
+    /// **Trials that never reached a lowered run claim nothing either**, and
+    /// neither does a route that spent no trial at all. Both are `rows_tried`
+    /// without dispositions, and both must fall through — a route the search
+    /// never reached has no defect to report.
+    #[test]
+    fn trials_without_a_disposition_claim_no_defect_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+
+        let untried = folded_route_record(&[]);
+        assert_eq!(untried.rows_tried, 0);
+        assert_eq!(
+            measured_defect_class(&untried, scales),
+            None,
+            "a route the search never spent a trial on cannot report a measured defect"
+        );
+
+        // A stage refusal: the trial was spent, but the chain never produced a
+        // cadence to read a disposition off.
+        let stage_refused = folded_route_record(&[None, None]);
+        assert_eq!(stage_refused.rows_tried, 2);
+        assert_eq!(
+            measured_defect_class(&stage_refused, scales),
+            None,
+            "two trials refused by a stage say nothing about clearance or stub re-entry"
+        );
+
+        // And the routed trial that simply did not improve is not a defect
+        // class either — it is the search outcome.
+        let routed = folded_route_record(&[Some(TrialContactDisposition::Routed)]);
+        assert_eq!(
+            measured_defect_class(&routed, scales),
+            None,
+            "a contact that ROUTED and did not improve coverage is not blocked by #51 or #52"
+        );
+    }
+
+    /// **The `UnroutedNoWinner` that was refused for some OTHER reason is not
+    /// task #51.** The disposition carries the distinction as a bool, and the
+    /// class may be claimed only from the `true` half — otherwise every
+    /// no-winner terminal in the workspace would be reported as a clearance
+    /// mask defect and #51's own instrument would be worthless.
+    #[test]
+    fn an_unrouted_terminal_refused_for_another_reason_is_not_task_51s_class() {
+        let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
+        let record = folded_route_record(&[Some(TrialContactDisposition::UnroutedNoWinner {
+            every_feasible_arm_refused_by_clearance: false,
+        })]);
+        assert_eq!(
+            (record.rows_tried, record.clearance_refused_terminals),
+            (1, 0)
+        );
+
+        assert_eq!(
+            measured_defect_class(&record, scales),
+            None,
+            "no winner for some other reason is not the clearance mask being unsatisfiable"
         );
     }
 }

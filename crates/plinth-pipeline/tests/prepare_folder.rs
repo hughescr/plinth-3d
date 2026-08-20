@@ -317,6 +317,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         filled_back_chambers_ml,
         ownerless_islands,
         contacts,
+        repair_report,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -325,6 +326,20 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         );
     };
     assert_eq!(emit.artifact_path, artifact);
+    // SPEC-A4 §G.1 stage 4. The folder executor's own door reaches the
+    // one-winner transactional controller, so every artifact it produces states
+    // what the repair controller spent — `trials=0 commits=0` for a model that
+    // covered on its baseline layout. `None` is the batch loop and nothing
+    // else, which makes this the second, independent revert-proof beside
+    // `tests/a4_production_door.rs`.
+    let repair = repair_report.as_ref().expect(
+        "the production door reports what coverage repair cost; `None` means `seal_and_emit` \
+         is calling `run_support` again",
+    );
+    assert!(
+        repair.trials >= repair.commits,
+        "every commit is a trial: {repair:?}"
+    );
     // Task #49. This fixture's every island keeps a routed contact, so the
     // accepted contact set charges no face to nobody and the disclosure is
     // empty. Asserted rather than ignored: an empty list here is the claim
@@ -684,11 +699,21 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
         evidence.source,
         plinth_pipeline::EvidenceSource::CoverageClosureController
     );
-    // 8, the registered `coverage_repair_max_attempts` bound, fully exhausted.
-    // (It was 5 while this test ran the doubly-decimated `.prepped.stl`, which
-    // stopped early on `NoEligibleRepairRows`; the procedural fixture has 14
-    // eligible rows for its island and burns every attempt on them.)
-    assert_eq!(evidence.attempts, Some(8));
+    // **Re-measured 2026-08-20 by SPEC-A4 §G.1 stage 4, from 8 to 0, and the
+    // number means something different now.** Under the batch loop this field
+    // counted passes of the loop and read 8 — the registered
+    // `coverage_repair_max_attempts` bound, fully exhausted, each pass having
+    // appended a whole batch of rows whether or not any of them helped. Under
+    // ruling R6 the same bound counts COMMITTED steps, and this model commits
+    // nothing: it spends 45 one-row transactions and rolls back every one, so
+    // the honest reading of a field named for that bound is zero.
+    //
+    // This is not the loop giving up early. `CoverageClosureReason` on the
+    // support side is `NoImprovingRepair { candidates_tried: 45, .. }` and the
+    // §A.8 report reads `trials=45 commits=0 remaining=0` — the search ran the
+    // pool out. The sidecar schema moves to `v2` below for exactly this reason:
+    // the same field name now carries a different fact.
+    assert_eq!(evidence.attempts, Some(0));
     assert!(!evidence.islands.is_empty(), "the unclosable island must be named");
     // **The refusal is a real hole, not censored dust.** This is the other half
     // of the 2026-08-14 censor change (SPEC-A3-A4-COVERAGE.md §4): a model whose
@@ -729,9 +754,13 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     assert!(sidecar_path.exists(), "the sidecar must actually be on disk");
     let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
     let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
-    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v1");
+    // §G.2: re-meaning `attempts` is a wire FORMAT change, not a rename, so the
+    // schema string moves with it. A reader holding a v1 sidecar and a v2
+    // sidecar must be able to tell "the loop ran 8 times" from "0 rows earned
+    // their place" without guessing which controller wrote the file.
+    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v2");
     assert_eq!(sidecar["source"], "coverage_closure_controller");
-    assert_eq!(sidecar["attempts"], 8);
+    assert_eq!(sidecar["attempts"], 0);
     assert!(
         sidecar["closure"].is_object(),
         "the sidecar must embed the typed closure refusal verbatim"
