@@ -174,8 +174,9 @@ pub(crate) struct UnattestedInitialStub {
 /// PR-8 evidence for one stub whose load-sized tip did not attest but whose
 /// GROWN tip did.
 ///
-/// The emitted radius is the smallest rung on the ladder that satisfies both of
-/// the tip's duties — the load law and attachment — so it is the honest minimum
+/// The emitted radius is the smallest radius MEASURED — over the ascending
+/// ladder and the descending refinement scan together — that satisfies both of
+/// the tip's duties, the load law and attachment. So it is the honest minimum
 /// for this contact rather than a concession to either one. It is recorded
 /// because a grown tip is a real geometry change the run made on its own
 /// initiative, and because a regression that stops growing must be visible in
@@ -184,12 +185,20 @@ pub(crate) struct UnattestedInitialStub {
 pub(crate) struct GrownInitialContact {
     pub(crate) terminal: u32,
     pub(crate) key: MemberKey,
+    /// Where the grown tip stands, mm — the contact point itself, not the
+    /// stub's outer end. Carried for the same reason the refusal record carries
+    /// it: a scar the run resized on its own initiative is one an operator has
+    /// to be able to FIND on the model, and a contact id alone does not locate
+    /// anything.
+    pub(crate) seat_mm: [f64; 3],
     /// mm RADIUS the load law asked for.
     pub(crate) law_radius_mm: f64,
     /// mm RADIUS actually emitted. Always `>= law_radius_mm`, so the load duty
     /// is satisfied at least as well as before growth.
     pub(crate) emitted_radius_mm: f64,
-    /// Every rung tried, in order. The last one is the cure.
+    /// Every radius tried, in the order it was measured: the ascending ladder,
+    /// then the descending refinement scan. The CURE is the smallest attesting
+    /// entry, which is not in general the last one.
     pub(crate) attempts: Vec<TipGrowthAttempt>,
     /// The load this growth KEPT, mm^2 — the area that would otherwise have
     /// been abandoned at quarantine.
@@ -826,6 +835,7 @@ pub(crate) fn build_initial_contacts(
             grown.push(GrownInitialContact {
                 terminal: seed.terminal,
                 key: *key,
+                seat_mm: seed.seat_mm,
                 law_radius_mm: seed.law_r0.get(),
                 emitted_radius_mm: seed.r0.get(),
                 attempts: remedy

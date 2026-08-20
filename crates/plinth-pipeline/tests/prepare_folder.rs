@@ -353,6 +353,28 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             (grown.emitted_tip_diameter_mm() - grown.emitted_tip_radius_mm() * 2.0).abs() < 1e-12,
             "the reported diameter must be exactly twice the reported radius; got {grown:?}"
         );
+        // The SMALLEST attesting radius on the record is the one built. The
+        // ascending ladder alone would emit the FIRST attesting rung, which the
+        // descending refinement scan then improves on, so this is what tells a
+        // scanned answer from an unscanned one on real geometry.
+        let smallest_attesting_mm = grown
+            .growth_rungs()
+            .iter()
+            .filter(|rung| rung.attested())
+            .map(plinth_support::TipGrowthRungDisclosure::radius_mm)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (smallest_attesting_mm - grown.emitted_tip_radius_mm()).abs() < 1e-12,
+            "the tip built must be the smallest radius the record shows \
+             attesting; got {grown:?}"
+        );
+        // And the operator can FIND it: a scar the run chose to enlarge is only
+        // actionable if the report says where it is.
+        assert!(
+            grown.seat_mm().iter().all(|value| value.is_finite()),
+            "a grown tip must disclose a real seat, or the enlarged scar cannot \
+             be located on the model; got {grown:?}"
+        );
     }
     // **What is in the file, not merely that there is one.** Two of the four
     // geometries are substitutions the chain fell back to, and a report that

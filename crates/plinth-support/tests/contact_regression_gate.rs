@@ -85,7 +85,7 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 24] = [
+const REQUIRED: [(&str, &str, &str); 25] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
@@ -111,6 +111,14 @@ const REQUIRED: [(&str, &str, &str); 24] = [
         "fn tip_growth_ladder(",
         "the growth ladder is gone, so growth has no principled sequence of \
          radii and no termination at the registered maximum",
+    ),
+    (
+        "designed_embed.rs",
+        "fn tip_refinement_scan(",
+        "the descending refinement scan is gone, so the run emits the first \
+         LADDER rung that attests instead of the smallest radius that does — a \
+         scar up to a whole area doubling larger than physics asked for, and \
+         invisible to every count-based assertion",
     ),
     (
         "initial.rs",

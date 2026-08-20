@@ -2350,13 +2350,21 @@ mod tests {
         )
         .expect("an abandoned-contact disclosure deserializes as a frozen report carries it");
         let grown: plinth_support::GrownContactTipDisclosure = serde_json::from_str(
-            r#"{"contact_id":7,"law_tip_radius_mm":0.05,
-                "emitted_tip_radius_mm":0.1,"emitted_tip_diameter_mm":0.2,
+            r#"{"contact_id":7,"seat_mm":[4.125,-0.5,12.75],
+                "law_tip_radius_mm":0.05,
+                "emitted_tip_radius_mm":0.08132887446985768,
+                "emitted_tip_diameter_mm":0.16265774893971535,
                 "kept_area_mm2":0.42,
                 "growth_rungs":[
                     {"radius_mm":0.07071067811865475,"diameter_mm":0.1414213562373095,
                      "attested":false},
-                    {"radius_mm":0.1,"diameter_mm":0.2,"attested":true}]}"#,
+                    {"radius_mm":0.1,"diameter_mm":0.2,"attested":true},
+                    {"radius_mm":0.0901825229575319,"diameter_mm":0.1803650459150638,
+                     "attested":true},
+                    {"radius_mm":0.08132887446985768,"diameter_mm":0.16265774893971535,
+                     "attested":true},
+                    {"radius_mm":0.0733444308898817,"diameter_mm":0.1466888617797634,
+                     "attested":false}]}"#,
         )
         .expect("a grown-tip disclosure deserializes as a frozen report carries it");
 
@@ -2419,18 +2427,42 @@ mod tests {
             abandoned_contacts[0].reseat(),
             "no_alternative_seat_at_this_stage"
         );
-        // And the cure's own row: what the law asked for, what was built, in
-        // BOTH units, and the load the growth kept.
+        // And the cure's own row: WHERE the scar is, what the law asked for,
+        // what was built, in BOTH units, and the load the growth kept.
         assert_eq!(grown_contact_tips, vec![grown]);
+        assert_eq!(grown_contact_tips[0].seat_mm(), [4.125, -0.5, 12.75]);
         assert_eq!(grown_contact_tips[0].law_tip_radius_mm(), 0.05);
-        assert_eq!(grown_contact_tips[0].emitted_tip_radius_mm(), 0.1);
-        assert_eq!(grown_contact_tips[0].emitted_tip_diameter_mm(), 0.2);
+        assert_eq!(
+            grown_contact_tips[0].emitted_tip_radius_mm(),
+            0.081_328_874_469_857_68
+        );
+        assert_eq!(
+            grown_contact_tips[0].emitted_tip_diameter_mm(),
+            0.162_657_748_939_715_35
+        );
         assert_eq!(grown_contact_tips[0].kept_area_mm2(), 0.42);
-        assert!(grown_contact_tips[0]
+        // The record carries the ladder AND the scan, so the LAST rung is a
+        // failed scan step and the cure is the smallest ATTESTING one. A report
+        // that only ever asserted `last().attested()` would go green again the
+        // day the scan is deleted.
+        assert_eq!(grown_contact_tips[0].growth_rungs().len(), 5);
+        assert!(!grown_contact_tips[0]
             .growth_rungs()
             .last()
             .unwrap()
             .attested());
+        let smallest_attesting_mm = grown_contact_tips[0]
+            .growth_rungs()
+            .iter()
+            .filter(|rung| rung.attested())
+            .map(plinth_support::TipGrowthRungDisclosure::radius_mm)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(
+            smallest_attesting_mm,
+            grown_contact_tips[0].emitted_tip_radius_mm(),
+            "the emitted tip must be the SMALLEST radius the record shows \
+             attesting, over the ladder and the scan together"
+        );
         assert_eq!(
             ownerless_islands,
             vec![disclosure, islandless],

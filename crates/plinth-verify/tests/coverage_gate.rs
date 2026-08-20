@@ -212,6 +212,33 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // or registered constant was touched by this refresh; the ceilings that moved
 // are this test's own hand-counted fixture bounds, re-counted against the
 // fixture they describe.
+//
+// **Refreshed a tenth time on 2026-08-20, for the DESCENDING REFINEMENT SCAN.**
+// The ascending ladder above returns the smallest radius ON THE LADDER, and its
+// step is one area doubling, so the tip it emits can be a whole doubling — or
+// more — above the smallest tip that would have worked. Once the ladder has
+// BRACKETED the answer between its last failing rung and its first passing one,
+// the scan walks back down inside that bracket at the ring's own step
+// (`q = 1 - 2 pi / 8^2`, one eighth of the eight rim rays' inter-ray gap) and
+// keeps the smallest radius that still attests.
+//
+// **`snapshot_digest` 15045390433036889889 -> 14374106896419012910, and NOTHING
+// ELSE in this file moved.** Diffed leaf by leaf through the same producer path:
+// **180 scalar leaves, EXACTLY 1 moved.** Every `request` bound, all 11
+// `resources` counters, all 9 islands, all 9 patches with their uncovered areas
+// and worst gaps, and all 7 defects are byte-identical, and the report still
+// refuses with 7 defects.
+//
+// **Why the counts do NOT move this time, and why that is the correct answer.**
+// The scan never changes WHICH contacts attest — it only shrinks a tip that had
+// already attested at a larger radius on the same seat. So no support appears,
+// none vanishes, and no coverage number can move. What moves is the geometry of
+// the one contact the toed slab grows: the leaf diff on the support side is one
+// member of 184, slot 61, terminal radius 0.800000000 -> 0.650630996 mm RADIUS
+// (1.600000000 -> 1.301261991 mm DIAMETER), which is 0.8 * q^2 — two refinement
+// steps below the ladder rung that used to be emitted — and 33.9% less interface
+// area scarred onto the model. No cap, gate, minimum, radius, tolerance or
+// registered constant was touched by this refresh.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {

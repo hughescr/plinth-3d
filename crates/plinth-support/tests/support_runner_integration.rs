@@ -338,10 +338,32 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (65_usize, 184_usize, 15_045_390_433_036_889_889_u64),
+        (65_usize, 184_usize, 14_374_106_896_419_012_910_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
-    // Digest re-derived 2026-08-19 for the tip-minimum ruling
+    // Digest re-derived 2026-08-20 for the DESCENDING REFINEMENT SCAN on
+    // grow-to-attest: 15_045_390_433_036_889_889 ->
+    // 14_374_106_896_419_012_910.  The counts are again deliberately
+    // unchanged, and the leaf diff through this same producer path is the
+    // narrowest one this corpus has produced: of the 184 final live members,
+    // ONE changed and 183 are bit-identical.
+    //   * slot 61, the model contact this model grows (contact 64), drops its
+    //     terminal radius (`r0`) 0.800000000 -> 0.650630996 mm RADIUS
+    //     (1.600000000 -> 1.301261991 mm DIAMETER).  That is 0.8 * q^2 with
+    //     `q = 1 - 2 pi / 8^2` — two refinement steps below the ladder rung
+    //     that used to be emitted — and it cuts the interface area this scar
+    //     leaves on the model by 33.9% (0.6614x).
+    //   * The ladder record shows why: rungs 0.0707 through 0.5657 all fail,
+    //     0.8000 is the first to attest, then the scan measures 0.7215
+    //     (attests), 0.6506 (attests) and 0.5868 (FAILS).  The smallest
+    //     attesting radius is the one built.
+    // Nothing else moved: no rootward radius, no endpoint, no kind, no
+    // connectivity, and all 65 routed contact positions are bit-identical.
+    // The coverage measurement's own numbers are bit-identical too — see the
+    // toed-slab coverage golden, where the ONLY field that changed is
+    // `snapshot_digest`.
+    //
+    // Digest previously re-derived 2026-08-19 for the tip-minimum ruling
     // (`TIP_RADIUS_DEFAULT_MM` 0.2 -> 0.05 mm RADIUS, 0.4 -> 0.1 mm
     // DIAMETER): 9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963.
     // The COUNTS above are deliberately unchanged, and that is the point.
@@ -649,11 +671,16 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
     // Same snapshot digest as the toed-slab closure test above, re-derived
-    // 2026-08-19 for the tip-minimum ruling (0.2 -> 0.05 mm RADIUS,
-    // 0.4 -> 0.1 mm DIAMETER): 9_355_852_079_468_421_123 ->
-    // 4_190_462_360_230_124_963.  The frozen resource arithmetic below is
-    // untouched, because no count moved.
-    assert_eq!(snapshot.digest(), 15_045_390_433_036_889_889);
+    // 2026-08-20 for the descending refinement scan on grow-to-attest:
+    // 15_045_390_433_036_889_889 -> 14_374_106_896_419_012_910.  ONE member
+    // moved, slot 61's terminal radius 0.800000000 -> 0.650630996 mm RADIUS;
+    // the leaf diff is recorded in full at the closure test above.  The frozen
+    // resource arithmetic below is untouched, because no count moved.
+    //
+    // Previously re-derived 2026-08-19 for the tip-minimum ruling (0.2 -> 0.05
+    // mm RADIUS, 0.4 -> 0.1 mm DIAMETER): 9_355_852_079_468_421_123 ->
+    // 4_190_462_360_230_124_963.
+    assert_eq!(snapshot.digest(), 14_374_106_896_419_012_910);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(

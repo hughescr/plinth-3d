@@ -585,7 +585,10 @@ impl AbandonedContactDisclosure {
     pub const fn growth_ceiling_radius_mm(&self) -> f64 {
         self.growth_ceiling_radius_mm
     }
-    /// Every larger tip that was tried, ascending, and what each measured.
+    /// Every larger tip that was tried, ascending, and what each measured. A
+    /// refused contact never reaches the descending refinement scan — the scan
+    /// needs a bracket, and there is none without a success — so this list is
+    /// the ladder alone.
     ///
     /// Empty means there was no larger legal tip to try — the load law had
     /// already sized this one at the registered maximum.
@@ -605,14 +608,23 @@ impl AbandonedContactDisclosure {
 /// **One contact whose tip this run grew, on its own initiative, so that it
 /// would attest.**
 ///
-/// The emitted radius is the smallest rung of the ladder that satisfies BOTH of
-/// the tip's duties — the registered load law and PR-8 attachment — so it is the
-/// honest minimum for this contact. It is always at least the law radius, so
-/// growth can only ever move a tip in the conservative direction.
+/// The emitted radius is the smallest radius the run MEASURED as satisfying BOTH
+/// of the tip's duties — the registered load law and PR-8 attachment. The
+/// ascending ladder brackets it and the descending refinement scan finds it
+/// inside that bracket, so it is the honest minimum for this contact rather than
+/// the first rung that happened to work. It is always at least the law radius,
+/// so growth can only ever move a tip in the conservative direction.
+///
+/// **The seat is part of the disclosure, not decoration.** A grown tip is a
+/// larger scar than the load law asked for, in a place the operator did not
+/// choose. Printing only a contact id says a scar exists somewhere; printing the
+/// seat says WHERE, which is the difference between a record and a record
+/// somebody can act on. The refusal disclosure already carried it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrownContactTipDisclosure {
     contact_id: u32,
+    seat_mm: [f64; 3],
     law_tip_radius_mm: f64,
     emitted_tip_radius_mm: f64,
     emitted_tip_diameter_mm: f64,
@@ -624,6 +636,13 @@ impl GrownContactTipDisclosure {
     #[must_use]
     pub const fn contact_id(&self) -> u32 {
         self.contact_id
+    }
+    /// Where the grown tip stands, in mm — the contact point itself, not the
+    /// stub's outer end. Same convention as
+    /// [`AbandonedContactDisclosure::seat_mm`].
+    #[must_use]
+    pub const fn seat_mm(&self) -> [f64; 3] {
+        self.seat_mm
     }
     /// What the load law asked for, mm RADIUS. PR-8 refused this size.
     #[must_use]
@@ -646,7 +665,10 @@ impl GrownContactTipDisclosure {
     pub const fn kept_area_mm2(&self) -> f64 {
         self.kept_area_mm2
     }
-    /// The ladder, ascending. The last rung is the cure.
+    /// Every radius tried, in the order it was MEASURED: the ascending ladder
+    /// that bracketed the answer, then the descending refinement scan that
+    /// found the smallest attesting radius inside that bracket. The cure is
+    /// therefore the smallest attesting entry, not necessarily the last one.
     #[must_use]
     pub fn growth_rungs(&self) -> &[TipGrowthRungDisclosure] {
         &self.growth_rungs
@@ -712,6 +734,7 @@ fn contact_attestation_disclosures(
         .iter()
         .map(|contact| GrownContactTipDisclosure {
             contact_id: contact.terminal,
+            seat_mm: contact.seat_mm,
             law_tip_radius_mm: contact.law_radius_mm,
             emitted_tip_radius_mm: contact.emitted_radius_mm,
             emitted_tip_diameter_mm: contact.emitted_radius_mm * 2.0,
