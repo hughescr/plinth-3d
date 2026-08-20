@@ -1792,67 +1792,89 @@ mod tests {
 
     /// **Rule N4, ruling R13 — design §E.5 case 11, the diversity fixture.**
     ///
-    /// Two equal-scoring candidates, one 0.5 mm from the rejected seat (inside
-    /// its 6.0 mm coverage disc) and one 8 mm away (outside it). The inside one
-    /// has the LOWER pool order, so today's tie-break — score, then pool order —
-    /// picks it, which is the measured "63 seats inside a 1.04 mm box" defect.
-    /// After the rejection the winner must be the outside one.
+    /// THREE equal-scoring candidates, and the third one is what makes this a
+    /// test rather than a formality: after the rejection, TWO candidates are
+    /// still live — one 0.5 mm from the rejected seat, inside its 6.0 mm
+    /// coverage disc, and one 8 mm away, outside it. The inside one has the
+    /// LOWER pool order, so score-then-pool-order picks it, and pool order is
+    /// spatially contiguous, which is the measured "63 seats inside a 1.04 mm
+    /// box" defect. N4 must pick the outside one instead.
+    ///
+    /// **Written this way deliberately.** With only two candidates the
+    /// rejection leaves exactly ONE live row and the assertion passes whatever
+    /// the sort key is — it would prove nothing. A sabotage run that zeroed
+    /// N4's contribution to the sort key caught the two-row form passing green,
+    /// so the fixture is the three-row form and the sabotage now fails as it
+    /// should.
     #[test]
     fn after_a_rejection_the_next_winner_is_outside_the_rejected_seats_coverage_disc() {
-        let rejected_seat = [0.0, 0.0, 0.0];
-        let inside = ranked_row(5, 0, 1, [0.5, 0.0, 0.0], 2.0);
-        let outside = ranked_row(5, 0, 2, [8.0, 0.0, 0.0], 2.0);
-        let pool = candidates(vec![inside.clone(), outside.clone()]);
+        let rejected = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 2.0);
+        let inside = ranked_row(5, 0, 2, [0.5, 0.0, 0.0], 2.0);
+        let outside = ranked_row(5, 0, 3, [8.0, 0.0, 0.0], 2.0);
+        let pool = candidates(vec![rejected.clone(), inside.clone(), outside.clone()]);
 
         let mut discs = DiversityDiscs::new(R);
         let served = BTreeMap::new();
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
 
-        // Before the rejection the contiguous neighbour wins on pool order,
-        // exactly as production ranks today.
+        // Lowest pool order wins the tie first, exactly as production ranks.
         let first = choose_winner(&pool, &BTreeSet::new(), &discs, &served, censor)
             .expect("a live candidate");
-        assert_eq!(pool.ranked[first.index].id, inside.id);
+        assert_eq!(pool.ranked[first.index].id, rejected.id);
 
         // Reject it: ledger the row AND record its coverage disc.
         let mut ledgered = BTreeSet::new();
-        ledgered.insert(inside.id);
-        discs.reject(rejected_seat);
+        ledgered.insert(rejected.id);
+        discs.reject(rejected.seat_mm);
 
         let next = choose_winner(&pool, &ledgered, &discs, &served, censor)
-            .expect("a live candidate remains");
+            .expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, outside.id,
-            "the next winner must be outside the rejected seat's own coverage disc"
+            "the next winner must be OUTSIDE the rejected seat's own coverage disc, even though \
+             the inside one has the lower pool order and the identical score"
         );
         assert_eq!(
             next.diversity_discs_containing_seat, 0,
-            "and the record must say it was not deprioritized"
+            "and the record must say the winner was not deprioritized"
+        );
+
+        // Completeness: the demoted neighbour is still tried, and the record
+        // says it was demoted when it was.
+        ledgered.insert(outside.id);
+        discs.reject(outside.seat_mm);
+        let last = choose_winner(&pool, &ledgered, &discs, &served, censor)
+            .expect("deprioritization is not exclusion");
+        assert_eq!(pool.ranked[last.index].id, inside.id);
+        assert_eq!(
+            last.diversity_discs_containing_seat, 1,
+            "the instrument must say this seat sat inside exactly one rejected disc"
         );
     }
 
-    /// **The revert proof for rule N4.** Delete the disc set — which is the
-    /// controller without ruling R13 — and the very next winner is the seat
-    /// 0.5 mm from the one just rejected, paying a second full pipeline pass to
-    /// re-prove what the first pass proved. If this ever fails, the fixture
-    /// above has stopped testing N4.
+    /// **The revert proof for rule N4.** Hand the same three rows the same
+    /// rejection with an EMPTY disc set — which is the controller without
+    /// ruling R13 — and the next winner is the seat 0.5 mm from the one just
+    /// rejected, paying a second full pipeline pass to re-prove what the first
+    /// pass proved. If this ever fails, the fixture above has stopped testing
+    /// N4 and is passing for some other reason.
     #[test]
     fn without_the_diversity_rule_the_next_winner_is_the_neighbouring_seat() {
-        let inside_a = ranked_row(5, 0, 1, [0.5, 0.0, 0.0], 2.0);
-        let inside_b = ranked_row(5, 0, 2, [0.516, 0.0, 0.0], 2.0);
+        let rejected = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 2.0);
+        let inside = ranked_row(5, 0, 2, [0.5, 0.0, 0.0], 2.0);
         let outside = ranked_row(5, 0, 3, [8.0, 0.0, 0.0], 2.0);
-        let pool = candidates(vec![inside_a.clone(), inside_b.clone(), outside]);
+        let pool = candidates(vec![rejected.clone(), inside.clone(), outside]);
 
         let no_discs = DiversityDiscs::new(R);
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
         let mut ledgered = BTreeSet::new();
-        ledgered.insert(inside_a.id);
+        ledgered.insert(rejected.id);
 
         let next = choose_winner(&pool, &ledgered, &no_discs, &BTreeMap::new(), censor)
-            .expect("a live candidate remains");
+            .expect("two live candidates remain");
         assert_eq!(
-            pool.ranked[next.index].id, inside_b.id,
-            "without the disc set the search marches 16 µm to the next pool order"
+            pool.ranked[next.index].id, inside.id,
+            "without the disc set the search marches to the next pool order, 0.5 mm away"
         );
     }
 

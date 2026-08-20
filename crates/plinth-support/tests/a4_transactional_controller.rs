@@ -249,6 +249,25 @@ fn every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses() 
         );
     }
 
+    // **The recorded numbers are the run's, not a story about it.** Everything
+    // above re-runs the accept predicate on the step's OWN recorded before and
+    // after, which proves the two sides are consistent with the rule — but it
+    // would also pass on numbers that were invented. This ties the record to
+    // the decision the controller actually took: the loop returns `Ok` if and
+    // only if the committing trial's measurement had no blocking patch, and a
+    // patch blocks the verdict exactly when it is above the censor. So the
+    // LAST committed step's recorded objective must show zero failing patches,
+    // and if it does not, the record and the verdict disagree.
+    let last = committed.last().expect("at least one commit");
+    assert_eq!(
+        last.objective_after
+            .expect("the sealing step was measured")
+            .failing_patch_count,
+        0,
+        "this run sealed, so its last committed step's own recorded objective must show the \
+         zero failing patches that sealing means"
+    );
+
     // The censored objective is monotone across the whole accepted chain, not
     // just per step: the accepted state only ever moves forward.
     for pair in committed.windows(2) {
