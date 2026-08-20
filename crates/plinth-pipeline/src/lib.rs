@@ -27,6 +27,13 @@ pub use coverage_evidence::{
 // card is the one today) can match on it without taking a direct
 // `plinth-support` dependency of its own for one field's type.
 pub use plinth_support::CoverageClosureGap;
+// Same reason, for the two PR-8 contact disclosures. They are already the
+// element types of public `ContactAttestationDisclosure` fields, so they are
+// part of this crate's surface either way; without the re-export the CLI can
+// print them but cannot NAME them, which is what forces the run report's
+// refusal wording to live inline in a `println!` instead of in a line builder a
+// test can read back.
+pub use plinth_support::{AbandonedContactDisclosure, GrownContactTipDisclosure};
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -368,6 +375,33 @@ pub struct PrepareRequest {
 // uncovered-area and gap measurements. Nothing keys a map or a set on an
 // outcome — the derive was reachable only because every field happened to be
 // integral — and a report is compared for equality in tests, never keyed on.
+/// **PR-8 grow-to-attest, as the run report carries it.**
+///
+/// A tip is sized by the load law, and PR-8 probes attachment with a ray ring at
+/// that same tip radius, so a load-sized thin tip seated near a model silhouette
+/// edge can find nothing but air and be refused for being SMALL. Where that is
+/// curable the run grows the tip until it attests and builds the grown one;
+/// where it is not, the contact is refused and the load it carried is abandoned
+/// with no neighbour told and nothing grown in its place.
+///
+/// Both halves are reported because both are decisions the run made on its own:
+///
+/// * `grown_contact_tips` — a support the run RESIZED, with the load it kept.
+/// * `abandoned_contacts` — a support that is NOT THERE, with the routed load in
+///   mm² that nothing now carries. The coverage measurement works at a 6 mm
+///   radius and cannot see a single missing claw tip, so if this list does not
+///   say it, nothing does.
+///
+/// Both empty is the ordinary outcome on a healthy model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactAttestationDisclosure {
+    #[serde(default)]
+    pub abandoned_contacts: Vec<plinth_support::AbandonedContactDisclosure>,
+    #[serde(default)]
+    pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
@@ -464,6 +498,14 @@ pub enum ModelPreparationOutcome {
         /// existed has to keep deserializing.
         #[serde(default)]
         ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
+        /// PR-8 grow-to-attest, both halves. See
+        /// [`ContactAttestationDisclosure`]. Boxed because two more vectors
+        /// inline would make this variant the reason the enum is oversized for
+        /// every other variant that has to be moved with it; `default` for the
+        /// same reason the fields above are, so a report frozen before this
+        /// existed keeps deserializing.
+        #[serde(default)]
+        contacts: Box<ContactAttestationDisclosure>,
     },
     Stopped {
         after: StageStop,
@@ -1390,6 +1432,7 @@ mod tests {
                         savings_shortfall: None,
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
+                        contacts: Box::default(),
                     },
                 },
                 ModelPreparationReport {
@@ -1463,6 +1506,7 @@ mod tests {
                         savings_shortfall: None,
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
+                        contacts: Box::default(),
                     },
                 ),
                 model("refused", refused),

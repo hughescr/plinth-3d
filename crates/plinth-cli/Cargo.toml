@@ -22,3 +22,8 @@ plinth-pipeline = { path = "../plinth-pipeline" }
 # type, and the report block's line builder is tested against it directly
 # rather than by capturing stdout.
 plinth-mesh = { path = "../plinth-mesh" }
+# Test-only: the PR-8 contact disclosures have private fields, so a test builds
+# one by deserializing it — the same route a frozen run report on disk takes
+# back in, which is why the numbers a test asserts are the numbers a reader
+# sees.
+serde_json = { workspace = true }

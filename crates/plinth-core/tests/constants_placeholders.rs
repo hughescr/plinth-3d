@@ -562,7 +562,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "TARGET_SPACING_MM", "4.0", "mm", "scalar";
     "TENSILE_GREEN_MPA", "0.288", "MPa", "scalar";
     "THIN_FEATURE_MM", "1.5", "mm", "scalar";
-    "TIP_RADIUS_DEFAULT_MM", "0.2", "mm", "scalar";
+    "TIP_RADIUS_DEFAULT_MM", "0.05", "mm", "scalar";
     "TIP_RADIUS_MAX_LEGACY_MM", "1.0", "mm", "scalar";
     "TIP_SAFETY_FACTOR", "8.0", "1", "scalar";
     "TOL_MM", "0.05", "mm", "scalar";
@@ -676,7 +676,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_305_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -684,14 +684,14 @@ fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 304);
+    assert_eq!(registry.len(), 305);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        304
+        305
     );
 }
 
@@ -997,7 +997,7 @@ fn named_accessors_preserve_lift_contact_bridge_and_search_distinctions() {
             .section_mm(),
         0.3
     );
-    assert_eq!(constants.tip_radius_default_mm().diagnostic().get(), 0.2);
+    assert_eq!(constants.tip_radius_default_mm().diagnostic().get(), 0.05);
     assert_eq!(
         constants.cco_split_slide_policy().diagnostic().cap().get(),
         40

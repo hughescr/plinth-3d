@@ -1049,6 +1049,704 @@ fn unusable_attestation(
     }
 }
 
+// ======================== GROW-TO-ATTEST (PR-8 remedy) ========================
+//
+// A tip has TWO duties and the engine used to size it for only one.
+//
+// * **Load.** `pi r^2 >= carried_mm2 / X` — the registered area law, which
+//   `FrozenTipLoadPolicy::tip_radius_mm` solves for every contact.
+// * **Attachment.** Some part of that same disc must actually be in the solid,
+//   which is what PR-8 measures with the centreline plus eight rim rays AT THE
+//   TIP RADIUS (see `EndpointValidationRow::terminalward`: the ring radius IS
+//   `r0`).
+//
+// Those duties disagree at a model silhouette edge. A tip seated within a tip
+// radius of an edge has its CENTRE on the boundary plane, which parity reads as
+// outside, and is held on by the rim alone — `is_attached()` says so out loud.
+// Shrink the tip and the ring shrinks with it, so the rim rays that were finding
+// material fold in toward the centreline and find air. The tip is then refused
+// `NotAttached` for being SMALL, not for being badly placed.
+//
+// Measured, on this branch: ten seats on thin claws and toes across the corpus
+// had centreline-in-air and lived on rim engagement alone. At a law-sized thin
+// tip the ring withdrew, all ten were refused and quarantined at the initial
+// stage, and the load each carried — 2.98 mm^2 on the Deinonychus — was
+// abandoned in silence. No neighbour was told, none was grown, and coverage's
+// 6 mm radius cannot see a hole that small.
+//
+// The remedy is physics, not a threshold: **a tip must be sized for BOTH duties,
+// so where the load-sized tip does not attest, grow it until it does and emit
+// the grown size.** A tip larger than the load law demands is legal and strictly
+// conservative — `violates_safety_factor` is monotone decreasing in radius, so
+// growing can never weaken the load refusal — and the growth is capped by the
+// registered `tip_radius_max_legacy_mm`. Only when the whole ladder fails may a
+// contact be refused, and that refusal is DISCLOSED with the load it abandons.
+//
+// **What this deliberately does NOT do.** It does not restore the old fat probe
+// ring. Every rung probes at the radius that rung would EMIT, so an attestation
+// only ever certifies a tip the run is actually going to build. Re-inflating the
+// ring while emitting a thin tip is the defect, not the fix.
+
+/// **WHICH registered limit ended a growth ladder.**
+///
+/// Named rather than inferred from the number, because the disclosure has to
+/// say which limit stopped it and a reader cannot tell 0.400 from 1.000 apart
+/// by eye once the ladder has been clamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum GrowthCeilingSource {
+    /// `TIP_RADIUS_MAX_GROWN_SCAR_MM` — Craig's measured field ceiling on the
+    /// scar a grow-for-attachment rescue may leave, 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER).
+    GrownScarMaximum,
+    /// `TIP_RADIUS_MAX_LEGACY_MM` — the load law's own clamp maximum,
+    /// 1.000 mm RADIUS (2.000 mm DIAMETER).
+    LegacyTipMaximum,
+}
+
+impl GrowthCeilingSource {
+    /// The registry id, so a disclosure names the constant and not a number.
+    pub(crate) const fn constant_id(self) -> &'static str {
+        match self {
+            Self::GrownScarMaximum => "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            Self::LegacyTipMaximum => "TIP_RADIUS_MAX_LEGACY_MM",
+        }
+    }
+}
+
+/// **THE SCAR BOUND — how high a rescue may grow a tip, and what it leaves
+/// alone.**
+///
+/// Craig's ruling of 2026-08-20, on his own field data: the heaviest support he
+/// has ever needed is a **0.800 mm DIAMETER** sphere, so **0.400 mm RADIUS
+/// (0.800 mm DIAMETER)** is the largest scar he accepts on a model. It is
+/// registered as `TIP_RADIUS_MAX_GROWN_SCAR_MM`, honestly labelled an EXTERNAL
+/// REQUIREMENT — field data, not physics and not a wet-finger estimate.
+///
+/// **The distinction that matters, and the reason this is a separate limit
+/// rather than a smaller `TIP_RADIUS_MAX_LEGACY_MM`.** Two different appetites
+/// can enlarge a tip:
+///
+/// * the **LOAD LAW** — `pi r^2 >= carried_area / X`, which sizes a tip to
+///   CARRY WEIGHT and may legitimately demand up to the registered
+///   `TIP_RADIUS_MAX_LEGACY_MM` of 1.000 mm radius (2.000 mm diameter) for a
+///   genuinely heavy area. **This bound does not touch that.** A load-sized tip
+///   above 0.400 mm radius that attests is emitted exactly as before: it is not
+///   clamped, not refused, and not mentioned here.
+/// * **GROWTH FOR ATTACHMENT** — this module's ladder, which enlarges a tip
+///   BEYOND what the load law asked for purely so the attestation ring can
+///   reach solid. That excess is a scar in a place the operator did not choose,
+///   and it is what this bound limits.
+///
+/// So the ladder truncates at the SMALLER of the two limits and the refusal
+/// path names whichever one it stopped at. A contact whose cure would need a
+/// larger tip than the ceiling gets the existing disclosed ABANDONED LOAD line,
+/// with the bound named as the stopper — never a silently over-grown scar.
+///
+/// The truncation weakens no refusal in either direction: lowering a ceiling
+/// can only turn a cure into a refusal, never a refusal into a cure.
+pub(crate) fn growth_ceiling_radius_mm(
+    legacy_max_mm: f64,
+    scar_bound_mm: f64,
+) -> (f64, GrowthCeilingSource) {
+    // SABOTAGE SEAM. Ignoring the scar bound is exactly the engine before this
+    // change: the ladder runs to the legacy maximum and a rescue may leave a
+    // scar wider than any support Craig has ever needed. It sits here, at the
+    // min, because the min IS the truncation — sabotaging the ladder's own
+    // arithmetic instead would make the ladder tests disagree with themselves.
+    // The bound binds only when it is a real number strictly below the legacy
+    // maximum. `is_finite` is stated rather than left to the comparison: a NaN
+    // bound must fall back to the legacy limit, and a bare `<` on a NaN is
+    // false by accident rather than by decision.
+    if !scar_bound_disabled() && scar_bound_mm.is_finite() && scar_bound_mm < legacy_max_mm {
+        (scar_bound_mm, GrowthCeilingSource::GrownScarMaximum)
+    } else {
+        (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+    }
+}
+
+fn growth_ceiling(request: &TipGrowthRequest) -> (f64, GrowthCeilingSource) {
+    growth_ceiling_radius_mm(request.max_radius_mm, request.scar_bound_radius_mm)
+}
+
+/// The radius ratio that DOUBLES a tip's nominal interface area.
+///
+/// `pi (sqrt(2) r)^2 = 2 pi r^2`. This is an algebraic identity of the disc, not
+/// a tunable and not a constant to register: there is no value here anyone could
+/// choose differently and still be doubling the area.
+const AREA_DOUBLING_RADIUS_RATIO: f64 = std::f64::consts::SQRT_2;
+
+/// The radii, ASCENDING, that a tip refused for attachment may be regrown to.
+///
+/// **The step is one area doubling.** The tip's registered duty is AREA, so the
+/// step that means something is the one that changes the area answer: each rung
+/// is `sqrt(2)` times the previous radius and therefore twice its nominal disc
+/// area. A finer step would re-ask the same question — the eight rim rays sit
+/// `2 pi r / 8 = 0.785 r` apart, so a radius change much smaller than `r` moves
+/// the ring by less than the gap between its own samples — and a coarser one
+/// would step over the smallest tip that would have worked.
+///
+/// **The rung COUNT is not chosen.** It is
+/// `ceil(log(max / law) / log(sqrt(2)))`, fixed by this row's own law radius and
+/// the ceiling [`growth_ceiling`] handed it. Across the widest span the
+/// registry admits — `TIP_RADIUS_MAX_LEGACY_MM / TIP_RADIUS_DEFAULT_MM` =
+/// 1.0 / 0.05 = 20 mm radius over mm radius (2.0 / 0.1 in diameter) — the
+/// deepest possible ladder is `ceil(2 * log2(20))` = 9 rungs. Under the scar
+/// bound the span is `TIP_RADIUS_MAX_GROWN_SCAR_MM / TIP_RADIUS_DEFAULT_MM` =
+/// 0.4 / 0.05 = 8, i.e. `ceil(2 * log2(8))` = 6 rungs, so the bound makes the
+/// ladder SHORTER and never longer. Nothing is registered and no count is
+/// hand-typed.
+///
+/// **The last rung is exactly the ceiling**, so the sweep always terminates on
+/// a radius the run is allowed to build and never proposes one above the limit
+/// the owner ruled.
+///
+/// **Ascending, first success wins, and no bisection.** Attestation is NOT
+/// monotone in radius: a wider ring can step PAST a thin feature that a
+/// narrower one was inside, so "it failed at r, therefore it fails below r" is
+/// false and a bisection on it would be unsound. An ordered ascending sweep that
+/// keeps the FIRST rung to attest needs no monotonicity assumption and returns
+/// the smallest radius on the ladder that satisfies both duties.
+fn tip_growth_ladder(law_radius_mm: f64, max_radius_mm: f64) -> Vec<f64> {
+    let mut rungs = Vec::new();
+    if !law_radius_mm.is_finite()
+        || !max_radius_mm.is_finite()
+        || law_radius_mm <= 0.0
+        || max_radius_mm <= law_radius_mm
+    {
+        return rungs;
+    }
+    let mut radius = law_radius_mm;
+    loop {
+        let next = radius * AREA_DOUBLING_RADIUS_RATIO;
+        // The ratio is > 1 and the radius is positive and finite, so this
+        // strictly increases and the loop terminates. The guard is here for the
+        // one way that could stop being true — a radius large enough that the
+        // multiply saturates — rather than trusting it.
+        if next <= radius || !next.is_finite() {
+            break;
+        }
+        if next >= max_radius_mm {
+            rungs.push(max_radius_mm);
+            break;
+        }
+        rungs.push(next);
+        radius = next;
+    }
+    rungs
+}
+
+/// The ladder itself, for the test that asserts its shape against the
+/// registered clamps rather than against a hand-typed list of radii.
+#[cfg(test)]
+pub(crate) fn tip_growth_ladder_for_test(law_radius_mm: f64, max_radius_mm: f64) -> Vec<f64> {
+    tip_growth_ladder(law_radius_mm, max_radius_mm)
+}
+
+// THE OVERSHOOT THE LADDER LEAVES, and the scan that closes it.
+//
+// The ladder's step is one AREA DOUBLING, so the rung it stops on can be up to
+// one whole doubling above the smallest tip that would have worked — and MORE
+// than one when the first success is two or three rungs up, because every rung
+// below the last failure was also skipped over in area. MEASURED on this branch
+// (the lane judge's item 1): the emitted tips sit 4.6x to 5.7x the LAW area,
+// i.e. 2.1x to 2.4x the law RADIUS, which is the two-to-three-rung signature of
+// a doubling ladder. Every one of those tips is a scar on the model that is
+// bigger than physics asked for.
+//
+// So: once the ascending ladder has BRACKETED the answer between its last
+// failing rung and its first passing one, walk back DOWN inside that bracket and
+// keep the smallest radius that still attests.
+//
+// **No monotonicity is assumed here either.** The ladder is ascending-first-wins
+// precisely because attestation is not monotone in radius; the scan inherits
+// that. It therefore measures EVERY step in the bracket rather than stopping at
+// the first failure on the way down, and the answer is keep-smallest-SUCCESS
+// over the whole scanned set — never "the last one before a failure".
+
+/// The radius ratio of ONE refinement step, descending.
+///
+/// **The step is a fixed fraction of the ring's own sample spacing.** The
+/// ladder's step was justified against the ring's angular sampling: the
+/// `ENDPOINT_VALIDATION_OFFSET_RAYS` rim rays sit `2 pi r / N` = `0.785 r` apart
+/// at radius `r`, so a radius change much smaller than `r` moves the ring by
+/// less than the gap between its own samples. The refinement uses the SAME
+/// geometry one level down: a step moves the rim by one `N`th of that inter-ray
+/// gap,
+///
+/// ```text
+/// delta(r) = (2 pi r / N) / N = 2 pi r / N^2 = 0.0982 r        (N = 8)
+/// ```
+///
+/// `N` is the ring's own ray count and the gap is the ring's own sample spacing,
+/// so nothing new is introduced and nothing is hand-typed — change the ray count
+/// and the scan step follows it. Because `delta` is proportional to `r` the
+/// descent is GEOMETRIC, with this ratio, which is what makes the rung count
+/// below independent of the radius the scan starts from.
+fn tip_refinement_radius_ratio() -> f64 {
+    let rays = ENDPOINT_VALIDATION_OFFSET_RAYS as f64;
+    1.0 - std::f64::consts::TAU / (rays * rays)
+}
+
+/// The radii, DESCENDING, inside the bracket the ladder closed.
+///
+/// `cure_radius_mm` is the ladder's first passing rung; `last_failed_radius_mm`
+/// is the rung immediately below it, which was MEASURED and failed (or, when the
+/// cure is the first rung, the law radius itself, which the ordinary attestation
+/// already refused). Every candidate is strictly between them, so the scan can
+/// never propose a radius below what the load law asked for and never re-asks a
+/// question already answered.
+///
+/// **The rung COUNT is not chosen — it is bounded by the two ratios.** Candidates
+/// are `r_hi q^j`, and they run while `q^j > r_lo / r_hi`. The ladder's own step
+/// makes `r_hi / r_lo` at most `sqrt(2)` (less only where the ladder's last rung
+/// was clamped to the registered maximum), so
+///
+/// ```text
+/// j < ln(sqrt 2) / ln(1/q) = 0.34657 / 0.10332 = 3.354  =>  at most 3 rungs
+/// ```
+///
+/// **at most THREE extra rounds, for any contact, at any depth of ladder.** With
+/// the ladder's own bound of 9 rungs across the whole registered clamp span, one
+/// contact costs at most 12 batched rounds end to end — still rounds, never the
+/// contact count.
+fn tip_refinement_scan(cure_radius_mm: f64, last_failed_radius_mm: f64) -> Vec<f64> {
+    let mut rungs = Vec::new();
+    if !cure_radius_mm.is_finite()
+        || !last_failed_radius_mm.is_finite()
+        || last_failed_radius_mm <= 0.0
+        || cure_radius_mm <= last_failed_radius_mm
+    {
+        return rungs;
+    }
+    let ratio = tip_refinement_radius_ratio();
+    let mut radius = cure_radius_mm;
+    loop {
+        let next = radius * ratio;
+        // The ratio is in (0, 1) and the radius is positive and finite, so this
+        // strictly decreases and the loop terminates against the positive lower
+        // bound. The guard is here for the one way that could stop being true.
+        if !next.is_finite() || next >= radius {
+            break;
+        }
+        if next <= last_failed_radius_mm {
+            break;
+        }
+        rungs.push(next);
+        radius = next;
+    }
+    rungs
+}
+
+/// The scan itself, for the test that asserts its bound against the ladder's
+/// ratio rather than against a hand-typed count.
+#[cfg(test)]
+pub(crate) fn tip_refinement_scan_for_test(
+    cure_radius_mm: f64,
+    last_failed_radius_mm: f64,
+) -> Vec<f64> {
+    tip_refinement_scan(cure_radius_mm, last_failed_radius_mm)
+}
+
+/// One contact asking to be regrown until it attests.
+///
+/// The geometry is the caller's PLACED geometry with the contact-end radius left
+/// out: growth proposes that radius, one rung at a time, and everything else —
+/// both endpoints, the seat, the OD-9 probe, the routed load — is held fixed.
+/// Moving the seat is a different remedy and belongs to whoever owns the seat
+/// set (see [`TipGrowthOutcome`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TipGrowthRequest {
+    /// The caller's own row index. Verdicts come back keyed by it.
+    pub(crate) row: usize,
+    pub(crate) p0_mm: V3,
+    pub(crate) p1_mm: V3,
+    /// Which end meets the model. That end's radius is the one growth proposes.
+    pub(crate) end: ContactEnd,
+    /// OD-9's probe, unchanged by growth: it is a point on the surface normal,
+    /// so no tip radius can move it. A BURIED seat therefore stays buried at
+    /// every rung, which is correct — burial is a mesh fault, not a sizing one.
+    pub(crate) exterior_probe: V3,
+    pub(crate) carried_mm2: f64,
+    /// The radius the load law and the registered clamp produced. Rung zero,
+    /// already tried by the ordinary attestation before growth is asked for.
+    pub(crate) law_radius_mm: f64,
+    /// The smallest the OTHER end may be. The mint site keeps a stub from
+    /// inverting by holding its rootward end at least as wide as its tip, and
+    /// growth keeps that same rule rather than inventing one.
+    pub(crate) opposite_end_minimum_radius_mm: f64,
+    /// The registered `tip_radius_max_legacy_mm`, in mm RADIUS — the LOAD
+    /// LAW's own clamp maximum, carried here so the ladder can say which of
+    /// the two limits it actually stopped at.
+    pub(crate) max_radius_mm: f64,
+    /// The registered `tip_radius_max_grown_scar_mm`, in mm RADIUS — Craig's
+    /// measured field ceiling, 0.400 mm RADIUS (0.800 mm DIAMETER). See
+    /// [`growth_ceiling`] for what it does and, just as importantly, what it
+    /// does not touch.
+    pub(crate) scar_bound_radius_mm: f64,
+    /// PR-4's non-regression clause, carried through VERBATIM from the caller.
+    ///
+    /// It is deliberately NOT set by growth reaching the cap. That clause means
+    /// "the TIP-SIZING policy wanted a larger radius and the clamp refused",
+    /// and it suppresses the area-deficit record so a pre-existing clamp is not
+    /// blamed on this package. Growth is a different appetite — the ATTACHMENT
+    /// duty wanting more reach — and letting it set the clause would suppress a
+    /// real PR-4 deficit on a contact the run is about to emit.
+    pub(crate) tip_clamped_at_max: bool,
+}
+
+impl TipGrowthRequest {
+    /// `(r0, r1)` for a proposed tip radius, contact end first as the row
+    /// convention requires.
+    fn radii_for(&self, tip_radius_mm: f64) -> (f64, f64) {
+        let opposite = self.opposite_end_minimum_radius_mm.max(tip_radius_mm);
+        match self.end {
+            ContactEnd::Terminalward => (tip_radius_mm, opposite),
+            ContactEnd::Rootward => (opposite, tip_radius_mm),
+        }
+    }
+
+    fn provisional_member(&self, tip_radius_mm: f64) -> Result<Member, DesignedMaskError> {
+        let (r0_mm, r1_mm) = self.radii_for(tip_radius_mm);
+        SeatAttestationRow {
+            p0_mm: self.p0_mm,
+            p1_mm: self.p1_mm,
+            r0_mm,
+            r1_mm,
+            end: self.end,
+            exterior_probe: self.exterior_probe,
+            carried_mm2: self.carried_mm2,
+        }
+        .provisional_member()
+    }
+}
+
+/// One rung of the ladder and what it measured.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub(crate) struct TipGrowthAttempt {
+    /// The tip RADIUS this rung proposed, in mm. Double it for the diameter the
+    /// slicer UI shows.
+    pub(crate) radius_mm: f64,
+    /// Whether PR-8 attested at that radius.
+    pub(crate) attested: bool,
+}
+
+/// The rung that cured a contact, and the attestation it earned there.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TipGrowthCure {
+    /// The tip RADIUS to emit. It is the SMALLEST radius MEASURED — over the
+    /// ascending ladder and the descending refinement scan together — that
+    /// satisfies both duties, and it is what the run must build: the ring that
+    /// attested and the tip that ships are the same disc.
+    pub(crate) radius_mm: f64,
+    /// The other end's radius at that tip size, held non-inverting.
+    pub(crate) opposite_end_radius_mm: f64,
+    pub(crate) attestation: ContactAttestation,
+}
+
+/// What growth did for one contact.
+///
+/// **Re-seating is not attempted here, and that is a statement about this stage
+/// rather than an omission.** The remedy set Craig named is "grow, and/or
+/// re-seat within the legal seat set". An initial contact has a seat set of
+/// exactly ONE: the point perception chose. The tournament machinery that can
+/// offer a cheap legal alternative — [`attest_seats_batch`] and its candidate
+/// generation — belongs to the two TOUCHING families, which propose several
+/// seats and pick between them. Moving an initial contact means asking
+/// perception for a different contact, which is a different stage's decision and
+/// a different lane's work. So on this path the honest remedy set is growth
+/// alone, an exhausted ladder is a genuine refusal, and the disclosure says
+/// which remedies were available rather than implying one was skipped.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TipGrowthOutcome {
+    pub(crate) row: usize,
+    /// Rung zero — what the load law asked for and PR-8 refused.
+    pub(crate) law_radius_mm: f64,
+    /// The largest tip this ladder was allowed to propose, mm RADIUS — the
+    /// SMALLER of the registered `tip_radius_max_grown_scar_mm` and
+    /// `tip_radius_max_legacy_mm`. Reported rather than recomputed downstream,
+    /// so the disclosure states the ceiling the run actually walked to.
+    pub(crate) growth_ceiling_radius_mm: f64,
+    /// WHICH registered constant that ceiling came from, so a refusal can name
+    /// its stopper instead of quoting a bare number.
+    pub(crate) growth_ceiling_source: GrowthCeilingSource,
+    /// Every rung tried ABOVE the law radius, in the order they were tried:
+    /// the ascending ladder first, then the descending refinement scan inside
+    /// the bracket the ladder closed. The order is the order of measurement,
+    /// not of size, so a disclosure that prints this list is printing what the
+    /// run actually did.
+    pub(crate) attempts: Vec<TipGrowthAttempt>,
+    /// `Some` when a rung attested. `None` means the ladder ran out at the
+    /// registered maximum and the contact is genuinely refused.
+    pub(crate) cure: Option<TipGrowthCure>,
+}
+
+/// Everything a growth round needs that does NOT change between rounds: the
+/// surface, the extent being proven, and the attestation's own sampling
+/// settings. Held as one value so the ladder phase and the scan phase provably
+/// ask their questions under identical conditions.
+#[derive(Clone, Copy)]
+struct GrowthRoundContext<'a> {
+    surface: &'a NativeSurface,
+    extent: PositiveFiniteMm,
+    majority_step_mm: PositiveFiniteMm,
+    samples_per_subsegment: usize,
+    policy: &'a ContactPolicy,
+}
+
+/// One batched attestation round: the same `radii[i]` question asked of every
+/// row in `live` at once.
+///
+/// Both phases go through here, so the ladder and the scan cannot drift apart
+/// about what "attested" means, and so `grow_tips_to_attest` keeps exactly ONE
+/// [`attest_members_batch`] call site however many phases it grows.
+fn attest_growth_round(
+    context: GrowthRoundContext<'_>,
+    requests: &[TipGrowthRequest],
+    live: &[usize],
+    radii: &[f64],
+) -> Result<Vec<ContactAttestation>, DesignedMaskError> {
+    let members = live
+        .iter()
+        .zip(radii)
+        .map(|(index, radius)| requests[*index].provisional_member(*radius))
+        .collect::<Result<Vec<_>, _>>()?;
+    let borrowed = members.iter().collect::<Vec<_>>();
+    let attest_requests = live
+        .iter()
+        .zip(radii)
+        .enumerate()
+        .map(|(row, (index, radius))| ContactAttestationRequest {
+            member: row,
+            end: requests[*index].end,
+            extent: context.extent,
+            exterior_probe: requests[*index].exterior_probe,
+            end_radius_mm: *radius,
+            carried_mm2: requests[*index].carried_mm2,
+            tip_clamped_at_max: requests[*index].tip_clamped_at_max,
+        })
+        .collect::<Vec<_>>();
+    let limits = EndpointMaskValidationLimits::for_batch(
+        context.surface,
+        attest_requests.len(),
+        context.majority_step_mm,
+        context.samples_per_subsegment,
+    )?;
+    let results = attest_members_batch(
+        context.surface,
+        &borrowed,
+        &attest_requests,
+        limits,
+        context.policy,
+    )?;
+    if results.len() != live.len() {
+        return Err(DesignedMaskError::CorruptKernelResult);
+    }
+    Ok(results)
+}
+
+/// **Grow every refused tip until it attests, in ROUNDS rather than per tip.**
+///
+/// **Two phases, and the emitted tip is the smallest radius either of them
+/// measured as attesting.** The ascending ladder BRACKETS the answer — first
+/// success wins, no monotonicity assumed — and the descending refinement scan
+/// then walks back down inside that bracket at the ring's own step, keeping the
+/// smallest radius that still attests. Without the second phase the emitted tip
+/// can be a whole area doubling (measured: 4.6x–5.7x the law area) larger than
+/// physics asked for, and every excess millimetre of it is scar on the model.
+///
+/// Batch-first, and the shape of the batching is the whole point. Round `k`
+/// gathers the `k`-th rung of every contact still unresolved and issues ONE
+/// delegated [`attest_members_batch`] for all of them. A contact that attests
+/// leaves the round set, so the work falls with each round instead of rising:
+/// the cost is `rounds x batched calls`, and `rounds` is the ladder depth — at
+/// most nine across the whole registered clamp span — NEVER the contact count.
+/// The scan rounds batch the same way and add at most THREE more, so the whole
+/// remedy is bounded at **12 rounds** end to end. A loop that attested one grown
+/// tip at a time would be exactly the per-item native call this module exists to
+/// prevent.
+///
+/// The delegation re-runs OD-9's parity probe each round on the rows still in
+/// play. That is redundant — the probe point does not move with the tip radius —
+/// and it is kept anyway: one attestation entry point that always runs both
+/// screens is worth more than a second, subtly cheaper one that could drift out
+/// of agreement with it about what "attested" means.
+///
+/// The outer `Err` remains a batch-level integrity failure, exactly as it is for
+/// the callers this delegates to. Nothing can be concluded about any row from
+/// it.
+pub(crate) fn grow_tips_to_attest(
+    surface: &NativeSurface,
+    requests: &[TipGrowthRequest],
+    extent: PositiveFiniteMm,
+    majority_step_mm: PositiveFiniteMm,
+    samples_per_subsegment: usize,
+    policy: &ContactPolicy,
+) -> Result<Vec<TipGrowthOutcome>, DesignedMaskError> {
+    // Fixed for the whole remedy: both phases attest under exactly these
+    // conditions, so a difference between them can only ever be the radius.
+    let context = GrowthRoundContext {
+        surface,
+        extent,
+        majority_step_mm,
+        samples_per_subsegment,
+        policy,
+    };
+    // THE CEILING, decided once per row before any rung is walked. It is the
+    // smaller of the registered scar bound and the registered legacy maximum,
+    // and it is carried into the outcome so the disclosure states the limit
+    // this run actually walked to and names the constant it came from.
+    let ceilings = requests.iter().map(growth_ceiling).collect::<Vec<_>>();
+    let ladders = requests
+        .iter()
+        .zip(&ceilings)
+        .map(|(request, (ceiling_mm, _))| tip_growth_ladder(request.law_radius_mm, *ceiling_mm))
+        .collect::<Vec<_>>();
+    let mut outcomes = requests
+        .iter()
+        .zip(&ceilings)
+        .map(|(request, (ceiling_mm, source))| TipGrowthOutcome {
+            row: request.row,
+            law_radius_mm: request.law_radius_mm,
+            growth_ceiling_radius_mm: *ceiling_mm,
+            growth_ceiling_source: *source,
+            attempts: Vec::new(),
+            cure: None,
+        })
+        .collect::<Vec<_>>();
+    // SABOTAGE SEAM. Zero rounds is exactly the engine before grow-to-attest
+    // existed: every ladder computed and none of it walked, so a refused tip
+    // stays refused and its load is abandoned. It is here, at the loop rather
+    // than at [`tip_growth_ladder`], because the ladder's own arithmetic is
+    // what the growth tests assert and sabotaging it would make the test
+    // disagree with itself.
+    let deepest = if growth_rounds_disabled() {
+        0
+    } else {
+        ladders.iter().map(Vec::len).max().unwrap_or(0)
+    };
+
+    // Which ladder rung cured each row, so the scan below knows the rung
+    // immediately BELOW the cure — the last radius that was measured and failed,
+    // and therefore the exclusive lower end of the bracket.
+    let mut cure_rung = vec![None; requests.len()];
+
+    for rung in 0..deepest {
+        // Only rows still unresolved AND still having a rung left to try.
+        let live = (0..requests.len())
+            .filter(|index| outcomes[*index].cure.is_none() && rung < ladders[*index].len())
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            break;
+        }
+        let radii = live
+            .iter()
+            .map(|index| ladders[*index][rung])
+            .collect::<Vec<_>>();
+        let results = attest_growth_round(context, requests, &live, &radii)?;
+        for result in results {
+            let index = *live
+                .get(result.member)
+                .ok_or(DesignedMaskError::CorruptKernelResult)?;
+            let radius_mm = ladders[index][rung];
+            let attested = result.verdict.is_ok();
+            outcomes[index].attempts.push(TipGrowthAttempt {
+                radius_mm,
+                attested,
+            });
+            if attested {
+                cure_rung[index] = Some(rung);
+                outcomes[index].cure = Some(cure_for(&requests[index], radius_mm, result));
+            }
+        }
+    }
+
+    // THE DESCENDING REFINEMENT SCAN, inside the bracket the ladder closed.
+    //
+    // The ladder returns the smallest radius ON THE LADDER, which can be up to a
+    // whole area doubling above the smallest radius that would have worked. Now
+    // that the answer is bracketed, walk back down through it at the ring's own
+    // refinement step and keep the smallest radius that still attests.
+    //
+    // Same batching shape as the ladder, and the same reason: scan step `j`
+    // gathers the `j`-th candidate of every CURED row and issues ONE delegated
+    // round. At most three steps per row (see [`tip_refinement_scan`]), so the
+    // whole remedy is bounded at 9 + 3 = 12 rounds — rounds, never contacts.
+    let scans = (0..requests.len())
+        .map(|index| {
+            cure_rung[index].map_or_else(Vec::new, |rung| {
+                let last_failed_mm = if rung == 0 {
+                    // Rung zero's predecessor is the law radius, which the
+                    // ordinary attestation measured and refused before growth
+                    // was asked for.
+                    requests[index].law_radius_mm
+                } else {
+                    ladders[index][rung - 1]
+                };
+                tip_refinement_scan(ladders[index][rung], last_failed_mm)
+            })
+        })
+        .collect::<Vec<_>>();
+    let deepest_scan = scans.iter().map(Vec::len).max().unwrap_or(0);
+
+    for step in 0..deepest_scan {
+        // EVERY candidate is measured. There is no early exit on a failure:
+        // attestation is not monotone in radius, so a smaller candidate can
+        // attest where a larger one did not, and stopping at the first failure
+        // would be the same unsound monotonicity assumption the ladder refuses
+        // to make.
+        let live = (0..requests.len())
+            .filter(|index| step < scans[*index].len())
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            break;
+        }
+        let radii = live
+            .iter()
+            .map(|index| scans[*index][step])
+            .collect::<Vec<_>>();
+        let results = attest_growth_round(context, requests, &live, &radii)?;
+        for result in results {
+            let index = *live
+                .get(result.member)
+                .ok_or(DesignedMaskError::CorruptKernelResult)?;
+            let radius_mm = scans[index][step];
+            let attested = result.verdict.is_ok();
+            outcomes[index].attempts.push(TipGrowthAttempt {
+                radius_mm,
+                attested,
+            });
+            // KEEP-SMALLEST-SUCCESS over the scanned set, stated as a
+            // comparison rather than relying on the descent's order.
+            let smaller = outcomes[index]
+                .cure
+                .as_ref()
+                .is_none_or(|cure| radius_mm < cure.radius_mm);
+            if attested && smaller {
+                outcomes[index].cure = Some(cure_for(&requests[index], radius_mm, result));
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
+/// The emitted geometry for one winning radius: the tip, the non-inverting
+/// opposite end, and the attestation earned AT that radius.
+fn cure_for(
+    request: &TipGrowthRequest,
+    radius_mm: f64,
+    attestation: ContactAttestation,
+) -> TipGrowthCure {
+    let (r0_mm, r1_mm) = request.radii_for(radius_mm);
+    TipGrowthCure {
+        radius_mm,
+        opposite_end_radius_mm: match request.end {
+            ContactEnd::Terminalward => r1_mm,
+            ContactEnd::Rootward => r0_mm,
+        },
+        attestation,
+    }
+}
+
 /// One stage's seat-attestation transcript, folded to a digest.
 ///
 /// Same totality requirement as `initial.rs`'s `attestation_digest`, and for
@@ -1129,6 +1827,77 @@ thread_local! {
     /// `(row, s_a)` — overwrite the first interval of one row's evidence.
     static ENDPOINT_INTERVAL_SABOTAGE: std::cell::Cell<Option<(usize, f64)>> =
         const { std::cell::Cell::new(None) };
+    /// Run zero growth rounds — see [`with_growth_rounds_disabled`].
+    static TIP_GROWTH_ROUNDS_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Ignore the registered scar bound — see [`with_scar_bound_disabled`].
+    static TIP_SCAR_BOUND_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the growth ladder is being walked. Always `true` in production: the
+/// switch below exists only in a test build.
+fn growth_rounds_disabled() -> bool {
+    #[cfg(test)]
+    {
+        TIP_GROWTH_ROUNDS_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// **Test-only sabotage of grow-to-attest**, so one fixture can be run BOTH
+/// ways through the real production path.
+///
+/// The growth tests need the counterfactual, not just the outcome. Asserting
+/// only that a contact survives proves nothing about growth — the contact might
+/// have attested at its load-sized tip all along, and the assertion would stay
+/// green with the whole ladder deleted. Running the same fixture with the rounds
+/// off shows that this contact genuinely depends on growth: without it the seat
+/// is refused `NotAttached`, quarantined, and its routed load abandoned.
+///
+/// Thread-local, and disarmed on the way out, exactly like
+/// [`with_sabotaged_interval`].
+#[cfg(test)]
+pub(crate) fn with_growth_rounds_disabled<T>(body: impl FnOnce() -> T) -> T {
+    TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(true));
+    let outcome = body();
+    TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(false));
+    outcome
+}
+
+/// Whether the registered scar bound is being honoured. Always `false` in
+/// production: the switch below exists only in a test build.
+fn scar_bound_disabled() -> bool {
+    #[cfg(test)]
+    {
+        TIP_SCAR_BOUND_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// **Test-only sabotage of the scar bound**, so one fixture can be run BOTH
+/// ways through the real production path.
+///
+/// The bound's whole claim is a counterfactual: a seat whose cure would need a
+/// tip wider than `TIP_RADIUS_MAX_GROWN_SCAR_MM` must be REFUSED, and the only
+/// way to show a refusal is the bound's doing — rather than a seat that was
+/// incurable anyway — is to lift the bound and watch the same fixture cure at
+/// an over-bound radius. A revert that deletes the truncation therefore turns
+/// the guard test red with the over-bound scar it would have built named in
+/// the failure.
+///
+/// Thread-local, and disarmed on the way out, exactly like
+/// [`with_growth_rounds_disabled`].
+#[cfg(test)]
+pub(crate) fn with_scar_bound_disabled<T>(body: impl FnOnce() -> T) -> T {
+    TIP_SCAR_BOUND_DISABLED.with(|cell| cell.set(true));
+    let outcome = body();
+    TIP_SCAR_BOUND_DISABLED.with(|cell| cell.set(false));
+    outcome
 }
 
 /// Test-only evidence injection, so the two DIVERGENT per-row policies can be
@@ -3374,5 +4143,620 @@ mod tests {
             "the placed-member mint must refuse the whole batch, naming the \
              check that refused it: {minted:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // GROW-TO-ATTEST
+    // ---------------------------------------------------------------------
+
+    /// A box `[0,4] x [0,2] x [0,2]`, the same shape the OD-9 fixtures use.
+    fn edge_seat_box() -> NativeSurface {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_box(&mut vertices, &mut faces, [0.0, 0.0, 0.0], [4.0, 2.0, 2.0]);
+        surface_from(&vertices, &faces, 0.1)
+    }
+
+    /// **THE EDGE SEAT, constructed so the numbers are checkable by hand.**
+    ///
+    /// The stub meets the box's `+x` face at `x = 4`, but its axis is displaced
+    /// `EDGE_OFFSET_MM` PAST the box's `+y` silhouette edge at `y = 2`. So:
+    ///
+    /// * the CENTRELINE starts at `y = 2 + 0.075`, in air, and can never engage
+    ///   however deep it is probed — this is the real corpus case, a tip centre
+    ///   lying outside the boundary while part of its disc is inside;
+    /// * a rim ray at tip radius `r` reaches inward to `y = 2.075 - r` at best,
+    ///   so the ring finds solid if and only if `r > 0.075`.
+    ///
+    /// That makes the outcome arithmetic rather than luck, for BOTH phases.
+    ///
+    /// **The ladder** from the registered minimum 0.05 mm radius is
+    /// 0.05 -> 0.0707 -> 0.1 -> ..., and the first rung whose ring can reach
+    /// `y < 2` is 0.1 mm RADIUS (0.2 mm DIAMETER). The two rungs below it must
+    /// fail even for a rim ray pointing exactly at `-y`: 2.075 - 0.05 = 2.025
+    /// and 2.075 - 0.0707 = 2.0043 are both outside.
+    ///
+    /// **The scan** then descends from 0.1 through the bracket `(0.0707, 0.1)`
+    /// at the ring's refinement ratio `q = 1 - 2 pi / 8^2 = 0.9018252`. Exactly
+    /// three candidates fit — 0.0901825, 0.0813289, 0.0733444 mm radius — and
+    /// the fourth, 0.0661439, is below the last failing ladder rung and is never
+    /// proposed. Against the same `r > 0.075` rule the first two reach solid and
+    /// the third does not, so the cure is
+    ///
+    /// ```text
+    /// 0.1 * q^2 = 0.081328874469857680 mm RADIUS
+    ///           = 0.162657748939715360 mm DIAMETER
+    /// ```
+    ///
+    /// which is the smallest tip the scan measured as attesting and sits just
+    /// above the 0.075 mm the geometry demands. It cuts the interface area this
+    /// contact scars the model with from 4.00x the law area to 2.65x.
+    const EDGE_OFFSET_MM: f64 = 0.075;
+    const EDGE_SEAT_DEPTH_MM: f64 = 0.3;
+    const EDGE_SEAT_EXTENT_MM: f64 = 0.05;
+    /// The registered tip-sizing clamp minimum, 0.05 mm RADIUS (0.1 mm
+    /// DIAMETER), which is what the load law hands a tiny contact.
+    const EDGE_SEAT_LAW_RADIUS_MM: f64 = 0.05;
+    /// The load this seat carries. Under the frozen policy's area law it needs
+    /// only `sqrt(0.05 / (X * pi))` mm of radius, well below the clamp minimum,
+    /// so 0.05 mm radius really is what the law asks for here.
+    const EDGE_SEAT_CARRIED_MM2: f64 = 0.05;
+    /// The cure the two phases together must land on: `0.1 * q^2` with
+    /// `q = 1 - 2 pi / 8^2`. Stated here as the number so a reader can check it
+    /// against the derivation on [`EDGE_OFFSET_MM`]; the test ALSO asserts it as
+    /// arithmetic through [`tip_refinement_radius_ratio`], so a hand-edited
+    /// literal cannot pass on its own.
+    const EDGE_SEAT_CURE_RADIUS_MM: f64 = 0.081_328_874_469_857_68;
+
+    /// The registered `TIP_RADIUS_MAX_GROWN_SCAR_MM`, read rather than typed,
+    /// so a ruling that moves the bound moves these fixtures with it.
+    fn registered_scar_bound_mm() -> f64 {
+        *plinth_core::m0_constants()
+            .expect("the M0 registry constructs")
+            .evidence()
+            .tip_radius_max_grown_scar_mm()
+            .value()
+    }
+
+    /// The registered `TIP_RADIUS_MAX_LEGACY_MM` — the load law's own clamp
+    /// maximum, which is what the ladder would run to WITHOUT the scar bound.
+    fn registered_legacy_tip_max_mm() -> f64 {
+        plinth_core::m0_constants()
+            .expect("the M0 registry constructs")
+            .placeholders()
+            .tip_radius_max_legacy_mm()
+            .diagnostic()
+            .get()
+    }
+
+    fn edge_seat_request(seat_y: f64) -> TipGrowthRequest {
+        TipGrowthRequest {
+            row: 0,
+            p0_mm: [4.0 - EDGE_SEAT_DEPTH_MM, seat_y, 1.0],
+            p1_mm: [4.0 + 2.5, seat_y, 1.0],
+            end: ContactEnd::Terminalward,
+            exterior_probe: [4.0 + EDGE_SEAT_EXTENT_MM, seat_y, 1.0],
+            carried_mm2: EDGE_SEAT_CARRIED_MM2,
+            law_radius_mm: EDGE_SEAT_LAW_RADIUS_MM,
+            opposite_end_minimum_radius_mm: 0.35,
+            max_radius_mm: registered_legacy_tip_max_mm(),
+            scar_bound_radius_mm: registered_scar_bound_mm(),
+            tip_clamped_at_max: false,
+        }
+    }
+
+    fn grow_edge_seat(
+        surface: &NativeSurface,
+        request: &TipGrowthRequest,
+    ) -> Vec<TipGrowthOutcome> {
+        grow_tips_to_attest(
+            surface,
+            std::slice::from_ref(request),
+            extent(EDGE_SEAT_EXTENT_MM),
+            extent(EDGE_SEAT_EXTENT_MM / 10.0),
+            ENDPOINT_VALIDATION_OFFSET_RAYS,
+            &attestation_policy(),
+        )
+        .expect("the growth batch itself is well formed")
+    }
+
+    /// **A load-sized tip that cannot attest is grown until it does, and the
+    /// tip that is BUILT is the tip that attested.**
+    ///
+    /// This is the defect in one fixture. PR-8 probes attachment with a ray ring
+    /// at the TIP RADIUS, so shrinking a tip to what the load law alone needs
+    /// withdraws the very ring the attestation depends on. The seat here is
+    /// sound — part of its disc really is over solid — and at 0.05 mm radius
+    /// (0.1 mm diameter) it is nevertheless refused `NotAttached`, quarantined
+    /// upstream, and its 0.05 mm² abandoned.
+    #[test]
+    fn an_edge_seat_refused_at_the_law_radius_attests_at_the_smallest_rung_that_reaches() {
+        let surface = edge_seat_box();
+        let seat_y = 2.0 + EDGE_OFFSET_MM;
+        let scan_ratio = tip_refinement_radius_ratio();
+
+        // NON-VACUITY, stated first, exactly as the OD-9 fixture does it: this
+        // is only an edge-seat test if the centreline really is in air, the
+        // seat really is exterior (so OD-9 cannot be what refuses it), and the
+        // rim at the cure radius really does reach solid.
+        assert_eq!(
+            surface.inside(&[
+                // the centreline's own start point, in air past the edge
+                [4.0 - EDGE_SEAT_DEPTH_MM, seat_y, 1.0],
+                // the OD-9 probe, which must read EXTERIOR
+                [4.0 + EDGE_SEAT_EXTENT_MM, seat_y, 1.0],
+                // a rim ray at the law radius, still in air
+                [
+                    4.0 - EDGE_SEAT_DEPTH_MM,
+                    seat_y - EDGE_SEAT_LAW_RADIUS_MM,
+                    1.0
+                ],
+                // a rim ray at the cure radius, inside the solid
+                [
+                    4.0 - EDGE_SEAT_DEPTH_MM,
+                    seat_y - EDGE_SEAT_CURE_RADIUS_MM,
+                    1.0
+                ],
+                // and a rim ray at the scan step BELOW the cure, back in air —
+                // the cure really is the smallest step that reaches, not merely
+                // one that does.
+                [
+                    4.0 - EDGE_SEAT_DEPTH_MM,
+                    seat_y - EDGE_SEAT_CURE_RADIUS_MM * scan_ratio,
+                    1.0
+                ],
+            ]),
+            vec![false, false, false, true, false],
+            "the fixture must be an EDGE seat: centreline in air, seat exterior, \
+             the law-radius ring missing, the cure ring reaching solid and the \
+             next scan step down missing again"
+        );
+
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert_eq!(outcomes.len(), 1);
+        let outcome = &outcomes[0];
+        let cure = outcome.cure.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the edge seat must be curable by growth; without it this contact \
+                 is refused and its {EDGE_SEAT_CARRIED_MM2} mm² of routed load is \
+                 ABANDONED, with no neighbour told and nothing grown in its place. \
+                 Rungs tried: {:?}",
+                outcome.attempts
+            )
+        });
+
+        // THE HONEST MINIMUM. Not the first LADDER rung that attests — that is
+        // 0.1 mm radius, a whole area doubling of overshoot — but the smallest
+        // radius EITHER phase measured as attesting, after the descending scan
+        // walked back down inside the bracket the ladder closed.
+        let expected_cure_mm = 0.1 * scan_ratio * scan_ratio;
+        assert!(
+            (expected_cure_mm - EDGE_SEAT_CURE_RADIUS_MM).abs() < 1e-15,
+            "the scan step is 2 pi r / 8^2 per the ring's own sampling geometry, \
+             so the cure is 0.1 * q^2 = {EDGE_SEAT_CURE_RADIUS_MM} mm radius; the \
+             ratio arithmetic now says {expected_cure_mm}"
+        );
+        assert!(
+            (cure.radius_mm - expected_cure_mm).abs() < 1e-12,
+            "the ladder brackets the answer at 0.1 mm radius and the scan must \
+             then descend to {expected_cure_mm} mm radius \
+             ({} mm diameter), the smallest step that still clears the \
+             {EDGE_OFFSET_MM} mm the seat stands past the edge; got {} mm radius",
+            expected_cure_mm * 2.0,
+            cure.radius_mm
+        );
+        assert!(
+            cure.radius_mm > EDGE_OFFSET_MM,
+            "a cure at or below {EDGE_OFFSET_MM} mm radius cannot reach the solid \
+             at all, so the scan would have kept a tip that does not attest"
+        );
+        assert_eq!(outcome.law_radius_mm, EDGE_SEAT_LAW_RADIUS_MM);
+        // TWO ladder rungs to bracket, then THREE scan steps inside the
+        // bracket — the bound this fixture exercises in full.
+        assert_eq!(
+            outcome.attempts.len(),
+            5,
+            "two ladder rungs above the law radius reach 0.1 mm, and exactly \
+             three scan steps fit in the bracket (0.0707, 0.1): {:?}",
+            outcome.attempts
+        );
+        assert!(
+            !outcome.attempts[0].attested,
+            "0.0707 mm radius cannot reach the solid and must be recorded as a \
+             failed rung, not skipped"
+        );
+        assert!(outcome.attempts[1].attested);
+        // The scan measures EVERY candidate, including the one below the cure.
+        // A run that stopped at the first failure on the way down would be
+        // assuming the monotonicity the ladder exists to avoid assuming.
+        assert!(
+            outcome.attempts[2].attested && outcome.attempts[3].attested,
+            "the two scan steps above {EDGE_OFFSET_MM} mm must attest: {:?}",
+            outcome.attempts
+        );
+        assert!(
+            !outcome.attempts[4].attested,
+            "the third scan step falls below {EDGE_OFFSET_MM} mm and must be \
+             MEASURED and recorded as failing, not skipped: {:?}",
+            outcome.attempts
+        );
+        assert!(
+            outcome.attempts[2].radius_mm > outcome.attempts[3].radius_mm
+                && outcome.attempts[3].radius_mm > outcome.attempts[4].radius_mm
+                && outcome.attempts[2].radius_mm < outcome.attempts[1].radius_mm,
+            "the scan record must be strictly DESCENDING and start below the \
+             ladder rung it refines: {:?}",
+            outcome.attempts
+        );
+        assert!(
+            outcome.attempts[2..]
+                .iter()
+                .all(|rung| rung.radius_mm > outcome.attempts[0].radius_mm),
+            "no scan step may drop to or below the last FAILING ladder rung at \
+             {} mm radius — that radius is already answered, and anything under \
+             it is below what the load law asked for: {:?}",
+            outcome.attempts[0].radius_mm,
+            outcome.attempts
+        );
+        assert_eq!(
+            outcome.attempts[3].radius_mm, cure.radius_mm,
+            "the tip that is BUILT must be the tip that ATTESTED — probing at one \
+             radius and emitting another is the defect, not the fix"
+        );
+        // The attestation the cure carries is a real one at that radius: the
+        // ring found solid, and it found it with the CENTRELINE still in air,
+        // which is the corpus case exactly.
+        assert!(cure.attestation.verdict.is_ok());
+        assert!(
+            !cure.attestation.engagement.centreline,
+            "this seat is held on by its RIM; a centreline that engaged would \
+             mean the fixture stopped being an edge seat"
+        );
+        assert!(cure.attestation.engagement.rim_engaged > 0);
+        // The shaft below a grown tip is never thinner than the tip, which is
+        // the same non-inverting rule the mint site already applies.
+        assert!(cure.opposite_end_radius_mm >= cure.radius_mm);
+
+        // THE COUNTERFACTUAL: the same fixture with the growth rounds off is
+        // the engine before this change. No cure, no rungs, load abandoned.
+        let refused =
+            with_growth_rounds_disabled(|| grow_edge_seat(&surface, &edge_seat_request(seat_y)));
+        assert!(
+            refused[0].cure.is_none() && refused[0].attempts.is_empty(),
+            "with the growth rounds off this seat must stay refused, or the test \
+             above proves nothing about growth"
+        );
+    }
+
+    /// **The refinement scan's step and its BOUND, asserted as arithmetic.**
+    ///
+    /// The step is the ring's own geometry: `N` rim rays sit `2 pi r / N` apart,
+    /// and one refinement step moves the rim by one `N`th of that gap, so the
+    /// descent ratio is `1 - 2 pi / N^2`. Because the step is proportional to
+    /// `r` the descent is geometric, so the number of steps that fit in a
+    /// bracket depends only on the bracket's RATIO — and the ladder makes that
+    /// ratio at most `sqrt(2)`. Hence at most three extra rounds, for every
+    /// contact, at every depth. Nothing here is hand-typed: change the ray count
+    /// and both the step and the bound follow it.
+    #[test]
+    fn the_refinement_scan_steps_by_the_rings_own_sample_spacing_and_is_bounded_at_three() {
+        let rays = ENDPOINT_VALIDATION_OFFSET_RAYS as f64;
+        let ratio = tip_refinement_radius_ratio();
+        let expected_ratio = 1.0 - (std::f64::consts::TAU / rays) / rays;
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-15,
+            "one step must move the rim by one {rays}th of the {}-mm-per-radius \
+             inter-ray gap; got ratio {ratio}",
+            std::f64::consts::TAU / rays
+        );
+        assert!(
+            ratio > 0.0 && ratio < 1.0,
+            "the scan must descend, and to a positive radius: ratio {ratio}"
+        );
+
+        // THE BOUND, from the two ratios and nothing else.
+        let bound = (AREA_DOUBLING_RADIUS_RATIO.ln() / (1.0 / ratio).ln()).ceil() as usize - 1;
+        let steps_per_doubling = AREA_DOUBLING_RADIUS_RATIO.ln() / (1.0 / ratio).ln();
+        assert_eq!(
+            bound, 3,
+            "ln(sqrt2)/ln(1/q) = {steps_per_doubling} steps fit in one area \
+             doubling, so the scan adds at most {bound} rounds"
+        );
+
+        // A bracket exactly one ladder step wide — the widest the ladder can
+        // hand over — yields exactly that many candidates, strictly descending
+        // and strictly inside the bracket.
+        for lower_mm in [0.05, 0.0707, 0.19, 0.5] {
+            let upper_mm = lower_mm * AREA_DOUBLING_RADIUS_RATIO;
+            let scan = tip_refinement_scan_for_test(upper_mm, lower_mm);
+            assert_eq!(
+                scan.len(),
+                bound,
+                "a full-width bracket ({lower_mm}, {upper_mm}) mm radius must \
+                 hold exactly {bound} steps; got {scan:?}"
+            );
+            let mut previous = upper_mm;
+            for radius in &scan {
+                assert!(
+                    *radius < previous && *radius > lower_mm,
+                    "step {radius} must be strictly inside ({lower_mm}, \
+                     {previous}) mm radius"
+                );
+                assert!(
+                    (radius - previous * ratio).abs() < 1e-15,
+                    "every step is one ratio, never a bisection: {scan:?}"
+                );
+                previous = *radius;
+            }
+        }
+
+        // A NARROWER bracket — what the ladder hands over when its last rung was
+        // clamped to the registered maximum — holds fewer, and never proposes a
+        // radius at or below the rung that already failed.
+        let narrow = tip_refinement_scan_for_test(1.0, 0.85);
+        assert!(
+            !narrow.is_empty()
+                && narrow.len() < bound
+                && narrow.iter().all(|radius| *radius > 0.85),
+            "a clamped final rung leaves a narrow bracket, which must still be \
+             scanned and still respect its lower end: {narrow:?}"
+        );
+        // And a bracket with nothing in it is empty rather than degenerate.
+        assert!(tip_refinement_scan_for_test(0.1, 0.1).is_empty());
+        assert!(tip_refinement_scan_for_test(0.1, 0.2).is_empty());
+        assert!(tip_refinement_scan_for_test(0.1, 0.0).is_empty());
+    }
+
+    /// **Growth does not paper over a seat that is genuinely not there.**
+    ///
+    /// Move the same stub far enough past the edge that no legal tip can reach
+    /// — `2.0 + 1.5` mm, beyond even the registered `tip_radius_max_legacy_mm`
+    /// of 1.0 mm radius, and so beyond any ceiling growth could ever be given —
+    /// and the ladder must be walked to its end and then REFUSE, with every
+    /// rung on the record. A remedy that cured this one would be inventing
+    /// attachment.
+    #[test]
+    fn a_seat_no_legal_tip_can_reach_is_refused_with_the_whole_ladder_on_the_record() {
+        let surface = edge_seat_box();
+        let seat_y = 2.0 + 1.5;
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert!(
+            outcomes[0].cure.is_none(),
+            "1.5 mm past the edge is further than the registered maximum 1.0 mm \
+             radius can reach; curing it would be inventing attachment"
+        );
+        // Every rung tried, none attested, and the last one is exactly the
+        // ceiling the run walked to — the ladder ends on a radius the run is
+        // allowed to build. Read from the outcome rather than typed, so this
+        // stays true whichever of the two registered limits binds.
+        assert!(!outcomes[0].attempts.is_empty());
+        assert!(outcomes[0].attempts.iter().all(|rung| !rung.attested));
+        assert_eq!(
+            outcomes[0].attempts.last().unwrap().radius_mm,
+            outcomes[0].growth_ceiling_radius_mm
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // THE SCAR BOUND — TIP_RADIUS_MAX_GROWN_SCAR_MM
+    // ---------------------------------------------------------------------
+
+    /// **THE OVER-BOUND SIBLING of the edge seat.**
+    ///
+    /// The same construction as [`EDGE_OFFSET_MM`], moved further out: the seat
+    /// stands `1.25 x` the registered scar maximum past the `+y` silhouette
+    /// edge. The reach rule is unchanged — a rim ray at tip radius `r` reaches
+    /// `y = 2 + offset - r`, so the ring finds solid **iff `r > offset`** — and
+    /// with `offset = 1.25 x bound` that means:
+    ///
+    /// * **every radius the bound allows fails**, because the whole ladder is
+    ///   at or below `bound < offset`;
+    /// * **a radius above the bound would work**, because the ladder run to the
+    ///   legacy maximum contains rungs above `offset`.
+    ///
+    /// So the seat is curable in geometry and refused by policy, which is
+    /// exactly the case the bound exists to decide. The factor is stated as
+    /// arithmetic against the registered constant, never as a typed millimetre,
+    /// so a ruling that moves the bound moves this fixture with it.
+    fn over_bound_edge_offset_mm() -> f64 {
+        1.25 * registered_scar_bound_mm()
+    }
+
+    /// **A cure that would exceed Craig's scar maximum is REFUSED, and the
+    /// refusal names the bound.**
+    ///
+    /// This is the ruling of 2026-08-20 in one fixture. The seat CAN be reached
+    /// — the counterfactual below proves it, by lifting the bound and watching
+    /// the same fixture cure — but only by growing the tip past 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER), which is the heaviest support Craig has ever needed
+    /// and the largest scar he accepts. The engine's answer is therefore the
+    /// disclosed ABANDONED LOAD, with the bound NAMED as the stopper, rather
+    /// than a support the operator never agreed to.
+    ///
+    /// **If the truncation is reverted this test goes red**, and the failure
+    /// prints the over-bound scar the run would have built — radius and
+    /// diameter — instead of a bare "expected None".
+    #[test]
+    fn a_cure_that_would_exceed_the_grown_scar_maximum_is_refused_and_names_the_bound() {
+        let surface = edge_seat_box();
+        let bound_mm = registered_scar_bound_mm();
+        let offset_mm = over_bound_edge_offset_mm();
+        let seat_y = 2.0 + offset_mm;
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert_eq!(outcomes.len(), 1);
+        let outcome = &outcomes[0];
+
+        if let Some(cure) = outcome.cure.as_ref() {
+            panic!(
+                "THE SCAR BOUND IS NOT BEING APPLIED. This seat stands \
+                 {offset_mm} mm past the edge, so nothing at or below the \
+                 registered TIP_RADIUS_MAX_GROWN_SCAR_MM of {bound_mm} mm RADIUS \
+                 ({} mm DIAMETER) can reach it — yet growth returned a cure at \
+                 {} mm RADIUS ({} mm DIAMETER), an over-bound scar {}x the \
+                 maximum Craig ruled. That is a support wider than the heaviest \
+                 he has ever needed, cut into a model in a place he did not \
+                 choose. Rungs walked: {:?}",
+                bound_mm * 2.0,
+                cure.radius_mm,
+                cure.radius_mm * 2.0,
+                cure.radius_mm / bound_mm,
+                outcome.attempts
+            );
+        }
+
+        // THE CEILING IS THE BOUND, and it is named.
+        assert_eq!(
+            outcome.growth_ceiling_radius_mm,
+            bound_mm,
+            "the ladder's ceiling must be the registered scar maximum \
+             {bound_mm} mm radius ({} mm diameter), not the load law's own \
+             clamp",
+            bound_mm * 2.0
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source,
+            GrowthCeilingSource::GrownScarMaximum
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source.constant_id(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            "the disclosure names the constant that stopped the rescue; a bare \
+             number cannot tell an operator WHICH rule refused their support"
+        );
+
+        // THE LADDER WAS WALKED, in full, and it stopped exactly at the bound.
+        // A refusal with an unwalked ladder would be the silent quarantine
+        // grow-to-attest exists to remove.
+        assert!(
+            !outcome.attempts.is_empty(),
+            "the contact was refused without any larger tip being tried"
+        );
+        assert!(outcome.attempts.iter().all(|rung| !rung.attested));
+        assert_eq!(outcome.attempts.last().unwrap().radius_mm, bound_mm);
+        assert!(
+            outcome
+                .attempts
+                .iter()
+                .all(|rung| rung.radius_mm <= bound_mm),
+            "no rung may PROPOSE a tip above the bound, even to measure it — \
+             every rung probes at the radius it would emit: {:?}",
+            outcome.attempts
+        );
+        assert_eq!(outcome.law_radius_mm, EDGE_SEAT_LAW_RADIUS_MM);
+    }
+
+    /// **The counterfactual: without the bound, this same seat CURES — at an
+    /// over-bound scar.**
+    ///
+    /// Without this, the refusal above proves nothing about the bound. A seat
+    /// that no tip could ever reach would refuse identically, and the guard
+    /// would stay green with the whole truncation deleted and the fixture
+    /// merely unreachable. Running the SAME fixture through the SAME production
+    /// path with the bound lifted separates the two: the cure that appears is
+    /// the scar the bound is refusing, and its size is what makes the refusal
+    /// worth having.
+    #[test]
+    fn without_the_scar_bound_the_same_seat_cures_at_an_over_bound_scar() {
+        let surface = edge_seat_box();
+        let bound_mm = registered_scar_bound_mm();
+        let legacy_max_mm = registered_legacy_tip_max_mm();
+        let offset_mm = over_bound_edge_offset_mm();
+        let seat_y = 2.0 + offset_mm;
+
+        let outcomes =
+            with_scar_bound_disabled(|| grow_edge_seat(&surface, &edge_seat_request(seat_y)));
+        let outcome = &outcomes[0];
+        assert_eq!(
+            outcome.growth_ceiling_radius_mm, legacy_max_mm,
+            "with the bound lifted the ceiling falls back to the load law's own \
+             clamp maximum"
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source,
+            GrowthCeilingSource::LegacyTipMaximum
+        );
+
+        let cure = outcome.cure.as_ref().unwrap_or_else(|| {
+            panic!(
+                "this fixture must be CURABLE once the bound is lifted, or the \
+                 refusal it drives says nothing about the bound: a seat nothing \
+                 could ever reach would refuse the same way. Rungs: {:?}",
+                outcome.attempts
+            )
+        });
+        assert!(
+            cure.radius_mm > bound_mm,
+            "the cure the bound refuses must genuinely exceed it: got \
+             {} mm radius ({} mm diameter) against a bound of {bound_mm} mm \
+             radius ({} mm diameter)",
+            cure.radius_mm,
+            cure.radius_mm * 2.0,
+            bound_mm * 2.0
+        );
+        assert!(
+            cure.radius_mm > offset_mm,
+            "a tip at or below the {offset_mm} mm the seat stands past the edge \
+             cannot reach the solid at all"
+        );
+        assert!(cure.radius_mm <= legacy_max_mm);
+    }
+
+    /// **The truncation itself, as arithmetic against the two registered
+    /// limits.**
+    ///
+    /// The rule is `min`, and it is stated here as the three cases rather than
+    /// exercised only through one fixture's geometry, so a ceiling that starts
+    /// picking the wrong limit is visible even if no fixture happens to
+    /// straddle it. The NAME travels with the number in every case: a
+    /// disclosure that quoted the right millimetres under the wrong constant
+    /// would still be telling the operator the wrong thing about which rule
+    /// refused their support.
+    #[test]
+    fn the_growth_ceiling_is_the_smaller_registered_limit_and_carries_its_name() {
+        let bound_mm = registered_scar_bound_mm();
+        let legacy_max_mm = registered_legacy_tip_max_mm();
+        assert!(
+            bound_mm < legacy_max_mm,
+            "the registered scar maximum {bound_mm} mm radius must sit below \
+             the load law's clamp maximum {legacy_max_mm} mm radius, or there \
+             is nothing for the truncation to do"
+        );
+
+        // The live pairing: the scar bound is the smaller, so it binds.
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, bound_mm),
+            (bound_mm, GrowthCeilingSource::GrownScarMaximum)
+        );
+        // A bound at or above the legacy maximum does not bind, and the
+        // disclosure must then name the limit that actually did.
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, legacy_max_mm),
+            (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+        );
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, legacy_max_mm * 2.0),
+            (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+        );
+
+        // And the ladder truncates there: under the bound it is SHORTER, and
+        // every rung it proposes is one the run may actually build.
+        let smallest_tip_mm = plinth_core::m0_constants()
+            .unwrap()
+            .placeholders()
+            .tip_radius_default_mm()
+            .diagnostic()
+            .get();
+        let bounded = tip_growth_ladder_for_test(smallest_tip_mm, bound_mm);
+        let unbounded = tip_growth_ladder_for_test(smallest_tip_mm, legacy_max_mm);
+        assert!(
+            bounded.len() < unbounded.len(),
+            "the bound must SHORTEN the ladder: {} rungs bounded against {} \
+             unbounded",
+            bounded.len(),
+            unbounded.len()
+        );
+        assert_eq!(*bounded.last().unwrap(), bound_mm);
+        assert!(bounded.iter().all(|radius| *radius <= bound_mm));
+        assert!(unbounded.iter().any(|radius| *radius > bound_mm));
     }
 }

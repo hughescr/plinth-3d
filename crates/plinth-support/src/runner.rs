@@ -492,6 +492,303 @@ pub struct FinalSupportAuthority<'a> {
     lowered: LoweredSupportRun<'a>,
     closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
     ownerless_islands: Vec<OwnerlessIslandDisclosure>,
+    abandoned_contacts: Vec<AbandonedContactDisclosure>,
+    grown_contact_tips: Vec<GrownContactTipDisclosure>,
+}
+
+/// One rung of the PR-8 growth ladder, as the run report prints it.
+///
+/// UNITS: `radius_mm` is a RADIUS. Both are given because the registry speaks
+/// radius and the slicer UI speaks diameter, and a number carried between them
+/// without halving or doubling lands 2x wrong.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TipGrowthRungDisclosure {
+    radius_mm: f64,
+    diameter_mm: f64,
+    attested: bool,
+}
+
+impl TipGrowthRungDisclosure {
+    /// The tip RADIUS this rung proposed, mm.
+    #[must_use]
+    pub const fn radius_mm(&self) -> f64 {
+        self.radius_mm
+    }
+    /// The same rung as a DIAMETER, mm — exactly twice the radius.
+    #[must_use]
+    pub const fn diameter_mm(&self) -> f64 {
+        self.diameter_mm
+    }
+    /// Whether PR-8 attested at that size.
+    #[must_use]
+    pub const fn attested(&self) -> bool {
+        self.attested
+    }
+}
+
+/// **One contact this run refused, and the load that refusal abandons.**
+///
+/// PR-8 refuses a contact whose tip is not measurably in the solid. Where that
+/// is curable by growing the tip, the run grows it (see
+/// [`GrownContactTipDisclosure`]); this type is what is left when every remedy
+/// the stage has was tried and none worked.
+///
+/// **Why the load is the headline number.** A refused contact is quarantined:
+/// it stops carrying, no neighbour is told, none is grown to take its place, and
+/// the coverage measurement's 6 mm radius cannot see the hole a single claw tip
+/// leaves. The area is therefore genuinely abandoned, and printing it is the
+/// difference between a support that was refused and a support that vanished.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonedContactDisclosure {
+    contact_id: u32,
+    seat_mm: [f64; 3],
+    abandoned_area_mm2: f64,
+    refusal: String,
+    law_tip_radius_mm: f64,
+    growth_ceiling_radius_mm: f64,
+    growth_ceiling_constant: String,
+    growth_ladder_entered: bool,
+    growth_rungs: Vec<TipGrowthRungDisclosure>,
+    reseat: String,
+}
+
+impl AbandonedContactDisclosure {
+    /// The physical contact this refusal is about.
+    #[must_use]
+    pub const fn contact_id(&self) -> u32 {
+        self.contact_id
+    }
+    /// Where it stood, in mm — the contact point itself, not the stub's outer
+    /// end.
+    #[must_use]
+    pub const fn seat_mm(&self) -> [f64; 3] {
+        self.seat_mm
+    }
+    /// The routed load this refusal abandons, mm².
+    #[must_use]
+    pub const fn abandoned_area_mm2(&self) -> f64 {
+        self.abandoned_area_mm2
+    }
+    /// Which PR-8/OD-9 screen refused it, by name.
+    #[must_use]
+    pub fn refusal(&self) -> &str {
+        &self.refusal
+    }
+    /// The tip RADIUS the load law asked for, mm — the size PR-8 refused.
+    #[must_use]
+    pub const fn law_tip_radius_mm(&self) -> f64 {
+        self.law_tip_radius_mm
+    }
+    /// The registered maximum the growth ladder stopped at, mm RADIUS. Stated
+    /// so the disclosure names the limit and not only the failure.
+    ///
+    /// It is the SMALLER of the two registered limits — see
+    /// [`Self::growth_ceiling_constant`] for which one this is.
+    #[must_use]
+    pub const fn growth_ceiling_radius_mm(&self) -> f64 {
+        self.growth_ceiling_radius_mm
+    }
+
+    /// **WHICH registered constant stopped the ladder**, by its registry id.
+    ///
+    /// `TIP_RADIUS_MAX_GROWN_SCAR_MM` is Craig's measured field ceiling on the
+    /// scar a grow-for-attachment rescue may leave — 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER), an external requirement carrying field data rather
+    /// than physics. `TIP_RADIUS_MAX_LEGACY_MM` is the load law's own clamp
+    /// maximum, 1.000 mm radius (2.000 mm diameter).
+    ///
+    /// The name is printed rather than left to be inferred from the number,
+    /// because two limits that differ by 0.6 mm are not distinguishable by eye
+    /// in a log, and "which rule refused my support" is the question this line
+    /// exists to answer.
+    #[must_use]
+    pub fn growth_ceiling_constant(&self) -> &str {
+        &self.growth_ceiling_constant
+    }
+
+    /// **Whether the growth ladder was walked for this contact at all** — the
+    /// one fact that tells a refusal the registered maximum STOPPED from a
+    /// refusal it merely stood beside.
+    ///
+    /// `false` means no rung was ever proposed: the seat is buried, and burial
+    /// is a mesh fault no tip radius can move. The ceiling reported above is
+    /// still the one growth would have used, so both disclosure paths quote the
+    /// same limit, but it did not refuse this contact and a reader must not be
+    /// left to infer that it did.
+    ///
+    /// `true` with an EMPTY [`Self::growth_rungs`] is the opposite case and a
+    /// real policy refusal: the ladder ran and the ceiling left it no legal
+    /// rung, because the load law had already sized this tip at or above the
+    /// ceiling.
+    #[must_use]
+    pub const fn growth_ladder_entered(&self) -> bool {
+        self.growth_ladder_entered
+    }
+    /// Every larger tip that was tried, ascending, and what each measured. A
+    /// refused contact never reaches the descending refinement scan — the scan
+    /// needs a bracket, and there is none without a success — so this list is
+    /// the ladder alone.
+    ///
+    /// Empty means one of two different things, and
+    /// [`Self::growth_ladder_entered`] is what tells them apart: with the
+    /// ladder entered, there was no larger legal tip to try — the load law had
+    /// already sized this one at or above the ceiling; without it, no rung was
+    /// ever proposed, because the refusal is one no tip radius can move.
+    #[must_use]
+    pub fn growth_rungs(&self) -> &[TipGrowthRungDisclosure] {
+        &self.growth_rungs
+    }
+    /// Why re-seating was not among the remedies. An initial contact's legal
+    /// seat set has exactly one member, the point perception chose, so there is
+    /// no alternative seat for this stage to try.
+    #[must_use]
+    pub fn reseat(&self) -> &str {
+        &self.reseat
+    }
+}
+
+/// **One contact whose tip this run grew, on its own initiative, so that it
+/// would attest.**
+///
+/// The emitted radius is the smallest radius the run MEASURED as satisfying BOTH
+/// of the tip's duties — the registered load law and PR-8 attachment. The
+/// ascending ladder brackets it and the descending refinement scan finds it
+/// inside that bracket, so it is the honest minimum for this contact rather than
+/// the first rung that happened to work. It is always at least the law radius,
+/// so growth can only ever move a tip in the conservative direction.
+///
+/// **The seat is part of the disclosure, not decoration.** A grown tip is a
+/// larger scar than the load law asked for, in a place the operator did not
+/// choose. Printing only a contact id says a scar exists somewhere; printing the
+/// seat says WHERE, which is the difference between a record and a record
+/// somebody can act on. The refusal disclosure already carried it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrownContactTipDisclosure {
+    contact_id: u32,
+    seat_mm: [f64; 3],
+    law_tip_radius_mm: f64,
+    emitted_tip_radius_mm: f64,
+    emitted_tip_diameter_mm: f64,
+    kept_area_mm2: f64,
+    growth_rungs: Vec<TipGrowthRungDisclosure>,
+}
+
+impl GrownContactTipDisclosure {
+    #[must_use]
+    pub const fn contact_id(&self) -> u32 {
+        self.contact_id
+    }
+    /// Where the grown tip stands, in mm — the contact point itself, not the
+    /// stub's outer end. Same convention as
+    /// [`AbandonedContactDisclosure::seat_mm`].
+    #[must_use]
+    pub const fn seat_mm(&self) -> [f64; 3] {
+        self.seat_mm
+    }
+    /// What the load law asked for, mm RADIUS. PR-8 refused this size.
+    #[must_use]
+    pub const fn law_tip_radius_mm(&self) -> f64 {
+        self.law_tip_radius_mm
+    }
+    /// What the run actually built, mm RADIUS.
+    #[must_use]
+    pub const fn emitted_tip_radius_mm(&self) -> f64 {
+        self.emitted_tip_radius_mm
+    }
+    /// The same tip as a DIAMETER, mm — what the slicer UI would show.
+    #[must_use]
+    pub const fn emitted_tip_diameter_mm(&self) -> f64 {
+        self.emitted_tip_diameter_mm
+    }
+    /// The load this growth KEPT, mm² — the area that would otherwise have been
+    /// abandoned at quarantine.
+    #[must_use]
+    pub const fn kept_area_mm2(&self) -> f64 {
+        self.kept_area_mm2
+    }
+    /// Every radius tried, in the order it was MEASURED: the ascending ladder
+    /// that bracketed the answer, then the descending refinement scan that
+    /// found the smallest attesting radius inside that bracket. The cure is
+    /// therefore the smallest attesting entry, not necessarily the last one.
+    #[must_use]
+    pub fn growth_rungs(&self) -> &[TipGrowthRungDisclosure] {
+        &self.growth_rungs
+    }
+}
+
+fn growth_rungs(
+    attempts: &[crate::designed_embed::TipGrowthAttempt],
+) -> Vec<TipGrowthRungDisclosure> {
+    attempts
+        .iter()
+        .map(|attempt| TipGrowthRungDisclosure {
+            radius_mm: attempt.radius_mm,
+            diameter_mm: attempt.radius_mm * 2.0,
+            attested: attempt.attested,
+        })
+        .collect()
+}
+
+/// Project the initial build's PR-8 evidence into the two public disclosures.
+///
+/// Batch-first and allocation-bounded by construction: one pass over each of the
+/// two evidence lists, which are the refusals and the cures, not the contacts.
+/// On a healthy model both are empty and this costs two empty vectors.
+fn contact_attestation_disclosures(
+    initial: &crate::initial::InitialContactBuild,
+) -> (
+    Vec<AbandonedContactDisclosure>,
+    Vec<GrownContactTipDisclosure>,
+) {
+    let abandoned = initial
+        .unattested()
+        .iter()
+        .map(|stub| AbandonedContactDisclosure {
+            contact_id: stub.terminal,
+            seat_mm: stub.seat_mm,
+            abandoned_area_mm2: stub.abandoned_mm2,
+            refusal: match stub.refusal {
+                crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. } => {
+                    "buried_surface"
+                }
+                crate::designed_embed::ContactAttestationRefusal::NotAttached { .. } => {
+                    "not_attached"
+                }
+                crate::designed_embed::ContactAttestationRefusal::UnusableGeometry { .. } => {
+                    "unusable_geometry"
+                }
+            }
+            .to_owned(),
+            law_tip_radius_mm: stub.remedy.law_radius_mm,
+            growth_ceiling_radius_mm: stub.remedy.growth_ceiling_radius_mm,
+            growth_ceiling_constant: stub.remedy.growth_ceiling_constant.to_owned(),
+            growth_ladder_entered: stub.remedy.ladder_entered,
+            growth_rungs: growth_rungs(&stub.remedy.growth),
+            reseat: match stub.remedy.reseat {
+                crate::initial::ReseatAvailability::NoAlternativeSeatAtThisStage => {
+                    "no_alternative_seat_at_this_stage"
+                }
+            }
+            .to_owned(),
+        })
+        .collect();
+    let grown = initial
+        .grown()
+        .iter()
+        .map(|contact| GrownContactTipDisclosure {
+            contact_id: contact.terminal,
+            seat_mm: contact.seat_mm,
+            law_tip_radius_mm: contact.law_radius_mm,
+            emitted_tip_radius_mm: contact.emitted_radius_mm,
+            emitted_tip_diameter_mm: contact.emitted_radius_mm * 2.0,
+            kept_area_mm2: contact.carried_mm2,
+            growth_rungs: growth_rungs(&contact.attempts),
+        })
+        .collect();
+    (abandoned, grown)
 }
 
 /// Task #49 — one island the sealing attempt's ACCEPTED contact set leaves with
@@ -712,6 +1009,36 @@ impl FinalSupportAuthority<'_> {
             .routed
             .accepted
             .specialized_unrouted
+    }
+
+    /// **PR-8 grow-to-attest — every contact the run REFUSED after trying every
+    /// remedy it has, with the load that refusal abandons.**
+    ///
+    /// A quarantined initial contact stops carrying, nothing is told to grow in
+    /// its place, and the coverage measurement works at a 6 mm radius, far too
+    /// coarse to notice a single missing claw tip. Before this disclosure a run
+    /// could drop a routed 2.98 mm² of Deinonychus toe load and say nothing at
+    /// all. Now it says so, per contact, with the seat, the area, and every
+    /// remedy it tried on the way.
+    ///
+    /// **Empty is the ordinary outcome and it is the point.** A non-empty list
+    /// means this run emitted an artifact with a load nothing carries.
+    #[must_use]
+    pub fn abandoned_contacts(&self) -> &[AbandonedContactDisclosure] {
+        &self.abandoned_contacts
+    }
+
+    /// **PR-8 grow-to-attest — every contact whose tip the run GREW on its own
+    /// initiative to make it attest.**
+    ///
+    /// Each row is a support that would have been quarantined, and a load that
+    /// would have been abandoned, at the tip radius the load law asked for. The
+    /// emitted radius is the smallest rung of the growth ladder that satisfies
+    /// both of the tip's duties, so it is the honest minimum for that contact
+    /// rather than a concession to either duty.
+    #[must_use]
+    pub fn grown_contact_tips(&self) -> &[GrownContactTipDisclosure] {
+        &self.grown_contact_tips
     }
 
     /// Task #49 — every island the accepted contact set leaves with no owning
@@ -1050,10 +1377,18 @@ pub fn run_support<'a>(
             // anywhere else would pair a disclosure with a different run's
             // measurement.
             let ownerless_islands = ownerless_island_disclosures(&lowered, &repair_targets);
+            // PR-8. Projected from the SEALING attempt's own initial build, for
+            // the same reason as the join above: a disclosure paired with a
+            // different attempt's attestation would name loads and radii that
+            // belong to geometry this run did not emit.
+            let (abandoned_contacts, grown_contact_tips) =
+                contact_attestation_disclosures(&lowered.structured.braced.rewired.routed.initial);
             return Ok(FinalSupportAuthority {
                 lowered,
                 closure_history: history,
                 ownerless_islands,
+                abandoned_contacts,
+                grown_contact_tips,
             });
         }
         last_blocking = blocking;

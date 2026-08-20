@@ -258,6 +258,16 @@ fn outcome<'a>(report: &'a PrepareReport, model: &str) -> &'a ModelPreparationOu
         .outcome
 }
 
+/// **How many contacts the healthy fixture refuses — MEASURED, 2026-08-20.**
+///
+/// Zero until Craig's scar bound landed. It is not zero now, and the reason is
+/// recorded where it is asserted: the bound refuses a rescue whose cure would
+/// have left a scar wider than any support he has ever printed, and that
+/// contact carries **0.000 mm²**. The load assertion is the one with teeth;
+/// this count is what stops a second, unrelated refusal from slipping in behind
+/// a zero-area sum now that `is_empty()` can no longer be demanded.
+const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 1;
+
 /// **The load-bearing test: a folder in, a real `.chitubox` out.**
 ///
 /// It also proves the executor's other half in the same run — the deliberately
@@ -306,6 +316,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         savings_shortfall,
         filled_back_chambers_ml,
         ownerless_islands,
+        contacts,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -325,6 +336,121 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "the healthy fixture must leave no island without an owning contact; got \
          {ownerless_islands:?}"
     );
+    // PR-8, and the same argument one step over. The claim being asserted is
+    // "every routed LOAD in this artifact is carried by a support that was
+    // affirmatively proven attached". A refused contact is quarantined, nothing
+    // is grown in its place, and the coverage measurement's 6 mm radius cannot
+    // see a single missing claw tip — so if any load ever stops being carried
+    // on the healthy fixture the report has to say so.
+    //
+    // **The assertion is on the LOAD, not on the length of the list, since the
+    // scar bound landed (2026-08-20).** Craig's `TIP_RADIUS_MAX_GROWN_SCAR_MM`
+    // of 0.400 mm RADIUS (0.800 mm DIAMETER) refuses one contact on this
+    // fixture whose rescue would have needed a wider scar than any support he
+    // has ever printed — and that contact carries **0.000 mm²**. Demanding an
+    // empty list would demand the engine build an over-bound scar to hold up
+    // nothing. Demanding zero abandoned AREA is the check that was always
+    // meant, it still has every tooth, and it now says what it means.
+    let plinth_pipeline::ContactAttestationDisclosure {
+        abandoned_contacts,
+        grown_contact_tips,
+    } = contacts.as_ref();
+    let abandoned_mm2 = abandoned_contacts
+        .iter()
+        .map(plinth_support::AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum::<f64>();
+    assert_eq!(
+        abandoned_mm2, 0.0,
+        "the healthy fixture must abandon no routed load; got {abandoned_mm2} mm² \
+         across {abandoned_contacts:?}"
+    );
+    // **What dropping `is_empty()` cost, bought back.** The load claim above is
+    // total, but on its own it would let a regression add any number of
+    // zero-load refusals without a single test going red. The COUNT is
+    // therefore pinned too: the healthy fixture refuses exactly the contacts it
+    // is measured to refuse (2026-08-20), and a new refusal — even one that
+    // abandons nothing — has to be re-derived deliberately rather than arriving
+    // unnoticed behind a zero sum.
+    assert_eq!(
+        abandoned_contacts.len(),
+        HEALTHY_FIXTURE_ABANDONED_CONTACTS,
+        "the healthy fixture's refusal count must not move without a re-derivation; got \
+         {abandoned_contacts:?}"
+    );
+    // And every refusal that IS present must name the registered limit that
+    // stopped it, in both units, so a reader can tell a policy refusal from a
+    // seat that nothing could ever reach.
+    for abandoned in abandoned_contacts {
+        // The discriminator that keeps the named limit honest. Only a
+        // `not_attached` refusal ever enters the growth ladder; a buried seat
+        // is a mesh fault no tip radius can move, and it is refused before any
+        // rung exists. Both lines quote the same registered ceiling, so without
+        // this flag an operator could read Craig's field maximum as the stopper
+        // of a rescue that was never attempted.
+        assert_eq!(
+            abandoned.growth_ladder_entered(),
+            abandoned.refusal() == "not_attached",
+            "only a not_attached refusal may be recorded as having walked the growth ladder; \
+             got {abandoned:?}"
+        );
+        assert!(
+            abandoned.growth_ladder_entered() || abandoned.growth_rungs().is_empty(),
+            "a refusal that never entered the ladder cannot have walked a rung; got \
+             {abandoned:?}"
+        );
+        assert!(
+            matches!(
+                abandoned.growth_ceiling_constant(),
+                "TIP_RADIUS_MAX_GROWN_SCAR_MM" | "TIP_RADIUS_MAX_LEGACY_MM"
+            ),
+            "an abandoned contact must name the registered maximum that stopped \
+             its rescue; got {abandoned:?}"
+        );
+        assert!(
+            abandoned
+                .growth_rungs()
+                .iter()
+                .all(|rung| rung.radius_mm() <= abandoned.growth_ceiling_radius_mm()),
+            "no rung may propose a tip above the ceiling it was walked to; got \
+             {abandoned:?}"
+        );
+    }
+    // Growth is allowed to fire here and is asserted rather than assumed: every
+    // grown tip must be at least the radius the load law asked for, so growth
+    // can only ever have moved a tip in the conservative direction.
+    for grown in grown_contact_tips {
+        assert!(
+            grown.emitted_tip_radius_mm() >= grown.law_tip_radius_mm(),
+            "grow-to-attest must never emit a tip SMALLER than the load law asked \
+             for; got {grown:?}"
+        );
+        assert!(
+            (grown.emitted_tip_diameter_mm() - grown.emitted_tip_radius_mm() * 2.0).abs() < 1e-12,
+            "the reported diameter must be exactly twice the reported radius; got {grown:?}"
+        );
+        // The SMALLEST attesting radius on the record is the one built. The
+        // ascending ladder alone would emit the FIRST attesting rung, which the
+        // descending refinement scan then improves on, so this is what tells a
+        // scanned answer from an unscanned one on real geometry.
+        let smallest_attesting_mm = grown
+            .growth_rungs()
+            .iter()
+            .filter(|rung| rung.attested())
+            .map(plinth_support::TipGrowthRungDisclosure::radius_mm)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (smallest_attesting_mm - grown.emitted_tip_radius_mm()).abs() < 1e-12,
+            "the tip built must be the smallest radius the record shows \
+             attesting; got {grown:?}"
+        );
+        // And the operator can FIND it: a scar the run chose to enlarge is only
+        // actionable if the report says where it is.
+        assert!(
+            grown.seat_mm().iter().all(|value| value.is_finite()),
+            "a grown tip must disclose a real seat, or the enlarged scar cannot \
+             be located on the model; got {grown:?}"
+        );
+    }
     // **What is in the file, not merely that there is one.** Two of the four
     // geometries are substitutions the chain fell back to, and a report that
     // said only "emitted" could not tell them from the intended shell.

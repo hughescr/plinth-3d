@@ -12,9 +12,9 @@ use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchError},
     contact::ContactPolicy,
     designed_embed::{
-        attest_members_batch, ContactAreaDeficit, ContactAttestationRefusal,
+        attest_members_batch, grow_tips_to_attest, ContactAreaDeficit, ContactAttestationRefusal,
         ContactAttestationRequest, DesignedMaskError, EndpointMaskValidationLimits,
-        PositiveFiniteMm,
+        PositiveFiniteMm, TipGrowthAttempt, TipGrowthRequest,
     },
     dyadic::CandidatePayloadConfig,
     forest::{
@@ -106,19 +106,126 @@ pub(crate) struct CondemnedInitialStub {
     pub(crate) remaining_inside_axis_mm: f64,
 }
 
+/// Why re-seating was not among the remedies tried.
+///
+/// One variant today, and it is a fact about this stage rather than a gap: an
+/// initial contact's legal seat set has exactly ONE member, the point perception
+/// chose. The tournament machinery that can offer a cheap legal alternative
+/// belongs to the two TOUCHING families, which generate several candidate seats
+/// and pick between them. Moving an initial contact means asking perception for
+/// a different contact, which is another stage's decision.
+///
+/// It is an enum rather than a comment so that a stage which later DOES gain an
+/// alternative seat set has somewhere to say so, and so the disclosure can never
+/// silently imply a remedy was skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReseatAvailability {
+    /// The seat set has one member; there is no alternative seat to try.
+    NoAlternativeSeatAtThisStage,
+}
+
+/// Every remedy this stage had for one contact that failed PR-8, and what each
+/// one measured. This is the "remedy attempts" half of the disclosure: a
+/// refusal must say what was tried, not merely that it failed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InitialContactRemedy {
+    /// Rung zero — the tip RADIUS in mm the load law and the registered clamp
+    /// produced, and the radius PR-8 refused. Double it for the DIAMETER the
+    /// slicer UI shows.
+    pub(crate) law_radius_mm: f64,
+    /// Every growth rung tried above the law radius, ascending, with its
+    /// verdict. Empty means the law radius was already the registered maximum,
+    /// so there was no larger legal tip to try.
+    pub(crate) growth: Vec<TipGrowthAttempt>,
+    /// The ceiling the ladder stopped at, in mm RADIUS — the SMALLER of the
+    /// registered `tip_radius_max_grown_scar_mm` and `tip_radius_max_legacy_mm`.
+    /// Recorded so the disclosure states the limit and not just the failure.
+    pub(crate) growth_ceiling_radius_mm: f64,
+    /// WHICH registered constant that ceiling is, by its registry id, so the
+    /// disclosure can name the stopper rather than quote a bare number.
+    pub(crate) growth_ceiling_constant: &'static str,
+    /// **Whether the growth ladder was WALKED for this contact at all.**
+    ///
+    /// Only a `NotAttached` refusal enters the ladder. A `BuriedSurface`
+    /// refusal is one no tip radius can move, so it is refused before any rung
+    /// exists, and the ceiling recorded above is only the one growth WOULD have
+    /// used. Without this flag the two cases are indistinguishable downstream —
+    /// both carry an empty `growth` list — and the disclosure would name a
+    /// registered maximum as the stopper of a rescue that was never attempted.
+    ///
+    /// An empty `growth` with this set TRUE is a different and honest thing:
+    /// the ladder ran and had no legal rung to offer, because the load law had
+    /// already sized this tip at or above the ceiling. There the ceiling IS the
+    /// stopper.
+    ///
+    /// Deliberately NOT digested. `attestation_digest` already separates the
+    /// two cases at a coarser grain — it tags a remedy `None` (no ladder) apart
+    /// from `Some` (ladder walked) — and it runs before the fallback remedy
+    /// below is substituted, so digesting this would add a byte that cannot
+    /// vary at the point the digest is taken.
+    pub(crate) ladder_entered: bool,
+    pub(crate) reseat: ReseatAvailability,
+}
+
 /// PR-8 evidence for one stub whose model contact could NOT be affirmatively
-/// attested.
+/// attested, **after every remedy this stage has was tried and failed**.
 ///
 /// This is a candidate refusal routed to the same quarantine the overlap cutoff
 /// uses, exactly as OD-4 requires — never a hard pipeline failure. The stub, its
 /// terminal ledger record and its carried load all survive quarantine, so a
 /// refusal is visible and accountable rather than a support that silently
 /// vanished.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// **The load is named because it is being abandoned.** A quarantined stub stops
+/// carrying, nothing is told to grow in its place, and the coverage measurement
+/// works at a 6 mm radius — far too coarse to see a single missing claw tip. So
+/// the area this contact was routed is recorded here, in mm^2, and disclosed.
+/// The failure this closes is a run that dropped 2.98 mm^2 of Deinonychus toe
+/// load in silence.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UnattestedInitialStub {
     pub(crate) terminal: u32,
     pub(crate) key: MemberKey,
     pub(crate) refusal: ContactAttestationRefusal,
+    /// The seat, in mm — the contact point itself, not the stub's outer end.
+    pub(crate) seat_mm: [f64; 3],
+    /// The routed load this refusal abandons, mm^2.
+    pub(crate) abandoned_mm2: f64,
+    pub(crate) remedy: InitialContactRemedy,
+}
+
+/// PR-8 evidence for one stub whose load-sized tip did not attest but whose
+/// GROWN tip did.
+///
+/// The emitted radius is the smallest radius MEASURED — over the ascending
+/// ladder and the descending refinement scan together — that satisfies both of
+/// the tip's duties, the load law and attachment. So it is the honest minimum
+/// for this contact rather than a concession to either one. It is recorded
+/// because a grown tip is a real geometry change the run made on its own
+/// initiative, and because a regression that stops growing must be visible in
+/// something other than the absence of a support.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GrownInitialContact {
+    pub(crate) terminal: u32,
+    pub(crate) key: MemberKey,
+    /// Where the grown tip stands, mm — the contact point itself, not the
+    /// stub's outer end. Carried for the same reason the refusal record carries
+    /// it: a scar the run resized on its own initiative is one an operator has
+    /// to be able to FIND on the model, and a contact id alone does not locate
+    /// anything.
+    pub(crate) seat_mm: [f64; 3],
+    /// mm RADIUS the load law asked for.
+    pub(crate) law_radius_mm: f64,
+    /// mm RADIUS actually emitted. Always `>= law_radius_mm`, so the load duty
+    /// is satisfied at least as well as before growth.
+    pub(crate) emitted_radius_mm: f64,
+    /// Every radius tried, in the order it was measured: the ascending ladder,
+    /// then the descending refinement scan. The CURE is the smallest attesting
+    /// entry, which is not in general the last one.
+    pub(crate) attempts: Vec<TipGrowthAttempt>,
+    /// The load this growth KEPT, mm^2 — the area that would otherwise have
+    /// been abandoned at quarantine.
+    pub(crate) carried_mm2: f64,
 }
 
 /// PR-4 evidence for one stub that IS attached but over less area than its tip
@@ -145,6 +252,7 @@ pub(crate) struct InitialContactBuild {
     terminals: Vec<InitialTerminalEvidence>,
     condemned: Vec<CondemnedInitialStub>,
     unattested: Vec<UnattestedInitialStub>,
+    grown: Vec<GrownInitialContact>,
     area_deficient: Vec<DeficientInitialContact>,
     contact_attestation_digest: u64,
     attested_contacts: usize,
@@ -198,10 +306,21 @@ impl InitialContactBuild {
     pub(crate) fn condemned(&self) -> &[CondemnedInitialStub] {
         &self.condemned
     }
-    /// PR-8 — every stub whose model contact was refused, with its reason.
+    /// PR-8 — every stub whose model contact was refused after every remedy
+    /// this stage has was tried, with its reason, the load it abandons and the
+    /// remedies that were attempted.
     #[must_use]
     pub(crate) fn unattested(&self) -> &[UnattestedInitialStub] {
         &self.unattested
+    }
+    /// PR-8 — every stub whose load-sized tip did not attest and whose GROWN
+    /// tip did, with the ladder that got there.
+    ///
+    /// Each row is a support that would have been quarantined, and a routed
+    /// load that would have been abandoned, before grow-to-attest existed.
+    #[must_use]
+    pub(crate) fn grown(&self) -> &[GrownInitialContact] {
+        &self.grown
     }
     /// PR-4 — every stub that is attached but over an interface too small for
     /// its routed load. Live, not quarantined; see [`ContactAreaDeficit`].
@@ -335,8 +454,18 @@ pub(crate) enum InitialContactError {
 
 struct StubSeed {
     terminal: u32,
+    /// The contact point itself, in mm — the seat. `p0` is one contact depth
+    /// INSIDE it along the normal, so the two are different points and the
+    /// disclosure must report this one.
+    seat_mm: [f64; 3],
     p0: [Finite; 3],
     p1: [Finite; 3],
+    /// What the load law and the registered clamp asked for, before any
+    /// grow-to-attest. Kept beside `r0` so a disclosure can state both, and so
+    /// growth can never be mistaken for the law having wanted a bigger tip.
+    law_r0: PositiveFinite,
+    /// The tip radius the run will EMIT. Equal to `law_r0` unless
+    /// grow-to-attest raised it.
     r0: PositiveFinite,
     r1: PositiveFinite,
     carried_mm2: Finite,
@@ -473,6 +602,18 @@ pub(crate) fn build_initial_contacts(
     })?;
 
     let tip_radius_max_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+    // Craig's measured field ceiling on a GROWN scar, 0.400 mm RADIUS
+    // (0.800 mm DIAMETER). It is read here and handed to growth alone. It is
+    // deliberately NOT mixed into `tip_radius_max_mm` above: that value is the
+    // LOAD LAW's clamp maximum and drives `tip_clamped_at_max`, and a load-sized
+    // tip above the scar bound is legal, unaffected and emitted as it always
+    // was. See `designed_embed::growth_ceiling`.
+    let tip_radius_max_grown_scar_mm = *m0_constants()
+        .map_err(|error| InitialContactError::Constants(error.to_string()))?
+        .evidence()
+        .tip_radius_max_grown_scar_mm()
+        .value();
+    let min_shoot_r_mm = policy.min_shoot_r_mm().diagnostic().get();
 
     let native_digest = geometry.digest();
     let mut seeds = Vec::new();
@@ -512,12 +653,14 @@ pub(crate) fn build_initial_contacts(
             return Err(InitialContactError::NonFiniteStub { contact_id });
         }
         let r0 = loads.tip_radii_mm()[slot];
-        let r1 = PositiveFinite::new(r0.get().max(policy.min_shoot_r_mm().diagnostic().get()))
+        let r1 = PositiveFinite::new(r0.get().max(min_shoot_r_mm))
             .map_err(|_| InitialContactError::NonFiniteStub { contact_id })?;
         seeds.push(StubSeed {
             terminal,
+            seat_mm: position,
             p0: finite(p0, contact_id)?,
             p1: finite(p1, contact_id)?,
+            law_r0: r0,
             r0,
             r1,
             carried_mm2: Finite::new(carried)
@@ -530,6 +673,50 @@ pub(crate) fn build_initial_contacts(
         });
     }
 
+    // PR-8 — AFFIRMATIVE CONTACT ATTESTATION, and its remedy.
+    //
+    // This is the owner's governing requirement: "be sure that the new code
+    // properly attaches the tips to the mini for all cases". Every stub the
+    // engine is about to hand to the routing stages has its model contact
+    // affirmatively verified here, before anything is built on top of it, at a
+    // cost of two batched native calls for the whole run plus at most one
+    // bounded ladder of rounds for the contacts that need regrowing.
+    //
+    // MAJOR-7 — PR-4's area law finally has real load. The policy is assembled
+    // from the same M0 placeholders every other contact-physics site reads, and
+    // `tip_load` is the engine's own `FrozenTipLoadPolicy`, so the H2 allowance
+    // is the registered `X_ALLOWED` chain rather than a second hand-typed
+    // threshold.
+    //
+    // **Why this runs HERE, before the census, the overlap classification and
+    // the forest.** Grow-to-attest can change a tip radius, and a tip radius is
+    // an input to all three: the census sizes the native charge from the stub
+    // capsules, the overlap classification sweeps those same capsules, and the
+    // forest stores the geometry the run will emit. Attesting after them would
+    // leave every one of those computed for a tip the run is no longer going to
+    // build — a stale charge, a stale overlap verdict and a forest that
+    // disagrees with its own attestation. Deciding the radius first is what
+    // keeps all four honest, and it costs nothing: the attestation admits its
+    // own native work through `EndpointMaskValidationLimits::for_batch` and
+    // never spent the construction charge.
+    let contact_policy = ContactPolicy {
+        floor_depth_mm: contact_depth_mm,
+        process_resolution_mm: attestation_margin_mm,
+        standoff_mm: policy.standoff_mm().diagnostic().get(),
+        min_free_span_mm: policy.min_illegal_len_mm().diagnostic().get(),
+        ball_factor_stub: policy.ball_factor_stub().diagnostic().get(),
+        tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(policy),
+    };
+    let attestation = attest_initial_contacts(
+        &mut seeds,
+        geometry,
+        attested_extent,
+        &contact_policy,
+        tip_radius_max_mm,
+        tip_radius_max_grown_scar_mm,
+        min_shoot_r_mm,
+    )?;
+
     // FU-8g H1 — the census pass. The stub batch input is built ONCE and used
     // twice: by the counting pass here and by the interval batch inside
     // `classify_initial_overlaps`. The counted totals (work as traversal
@@ -537,6 +724,9 @@ pub(crate) fn build_initial_contacts(
     // `rows x faces`) are what the preflight below charges against the
     // UNCHANGED production caps, and they are also the per-row allocation
     // budgets the interval batch executes under.
+    //
+    // It reads `seeds` AFTER the attestation above, so a regrown tip is charged
+    // and swept at the radius it will actually be built at.
     let majority_step_mm = policy.initial_axis_majority_step_mm().diagnostic().get();
     let axis_batch = axis_batch_input(&seeds)?;
     let penetration_limits = if seeds.is_empty() {
@@ -575,13 +765,16 @@ pub(crate) fn build_initial_contacts(
     let scratch_bytes = preflight_work(contact_count, penetration_limits, limits)?;
 
     crate::census_record!(if crate::census::enabled() {
+        // The EMITTED radius, out of the seed, not the load law's request out
+        // of `loads`. Grow-to-attest can raise one, and a census that reported
+        // the request would be describing a tip the run is not building.
         crate::census::record_contacts(contacts.iter().enumerate().map(|(slot, contact)| {
             let normal = contact.normal();
             let length = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
             (
                 contact.position_mm(),
                 normal.map(|value| value / length),
-                loads.tip_radii_mm()[slot].get(),
+                seeds[slot].r0.get(),
             )
         }));
     });
@@ -622,16 +815,7 @@ pub(crate) fn build_initial_contacts(
     let mut forest = Forest::try_new_for_initial_contacts(contact_count)
         .map_err(|_| InitialContactError::Allocation("forest arena vectors"))?;
     for seed in &seeds {
-        keys.push(forest.add_member(Member::new(MemberSpec {
-            p0_mm: seed.p0,
-            p1_mm: seed.p1,
-            r0_mm: TerminalEndRadius::new(seed.r0),
-            r1_mm: RootwardEndRadius::new(seed.r1),
-            kind: MemberKind::Stub,
-            owner: Owner::Contact(seed.terminal),
-            model_contact_end: Some(ContactEnd::Terminalward),
-            carried_mm2: seed.carried_mm2,
-        })));
+        keys.push(forest.add_member(stub_member(seed)));
     }
     for (seed, key) in seeds.iter().zip(&keys) {
         forest.register_terminal(seed.terminal, *key)?;
@@ -640,50 +824,33 @@ pub(crate) fn build_initial_contacts(
         .iter()
         .all(|seed| forest.terminal(seed.terminal).is_some()));
 
-    // PR-8 — AFFIRMATIVE CONTACT ATTESTATION.
-    //
-    // This is the owner's governing requirement: "be sure that the new code
-    // properly attaches the tips to the mini for all cases". Every stub the
-    // engine is about to hand to the routing stages has its model contact
-    // affirmatively verified here, before anything is built on top of it, at a
-    // cost of two batched native calls for the whole run.
-    // MAJOR-7 — PR-4's area law finally has real load. The policy is assembled
-    // from the same M0 placeholders every other contact-physics site reads, and
-    // `tip_load` is the engine's own `FrozenTipLoadPolicy`, so the H2 allowance
-    // is the registered `X_ALLOWED` chain rather than a second hand-typed
-    // threshold.
-    let contact_policy = ContactPolicy {
-        floor_depth_mm: contact_depth_mm,
-        process_resolution_mm: attestation_margin_mm,
-        standoff_mm: policy.standoff_mm().diagnostic().get(),
-        min_free_span_mm: policy.min_illegal_len_mm().diagnostic().get(),
-        ball_factor_stub: policy.ball_factor_stub().diagnostic().get(),
-        tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(policy),
-    };
-    let attestation = attest_initial_contacts(
-        &seeds,
-        &forest,
-        &keys,
-        geometry,
-        attested_extent,
-        &contact_policy,
-    )?;
     let mut unattested = Vec::new();
     unattested
         .try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("attestation evidence"))?;
+    let mut grown = Vec::new();
+    grown
+        .try_reserve_exact(contact_count)
+        .map_err(|_| InitialContactError::Allocation("tip growth evidence"))?;
     let mut area_deficient = Vec::new();
     area_deficient
         .try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("area deficit evidence"))?;
 
     let cutoff = policy.min_illegal_len_mm().diagnostic().get();
-    for ((((seed, key), overlap), refusal), deficit) in seeds
+    let (fallback_growth_ceiling_mm, fallback_growth_ceiling_source) =
+        crate::designed_embed::growth_ceiling_radius_mm(
+            tip_radius_max_mm,
+            tip_radius_max_grown_scar_mm,
+        );
+    let fallback_growth_ceiling_constant = fallback_growth_ceiling_source.constant_id();
+    for (((((seed, key), overlap), refusal), deficit), remedy) in seeds
         .iter()
         .zip(&keys)
         .zip(&overlaps)
         .zip(&attestation.refusals)
         .zip(&attestation.deficits)
+        .zip(&attestation.remedies)
     {
         // Both quarantine reasons are recorded even when both fire, so the
         // evidence never claims one cause for a stub that had two.
@@ -692,6 +859,39 @@ pub(crate) fn build_initial_contacts(
                 terminal: seed.terminal,
                 key: *key,
                 refusal: *refusal,
+                seat_mm: seed.seat_mm,
+                abandoned_mm2: seed.carried_mm2.get(),
+                remedy: remedy.clone().unwrap_or_else(|| InitialContactRemedy {
+                    law_radius_mm: seed.law_r0.get(),
+                    growth: Vec::new(),
+                    // This stub never entered the ladder — it was refused for a
+                    // reason no tip radius can move (a buried seat). The ceiling
+                    // stated is nevertheless the one growth WOULD have used, so
+                    // the two disclosure paths quote the same limit — but
+                    // `ladder_entered: false` says plainly that it did not stop
+                    // this one, so the line cannot read as a policy refusal.
+                    growth_ceiling_radius_mm: fallback_growth_ceiling_mm,
+                    growth_ceiling_constant: fallback_growth_ceiling_constant,
+                    ladder_entered: false,
+                    reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
+                }),
+            });
+        }
+        // A tip the run REGREW to make it attest. Recorded whether or not it
+        // ends up quarantined for overlap, because the growth happened and a
+        // regression that stops it must move something visible.
+        if seed.r0.get() > seed.law_r0.get() {
+            grown.push(GrownInitialContact {
+                terminal: seed.terminal,
+                key: *key,
+                seat_mm: seed.seat_mm,
+                law_radius_mm: seed.law_r0.get(),
+                emitted_radius_mm: seed.r0.get(),
+                attempts: remedy
+                    .as_ref()
+                    .map(|remedy| remedy.growth.clone())
+                    .unwrap_or_default(),
+                carried_mm2: seed.carried_mm2.get(),
             });
         }
         if let Some(deficit) = deficit {
@@ -740,6 +940,7 @@ pub(crate) fn build_initial_contacts(
         contact_attestation_digest: attestation.digest,
         attested_contacts: contact_count - unattested.len(),
         unattested,
+        grown,
         area_deficient,
         interval_batch_count,
         queried_stubs: contact_count,
@@ -748,10 +949,33 @@ pub(crate) fn build_initial_contacts(
     })
 }
 
+/// The exact member one stub seed becomes.
+///
+/// One function, called by BOTH the attestation and the forest build, so the
+/// geometry that is measured and the geometry that is placed cannot drift
+/// apart. They used to be two literals in two places; grow-to-attest makes the
+/// radius mutable between them, and two literals would have been a way for the
+/// run to attest one tip and emit another.
+fn stub_member(seed: &StubSeed) -> Member {
+    Member::new(MemberSpec {
+        p0_mm: seed.p0,
+        p1_mm: seed.p1,
+        r0_mm: TerminalEndRadius::new(seed.r0),
+        r1_mm: RootwardEndRadius::new(seed.r1),
+        kind: MemberKind::Stub,
+        owner: Owner::Contact(seed.terminal),
+        model_contact_end: Some(ContactEnd::Terminalward),
+        carried_mm2: seed.carried_mm2,
+    })
+}
+
 /// The verdicts of one PR-8 attestation stage, index-aligned with the seeds.
 struct InitialAttestation {
     refusals: Vec<Option<ContactAttestationRefusal>>,
     deficits: Vec<Option<ContactAreaDeficit>>,
+    /// What grow-to-attest tried for each seed that needed it. `None` for a
+    /// seat that attested at its load-sized tip and never entered the ladder.
+    remedies: Vec<Option<InitialContactRemedy>>,
     digest: u64,
 }
 
@@ -787,12 +1011,16 @@ struct InitialAttestation {
 /// resource admission or a malformed request set — is an error, and none of
 /// those is a statement about any contact.
 fn attest_initial_contacts(
-    seeds: &[StubSeed],
-    forest: &Forest,
-    keys: &[MemberKey],
+    seeds: &mut [StubSeed],
     geometry: &AnchorGeometryAuthority<'_>,
     extent: PositiveFiniteMm,
     policy: &ContactPolicy,
+    // `tip_radius_max_legacy_mm` — the LOAD LAW's clamp maximum, mm RADIUS.
+    tip_radius_max_mm: f64,
+    // `tip_radius_max_grown_scar_mm` — Craig's field ceiling on a GROWN scar,
+    // mm RADIUS. Handed to growth alone; it bounds nothing the load law sizes.
+    tip_radius_max_grown_scar_mm: f64,
+    min_shoot_r_mm: f64,
 ) -> Result<InitialAttestation, InitialContactError> {
     let mut refusals = Vec::new();
     refusals
@@ -804,19 +1032,27 @@ fn attest_initial_contacts(
         .try_reserve_exact(seeds.len())
         .map_err(|_| InitialContactError::Allocation("attestation area deficits"))?;
     deficits.resize(seeds.len(), None);
+    let mut remedies = Vec::new();
+    remedies
+        .try_reserve_exact(seeds.len())
+        .map_err(|_| InitialContactError::Allocation("attestation remedies"))?;
+    remedies.resize(seeds.len(), None);
     if seeds.is_empty() {
-        let digest = attestation_digest(seeds, &refusals, &deficits, extent);
+        let digest = attestation_digest(seeds, &refusals, &deficits, &remedies, extent);
         return Ok(InitialAttestation {
             refusals,
             deficits,
+            remedies,
             digest,
         });
     }
 
-    let members = keys
-        .iter()
-        .map(|key| forest.member(*key).expect("stub was just added"))
-        .collect::<Vec<_>>();
+    // The exact members the forest build will place, built through the one
+    // shared `stub_member`. They are not competing candidates: every one of
+    // them is committed geometry, which is why an ungradable row below is
+    // still a TOTAL refusal.
+    let owned_members = seeds.iter().map(stub_member).collect::<Vec<_>>();
+    let members = owned_members.iter().collect::<Vec<_>>();
     let requests = seeds
         .iter()
         .enumerate()
@@ -854,8 +1090,9 @@ fn attest_initial_contacts(
             DesignedMaskError::CorruptKernelResult,
         ));
     }
-    // #28 — this family attests PLACED members. Every entry in `members` was
-    // read straight out of the forest above, so an ungradable row here is not a
+    // #28 — this family attests COMMITTED members. Every entry in `members`
+    // came out of the one `stub_member` the forest build also uses, so an
+    // ungradable row here is not a
     // candidate proposal that can leave the tournament: it is evidence about a
     // load-carrying member that could not be graded AT ALL — an orphan or
     // out-of-order kernel interval, a non-finite target, a boundary outside the
@@ -898,10 +1135,110 @@ fn attest_initial_contacts(
         refusals[outcome.member] = outcome.verdict.as_ref().err().copied();
         deficits[outcome.member] = outcome.area_deficit;
     }
-    let digest = attestation_digest(seeds, &refusals, &deficits, extent);
+
+    // GROW-TO-ATTEST. A tip refused `NotAttached` was sized for its LOAD alone,
+    // and the ring PR-8 probes with is that same tip radius, so the thinner the
+    // load law allows the tip to be, the less of the model the probe can reach.
+    // Before this existed, such a seat was quarantined and the area it carried
+    // was abandoned with nothing told to take it over.
+    //
+    // Only `NotAttached` enters the ladder, and the other two verdicts are
+    // excluded for reasons, not by omission:
+    //
+    // * `BuriedSurface` — the OD-9 probe is a point on the surface normal, so
+    //   no tip radius moves it. Growing a buried seat would re-ask the same
+    //   question and get the same answer. Burial is a mesh fault.
+    // * `UnusableGeometry` — already collected into a TOTAL build refusal
+    //   above, before this point is reached.
+    let growth_requests = seeds
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            matches!(
+                refusals[*index],
+                Some(ContactAttestationRefusal::NotAttached { .. })
+            )
+        })
+        .map(|(index, seed)| TipGrowthRequest {
+            row: index,
+            p0_mm: seed.p0.map(Finite::get),
+            p1_mm: seed.p1.map(Finite::get),
+            end: ContactEnd::Terminalward,
+            exterior_probe: seed.exterior_probe,
+            carried_mm2: seed.carried_mm2.get(),
+            law_radius_mm: seed.law_r0.get(),
+            opposite_end_minimum_radius_mm: min_shoot_r_mm,
+            max_radius_mm: tip_radius_max_mm,
+            scar_bound_radius_mm: tip_radius_max_grown_scar_mm,
+            tip_clamped_at_max: seed.tip_clamped_at_max,
+        })
+        .collect::<Vec<_>>();
+    if !growth_requests.is_empty() {
+        let outcomes = grow_tips_to_attest(
+            geometry.surface(),
+            &growth_requests,
+            extent,
+            majority_step,
+            ENDPOINT_ATTESTATION_SAMPLES_PER_SUBSEGMENT,
+            policy,
+        )
+        .map_err(InitialContactError::Attestation)?;
+        for outcome in outcomes {
+            let index = outcome.row;
+            if index >= seeds.len() {
+                return Err(InitialContactError::Attestation(
+                    DesignedMaskError::CorruptKernelResult,
+                ));
+            }
+            remedies[index] = Some(InitialContactRemedy {
+                law_radius_mm: outcome.law_radius_mm,
+                growth: outcome.attempts.clone(),
+                growth_ceiling_radius_mm: outcome.growth_ceiling_radius_mm,
+                growth_ceiling_constant: outcome.growth_ceiling_source.constant_id(),
+                // The ladder RAN for this row: only `NotAttached` rows are in
+                // `growth_requests`, and every one of them got a ceiling and a
+                // (possibly empty) rung list from `grow_tips_to_attest`. An
+                // empty list here means the ceiling had no legal rung to offer,
+                // which is the ceiling genuinely stopping the rescue.
+                ladder_entered: true,
+                reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
+            });
+            let Some(cure) = outcome.cure else {
+                // The ladder ran out at its ceiling — the registered scar bound
+                // or the registered legacy maximum, whichever is smaller. The
+                // refusal stands, and `build_initial_contacts` discloses it with
+                // the load it abandons, every rung recorded above, and the
+                // constant that stopped it NAMED.
+                continue;
+            };
+            // The tip the run will BUILD is the tip that attested. `r0` is the
+            // emitted radius; `law_r0` is untouched, so the disclosure can
+            // always say what the load law asked for.
+            seeds[index].r0 = PositiveFinite::new(cure.radius_mm)
+                .map_err(|_| InitialContactError::Attestation(DesignedMaskError::InvalidExtent))?;
+            seeds[index].r1 = PositiveFinite::new(cure.opposite_end_radius_mm)
+                .map_err(|_| InitialContactError::Attestation(DesignedMaskError::InvalidExtent))?;
+            crate::census_record!(if crate::census::enabled() {
+                crate::census::record_contact_attestation(
+                    seeds[index].terminal,
+                    cure.attestation.engagement.centreline,
+                    cure.attestation.engagement.rim_engaged,
+                    cure.attestation.engagement.rim_total,
+                    cure.attestation.attested_radius_mm,
+                    false,
+                    cure.attestation.area_deficit.is_some(),
+                );
+            });
+            refusals[index] = None;
+            deficits[index] = cure.attestation.area_deficit;
+        }
+    }
+
+    let digest = attestation_digest(seeds, &refusals, &deficits, &remedies, extent);
     Ok(InitialAttestation {
         refusals,
         deficits,
+        remedies,
         digest,
     })
 }
@@ -925,14 +1262,49 @@ fn attestation_digest(
     seeds: &[StubSeed],
     refusals: &[Option<ContactAttestationRefusal>],
     deficits: &[Option<ContactAreaDeficit>],
+    remedies: &[Option<InitialContactRemedy>],
     extent: PositiveFiniteMm,
 ) -> u64 {
     let mut digest = DigestWriter::new();
     digest.tag(0x8b);
     digest.f64(extent.get());
     digest.u64(seeds.len() as u64);
-    for ((seed, refusal), deficit) in seeds.iter().zip(refusals).zip(deficits) {
+    for (((seed, refusal), deficit), remedy) in
+        seeds.iter().zip(refusals).zip(deficits).zip(remedies)
+    {
         digest.u64(u64::from(seed.terminal));
+        // GROW-TO-ATTEST, digested at every rung. Both radii are covered
+        // because they answer different questions: `law_r0` is what the load
+        // law asked for and `r0` is what the run will emit, and a regression
+        // that stops growing, grows to a different rung, or grows the wrong
+        // contact moves one of them. The ladder itself is digested so a
+        // change in the STEP is visible even where the winning radius happens
+        // to land in the same place.
+        digest.f64(seed.law_r0.get());
+        digest.f64(seed.r0.get());
+        match remedy {
+            None => digest.tag(0),
+            Some(remedy) => {
+                digest.tag(1);
+                digest.f64(remedy.growth_ceiling_radius_mm);
+                // The ceiling's NAME as well as its number: a change that swaps
+                // which registered constant bounds growth without moving the
+                // value it lands on is still a change to what the run promises,
+                // and the transcript must see it.
+                digest.u64(remedy.growth_ceiling_constant.len() as u64);
+                for byte in remedy.growth_ceiling_constant.as_bytes() {
+                    digest.tag(*byte);
+                }
+                digest.u64(remedy.growth.len() as u64);
+                for attempt in &remedy.growth {
+                    digest.f64(attempt.radius_mm);
+                    digest.tag(u8::from(attempt.attested));
+                }
+                digest.tag(match remedy.reseat {
+                    ReseatAvailability::NoAlternativeSeatAtThisStage => 0,
+                });
+            }
+        }
         digest.tag(match refusal {
             None => 0,
             Some(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
@@ -1495,8 +1867,10 @@ mod tests {
     fn seed(terminal: u32, z: f64, carried_mm2: f64, specialized: bool) -> StubSeed {
         StubSeed {
             terminal,
+            seat_mm: [0.0, 0.0, z],
             p0: [0.0, 0.0, z].map(|value| Finite::new(value).unwrap()),
             p1: [0.0, 0.0, z].map(|value| Finite::new(value).unwrap()),
+            law_r0: PositiveFinite::new(0.2).unwrap(),
             r0: PositiveFinite::new(0.2).unwrap(),
             r1: PositiveFinite::new(0.35).unwrap(),
             carried_mm2: Finite::new(carried_mm2).unwrap(),
@@ -2129,8 +2503,10 @@ mod tests {
                     .unwrap();
                 StubSeed {
                     terminal: terminal.terminal,
+                    seat_mm: record.p0_mm.map(Finite::get),
                     p0: record.p0_mm,
                     p1: record.p1_mm,
+                    law_r0: record.r0_mm.get(),
                     r0: record.r0_mm.get(),
                     r1: record.r1_mm.get(),
                     carried_mm2: record.carried_mm2,
@@ -2314,5 +2690,228 @@ mod tests {
             assert_eq!(*effective, requested);
             assert!((1..=requested).contains(participating));
         }
+    }
+
+    /// **A refusal growth could not cure is DISCLOSED, not silently
+    /// quarantined — and it is still quarantined.**
+    ///
+    /// `make_raking_blade` is the fixture for this: five of its forty contacts
+    /// seat on a razor edge whose solid no legal tip can reach, so growth walks
+    /// their whole ladder to the registered maximum and refuses. That is the
+    /// correct answer — curing them would be inventing attachment — and the
+    /// point of this test is what the engine must SAY while giving it.
+    ///
+    /// Before this change the answer was silence: the stub was quarantined, the
+    /// area it carried stopped being carried, no neighbour was told, nothing was
+    /// grown in its place, and coverage's 6 mm radius cannot see a hole a claw
+    /// tip leaves. One contact on this fixture is charged 10.15 mm² and it went
+    /// unmentioned.
+    ///
+    /// The end-to-end CURE — a contact that used to be quarantined and now
+    /// attests at a grown tip — is pinned on the toed slab in
+    /// `plinth-support/tests/support_runner_integration.rs`, where routed
+    /// contacts move 64 -> 65 and live members 170 -> 184. It cannot be pinned
+    /// here because this file's `Fixture` runs a zero delicacy field and lands a
+    /// different contact set; the mechanism itself is pinned on a constructed
+    /// edge seat in `designed_embed.rs`.
+    #[test]
+    fn an_incurable_refusal_is_quarantined_with_its_seat_load_and_every_remedy_disclosed() {
+        let constants = m0_constants().unwrap();
+        let policy = constants.placeholders();
+        // The ceiling a rescue may walk to: the SMALLER of the load law's own
+        // clamp maximum and Craig's registered maximum on a grown scar. Derived
+        // from the registry rather than typed, so a ruling that moves either
+        // limit moves this assertion with it.
+        let (max_radius_mm, ceiling_source) = crate::designed_embed::growth_ceiling_radius_mm(
+            policy.tip_radius_max_legacy_mm().diagnostic().get(),
+            *constants.evidence().tip_radius_max_grown_scar_mm().value(),
+        );
+        let build = Fixture::new(make_raking_blade().unwrap())
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+
+        let unreachable = build
+            .unattested()
+            .iter()
+            .filter(|stub| matches!(stub.refusal, ContactAttestationRefusal::NotAttached { .. }))
+            .collect::<Vec<_>>();
+        assert!(
+            !unreachable.is_empty(),
+            "make_raking_blade is the fixture that carries attachment refusals \
+             no legal tip can cure; if none survive here this test is asserting \
+             about an empty list"
+        );
+        // Nothing was cured, so nothing may be recorded as grown. The two lists
+        // are complements on this fixture, and a row in both would mean the
+        // engine claimed to have both saved and abandoned the same contact.
+        assert!(build.grown().is_empty());
+
+        let mut abandoned_mm2 = 0.0;
+        let mut walked = 0_usize;
+        let mut already_at_or_above_ceiling = 0_usize;
+        for stub in &unreachable {
+            assert!(stub.remedy.law_radius_mm > 0.0);
+            assert_eq!(stub.remedy.growth_ceiling_radius_mm, max_radius_mm);
+            if stub.remedy.law_radius_mm < max_radius_mm {
+                // THE LADDER WAS WALKED, to the ceiling, before the refusal was
+                // allowed to stand. A refusal with an unwalked ladder is the
+                // silent quarantine this change exists to remove.
+                walked += 1;
+                assert!(
+                    !stub.remedy.growth.is_empty(),
+                    "terminal {} was refused without any larger tip being tried",
+                    stub.terminal
+                );
+                assert_eq!(
+                    stub.remedy.growth.last().unwrap().radius_mm,
+                    max_radius_mm,
+                    "the ladder must be walked to {max_radius_mm} mm radius \
+                     ({} mm diameter) before a refusal stands",
+                    max_radius_mm * 2.0
+                );
+                assert!(stub
+                    .remedy
+                    .growth
+                    .iter()
+                    .all(|rung| rung.radius_mm <= max_radius_mm));
+            } else {
+                // THE OTHER HONEST OUTCOME, and it is a class rather than an
+                // accident: the LOAD LAW already sized this tip at or above the
+                // ceiling a rescue may grow to. There is no larger tip growth is
+                // allowed to propose, so the ladder is EMPTY and says so — a
+                // rung above the ceiling would be a scar the run may not build.
+                // The tip itself is untouched: `law_radius_mm` is what the load
+                // law asked for and nothing shrank it.
+                already_at_or_above_ceiling += 1;
+                assert!(
+                    stub.remedy.growth.is_empty(),
+                    "terminal {} was already sized at {} mm radius, at or above \
+                     the {max_radius_mm} mm radius ceiling, so no larger tip is \
+                     legal to propose: {:?}",
+                    stub.terminal,
+                    stub.remedy.law_radius_mm,
+                    stub.remedy.growth
+                );
+            }
+            assert!(
+                stub.remedy.growth.iter().all(|rung| !rung.attested),
+                "terminal {} is recorded refused but a rung attested",
+                stub.terminal
+            );
+            // The ceiling is NAMED, so the ABANDONED LOAD line can say which
+            // rule stopped the rescue rather than quoting a bare number.
+            assert_eq!(
+                stub.remedy.growth_ceiling_constant,
+                ceiling_source.constant_id()
+            );
+            assert_eq!(
+                stub.remedy.growth_ceiling_constant, "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+                "these rescues stop at Craig's registered maximum on a grown \
+                 scar, 0.400 mm radius (0.800 mm diameter) — not at the load \
+                 law's own clamp"
+            );
+            // Re-seating is recorded as UNAVAILABLE rather than left unsaid, so
+            // the disclosure can never imply a remedy was skipped.
+            assert_eq!(
+                stub.remedy.reseat,
+                ReseatAvailability::NoAlternativeSeatAtThisStage
+            );
+            // THE SEAT AND THE LOAD. Both are what makes this a disclosure
+            // rather than a count.
+            assert!(stub.seat_mm.iter().all(|value| value.is_finite()));
+            assert!(stub.abandoned_mm2 >= 0.0);
+            abandoned_mm2 += stub.abandoned_mm2;
+            // ITEM 2 — quarantine is PRESERVED for a seat that is genuinely
+            // condemned. Grow-to-attest removes the swallowing, not the
+            // quarantine.
+            assert_eq!(
+                build
+                    .forest()
+                    .terminal_ledger(stub.terminal)
+                    .expect("registered terminal")
+                    .state,
+                TerminalLedgerState::Quarantined,
+                "terminal {} carrying {} mm2 is refused and must still be \
+                 quarantined",
+                stub.terminal,
+                stub.abandoned_mm2
+            );
+        }
+        // Non-vacuity on the SHAPE of the evidence: this fixture must still
+        // contain a genuinely walked ladder, or the paragraph above about
+        // walking one is asserting over an empty set.
+        assert!(
+            walked > 0,
+            "make_raking_blade must still contain at least one refusal whose \
+             ladder was actually walked; got {walked} walked and \
+             {already_at_or_above_ceiling} already at or above the ceiling"
+        );
+        // Non-vacuity on the number that matters: this fixture really does
+        // abandon load, so the disclosure is reporting something.
+        assert!(
+            abandoned_mm2 > 10.0,
+            "make_raking_blade abandons about 10.15 mm2 across its refused \
+             contacts; got {abandoned_mm2} mm2, which means either the fixture \
+             or the load partition moved and the disclosure is describing \
+             something else"
+        );
+    }
+
+    /// **The growth ladder's shape, asserted against the registered clamps
+    /// rather than against a hand-typed list.**
+    ///
+    /// The step is one AREA DOUBLING — `pi (sqrt2 r)^2 = 2 pi r^2` — because
+    /// area is the tip's registered duty, so it is the step that changes the
+    /// answer the load law gives. The rung COUNT is therefore not chosen: it is
+    /// `ceil(log(max/law)/log(sqrt2))`, fixed by the row's own law radius and
+    /// the registered `TIP_RADIUS_MAX_LEGACY_MM`. This test states that
+    /// relationship as arithmetic so a hand-edited ladder cannot pass.
+    #[test]
+    fn the_growth_ladder_doubles_the_interface_area_and_stops_at_the_registered_maximum() {
+        let policy = m0_constants().unwrap().placeholders();
+        let min_radius_mm = policy.tip_radius_default_mm().diagnostic().get();
+        let max_radius_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+
+        // The deepest ladder the registered clamp span admits: from the
+        // smallest legal tip to the largest.
+        let rungs = crate::designed_embed::tip_growth_ladder_for_test(min_radius_mm, max_radius_mm);
+        let expected_count = (max_radius_mm / min_radius_mm).ln() / 2.0_f64.sqrt().ln();
+        assert_eq!(
+            rungs.len(),
+            expected_count.ceil() as usize,
+            "the rung count is ceil(log(max/law)/log(sqrt2)) = ceil({expected_count}), \
+             derived from TIP_RADIUS_DEFAULT_MM = {min_radius_mm} mm radius and \
+             TIP_RADIUS_MAX_LEGACY_MM = {max_radius_mm} mm radius, never hand-typed"
+        );
+        assert_eq!(
+            *rungs.last().unwrap(),
+            max_radius_mm,
+            "the ladder must END on the registered maximum, so the sweep always \
+             stops at a legal radius"
+        );
+        // Strictly ascending, and every rung but the last exactly doubles the
+        // nominal interface area of the one before it.
+        let mut previous = min_radius_mm;
+        for (index, radius) in rungs.iter().enumerate() {
+            assert!(
+                *radius > previous,
+                "rung {index} at {radius} mm radius does not exceed {previous} mm"
+            );
+            if index + 1 < rungs.len() {
+                let area_ratio = (radius * radius) / (previous * previous);
+                assert!(
+                    (area_ratio - 2.0).abs() < 1e-9,
+                    "rung {index} must DOUBLE the nominal disc area; got {area_ratio}x"
+                );
+            }
+            previous = *radius;
+        }
+        // A tip the load law already sized at the registered maximum has no
+        // larger legal tip to try, and the ladder says so with no rungs rather
+        // than by proposing an illegal one.
+        assert!(
+            crate::designed_embed::tip_growth_ladder_for_test(max_radius_mm, max_radius_mm)
+                .is_empty()
+        );
     }
 }

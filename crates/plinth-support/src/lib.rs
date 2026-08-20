@@ -140,10 +140,11 @@ pub use coverage_measurement::{
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, FinalLiveMemberEvidence, FinalSupportAuthority, OwnerlessIslandDisclosure,
-    RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
-    SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,
-    SupportVerificationSnapshot, UnroutedContactReason, UnroutedRegularRemoval,
+    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence, FinalSupportAuthority,
+    GrownContactTipDisclosure, OwnerlessIslandDisclosure, RoutedPhysicalContactEvidence,
+    SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
+    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
+    TipGrowthRungDisclosure, UnroutedContactReason, UnroutedRegularRemoval,
     UnroutedSpecializedContact,
 };
 

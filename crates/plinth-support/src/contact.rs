@@ -142,7 +142,11 @@ pub(crate) struct ContactPolicy {
     pub(crate) ball_factor_stub: f64,
     /// The engine's existing tip-load policy.  PR-4 delegates to it rather
     /// than duplicating the predicate, so the 1e-6 safety-factor tolerance and
-    /// the `[0.2, 1.0]` clamp-boundary agreement are inherited, not restated.
+    /// the `[0.05, 1.0]` mm-RADIUS clamp-boundary agreement (`[0.1, 2.0]` mm
+    /// DIAMETER) are inherited, not restated.  The minimum moved from 0.2 mm
+    /// radius (0.4 mm diameter) by the owner ruling of 2026-08-19; because
+    /// this is delegation and not a restatement, that move needed no edit
+    /// here beyond the numbers in this sentence.
     pub(crate) tip_load: FrozenTipLoadPolicy,
 }
 
@@ -339,8 +343,12 @@ pub(crate) fn mask_extent_mm(
 ///
 /// Delegation is deliberate (not a duplicated inequality): a strict
 /// reimplementation would refuse a contact one ULP low and vanish a support
-/// that prints fine today, and it would have to re-derive the `[0.2, 1.0]`
-/// clamp-boundary agreement by inspection rather than by construction.
+/// that prints fine today, and it would have to re-derive the `[0.05, 1.0]`
+/// mm-RADIUS clamp-boundary agreement (`[0.1, 2.0]` mm DIAMETER) by
+/// inspection rather than by construction.  That is not hypothetical: the
+/// minimum moved from 0.2 mm radius (0.4 mm diameter) to 0.05 mm radius
+/// (0.1 mm diameter) on 2026-08-19, and delegation carried the move for
+/// free where a copy would have gone stale.
 ///
 /// PRECONDITION ON `A_contact`.  The area this predicate credits is
 /// `pi*r_eff^2`, which is WITNESSED — not proven in general — by the PR-5

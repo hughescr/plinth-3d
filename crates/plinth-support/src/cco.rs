@@ -2947,6 +2947,50 @@ fn no_winner_evidence(outcome: &TerminalCcoOutcome) -> NoWinnerEvidence {
     }
 }
 
+/// The placed stub's tip radius against the one the finalized load authority
+/// sized, in the ONE direction that is a defect.
+///
+/// This used to be an equality, and the equality was standing in for the real
+/// requirement: *the stub CCO is about to build on must not be under-sized for
+/// the load the authority certified*. Equality enforced that and one more thing
+/// besides — that nothing ever raised a tip — which grow-to-attest legitimately
+/// does. A tip refused PR-8 at the radius the load law asked for is regrown, at
+/// `initial.rs`, until it attests, and the run then BUILDS the grown tip. So the
+/// placed radius can honestly exceed the finalized one.
+///
+/// What is checked instead is the same safety property with the accidental half
+/// removed:
+///
+/// * **Never smaller.** A placed tip below the finalized radius would be
+///   carrying more load than it was sized for. That is the failure this
+///   function exists to catch and it is unchanged.
+/// * **Never above the registered maximum.** `TIP_RADIUS_MAX_LEGACY_MM` is the
+///   owner's cap on any emitted tip, so a radius above it is not a legal
+///   revision however it arrived.
+///
+/// Growth can therefore only ever move a tip in the conservative direction —
+/// `FrozenTipLoadPolicy::violates_safety_factor` is monotone decreasing in
+/// radius, so a larger tip satisfies the area law at least as well as the
+/// finalized one did. UNITS: both arguments are RADII in mm.
+fn validate_placed_tip_against_finalized_load(
+    placed_radius_mm: PositiveFinite,
+    finalized_radius_mm: PositiveFinite,
+) -> Result<(), CcoError> {
+    if placed_radius_mm.get() < finalized_radius_mm.get() {
+        return Err(CcoError::FinalizedStubLoadMismatch);
+    }
+    let max_radius_mm = m0_constants()
+        .map_err(|error| CcoError::Constants(error.to_string()))?
+        .placeholders()
+        .tip_radius_max_legacy_mm()
+        .diagnostic()
+        .get();
+    if placed_radius_mm.get() > max_radius_mm {
+        return Err(CcoError::FinalizedStubLoadMismatch);
+    }
+    Ok(())
+}
+
 fn validate_finalized_anchor_route(
     request: &TerminalCcoRequest,
     route: &FinalizedAnchorTerminalRoute<'_, '_>,
@@ -2999,10 +3043,13 @@ fn validate_finalized_anchor_route(
         || Finite::new(leaf.carried_area_mm2())
             .map_err(|_| CcoError::FinalizedLoadBindingMismatch)?
             != request.carried_mm2()
-        || leaf.tip_radius_mm() != request.finalized_tip_radius_mm()
     {
         return Err(CcoError::FinalizedStubLoadMismatch);
     }
+    validate_placed_tip_against_finalized_load(
+        request.finalized_tip_radius_mm(),
+        leaf.tip_radius_mm(),
+    )?;
     // FU-32 J1: the plan digest inside this fingerprint is the token's, hashed
     // once for the stage and proved equal to the plan's own seal at
     // `VerifiedRoutingAuthority::compute`; the contact is the one this

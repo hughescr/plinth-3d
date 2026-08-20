@@ -338,10 +338,167 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 9_355_852_079_468_421_123_u64),
+        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
+    // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
+    // ruling of the same day: a grow-for-attachment rescue may not exceed
+    // `TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm RADIUS (0.800 mm DIAMETER),
+    // his measured field ceiling — the heaviest support he has ever needed.
+    // 65 -> 64 routed contacts, 184 -> 170 final live members,
+    // 14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963.
+    //
+    // **MEASURED, on this fixture, through this producer path.** Exactly one
+    // contact moved: contact 64, the single seat this model was growing. Its
+    // load law asked for 0.050 mm RADIUS (0.100 mm DIAMETER) and the cure the
+    // scan landed on was **0.650630996 mm RADIUS = 1.301261991 mm DIAMETER**
+    // — 1.63x Craig's field ceiling, and a scar wider than any support he has
+    // ever printed. It is now refused, disclosed as an ABANDONED LOAD naming
+    // `TIP_RADIUS_MAX_GROWN_SCAR_MM` as the stopper, and its 14 dependent
+    // members go with it.
+    //
+    // **The load abandoned by that refusal is 0.000 mm².** That is measured,
+    // not assumed: this contact carried no routed area at all, so the bound
+    // costs this model a 1.3 mm-diameter scar and buys back nothing that was
+    // holding the model up. It is the cheapest possible demonstration of the
+    // ruling and it is why the counts moving here is the right answer rather
+    // than a regression.
+    //
+    // The resulting digest is bit-identical to the pre-grow-to-attest state
+    // (4_190_462_360_230_124_963, recorded below for the 2026-08-19 tip
+    // minimum): withdrawing the one over-bound cure returns this fixture
+    // exactly to the layout it had before growth existed, which is the
+    // strongest available evidence that ONE thing changed and nothing else
+    // drifted.
+    //
+    // Superseded record — digest re-derived 2026-08-20 for the DESCENDING
+    // REFINEMENT SCAN on
+    // grow-to-attest: 15_045_390_433_036_889_889 ->
+    // 14_374_106_896_419_012_910.  The counts are again deliberately
+    // unchanged, and the leaf diff through this same producer path is the
+    // narrowest one this corpus has produced: of the 184 final live members,
+    // ONE changed and 183 are bit-identical.
+    //   * slot 61, the model contact this model grows (contact 64), drops its
+    //     terminal radius (`r0`) 0.800000000 -> 0.650630996 mm RADIUS
+    //     (1.600000000 -> 1.301261991 mm DIAMETER).  That is 0.8 * q^2 with
+    //     `q = 1 - 2 pi / 8^2` — two refinement steps below the ladder rung
+    //     that used to be emitted — and it cuts the interface area this scar
+    //     leaves on the model by 33.9% (0.6614x).
+    //   * The ladder record shows why: rungs 0.0707 through 0.5657 all fail,
+    //     0.8000 is the first to attest, then the scan measures 0.7215
+    //     (attests), 0.6506 (attests) and 0.5868 (FAILS).  The smallest
+    //     attesting radius is the one built.
+    // Nothing else moved: no rootward radius, no endpoint, no kind, no
+    // connectivity, and all 65 routed contact positions were bit-identical AT
+    // THAT TIP — the scar bound above has since withdrawn one of those 65.
+    // The coverage measurement's own numbers are bit-identical too — see the
+    // toed-slab coverage golden, where the ONLY field that changed is
+    // `snapshot_digest`.
+    //
+    // Digest previously re-derived 2026-08-19 for the tip-minimum ruling
+    // (`TIP_RADIUS_DEFAULT_MM` 0.2 -> 0.05 mm RADIUS, 0.4 -> 0.1 mm
+    // DIAMETER): 9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963.
+    // The COUNTS above are deliberately unchanged, and that is the point.
+    // Leaf-diffed through this same producer path: of the 170 final live
+    // members, 65 changed and 105 are bit-identical.  The 65 are three
+    // disjoint groups, 60 + 2 + 3:
+    //   * 60 stubs move their terminal radius (`r0`) 0.200 -> 0.050 mm
+    //     RADIUS (0.400 -> 0.100 mm DIAMETER).  These carry so little area
+    //     that the minimum still binds; it is simply lower now.
+    //   * 2 stubs (slots 56, 59) drop `r0` 0.200 -> 0.155284 mm RADIUS
+    //     (0.400 -> 0.310568 mm DIAMETER).  The OLD minimum was clamping
+    //     these ABOVE their own law-required radius; the law sizes them
+    //     now.  This is the band the ruling actually freed.
+    //   * 3 members (slots 84, 90, 91) keep every radius bit-identical and
+    //     move an ENDPOINT instead.  They share one interior junction,
+    //     which shifted 0.272 mm: `rewire.rs::junction_geometry` slides the
+    //     junction to minimise frustum volume and `frustum_raw` reads the
+    //     child's terminal radius, so thinner tips move that optimum.  The
+    //     junction radius is `max(required_radius, terminal_radius)`, so a
+    //     thinner terminal can only lower it, and the unconditional
+    //     `MIN_SHOOT_R_MM` = 0.35 mm radius (0.7 mm diameter) bounds it
+    //     from below regardless.
+    // Counting these 3 as unchanged is the mistake to avoid: their radii
+    // are identical but their lines are not.  No rootward radius (`r1`)
+    // moved anywhere, all 64 routed contact positions are bit-identical,
+    // and member count, kinds and connectivity are unchanged.
     assert_eq!(seats.len(), identities.len());
+    // **THE ABANDONED LOAD, ASSERTED — not left in prose.**
+    //
+    // Accepting 65 -> 64 routed contacts turns entirely on the claim above that
+    // the contact the scar bound withdraws carries **0.000 mm²**: the bound
+    // costs this model a 1.3 mm-diameter scar and buys back nothing that was
+    // holding it up. A comment cannot fail, so the claim is measured here. If a
+    // future change ever makes the bound drop a contact that IS carrying load,
+    // this fixture must go red rather than keep quoting a number nobody checks.
+    let abandoned = authority.abandoned_contacts();
+    let abandoned_mm2 = abandoned
+        .iter()
+        .map(plinth_support::AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum::<f64>();
+    assert_eq!(
+        abandoned_mm2, 0.0,
+        "the scar bound must cost this fixture no routed load; got {abandoned_mm2} mm² across \
+         {abandoned:?}"
+    );
+    // **TWO refusals, of two DIFFERENT kinds, and the fixture pins which is
+    // which.** Measured 2026-08-20, and the pair is the reason this assertion
+    // is worth writing at all:
+    //
+    //   * contact 25, seat (-5.495, -0.938, 3.750) mm — `buried_surface`. This
+    //     one predates the scar bound entirely and has nothing to do with it:
+    //     the OD-9 probe is a point on the surface normal, so NO tip radius
+    //     moves a buried seat. The ladder was never walked
+    //     (`growth_ladder_entered == false`, zero rungs) and the run report
+    //     must not let Craig's field ceiling read as the reason it is missing.
+    //   * contact 64, seat (10.928, 0.000, 6.304) mm — `not_attached`, ladder
+    //     walked, six rungs from 0.0707 to 0.4000 mm RADIUS (0.1414 to 0.8000
+    //     mm DIAMETER) and every one refused. THIS is the contact the bound
+    //     withdraws, and here naming `TIP_RADIUS_MAX_GROWN_SCAR_MM` as the
+    //     stopper is exactly true.
+    //
+    // Both abandon 0.000 mm², which the sum above already states.
+    assert_eq!(
+        abandoned.len(),
+        2,
+        "this fixture refuses exactly two contacts — one buried seat and one the scar bound \
+         withdraws; got {abandoned:?}"
+    );
+    let classes = abandoned
+        .iter()
+        .map(|contact| {
+            (
+                contact.contact_id(),
+                contact.refusal(),
+                contact.growth_ladder_entered(),
+                contact.growth_rungs().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        classes,
+        vec![
+            (25_u32, "buried_surface", false, 0_usize),
+            (64_u32, "not_attached", true, 6_usize),
+        ],
+        "a buried seat must be recorded as never having entered the ladder, and only the \
+         ladder-walked refusal may read as the bound's doing"
+    );
+    for contact in abandoned {
+        assert_eq!(
+            contact.growth_ceiling_constant(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            "both paths must quote the SAME registered limit, so the number never changes \
+             meaning between lines; got {contact:?}"
+        );
+        assert!(
+            contact
+                .growth_rungs()
+                .iter()
+                .all(|rung| rung.radius_mm() <= contact.growth_ceiling_radius_mm()),
+            "no rung may propose a tip above the ceiling; got {contact:?}"
+        );
+    }
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");
@@ -610,7 +767,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let request = CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(71, 69, 50_688, 1_033_728, 12_624_152, 5_879_808)
+        CoverageMeasurementLimits::new(74, 71, 50_688, 1_034_240, 12_624_272, 5_879_808)
             .expect("explicit frozen test ceilings"),
     )
     .expect("explicit finite coverage request");
@@ -621,7 +778,23 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .measure_coverage(request)
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
-    assert_eq!(snapshot.digest(), 9_355_852_079_468_421_123);
+    // Same snapshot digest as the toed-slab closure test above, re-derived
+    // 2026-08-20 for the SCAR BOUND (`TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm
+    // RADIUS / 0.800 mm DIAMETER, Craig's field ceiling):
+    // 14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963.  ONE contact
+    // moved — contact 64's cure needed 0.650630996 mm RADIUS
+    // (1.301261991 mm DIAMETER), 1.63x the ceiling, so it is refused and
+    // disclosed instead of built.  The full measurement, including the
+    // 0.000 mm² of load that refusal abandons, is recorded at the closure test
+    // above.  The frozen resource arithmetic below MOVES with the count, and
+    // is re-derived here rather than inherited.
+    //
+    // Superseded records: re-derived 2026-08-20 for the descending refinement
+    // scan on grow-to-attest (15_045_390_433_036_889_889 ->
+    // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
+    // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
+    // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
+    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
@@ -638,6 +811,16 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             plan.assessment_evidence_bytes(),
             plan.assessment_phase_peak_bytes(),
         ),
+        // Re-derived 2026-08-20 with the scar bound. Only the three terms that
+        // are a function of the ROUTED CONTACT COUNT moved, which is exactly
+        // what withdrawing one over-bound contact must do and nothing more:
+        //   * route_membership_sum   74 -> 71  (the contact left three routes)
+        //   * indexed_point_count    71 -> 69
+        //   * distance_work     1_034_240 -> 1_033_728  (= query rows x points)
+        //   * logical_peak_bytes 12_624_272 -> 12_624_152
+        // The sequential peaks (30, 30), the query row count and the whole
+        // assessment phase are UNMOVED: they are functions of the mesh and the
+        // request, not of how many contacts survived.
         (
             71, 30, 69, 30, 50_688, 1_033_728, 12_624_152, 5_879_808, 3_902_976, 8_312_832,
             12_215_808
@@ -734,9 +917,22 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             77,
             &[77],
+            // Re-derived 2026-08-20 with the scar bound: 0.461_625_340 ->
+            // 0.482_931_125 mm² uncovered, +0.021_305_785 mm². Islands 5 and 8
+            // are the two toe islands the withdrawn over-bound contact stood
+            // between, they move together and by the same amount, and this is
+            // the ENTIRE coverage cost of refusing that 1.301 mm-DIAMETER scar:
+            // twenty-one thousandths of a square millimetre each, on islands
+            // the gate still passes (`assessment_failed` stays false). The
+            // other seven patches are bit-identical.
             0.482_931_124_892_749_53_f64.to_bits(),
             false,
             false,
+            // The worst gap on this island moves with the same withdrawal:
+            // 2.195_345_800 -> 4.380_949_641 mm, because the contact that was
+            // standing nearest these faces is the one the scar bound refused.
+            // The island's verdict is unchanged (`assessment_failed` false):
+            // the gate rules on uncovered AREA, and 0.483 mm² still passes.
             4.380_949_640_913_765_f64.to_bits(),
         ),
         (
@@ -764,6 +960,9 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             109,
             &[109],
+            // Island 8, the mirror of island 5 above, moves identically and one
+            // ULP apart: 0.461_625_340 -> 0.482_931_125 mm² uncovered, worst
+            // gap 2.195_345_800 -> 4.380_949_641 mm, verdict unchanged.
             0.482_931_124_892_749_64_f64.to_bits(),
             false,
             false,

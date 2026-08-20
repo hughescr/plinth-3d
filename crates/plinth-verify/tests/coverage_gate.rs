@@ -157,6 +157,129 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // patches and all 7 defects are byte-identical — no evidence lost, the report
 // still refuses with 7 defects. No cap, gate, floor, radius, tolerance or
 // registered constant was touched, and none was added.
+//
+// **Refreshed an eighth time on 2026-08-19, for the tip-minimum ruling.**
+// The owner lowered `TIP_RADIUS_DEFAULT_MM` from 0.2 to 0.05 mm RADIUS
+// (0.4 -> 0.1 mm DIAMETER) on his ChituBox field practice. That constant is
+// the tip-sizing clamp MINIMUM, so tips carrying a tiny area are no longer
+// over-sized to 0.2 mm; the `load_digest` input moves and with it
+// `snapshot_digest`: **9355852079468421123 -> 4190462360230124963**.
+//
+// This is a PERMISSION, not a weakened refusal, and the golden proves it.
+// The load law still sizes every tip, so the minimum can only bind where the
+// carried area is at or below `X * pi * 0.05^2` = 0.0942 mm2; every larger
+// area is sized and refused exactly as before. The golden was REGENERATED
+// THROUGH THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm below),
+// never hand-edited, and the two documents were then diffed leaf by leaf:
+// **169 scalar leaves, EXACTLY 1 moved** (`snapshot_digest`). Every
+// `request` bound, all 11 `resources` counters, all 9 islands, all 9 patches
+// and all 7 defects are byte-identical — the report still refuses with 7
+// defects, and no count moved anywhere. No cap, gate, minimum, radius or
+// tolerance was touched beyond the one authorized constant, and none was
+// added.
+//
+// **Refreshed a ninth time on 2026-08-19, for GROW-TO-ATTEST** — a tip refused
+// PR-8 `NotAttached` is now regrown, one area-doubling rung at a time up to the
+// registered `TIP_RADIUS_MAX_LEGACY_MM`, until it attests, and the run emits the
+// grown tip. Before this, such a seat was quarantined and the load it carried
+// was abandoned with nothing told to take it over.
+//
+// **This golden is that change's own witness, and unlike every refresh above it
+// moves COUNTS — which is the point.** One toed-slab contact that used to be
+// quarantined now attests and routes: routed contacts 64 -> 65, final live
+// members 170 -> 184, `snapshot_digest` 4190462360230124963 ->
+// 15045390433036889889. The frozen ceilings in `request` move with the counts
+// they bound (route memberships 71 -> 74, indexed points 69 -> 71, distance work
+// 1033728 -> 1034240, logical peak bytes 12624152 -> 12624272); the coverage row
+// count, assessment work, scratch, evidence and phase-peak bytes do not move at
+// all.
+//
+// Regenerated THROUGH THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm
+// below), never hand-edited, then diffed leaf by leaf: **180 scalar leaves, 13
+// moved.** Nine are the digest and the eight counter/ceiling pairs above. The
+// other four are the measured consequence of the restored support, on the two
+// toe islands it stands between:
+//
+// * island 5 uncovered area 0.48293112489274953 -> 0.4616253399710106 mm²,
+//   worst gap 4.380949640913765 -> 2.1953457995370087 mm
+// * island 8 uncovered area 0.48293112489274964 -> 0.4616253399710107 mm²,
+//   worst gap 4.380949640913764 -> 2.195345799537009 mm
+//
+// Both move in the SAFE direction — less uncovered area, and a worst gap cut
+// roughly in half — because a support that used to vanish now stands. All 9
+// islands, the other 7 patches and all 7 defects are byte-identical, and the
+// report still refuses with 7 defects. No cap, gate, minimum, radius, tolerance
+// or registered constant was touched by this refresh; the ceilings that moved
+// are this test's own hand-counted fixture bounds, re-counted against the
+// fixture they describe.
+//
+// **Refreshed a tenth time on 2026-08-20, for the DESCENDING REFINEMENT SCAN.**
+// The ascending ladder above returns the smallest radius ON THE LADDER, and its
+// step is one area doubling, so the tip it emits can be a whole doubling — or
+// more — above the smallest tip that would have worked. Once the ladder has
+// BRACKETED the answer between its last failing rung and its first passing one,
+// the scan walks back down inside that bracket at the ring's own step
+// (`q = 1 - 2 pi / 8^2`, one eighth of the eight rim rays' inter-ray gap) and
+// keeps the smallest radius that still attests.
+//
+// **`snapshot_digest` 15045390433036889889 -> 14374106896419012910, and NOTHING
+// ELSE in this file moved.** Diffed leaf by leaf through the same producer path:
+// **180 scalar leaves, EXACTLY 1 moved.** Every `request` bound, all 11
+// `resources` counters, all 9 islands, all 9 patches with their uncovered areas
+// and worst gaps, and all 7 defects are byte-identical, and the report still
+// refuses with 7 defects.
+//
+// **Why the counts do NOT move this time, and why that is the correct answer.**
+// The scan never changes WHICH contacts attest — it only shrinks a tip that had
+// already attested at a larger radius on the same seat. So no support appears,
+// none vanishes, and no coverage number can move. What moves is the geometry of
+// the one contact the toed slab grows: the leaf diff on the support side is one
+// member of 184, slot 61, terminal radius 0.800000000 -> 0.650630996 mm RADIUS
+// (1.600000000 -> 1.301261991 mm DIAMETER), which is 0.8 * q^2 — two refinement
+// steps below the ladder rung that used to be emitted — and 33.9% less interface
+// area scarred onto the model. No cap, gate, minimum, radius, tolerance or
+// registered constant was touched by this refresh.
+//
+// **Refreshed an eleventh time on 2026-08-20, for the SCAR BOUND** — Craig's
+// ruling of the same day, registered as `TIP_RADIUS_MAX_GROWN_SCAR_MM` =
+// **0.400 mm RADIUS (0.800 mm DIAMETER)**. It is an EXTERNAL REQUIREMENT
+// carrying field data, not physics: the heaviest support he has ever needed is
+// a 0.8 mm diameter sphere, so that is the largest scar a grow-for-ATTACHMENT
+// rescue may leave. The growth ladder and its refinement scan now truncate at
+// `min(this, TIP_RADIUS_MAX_LEGACY_MM)`, and a contact whose cure would exceed
+// it is refused through the disclosed ABANDONED LOAD line with the bound named
+// as the stopper.
+//
+// **This golden is that ruling's witness too, and it moves counts BACK.** The
+// one toed-slab contact grow-to-attest rescued (contact 64) needed
+// **0.650630996 mm RADIUS = 1.301261991 mm DIAMETER** — 1.63x the ceiling — so
+// it is now refused. Routed contacts 65 -> 64, final live members 184 -> 170,
+// `snapshot_digest` 14374106896419012910 -> 4190462360230124963, which is
+// bit-identical to the pre-grow-to-attest value recorded above. The frozen
+// ceilings move back with the counts they bound: route memberships 74 -> 71,
+// indexed points 71 -> 69, distance work 1034240 -> 1033728, logical peak bytes
+// 12624272 -> 12624152. Coverage row count, assessment work, scratch, evidence
+// and phase-peak bytes are unmoved.
+//
+// **What the refusal costs, measured.** The load that contact carried is
+// **0.000 mm²** — it was holding nothing up — so the whole price of the ruling
+// on this model is the coverage on the two toe islands it stood between:
+//
+// * island 5 uncovered area 0.4616253399710106 -> 0.48293112489274953 mm²,
+//   worst gap 2.1953457995370087 -> 4.380949640913765 mm
+// * island 8 uncovered area 0.4616253399710107 -> 0.48293112489274964 mm²,
+//   worst gap 2.195345799537009 -> 4.380949640913764 mm
+//
+// Both stay BELOW this test's 1.0 mm² censor, both keep
+// `assessment_failed = false`, and the report still refuses with the same 7
+// defects on the same 7 islands. So the ruling trades 0.0213 mm² of extra
+// uncovered area on each of two already-passing islands for not cutting a
+// 1.3 mm-diameter scar into the model. Every other leaf is byte-identical.
+//
+// No cap, gate, minimum, radius or tolerance was touched by this refresh, and
+// the ceilings that moved are this test's own hand-counted fixture bounds,
+// re-counted against the fixture they describe. One constant was ADDED — the
+// scar maximum above — under the owner ruling that authorized it.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {

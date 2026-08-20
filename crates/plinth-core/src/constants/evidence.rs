@@ -55,6 +55,7 @@ pub struct M0EvidenceConstants {
     support_parity_grid_max_bytes_per_face: Derived<u64>,
     support_parity_grid_refs_per_face_observed: Measured<f64>,
     tip_diameter_min_allowed_mm: Measured<f64>,
+    tip_radius_max_grown_scar_mm: Measured<f64>,
     tip_radius_min_allowed_mm: Derived<f64>,
     x_allowed: Derived<f64>,
     x_star_cone: Measured<FiniteInterval>,
@@ -103,15 +104,15 @@ impl M0EvidenceConstants {
             .ok_or(M0EvidenceConstantsError::NonAdditiveLoadSharing)?;
 
         let tip_diameter_min_allowed_mm = Measured::new(
-            0.150,
+            0.100,
             EvidenceSource::owner_decision(
                 EvidenceId::new("tip-diameter-floor-owner-decision")?,
                 "docs/engineering-journal/03-physics-and-constants.md",
                 "§3.2",
-                on_or_before_date("2026-07-31")?,
+                exact_date("2026-08-19")?,
             )?,
             None,
-            "Owner-authorized hard validator floor for this machine and resin; it is not a target or a cap.",
+            "Owner-authorized hard validator MINIMUM for this machine and resin; it is not a target or a cap. 0.100 mm DIAMETER (0.050 mm RADIUS) since the owner ruling of 2026-08-19, SUPERSEDING the earlier 0.150 mm diameter (0.075 mm radius) decision of on-or-before 2026-07-31. The supersession is field data beating a desk number: the owner prints 0.1 mm DIAMETER cylindrical tips in ChituBox today, on tiny islands in narrow gaps, so a validator that refuses 0.1 mm diameter would refuse geometry the machine and resin demonstrably render. The earlier value was an owner decision with no coupon behind it and no production reader, which is why it could sit un-noticed BELOW nothing and ABOVE the live sizing clamp. UNITS TRAP: this constant is a DIAMETER and its derived twin TIP_RADIUS_MIN_ALLOWED_MM is a RADIUS; a number transcribed between them without halving or doubling lands 2x wrong. This value now AGREES with the live sizing clamp TIP_RADIUS_DEFAULT_MM = 0.050 mm radius (0.100 mm diameter), closing the conflict that ruling flagged rather than leaving two records disagreeing. Thin-tip formability below 0.100 mm diameter remains uncalibrated, and this minimum is what refuses it.",
         )?;
         let tip_radius_value = *tip_diameter_min_allowed_mm.value() / 2.0;
 
@@ -327,10 +328,21 @@ impl M0EvidenceConstants {
                 "Weeping Treant v1.2, 429,120 support faces: the axis parity grid projected a peak of 78,482,308 bytes, which inverts through 81·faces + 36·references + 4 to exactly 1,214,544 (cell, face) references. References, not faces, dominate that projection, and their ratio to faces falls as a mesh refines — 526 per face on the 244-face Cylinder against 2.83 here — so the treant is the tight case and the byte floor governs every coarse model. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-05. The 526 ↔ 2.83 spread is the reason that matters: this quantity is measured to vary by 186× across the corpus, and one point on a curve that steep is not a distribution. A second large-model measurement triggers re-derivation of SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE rather than silent inheritance of a treant-shaped constant.",
             )?,
             tip_diameter_min_allowed_mm,
+            tip_radius_max_grown_scar_mm: Measured::new(
+                0.400,
+                EvidenceSource::owner_decision(
+                    EvidenceId::new("tip-grown-scar-maximum-owner-field-data")?,
+                    "docs/engineering-journal/03-physics-and-constants.md",
+                    "§3.2",
+                    exact_date("2026-08-20")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- field data, NOT physics and NOT a wet-finger estimate. The owner's measured field ceiling for a support tip: 0.400 mm RADIUS = 0.800 mm DIAMETER, ruled by Craig on 2026-08-20 and evidenced by his own printing practice -- the heaviest support he has ever needed is a 0.8 mm DIAMETER sphere, and he has never needed a larger scar on a model. UNITS TRAP: this registry speaks RADIUS and both the owner and the ChituBox UI speak DIAMETER; state both or the number lands 2x wrong. No physics derives this number and none is claimed for it. It is the largest scar the owner will accept, registered as an honestly-labelled external requirement so that a future coupon measurement of thin-tip attachment supersedes it rather than colliding with it. WHAT IT BOUNDS, exactly: GROWTH-FOR-ATTACHMENT only. PR-8's grow-to-attest ladder enlarges a tip BEYOND what the load law asked for, purely so the attestation ring can reach solid, and that enlargement is a scar the operator did not choose. The ascending ladder and its descending refinement scan therefore truncate at min(this bound, TIP_RADIUS_MAX_LEGACY_MM) = 0.400 mm radius (0.800 mm diameter), and a contact whose cure would need a larger tip is REFUSED through the existing disclosed ABANDONED LOAD line, which states the seat, the load, the rungs tried, and this bound by name as the stopper. WHAT IT DOES NOT BOUND: tips the LOAD LAW sizes. The area law -- pi*r^2 >= carried_area/X with X = X_ALLOWED = 12 -- may legitimately demand up to the registered TIP_RADIUS_MAX_LEGACY_MM of 1.000 mm radius (2.000 mm diameter) for a genuinely heavy area, and this bound neither clamps nor refuses such a tip: a load-sized tip above 0.400 mm radius that attests is emitted unchanged. The two are different appetites -- carrying weight versus reaching solid -- and only the second is bounded here. This constant WEAKENS NO REFUSAL: it can only turn a cure into a refusal, never a refusal into a cure.",
+            )?,
             tip_radius_min_allowed_mm: Derived::new(
                 tip_radius_value,
                 ["TIP_DIAMETER_MIN_ALLOWED_MM"],
-                "Exact diameter-to-radius conversion: TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.075 mm; do not substitute the 0.200 mm default.",
+                "Exact diameter-to-radius conversion: TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.050 mm RADIUS, from 0.100 mm DIAMETER. Was 0.075 mm radius (0.150 mm diameter) until the owner ruling of 2026-08-19 superseded its parent. This is a RADIUS and its parent is a DIAMETER; halve or double, never substitute. The warning this note used to carry -- do not substitute the tip-sizing default -- is now moot in VALUE and live in KIND: TIP_RADIUS_DEFAULT_MM is also 0.050 mm radius (0.100 mm diameter) since the same ruling, but it is the GENERATION clamp minimum and this is the VALIDATOR minimum. They agree today by ruling, not by derivation, and neither may be written in terms of the other.",
             ),
             x_allowed: Derived::new(
                 x_allowed_value,
@@ -487,6 +499,17 @@ impl M0EvidenceConstants {
         &self.tip_diameter_min_allowed_mm
     }
 
+    /// The MAXIMUM tip a grow-for-attachment rescue may reach, mm RADIUS.
+    ///
+    /// 0.400 mm RADIUS = 0.800 mm DIAMETER. An external requirement carrying
+    /// the owner's field data, not a physics result: it bounds the scar that
+    /// PR-8's growth ladder is allowed to leave on a model, and it bounds
+    /// nothing the LOAD LAW sizes.
+    #[must_use]
+    pub const fn tip_radius_max_grown_scar_mm(&self) -> &Measured<f64> {
+        &self.tip_radius_max_grown_scar_mm
+    }
+
     #[must_use]
     pub const fn tip_radius_min_allowed_mm(&self) -> &Derived<f64> {
         &self.tip_radius_min_allowed_mm
@@ -508,7 +531,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 31], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 32], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -671,6 +694,12 @@ impl M0EvidenceConstants {
                 "mm",
                 SCALAR,
                 &self.tip_diameter_min_allowed_mm,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("TIP_RADIUS_MAX_GROWN_SCAR_MM"),
+                "mm",
+                SCALAR,
+                &self.tip_radius_max_grown_scar_mm,
             )?,
             ConstantDescriptor::from_derived(
                 ConstantId::from("TIP_RADIUS_MIN_ALLOWED_MM"),

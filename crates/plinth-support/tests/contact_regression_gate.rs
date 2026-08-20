@@ -85,11 +85,81 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 20] = [
+const REQUIRED: [(&str, &str, &str); 28] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
         "no stub is attested at all: the governing requirement is unmet again",
+    ),
+    // --- GROW-TO-ATTEST: a tip must be sized for BOTH duties ------------
+    //
+    // PR-8 probes attachment with a ray ring AT THE TIP RADIUS, so a tip sized
+    // only by the load law and seated near a model silhouette edge can find
+    // nothing but air and be refused for being SMALL. Deleting the remedy is
+    // behaviourally visible on the toed slab (routed contacts fall 65 -> 64),
+    // but the DISCLOSURE half is not: strip the abandonment record and every
+    // healthy-fixture `is_empty()` assertion stays green while a run goes back
+    // to dropping load in silence.
+    (
+        "designed_embed.rs",
+        "pub(crate) fn grow_tips_to_attest(",
+        "there is no growth remedy at all: a load-sized tip that cannot attest \
+         is refused again, and the load it carried is abandoned",
+    ),
+    (
+        "designed_embed.rs",
+        "fn tip_growth_ladder(",
+        "the growth ladder is gone, so growth has no principled sequence of \
+         radii and no termination at the registered maximum",
+    ),
+    (
+        "designed_embed.rs",
+        "fn tip_refinement_scan(",
+        "the descending refinement scan is gone, so the run emits the first \
+         LADDER rung that attests instead of the smallest radius that does — a \
+         scar up to a whole area doubling larger than physics asked for, and \
+         invisible to every count-based assertion",
+    ),
+    (
+        "initial.rs",
+        "grow_tips_to_attest(",
+        "the initial-contact stage no longer asks for the remedy, so a curable \
+         NotAttached is quarantined and its load abandoned",
+    ),
+    // --- THE SCAR BOUND: Craig's ruling of 2026-08-20 --------------------
+    //
+    // A grow-for-attachment rescue may not leave a scar wider than
+    // TIP_RADIUS_MAX_GROWN_SCAR_MM = 0.400 mm RADIUS (0.800 mm DIAMETER), his
+    // measured field ceiling. Deleting the truncation IS behaviourally visible
+    // today (the toed slab goes 64 -> 65 routed contacts and its digest moves),
+    // so these three rows are belt-and-braces rather than the sole guard —
+    // but a rename that silently routed the ladder back to the legacy 1.000 mm
+    // maximum would otherwise be a one-word edit with no named guard, and this
+    // is the same technique the neighbouring entries use.
+    (
+        "designed_embed.rs",
+        "pub(crate) fn growth_ceiling_radius_mm(",
+        "the truncation seam is gone: the ladder no longer takes the SMALLER \
+         of the scar bound and the legacy maximum, so a rescue may leave a scar \
+         wider than any support the owner has ever printed",
+    ),
+    (
+        "designed_embed.rs",
+        "scar_bound_radius_mm",
+        "the growth request no longer CARRIES the scar bound, so the ceiling \
+         falls back to the legacy maximum however the truncation is written",
+    ),
+    (
+        "initial.rs",
+        "scar_bound_radius_mm: tip_radius_max_grown_scar_mm",
+        "the initial-contact stage no longer hands the REGISTERED scar bound to \
+         the ladder, so the bound is registered but unread",
+    ),
+    (
+        "initial.rs",
+        "abandoned_mm2",
+        "a refusal no longer records the load it abandons, which is the one \
+         number that tells a refused support from one that vanished",
     ),
     (
         "initial.rs",
