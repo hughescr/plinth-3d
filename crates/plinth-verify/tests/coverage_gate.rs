@@ -177,6 +177,41 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // defects, and no count moved anywhere. No cap, gate, minimum, radius or
 // tolerance was touched beyond the one authorized constant, and none was
 // added.
+//
+// **Refreshed a ninth time on 2026-08-19, for GROW-TO-ATTEST** — a tip refused
+// PR-8 `NotAttached` is now regrown, one area-doubling rung at a time up to the
+// registered `TIP_RADIUS_MAX_LEGACY_MM`, until it attests, and the run emits the
+// grown tip. Before this, such a seat was quarantined and the load it carried
+// was abandoned with nothing told to take it over.
+//
+// **This golden is that change's own witness, and unlike every refresh above it
+// moves COUNTS — which is the point.** One toed-slab contact that used to be
+// quarantined now attests and routes: routed contacts 64 -> 65, final live
+// members 170 -> 184, `snapshot_digest` 4190462360230124963 ->
+// 15045390433036889889. The frozen ceilings in `request` move with the counts
+// they bound (route memberships 71 -> 74, indexed points 69 -> 71, distance work
+// 1033728 -> 1034240, logical peak bytes 12624152 -> 12624272); the coverage row
+// count, assessment work, scratch, evidence and phase-peak bytes do not move at
+// all.
+//
+// Regenerated THROUGH THIS FILE'S OWN PRODUCER PATH (the `THREAD_CHILD` arm
+// below), never hand-edited, then diffed leaf by leaf: **180 scalar leaves, 13
+// moved.** Nine are the digest and the eight counter/ceiling pairs above. The
+// other four are the measured consequence of the restored support, on the two
+// toe islands it stands between:
+//
+// * island 5 uncovered area 0.48293112489274953 -> 0.4616253399710106 mm²,
+//   worst gap 4.380949640913765 -> 2.1953457995370087 mm
+// * island 8 uncovered area 0.48293112489274964 -> 0.4616253399710107 mm²,
+//   worst gap 4.380949640913764 -> 2.195345799537009 mm
+//
+// Both move in the SAFE direction — less uncovered area, and a worst gap cut
+// roughly in half — because a support that used to vanish now stands. All 9
+// islands, the other 7 patches and all 7 defects are byte-identical, and the
+// report still refuses with 7 defects. No cap, gate, minimum, radius, tolerance
+// or registered constant was touched by this refresh; the ceilings that moved
+// are this test's own hand-counted fixture bounds, re-counted against the
+// fixture they describe.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
@@ -252,14 +287,14 @@ fn request(max_distance_work: usize) -> CoverageMeasurementRequest {
     CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(71, 69, 50_688, max_distance_work, 12_624_152, 5_879_808)
+        CoverageMeasurementLimits::new(74, 71, 50_688, max_distance_work, 12_624_272, 5_879_808)
             .expect("nonzero frozen limits"),
     )
     .expect("finite request")
 }
 
 fn report_json() -> String {
-    verify_json(1_033_728).expect("coverage report")
+    verify_json(1_034_240).expect("coverage report")
 }
 
 #[test]
@@ -281,7 +316,7 @@ fn public_coverage_report_is_frozen_without_evidence_loss() {
 #[test]
 fn cap_minus_one_returns_a_typed_error_without_a_report() {
     assert_eq!(
-        verify_json(1_033_727),
+        verify_json(1_034_239),
         Err(CoverageVerificationError::ResourceLimit {
             resource: "distance work".to_owned()
         })

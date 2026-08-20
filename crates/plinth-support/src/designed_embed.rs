@@ -1049,6 +1049,326 @@ fn unusable_attestation(
     }
 }
 
+// ======================== GROW-TO-ATTEST (PR-8 remedy) ========================
+//
+// A tip has TWO duties and the engine used to size it for only one.
+//
+// * **Load.** `pi r^2 >= carried_mm2 / X` — the registered area law, which
+//   `FrozenTipLoadPolicy::tip_radius_mm` solves for every contact.
+// * **Attachment.** Some part of that same disc must actually be in the solid,
+//   which is what PR-8 measures with the centreline plus eight rim rays AT THE
+//   TIP RADIUS (see `EndpointValidationRow::terminalward`: the ring radius IS
+//   `r0`).
+//
+// Those duties disagree at a model silhouette edge. A tip seated within a tip
+// radius of an edge has its CENTRE on the boundary plane, which parity reads as
+// outside, and is held on by the rim alone — `is_attached()` says so out loud.
+// Shrink the tip and the ring shrinks with it, so the rim rays that were finding
+// material fold in toward the centreline and find air. The tip is then refused
+// `NotAttached` for being SMALL, not for being badly placed.
+//
+// Measured, on this branch: ten seats on thin claws and toes across the corpus
+// had centreline-in-air and lived on rim engagement alone. At a law-sized thin
+// tip the ring withdrew, all ten were refused and quarantined at the initial
+// stage, and the load each carried — 2.98 mm^2 on the Deinonychus — was
+// abandoned in silence. No neighbour was told, none was grown, and coverage's
+// 6 mm radius cannot see a hole that small.
+//
+// The remedy is physics, not a threshold: **a tip must be sized for BOTH duties,
+// so where the load-sized tip does not attest, grow it until it does and emit
+// the grown size.** A tip larger than the load law demands is legal and strictly
+// conservative — `violates_safety_factor` is monotone decreasing in radius, so
+// growing can never weaken the load refusal — and the growth is capped by the
+// registered `tip_radius_max_legacy_mm`. Only when the whole ladder fails may a
+// contact be refused, and that refusal is DISCLOSED with the load it abandons.
+//
+// **What this deliberately does NOT do.** It does not restore the old fat probe
+// ring. Every rung probes at the radius that rung would EMIT, so an attestation
+// only ever certifies a tip the run is actually going to build. Re-inflating the
+// ring while emitting a thin tip is the defect, not the fix.
+
+/// The radius ratio that DOUBLES a tip's nominal interface area.
+///
+/// `pi (sqrt(2) r)^2 = 2 pi r^2`. This is an algebraic identity of the disc, not
+/// a tunable and not a constant to register: there is no value here anyone could
+/// choose differently and still be doubling the area.
+const AREA_DOUBLING_RADIUS_RATIO: f64 = std::f64::consts::SQRT_2;
+
+/// The radii, ASCENDING, that a tip refused for attachment may be regrown to.
+///
+/// **The step is one area doubling.** The tip's registered duty is AREA, so the
+/// step that means something is the one that changes the area answer: each rung
+/// is `sqrt(2)` times the previous radius and therefore twice its nominal disc
+/// area. A finer step would re-ask the same question — the eight rim rays sit
+/// `2 pi r / 8 = 0.785 r` apart, so a radius change much smaller than `r` moves
+/// the ring by less than the gap between its own samples — and a coarser one
+/// would step over the smallest tip that would have worked.
+///
+/// **The rung COUNT is not chosen.** It is
+/// `ceil(log(max / law) / log(sqrt(2)))`, fixed by this row's own law radius and
+/// the registered `tip_radius_max_legacy_mm`. Across the whole registered clamp
+/// span — `TIP_RADIUS_MAX_LEGACY_MM / TIP_RADIUS_DEFAULT_MM` = 1.0 / 0.05 = 20
+/// mm radius over mm radius (2.0 / 0.1 in diameter) — the deepest possible
+/// ladder is `ceil(2 * log2(20))` = 9 rungs. Nothing is registered and no count
+/// is hand-typed.
+///
+/// **The last rung is exactly the registered maximum**, so the sweep always
+/// terminates on a legal radius and never proposes one above the cap the owner
+/// ruled stays.
+///
+/// **Ascending, first success wins, and no bisection.** Attestation is NOT
+/// monotone in radius: a wider ring can step PAST a thin feature that a
+/// narrower one was inside, so "it failed at r, therefore it fails below r" is
+/// false and a bisection on it would be unsound. An ordered ascending sweep that
+/// keeps the FIRST rung to attest needs no monotonicity assumption and returns
+/// the smallest radius on the ladder that satisfies both duties.
+fn tip_growth_ladder(law_radius_mm: f64, max_radius_mm: f64) -> Vec<f64> {
+    let mut rungs = Vec::new();
+    if !law_radius_mm.is_finite()
+        || !max_radius_mm.is_finite()
+        || law_radius_mm <= 0.0
+        || max_radius_mm <= law_radius_mm
+    {
+        return rungs;
+    }
+    let mut radius = law_radius_mm;
+    loop {
+        let next = radius * AREA_DOUBLING_RADIUS_RATIO;
+        // The ratio is > 1 and the radius is positive and finite, so this
+        // strictly increases and the loop terminates. The guard is here for the
+        // one way that could stop being true — a radius large enough that the
+        // multiply saturates — rather than trusting it.
+        if next <= radius || !next.is_finite() {
+            break;
+        }
+        if next >= max_radius_mm {
+            rungs.push(max_radius_mm);
+            break;
+        }
+        rungs.push(next);
+        radius = next;
+    }
+    rungs
+}
+
+/// One contact asking to be regrown until it attests.
+///
+/// The geometry is the caller's PLACED geometry with the contact-end radius left
+/// out: growth proposes that radius, one rung at a time, and everything else —
+/// both endpoints, the seat, the OD-9 probe, the routed load — is held fixed.
+/// Moving the seat is a different remedy and belongs to whoever owns the seat
+/// set (see [`TipGrowthOutcome`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TipGrowthRequest {
+    /// The caller's own row index. Verdicts come back keyed by it.
+    pub(crate) row: usize,
+    pub(crate) p0_mm: V3,
+    pub(crate) p1_mm: V3,
+    /// Which end meets the model. That end's radius is the one growth proposes.
+    pub(crate) end: ContactEnd,
+    /// OD-9's probe, unchanged by growth: it is a point on the surface normal,
+    /// so no tip radius can move it. A BURIED seat therefore stays buried at
+    /// every rung, which is correct — burial is a mesh fault, not a sizing one.
+    pub(crate) exterior_probe: V3,
+    pub(crate) carried_mm2: f64,
+    /// The radius the load law and the registered clamp produced. Rung zero,
+    /// already tried by the ordinary attestation before growth is asked for.
+    pub(crate) law_radius_mm: f64,
+    /// The smallest the OTHER end may be. The mint site keeps a stub from
+    /// inverting by holding its rootward end at least as wide as its tip, and
+    /// growth keeps that same rule rather than inventing one.
+    pub(crate) opposite_end_minimum_radius_mm: f64,
+    /// The registered `tip_radius_max_legacy_mm`. The ladder ends here.
+    pub(crate) max_radius_mm: f64,
+    /// PR-4's non-regression clause, carried through VERBATIM from the caller.
+    ///
+    /// It is deliberately NOT set by growth reaching the cap. That clause means
+    /// "the TIP-SIZING policy wanted a larger radius and the clamp refused",
+    /// and it suppresses the area-deficit record so a pre-existing clamp is not
+    /// blamed on this package. Growth is a different appetite — the ATTACHMENT
+    /// duty wanting more reach — and letting it set the clause would suppress a
+    /// real PR-4 deficit on a contact the run is about to emit.
+    pub(crate) tip_clamped_at_max: bool,
+}
+
+impl TipGrowthRequest {
+    /// `(r0, r1)` for a proposed tip radius, contact end first as the row
+    /// convention requires.
+    fn radii_for(&self, tip_radius_mm: f64) -> (f64, f64) {
+        let opposite = self.opposite_end_minimum_radius_mm.max(tip_radius_mm);
+        match self.end {
+            ContactEnd::Terminalward => (tip_radius_mm, opposite),
+            ContactEnd::Rootward => (opposite, tip_radius_mm),
+        }
+    }
+
+    fn provisional_member(&self, tip_radius_mm: f64) -> Result<Member, DesignedMaskError> {
+        let (r0_mm, r1_mm) = self.radii_for(tip_radius_mm);
+        SeatAttestationRow {
+            p0_mm: self.p0_mm,
+            p1_mm: self.p1_mm,
+            r0_mm,
+            r1_mm,
+            end: self.end,
+            exterior_probe: self.exterior_probe,
+            carried_mm2: self.carried_mm2,
+        }
+        .provisional_member()
+    }
+}
+
+/// One rung of the ladder and what it measured.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub(crate) struct TipGrowthAttempt {
+    /// The tip RADIUS this rung proposed, in mm. Double it for the diameter the
+    /// slicer UI shows.
+    pub(crate) radius_mm: f64,
+    /// Whether PR-8 attested at that radius.
+    pub(crate) attested: bool,
+}
+
+/// The rung that cured a contact, and the attestation it earned there.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TipGrowthCure {
+    /// The tip RADIUS to emit. It is the SMALLEST radius on the ladder that
+    /// satisfies both duties, and it is what the run must build — the ring that
+    /// attested and the tip that ships are the same disc.
+    pub(crate) radius_mm: f64,
+    /// The other end's radius at that tip size, held non-inverting.
+    pub(crate) opposite_end_radius_mm: f64,
+    pub(crate) attestation: ContactAttestation,
+}
+
+/// What growth did for one contact.
+///
+/// **Re-seating is not attempted here, and that is a statement about this stage
+/// rather than an omission.** The remedy set Craig named is "grow, and/or
+/// re-seat within the legal seat set". An initial contact has a seat set of
+/// exactly ONE: the point perception chose. The tournament machinery that can
+/// offer a cheap legal alternative — [`attest_seats_batch`] and its candidate
+/// generation — belongs to the two TOUCHING families, which propose several
+/// seats and pick between them. Moving an initial contact means asking
+/// perception for a different contact, which is a different stage's decision and
+/// a different lane's work. So on this path the honest remedy set is growth
+/// alone, an exhausted ladder is a genuine refusal, and the disclosure says
+/// which remedies were available rather than implying one was skipped.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TipGrowthOutcome {
+    pub(crate) row: usize,
+    /// Rung zero — what the load law asked for and PR-8 refused.
+    pub(crate) law_radius_mm: f64,
+    /// Every rung tried ABOVE the law radius, in the order they were tried.
+    pub(crate) attempts: Vec<TipGrowthAttempt>,
+    /// `Some` when a rung attested. `None` means the ladder ran out at the
+    /// registered maximum and the contact is genuinely refused.
+    pub(crate) cure: Option<TipGrowthCure>,
+}
+
+/// **Grow every refused tip until it attests, in ROUNDS rather than per tip.**
+///
+/// Batch-first, and the shape of the batching is the whole point. Round `k`
+/// gathers the `k`-th rung of every contact still unresolved and issues ONE
+/// delegated [`attest_members_batch`] for all of them. A contact that attests
+/// leaves the round set, so the work falls with each round instead of rising:
+/// the cost is `rounds x batched calls`, and `rounds` is the ladder depth — at
+/// most nine across the whole registered clamp span — NEVER the contact count.
+/// A loop that attested one grown tip at a time would be exactly the per-item
+/// native call this module exists to prevent.
+///
+/// The delegation re-runs OD-9's parity probe each round on the rows still in
+/// play. That is redundant — the probe point does not move with the tip radius —
+/// and it is kept anyway: one attestation entry point that always runs both
+/// screens is worth more than a second, subtly cheaper one that could drift out
+/// of agreement with it about what "attested" means.
+///
+/// The outer `Err` remains a batch-level integrity failure, exactly as it is for
+/// the callers this delegates to. Nothing can be concluded about any row from
+/// it.
+pub(crate) fn grow_tips_to_attest(
+    surface: &NativeSurface,
+    requests: &[TipGrowthRequest],
+    extent: PositiveFiniteMm,
+    majority_step_mm: PositiveFiniteMm,
+    samples_per_subsegment: usize,
+    policy: &ContactPolicy,
+) -> Result<Vec<TipGrowthOutcome>, DesignedMaskError> {
+    let ladders = requests
+        .iter()
+        .map(|request| tip_growth_ladder(request.law_radius_mm, request.max_radius_mm))
+        .collect::<Vec<_>>();
+    let mut outcomes = requests
+        .iter()
+        .map(|request| TipGrowthOutcome {
+            row: request.row,
+            law_radius_mm: request.law_radius_mm,
+            attempts: Vec::new(),
+            cure: None,
+        })
+        .collect::<Vec<_>>();
+    let deepest = ladders.iter().map(Vec::len).max().unwrap_or(0);
+
+    for rung in 0..deepest {
+        // Only rows still unresolved AND still having a rung left to try.
+        let live = (0..requests.len())
+            .filter(|index| outcomes[*index].cure.is_none() && rung < ladders[*index].len())
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            break;
+        }
+        let members = live
+            .iter()
+            .map(|index| requests[*index].provisional_member(ladders[*index][rung]))
+            .collect::<Result<Vec<_>, _>>()?;
+        let borrowed = members.iter().collect::<Vec<_>>();
+        let attest_requests = live
+            .iter()
+            .enumerate()
+            .map(|(row, index)| ContactAttestationRequest {
+                member: row,
+                end: requests[*index].end,
+                extent,
+                exterior_probe: requests[*index].exterior_probe,
+                end_radius_mm: ladders[*index][rung],
+                carried_mm2: requests[*index].carried_mm2,
+                tip_clamped_at_max: requests[*index].tip_clamped_at_max,
+            })
+            .collect::<Vec<_>>();
+        let limits = EndpointMaskValidationLimits::for_batch(
+            surface,
+            attest_requests.len(),
+            majority_step_mm,
+            samples_per_subsegment,
+        )?;
+        let results = attest_members_batch(surface, &borrowed, &attest_requests, limits, policy)?;
+        if results.len() != live.len() {
+            return Err(DesignedMaskError::CorruptKernelResult);
+        }
+        for result in results {
+            let index = *live
+                .get(result.member)
+                .ok_or(DesignedMaskError::CorruptKernelResult)?;
+            let radius_mm = ladders[index][rung];
+            let attested = result.verdict.is_ok();
+            outcomes[index].attempts.push(TipGrowthAttempt {
+                radius_mm,
+                attested,
+            });
+            if attested {
+                let (r0_mm, r1_mm) = requests[index].radii_for(radius_mm);
+                outcomes[index].cure = Some(TipGrowthCure {
+                    radius_mm,
+                    opposite_end_radius_mm: match requests[index].end {
+                        ContactEnd::Terminalward => r1_mm,
+                        ContactEnd::Rootward => r0_mm,
+                    },
+                    attestation: result,
+                });
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
 /// One stage's seat-attestation transcript, folded to a digest.
 ///
 /// Same totality requirement as `initial.rs`'s `attestation_digest`, and for

@@ -338,7 +338,7 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
+        (65_usize, 184_usize, 15_045_390_433_036_889_889_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
     // Digest re-derived 2026-08-19 for the tip-minimum ruling
@@ -637,7 +637,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let request = CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(71, 69, 50_688, 1_033_728, 12_624_152, 5_879_808)
+        CoverageMeasurementLimits::new(74, 71, 50_688, 1_034_240, 12_624_272, 5_879_808)
             .expect("explicit frozen test ceilings"),
     )
     .expect("explicit finite coverage request");
@@ -653,7 +653,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     // 0.4 -> 0.1 mm DIAMETER): 9_355_852_079_468_421_123 ->
     // 4_190_462_360_230_124_963.  The frozen resource arithmetic below is
     // untouched, because no count moved.
-    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
+    assert_eq!(snapshot.digest(), 15_045_390_433_036_889_889);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
@@ -671,7 +671,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             plan.assessment_phase_peak_bytes(),
         ),
         (
-            71, 30, 69, 30, 50_688, 1_033_728, 12_624_152, 5_879_808, 3_902_976, 8_312_832,
+            74, 30, 71, 30, 50_688, 1_034_240, 12_624_272, 5_879_808, 3_902_976, 8_312_832,
             12_215_808
         )
     );
@@ -766,10 +766,10 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             77,
             &[77],
-            0.482_931_124_892_749_53_f64.to_bits(),
+            0.461_625_339_971_010_6_f64.to_bits(),
             false,
             false,
-            4.380_949_640_913_765_f64.to_bits(),
+            2.195_345_799_537_008_7_f64.to_bits(),
         ),
         (
             6,
@@ -796,10 +796,10 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             109,
             &[109],
-            0.482_931_124_892_749_64_f64.to_bits(),
+            0.461_625_339_971_010_7_f64.to_bits(),
             false,
             false,
-            4.380_949_640_913_764_f64.to_bits(),
+            2.195_345_799_537_009_f64.to_bits(),
         ),
     ];
     assert_eq!(
