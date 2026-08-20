@@ -2610,4 +2610,171 @@ mod tests {
             assert!((1..=requested).contains(participating));
         }
     }
+
+    /// **A refusal growth could not cure is DISCLOSED, not silently
+    /// quarantined — and it is still quarantined.**
+    ///
+    /// `make_raking_blade` is the fixture for this: five of its forty contacts
+    /// seat on a razor edge whose solid no legal tip can reach, so growth walks
+    /// their whole ladder to the registered maximum and refuses. That is the
+    /// correct answer — curing them would be inventing attachment — and the
+    /// point of this test is what the engine must SAY while giving it.
+    ///
+    /// Before this change the answer was silence: the stub was quarantined, the
+    /// area it carried stopped being carried, no neighbour was told, nothing was
+    /// grown in its place, and coverage's 6 mm radius cannot see a hole a claw
+    /// tip leaves. One contact on this fixture is charged 10.15 mm² and it went
+    /// unmentioned.
+    ///
+    /// The end-to-end CURE — a contact that used to be quarantined and now
+    /// attests at a grown tip — is pinned on the toed slab in
+    /// `plinth-support/tests/support_runner_integration.rs`, where routed
+    /// contacts move 64 -> 65 and live members 170 -> 184. It cannot be pinned
+    /// here because this file's `Fixture` runs a zero delicacy field and lands a
+    /// different contact set; the mechanism itself is pinned on a constructed
+    /// edge seat in `designed_embed.rs`.
+    #[test]
+    fn an_incurable_refusal_is_quarantined_with_its_seat_load_and_every_remedy_disclosed() {
+        let policy = m0_constants().unwrap().placeholders();
+        let max_radius_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+        let build = Fixture::new(make_raking_blade().unwrap())
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+
+        let unreachable = build
+            .unattested()
+            .iter()
+            .filter(|stub| matches!(stub.refusal, ContactAttestationRefusal::NotAttached { .. }))
+            .collect::<Vec<_>>();
+        assert!(
+            !unreachable.is_empty(),
+            "make_raking_blade is the fixture that carries attachment refusals \
+             no legal tip can cure; if none survive here this test is asserting \
+             about an empty list"
+        );
+        // Nothing was cured, so nothing may be recorded as grown. The two lists
+        // are complements on this fixture, and a row in both would mean the
+        // engine claimed to have both saved and abandoned the same contact.
+        assert!(build.grown().is_empty());
+
+        let mut abandoned_mm2 = 0.0;
+        for stub in &unreachable {
+            // THE LADDER WAS WALKED, to the registered maximum, before the
+            // refusal was allowed to stand. A refusal with an unwalked ladder
+            // is the quarantine this change exists to remove.
+            assert!(
+                !stub.remedy.growth.is_empty(),
+                "terminal {} was refused without any larger tip being tried",
+                stub.terminal
+            );
+            assert!(
+                stub.remedy.growth.iter().all(|rung| !rung.attested),
+                "terminal {} is recorded refused but a rung attested",
+                stub.terminal
+            );
+            assert_eq!(
+                stub.remedy.growth.last().unwrap().radius_mm,
+                max_radius_mm,
+                "the ladder must be walked to the registered maximum {max_radius_mm} \
+                 mm radius ({} mm diameter) before a refusal stands",
+                max_radius_mm * 2.0
+            );
+            assert!(stub.remedy.law_radius_mm > 0.0);
+            assert!(stub.remedy.law_radius_mm <= max_radius_mm);
+            assert_eq!(stub.remedy.growth_ceiling_radius_mm, max_radius_mm);
+            // Re-seating is recorded as UNAVAILABLE rather than left unsaid, so
+            // the disclosure can never imply a remedy was skipped.
+            assert_eq!(
+                stub.remedy.reseat,
+                ReseatAvailability::NoAlternativeSeatAtThisStage
+            );
+            // THE SEAT AND THE LOAD. Both are what makes this a disclosure
+            // rather than a count.
+            assert!(stub.seat_mm.iter().all(|value| value.is_finite()));
+            assert!(stub.abandoned_mm2 >= 0.0);
+            abandoned_mm2 += stub.abandoned_mm2;
+            // ITEM 2 — quarantine is PRESERVED for a seat that is genuinely
+            // condemned. Grow-to-attest removes the swallowing, not the
+            // quarantine.
+            assert_eq!(
+                build
+                    .forest()
+                    .terminal_ledger(stub.terminal)
+                    .expect("registered terminal")
+                    .state,
+                TerminalLedgerState::Quarantined,
+                "terminal {} carrying {} mm2 is refused and must still be \
+                 quarantined",
+                stub.terminal,
+                stub.abandoned_mm2
+            );
+        }
+        // Non-vacuity on the number that matters: this fixture really does
+        // abandon load, so the disclosure is reporting something.
+        assert!(
+            abandoned_mm2 > 10.0,
+            "make_raking_blade abandons about 10.15 mm2 across its refused \
+             contacts; got {abandoned_mm2} mm2, which means either the fixture \
+             or the load partition moved and the disclosure is describing \
+             something else"
+        );
+    }
+
+    /// **The growth ladder's shape, asserted against the registered clamps
+    /// rather than against a hand-typed list.**
+    ///
+    /// The step is one AREA DOUBLING — `pi (sqrt2 r)^2 = 2 pi r^2` — because
+    /// area is the tip's registered duty, so it is the step that changes the
+    /// answer the load law gives. The rung COUNT is therefore not chosen: it is
+    /// `ceil(log(max/law)/log(sqrt2))`, fixed by the row's own law radius and
+    /// the registered `TIP_RADIUS_MAX_LEGACY_MM`. This test states that
+    /// relationship as arithmetic so a hand-edited ladder cannot pass.
+    #[test]
+    fn the_growth_ladder_doubles_the_interface_area_and_stops_at_the_registered_maximum() {
+        let policy = m0_constants().unwrap().placeholders();
+        let min_radius_mm = policy.tip_radius_default_mm().diagnostic().get();
+        let max_radius_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+
+        // The deepest ladder the registered clamp span admits: from the
+        // smallest legal tip to the largest.
+        let rungs = crate::designed_embed::tip_growth_ladder_for_test(min_radius_mm, max_radius_mm);
+        let expected_count = (max_radius_mm / min_radius_mm).ln() / 2.0_f64.sqrt().ln();
+        assert_eq!(
+            rungs.len(),
+            expected_count.ceil() as usize,
+            "the rung count is ceil(log(max/law)/log(sqrt2)) = ceil({expected_count}), \
+             derived from TIP_RADIUS_DEFAULT_MM = {min_radius_mm} mm radius and \
+             TIP_RADIUS_MAX_LEGACY_MM = {max_radius_mm} mm radius, never hand-typed"
+        );
+        assert_eq!(
+            *rungs.last().unwrap(),
+            max_radius_mm,
+            "the ladder must END on the registered maximum, so the sweep always \
+             stops at a legal radius"
+        );
+        // Strictly ascending, and every rung but the last exactly doubles the
+        // nominal interface area of the one before it.
+        let mut previous = min_radius_mm;
+        for (index, radius) in rungs.iter().enumerate() {
+            assert!(
+                *radius > previous,
+                "rung {index} at {radius} mm radius does not exceed {previous} mm"
+            );
+            if index + 1 < rungs.len() {
+                let area_ratio = (radius * radius) / (previous * previous);
+                assert!(
+                    (area_ratio - 2.0).abs() < 1e-9,
+                    "rung {index} must DOUBLE the nominal disc area; got {area_ratio}x"
+                );
+            }
+            previous = *radius;
+        }
+        // A tip the load law already sized at the registered maximum has no
+        // larger legal tip to try, and the ladder says so with no rungs rather
+        // than by proposing an illegal one.
+        assert!(
+            crate::designed_embed::tip_growth_ladder_for_test(max_radius_mm, max_radius_mm)
+                .is_empty()
+        );
+    }
 }

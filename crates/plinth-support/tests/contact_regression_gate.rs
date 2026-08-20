@@ -85,11 +85,44 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 20] = [
+const REQUIRED: [(&str, &str, &str); 24] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
         "no stub is attested at all: the governing requirement is unmet again",
+    ),
+    // --- GROW-TO-ATTEST: a tip must be sized for BOTH duties ------------
+    //
+    // PR-8 probes attachment with a ray ring AT THE TIP RADIUS, so a tip sized
+    // only by the load law and seated near a model silhouette edge can find
+    // nothing but air and be refused for being SMALL. Deleting the remedy is
+    // behaviourally visible on the toed slab (routed contacts fall 65 -> 64),
+    // but the DISCLOSURE half is not: strip the abandonment record and every
+    // healthy-fixture `is_empty()` assertion stays green while a run goes back
+    // to dropping load in silence.
+    (
+        "designed_embed.rs",
+        "pub(crate) fn grow_tips_to_attest(",
+        "there is no growth remedy at all: a load-sized tip that cannot attest \
+         is refused again, and the load it carried is abandoned",
+    ),
+    (
+        "designed_embed.rs",
+        "fn tip_growth_ladder(",
+        "the growth ladder is gone, so growth has no principled sequence of \
+         radii and no termination at the registered maximum",
+    ),
+    (
+        "initial.rs",
+        "grow_tips_to_attest(",
+        "the initial-contact stage no longer asks for the remedy, so a curable \
+         NotAttached is quarantined and its load abandoned",
+    ),
+    (
+        "initial.rs",
+        "abandoned_mm2",
+        "a refusal no longer records the load it abandons, which is the one \
+         number that tells a refused support from one that vanished",
     ),
     (
         "initial.rs",

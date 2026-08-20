@@ -1151,6 +1151,13 @@ fn tip_growth_ladder(law_radius_mm: f64, max_radius_mm: f64) -> Vec<f64> {
     rungs
 }
 
+/// The ladder itself, for the test that asserts its shape against the
+/// registered clamps rather than against a hand-typed list of radii.
+#[cfg(test)]
+pub(crate) fn tip_growth_ladder_for_test(law_radius_mm: f64, max_radius_mm: f64) -> Vec<f64> {
+    tip_growth_ladder(law_radius_mm, max_radius_mm)
+}
+
 /// One contact asking to be regrown until it attests.
 ///
 /// The geometry is the caller's PLACED geometry with the contact-end radius left
@@ -1305,7 +1312,17 @@ pub(crate) fn grow_tips_to_attest(
             cure: None,
         })
         .collect::<Vec<_>>();
-    let deepest = ladders.iter().map(Vec::len).max().unwrap_or(0);
+    // SABOTAGE SEAM. Zero rounds is exactly the engine before grow-to-attest
+    // existed: every ladder computed and none of it walked, so a refused tip
+    // stays refused and its load is abandoned. It is here, at the loop rather
+    // than at [`tip_growth_ladder`], because the ladder's own arithmetic is
+    // what the growth tests assert and sabotaging it would make the test
+    // disagree with itself.
+    let deepest = if growth_rounds_disabled() {
+        0
+    } else {
+        ladders.iter().map(Vec::len).max().unwrap_or(0)
+    };
 
     for rung in 0..deepest {
         // Only rows still unresolved AND still having a rung left to try.
@@ -1449,6 +1466,41 @@ thread_local! {
     /// `(row, s_a)` — overwrite the first interval of one row's evidence.
     static ENDPOINT_INTERVAL_SABOTAGE: std::cell::Cell<Option<(usize, f64)>> =
         const { std::cell::Cell::new(None) };
+    /// Run zero growth rounds — see [`with_growth_rounds_disabled`].
+    static TIP_GROWTH_ROUNDS_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the growth ladder is being walked. Always `true` in production: the
+/// switch below exists only in a test build.
+fn growth_rounds_disabled() -> bool {
+    #[cfg(test)]
+    {
+        TIP_GROWTH_ROUNDS_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// **Test-only sabotage of grow-to-attest**, so one fixture can be run BOTH
+/// ways through the real production path.
+///
+/// The growth tests need the counterfactual, not just the outcome. Asserting
+/// only that a contact survives proves nothing about growth — the contact might
+/// have attested at its load-sized tip all along, and the assertion would stay
+/// green with the whole ladder deleted. Running the same fixture with the rounds
+/// off shows that this contact genuinely depends on growth: without it the seat
+/// is refused `NotAttached`, quarantined, and its routed load abandoned.
+///
+/// Thread-local, and disarmed on the way out, exactly like
+/// [`with_sabotaged_interval`].
+#[cfg(test)]
+pub(crate) fn with_growth_rounds_disabled<T>(body: impl FnOnce() -> T) -> T {
+    TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(true));
+    let outcome = body();
+    TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(false));
+    outcome
 }
 
 /// Test-only evidence injection, so the two DIVERGENT per-row policies can be
@@ -3694,5 +3746,202 @@ mod tests {
             "the placed-member mint must refuse the whole batch, naming the \
              check that refused it: {minted:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // GROW-TO-ATTEST
+    // ---------------------------------------------------------------------
+
+    /// A box `[0,4] x [0,2] x [0,2]`, the same shape the OD-9 fixtures use.
+    fn edge_seat_box() -> NativeSurface {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_box(&mut vertices, &mut faces, [0.0, 0.0, 0.0], [4.0, 2.0, 2.0]);
+        surface_from(&vertices, &faces, 0.1)
+    }
+
+    /// **THE EDGE SEAT, constructed so the numbers are checkable by hand.**
+    ///
+    /// The stub meets the box's `+x` face at `x = 4`, but its axis is displaced
+    /// `EDGE_OFFSET_MM` PAST the box's `+y` silhouette edge at `y = 2`. So:
+    ///
+    /// * the CENTRELINE starts at `y = 2 + 0.075`, in air, and can never engage
+    ///   however deep it is probed — this is the real corpus case, a tip centre
+    ///   lying outside the boundary while part of its disc is inside;
+    /// * a rim ray at tip radius `r` reaches inward to `y = 2.075 - r` at best,
+    ///   so the ring finds solid if and only if `r > 0.075`.
+    ///
+    /// That makes the outcome arithmetic rather than luck. The ladder from the
+    /// registered minimum 0.05 mm radius is 0.05 -> 0.0707 -> 0.1 -> ..., and
+    /// the first rung whose ring can reach `y < 2` is 0.1 mm RADIUS (0.2 mm
+    /// DIAMETER). The two rungs below it must fail even for a rim ray pointing
+    /// exactly at `-y`: 2.075 - 0.05 = 2.025 and 2.075 - 0.0707 = 2.0043 are
+    /// both outside.
+    const EDGE_OFFSET_MM: f64 = 0.075;
+    const EDGE_SEAT_DEPTH_MM: f64 = 0.3;
+    const EDGE_SEAT_EXTENT_MM: f64 = 0.05;
+    /// The registered tip-sizing clamp minimum, 0.05 mm RADIUS (0.1 mm
+    /// DIAMETER), which is what the load law hands a tiny contact.
+    const EDGE_SEAT_LAW_RADIUS_MM: f64 = 0.05;
+    /// The load this seat carries. Under the frozen policy's area law it needs
+    /// only `sqrt(0.05 / (X * pi))` mm of radius, well below the clamp minimum,
+    /// so 0.05 mm radius really is what the law asks for here.
+    const EDGE_SEAT_CARRIED_MM2: f64 = 0.05;
+
+    fn edge_seat_request(seat_y: f64) -> TipGrowthRequest {
+        TipGrowthRequest {
+            row: 0,
+            p0_mm: [4.0 - EDGE_SEAT_DEPTH_MM, seat_y, 1.0],
+            p1_mm: [4.0 + 2.5, seat_y, 1.0],
+            end: ContactEnd::Terminalward,
+            exterior_probe: [4.0 + EDGE_SEAT_EXTENT_MM, seat_y, 1.0],
+            carried_mm2: EDGE_SEAT_CARRIED_MM2,
+            law_radius_mm: EDGE_SEAT_LAW_RADIUS_MM,
+            opposite_end_minimum_radius_mm: 0.35,
+            max_radius_mm: 1.0,
+            tip_clamped_at_max: false,
+        }
+    }
+
+    fn grow_edge_seat(
+        surface: &NativeSurface,
+        request: &TipGrowthRequest,
+    ) -> Vec<TipGrowthOutcome> {
+        grow_tips_to_attest(
+            surface,
+            std::slice::from_ref(request),
+            extent(EDGE_SEAT_EXTENT_MM),
+            extent(EDGE_SEAT_EXTENT_MM / 10.0),
+            ENDPOINT_VALIDATION_OFFSET_RAYS,
+            &attestation_policy(),
+        )
+        .expect("the growth batch itself is well formed")
+    }
+
+    /// **A load-sized tip that cannot attest is grown until it does, and the
+    /// tip that is BUILT is the tip that attested.**
+    ///
+    /// This is the defect in one fixture. PR-8 probes attachment with a ray ring
+    /// at the TIP RADIUS, so shrinking a tip to what the load law alone needs
+    /// withdraws the very ring the attestation depends on. The seat here is
+    /// sound — part of its disc really is over solid — and at 0.05 mm radius
+    /// (0.1 mm diameter) it is nevertheless refused `NotAttached`, quarantined
+    /// upstream, and its 0.05 mm² abandoned.
+    #[test]
+    fn an_edge_seat_refused_at_the_law_radius_attests_at_the_smallest_rung_that_reaches() {
+        let surface = edge_seat_box();
+        let seat_y = 2.0 + EDGE_OFFSET_MM;
+
+        // NON-VACUITY, stated first, exactly as the OD-9 fixture does it: this
+        // is only an edge-seat test if the centreline really is in air, the
+        // seat really is exterior (so OD-9 cannot be what refuses it), and the
+        // rim at the cure radius really does reach solid.
+        assert_eq!(
+            surface.inside(&[
+                // the centreline's own start point, in air past the edge
+                [4.0 - EDGE_SEAT_DEPTH_MM, seat_y, 1.0],
+                // the OD-9 probe, which must read EXTERIOR
+                [4.0 + EDGE_SEAT_EXTENT_MM, seat_y, 1.0],
+                // a rim ray at the law radius, still in air
+                [
+                    4.0 - EDGE_SEAT_DEPTH_MM,
+                    seat_y - EDGE_SEAT_LAW_RADIUS_MM,
+                    1.0
+                ],
+                // a rim ray at the cure radius, inside the solid
+                [4.0 - EDGE_SEAT_DEPTH_MM, seat_y - 0.1, 1.0],
+            ]),
+            vec![false, false, false, true],
+            "the fixture must be an EDGE seat: centreline in air, seat exterior, \
+             the law-radius ring missing and only a grown ring reaching solid"
+        );
+
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert_eq!(outcomes.len(), 1);
+        let outcome = &outcomes[0];
+        let cure = outcome.cure.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the edge seat must be curable by growth; without it this contact \
+                 is refused and its {EDGE_SEAT_CARRIED_MM2} mm² of routed load is \
+                 ABANDONED, with no neighbour told and nothing grown in its place. \
+                 Rungs tried: {:?}",
+                outcome.attempts
+            )
+        });
+
+        // THE HONEST MINIMUM. The cure is the FIRST rung that attests, so it is
+        // the smallest tip satisfying both duties, and every rung below it was
+        // measured and failed rather than skipped.
+        assert!(
+            (cure.radius_mm - 0.1).abs() < 1e-12,
+            "the arithmetic above says the first ring that can reach y < 2.0 is \
+             0.1 mm RADIUS (0.2 mm DIAMETER); got {} mm radius",
+            cure.radius_mm
+        );
+        assert_eq!(outcome.law_radius_mm, EDGE_SEAT_LAW_RADIUS_MM);
+        assert_eq!(
+            outcome.attempts.len(),
+            2,
+            "two rungs above the law radius reach 0.1 mm: {:?}",
+            outcome.attempts
+        );
+        assert!(
+            !outcome.attempts[0].attested,
+            "0.0707 mm radius cannot reach the solid and must be recorded as a \
+             failed rung, not skipped"
+        );
+        assert!(outcome.attempts[1].attested);
+        assert_eq!(
+            outcome.attempts[1].radius_mm, cure.radius_mm,
+            "the tip that is BUILT must be the tip that ATTESTED — probing at one \
+             radius and emitting another is the defect, not the fix"
+        );
+        // The attestation the cure carries is a real one at that radius: the
+        // ring found solid, and it found it with the CENTRELINE still in air,
+        // which is the corpus case exactly.
+        assert!(cure.attestation.verdict.is_ok());
+        assert!(
+            !cure.attestation.engagement.centreline,
+            "this seat is held on by its RIM; a centreline that engaged would \
+             mean the fixture stopped being an edge seat"
+        );
+        assert!(cure.attestation.engagement.rim_engaged > 0);
+        // The shaft below a grown tip is never thinner than the tip, which is
+        // the same non-inverting rule the mint site already applies.
+        assert!(cure.opposite_end_radius_mm >= cure.radius_mm);
+
+        // THE COUNTERFACTUAL: the same fixture with the growth rounds off is
+        // the engine before this change. No cure, no rungs, load abandoned.
+        let refused =
+            with_growth_rounds_disabled(|| grow_edge_seat(&surface, &edge_seat_request(seat_y)));
+        assert!(
+            refused[0].cure.is_none() && refused[0].attempts.is_empty(),
+            "with the growth rounds off this seat must stay refused, or the test \
+             above proves nothing about growth"
+        );
+    }
+
+    /// **Growth does not paper over a seat that is genuinely not there.**
+    ///
+    /// Move the same stub far enough past the edge that no legal tip can reach
+    /// — `2.0 + 1.5` mm, beyond the registered `tip_radius_max_legacy_mm` of
+    /// 1.0 mm radius — and the ladder must be walked to its end and then REFUSE,
+    /// with every rung on the record. A remedy that cured this one would be
+    /// inventing attachment.
+    #[test]
+    fn a_seat_no_legal_tip_can_reach_is_refused_with_the_whole_ladder_on_the_record() {
+        let surface = edge_seat_box();
+        let seat_y = 2.0 + 1.5;
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert!(
+            outcomes[0].cure.is_none(),
+            "1.5 mm past the edge is further than the registered maximum 1.0 mm \
+             radius can reach; curing it would be inventing attachment"
+        );
+        // Every rung tried, none attested, and the last one is exactly the
+        // registered maximum — the ladder ends on a legal radius.
+        assert!(!outcomes[0].attempts.is_empty());
+        assert!(outcomes[0].attempts.iter().all(|rung| !rung.attested));
+        assert_eq!(outcomes[0].attempts.last().unwrap().radius_mm, 1.0);
     }
 }
