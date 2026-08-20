@@ -306,6 +306,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         savings_shortfall,
         filled_back_chambers_ml,
         ownerless_islands,
+        contacts,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -325,6 +326,34 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "the healthy fixture must leave no island without an owning contact; got \
          {ownerless_islands:?}"
     );
+    // PR-8, and the same argument one step over: an empty list here is the
+    // claim "every routed load in this artifact is carried by a support that
+    // was affirmatively proven attached". A refused contact is quarantined,
+    // nothing is grown in its place, and the coverage measurement's 6 mm radius
+    // cannot see a single missing claw tip — so if this ever stops being empty
+    // on the healthy fixture the report has to say so.
+    let plinth_pipeline::ContactAttestationDisclosure {
+        abandoned_contacts,
+        grown_contact_tips,
+    } = contacts.as_ref();
+    assert!(
+        abandoned_contacts.is_empty(),
+        "the healthy fixture must abandon no routed load; got {abandoned_contacts:?}"
+    );
+    // Growth is allowed to fire here and is asserted rather than assumed: every
+    // grown tip must be at least the radius the load law asked for, so growth
+    // can only ever have moved a tip in the conservative direction.
+    for grown in grown_contact_tips {
+        assert!(
+            grown.emitted_tip_radius_mm() >= grown.law_tip_radius_mm(),
+            "grow-to-attest must never emit a tip SMALLER than the load law asked \
+             for; got {grown:?}"
+        );
+        assert!(
+            (grown.emitted_tip_diameter_mm() - grown.emitted_tip_radius_mm() * 2.0).abs() < 1e-12,
+            "the reported diameter must be exactly twice the reported radius; got {grown:?}"
+        );
+    }
     // **What is in the file, not merely that there is one.** Two of the four
     // geometries are substitutions the chain fell back to, and a report that
     // said only "emitted" could not tell them from the intended shell.

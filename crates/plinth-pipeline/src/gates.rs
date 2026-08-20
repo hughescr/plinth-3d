@@ -374,6 +374,12 @@ pub struct GatedEmission {
     /// nothing is charged to carry, forgiven by the registered censor on the
     /// measurement this same run took.
     pub ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
+    /// PR-8 grow-to-attest. Every contact this run refused after every remedy,
+    /// with the routed load that refusal abandons, and every contact whose tip
+    /// the run grew so that it would attest. Both read off the authority before
+    /// it is consumed. Both empty on the ordinary model.
+    pub abandoned_contacts: Vec<plinth_support::AbandonedContactDisclosure>,
+    pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -450,6 +456,8 @@ fn judged_emission(
     // Task #49: read while the authority is still alive — `into_supported_model`
     // below consumes it, and the supported scene carries no §6 ledger.
     let ownerless_islands = authority.ownerless_islands().to_vec();
+    let abandoned_contacts = authority.abandoned_contacts().to_vec();
+    let grown_contact_tips = authority.grown_contact_tips().to_vec();
     let (gates, routed_contacts, final_live_members, snapshot_digest) = {
         let snapshot =
             authority
@@ -487,6 +495,8 @@ fn judged_emission(
     Ok(GatedEmission {
         gates,
         ownerless_islands,
+        abandoned_contacts,
+        grown_contact_tips,
         routed_contacts,
         final_live_members,
         snapshot_digest,

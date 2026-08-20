@@ -666,6 +666,12 @@ pub struct ChainOutcome {
     /// owning contact, carried out to the run report rather than left inside
     /// the support crate where nothing could print it.
     pub ownerless_islands: Vec<plinth_support::OwnerlessIslandDisclosure>,
+    /// PR-8 grow-to-attest: the contacts this run refused with the load each
+    /// abandons, and the contacts whose tips it grew to keep them. Carried out
+    /// to the run report for the same reason as the field above -- a support
+    /// that vanished with nobody told is exactly what this closes.
+    pub abandoned_contacts: Vec<plinth_support::AbandonedContactDisclosure>,
+    pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -1803,6 +1809,8 @@ pub fn seal_and_emit(
         hollow_disposition,
         supported_geometry,
         ownerless_islands: gated.ownerless_islands,
+        abandoned_contacts: gated.abandoned_contacts,
+        grown_contact_tips: gated.grown_contact_tips,
         routed_contacts: gated.routed_contacts,
         final_live_members: gated.final_live_members,
         snapshot_digest: gated.snapshot_digest,
@@ -1840,6 +1848,12 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // Task #49: the artifact emitted, and this is the list of islands
         // nothing is charged to carry under it.
         ownerless_islands: outcome.ownerless_islands,
+        // PR-8: the artifact emitted, and these are the loads it does not
+        // carry and the tips it grew in order to carry the rest.
+        contacts: Box::new(crate::ContactAttestationDisclosure {
+            abandoned_contacts: outcome.abandoned_contacts,
+            grown_contact_tips: outcome.grown_contact_tips,
+        }),
     }
 }
 
@@ -2320,6 +2334,31 @@ mod tests {
                 "measured_uncovered_area_mm2":null}"#,
         )
         .expect("an islandless disclosure states that it has no measurement");
+        // PR-8 grow-to-attest, same last hop and the same failure mode: an
+        // `abandoned_contacts: Vec::new()` here would emit an artifact that
+        // silently claims every routed load is carried, and every `is_empty()`
+        // assertion on a healthy fixture would still pass.
+        let abandoned: plinth_support::AbandonedContactDisclosure = serde_json::from_str(
+            r#"{"contact_id":41,"seat_mm":[1.5,-2.25,3.0],
+                "abandoned_area_mm2":2.98,"refusal":"not_attached",
+                "law_tip_radius_mm":0.05,"growth_ceiling_radius_mm":1.0,
+                "growth_rungs":[
+                    {"radius_mm":0.07071067811865475,"diameter_mm":0.1414213562373095,
+                     "attested":false},
+                    {"radius_mm":1.0,"diameter_mm":2.0,"attested":false}],
+                "reseat":"no_alternative_seat_at_this_stage"}"#,
+        )
+        .expect("an abandoned-contact disclosure deserializes as a frozen report carries it");
+        let grown: plinth_support::GrownContactTipDisclosure = serde_json::from_str(
+            r#"{"contact_id":7,"law_tip_radius_mm":0.05,
+                "emitted_tip_radius_mm":0.1,"emitted_tip_diameter_mm":0.2,
+                "kept_area_mm2":0.42,
+                "growth_rungs":[
+                    {"radius_mm":0.07071067811865475,"diameter_mm":0.1414213562373095,
+                     "attested":false},
+                    {"radius_mm":0.1,"diameter_mm":0.2,"attested":true}]}"#,
+        )
+        .expect("a grown-tip disclosure deserializes as a frozen report carries it");
 
         let outcome = ChainOutcome {
             model: ModelId::new("deinonychus"),
@@ -2335,6 +2374,8 @@ mod tests {
             filled_back_chambers_ml: Vec::new(),
             supported_geometry: SupportedGeometry::HollowStageDecidedSolid,
             ownerless_islands: vec![disclosure, islandless],
+            abandoned_contacts: vec![abandoned.clone()],
+            grown_contact_tips: vec![grown.clone()],
             routed_contacts: 0,
             final_live_members: 0,
             snapshot_digest: 0,
@@ -2350,11 +2391,46 @@ mod tests {
         };
 
         let ModelPreparationOutcome::Artifact {
-            ownerless_islands, ..
+            ownerless_islands,
+            contacts,
+            ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // PR-8. The refused contact's ABANDONED LOAD and the ladder that failed
+        // to save it must both survive the hop: an operator who cannot see the
+        // 2.98 mm² cannot tell a refused support from one that vanished.
+        let crate::ContactAttestationDisclosure {
+            abandoned_contacts,
+            grown_contact_tips,
+        } = *contacts;
+        assert_eq!(abandoned_contacts, vec![abandoned]);
+        assert_eq!(abandoned_contacts[0].contact_id(), 41);
+        assert_eq!(abandoned_contacts[0].abandoned_area_mm2(), 2.98);
+        assert_eq!(abandoned_contacts[0].refusal(), "not_attached");
+        assert_eq!(abandoned_contacts[0].growth_rungs().len(), 2);
+        assert!(abandoned_contacts[0]
+            .growth_rungs()
+            .iter()
+            .all(|rung| !rung.attested()));
+        assert_eq!(abandoned_contacts[0].growth_ceiling_radius_mm(), 1.0);
+        assert_eq!(
+            abandoned_contacts[0].reseat(),
+            "no_alternative_seat_at_this_stage"
+        );
+        // And the cure's own row: what the law asked for, what was built, in
+        // BOTH units, and the load the growth kept.
+        assert_eq!(grown_contact_tips, vec![grown]);
+        assert_eq!(grown_contact_tips[0].law_tip_radius_mm(), 0.05);
+        assert_eq!(grown_contact_tips[0].emitted_tip_radius_mm(), 0.1);
+        assert_eq!(grown_contact_tips[0].emitted_tip_diameter_mm(), 0.2);
+        assert_eq!(grown_contact_tips[0].kept_area_mm2(), 0.42);
+        assert!(grown_contact_tips[0]
+            .growth_rungs()
+            .last()
+            .unwrap()
+            .attested());
         assert_eq!(
             ownerless_islands,
             vec![disclosure, islandless],

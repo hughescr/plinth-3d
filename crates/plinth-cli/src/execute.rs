@@ -229,6 +229,7 @@ fn print_model(model: &ModelPreparationReport) {
             realized_wall,
             savings_shortfall,
             ownerless_islands,
+            contacts,
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -322,6 +323,55 @@ fn print_model(model: &ModelPreparationReport) {
                         .map_or_else(|| "(no island)".to_owned(), |id| id.to_string()),
                     island.ownerless_face_count(),
                     island.ownerless_face_area_mm2(),
+                );
+            }
+            // PR-8 grow-to-attest. A tip is sized for its LOAD, and the same
+            // radius is what the attestation probes with, so a load-sized thin
+            // tip at a model silhouette edge can find nothing but air. Where
+            // that is curable the run GREW the tip until it attested and built
+            // the grown one; this is that line, printed because a support the
+            // run resized on its own initiative is a decision the operator
+            // should be able to see. Radius AND diameter, because the slicer UI
+            // speaks diameter and the registry speaks radius.
+            for grown in &contacts.grown_contact_tips {
+                println!(
+                    "  grew contact tip  contact {}  {:.4} -> {:.4} mm radius \
+                     ({:.4} -> {:.4} mm diameter) over {} rung(s), keeping {:.4} mm² of load",
+                    grown.contact_id(),
+                    grown.law_tip_radius_mm(),
+                    grown.emitted_tip_radius_mm(),
+                    grown.law_tip_radius_mm() * 2.0,
+                    grown.emitted_tip_diameter_mm(),
+                    grown.growth_rungs().len(),
+                    grown.kept_area_mm2(),
+                );
+            }
+            // And the refusals growth could NOT cure. Each line is a support
+            // that is not there and a routed load nothing carries — the
+            // coverage measurement's 6 mm radius cannot see a missing claw tip,
+            // so if this line does not say it, nothing does. Silent when there
+            // are none.
+            for contact in &contacts.abandoned_contacts {
+                println!(
+                    "  ABANDONED LOAD  contact {} at ({:.3}, {:.3}, {:.3}) mm  {}: \
+                     {:.4} mm² carried by nothing",
+                    contact.contact_id(),
+                    contact.seat_mm()[0],
+                    contact.seat_mm()[1],
+                    contact.seat_mm()[2],
+                    contact.refusal(),
+                    contact.abandoned_area_mm2(),
+                );
+                println!(
+                    "    remedies tried  tip {:.4} mm radius ({:.4} mm diameter) from the load \
+                     law, then {} growth rung(s) up to the registered {:.4} mm radius \
+                     ({:.4} mm diameter); re-seat: {}",
+                    contact.law_tip_radius_mm(),
+                    contact.law_tip_radius_mm() * 2.0,
+                    contact.growth_rungs().len(),
+                    contact.growth_ceiling_radius_mm(),
+                    contact.growth_ceiling_radius_mm() * 2.0,
+                    contact.reseat(),
                 );
             }
         }
