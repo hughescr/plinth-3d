@@ -594,8 +594,11 @@ ruling R10 refuses to answer it with a cap.
 >
 > Discs accumulate. A candidate inside *any* rejected seat's disc is
 > deprioritized; the sort key is the **count** of rejected discs it falls inside,
-> ascending, applied before score. That makes "how many times has this
-> neighbourhood already failed" the first question and keeps the rule total,
+> ascending, applied as the **first tie-break, after score**
+> (**AMENDED 2026-08-20 — see §N.1**; this sentence originally read "applied
+> before score", which contradicted the sentence above it and was measured doing
+> harm). That makes "how many times has this neighbourhood already failed" the
+> question that decides everything area has left tied, and keeps the rule total,
 > deterministic and tie-free.
 
 **No new constant.** `R` is `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM`, already
@@ -823,7 +826,10 @@ repeat until stop:
   if ranked is empty                → stop: NothingToTry
   apply the first-trial guarantee to choose the route    (§A.4 N3)
   winner = the chosen route's best candidate             (N4 order applies)
-  if winner.marginal_area_mm2 == 0.0 → stop: NoImprovingRepair   (§B.3, guard B2)
+  if BEST LIVE candidate's score == 0.0 → stop: NoImprovingRepair (§B.3, guard B2)
+        AMENDED 2026-08-20 (§N.1): this line read "winner.marginal_area_mm2",
+        which contradicts §B.3's own wording and was measured abandoning a live
+        13.68 mm² candidate on `make_overhang_table`.
   if committed == commit_budget      → stop: CommitBudgetExhausted (rulings R6+R11)
   trial = transact(winner)                               (§A.1, §A.3)
   if all three accept clauses hold (§B.5):
@@ -3165,3 +3171,184 @@ will show, and those are Prove-stage runs.**
   `CommitBudgetExhausted` (none needs more than the bound). Both are reachable
   by construction and neither is proven. Prove should look for a model that
   reaches each.
+
+---
+
+## N. The challenger's REJECT, and what each finding cost the design (2026-08-20)
+
+Written by the implementer after the adversarial review of `d3bdbb2` returned
+**REJECT**. Three findings blocked and four asked to be fixed or disclosed. All
+seven are addressed below, each with the sabotage run that now goes red — a
+finding whose fix has no red run is called out as unproven rather than claimed.
+
+### N.1 BLOCKING 1 — the search abandoned a 13.68 mm² candidate (ruling 1)
+
+**MEASURED by the challenger** on `make_overhang_table`, gate profile, with the
+first trials forced to reject: the loop stopped after three rejections reporting
+`NoImprovingRepair { best_remaining_score_mm2: 0.0 }` while **1,008 rows were
+still live and the best of them covered 13.68 mm²**. Craig's ruling 1 says the
+loop gives up only when no candidate can physically help. Two composing causes,
+both fixed:
+
+**(a) The rank key put the disc count ahead of score.** §A.4 N4 states the rule
+twice and the two sentences do not agree — "it sorts after every candidate
+outside that disc, **at equal score**" and "the sort key is the count …
+**applied before score**". Only the first is safe. **905 of 1,011 ranked rows on
+the overhang table score 0.00 mm²** (measured), because a worklist route's pool
+spans its whole island while the uncovered samples are local; with the count
+leading, a seat covering **nothing** outranks a live 13.68 mm² seat the moment
+the good seat falls inside one rejected disc, and the search then buys hundreds
+of full pipeline passes that can improve nothing.
+
+**Resolution: score leads, the disc count is the first tie-break.** Area is the
+physical quantity; the disc count is a statement about redundancy, and
+redundancy may decide only what area has left tied. This closes the whole of the
+measured defect, because that defect *is* a tie: the 63-seats-in-a-1.04 mm-box
+run ties on absolute area and is ordered by spatially contiguous pool order, and
+§B-O7.5's Crawler Zombie mechanism is a **2,304-way exact tie**. It is the
+weaker of the two readings in one respect, stated plainly: a run of seats whose
+scores are *close but not equal* is not reordered, so N4 does not break spatial
+contiguity there. No measurement shows that case; the measured one is the tie.
+
+**(b) The §B.3 guard tested the WINNER, not the best eligible candidate.** §B.3's
+own words are "when the **best eligible candidate's** global score is
+0.00 mm²"; §A.7's pseudocode said "winner", and the code took the branch that
+breaks. It now measures the best live score over the ranking, uses it for the
+guard, and **reports it** — so `NoImprovingRepair` naming 0.00 mm² is a
+measurement rather than a claim. Both §A.4 N4 and §A.7 are amended in place.
+
+Red under sabotage: putting the disc count back ahead of score fails
+`a_seat_that_covers_nothing_never_outranks_a_seat_that_covers_something` and
+`while_any_live_row_covers_something_the_winner_covers_something`.
+
+**What is NOT claimed.** `BlockedCause::NoCandidateCoversAnything` was
+re-examined and is sound as it stands: it reads the best **global** score over
+the route's own rows, so it is claimed only when that route's rows cover nothing
+anywhere. §M.2's "44 of 44" reading is corrected in §N.6.
+
+### N.2 BLOCKING 2 and BLOCKING 3 — rules N1 and N2 had no test at all
+
+The challenger reverted **both** rules with the whole suite green: re-adding the
+per-patch pick cap after `sort_ranked_rows` left 544 tests passing, and so did
+re-adding the route-local sample filter. The cause was structural —
+`rank_repair_candidates`, the function carrying N1 and N2, had **zero direct
+tests**, and the N2 pair that existed called `score_candidates_globally` on
+hand-built sample lists, where a filter added in the production caller is
+invisible.
+
+**Resolution: split eligibility from ranking.** `rank_repair_candidates` now
+does only the one thing that needs a `SpecializedContactPlan` — decide which
+pool rows are eligible — and its tail expression hands the whole eligible set,
+unfiltered and untruncated, to `rank_eligible_candidates`, which is where N1 and
+N2 live and which needs no plan. Both rules are now exercised on a fixture with
+**two worklist routes and cross-route samples**, exactly what the challenger's
+minimum-to-re-review asked for, and N1 is additionally read off the shipped
+controller.
+
+Red under sabotage:
+
+| sabotage | red |
+| --- | --- |
+| `ranked.truncate(route_uncovered_mm2.len())` after the sort | `ranked_rows_are_never_capped_by_the_patch_or_route_count` **and** `the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch` (measured `remaining=1011` clean, `remaining=1` sabotaged) |
+| per-candidate route-local sample filter | `a_dust_routes_row_outranks_the_hole_owners_row_in_the_production_ranking` |
+
+The N2 fixture also asserts the row's **own** route share, so a filter that
+keeps one route's samples and drops another's is red whichever route it keeps.
+
+### N.3 Finding 4 — the serve-set tie-break was dead code
+
+`rank_key` carried `order` and `key`, unique per row, so §A.4 N3's "ties break on
+larger route uncovered area" could never be consulted and the **smaller** route
+won on pool order (challenger's probe: 13.041 mm² against 0.21 mm²). Fixed by
+comparing serve-set routes on a key that deliberately omits the unique fields.
+Red under sabotage: restoring `order` and `key` to that key fails
+`the_serve_set_breaks_a_score_tie_on_the_larger_route_not_on_pool_order`.
+
+### N.4 Finding 5 — N4's bookkeeping was O(rows × rejections)
+
+§A.4 ordered "compute it incrementally: one new disc per rejection". The landed
+code recomputed `discs_containing` **inside a `min_by` comparator** and then
+swept the pool a second time per rejection; the challenger measured **1.10 s of
+pure ordering** to drain a 2,000-row pool.
+
+The count now lives on the row (`RankedRepairRow::diversity_discs`).
+`DiversityDiscs::reject` charges exactly one new disc in one pass; the
+comparator reads a `usize`. The only rows × discs sweep left is
+`DiversityDiscs::recount`, which runs when a **commit** rebuilds the ranking and
+is therefore bounded by the registered commit bound. Red under sabotage:
+reporting a demotion per event rather than per candidate fails
+`charging_one_disc_per_rejection_agrees_with_recomputing_every_disc`, which also
+pins that the cheap incremental path and the full recount cannot drift.
+
+### N.5 Findings 6 and 7 — the record
+
+**Finding 6, §D.1's `RouteDelta`.** Two field pairs had been dropped and one
+renamed, so §D.2's promised line — "closed island 5's 0.36 mm² patch" — could
+not be produced from what was recorded. `failing_area_before/after_mm2`,
+`failing_patches_before/after` and `worst_gap_before/after` are restored, folded
+from `MeasuredState::blocking` (the CENSORED verdict set) beside the existing
+uncensored pair. Red under sabotage: folding the failing area from the
+uncensored side fails
+`a_route_delta_states_the_censored_and_the_uncensored_side_separately`.
+`worst_gap_*` is `Option`, deviating from §D.1's non-optional field, because
+"this route carried no patch on that side" is a different statement from "the
+gap was zero" and the design offers no value for the former.
+
+**Finding 7, §A.8's "every path".** The attempt-0 `MeasurementRefused` return
+and `rank_or_refuse`'s error return never printed the report, and the latter
+discarded it entirely (`repair: None`) after trials may already have run. Both
+now finish and print, and `rank_or_refuse` carries the report. On that path
+`candidates_remaining` stays 0 and that is honest rather than convenient: the
+ranking itself refused, so there is no ranking to count rows on.
+**UNPROVEN — no fixture reaches either path**, in the same sense §M.3 records
+for §A.5's digest restore. Both are exercised only by a plan whose repair pool
+refuses, which no procedural fixture produces.
+
+### N.6 Corrections to §M
+
+1. **§M.2's `44 of 44` is not the completeness proof it was presented as.** The
+   raking blade's pool has **0 zero-score rows out of 45**, which is why the
+   unsafe rank-key reading did no harm there; on the overhang table, where 905
+   of 1,011 rows score zero, the challenger's forced-rejection probe read
+   `diversity_demotions=181 of_which_tried=0` from the same instrument. The
+   completeness promise is pinned by
+   `every_deprioritized_candidate_is_eventually_tried`, not by the blade's
+   trial count.
+2. **§M.4's "two loop guards are unexercised" is now one and a half.** §B.3's
+   guard has unit coverage of its own quantity
+   (`the_best_live_score_ignores_ledgered_rows_and_reaches_zero_only_when_nothing_covers`)
+   and of the property that makes it agree with the search order
+   (`while_any_live_row_covers_something_the_winner_covers_something`), but no
+   procedural fixture reaches the stop itself. `CommitBudgetExhausted` remains
+   entirely unexercised. Both stay Prove obligations.
+3. **No procedural fixture separates the censored and uncensored sides of a
+   `RouteDelta` end to end.** `make_overhang_table`'s route carries no
+   sub-censor dust, so the integration assertion holds under a sabotage that
+   folds the failing area from the uncensored side; the unit fixture in
+   `runner.rs` is what pins the split. A model with dust beside a closing route
+   is a Prove-stage read.
+
+### N.7 What did NOT move
+
+No constant was added, raised, relaxed or registered. No cap, gate, threshold or
+tolerance moved. No counter decides an outcome: `committed >= commit_budget`
+(R6) is still the only counter in a branch, and `best_live_mm2` is a measured
+area, not a count. The rollback, clause 3, the strictness pin and §C.3's drift
+test are untouched — the challenger verified all four and they are carried
+forward unchanged.
+
+**And §M.1's measurements are unmoved**, re-read after every fix on the same
+gate profile:
+
+```
+make_overhang_table  coverage-repair: trials=1 commits=1 remaining=1011 wall_total=1199ms
+                       diversity_demotions=0 of_which_tried=0 []
+make_raking_blade    coverage-repair: trials=45 commits=0 remaining=0 wall_total=26117ms
+                       wall/trial min=571ms med=581ms max=586ms
+                       diversity_demotions=44 of_which_tried=44 [no_improvement=45]
+```
+
+`make_toed_slab` still seals at attempt 0 with the frozen digest
+`4_190_462_360_230_124_963` unmoved. Every number matches §M.1 and §M.2, so the
+seven fixes changed which searches are *possible*, not which results the
+existing fixtures produce.
