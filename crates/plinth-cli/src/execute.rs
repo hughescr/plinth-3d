@@ -333,11 +333,21 @@ fn print_model(model: &ModelPreparationReport) {
             // run resized on its own initiative is a decision the operator
             // should be able to see. Radius AND diameter, because the slicer UI
             // speaks diameter and the registry speaks radius.
+            //
+            // WITH THE SEAT, in the same `(x, y, z)` mm form the ABANDONED LOAD
+            // lines use. A grown tip leaves a bigger scar than the load law
+            // asked for, and an operator who cannot LOCATE it cannot inspect it,
+            // sand it, or tell the run it chose badly. A contact id alone names
+            // a decision without naming a place.
             for grown in &contacts.grown_contact_tips {
                 println!(
-                    "  grew contact tip  contact {}  {:.4} -> {:.4} mm radius \
+                    "  grew contact tip  contact {} at ({:.3}, {:.3}, {:.3}) mm  \
+                     {:.4} -> {:.4} mm radius \
                      ({:.4} -> {:.4} mm diameter) over {} rung(s), keeping {:.4} mm² of load",
                     grown.contact_id(),
+                    grown.seat_mm()[0],
+                    grown.seat_mm()[1],
+                    grown.seat_mm()[2],
                     grown.law_tip_radius_mm(),
                     grown.emitted_tip_radius_mm(),
                     grown.law_tip_radius_mm() * 2.0,
@@ -630,6 +640,44 @@ mod tests {
                 after: plinth_pipeline::StageStop::Decimate,
             },
         }
+    }
+
+    /// **Every scar the run CHOSE must be locatable, not merely counted.**
+    ///
+    /// The two PR-8 disclosure lines report decisions about a specific place on
+    /// the model: a load nothing carries, and a tip the run enlarged past what
+    /// the load law asked for. A contact id names the decision; only the seat
+    /// names the PLACE, and an operator who cannot find the site can neither
+    /// inspect it nor overrule it.
+    ///
+    /// This is a source-text guard because the two lines are `println!`s inside
+    /// the outcome match rather than a returned `*_lines` list. It looks for the
+    /// composed call that reads the third coordinate, so dropping the coordinate
+    /// arguments from either line fails here even though the struct field
+    /// survives.
+    ///
+    /// **Every needle is composed at run time, and that is not decoration.** A
+    /// guard that reads its own file and looks for a literal it CONTAINS is
+    /// vacuous: the literal in the test satisfies the search whatever the
+    /// production line does. Measured — this test passed with the seat arguments
+    /// deleted from the print until the needles were composed instead of
+    /// written out.
+    #[test]
+    fn both_contact_disclosure_lines_state_where_the_scar_is() {
+        let source = include_str!("execute.rs");
+        let reads_third_coordinate = |binding: &str, field: &str| format!("{binding}.{field}()[2]");
+        for (owner, binding) in [
+            ("the ABANDONED LOAD line", "contact"),
+            ("the grew-contact-tip line", "grown"),
+        ] {
+            assert!(
+                source.contains(&reads_third_coordinate(binding, "seat_mm")),
+                "{owner} no longer prints its seat, so the scar it reports \
+                 cannot be found on the model"
+            );
+        }
+        // Non-vacuity: the guard can tell a present call from an absent one.
+        assert!(!source.contains(&reads_third_coordinate("grown", "seat_of_nothing")));
     }
 
     #[test]
