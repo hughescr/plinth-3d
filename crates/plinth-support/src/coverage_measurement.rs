@@ -421,6 +421,8 @@ pub struct CoverageMeasurement {
     resource_plan: CoverageMeasurementResourcePlan,
     evidence: CoverageMeasurementEvidence,
     uncovered_sample_indices: Vec<usize>,
+    objective: crate::CoverageObjective,
+    uncensored_uncovered_mm2: f64,
 }
 
 impl CoverageMeasurement {
@@ -461,6 +463,44 @@ impl CoverageMeasurement {
         &self.uncovered_sample_indices
     }
 
+    /// **SPEC-A4 §6 clause 1's own quantity, no longer discarded.**
+    ///
+    /// The assessment behind every measurement already computes this
+    /// lexicographic four-component objective — total failing area, largest
+    /// failing patch, failing-patch count, worst gap — and until now
+    /// `measure_coverage` threw it away and kept only the patches. The A4
+    /// controller's accept test IS this key strictly improving, so it is
+    /// retained rather than recomputed beside the measurement: a second
+    /// derivation is a second definition, and the two would drift.
+    ///
+    /// **Censored**, exactly as §4 and §6 say: a patch is "failing" only above
+    /// the 0.16 mm² A3 censor or on an ambiguous cut. Costs one struct copy.
+    #[must_use]
+    pub const fn objective(&self) -> crate::CoverageObjective {
+        self.objective
+    }
+
+    /// **SPEC-A4 §B.5 clause 3's quantity: total UNCENSORED uncovered sample
+    /// area, in mm², over every route.**
+    ///
+    /// The sum of the area weights of every sample this measurement found
+    /// uncovered — no censor, no patch grouping, no island identity. That is
+    /// what makes it Goodhart-robust and it is why the sum is taken over
+    /// SAMPLES rather than over patch areas: the sample set and its weights are
+    /// frozen at attempt 0 for the whole run, so a repair can change only WHICH
+    /// samples are uncovered. It cannot split a patch to move this number, it
+    /// cannot push area under the censor to move this number, and it cannot
+    /// relabel an island to move this number. The only way down is to cover a
+    /// sample.
+    ///
+    /// (The patch-area sum agrees with it to floating-point noise, because
+    /// patches partition the uncovered samples. The sample sum is the one
+    /// implemented because it is the one the clause names.)
+    #[must_use]
+    pub const fn uncensored_uncovered_mm2(&self) -> f64 {
+        self.uncensored_uncovered_mm2
+    }
+
     #[allow(dead_code, reason = "reserved for the future verifier implementation")]
     pub(crate) const fn new(
         snapshot_digest: u64,
@@ -468,6 +508,8 @@ impl CoverageMeasurement {
         resource_plan: CoverageMeasurementResourcePlan,
         evidence: CoverageMeasurementEvidence,
         uncovered_sample_indices: Vec<usize>,
+        objective: crate::CoverageObjective,
+        uncensored_uncovered_mm2: f64,
     ) -> Self {
         Self {
             snapshot_digest,
@@ -475,6 +517,8 @@ impl CoverageMeasurement {
             resource_plan,
             evidence,
             uncovered_sample_indices,
+            objective,
+            uncensored_uncovered_mm2,
         }
     }
 }

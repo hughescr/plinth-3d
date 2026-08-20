@@ -2210,6 +2210,17 @@ impl<'a> SupportVerificationSnapshot<'a> {
             )
         });
         let uncovered_sample_indices = std::mem::take(&mut assessment.uncovered_sample_indices);
+        // SPEC-A4 §6 clause 1 and §B.5 clause 3. Both quantities are already
+        // computed by the assessment above and were both being discarded; the
+        // objective is a struct copy and the uncensored total is one pass over
+        // the uncovered rows this measurement already owns. No new geometry
+        // work, no new allocation, no new charge.
+        let objective = assessment.objective;
+        let uncensored_uncovered_mm2 = uncovered_sample_indices
+            .iter()
+            .filter_map(|&index| self.coverage_samples().get(index))
+            .map(|sample| sample.area_mm2)
+            .sum();
         let mut patches = assessment
             .patches
             .into_iter()
@@ -2267,6 +2278,8 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 patches.into_boxed_slice(),
             ),
             uncovered_sample_indices,
+            objective,
+            uncensored_uncovered_mm2,
         ))
     }
     #[must_use]
@@ -4127,6 +4140,64 @@ impl<'a> LoweredSupportRun<'a> {
     /// next attempt rebuilds from the (now repair-extended) plan.
     pub(crate) fn into_context(self) -> SupportRunContext<'a> {
         self.structured.context
+    }
+
+    /// **SPEC-A4 §6 clause 2's vector, measured off this run.**
+    ///
+    /// Every component is a count the run already keeps, so this is a read,
+    /// not a computation: one pass over the CCO transcript for the two
+    /// disposition counts (O(cadence) integer compares — about 1,200 on the
+    /// Giant Toad), a length read for the unrouted specialized list task #49
+    /// built, and two field reads off the plan's frozen gate evidence. Against
+    /// a trial that costs `cadence × pool_rows` seat evaluations — 6.0 × 10⁸ on
+    /// that same toad — the whole check is ~10³ operations. It needs no new
+    /// geometry call, no new allocation and no new registered limit.
+    ///
+    /// The plan half is read off the **accepted** (reduced) plan, never the
+    /// routed one, because SPEC §6 strips the unrouted regular contacts before
+    /// the carried-load repartition and comparing the pre-strip partition would
+    /// compare a state the spec says must not exist.
+    pub(crate) fn noncoverage_vector(&self) -> crate::coverage_repair::NoncoverageVector {
+        let routed = &self.structured.braced.rewired.routed;
+        let mut unrouted_no_winner = 0_u32;
+        let mut quarantined = 0_u32;
+        for row in routed.transcript.rows() {
+            match row.kind() {
+                crate::cco::FinalizedDispositionKind::Routed => {}
+                crate::cco::FinalizedDispositionKind::SkippedQuarantined => {
+                    quarantined = quarantined.saturating_add(1);
+                }
+                crate::cco::FinalizedDispositionKind::UnroutedNoWinner => {
+                    unrouted_no_winner = unrouted_no_winner.saturating_add(1);
+                }
+            }
+        }
+        let unrouted_specialized =
+            u32::try_from(routed.accepted.specialized_unrouted.len()).unwrap_or(u32::MAX);
+        crate::coverage_repair::NoncoverageVector::from_accepted_plan(
+            routed.accepted.plan(&routed.plan),
+        )
+        .with_transcript_counts(unrouted_no_winner, quarantined, unrouted_specialized)
+    }
+
+    /// Task #49's ownerless faces, as EVIDENCE on a repair step.
+    ///
+    /// Deliberately not a clause-2 component. #49's own ruling is that load
+    /// eligibility is provenance, not reach, so an ownerless face is not a
+    /// measurement that anything is unsupported — the measurement that decides
+    /// that is the routed-coverage judgment this controller runs. Making a
+    /// set-membership tally a hard component would let a bare count veto a step
+    /// the physical measurement approves, which is exactly what the
+    /// physics-first doctrine forbids. So it travels in the record and decides
+    /// nothing.
+    pub(crate) fn ownerless_face_count(&self) -> usize {
+        self.structured
+            .braced
+            .rewired
+            .routed
+            .accepted
+            .ownerless_faces
+            .len()
     }
 
     /// SPEC-A4 §A.2 — recover BOTH the accepted plan and the context from a

@@ -71,6 +71,7 @@ mod coverage;
 /// and `plinth_pipeline::gates::registered_coverage_request` delegates to
 /// [`coverage_closure::registered_coverage_request`].
 pub mod coverage_closure;
+pub mod coverage_repair;
 mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
@@ -1661,12 +1662,30 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct CoverageObjective {
-    pub(crate) failing_uncovered_area_mm2: f64,
-    pub(crate) max_patch_area_mm2: f64,
-    pub(crate) failing_patch_count: usize,
-    pub(crate) worst_gap_mm: f64,
+/// **SPEC-A3-A4-COVERAGE.md §6 clause 1's objective, in the spec's own order.**
+///
+/// > the coverage objective strictly improves lexicographically in this order:
+/// > total failing area, maximum failing-patch area, failing-patch count,
+/// > worst gap
+///
+/// Censored, because §6 says "failing": a patch counts here only if its
+/// uncovered area is above the registered A3 censor (`voxel_pitch_mm²`,
+/// 0.16 mm²) or it touches an ambiguous topology cut. Sub-censor dust is
+/// §4's "diagnostic only" and may not justify committing a contact.
+///
+/// `worst_gap_mm` is `+inf` when a failing route has no routed contact at all;
+/// `specialized::coverage_key` orders that as worse than any finite distance,
+/// which is the reading the pre-write gate already uses.
+///
+/// Public since the A4 controller: it is the quantity the accept test compares
+/// and the quantity the refusal evidence prints, so it crosses the crate
+/// boundary into `plinth-pipeline`'s sidecar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoverageObjective {
+    pub failing_uncovered_area_mm2: f64,
+    pub max_patch_area_mm2: f64,
+    pub failing_patch_count: usize,
+    pub worst_gap_mm: f64,
 }
 
 pub(crate) struct CoverageAssessment {

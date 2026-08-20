@@ -1604,6 +1604,31 @@ pub struct FrozenSpecializedGateVector {
 }
 
 impl FrozenSpecializedGateVector {
+    /// Project SPEC-A4 §6 clause 1's coverage objective into the vector the
+    /// merge tournament's own `coverage_key` already orders.
+    ///
+    /// The A4 controller reuses `coverage_key` rather than restating the
+    /// lexicographic order beside it — one implementation, one place to change,
+    /// and `numeric_cmp`'s infinity handling comes along for free (a route with
+    /// NO routed contact has a `+inf` worst gap, and that must order as worse
+    /// than any finite distance rather than as a NaN).
+    ///
+    /// The two noncoverage counts are carried at zero because clause 1 is only
+    /// about coverage: clause 2 compares those counts componentwise on the
+    /// [`crate::runner::NoncoverageVector`] instead, which is a strictly wider
+    /// vector than this one.
+    #[must_use]
+    pub(crate) const fn coverage_only(coverage: CoverageObjective) -> Self {
+        Self {
+            failing_uncovered_area_mm2: coverage.failing_uncovered_area_mm2,
+            max_patch_area_mm2: coverage.max_patch_area_mm2,
+            failing_patch_count: coverage.failing_patch_count,
+            worst_gap_mm: coverage.worst_gap_mm,
+            load_violation_count: 0,
+            unsupported_specialized_count: 0,
+        }
+    }
+
     fn from_live(
         coverage: CoverageObjective,
         load_violation_count: usize,
@@ -3420,7 +3445,7 @@ const fn demand_representative_key(demand: &SpecializedDemand) -> Representative
     }
 }
 
-fn gate_not_worse(
+pub(crate) fn gate_not_worse(
     candidate: FrozenSpecializedGateVector,
     baseline: FrozenSpecializedGateVector,
 ) -> bool {
@@ -3780,7 +3805,7 @@ fn gate_header_preflight(
     Ok(())
 }
 
-fn coverage_key(
+pub(crate) fn coverage_key(
     vector: FrozenSpecializedGateVector,
 ) -> (OrderedF64, OrderedF64, usize, OrderedF64) {
     (
@@ -3792,7 +3817,7 @@ fn coverage_key(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct OrderedF64(f64);
+pub(crate) struct OrderedF64(f64);
 
 impl Eq for OrderedF64 {}
 impl PartialOrd for OrderedF64 {
