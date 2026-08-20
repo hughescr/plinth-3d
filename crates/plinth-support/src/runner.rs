@@ -1197,7 +1197,33 @@ pub fn run_support<'a>(
         // and is a coverage refusal — with the evidence FU-57 requires, and
         // ineligible for the oriented-solid reserve, because attempt 0 proved
         // this geometry seals.
+        // SPEC-A4 §A.3 landed the recoverable seam, so every typestate stage
+        // now hands the context back on its error path. This loop is the batch
+        // controller and still discards it — dropping the context is exactly
+        // what it did before, so no behaviour moves here; the transactional
+        // controller is what takes the recovery up.
         macro_rules! stage {
+            ($expr:expr, $stage:literal, $phase:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err((_recovered_context, error)) => {
+                        note_stage_failure($stage, &error);
+                        return Err(repair_plan_or_stage_failure(
+                            attempt,
+                            $phase,
+                            &error,
+                            &last_blocking,
+                            &tally,
+                            history,
+                        ));
+                    }
+                }
+            };
+        }
+        // The coverage measurement's own snapshot is not a typestate stage: it
+        // borrows the lowered run rather than consuming it, so there is no
+        // context to hand back.
+        macro_rules! borrowed_stage {
             ($expr:expr, $stage:literal, $phase:expr) => {
                 match $expr {
                     Ok(value) => value,
@@ -1253,7 +1279,7 @@ pub fn run_support<'a>(
         // tasks #51/#52/#24 by owner ruling.
         let routed = match prepared.route_initial_cco() {
             Ok(value) => value,
-            Err(error) => {
+            Err((_context, error)) => {
                 note_stage_failure("Routing", &error);
                 return Err(repair_plan_or_stage_failure(
                     attempt,
@@ -1291,7 +1317,7 @@ pub fn run_support<'a>(
         // coverage — it can never excuse one, because the stop/refuse decision
         // below reads `blocking` and nothing else.
         let (blocking, repair_targets, uncovered_samples) = {
-            let snapshot = stage!(
+            let snapshot = borrowed_stage!(
                 lowered.verification_snapshot(),
                 "CoverageMeasurement",
                 SupportRunPhase::CoverageMeasurement
@@ -2586,6 +2612,67 @@ impl<'a> SupportRunContext<'a> {
         }
         Ok(geometry)
     }
+
+    /// SPEC-A4 §A.5 — the five plan-dependent digest fields
+    /// [`prepared_run_for_plan`] stamps, captured so a rejected trial can be
+    /// rolled back to the accepted state's own preparation.
+    pub(crate) const fn prepared_digests(&self) -> PreparedDigestSnapshot {
+        PreparedDigestSnapshot {
+            plan: self.digests.plan,
+            loads: self.digests.loads,
+            initial_forest: self.digests.initial_forest,
+            contact_attestation: self.digests.contact_attestation,
+            prepared: self.digests.prepared,
+        }
+    }
+
+    /// Re-stamp exactly those five fields.
+    ///
+    /// A trial rejected at Routing, Rewire, Brace, Structure or Lowering hands
+    /// this context back stamped with the REJECTED CHILD's digests. Today that
+    /// self-heals only because the next call is always
+    /// [`prepared_run_for_plan`]; under one-winner transactions the controller
+    /// assembles refusal evidence BETWEEN trials, and evidence read from a
+    /// stale digest would describe a plan that does not exist. So the restore
+    /// is explicit rather than an invariant nobody states.
+    pub(crate) const fn restore_prepared_digests(&mut self, snapshot: PreparedDigestSnapshot) {
+        self.digests.plan = snapshot.plan;
+        self.digests.loads = snapshot.loads;
+        self.digests.initial_forest = snapshot.initial_forest;
+        self.digests.contact_attestation = snapshot.contact_attestation;
+        self.digests.prepared = snapshot.prepared;
+    }
+}
+
+/// The five digest fields [`prepared_run_for_plan`] stamps on the context, as a
+/// value. SPEC-A4 §A.5's rollback restores exactly these and nothing else:
+/// every other piece of per-attempt state either lives in the plan (which is a
+/// persistent value, so rollback is "do not rebind it") or is rebuilt inside
+/// the next `prepared_run_for_plan`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PreparedDigestSnapshot {
+    plan: u64,
+    loads: u64,
+    initial_forest: u64,
+    contact_attestation: u64,
+    prepared: u64,
+}
+
+/// Opaque by design.
+///
+/// The context exists because exactly one mesh, topology and `NativeSurface`
+/// grid may be on the machine at a time (`runner.rs`'s memory-critical seam), so
+/// there is nothing here anyone should want printed. It carries a `Debug` at all
+/// only because SPEC-A4 §A.3's recoverable stage seam returns
+/// `Err((SupportRunContext, E))`, and `Result::expect` needs the whole `Err` to
+/// be printable.
+impl std::fmt::Debug for SupportRunContext<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SupportRunContext")
+            .field("prepared_digest", &self.digests.prepared)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Opaque, move-only hand-off to the later support controller.
@@ -2641,8 +2728,19 @@ impl<'a> PreparedSupportRun<'a> {
     /// transaction.  The frozen initial routing order is the only cadence;
     /// all route-shaped authority is rechecked before the first native query
     /// or forest transition.
-    pub(crate) fn route_initial_cco(self) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
-        let limits = RouteCcoWorkLimits::registered()?;
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
+    pub(crate) fn route_initial_cco(
+        self,
+    ) -> Result<RoutedSupportRun<'a>, (SupportRunContext<'a>, SupportRoutingError)> {
+        let limits = match RouteCcoWorkLimits::registered() {
+            Ok(limits) => limits,
+            Err(error) => return Err((self.context, error)),
+        };
         self.route_initial_cco_with_limits(limits)
     }
 
@@ -2654,15 +2752,51 @@ impl<'a> PreparedSupportRun<'a> {
     /// REAL routing path into the new refusal on real geometry, instead of
     /// proving the arithmetic in isolation and trusting the wiring by
     /// inspection. Production has one caller and it passes the registered caps.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
     fn route_initial_cco_with_limits(
         self,
         limits: RouteCcoWorkLimits,
-    ) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
+    ) -> Result<RoutedSupportRun<'a>, (SupportRunContext<'a>, SupportRoutingError)> {
         let PreparedSupportRun {
             context,
             plan,
-            mut initial,
+            initial,
         } = self;
+        match route_initial_cco_state(&context, plan, initial, limits) {
+            Ok(state) => Ok(RoutedSupportRun { context, state }),
+            Err(error) => Err((context, error)),
+        }
+    }
+}
+
+/// SPEC-A4 §A.3 — the routing cadence, factored so the stage above can hand the
+/// context back on the error path.
+///
+/// **Why a split rather than a hand-written unwind at every `?`.** The design
+/// budgeted this as "the single largest piece of hand-written work in this
+/// change", because `geometry`, `pool` and `authority` all borrow `context` and
+/// each early return would have to end those borrows at exactly the right
+/// point. Taking `&SupportRunContext` here does that once, structurally: every
+/// borrow ends when this function returns, so the caller owns the context again
+/// with no lifetime reasoning per exit and no chance of an exit that forgets.
+/// Nothing about WHAT the stage does moves — the body below is the previous
+/// body, `?` for `?`.
+///
+/// It also cannot leak an inconsistent typestate, which is the reason v1's
+/// `Result<T, (Self, E)>` was rejected: `initial` is consumed here and a
+/// half-grown forest is never handed back to anyone.
+fn route_initial_cco_state(
+    context: &SupportRunContext<'_>,
+    plan: SpecializedContactPlan,
+    mut initial: InitialContactBuild,
+    limits: RouteCcoWorkLimits,
+) -> Result<RoutedPlanState, SupportRoutingError> {
+    {
         // Bind these three retained fields directly so the independent
         // initial forest remains available for the serial transaction below.
         let geometry =
@@ -2776,16 +2910,13 @@ impl<'a> PreparedSupportRun<'a> {
         // or coverage judgment".
         let accepted =
             accepted_contact_set_after_routing(&plan, &transcript, initial.forest())?;
-        Ok(RoutedSupportRun {
-            context,
-            state: RoutedPlanState {
-                plan,
-                accepted,
-                initial,
-                controller,
-                transcript,
-                contact_attestation_chain,
-            },
+        Ok(RoutedPlanState {
+            plan,
+            accepted,
+            initial,
+            controller,
+            transcript,
+            contact_attestation_chain,
         })
     }
 }
@@ -3361,12 +3492,43 @@ impl<'a> RoutedSupportRun<'a> {
         &self.state.accepted.specialized_unrouted
     }
 
+    /// Recover the context from a routed run that a test decided not to carry
+    /// further. Production never abandons a routed run: it either continues to
+    /// the next stage or takes the context back off a refusal.
+    #[cfg(test)]
+    pub(crate) fn into_context_for_test(self) -> SupportRunContext<'a> {
+        self.context
+    }
+
     /// Consume the sealed CCO route state in the one deterministic rewire
     /// transaction.  This rebinds the retained native surface and gathers the
     /// exterior anchor rows once; it never reconstructs mesh, topology, or a
     /// native index.
-    pub(crate) fn rewire(self) -> Result<RewiredSupportRun<'a>, SupportRewireError> {
-        let RoutedSupportRun { context, mut state } = self;
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
+    pub(crate) fn rewire(
+        self,
+    ) -> Result<RewiredSupportRun<'a>, (SupportRunContext<'a>, SupportRewireError)> {
+        let RoutedSupportRun { context, state } = self;
+        match rewire_state(&context, state) {
+            Ok(state) => Ok(RewiredSupportRun { context, state }),
+            Err(error) => Err((context, error)),
+        }
+    }
+}
+
+/// SPEC-A4 §A.3 — the rewire transaction, factored for context recovery. See
+/// [`route_initial_cco_state`] for why the split is the seam rather than a
+/// hand-written unwind per `?`.
+fn rewire_state(
+    context: &SupportRunContext<'_>,
+    mut state: RoutedPlanState,
+) -> Result<RewiredPlanState, SupportRewireError> {
+    {
         let geometry = context.geometry()?;
         let loads = state.plan.finalized_loads()?;
         context.validate_rewire_preflight(&state, &geometry, loads)?;
@@ -3411,15 +3573,12 @@ impl<'a> RoutedSupportRun<'a> {
             report.contact_attestation_digest,
         );
 
-        Ok(RewiredSupportRun {
-            context,
-            state: RewiredPlanState {
-                routed: state,
-                rewire_report_digest: rewire_report_digest(&report),
-                report,
-                post_rewire_forest_digest,
-                contact_attestation_chain,
-            },
+        Ok(RewiredPlanState {
+            routed: state,
+            rewire_report_digest: rewire_report_digest(&report),
+            report,
+            post_rewire_forest_digest,
+            contact_attestation_chain,
         })
     }
 }
@@ -3512,8 +3671,32 @@ impl<'a> RewiredSupportRun<'a> {
     /// Consume the sealed rewire state in the frozen bracing fixed point.
     /// The retained surface, plate frame, and caller-owned batch resource are
     /// used directly; no geometry/index or bracing policy is reconstructed.
-    pub(crate) fn brace(self) -> Result<BracedSupportRun<'a>, SupportBraceError> {
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
+    pub(crate) fn brace(
+        self,
+    ) -> Result<BracedSupportRun<'a>, (SupportRunContext<'a>, SupportBraceError)> {
         let RewiredSupportRun { context, state } = self;
+        match brace_state(&context, state) {
+            Ok(state) => Ok(BracedSupportRun { context, state }),
+            Err(error) => Err((context, error)),
+        }
+    }
+}
+
+/// SPEC-A4 §A.3 — the bracing fixed point, factored for context recovery. This
+/// is the stage task #47 turns on: the Giant Bat's
+/// `Brace(ClearanceViolation(1))` is a whole model today and becomes one
+/// ledgered rollback once the controller can take the context back.
+fn brace_state(
+    context: &SupportRunContext<'_>,
+    state: RewiredPlanState,
+) -> Result<BracedPlanState, SupportBraceError> {
+    {
         let geometry = context.geometry()?;
         let loads = state.routed.plan.finalized_loads()?;
         context.validate_brace_preflight(&state, &geometry, loads)?;
@@ -3544,17 +3727,14 @@ impl<'a> RewiredSupportRun<'a> {
             plan.contact_attestation_digest,
         );
 
-        Ok(BracedSupportRun {
-            context,
-            state: BracedPlanState {
-                rewired: state,
-                plan,
-                report,
-                brace_plan_digest,
-                post_brace_forest_digest,
-                post_brace_report_digest,
-                contact_attestation_chain,
-            },
+        Ok(BracedPlanState {
+            rewired: state,
+            plan,
+            report,
+            brace_plan_digest,
+            post_brace_forest_digest,
+            post_brace_report_digest,
+            contact_attestation_chain,
         })
     }
 }
@@ -3771,12 +3951,41 @@ impl<'a> BracedSupportRun<'a> {
     /// Consume the braced forest exactly once into the joint and raft semantic
     /// planners.  All predecessor bindings are preflighted before gathering
     /// the view, and both outputs are rebound to that exact view afterward.
-    pub(crate) fn structure(self) -> Result<StructuredSupportRun<'a>, SupportStructureError> {
-        self.validate_integrity()?;
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
+    pub(crate) fn structure(
+        self,
+    ) -> Result<StructuredSupportRun<'a>, (SupportRunContext<'a>, SupportStructureError)> {
         let BracedSupportRun {
             context,
             state: braced,
         } = self;
+        match structure_parts(&context, &braced) {
+            Ok((live_view, joints, raft)) => Ok(StructuredSupportRun {
+                context,
+                braced,
+                live_view,
+                joints,
+                raft,
+            }),
+            Err(error) => Err((context, error)),
+        }
+    }
+}
+
+/// SPEC-A4 §A.3 — the joint and raft planners, factored for context recovery.
+/// `braced` is borrowed rather than moved because the structured typestate
+/// keeps it verbatim; nothing here mutates it.
+fn structure_parts(
+    context: &SupportRunContext<'_>,
+    braced: &BracedPlanState,
+) -> Result<(FilteredLiveView, JointPlan, RaftPlan), SupportStructureError> {
+    {
+        braced.validate_integrity(context)?;
         braced.plan.forest.validate().map_err(BraceError::from)?;
         let unrouted = finalized_unrouted_terminal_ids(
             &braced.rewired.routed.transcript,
@@ -3800,13 +4009,7 @@ impl<'a> BracedSupportRun<'a> {
         )?;
         joints.validate_filtered(&braced.plan.forest, &live_view, joint)?;
         raft.validate(&braced.plan.forest, &live_view, context.frame.plate_z_mm())?;
-        Ok(StructuredSupportRun {
-            context,
-            braced,
-            live_view,
-            joints,
-            raft,
-        })
+        Ok((live_view, joints, raft))
     }
 }
 
@@ -3868,7 +4071,28 @@ impl<'a> StructuredSupportRun<'a> {
     }
 
     /// Lower the one final structured authority. No semantic planning stage is repeated.
-    pub(crate) fn lower(self) -> Result<LoweredSupportRun<'a>, SupportLoweringError> {
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Ok variant carries the same SupportRunContext by construction: \
+                  it is MOVED through the typestate either way, so boxing the Err \
+                  would allocate on every refusal and save nothing"
+    )]
+    pub(crate) fn lower(
+        self,
+    ) -> Result<LoweredSupportRun<'a>, (SupportRunContext<'a>, SupportLoweringError)> {
+        // SPEC-A4 §A.3. Lowering needs no split: it mutates nothing, so the
+        // fallible half runs on `&self` and the context is moved out of `self`
+        // only on the error path, after every borrow has ended.
+        match self.lowered_plan() {
+            Ok(lowered) => Ok(LoweredSupportRun {
+                structured: self,
+                lowered,
+            }),
+            Err(error) => Err((self.context, error)),
+        }
+    }
+
+    fn lowered_plan(&self) -> Result<LoweredSupportPlan, SupportLoweringError> {
         self.validate_integrity()?;
         let (max_primitives, max_primitive_bytes) = self.context.lowering_limits();
         let config = LoweringConfig::current(
@@ -3884,11 +4108,8 @@ impl<'a> StructuredSupportRun<'a> {
             &self.raft,
             config,
         )?;
-        validate_lowered_output(&self, &lowered, config)?;
-        Ok(LoweredSupportRun {
-            structured: self,
-            lowered,
-        })
+        validate_lowered_output(self, &lowered, config)?;
+        Ok(lowered)
     }
 }
 
@@ -3906,6 +4127,24 @@ impl<'a> LoweredSupportRun<'a> {
     /// next attempt rebuilds from the (now repair-extended) plan.
     pub(crate) fn into_context(self) -> SupportRunContext<'a> {
         self.structured.context
+    }
+
+    /// SPEC-A4 §A.2 — recover BOTH the accepted plan and the context from a
+    /// successful run, so a COMMITTED transactional step needs no third plan
+    /// copy alive beside the two the run already owns.
+    ///
+    /// **The plan handed back is the ACCEPTED one, never the routed one.**
+    /// Task #49 put an `AcceptedContactSet` in front of the routed plan: when
+    /// any unrouted regular contact was stripped, the accepted set is a reduced
+    /// child, and carrying the pre-strip plan forward would re-admit contacts
+    /// SPEC §6 removed before rewire, bracing and repartition. Cloning is what
+    /// the reduced branch costs, and it costs it only when something was
+    /// actually removed — `AcceptedContactSet::reduced` is `None` otherwise and
+    /// the routed plan is moved out whole.
+    pub(crate) fn into_plan_and_context(self) -> (SpecializedContactPlan, SupportRunContext<'a>) {
+        let routed = self.structured.braced.rewired.routed;
+        let plan = routed.accepted.reduced.unwrap_or(routed.plan);
+        (plan, self.structured.context)
     }
 
     #[must_use]
@@ -4815,7 +5054,10 @@ pub(crate) fn prepare_support_run<'a>(
     authority: SupportPreparationAuthority<'a>,
 ) -> Result<PreparedSupportRun<'a>, SupportPreparationError> {
     let (context, plan) = prepare_support_context(hollowed, request, authority)?;
-    prepared_run_for_plan(context, plan)
+    // The single-attempt entry has nothing to recover the context FOR: it is
+    // the whole run, so a preparation failure ends it. Dropping the context
+    // here is what this function has always done.
+    prepared_run_for_plan(context, plan).map_err(|(_recovered_context, error)| error)
 }
 
 /// Part (a) of the sealed-preparation split (FU-56): everything that does NOT
@@ -4933,13 +5175,48 @@ pub(crate) fn prepare_support_context<'a>(
 /// plan-dependent digest fresh. Every existing single-attempt caller is
 /// `prepare_support_context` then this, which is exactly what
 /// [`prepare_support_run`] does, so no first-attempt-closes digest moves.
+#[allow(
+    clippy::result_large_err,
+    reason = "the Ok variant carries the same SupportRunContext by construction: \
+              it is MOVED through the typestate either way, so boxing the Err \
+              would allocate on every refusal and save nothing"
+)]
 pub(crate) fn prepared_run_for_plan<'a>(
     mut context: SupportRunContext<'a>,
     plan: SpecializedContactPlan,
-) -> Result<PreparedSupportRun<'a>, SupportPreparationError> {
+) -> Result<PreparedSupportRun<'a>, (SupportRunContext<'a>, SupportPreparationError)> {
+    let initial = match initial_contacts_for_plan(&context, &plan) {
+        Ok(initial) => initial,
+        Err(error) => return Err((context, error)),
+    };
+
+    let loads_digest = match plan.finalized_loads() {
+        Ok(loads) => loads.digest(),
+        Err(error) => return Err((context, error.into())),
+    };
+    context.digests.plan = plan.digest();
+    context.digests.loads = loads_digest;
+    context.digests.initial_forest = initial.post_quarantine_forest_digest();
+    context.digests.contact_attestation = initial.contact_attestation_digest();
+    context.digests.prepared = prepared_digest(&context.digests, context.frame, context.authority);
+
+    Ok(PreparedSupportRun {
+        context,
+        plan,
+        initial,
+    })
+}
+
+/// SPEC-A4 §A.3 — the initial-contact build, factored out so
+/// [`prepared_run_for_plan`] can hand the context back when a trial's plan
+/// cannot be prepared at all.
+fn initial_contacts_for_plan(
+    context: &SupportRunContext<'_>,
+    plan: &SpecializedContactPlan,
+) -> Result<InitialContactBuild, SupportPreparationError> {
     let geometry = context.geometry()?;
-    let initial = build_initial_contacts(
-        &plan,
+    Ok(build_initial_contacts(
+        plan,
         plan.finalized_loads()?,
         &context.mesh,
         &context.authority.perception_config,
@@ -4954,20 +5231,7 @@ pub(crate) fn prepared_run_for_plan<'a>(
         context.authority.specialized_limits,
         &geometry,
         context.authority.construction_limits,
-    )?;
-
-    let loads_digest = plan.finalized_loads()?.digest();
-    context.digests.plan = plan.digest();
-    context.digests.loads = loads_digest;
-    context.digests.initial_forest = initial.post_quarantine_forest_digest();
-    context.digests.contact_attestation = initial.contact_attestation_digest();
-    context.digests.prepared = prepared_digest(&context.digests, context.frame, context.authority);
-
-    Ok(PreparedSupportRun {
-        context,
-        plan,
-        initial,
-    })
+    )?)
 }
 
 fn validate_authority_pre_query(
@@ -5874,6 +6138,17 @@ mod tests {
         )
     }
 
+    /// Drop the recovered context from a stage refusal.
+    ///
+    /// SPEC-A4 §A.3's recoverable seam returns `(SupportRunContext, E)` so a
+    /// transactional trial can take the context back and try the next
+    /// candidate. A test that asserts on the ERROR wants only the error, and
+    /// dropping the context here is exactly what the pre-seam signature did
+    /// implicitly at every one of these sites.
+    fn stage_error<T, E>(result: Result<T, (SupportRunContext<'_>, E)>) -> Result<T, E> {
+        result.map_err(|(_recovered_context, error)| error)
+    }
+
     fn with_prepared_table<T>(use_prepared: impl FnOnce(PreparedSupportRun<'_>) -> T) -> T {
         let hollowed = hollowed_fixture(load_required_runner_corpus());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
@@ -6343,7 +6618,7 @@ mod tests {
                 SupportBraceError::RewireDigestMismatch
             ));
             assert!(matches!(
-                rewired.brace(),
+                stage_error(rewired.brace()),
                 Err(SupportBraceError::RewireDigestMismatch)
             ));
         });
@@ -6468,7 +6743,9 @@ mod tests {
     fn fu32_j5_routing_refuses_an_over_demand_seat_search_on_the_required_corpus() {
         with_prepared_table(|prepared| {
             let refused =
-                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX));
+                stage_error(prepared.route_initial_cco_with_limits(
+                    RouteCcoWorkLimits::for_test(1, usize::MAX),
+                ));
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat evaluations",
@@ -6489,7 +6766,9 @@ mod tests {
     fn fu32_j5_routing_refuses_an_over_demand_refusal_evidence_budget_on_the_required_corpus() {
         with_prepared_table(|prepared| {
             let refused =
-                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(usize::MAX, 1));
+                stage_error(prepared.route_initial_cco_with_limits(
+                    RouteCcoWorkLimits::for_test(usize::MAX, 1),
+                ));
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat refusal rows",
@@ -6514,9 +6793,9 @@ mod tests {
         // The charge this instance is priced at, recovered from the refusing
         // arm above rather than recomputed from a formula this test owns.
         let charged = with_prepared_table(|prepared| {
-            match prepared
+            match stage_error(prepared
                 .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX))
-            {
+            ) {
                 Err(SupportRoutingError::Limit { required, .. }) => required,
                 Err(other) => panic!("expected a limit refusal, got {other:?}"),
                 Ok(_) => panic!("an over-demand seat search must refuse"),
@@ -6612,6 +6891,7 @@ mod tests {
             .rewire()
             .expect("required corpus rewires")
             .brace();
+        let result = stage_error(result);
         assert!(matches!(
             result,
             Err(SupportBraceError::Brace(BraceError::Penetration(
@@ -6632,7 +6912,7 @@ mod tests {
                 .expect("required corpus routes before stale authority check");
             routed.context.digests.plan = routed.context.digests.plan.wrapping_add(1);
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::PlanOrLoadDigestMismatch)
             ));
         });
@@ -6650,7 +6930,7 @@ mod tests {
                 SupportRewireError::InitialAuthorityMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::InitialAuthorityMismatch)
             ));
         });
@@ -6683,7 +6963,7 @@ mod tests {
                 SupportRewireError::InitialAuthorityMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::InitialAuthorityMismatch)
             ));
         });
@@ -6704,7 +6984,7 @@ mod tests {
                 SupportRewireError::InitialAuthorityMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::InitialAuthorityMismatch)
             ));
         });
@@ -6725,7 +7005,7 @@ mod tests {
                 SupportRewireError::InitialAuthorityMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::InitialAuthorityMismatch)
             ));
         });
@@ -6743,7 +7023,7 @@ mod tests {
                 SupportRewireError::TranscriptDigestMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::TranscriptDigestMismatch)
             ));
         });
@@ -6764,9 +7044,122 @@ mod tests {
                 SupportRewireError::TranscriptDigestMismatch
             ));
             assert!(matches!(
-                routed.rewire(),
+                stage_error(routed.rewire()),
                 Err(SupportRewireError::TranscriptDigestMismatch)
             ));
+        });
+    }
+
+    /// SPEC-A4 §A.3, and it is the property task #47 dies for today: a stage
+    /// that REFUSES must hand the context back, and the context it hands back
+    /// must still be a usable authority for the next trial.
+    ///
+    /// The refusal used here is the registered routing work limit driven to 1,
+    /// so the stage does real work and fails deep inside the cadence rather
+    /// than at a preflight. Before this seam the context was consumed by the
+    /// failing stage and the whole model died with it.
+    #[test]
+    fn a_refused_stage_returns_the_context_and_the_next_trial_can_still_use_it() {
+        with_prepared_table(|prepared| {
+            let plan = prepared.plan.clone();
+            let (context, error) = prepared
+                .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX))
+                .err()
+                .expect("an over-demand seat search must refuse");
+            assert!(
+                matches!(error, SupportRoutingError::Limit { .. }),
+                "expected the seat-evaluation limit refusal, got {error:?}"
+            );
+            // The recovered context is not a corpse: it prepares and routes
+            // the very same plan at the registered limits.
+            let prepared_again = stage_error(prepared_run_for_plan(context, plan))
+                .expect("the recovered context prepares the next trial");
+            stage_error(prepared_again.route_initial_cco())
+                .expect("the recovered context routes at the registered limits");
+        });
+    }
+
+    /// SPEC-A4 §A.5's rollback obligation: a rejected trial may not leave its
+    /// own digests visible on the context.
+    ///
+    /// `prepared_run_for_plan` stamps five plan-dependent digest fields. A
+    /// trial rejected at Routing, Rewire, Brace, Structure or Lowering hands
+    /// back a context stamped with the REJECTED CHILD's values, and under
+    /// one-winner transactions the controller reads evidence between trials —
+    /// so a stale stamp would describe a plan that does not exist. This drives
+    /// the whole cycle on real geometry: accepted plan, child plan with one
+    /// appended repair row, refusal, restore.
+    #[test]
+    fn a_rejected_trial_does_not_leave_its_digests_on_the_context() {
+        with_prepared_table(|prepared| {
+            let accepted_plan = prepared.plan.clone();
+            let accepted_digests = prepared.context.prepared_digests();
+            let context = prepared.route_initial_cco().map_or_else(
+                |(context, _error)| context,
+                |routed| routed.rewire().map_or_else(
+                    |(context, _error)| context,
+                    |rewired| rewired.brace().map_or_else(
+                        |(context, _error)| context,
+                        |braced| braced.structure().map_or_else(
+                            |(context, _error)| context,
+                            |structured| structured.lower().map_or_else(
+                                |(context, _error)| context,
+                                LoweredSupportRun::into_context,
+                            ),
+                        ),
+                    ),
+                ),
+            );
+            assert_eq!(
+                context.prepared_digests(),
+                accepted_digests,
+                "a run that never re-prepared must still carry the accepted stamp"
+            );
+
+            // Now a real child: one repair row appended, which is exactly what
+            // a trial is.
+            let occupied: std::collections::BTreeSet<_> = accepted_plan
+                .occupied_repair_rows()
+                .expect("the fixture plan reports its occupied repair rows")
+                .into_iter()
+                .map(|occupancy| occupancy.row_id())
+                .collect();
+            let row = accepted_plan
+                .all_repair_rows()
+                .iter()
+                .map(crate::specialized::RepairRow::id)
+                .find(|id| !occupied.contains(id))
+                .expect("the required corpus fixture has an unoccupied repair row");
+            let child = accepted_plan
+                .begin_regular_edit()
+                .and_then(|edit| edit.append_regular_repair_rows(&[row]))
+                .expect("appending one repair row derives a child plan");
+            let trial = stage_error(prepared_run_for_plan(context, child))
+                .expect("the child plan prepares");
+            let trial_digests = trial.context.prepared_digests();
+            assert_ne!(
+                trial_digests, accepted_digests,
+                "a child plan with an extra contact must stamp different digests, \
+                 or this test proves nothing"
+            );
+
+            // Reject the trial the way the controller will, and restore.
+            let mut context = trial.route_initial_cco().map_or_else(
+                |(context, _error)| context,
+                |routed| routed.into_context_for_test(),
+            );
+            assert_eq!(
+                context.prepared_digests(),
+                trial_digests,
+                "before the restore the context carries the REJECTED child's stamp — \
+                 that is the defect §A.5 exists to close"
+            );
+            context.restore_prepared_digests(accepted_digests);
+            assert_eq!(
+                context.prepared_digests(),
+                accepted_digests,
+                "after the restore the context is the accepted state's again"
+            );
         });
     }
 
@@ -6775,7 +7168,7 @@ mod tests {
         with_prepared_table(|mut prepared| {
             prepared.initial.test_corrupt_initial_forest_digest();
             assert!(matches!(
-                prepared.route_initial_cco(),
+                stage_error(prepared.route_initial_cco()),
                 Err(SupportRoutingError::InitialAuthorityMismatch)
             ));
         });
@@ -8508,7 +8901,7 @@ mod tests {
         assert!(count > 1, "required corpus has more than one primitive");
         with_structured_limits(count - 1, bytes, |structured| {
             assert!(matches!(
-                structured.lower(),
+                stage_error(structured.lower()),
                 Err(SupportLoweringError::Lowering(
                     LoweringError::PrimitiveLimit
                 ))
@@ -8516,7 +8909,7 @@ mod tests {
         });
         with_structured_limits(count, bytes - 1, |structured| {
             assert!(matches!(
-                structured.lower(),
+                stage_error(structured.lower()),
                 Err(SupportLoweringError::Lowering(
                     LoweringError::PrimitiveBytesLimit
                 ))
