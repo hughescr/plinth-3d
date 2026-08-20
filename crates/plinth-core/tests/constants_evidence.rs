@@ -263,13 +263,16 @@ const EXPECTED_SOURCES: [ExpectedSource; 20] = [
         date: "2026-08-05",
     },
     ExpectedSource {
+        // Superseded 2026-08-19: the owner's ChituBox field practice (working
+        // 0.100 mm DIAMETER tips) replaced the earlier 0.150 mm diameter desk
+        // decision, so the date is now EXACT rather than on-or-before.
         constant: "TIP_DIAMETER_MIN_ALLOWED_MM",
         kind: "owner_decision",
         identity: "tip-diameter-floor-owner-decision",
         record: "docs/engineering-journal/03-physics-and-constants.md",
         locator: "§3.2",
-        precision: "on_or_before",
-        date: "2026-07-31",
+        precision: "exact",
+        date: "2026-08-19",
     },
     ExpectedSource {
         constant: "X_STAR_CONE",
@@ -357,8 +360,8 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
         scalar(&descriptors, "SATURN_RELEASE_FILM_THICKNESS_MM"),
         0.127
     );
-    assert_eq!(scalar(&descriptors, "TIP_DIAMETER_MIN_ALLOWED_MM"), 0.150);
-    assert_eq!(scalar(&descriptors, "TIP_RADIUS_MIN_ALLOWED_MM"), 0.075);
+    assert_eq!(scalar(&descriptors, "TIP_DIAMETER_MIN_ALLOWED_MM"), 0.100);
+    assert_eq!(scalar(&descriptors, "TIP_RADIUS_MIN_ALLOWED_MM"), 0.050);
     assert_eq!(scalar(&descriptors, "X_ALLOWED"), 12.0);
 
     for id in ["MINIMA_DROP_INTERIOR_FACES", "MINIMA_REQUIRE_ISLAND_BIRTH"] {
@@ -844,5 +847,95 @@ fn release_directions_are_distinct_named_facts() {
     assert_ne!(
         ConstantId::from("SATURN_LEADING_RELEASE_EDGE"),
         ConstantId::from("SATURN_RELEASE_FRONT_SWEEP_DIRECTION")
+    );
+}
+
+/// Craig's 2026-08-19 supersession, pinned in BOTH units and in both
+/// directions of the diameter/radius conversion.
+///
+/// The earlier owner decision — 0.150 mm DIAMETER (0.075 mm RADIUS), dated
+/// on-or-before 2026-07-31 — would have refused the tips Craig prints today.
+/// The ruling that lowered the generation clamp `TIP_RADIUS_DEFAULT_MM` to
+/// 0.050 mm radius (0.100 mm diameter) rests on the same field data, so the
+/// validator minimum moved with it and the conflict the earlier lane flagged
+/// is closed.
+///
+/// **What this test does NOT assert.** It does not assert that the validator
+/// minimum is DERIVED from the generation clamp, and the two must never be
+/// written in terms of each other: one is what the sizing policy is allowed to
+/// ask for, the other is what the validator will accept. They are equal today
+/// because one person ruled once on one body of evidence. If a later ruling
+/// moves only one of them, this test goes red and that is correct — it is a
+/// prompt to re-read both notes, not a licence to re-point one at the other.
+#[test]
+fn the_validator_tip_minimum_was_superseded_to_the_owners_own_field_practice() {
+    let descriptors = component().descriptors().unwrap();
+
+    // The registered pair, stated in the unit each one is registered in.
+    let diameter_min_mm = scalar(&descriptors, "TIP_DIAMETER_MIN_ALLOWED_MM");
+    let radius_min_mm = scalar(&descriptors, "TIP_RADIUS_MIN_ALLOWED_MM");
+    assert_eq!(
+        diameter_min_mm, 0.100,
+        "validator minimum is 0.100 mm DIAMETER since Craig's 2026-08-19 \
+         supersession, from 0.150 mm diameter"
+    );
+    assert_eq!(
+        radius_min_mm, 0.050,
+        "validator minimum is 0.050 mm RADIUS since Craig's 2026-08-19 \
+         supersession, from 0.075 mm radius"
+    );
+    // The derivation identity itself, so a hand-typed radius that drifts from
+    // its parent diameter cannot pass.
+    assert_eq!(
+        radius_min_mm,
+        diameter_min_mm / 2.0,
+        "TIP_RADIUS_MIN_ALLOWED_MM is exactly half its parent DIAMETER"
+    );
+
+    // The validator minimum no longer refuses what the sizing policy is
+    // allowed to generate. Before the supersession the generation clamp
+    // minimum (0.050 mm radius) sat BELOW the validator minimum (0.075 mm
+    // radius), so every tip the policy sized at its own minimum was one the
+    // validator would have rejected had anything read it.
+    let generation_clamp_min_radius_mm = plinth_core::m0_constants()
+        .unwrap()
+        .placeholders()
+        .tip_radius_default_mm()
+        .diagnostic()
+        .get();
+    assert_eq!(
+        generation_clamp_min_radius_mm, 0.050,
+        "TIP_RADIUS_DEFAULT_MM is 0.050 mm RADIUS (0.100 mm DIAMETER)"
+    );
+    assert!(
+        generation_clamp_min_radius_mm >= radius_min_mm,
+        "the smallest tip the sizing policy may generate ({generation_clamp_min_radius_mm} mm \
+         radius / {} mm diameter) must not be one the validator minimum \
+         ({radius_min_mm} mm radius / {diameter_min_mm} mm diameter) refuses",
+        generation_clamp_min_radius_mm * 2.0
+    );
+
+    // The supersession is on the record as an EXACT date, not the earlier
+    // on-or-before. A supersession whose provenance still pointed at
+    // 2026-07-31 would be claiming the old decision produced the new number.
+    let RegistryProvenanceView::Measured { source, err, .. } =
+        descriptor(&descriptors, "TIP_DIAMETER_MIN_ALLOWED_MM")
+            .provenance()
+            .view()
+    else {
+        panic!("the validator minimum is a Measured owner decision");
+    };
+    assert!(err.is_none());
+    assert_source(
+        source,
+        &ExpectedSource {
+            constant: "TIP_DIAMETER_MIN_ALLOWED_MM",
+            kind: "owner_decision",
+            identity: "tip-diameter-floor-owner-decision",
+            record: "docs/engineering-journal/03-physics-and-constants.md",
+            locator: "§3.2",
+            precision: "exact",
+            date: "2026-08-19",
+        },
     );
 }

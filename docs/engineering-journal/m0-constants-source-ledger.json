@@ -2316,17 +2316,17 @@
     {
       "id": "TIP_DIAMETER_MIN_ALLOWED_MM",
       "classification": "runtime_validation",
-      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Measured OwnerDecision tip-diameter-floor-owner-decision, 0.150 mm, err null",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Measured OwnerDecision tip-diameter-floor-owner-decision, 0.100 mm DIAMETER (0.050 mm RADIUS), err null. SUPERSESSION -- Craig 2026-08-19: field data supersedes the earlier owner decision. The earlier value was 0.150 mm diameter (0.075 mm radius), dated on-or-before 2026-07-31, an owner decision with no coupon behind it. Craig prints 0.100 mm DIAMETER cylindrical ChituBox tips today on tiny islands in narrow gaps, so a validator minimum of 0.150 mm diameter would refuse geometry this machine and resin demonstrably render. The new value AGREES with the live sizing clamp TIP_RADIUS_DEFAULT_MM = 0.050 mm radius (0.100 mm diameter), closing the conflict that constant's 2026-08-19 note flagged. UNITS: this constant is a DIAMETER; its derived twin TIP_RADIUS_MIN_ALLOWED_MM is a RADIUS. Below 0.100 mm diameter thin-tip formability is still uncalibrated and this minimum is what refuses it.",
       "source_locators": [
         "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured EvidenceSource kind=OwnerDecision id=tip-diameter-floor-owner-decision record=docs/rust-migration/03-physics-and-constants.md locator=§3.2 date=OnOrBefore(2026-07-31) err=null"
+      "provenance_detail": "Measured EvidenceSource kind=OwnerDecision id=tip-diameter-floor-owner-decision record=docs/rust-migration/03-physics-and-constants.md locator=§3.2 date=Exact(2026-08-19) err=null"
     },
     {
       "id": "TIP_RADIUS_DEFAULT_MM",
       "classification": "runtime_generation_profile",
-      "normative": "03-physics-and-constants.md §3.2; 0.050 mm RADIUS (0.100 mm DIAMETER) by owner ruling 2026-08-19, from 0.200 mm radius (0.400 mm diameter). Evidence: the owner's ChituBox field practice -- 0.1 mm diameter cylindrical tips on tiny islands in narrow gaps, short runs only. This is the tip-sizing clamp MINIMUM and a permission, not a target: the load law still sizes every tip, so it binds only where carried area <= X*pi*0.05^2 = 0.0942 mm2, and refuses larger areas exactly as before. UNITS: registry speaks RADIUS, the owner speaks DIAMETER. NOTE an unreconciled conflict with TIP_DIAMETER_MIN_ALLOWED_MM = 0.150 mm diameter (0.075 mm radius), an older owner-authorized hard minimum with no production reader.",
+      "normative": "03-physics-and-constants.md §3.2; 0.050 mm RADIUS (0.100 mm DIAMETER) by owner ruling 2026-08-19, from 0.200 mm radius (0.400 mm diameter). Evidence: the owner's ChituBox field practice -- 0.1 mm diameter cylindrical tips on tiny islands in narrow gaps, short runs only. This is the tip-sizing clamp MINIMUM and a permission, not a target: the load law still sizes every tip, so it binds only where carried area <= X*pi*0.05^2 = 0.0942 mm2, and refuses larger areas exactly as before. UNITS: registry speaks RADIUS, the owner speaks DIAMETER. The conflict this entry flagged on 2026-08-19 -- TIP_DIAMETER_MIN_ALLOWED_MM at 0.150 mm diameter (0.075 mm radius) -- is CLOSED: Craig superseded that constant to 0.100 mm diameter (0.050 mm radius) the same day, on the same field data, so the validator minimum and this generation clamp minimum now agree.",
       "source_locators": [
         "scripts/support_placement/config.py:tip_r_min_mm"
       ],
@@ -2346,7 +2346,7 @@
     {
       "id": "TIP_RADIUS_MIN_ALLOWED_MM",
       "classification": "runtime_validation",
-      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Derived TIP_DIAMETER_MIN_ALLOWED_MM/2 = 0.075 mm from=[TIP_DIAMETER_MIN_ALLOWED_MM]",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Derived TIP_DIAMETER_MIN_ALLOWED_MM/2 = 0.050 mm RADIUS from=[TIP_DIAMETER_MIN_ALLOWED_MM], was 0.075 mm radius (0.150 mm diameter). It moved only because its parent moved on Craig's 2026-08-19 supersession; the relation is unchanged. This is a RADIUS and the parent is a DIAMETER. It is now numerically EQUAL to TIP_RADIUS_DEFAULT_MM = 0.050 mm radius (0.100 mm diameter), by ruling and not by derivation: that one is the GENERATION clamp minimum, this one is the VALIDATOR minimum, and neither may ever be written in terms of the other.",
       "source_locators": [
         "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
       ],

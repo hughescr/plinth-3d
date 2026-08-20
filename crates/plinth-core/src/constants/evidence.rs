@@ -103,15 +103,15 @@ impl M0EvidenceConstants {
             .ok_or(M0EvidenceConstantsError::NonAdditiveLoadSharing)?;
 
         let tip_diameter_min_allowed_mm = Measured::new(
-            0.150,
+            0.100,
             EvidenceSource::owner_decision(
                 EvidenceId::new("tip-diameter-floor-owner-decision")?,
                 "docs/engineering-journal/03-physics-and-constants.md",
                 "§3.2",
-                on_or_before_date("2026-07-31")?,
+                exact_date("2026-08-19")?,
             )?,
             None,
-            "Owner-authorized hard validator floor for this machine and resin; it is not a target or a cap.",
+            "Owner-authorized hard validator MINIMUM for this machine and resin; it is not a target or a cap. 0.100 mm DIAMETER (0.050 mm RADIUS) since the owner ruling of 2026-08-19, SUPERSEDING the earlier 0.150 mm diameter (0.075 mm radius) decision of on-or-before 2026-07-31. The supersession is field data beating a desk number: the owner prints 0.1 mm DIAMETER cylindrical tips in ChituBox today, on tiny islands in narrow gaps, so a validator that refuses 0.1 mm diameter would refuse geometry the machine and resin demonstrably render. The earlier value was an owner decision with no coupon behind it and no production reader, which is why it could sit un-noticed BELOW nothing and ABOVE the live sizing clamp. UNITS TRAP: this constant is a DIAMETER and its derived twin TIP_RADIUS_MIN_ALLOWED_MM is a RADIUS; a number transcribed between them without halving or doubling lands 2x wrong. This value now AGREES with the live sizing clamp TIP_RADIUS_DEFAULT_MM = 0.050 mm radius (0.100 mm diameter), closing the conflict that ruling flagged rather than leaving two records disagreeing. Thin-tip formability below 0.100 mm diameter remains uncalibrated, and this minimum is what refuses it.",
         )?;
         let tip_radius_value = *tip_diameter_min_allowed_mm.value() / 2.0;
 
@@ -330,7 +330,7 @@ impl M0EvidenceConstants {
             tip_radius_min_allowed_mm: Derived::new(
                 tip_radius_value,
                 ["TIP_DIAMETER_MIN_ALLOWED_MM"],
-                "Exact diameter-to-radius conversion: TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.075 mm; do not substitute the 0.200 mm default.",
+                "Exact diameter-to-radius conversion: TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.050 mm RADIUS, from 0.100 mm DIAMETER. Was 0.075 mm radius (0.150 mm diameter) until the owner ruling of 2026-08-19 superseded its parent. This is a RADIUS and its parent is a DIAMETER; halve or double, never substitute. The warning this note used to carry -- do not substitute the tip-sizing default -- is now moot in VALUE and live in KIND: TIP_RADIUS_DEFAULT_MM is also 0.050 mm radius (0.100 mm diameter) since the same ruling, but it is the GENERATION clamp minimum and this is the VALIDATOR minimum. They agree today by ruling, not by derivation, and neither may be written in terms of the other.",
             ),
             x_allowed: Derived::new(
                 x_allowed_value,
