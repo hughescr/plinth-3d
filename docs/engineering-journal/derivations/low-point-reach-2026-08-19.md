@@ -88,8 +88,15 @@ registered **Placeholder default**, read through `.diagnostic()`. It is not a mi
 registered minimum is `TIP_DIAMETER_MIN_ALLOWED_MM = 0.150 mm diameter`
 (`TIP_RADIUS_MIN_ALLOWED_MM = 0.075 mm radius`), an owner decision whose note says in as many words
 "do not substitute the 0.200 mm default". Task #61's proposed 0.100 mm diameter / 0.050 mm radius
-is therefore **below the owner-authorized minimum of 0.150 mm diameter**. That conflict belongs to
-task #61 and is out of scope here, but it is recorded rather than left unsaid.
+is therefore **below the owner-authorized minimum of 0.150 mm diameter** *as `develop` stands*.
+
+That conflict is **already closed** on the parked `feature/tip-min` branch, which is not merged into
+`develop` and is not this task's to touch: Craig superseded the validator minimum on 2026-08-19,
+`TIP_DIAMETER_MIN_ALLOWED_MM` 0.150 → 0.100 mm diameter (`TIP_RADIUS_MIN_ALLOWED_MM` 0.075 →
+0.050 mm radius), on the grounds that he prints 0.100 mm diameter tips today and a desk number
+should not refuse geometry the machine demonstrably renders. Recorded here so a reader of this
+document does not re-raise a settled question. The naming correction stands regardless of the
+values: a **default** is not a **minimum**, and this document had called one the other.
 
 **MEASURED.** `filter_minima_by_birth_and_adequacy` was instrumented in a throwaway worktree, every
 non-birth minimum dumped with its carried area and its true reach, and the same two models run with
@@ -217,10 +224,12 @@ rather than measure it — bounds that, so the conclusion survives. But "plate p
 this limit" is *not* what was proved.
 
 For reference in tip language, since tips are the only other thing in this pipeline measured in
-these units: 0.0707 mm of reach is the radius of a 0.141 mm diameter disc. The registered tip
-minimum is 0.075 mm radius / 0.150 mm diameter, and the registered tip default is 0.200 mm radius /
-0.400 mm diameter. After this change **no tip number can move a low-point verdict**, which is the
-specific accident that started this task.
+these units: 0.0707 mm of reach is the radius of a 0.141 mm diameter disc. On `develop` the
+registered tip **minimum** is 0.075 mm radius / 0.150 mm diameter and the registered tip
+**default** is 0.200 mm radius / 0.400 mm diameter; both move on the parked `feature/tip-min`
+branch (§1). The comparison is offered only to give the number a familiar scale — after this change
+**no tip number can move a low-point verdict**, which is the specific accident that started this
+task.
 
 ### 2.4 Two consequences of the same number, which are worth having
 
@@ -572,8 +581,9 @@ measured.** It is not folded into this task.
    removed, ledger entry moved to `retired`, this document cited as the basis.
 3. **Correct the record on task #61.** The 0.050 mm tip radius / 0.100 mm diameter dropped no
    low-point support on Deinonychus or Crawler Zombie; the record-count change is a downstream
-   junction effect and wants its own look. **And** that proposed 0.100 mm diameter is below the
-   owner-authorized minimum of 0.150 mm diameter (§1). Both are for task #61.
+   junction effect and wants its own look. The tip-minimum half of §1 needs no action: Craig
+   superseded the validator minimum to 0.100 mm diameter / 0.050 mm radius on 2026-08-19, on the
+   parked `feature/tip-min` branch. The record-count question is still open, and is for task #61.
 4. **Take `OVERHANG_ANGLE_DEG` next,** with an angle-fan coupon: a vertical wall with wide
    unsupported undersides springing from it at θ ∈ {10, 15, 20, 25, 30, 35, 40, 45}° above
    horizontal, ~5 mm of run each, contiguous row bases, no factor assigned by position, the
