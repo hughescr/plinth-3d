@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 274] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -130,7 +130,6 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 274] = [
     "MINIMA_CONNECT_LAYERS",
     "MINIMA_CONTACT_RADIUS_MM",
     "MINIMA_EPS_MM",
-    "MINIMA_SUPPORT_AREA_TIPS",
     "MIN_CONTACTS_PER_ISLAND",
     "MIN_ILLEGAL_LEN_MM",
     "MIN_SHAFT_R_MM",
@@ -298,7 +297,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 274] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -420,7 +419,6 @@ static EXPECTED_ROWS: [ExpectedRow; 274] = rows! {
     "MINIMA_CONNECT_LAYERS", "2.0", "layers", "scalar";
     "MINIMA_CONTACT_RADIUS_MM", "1.0", "mm", "scalar";
     "MINIMA_EPS_MM", "0.02", "mm", "scalar";
-    "MINIMA_SUPPORT_AREA_TIPS", "1.0", "1", "scalar";
     "MIN_CONTACTS_PER_ISLAND", "1", "count", "scalar";
     "MIN_ILLEGAL_LEN_MM", "0.05", "mm", "scalar";
     "MIN_SHAFT_R_MM", "0.3", "mm", "scalar";
@@ -587,7 +585,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 274);
+    assert_eq!(descriptors.len(), 273);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -678,7 +676,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_305_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_304_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -686,14 +684,14 @@ fn evidence_and_placeholder_fixture_builds_one_305_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 305);
+    assert_eq!(registry.len(), 304);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        305
+        304
     );
 }
 

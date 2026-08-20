@@ -131,7 +131,6 @@
 | MINIMA&#95;DROP&#95;INTERIOR&#95;FACES | true | 1 | scalar | measured(source=project&#95;record(id="minima-contact-fix-2026-07-24",record="docs/engineering-journal/reference/acceptance-run-2026-07-24-contactfix.md",locator="Provenance and What moved",date=exact("2026-07-24")),err=null,note="Measured contact-fix disposition; see §3.7 for the old-rule false-contact rates and per-layer propagation context.") |
 | MINIMA&#95;EPS&#95;MM | 0.02 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Minima-stage sub-layer tie tolerance.") |
 | MINIMA&#95;REQUIRE&#95;ISLAND&#95;BIRTH | true | 1 | scalar | measured(source=project&#95;record(id="minima-contact-fix-2026-07-24",record="docs/engineering-journal/reference/acceptance-run-2026-07-24-contactfix.md",locator="Provenance and What moved",date=exact("2026-07-24")),err=null,note="Measured contact-fix disposition; see §3.7 for the old-rule false-contact rates and per-layer propagation context.") |
-| MINIMA&#95;SUPPORT&#95;AREA&#95;TIPS | 1.0 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Selected tuning in a flat sensitivity region, not a measured boundary.") |
 | MIN&#95;CONTACTS&#95;PER&#95;ISLAND | 1 | count | scalar | placeholder(note="Placeholder; non-AcceptSafe. Minimum placement contacts per island.") |
 | MIN&#95;ILLEGAL&#95;LEN&#95;MM | 0.05 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Post-anchoring crossing sliver cutoff.") |
 | MIN&#95;SHAFT&#95;R&#95;MM | 0.3 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Minimum shaft radius.") |

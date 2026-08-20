@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 274], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 273], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1239,8 +1239,6 @@ placeholder_declarations! {
     "MINIMA_CONTACT_RADIUS_MM", "mm", "scalar", "Minima contact discretization slack, not coverage radius.";
     minima_eps_mm: PositiveFinite = PositiveFinite::new(0.02)?;
     "MINIMA_EPS_MM", "mm", "scalar", "Minima-stage sub-layer tie tolerance.";
-    minima_support_area_tips: PositiveFinite = PositiveFinite::new(1.0)?;
-    "MINIMA_SUPPORT_AREA_TIPS", "1", "scalar", "Selected tuning in a flat sensitivity region, not a measured boundary.";
     min_contacts_per_island: NonZeroU64 = nonzero(1)?;
     "MIN_CONTACTS_PER_ISLAND", "count", "scalar", "Minimum placement contacts per island.";
     min_illegal_len_mm: PositiveFinite = PositiveFinite::new(0.05)?;
