@@ -549,7 +549,7 @@ fresh disk provenance and non-circular fixtures provide independent evidence.
 | `minima_birth_match_layers` (555) | 2.0 | layers | **P** — same corpus rule of thumb and selected headroom | `plinth-support::perceive` | |
 | `minima_eps_mm` (503) | 0.02 | mm | **P** — sub-layer tie tolerance | `plinth-support::perceive` | |
 | `minima_contact_radius_mm` (508) | 1.0 | mm | **P** — discretization slack, explicitly **not** a coverage radius | `plinth-support::perceive` | |
-| `minima_support_area_tips` (571) | 1.0 | — | **P** — selected in a flat sensitivity region; flatness does not measure a preferred value | `plinth-support::perceive` | Threshold is `× π·tip_r_min_mm² = 0.1257 mm²`. |
+| `minima_support_area_tips` (571) | 1.0 | — | **RETIRED 2026-08-19 — no runtime declaration** | — | Its one reader was the low-point adequacy test, which compared a carried area against `× π·tip_radius²`. That is a tension yardstick in units of support-tip discs; the physics is bending. Replaced by the reach criterion `reach ≤ sqrt(X_ALLOWED/6) × LAYER_HEIGHT_DEFAULT_MM` = 0.0707 mm — see the retirement note below and `derivations/low-point-reach-2026-08-19.md`. Retired, not re-tuned: the band it controlled was empty by 14× across 57 corpus minima, and it is inert by construction. |
 | `minima_require_island_birth` / `minima_drop_interior_faces` (538/549) | True / True | — | **M** — flipped 2026-07-24 after measuring **38.1 % / 21.7 %** false minima-stage contacts (treant / morel) under the old surface-only rule | `plinth-support::perceive` | |
 
 **Per-layer-height propagation checklist.** When layer height stops being a
@@ -1003,8 +1003,40 @@ non-AcceptSafe: `DECIMATION_P999_FACTOR`, `DECIMATION_P99_FACTOR`,
 `TRANSIENT_SHOOT_COUNT_EXPONENT`, and `VOXEL_PITCH_MM`. Their arithmetic,
 version convention, or corpus rationale preserves an explanation, not
 AcceptSafe authority; in particular arithmetic from a Placeholder cannot improve
-its provenance. `MINIMA_SUPPORT_AREA_TIPS = 1.0` is likewise Placeholder tuning
-selected in a flat sensitivity region, not a measurement.
+its provenance. `MINIMA_SUPPORT_AREA_TIPS` was likewise Placeholder tuning
+selected in a flat sensitivity region, not a measurement; it is **retired** as
+of 2026-08-19 (task #62) and no longer declared.
+
+**Retirement note, `MINIMA_SUPPORT_AREA_TIPS`, 2026-08-19 (task #62).** Its one
+reader was the low-point adequacy test in `plinth-support::perception`, which
+asked whether the carried area under a non-birth local minimum reached
+`minima_support_area_tips × π × tip_radius_default_mm²`. That is a **tension**
+yardstick expressed in support-tip discs. The physics at a non-birth low point
+is **bending**: one layer of green resin cures with nothing beneath it, joined
+sideways within its own layer to resin that is seated, and the peel pull
+cantilevers that tongue about its root. The replacement measures the tongue's
+**reach**:
+
+> a non-birth low point is adequately carried if its reach is at most
+> `sqrt(X_ALLOWED / 6) × LAYER_HEIGHT_DEFAULT_MM` = **0.0707 mm**
+
+reading `X_ALLOWED` (Derived, plate 5) and `LAYER_HEIGHT_DEFAULT_MM` (Measured,
+plate 6) from this registry. This is `X_ALLOWED`'s **first production reader**
+and closes one line of the registry-bypass finding (§task #57). The 6 is the
+root bending-moment coefficient for a load concentrated at the peel front;
+Craig ruled on 2026-08-19 that the engine ships that conservative end rather
+than the evenly-spread coefficient 3, which would give 0.100 mm.
+
+Retired rather than re-tuned, and the reason is not that it was mistuned: **it
+never decided anything.** Across 57 non-birth minima measured on 12 corpus
+models the band it controlled was empty by 14×, and it is inert *by
+construction* — the predicate compared a whole model cross-section's area
+against a support tip's, a scale mismatch of about three orders of magnitude
+for any printable feature. The recorded basis is
+`derivations/low-point-reach-2026-08-19.md`, which carries the derivation, the
+57-minima table, the adversarial review's eight corrections, and the two known
+gaps that stay open (narrow-neck width amplification, and the reach probe's
+missing connectivity requirement).
 
 `SURFACE_PITCH_BOUND_PERCENTILE` is retired/no-port: `SPEC-V5-GEOM` §2.1 and
 §2.6 make sampled-cloud pitch uncertainty identically zero on exact triangle paths.

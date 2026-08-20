@@ -1334,16 +1334,6 @@
       "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=minima-contact-fix-2026-07-24 record=docs/reference/acceptance-run-2026-07-24-contactfix.md locator=Provenance and What moved date=Exact(2026-07-24) err=null"
     },
     {
-      "id": "MINIMA_SUPPORT_AREA_TIPS",
-      "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = 1.0; Placeholder selected tuning policy in a flat sensitivity region",
-      "source_locators": [
-        "scripts/support_placement/config.py:minima_support_area_tips"
-      ],
-      "provenance_wrapper": "Placeholder",
-      "provenance_detail": "non-AcceptSafe selected tuning policy; a flat sensitivity region does not measure a boundary or preferred value"
-    },
-    {
       "id": "MIN_CONTACTS_PER_ISLAND",
       "classification": "runtime_placement",
       "normative": "03-physics-and-constants.md §3.4 = 1",
@@ -3291,6 +3281,13 @@
         "scripts/tools/run_v5.py:SupportConfig lift_mm 3.0",
         "scripts/tools/run_engine_full.py:SupportConfig lift_mm 3.0",
         "scripts/tools/recheck_rewire_cap.py:SupportConfig lift_mm 3.0"
+      ]
+    },
+    {
+      "id": "MINIMA_SUPPORT_AREA_TIPS",
+      "reason": "Retired 2026-08-19, task #62. Its one reader was the low-point adequacy test in plinth-support::perception, which compared a carried area against minima_support_area_tips * pi * tip_radius^2. That is a TENSION yardstick written in support-tip discs, and the physics at a non-birth low point is BENDING: a one-layer shelf of green resin cantilevered off its root under peel. The replacement is a reach criterion, reach <= sqrt(X_ALLOWED/6) * LAYER_HEIGHT_DEFAULT_MM = 0.0707 mm, reading both inputs from this registry. Craig's ruling of 2026-08-19 selected the conservative peel-front-concentrated coefficient 6 over the evenly-spread 3. This constant is retired rather than re-tuned because it never decided anything: across 57 non-birth minima measured on 12 corpus models the band it controlled was empty by 14x, and it is inert by construction, since it compares a whole model cross-section's area against a support tip's. Recorded basis: docs/engineering-journal/derivations/low-point-reach-2026-08-19.md",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_support_area_tips"
       ]
     },
     {

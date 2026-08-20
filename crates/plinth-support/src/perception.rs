@@ -2325,18 +2325,11 @@ fn find_local_minima(
             },
         )
         .map_err(|error| GenericPerceptionError::Slice(error.to_string()))?;
-    let threshold = constants
-        .placeholders()
-        .minima_support_area_tips()
-        .diagnostic()
-        .get()
-        * std::f64::consts::PI
-        * constants
-            .placeholders()
-            .tip_radius_default_mm()
-            .diagnostic()
-            .get()
-            .powi(2);
+    // Task #62: the adequacy yardstick is a REACH, in mm, not a carried area.
+    // Derivation: docs/engineering-journal/derivations/low-point-reach-2026-08-19.md.
+    // Both inputs are read from the M0 registry here, so no tip decision and
+    // no placeholder tuning can move a low-point verdict again.
+    let allowance_mm = registry_low_point_reach_allowance_mm(constants);
     // OQ-3, answered yes in the design: the adequacy probes go through the
     // same normalized path as the print layers -- one code path, and adequacy
     // areas are exactly where the deleted bbox/drop distortions bit (sec 2 D5).
@@ -2349,16 +2342,147 @@ fn find_local_minima(
     )?;
     let mut adequate = vec![false; minima.len()];
     for (probe_row, (minimum_index, minimum)) in suspects.into_iter().enumerate() {
-        let point = [minimum.position_mm[0], minimum.position_mm[1]];
-        let carried = carried_outer_area(&probe_layers[probe_row], point);
-        adequate[minimum_index] = carried >= threshold;
+        let reach_mm = region_reach_mm(&probe_layers[probe_row], minimum);
+        adequate[minimum_index] = reach_mm <= allowance_mm;
     }
     Ok(minima
         .into_iter()
         .enumerate()
-        .filter(|(index, _)| is_birth[*index] || !adequate[*index])
+        .filter(|(index, _)| minimum_demands_support(is_birth[*index], adequate[*index]))
         .map(|(_, minimum)| minimum)
         .collect())
+}
+
+/// Root bending-moment coefficient for the load concentrated at the peel
+/// front, the conservative end of the derived criterion.
+///
+/// This is a closed-form beam coefficient, not a tunable and not a
+/// measurement, so it is deliberately not a registry constant. A shelf of
+/// reach `L` and thickness `t` under a total peel force `F` carries root
+/// stress `6·F·L/(W·t²)` when that force sits at the free edge, against
+/// `3·F·L/(W·t²)` when it is spread evenly over the shelf. Peel is by
+/// definition a force concentrated at a travelling separation line, and the
+/// root moment peaks when that line reaches the free edge, so 6 is the
+/// physical default and 3 is the optimistic bound.
+///
+/// Craig's ruling, 2026-08-19: ship the conservative end.
+const PEEL_FRONT_ROOT_MOMENT_COEFFICIENT: f64 = 6.0;
+
+/// The greatest reach a non-birth low point may have and still be adequately
+/// carried, in mm.
+///
+/// `K = sqrt(X_ALLOWED / 6)` and the allowance is `K · h`. Both `X_ALLOWED`
+/// (the registered area law, `Derived` from calibration plate 5) and `h`
+/// (`LAYER_HEIGHT_DEFAULT_MM`, `Measured` on calibration plate 6) come from
+/// the caller so this formula can be exercised away from the registered
+/// values; [`registry_low_point_reach_allowance_mm`] is the one production
+/// reader and supplies both from the registry.
+///
+/// At the registered values the allowance is `sqrt(12/6) × 0.050 mm`
+/// = 0.0707 mm of reach.
+fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
+    (x_allowed / PEEL_FRONT_ROOT_MOMENT_COEFFICIENT).sqrt() * layer_height_mm
+}
+
+/// The sole production reader of the low-point reach allowance, and the sole
+/// production reader of `X_ALLOWED` anywhere in the engine (task #57,
+/// registry-bypass finding, constants audit sec 2f).
+///
+/// The layer height comes from the registry, per Craig's ruling, not from the
+/// `LayerPlan`. Recorded divergence, not a defect today: the probe slice one
+/// layer down is taken at `z - layers.heights_mm()[index_at(z)]`, so if a plan
+/// ever carries per-layer heights that differ from `LAYER_HEIGHT_DEFAULT_MM`,
+/// the allowance and the probe depth stop describing the same layer. Every
+/// plan in the engine is built at the registered height today, so the two
+/// agree. If per-layer heights ever land, this is the site that has to choose,
+/// and the physical answer is the shelf's own thickness -- the plan value.
+///
+/// Disclosure: no test here can distinguish this registry read from a
+/// hardcoded literal at today's values, because `M0EvidenceConstants`
+/// exposes only `new()` -- there is no way to construct one with a
+/// different evidence set to substitute in a test. The mitigation
+/// is `the_reach_allowance_is_read_from_the_registry_not_hardcoded`, which
+/// pins `x_allowed == 12.0` and `layer_height_mm == 0.050`: a future
+/// registry change to either value flips that assertion red, even though it
+/// cannot prove today that this function reads the registry rather than a
+/// constant.
+fn registry_low_point_reach_allowance_mm(constants: &plinth_core::M0Constants) -> f64 {
+    let evidence = constants.evidence();
+    low_point_reach_allowance_mm(
+        *evidence.x_allowed().value(),
+        *evidence.layer_height_default_mm().value(),
+    )
+}
+
+/// A minimum reaches the support planner when it is a true island birth, or
+/// when it is a non-birth minimum that is not adequately carried.
+///
+/// Births are unconditional: nothing at all is under a birth, so no reach
+/// measurement can excuse one. The birth filter is upstream and untouched by
+/// task #62; this predicate is where its unconditional standing is pinned.
+const fn minimum_demands_support(is_birth: bool, adequate: bool) -> bool {
+    is_birth || !adequate
+}
+
+/// How far a low point's region hangs out past the material carrying it, in mm.
+///
+/// The physics is a cantilever: at a non-birth low point one layer of green
+/// resin cures with nothing beneath it, joined sideways within its own layer
+/// to resin that IS sitting on the previous layer, and the peel pull bends
+/// that tongue at its root. Reach is the tongue's length, so it is the
+/// quantity the derived criterion bounds.
+///
+/// Zero when every sampled region point sits inside the solid one layer down.
+/// Otherwise the largest point-to-solid distance over the sampled region:
+/// that point is the free end of the shelf.
+///
+/// KNOWN GAP, filed and not fixed here (1 of 2): this is reach only. A wide
+/// shelf hanging off a NARROW ROOT amplifies root stress by
+/// `W_shelf / W_root`, without bound, and no reach measurement sees it. The
+/// criterion therefore does not catch a wide ledge on a thin stalk, nor a
+/// patch joined to carried material by a hair-thin in-plane neck (which is
+/// physically a birth island on a thread yet classifies as non-birth with a
+/// short reach).
+///
+/// KNOWN GAP, filed and not fixed here (2 of 2): there is no connectivity
+/// requirement. The nearest solid one layer down may belong to a different
+/// component -- a neighbouring limb, a separate island, or another model on a
+/// crowded plate -- in which case a short reach is scored where there is no
+/// load path at all. `carried_outer_area`, the predicate this replaces, had
+/// exactly the same hole (`point_in_polygon` over every solid, no component
+/// identity), so this is disclosed, not worsened.
+///
+/// Cost is one point-to-polygon scan per sampled region point, the same order
+/// and the same shape of work as [`birth_xy_ok`] in the birth test above.
+fn region_reach_mm(solids: &[SliceSolid], minimum: &LocalZMinimum) -> f64 {
+    sampled_region_points(minimum)
+        .iter()
+        .map(|point| point_reach_mm(solids, [point[0], point[1]]))
+        .fold(0.0, f64::max)
+}
+
+/// Distance in mm from one point to the nearest carrying solid, zero when the
+/// point is inside one.
+///
+/// Infinite when there is no solid at all one layer down, which no finite
+/// allowance admits -- a low point over nothing always demands a support.
+fn point_reach_mm(solids: &[SliceSolid], point: [f64; 2]) -> f64 {
+    if solids.iter().any(|solid| solid_contains(solid, point)) {
+        return 0.0;
+    }
+    solids
+        .iter()
+        .flat_map(|solid| std::iter::once(&solid.outer).chain(solid.holes.iter()))
+        .flat_map(|loop_| {
+            (0..loop_.points_xy_mm.len()).map(move |index| {
+                point_segment_distance(
+                    point,
+                    loop_.points_xy_mm[index],
+                    loop_.points_xy_mm[(index + 1) % loop_.points_xy_mm.len()],
+                )
+            })
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn filter_minima_to_exterior_faces(
@@ -2401,17 +2525,6 @@ fn filter_minima_to_exterior_faces(
         .map(|(_, minimum)| minimum)
         .collect();
     Ok(minima)
-}
-
-fn carried_outer_area(solids: &[SliceSolid], point: [f64; 2]) -> f64 {
-    // Python Path2D.discrete tests each positive outer loop independently.
-    // A hollow cavity does not subtract from the load-bearing outer component
-    // for this one adequacy predicate.
-    solids
-        .iter()
-        .filter(|solid| point_in_polygon(point, solid.outer.points_xy_mm()))
-        .map(|solid| solid.outer.signed_area_mm2)
-        .fold(0.0, f64::max)
 }
 
 fn layer_tolerance(layers: &LayerPlan, z: f64, count: usize) -> f64 {
@@ -6047,8 +6160,16 @@ mod tests {
         assert_eq!(births[1].centroid_xy_mm, [5.5, 1.325]);
     }
 
+    /// The reach criterion reverses the old area predicate over a cavity, and
+    /// it does so deliberately.
+    ///
+    /// `carried_outer_area` credited the whole positive outer loop to a point
+    /// standing over a hole, so a low point suspended over a cavity read as
+    /// well carried. Physically there is nothing under it: the material that
+    /// holds it is the cavity wall, and the distance to that wall is the
+    /// cantilever it has to bridge. Reach measures that distance.
     #[test]
-    fn hollow_adequacy_uses_positive_outer_area_even_when_point_is_in_hole() {
+    fn a_low_point_over_a_cavity_reaches_to_the_cavity_wall() {
         let solid = SliceSolid {
             outer: SliceLoop {
                 points_xy_mm: vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
@@ -6061,7 +6182,168 @@ mod tests {
                 hole: true,
             }],
         };
-        assert_eq!(carried_outer_area(&[solid], [2.0, 2.0]), 16.0);
+        // The cavity centre is 1.0 mm from every wall, 14x the 0.0707 mm
+        // allowance.
+        assert!((point_reach_mm(std::slice::from_ref(&solid), [2.0, 2.0]) - 1.0).abs() < 1.0e-12);
+        // A point on the solid annulus is carried outright.
+        assert_eq!(point_reach_mm(&[solid], [0.5, 0.5]), 0.0);
+    }
+
+    /// A 10 x 10 mm carrying solid one layer down, with its lower edge on
+    /// `y = 0`, so a region point at `y = -d` has reach exactly `d` mm.
+    fn reach_fixture_probe() -> Vec<SliceSolid> {
+        vec![test_slice_solid(vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ])]
+    }
+
+    /// A minimum whose region has one point inside the carrying solid and one
+    /// point hanging `overhang_mm` past its `y = 0` edge. A negative
+    /// `overhang_mm` puts that second point inside the solid too, which is the
+    /// zero-reach dimple case.
+    fn reach_fixture_minimum(z_mm: f64, overhang_mm: f64) -> LocalZMinimum {
+        LocalZMinimum {
+            position_mm: [5.0, 5.0, z_mm],
+            normal: [0.0, 0.0, -1.0],
+            region_points_mm: vec![[5.0, 5.0, z_mm], [5.0, -overhang_mm, z_mm]],
+        }
+    }
+
+    /// NOT a corpus-parity check. The three reach values below are literals
+    /// copied from the instrumented `b8edcb8` dumps (derivation's 57-minima
+    /// table,
+    /// `docs/engineering-journal/derivations/low-point-reach-2026-08-19.md`
+    /// sec 3), not re-derived from a mesh here, so the test is tautological
+    /// on those values by construction. What it actually pins: (a) the
+    /// comparison direction at both ends -- `>` the allowance demands a
+    /// support, `<=` is adequate; (b) the two non-trivial margins, 1.4756x
+    /// and 0.2827x the allowance; and (c) that `region_reach_mm` takes the
+    /// max over every sampled region point rather than only the minimum's
+    /// representative point -- `reach_fixture_minimum`'s representative
+    /// point always sits inside the carrying solid, so a reach read off it
+    /// alone would read zero in every case here, and the second region point
+    /// is what the max must pick up. The real corpus-parity evidence is the
+    /// byte-identical emissions recorded in the derivation's provenance
+    /// appendix, not this fixture.
+    ///
+    /// MEASURED reach values, read off the instrumented `b8edcb8` dumps:
+    ///
+    /// - Crawler Zombie minimum 13 -- reach 0.104343 mm. 148% of the
+    ///   0.0707 mm allowance, so it DEMANDS a support.
+    /// - Thorny Vegepygmy minimum 17 -- reach 0.019988 mm. 28% of the
+    ///   allowance, so it is adequate.
+    /// - the other 55 -- reach 0.000000 mm exactly, every sampled region point
+    ///   inside the solid below. Adequate with full margin.
+    ///
+    /// These are the only three reach values in the whole corpus. Reverting to
+    /// any area-shaped yardstick, or hardcoding an allowance, changes at least
+    /// one of the three verdicts or the margins asserted with them.
+    #[test]
+    fn the_corpus_reach_table_reproduces_at_the_registered_allowance() {
+        let constants = plinth_core::m0_constants().expect("M0 constants");
+        let allowance_mm = registry_low_point_reach_allowance_mm(constants);
+        let probe = reach_fixture_probe();
+
+        // Crawler Zombie minimum 13, z = 0.855195 mm.
+        let crawler_zombie = region_reach_mm(&probe, &reach_fixture_minimum(0.855195, 0.104343));
+        assert!((crawler_zombie - 0.104343).abs() < 1.0e-12);
+        assert!(
+            crawler_zombie > allowance_mm,
+            "Crawler Zombie minimum 13 reaches {crawler_zombie} mm against a {allowance_mm} mm \
+             allowance and must demand a support"
+        );
+        assert!(minimum_demands_support(
+            false,
+            crawler_zombie <= allowance_mm
+        ));
+        // 148% of the allowance. The margin is asserted, not just the verdict:
+        // the corpus alone cannot tell the conservative coefficient 6 from the
+        // optimistic 3 (this case demands a support at either), so the margin
+        // is what pins Craig's conservative-end ruling here.
+        assert!((crawler_zombie / allowance_mm - 1.4756).abs() < 1.0e-3);
+
+        // Thorny Vegepygmy minimum 17, z = 2.355105 mm.
+        let thorny_vegepygmy = region_reach_mm(&probe, &reach_fixture_minimum(2.355105, 0.019988));
+        assert!((thorny_vegepygmy - 0.019988).abs() < 1.0e-12);
+        assert!(
+            thorny_vegepygmy <= allowance_mm,
+            "Thorny Vegepygmy minimum 17 reaches {thorny_vegepygmy} mm against a {allowance_mm} mm \
+             allowance and is adequately carried"
+        );
+        assert!(!minimum_demands_support(
+            false,
+            thorny_vegepygmy <= allowance_mm
+        ));
+        // 28% of the allowance.
+        assert!((thorny_vegepygmy / allowance_mm - 0.2827).abs() < 1.0e-3);
+
+        // The other 55: a dimple wholly inside the material below.
+        let dimple = region_reach_mm(&probe, &reach_fixture_minimum(6.421297, -0.5));
+        assert_eq!(dimple, 0.0);
+        assert!(!minimum_demands_support(false, dimple <= allowance_mm));
+    }
+
+    /// A low point with nothing at all one layer down is never adequate, at
+    /// any finite allowance.
+    #[test]
+    fn a_low_point_over_empty_space_always_demands_a_support() {
+        let constants = plinth_core::m0_constants().expect("M0 constants");
+        let allowance_mm = registry_low_point_reach_allowance_mm(constants);
+        let reach_mm = region_reach_mm(&[], &reach_fixture_minimum(1.0, 0.0));
+        assert!(reach_mm.is_infinite());
+        assert!(minimum_demands_support(false, reach_mm <= allowance_mm));
+    }
+
+    /// The birth filter is untouched by the reach criterion: a birth demands a
+    /// support whatever the reach measurement says, because there is nothing
+    /// beneath a birth for a reach to be measured against.
+    #[test]
+    fn a_birth_demands_a_support_however_the_reach_verdict_falls() {
+        assert!(minimum_demands_support(true, true));
+        assert!(minimum_demands_support(true, false));
+        assert!(!minimum_demands_support(false, true));
+        assert!(minimum_demands_support(false, false));
+    }
+
+    /// Sabotage: the allowance must be a live function of two registered
+    /// constants, not a literal.
+    ///
+    /// Mutating a test-local copy of either registered input moves the
+    /// allowance by the amount the derivation predicts -- `sqrt` in the area
+    /// law, linear in the layer height. A hardcoded 0.0707 mm survives
+    /// neither check.
+    #[test]
+    fn the_reach_allowance_is_read_from_the_registry_not_hardcoded() {
+        let constants = plinth_core::m0_constants().expect("M0 constants");
+        let evidence = constants.evidence();
+        let x_allowed = *evidence.x_allowed().value();
+        let layer_height_mm = *evidence.layer_height_default_mm().value();
+
+        // The production reader composes exactly these two registered values
+        // and nothing else.
+        let registered = registry_low_point_reach_allowance_mm(constants);
+        assert_eq!(
+            registered,
+            low_point_reach_allowance_mm(x_allowed, layer_height_mm)
+        );
+
+        // Craig's conservative-end ruling, 2026-08-19: coefficient 6, the peel
+        // front concentrated at the free edge. sqrt(12/6) * 0.050 mm.
+        assert!((PEEL_FRONT_ROOT_MOMENT_COEFFICIENT - 6.0).abs() < 1.0e-12);
+        assert!((x_allowed - 12.0).abs() < 1.0e-12);
+        assert!((layer_height_mm - 0.050).abs() < 1.0e-12);
+        assert!((registered - 0.070_710_678_118_654_75).abs() < 1.0e-15);
+
+        // Sabotage the area law: four times X_ALLOWED must double the reach.
+        let sabotaged_law = low_point_reach_allowance_mm(4.0 * x_allowed, layer_height_mm);
+        assert!((sabotaged_law / registered - 2.0).abs() < 1.0e-12);
+
+        // Sabotage the layer height: a doubled layer doubles the reach.
+        let sabotaged_layer = low_point_reach_allowance_mm(x_allowed, 2.0 * layer_height_mm);
+        assert!((sabotaged_layer / registered - 2.0).abs() < 1.0e-12);
     }
 
     #[test]
