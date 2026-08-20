@@ -666,6 +666,7 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
         exit_code,
         detail,
         evidence,
+        repair_report,
     } = outcome(&report, "blade")
     else {
         panic!(
@@ -677,6 +678,38 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     assert!(
         detail.contains("coverage closure refused"),
         "the detail must name the refusal: {detail}"
+    );
+
+    // **SPEC-A4 §A.8's third destination, on the path that needs it most.**
+    // Ruling R10 deleted the failed-tries cap and put loud reporting in its
+    // place, and §A.8 puts the report in three places "on every path — sealed
+    // or refused". This is the refused path: no cap, the pool runs all the way
+    // out, and this model spends 45 one-row transactions and commits none of
+    // them. Until 2026-08-20 the run report said NOTHING about that — the
+    // ledger reached the `Artifact` disposition only, so the run report priced
+    // the cheap path and stayed silent about the expensive one.
+    //
+    // Measured, not chosen: 45 is `NoImprovingRepair { candidates_tried: 45 }`
+    // on this fixture, the same number the sidecar carries below and the same
+    // one the support-side gate pins. A change that moves it is a change to
+    // what the search does, and it has to be re-measured deliberately.
+    let repair = repair_report.as_ref().expect(
+        "a coverage-closure refusal states what the controller spent; `None` means §A.8's \
+         third destination is wired on the sealed path only again",
+    );
+    assert_eq!(
+        (repair.trials, repair.commits),
+        (45, 0),
+        "the raking blade runs its pool out and commits nothing: {repair:?}"
+    );
+    assert_eq!(
+        repair.candidates_remaining, 0,
+        "\"remaining=0\" is the claim that the loop stopped because nothing could help, \
+         not because a counter said stop: {repair:?}"
+    );
+    assert!(
+        repair.trials >= repair.commits,
+        "every commit is a trial: {repair:?}"
     );
 
     assert!(
@@ -765,6 +798,16 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
         sidecar["closure"].is_object(),
         "the sidecar must embed the typed closure refusal verbatim"
     );
+    // **§A.8's SECOND destination, pinned pipeline-side for the first time.**
+    // The schema bump to `v2` above is justified by "a reader must be able to
+    // tell `the loop ran 8 times` from `0 rows earned their place`" — and that
+    // only holds because `closure.repair` is in the same file saying 45 trials
+    // bought 0 commits. Nothing on this side asserted that, so `repair: None`
+    // could be reintroduced with the whole pipeline gate staying green while
+    // the v2 claim quietly became false. It cannot now.
+    assert_eq!(sidecar["closure"]["repair"]["trials"], 45);
+    assert_eq!(sidecar["closure"]["repair"]["commits"], 0);
+    assert_eq!(sidecar["closure"]["repair"]["candidates_remaining"], 0);
     assert!(
         sidecar["report"].is_null(),
         "a controller refusal must not carry a gate report"

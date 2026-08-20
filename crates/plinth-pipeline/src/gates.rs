@@ -380,20 +380,16 @@ pub struct GatedEmission {
     /// it is consumed. Both empty on the ordinary model.
     pub abandoned_contacts: Vec<plinth_support::AbandonedContactDisclosure>,
     pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
-    /// **SPEC-A4 §A.8's third destination.** What the one-winner repair
-    /// controller spent to seal this model: trials, commits, the rejection
-    /// histogram by class, and the wall time. Read off the authority here for
-    /// the same reason as the three lists above — `into_supported_model` below
-    /// consumes it and the lowered scene carries no repair ledger.
+    /// **SPEC-A4 §A.8's third destination is NOT read here**, deliberately —
+    /// see `prepare::seal_and_emit`, which reads the repair ledger off the
+    /// authority one frame out, before it hands the authority to
+    /// [`judge_then_emit`].
     ///
-    /// Ruling R10 deleted the failed-tries cap and put visibility in its place.
-    /// That trade only holds if the cost reaches a reader, so this travels to
-    /// the run report rather than living and dying inside `plinth-support`.
-    ///
-    /// `None` means the sealed run was produced by a controller that keeps no
-    /// repair ledger — today that is only the retained batch loop
-    /// `plinth_support::run_support`, which is no longer a production door.
-    pub repair_report: Option<plinth_support::RepairRunReport>,
+    /// It used to be read here, and that put the ledger on the SEALED path
+    /// only: a gate refusal returns `Err` from this function and the clone
+    /// died with it, so the refused path — the path ruling R10 deleted the
+    /// failed-tries cap on, the expensive one — reported nothing. One read,
+    /// one frame out, reaches both dispositions.
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -472,8 +468,9 @@ fn judged_emission(
     let ownerless_islands = authority.ownerless_islands().to_vec();
     let abandoned_contacts = authority.abandoned_contacts().to_vec();
     let grown_contact_tips = authority.grown_contact_tips().to_vec();
-    // SPEC-A4 §A.8, third destination: same window, same reason.
-    let repair_report = authority.repair_report().cloned();
+    // SPEC-A4 §A.8's repair ledger is read by the CALLER, before it hands the
+    // authority over — see `GatedEmission::routed_contacts`'s neighbouring
+    // doc. Reading it here would only reach the sealed path.
     let (gates, routed_contacts, final_live_members, snapshot_digest) = {
         let snapshot =
             authority
@@ -513,7 +510,6 @@ fn judged_emission(
         ownerless_islands,
         abandoned_contacts,
         grown_contact_tips,
-        repair_report,
         routed_contacts,
         final_live_members,
         snapshot_digest,

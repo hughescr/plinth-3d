@@ -334,6 +334,32 @@ impl DrilledShellRefusal {
         let stage = stop
             .shell_refusal_stage()
             .expect("only a support refusal reaches the oriented-solid reserve");
+        // **No SPEC-A4 §A.8 spend travels here, and that is a measurement
+        // rather than an omission.** The substitution seam does run the
+        // repair controller twice — once on the drilled shell, then again on
+        // the oriented solid — but no stop that reaches this function can
+        // carry a repair ledger, by construction:
+        //
+        // * a stop reaches here only when [`ChainStop::is_support_refusal`]
+        //   holds, and that predicate explicitly EXCLUDES
+        //   `SupportRunError::CoverageClosure` — the one refusal class the
+        //   controller attaches a ledger to. A coverage-closure refusal of
+        //   the shell is terminal and keeps its own report;
+        // * every other class it admits (`Support`, and `SealedRun` with
+        //   `Failed` / `InvalidDerivedFrame` / `InvalidResourceCaps`) is a
+        //   failure at or before attempt 0, where the repair loop was never
+        //   entered and no ledger exists to lose;
+        // * and a shell that SEALED and then failed to lower or emit is not
+        //   a support refusal either, so it keeps its own ledger on its own
+        //   `Failed` disposition.
+        //
+        // `debug_assert` rather than prose alone, so the day one of those
+        // three facts changes this stops being true quietly.
+        debug_assert!(
+            stop.repair_report().is_none(),
+            "a stop carrying a repair ledger reached the substitution seam; the shell's \
+             §A.8 spend would be dropped here"
+        );
         Self {
             drilled_faces,
             stage,
@@ -408,6 +434,27 @@ pub struct ChainStop {
     /// [`Self::evidence`]'s reason: it carries a rendered refusal string, and
     /// the overwhelming majority of stops never carry one.
     refused_shell: Option<Box<DrilledShellRefusal>>,
+    /// **SPEC-A4 §A.8's third destination, on the refused path.** What the
+    /// one-winner coverage-repair controller spent before this stop was
+    /// reached: trials, commits, the rejection histogram by class, the
+    /// per-trial wall-time order statistics, and rule N4's demotion pair.
+    ///
+    /// Ruling R10 deleted the failed-tries cap and put loud reporting in its
+    /// place, and §A.8 says the report goes to three places **on every path —
+    /// sealed or refused**. The refused path is the expensive one: it is where
+    /// the pool runs all the way out (45 one-row transactions on the raking
+    /// blade, committing none). A report that only reaches the sealed path
+    /// leaves that spend nowhere a reader can compare it, and the trade R10
+    /// made would not hold.
+    ///
+    /// Attached by [`Self::with_repair_report`] at the two points in
+    /// `seal_and_emit` where a stop is first known to follow a controller run,
+    /// and projected into `Refused` / `Failed` by [`failure`]. `None` means no
+    /// controller ledger exists for this stop — a model that failed before or
+    /// at attempt 0 never entered the repair loop, and claiming `trials=0`
+    /// for it would say "the loop ran and spent nothing" about a loop that
+    /// never ran. Boxed for [`Self::evidence`]'s reason.
+    repair_report: Option<Box<plinth_support::RepairRunReport>>,
 }
 
 impl ChainStop {
@@ -419,6 +466,7 @@ impl ChainStop {
             measured_against: None,
             evidence: None,
             refused_shell: None,
+            repair_report: None,
         }
     }
 
@@ -430,6 +478,7 @@ impl ChainStop {
             measured_against: None,
             evidence: None,
             refused_shell: None,
+            repair_report: None,
         }
     }
 
@@ -454,6 +503,28 @@ impl ChainStop {
     #[must_use]
     pub fn evidence(&self) -> Option<&crate::coverage_evidence::CoverageRefusalEvidence> {
         self.evidence.as_deref()
+    }
+
+    /// Attach what SPEC-A4 §A.8's repair controller spent before this stop.
+    ///
+    /// Takes the `Option` rather than the value, because the caller's question
+    /// is "does a controller ledger exist for this stop" and answering it at
+    /// the call site is what keeps "no ledger" from being written as an
+    /// all-zero one.
+    #[must_use]
+    pub fn with_repair_report(
+        mut self,
+        repair_report: Option<plinth_support::RepairRunReport>,
+    ) -> Self {
+        self.repair_report = repair_report.map(Box::new);
+        self
+    }
+
+    /// What SPEC-A4 §A.8's repair controller spent before this stop, when a
+    /// controller ran at all.
+    #[must_use]
+    pub fn repair_report(&self) -> Option<&plinth_support::RepairRunReport> {
+        self.repair_report.as_deref()
     }
 
     /// Record that a drilled shell was built and refused before the geometry
@@ -802,6 +873,10 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
                         target.display()
                     ),
                     evidence: None,
+                    // Refused by name before it was opened: no stage ran, so
+                    // no controller ran, so there is nothing §A.8 could
+                    // report. `None` is the measurement here.
+                    repair_report: None,
                 },
             });
             continue;
@@ -1108,19 +1183,28 @@ fn clear_stale_coverage_evidence(target: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Project a stop into the report's serializable disposition.
+///
+/// **SPEC-A4 §A.8's third destination travels through here on the refused
+/// path**, into whichever of the two non-emitting dispositions the stop lands
+/// in — a pre-write gate refusal is `Refused`, a controller refusal or a
+/// post-seal lowering/emit failure is `Failed`, and the controller spent the
+/// same trials either way.
 fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
+    let repair_report = stop.repair_report().cloned().map(Box::new);
     if stop.is_gates() {
         ModelPreparationOutcome::Refused {
             gate: stop.gate(),
             geometry: stop.refused_geometry().cloned(),
             violation: stop.detail(),
             evidence: stop.evidence().cloned().map(Box::new),
+            repair_report,
         }
     } else {
         ModelPreparationOutcome::Failed {
             exit_code: stop.exit_code(),
             detail: stop.detail(),
             evidence: stop.evidence().cloned().map(Box::new),
+            repair_report,
         }
     }
 }
@@ -1732,11 +1816,28 @@ pub fn seal_and_emit(
         } else {
             None
         };
+        // **SPEC-A4 §A.8's third destination, refused half.** The controller
+        // refused, and this is the disposition that carries what it spent
+        // doing so. It comes off the typed refusal rather than off the
+        // authority, because on this path there IS no authority — the run
+        // returned `Err` and its ledger lives in the refusal. Ruling R10
+        // deleted the failed-tries cap here specifically, so this is the
+        // expensive path and the one whose cost most needs a reader.
+        //
+        // Every other `SupportRunError` is a stage failure at or before
+        // attempt 0, where the repair loop was never entered: `None`, not an
+        // all-zero report, because "the loop ran and spent nothing" and "the
+        // loop never ran" are different facts.
+        let repair_report = match &source {
+            SupportRunError::CoverageClosure(refusal) => refusal.repair.clone(),
+            _ => None,
+        };
         let stop = ChainStop::new(PipelineError::SealedRun {
             model: model.clone(),
             source,
         })
-        .measured_against(scaled_caps);
+        .measured_against(scaled_caps)
+        .with_repair_report(repair_report);
         match evidence {
             Some(evidence) => stop.with_evidence(evidence),
             None => stop,
@@ -1746,76 +1847,104 @@ pub fn seal_and_emit(
         return Ok(None);
     }
 
+    // **SPEC-A4 §A.8's third destination, sealed half — read HERE and not
+    // inside `judge_then_emit`.** The authority is about to be handed over and
+    // consumed, and the lowered scene keeps no repair ledger, so this is the
+    // last frame in which the ledger exists. Reading it one frame in, inside
+    // `judged_emission`, is what put the report on the sealed path only: a
+    // gate refusal returns `Err` from there and the read died with it, so the
+    // path ruling R10 deleted the failed-tries cap on reported nothing about
+    // what it spent. One read here reaches the artifact, the gate refusal and
+    // a post-seal lowering or emit failure alike.
+    let repair_report = authority.repair_report().cloned();
+
     // The pre-write gate. `judge_then_emit` judges the sealed snapshot while
     // the authority is still alive, and only a passing verdict reaches
     // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
     // no file at `target` at all. There is no override parameter and there is
     // not going to be one.
-    let gated = crate::judge_then_emit(
+    let gated = match crate::judge_then_emit(
         model,
         authority,
         &EmitRequest {
             target_path: target.to_path_buf(),
             printer: policy.printer().clone(),
         },
-    )
-    .map_err(|error| match &error {
-        // Carry the gate's own reason, the gate itself, and the geometry it
-        // was refusing -- a refusal without the verdict behind it is not a
-        // measurement, and a gate verdict without the geometry it judged
-        // cannot be told apart from a verdict on the fallback.
-        PipelineError::Gates { source, .. } => {
-            let gate = source.gate();
-            // FU-57: a blocking coverage verdict carries the full
-            // `CoverageReport` on `GateRefusal::Refused`, and an UNMEASURABLE
-            // coverage gate is still a coverage refusal — fail-closed, the
-            // model `Refused`, the coverage gate named — so it keeps evidence
-            // too, as a reason-only sidecar naming the measurement failure.
-            // That is exactly what the controller's own equivalent failure
-            // (`CoverageClosureReason::MeasurementRefused`) has always
-            // written; before this the identical error produced a sidecar one
-            // stage earlier and complete silence here. Gate outcomes that are
-            // not about coverage at all (unauthorized emission, an
-            // unavailable registry, a pending-but-unported gate) persist
-            // nothing, because there is no coverage refusal to explain.
-            let evidence = source.report().map_or_else(
-                || {
-                    source.unmeasurable_coverage_reason().map(|reason| {
-                        coverage_evidence::persist_unmeasurable_gate(
-                            model,
-                            target,
-                            &render_mesh,
+    ) {
+        Ok(gated) => gated,
+        // A `match` rather than `map_err` so the one repair-ledger read above
+        // can be MOVED into whichever of the two paths runs, instead of being
+        // cloned once for a closure that usually never fires.
+        Err(error) => {
+            let stop = match &error {
+                // Carry the gate's own reason, the gate itself, and the
+                // geometry it was refusing -- a refusal without the verdict
+                // behind it is not a measurement, and a gate verdict without
+                // the geometry it judged cannot be told apart from a verdict
+                // on the fallback.
+                PipelineError::Gates { source, .. } => {
+                    let gate = source.gate();
+                    // FU-57: a blocking coverage verdict carries the full
+                    // `CoverageReport` on `GateRefusal::Refused`, and an
+                    // UNMEASURABLE coverage gate is still a coverage refusal —
+                    // fail-closed, the model `Refused`, the coverage gate
+                    // named — so it keeps evidence too, as a reason-only
+                    // sidecar naming the measurement failure. That is exactly
+                    // what the controller's own equivalent failure
+                    // (`CoverageClosureReason::MeasurementRefused`) has always
+                    // written; before this the identical error produced a
+                    // sidecar one stage earlier and complete silence here.
+                    // Gate outcomes that are not about coverage at all
+                    // (unauthorized emission, an unavailable registry, a
+                    // pending-but-unported gate) persist nothing, because
+                    // there is no coverage refusal to explain.
+                    let evidence = source.report().map_or_else(
+                        || {
+                            source.unmeasurable_coverage_reason().map(|reason| {
+                                coverage_evidence::persist_unmeasurable_gate(
+                                    model,
+                                    target,
+                                    &render_mesh,
+                                    gate,
+                                    Some(&supported_geometry),
+                                    &reason,
+                                )
+                            })
+                        },
+                        |report| {
+                            Some(coverage_evidence::persist_gate_refusal(
+                                model,
+                                target,
+                                &render_mesh,
+                                gate,
+                                Some(&supported_geometry),
+                                report,
+                            ))
+                        },
+                    );
+                    let stop = ChainStop::refused(
+                        error,
+                        GateStop {
                             gate,
-                            Some(&supported_geometry),
-                            &reason,
-                        )
-                    })
-                },
-                |report| {
-                    Some(coverage_evidence::persist_gate_refusal(
-                        model,
-                        target,
-                        &render_mesh,
-                        gate,
-                        Some(&supported_geometry),
-                        report,
-                    ))
-                },
-            );
-            let stop = ChainStop::refused(
-                error,
-                GateStop {
-                    gate,
-                    geometry: supported_geometry.clone(),
-                },
-            );
-            match evidence {
-                Some(evidence) => stop.with_evidence(evidence),
-                None => stop,
-            }
+                            geometry: supported_geometry.clone(),
+                        },
+                    );
+                    match evidence {
+                        Some(evidence) => stop.with_evidence(evidence),
+                        None => stop,
+                    }
+                }
+                _ => ChainStop::new(error),
+            };
+            // §A.8 again, and this is the half the challenger measured
+            // missing. The controller had already run and already spent when
+            // the gate refused, or when lowering or the emit audit failed
+            // afterwards. Attached to every one of those stops, not only the
+            // coverage-gate one: the spend is the same fact whichever stage
+            // spoke next.
+            return Err(stop.with_repair_report(repair_report));
         }
-        _ => ChainStop::new(error),
-    })?;
+    };
 
     Ok(Some(ChainOutcome {
         model: model.clone(),
@@ -1829,7 +1958,9 @@ pub fn seal_and_emit(
         hollow_disposition,
         supported_geometry,
         ownerless_islands: gated.ownerless_islands,
-        repair_report: gated.repair_report,
+        // The same single read as the refused path above — see the comment at
+        // the `judge_then_emit` call.
+        repair_report,
         abandoned_contacts: gated.abandoned_contacts,
         grown_contact_tips: gated.grown_contact_tips,
         routed_contacts: gated.routed_contacts,
@@ -2073,6 +2204,73 @@ mod tests {
             !stop.is_support_refusal(),
             "a coverage-closure refusal must not be answered with a substitute geometry"
         );
+    }
+
+    /// **SPEC-A4 §A.8's third destination survives the projection into BOTH
+    /// non-emitting dispositions.**
+    ///
+    /// `failure()` is the one funnel every stop passes through on its way to
+    /// the run report, and until 2026-08-20 it dropped the repair ledger on
+    /// the way — `Refused` and `Failed` had nowhere to put it, so the report
+    /// stated what the controller spent only when the model EMITTED. §A.8
+    /// says "on every path — sealed or refused", and the refused path is the
+    /// one ruling R10 deleted the failed-tries cap on.
+    ///
+    /// The two shapes are pinned separately because they are reached by
+    /// different attachment points in `seal_and_emit`: a pre-write gate
+    /// refusal reads the ledger off the still-live authority, and a
+    /// controller refusal reads it off the typed refusal, there being no
+    /// authority on that path.
+    #[test]
+    fn a_refused_and_a_failed_disposition_both_carry_what_the_controller_spent() {
+        let model = ModelId::new("fixture");
+        let spent = plinth_support::RepairRunReport {
+            trials: 45,
+            commits: 0,
+            candidates_remaining: 0,
+            ..plinth_support::RepairRunReport::default()
+        };
+
+        // The gate refused a model the controller had already spent on.
+        let gate_stop = ChainStop::refused(
+            PipelineError::Gates {
+                model: model.clone(),
+                source: GateRefusal::ConstantsUnavailable,
+            },
+            GateStop {
+                gate: Some(crate::PreWriteGate::UncoveredIslands),
+                geometry: SupportedGeometry::DrilledShellSealed,
+            },
+        )
+        .with_repair_report(Some(spent.clone()));
+        assert_eq!(gate_stop.repair_report(), Some(&spent));
+        let refused = failure(&gate_stop);
+        assert!(matches!(refused, ModelPreparationOutcome::Refused { .. }));
+        assert_eq!(refused.repair_report(), Some(&spent));
+
+        // The controller itself refused, and its ledger came off the refusal.
+        let closure_stop = ChainStop::new(PipelineError::SealedRun {
+            model: model.clone(),
+            source: plinth_support::SupportRunError::CoverageClosure(Box::new(
+                plinth_support::CoverageClosureRefusal {
+                    attempts: 0,
+                    reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+                    islands: Vec::new(),
+                    history: Vec::new(),
+                    repair: Some(spent.clone()),
+                },
+            )),
+        })
+        .with_repair_report(Some(spent.clone()));
+        let failed = failure(&closure_stop);
+        assert!(matches!(failed, ModelPreparationOutcome::Failed { .. }));
+        assert_eq!(failed.repair_report(), Some(&spent));
+
+        // And a stop from before any controller ran carries no ledger, which
+        // is a measurement: "the loop never ran" is not "the loop ran and
+        // spent nothing".
+        let early = failure(&ChainStop::new(PipelineError::DegenerateExtent { model }));
+        assert_eq!(early.repair_report(), None);
     }
 
     /// A shell that was built and drilled, and then refused, is a stop of a

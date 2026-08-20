@@ -34,6 +34,11 @@ pub use plinth_support::CoverageClosureGap;
 // refusal wording to live inline in a `println!` instead of in a line builder a
 // test can read back.
 pub use plinth_support::{AbandonedContactDisclosure, GrownContactTipDisclosure};
+// Same reason again, for SPEC-A4 §A.8's report. It is the type of a public
+// field on three of [`ModelPreparationOutcome`]'s four variants, so it is part
+// of this crate's surface either way — and §A.8's third destination is the
+// CLI's per-model line, which cannot NAME the type it prints without this.
+pub use plinth_support::RepairRunReport;
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -557,6 +562,23 @@ pub enum ModelPreparationOutcome {
         /// `Refused` value, including a non-coverage gate refusal.
         #[serde(default)]
         evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
+        /// **SPEC-A4 §A.8's third destination on the REFUSED path** — what
+        /// the one-winner coverage-repair controller spent before the gate
+        /// refused this model. Same fields, same meaning and same reason as
+        /// [`Self::Artifact`]'s copy.
+        ///
+        /// It is here because §A.8 says the report goes to three places "on
+        /// every path — sealed or refused", and because the refused path is
+        /// the expensive one: ruling R10 deleted the failed-tries cap, so a
+        /// model that refuses runs its candidate pool all the way out. A run
+        /// report that states the spend for the cheap path and nothing for
+        /// the costly one is not the visibility R10 traded the cap for.
+        ///
+        /// `None` means no controller ledger exists for this refusal — the
+        /// model never reached a sealed run at all. `default` for the same
+        /// reason `evidence` is.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
     },
     /// The model did not reach the gates at all. `exit_code` is the frozen
     /// per-stage projection of the typed error behind `detail`.
@@ -571,6 +593,25 @@ pub enum ModelPreparationOutcome {
         /// reason as `Refused::evidence`; boxed for the same reason too.
         #[serde(default)]
         evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
+        /// **SPEC-A4 §A.8's third destination on the FAILED path** — what the
+        /// one-winner coverage-repair controller spent before this failure.
+        ///
+        /// Two failure classes reach it, and they are the two that matter
+        /// most to ruling R10's trade:
+        ///
+        /// 1. the controller's own refusal (`SupportRunError::CoverageClosure`
+        ///    — the disposition FU-56 gave the coverage verdict), where the
+        ///    ledger comes off the typed refusal, because there is no sealed
+        ///    authority on that path; and
+        /// 2. a model that SEALED and then failed to lower or to emit, where
+        ///    it comes off the authority before it was handed over.
+        ///
+        /// `None` on every other failure, and that is a measurement, not a
+        /// gap: a model that failed at or before attempt 0 never entered the
+        /// repair loop, and writing `trials=0` for it would claim the loop ran
+        /// and spent nothing. `default` for the same reason `evidence` is.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
     },
 }
 
@@ -583,6 +624,33 @@ impl ModelPreparationOutcome {
         match self {
             Self::Refused { evidence, .. } | Self::Failed { evidence, .. } => evidence.as_deref(),
             Self::Artifact { .. } | Self::Stopped { .. } => None,
+        }
+    }
+
+    /// **SPEC-A4 §A.8's third destination, read the same way on every
+    /// disposition** — what the one-winner coverage-repair controller spent on
+    /// this model, whether the model emitted, was refused by a gate, or
+    /// failed.
+    ///
+    /// One accessor rather than three match arms at every reader, for the
+    /// reason `coverage_evidence` above is one: §A.8 says the report is
+    /// reported "on every path", and a reader that has to remember which
+    /// variants carry it is a reader that will forget one. That is exactly the
+    /// defect this method was added to close — the `Artifact` arm printed the
+    /// spend and the `Refused` and `Failed` arms printed nothing, on the path
+    /// where ruling R10 removed the cap.
+    ///
+    /// `Stopped` carries none because a run told to stop before the sealed
+    /// stage never ran a controller. A run told to stop AFTER it did still
+    /// prints the operator's stderr line; carrying it into the report as well
+    /// is not wired, and is disclosed rather than claimed.
+    #[must_use]
+    pub fn repair_report(&self) -> Option<&plinth_support::RepairRunReport> {
+        match self {
+            Self::Artifact { repair_report, .. }
+            | Self::Refused { repair_report, .. }
+            | Self::Failed { repair_report, .. } => repair_report.as_deref(),
+            Self::Stopped { .. } => None,
         }
     }
 
@@ -1486,19 +1554,35 @@ mod tests {
     /// codes, and the run's code is the first non-Ok one in model order.
     #[test]
     fn a_gate_refusal_reports_gates_and_a_stage_failure_reports_its_own_stage() {
+        // SPEC-A4 §A.8's third destination on the refused path. The gate
+        // refused a model the repair controller had already spent 45 rolled-
+        // back transactions on, and the run report has to say so: this is the
+        // path ruling R10 deleted the failed-tries cap on.
+        let spent = plinth_support::RepairRunReport {
+            trials: 45,
+            commits: 0,
+            ..plinth_support::RepairRunReport::default()
+        };
         let refused = ModelPreparationOutcome::Refused {
             gate: Some(PreWriteGate::UncoveredIslands),
             geometry: Some(SupportedGeometry::DrilledShellSealed),
             violation: "nine uncovered islands".to_owned(),
             evidence: None,
+            repair_report: Some(Box::new(spent.clone())),
         };
         assert_eq!(refused.exit_code(), PipelineExitCode::Gates);
+        assert_eq!(refused.repair_report(), Some(&spent));
+        // A model that never reached a sealed run carries no ledger, and that
+        // is a measurement rather than a gap — "the loop never ran" is not
+        // "the loop ran and spent nothing".
         let failed = ModelPreparationOutcome::Failed {
             exit_code: PipelineExitCode::Input,
             detail: "unreadable".to_owned(),
             evidence: None,
+            repair_report: None,
         };
         assert_eq!(failed.exit_code(), PipelineExitCode::Input);
+        assert_eq!(failed.repair_report(), None);
 
         let model = |name: &str, outcome| ModelPreparationReport {
             model: ModelId::new(name),
@@ -1548,7 +1632,17 @@ mod tests {
             wire["models"][1]["outcome"]["geometry"]["kind"],
             "drilled_shell_sealed"
         );
+        // §A.8's third destination has to survive the wire, not just the
+        // struct: the run report on disk is the machine-readable half of the
+        // owner's summary, and a refused model's spend is the figure two runs
+        // get compared on.
+        assert_eq!(wire["models"][1]["outcome"]["repair_report"]["trials"], 45);
+        assert_eq!(wire["models"][1]["outcome"]["repair_report"]["commits"], 0);
         assert_eq!(wire["models"][2]["outcome"]["exit_code"], "input");
+        assert!(
+            wire["models"][2]["outcome"]["repair_report"].is_null(),
+            "a model that never reached a sealed run must not claim a repair ledger"
+        );
         assert_eq!(
             wire["models"][0]["outcome"]["geometry"]["kind"], "drilled_shell_sealed",
             "a successful artifact must carry the geometry it was built from"
@@ -1581,6 +1675,7 @@ mod tests {
                 exit_code: PipelineExitCode::Input,
                 detail: "not a binary STL".to_owned(),
                 evidence: None,
+                repair_report: None,
             },
         );
         let refused = model(
@@ -1590,6 +1685,7 @@ mod tests {
                 geometry: Some(SupportedGeometry::DrilledShellSealed),
                 violation: "nine uncovered islands".to_owned(),
                 evidence: None,
+                repair_report: None,
             },
         );
 
@@ -1624,6 +1720,7 @@ mod tests {
                         exit_code: PipelineExitCode::Supports,
                         detail: "sealed run refused".to_owned(),
                         evidence: None,
+                        repair_report: None,
                     },
                 ),
             ],
