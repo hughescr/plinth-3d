@@ -536,6 +536,32 @@ impl RepairRowId {
     pub(crate) const fn component_id(self) -> u32 {
         self.component_id
     }
+
+    /// A synthetic identity for a unit test, and **only** for a unit test.
+    ///
+    /// The production rule — "only the specialized planner may construct one" —
+    /// is unchanged: this is `#[cfg(test)]`, so it does not exist in any shipped
+    /// binary and no production path can reach it. It exists because the A4
+    /// search rules (design §A.4 N2/N3/N4) are decisions about ORDER over a list
+    /// of `(seat, route, score, pool order)` tuples, and proving them through a
+    /// whole `SpecializedContactPlan` would prove the plan builder instead of
+    /// the rule. The rule is what the ruling is about, so the rule is what gets
+    /// its own test.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn for_search_rule_test(
+        owner_island_id: u32,
+        component_id: u32,
+        candidate_id: u64,
+    ) -> Self {
+        Self {
+            owner_island_id,
+            candidate_id: crate::ContactCandidateId(candidate_id),
+            face_id: 0,
+            component_id,
+            source_kind: RepairRowSourceKind::Generic,
+        }
+    }
 }
 
 /// One frozen candidate seat retained verbatim for a later regular-only

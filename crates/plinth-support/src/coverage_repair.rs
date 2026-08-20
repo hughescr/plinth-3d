@@ -36,7 +36,14 @@
 //! reduce it is to move at least one sample from uncovered to covered, which is
 //! coverage by definition. The metric and the goal are the same thing.
 
-use crate::specialized::{coverage_key, FrozenSpecializedGateVector, SpecializedContactPlan};
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::coverage_closure::CoverageScoreShare;
+use crate::specialized::{
+    coverage_key, FrozenSpecializedGateVector, RepairRowId, SpecializedContactPlan,
+};
 use crate::CoverageObjective;
 
 /// The noncoverage counts a committed repair step may never worsen — SPEC-A4
@@ -297,6 +304,181 @@ pub fn repair_step_outcome(
         };
     }
     RepairStepOutcome::Committed
+}
+
+/// **SPEC-A4 §D.1 — one repair transaction, as it goes into the evidence
+/// stream.**
+///
+/// Because a step changes the plan by exactly ONE contact, the difference
+/// between its before- and after-measurement IS that contact's contribution.
+/// There is no inference and no apportionment. That is the whole of §D, and it
+/// is what the batch loop could never produce: an attempt that appended 266
+/// rows and moved the area by 0.4 mm² could not say which row did it, or that
+/// 265 rows did nothing.
+///
+/// **Deliberately NOT `Serialize` in this lane, and it is a disclosed
+/// deviation from §D.2.** Putting the stream on the wire is the FU-57 sidecar
+/// format change §G.1 sequences at stage 4 — the schema string moves to
+/// `plinth.coverage-refusal.v2`, `attempts` is re-meant at five struct sites,
+/// and `RepairRowId` would have to gain a public wire encoding it has never
+/// had. All of that must be re-frozen against measured corpus values, which is
+/// a model-run obligation, not a code one. The stream is produced, ledgered and
+/// PRINTED here; persisting it travels with the format change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoverageRepairStep {
+    /// Every transaction attempted, committed or not, from 1.
+    pub trial: usize,
+    /// Which commit this was, if it committed. `None` for a rejection.
+    pub commit: Option<usize>,
+    /// The winner, by exact pool identity, and where it sits.
+    pub row_id: RepairRowId,
+    pub seat_mm: [f64; 3],
+    /// The route the row is drawn from …
+    pub source_island_id: u32,
+    pub source_component_id: u32,
+    /// … and every route whose uncovered samples contributed to its GLOBAL
+    /// score, with each route's share. Often the row's own route is NOT the
+    /// largest contributor, and that cross-route effect is the uncensored
+    /// worklist's whole justification.
+    pub scored_from: Vec<CoverageScoreShare>,
+    pub marginal_area_mm2: f64,
+    /// Whether rule N3's first-trial guarantee chose this route rather than the
+    /// global ranking. Makes the guarantee's cost measurable.
+    pub chosen_by_first_trial_guarantee: bool,
+    /// How many rejected coverage discs this seat lay inside when it was
+    /// chosen (rule N4). **This is the instrument that says whether
+    /// diversity-on-rejection did any work on this model** — a nonzero value
+    /// means the seat was deprioritized and tried anyway, which is the
+    /// completeness half of ruling R13.
+    pub diversity_discs_containing_seat: usize,
+    pub objective_before: CoverageObjective,
+    /// `None` when the trial never reached a measurement.
+    pub objective_after: Option<CoverageObjective>,
+    /// Clause 3's quantity on both sides. A rejected step whose failing area
+    /// fell to zero while THIS did not move is a patch split caught in the act,
+    /// and the record names it as one.
+    pub uncensored_before_mm2: f64,
+    pub uncensored_after_mm2: Option<f64>,
+    pub gates_before: NoncoverageVector,
+    pub gates_after: Option<NoncoverageVector>,
+    /// EVIDENCE ONLY. How many model faces task #49's carried-load repartition
+    /// charged to no contact, on both sides. A step that creates ownerless
+    /// faces is visible in the record; it is not rejected for it, because load
+    /// eligibility is provenance and the routed coverage measurement is what
+    /// rules on the face.
+    pub ownerless_faces_before: usize,
+    pub ownerless_faces_after: Option<usize>,
+    /// EVIDENCE ONLY, and it is the class §B-O7 measured but deliberately did
+    /// not act on: whether this trial's own appended contact was condemned at
+    /// quarantine before any arm was proposed. On Crawler Zombie's five-round
+    /// plateau every one of 50 appended contacts was, which is why nothing
+    /// moved. Rejecting early on it would be a guess about a plan that had not
+    /// been routed — `unrouted_no_winner` demonstrably moved 7 → 11 while those
+    /// contacts were being appended — so the class is recorded and sized here
+    /// rather than acted on.
+    pub own_contact_quarantined: Option<bool>,
+    /// Every route whose evidence moved, and by how much. Routes that did not
+    /// move are omitted, so a committed step that touched one route carries one
+    /// row.
+    pub route_deltas: Vec<RouteDelta>,
+    pub outcome: RepairStepOutcome,
+}
+
+/// One route's before/after evidence across a single transaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteDelta {
+    pub island_id: u32,
+    pub component_id: u32,
+    pub uncensored_area_before_mm2: f64,
+    pub uncensored_area_after_mm2: f64,
+    pub patches_before: usize,
+    pub patches_after: usize,
+}
+
+/// **SPEC-A4 §A.8 — the loud per-run report, which is the price of having no
+/// failed-tries cap (Craig's ruling R10).**
+///
+/// R10 removes the cap and replaces it with visibility, and that trade only
+/// holds if the visibility is real. Every field here is printed on every path,
+/// sealed or refused.
+///
+/// > **These are counters that REPORT; none of them DECIDES.** No branch in the
+/// > controller reads any of them except `committed` against the registered
+/// > bound, which is rulings R6 and R11's own rule. That distinction is the
+/// > whole of the physics-first doctrine here: a number that steers is a cap, a
+/// > number that is printed is evidence.
+///
+/// **Wall time is evidence, never a bound.** It is measured and printed and
+/// nothing compares it to anything. A machine that runs the corpus slowly must
+/// produce the same verdicts as one that runs it fast, or the verdicts were
+/// never about the model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepairRunReport {
+    /// Every transaction attempted, committed or not.
+    pub trials: usize,
+    /// How many became the accepted plan.
+    pub commits: usize,
+    /// The [`RepairStepOutcome`] histogram, by class name, ascending by name so
+    /// two runs of the same model print the same line.
+    pub rejections_by_class: BTreeMap<String, usize>,
+    /// The repair loop's own elapsed wall time.
+    pub wall_time_total_ms: u64,
+    /// Minimum / median / maximum per trial, so one pathological trial is
+    /// visible against many cheap ones instead of being averaged away.
+    pub wall_time_per_trial_min_ms: u64,
+    pub wall_time_per_trial_median_ms: u64,
+    pub wall_time_per_trial_max_ms: u64,
+    /// Eligible rows never tried when the loop stopped.
+    pub candidates_remaining: usize,
+    /// How many candidates rule N4 deprioritized …
+    pub diversity_demotions: usize,
+    /// … and how many of those were tried anyway. **This pair is the instrument
+    /// that says whether ruling R13 worked**, and whether it kept its
+    /// completeness promise.
+    pub diversity_demotions_tried: usize,
+}
+
+impl RepairRunReport {
+    /// Fold one finished trial's wall time in. Kept as a method so the min /
+    /// median / max are derived in one place from the same sample list rather
+    /// than three times from three.
+    pub fn record_trial_times(&mut self, mut per_trial_ms: Vec<u64>) {
+        self.wall_time_total_ms = per_trial_ms.iter().sum();
+        if per_trial_ms.is_empty() {
+            return;
+        }
+        per_trial_ms.sort_unstable();
+        self.wall_time_per_trial_min_ms = per_trial_ms[0];
+        self.wall_time_per_trial_max_ms = per_trial_ms[per_trial_ms.len() - 1];
+        self.wall_time_per_trial_median_ms = per_trial_ms[per_trial_ms.len() / 2];
+    }
+
+    /// The one INFO line an operator watching a long run must see move.
+    /// Deliberately one line and deliberately unconditional: a cost that is
+    /// only printed when someone asks for it is a cost that is hidden.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        let histogram = self
+            .rejections_by_class
+            .iter()
+            .map(|(class, count)| format!("{class}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "coverage-repair: trials={} commits={} remaining={} \
+             wall_total={}ms wall/trial min={}ms med={}ms max={}ms \
+             diversity_demotions={} of_which_tried={} [{histogram}]",
+            self.trials,
+            self.commits,
+            self.candidates_remaining,
+            self.wall_time_total_ms,
+            self.wall_time_per_trial_min_ms,
+            self.wall_time_per_trial_median_ms,
+            self.wall_time_per_trial_max_ms,
+            self.diversity_demotions,
+            self.diversity_demotions_tried,
+        )
+    }
 }
 
 #[cfg(test)]

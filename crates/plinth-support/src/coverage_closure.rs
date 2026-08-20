@@ -185,11 +185,10 @@ pub enum CoverageClosureSetupError {
 /// [`CoverageClosureSetupError::ResourcePolicyUnavailable`] if the registry
 /// cannot be read, and [`CoverageClosureSetupError::InvalidCoverageRequest`]
 /// if the registered values do not form a valid request.
-pub fn registered_coverage_request(
-) -> Result<CoverageMeasurementRequest, CoverageClosureSetupError> {
-    let limits = SupportPreparationLimits::production().map_err(|error| {
-        CoverageClosureSetupError::ResourcePolicyUnavailable(error.to_string())
-    })?;
+pub fn registered_coverage_request() -> Result<CoverageMeasurementRequest, CoverageClosureSetupError>
+{
+    let limits = SupportPreparationLimits::production()
+        .map_err(|error| CoverageClosureSetupError::ResourcePolicyUnavailable(error.to_string()))?;
     let constants = m0_constants().map_err(|error| {
         CoverageClosureSetupError::RegisteredConstantsUnavailable(error.to_string())
     })?;
@@ -288,6 +287,96 @@ pub enum CoverageClosureReason {
         /// That stage's own error, as it was reported.
         detail: String,
     },
+    /// **SPEC-A4 §B.7.** No route on the worklist had a single eligible
+    /// repair-pool row at the FIRST repair step, so there was never anything
+    /// to transact. The one-winner controller's whole-model version of
+    /// [`Self::NoEligibleRepairRows`], separated from it because the batch
+    /// loop's variant also fires mid-run and this one cannot.
+    NothingToTry,
+    /// **SPEC-A4 §B.7.** The honest end of a greedy search: every candidate was
+    /// tried and rolled back, or the best remaining candidate's GLOBAL score is
+    /// 0.00 mm² and cannot cover anything (§B.3's zero-score guard).
+    ///
+    /// This is not a claim that the model cannot be repaired. Which routes
+    /// remain, and why each one remains, is per-route evidence
+    /// ([`RouteRepairOutcome`]) measured from counters the run already keeps —
+    /// never a distance claim.
+    NoImprovingRepair {
+        candidates_tried: usize,
+        best_remaining_score_mm2: f64,
+    },
+    /// **SPEC-A4 §B.7, ruling R6.** The registered bound
+    /// (`coverage_repair_max_attempts`, value 8) stopped the search with
+    /// candidates left. Under R6 that bound counts COMMITTED steps only;
+    /// rejections are bounded by pool exhaustion plus the zero-score guard,
+    /// and under ruling R10 there is no failed-tries cap at all.
+    CommitBudgetExhausted {
+        committed: usize,
+        candidates_remaining: usize,
+    },
+}
+
+/// **SPEC-A4 §E.1 — why one still-uncovered route is still uncovered when the
+/// loop stopped. Craig's rulings R7 and R14.**
+///
+/// Every variant is MEASURED from a counter the run already keeps. **None of
+/// them is a distance claim**, and that is the whole of the ruling: the design
+/// v1 assigned Warhorse islands 5 and 6 the cause "no row within radius",
+/// inferred from worst gaps of 7.09 mm and 15.29 mm against a 6.0 mm radius.
+/// Those are two different distances — worst gap measures the distance to the
+/// nearest ROUTED CONTACT, reach measures the distance to a CANDIDATE SEAT —
+/// and the island diagnosis says the inference was false: 220 of island 5's
+/// 300 pool rows sit within the radius, with the nearest candidate seat
+/// **0.0972 mm** from the uncovered area. "Nothing reached it" and "nothing
+/// could reach it" are not the same statement.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RouteRepairOutcome {
+    /// Rows existed, were tried, and none passed the accept clauses.
+    TriedNoImprovement {
+        rows_tried: usize,
+        best_marginal_area_mm2: f64,
+    },
+    /// Rows existed and remained when the commit bound ended the search.
+    NotReached { rows_remaining: usize },
+    /// A measured defect class: this route cannot be repaired by any row in its
+    /// pool under today's rules, and the counter that says so is named.
+    Blocked(BlockedCause),
+}
+
+/// The five measured defect classes ruling R14 names, and no others.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BlockedCause {
+    /// Every eligible row was tried; each was rolled back.
+    PoolExhausted {
+        pool_rows: usize,
+        occupied: usize,
+        ledgered: usize,
+    },
+    /// No eligible row scores above 0.00 mm² against the current uncovered set.
+    ///
+    /// This IS a measurement — the score — not an inference from a distance.
+    /// It is named so it cannot be read as a reach claim.
+    /// `nearest_seat_to_uncovered_mm` rides along as CONTEXT: the class is
+    /// decided by the score being zero, and the distance is reported beside it,
+    /// never as the reason.
+    NoCandidateCoversAnything {
+        pool_rows: usize,
+        rows_within_radius: usize,
+        nearest_seat_to_uncovered_mm: f64,
+    },
+    /// The route never had a pool row of its own.
+    NoPoolRows,
+    /// **Task #51.** Every candidate arm the router proposed for this route was
+    /// refused by the support-to-model clearance standoff. Measured from the
+    /// CCO transcript's per-terminal refusal reasons.
+    ClearanceMaskUnsatisfiable { terminals: u32, standoff_mm: f64 },
+    /// **Task #52.** Every contact placed on this route was condemned BEFORE
+    /// any arm was tried, because the stub axis re-enters the model further
+    /// than the allowance. Measured from the quarantine disposition.
+    ///
+    /// It costs ZERO trials to detect, because quarantine happens before
+    /// routing.
+    StubReentry { terminals_quarantined: u32 },
 }
 
 /// A worst routed-contact gap, projected from [`CoverageGap`] for a refusal
@@ -656,11 +745,14 @@ pub(crate) fn nominate_repair_rows(
 
         let mut ranked: Vec<usize> = candidate_indices.clone();
         ranked.sort_by(|&left, &right| {
-            scores[left].total_cmp(&scores[right]).reverse().then_with(|| {
-                candidate_rows[left]
-                    .order()
-                    .cmp(&candidate_rows[right].order())
-            })
+            scores[left]
+                .total_cmp(&scores[right])
+                .reverse()
+                .then_with(|| {
+                    candidate_rows[left]
+                        .order()
+                        .cmp(&candidate_rows[right].order())
+                })
         });
 
         let mut picked = 0usize;
@@ -689,6 +781,574 @@ pub(crate) fn nominate_repair_rows(
     Ok(nominated)
 }
 
+/// One route's share of a candidate's GLOBAL score — SPEC-A4 design §D.1's
+/// `scored_from`.
+///
+/// A candidate seat covers whatever falls inside its coverage disc, and the
+/// disc does not know about island ids. Often the row's own route is not the
+/// largest contributor, and that cross-route effect is the whole justification
+/// for keeping the repair worklist uncensored (task #27): a seat owned by a
+/// dust route that physically closes the real hole next door is credited for
+/// the hole, by name, rather than for the dust.
+///
+/// Per ROUTE and not per patch, deliberately. A per-patch attribution is not
+/// producible without scoring per patch, which multiplies the scoring work by
+/// the patch count; per route is one extra accumulator in the same matrix pass.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoverageScoreShare {
+    pub island_id: u32,
+    pub component_id: u32,
+    pub area_mm2: f64,
+}
+
+/// One eligible repair-pool row with its GLOBAL marginal uncovered area.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) struct RankedRepairRow {
+    pub(crate) id: RepairRowId,
+    /// The route that OWNS the row. Rule N2 changes how a row is scored, never
+    /// which route owns it (SPEC §3's one-route rule is untouched).
+    pub(crate) key: (u32, u32),
+    pub(crate) seat_mm: [f64; 3],
+    /// Pool order, the deterministic tie-break SPEC §6 names.
+    pub(crate) order: usize,
+    /// **Rule N2**: the summed area weight of every uncovered sample within `R`
+    /// of this seat, on ANY route.
+    pub(crate) marginal_area_mm2: f64,
+    pub(crate) scored_from: Vec<CoverageScoreShare>,
+}
+
+/// Every eligible candidate across every worklist route, scored globally.
+///
+/// This is what replaces "one row per patch, deduplicated". There is no pick
+/// cap in it (rule N1) and no per-route filter on the scoring samples
+/// (rule N2); the controller picks exactly one winner from it per trial, and
+/// re-sorts rather than re-scores after a rejection.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) struct RankedRepairCandidates {
+    pub(crate) ranked: Vec<RankedRepairRow>,
+    pub(crate) per_key: BTreeMap<(u32, u32), KeyNomination>,
+    /// Each worklist route's own measured UNCENSORED uncovered area, the
+    /// quantity rule N3's serve set watches for change.
+    pub(crate) route_uncovered_mm2: BTreeMap<(u32, u32), f64>,
+}
+
+/// One candidate seat's GLOBAL score and the routes that produced it.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) struct GlobalCandidateScore {
+    pub(crate) marginal_area_mm2: f64,
+    pub(crate) scored_from: Vec<CoverageScoreShare>,
+}
+
+/// **Rule N2's arithmetic, on its own, so it can be proved on its own.**
+///
+/// One matrix over (all candidate seats) × (all uncovered samples), tiled so
+/// that `candidate_block.len() × sample_block.len() ≤ matrix_budget` — the same
+/// discipline and the same 65,536 production ceiling
+/// (`coverage_score_matrix_max_entries`) today's route-local scoring uses. What
+/// is different is one deletion: **the samples are NOT filtered to the
+/// candidate's own `(island_id, component_id)`**, because the physical quantity
+/// SPEC §6 names is the area the contact actually covers and a contact does not
+/// know about island ids.
+///
+/// The per-route shares are the same additions the total already performs,
+/// keyed — there is no second pass over the geometry and no second distance
+/// test. That is why §D.1's attribution is per ROUTE and not per patch: per
+/// route is one extra accumulator in this pass, per patch would multiply the
+/// pass by the patch count.
+///
+/// Kept separate from [`rank_repair_candidates`] deliberately: the ranking
+/// needs a whole `SpecializedContactPlan` (mesh, topology, repair pool,
+/// lineage) to say which rows are ELIGIBLE, and none of that is needed to say
+/// what a seat COVERS. Splitting them is what lets the cross-route credit that
+/// task #27's population depends on be proved from a handful of samples instead
+/// of from a model run.
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) fn score_candidates_globally(
+    seats: &[[f64; 3]],
+    samples: &[crate::CoverageSample],
+    scoring_samples: &[usize],
+    radius_mm: f64,
+    matrix_budget: usize,
+) -> Vec<GlobalCandidateScore> {
+    let radius_sq = radius_mm * radius_mm;
+    let matrix_budget = matrix_budget.clamp(1, 65_536);
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a tile edge is a positive count well below 2^53; the clamp above bounds it"
+    )]
+    let sample_tile = ((matrix_budget as f64).sqrt() as usize).max(1);
+    let candidate_tile = (matrix_budget / sample_tile).max(1);
+
+    let mut totals = vec![0.0_f64; seats.len()];
+    let mut shares: Vec<BTreeMap<(u32, u32), f64>> = vec![BTreeMap::new(); seats.len()];
+    let candidate_indices: Vec<usize> = (0..seats.len()).collect();
+    for candidate_block in candidate_indices.chunks(candidate_tile) {
+        for sample_block in scoring_samples.chunks(sample_tile) {
+            debug_assert!(candidate_block.len() * sample_block.len() <= matrix_budget);
+            for &candidate_offset in candidate_block {
+                let point = seats[candidate_offset];
+                for &sample_index in sample_block {
+                    let Some(sample) = samples.get(sample_index) else {
+                        continue;
+                    };
+                    if squared_distance(point, sample.point_mm) <= radius_sq {
+                        totals[candidate_offset] += sample.area_mm2;
+                        *shares[candidate_offset]
+                            .entry((sample.island_id, sample.component_id))
+                            .or_insert(0.0) += sample.area_mm2;
+                    }
+                }
+            }
+        }
+    }
+
+    totals
+        .into_iter()
+        .zip(shares)
+        .map(|(marginal_area_mm2, share)| GlobalCandidateScore {
+            marginal_area_mm2,
+            scored_from: share
+                .into_iter()
+                .map(|((island_id, component_id), area_mm2)| CoverageScoreShare {
+                    island_id,
+                    component_id,
+                    area_mm2,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The base order SPEC §6 names: score descending, then lower pool row as the
+/// deterministic tie-break.
+///
+/// Rule N4 re-sorts on top of this after every rejection (see
+/// [`choose_winner`]); it never re-scores, because a dropped child plan leaves
+/// the uncovered sample set and every candidate seat bit-identical.
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) fn sort_ranked_rows(ranked: &mut [RankedRepairRow]) {
+    ranked.sort_by(|left, right| {
+        left.marginal_area_mm2
+            .total_cmp(&right.marginal_area_mm2)
+            .reverse()
+            .then_with(|| left.order.cmp(&right.order))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+}
+
+/// **SPEC-A4 design §A.4 rules N1 and N2 — rank every eligible repair-pool row
+/// on the worklist by GLOBAL marginal uncovered sample area.**
+///
+/// Two rules separate this from [`nominate_repair_rows`], and both are
+/// deliberate deletions rather than additions:
+///
+/// **N1 — there is no per-patch pick cap.** The batch loop stopped at
+/// `picked >= patches.len()`, one seat per patch per attempt, which is blind to
+/// how large the hole is: the Rotting Warhorse's island 68 carries its whole
+/// 11.879 mm² as a SINGLE patch and therefore received one seat per attempt —
+/// 8 seats out of 377 — refusing with 361 eligible seats never tried. Under
+/// one-winner transactions exactly one row is appended per step anyway, so the
+/// cap has no nomination work left to do; all it did was ration attention.
+///
+/// **N2 — the score is global.** Today's scoring filters the samples to the
+/// candidate's own `(island_id, component_id)` and to that key's patch faces.
+/// That filter is gone. The physical quantity SPEC §6 names — "marginal
+/// uncovered sample area" — is the area the contact actually covers, and a
+/// contact does not know about island ids. Route-local scoring under-values
+/// exactly the rows task #27 exists to keep.
+///
+/// **The tiling discipline is unchanged**: one matrix over (all eligible
+/// candidates) × (all uncovered samples), chunked so that
+/// `candidate_block.len() × sample_block.len() ≤ matrix_budget`, clamped to the
+/// same 65,536 production ceiling, with the same `total_cmp` tie-break. Cost is
+/// three orders of magnitude below one pipeline pass — the Rotting Warhorse's
+/// worst rescore is ~1.5 × 10⁶ squared distances against a single trial's
+/// 6.0 × 10⁸ seat evaluations on the Giant Toad — so it needs no new limit and
+/// no new registered constant.
+///
+/// The three exclusions are kept verbatim from [`nominate_repair_rows`]:
+/// occupied rows, ledgered (`failed`) rows, and rows whose physical seat is
+/// already claimed by an existing contact — the last mirroring
+/// `append_regular_repair_rows`' own `DuplicateChildPhysicalSeat` refusal, so
+/// the controller never spends a trial to discover a refusal it could see.
+///
+/// # Errors
+///
+/// Propagates [`SpecializedError`] from
+/// [`SpecializedContactPlan::occupied_repair_rows`].
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) fn rank_repair_candidates(
+    plan: &SpecializedContactPlan,
+    repair_targets: &[BlockingPatchKey],
+    uncovered_samples: &[usize],
+    radius_mm: f64,
+    matrix_budget: usize,
+    failed: &BTreeSet<RepairRowId>,
+) -> Result<RankedRepairCandidates, SpecializedError> {
+    let mut excluded: BTreeSet<RepairRowId> = plan
+        .occupied_repair_rows()?
+        .into_iter()
+        .map(|occupancy| occupancy.row_id())
+        .collect();
+    excluded.extend(failed.iter().copied());
+
+    let claimed_points: Vec<[f64; 3]> = plan
+        .contacts()
+        .iter()
+        .map(|contact| contact.position_mm())
+        .collect();
+
+    // Only routes ON the worklist may nominate — ruling R2's reading of §6's
+    // "failing route", with the worklist uncensored per task #27.
+    let mut route_uncovered_mm2: BTreeMap<(u32, u32), f64> = BTreeMap::new();
+    for patch in repair_targets {
+        *route_uncovered_mm2
+            .entry((patch.island_id, patch.component_id))
+            .or_insert(0.0) += f64::from_bits(patch.uncovered_area_mm2_bits);
+    }
+
+    let mut eligible_by_key: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    let mut candidates: Vec<&RepairRow> = Vec::new();
+    for row in plan.all_repair_rows() {
+        let key = (row.id().owner_island_id(), row.id().component_id());
+        if !route_uncovered_mm2.contains_key(&key) {
+            continue;
+        }
+        if excluded.contains(&row.id())
+            || claimed_points
+                .iter()
+                .any(|point| *point == row.candidate().point_mm)
+        {
+            continue;
+        }
+        *eligible_by_key.entry(key).or_insert(0) += 1;
+        candidates.push(row);
+    }
+    // A worklist route with no eligible row leaves a trace rather than
+    // vanishing: "this route never had a single unoccupied, unfailed row" is a
+    // different owner action from "rows were tried and none helped", and §E.1
+    // reports them as different measured classes.
+    for key in route_uncovered_mm2.keys() {
+        eligible_by_key.entry(*key).or_insert(0);
+    }
+
+    // The scoring sample set is EVERY uncovered sample, on every route — that
+    // is rule N2 in one line. Gathered once, ascending, so the tiling is
+    // order-stable.
+    let samples = plan.coverage_samples();
+    let scoring_samples: Vec<usize> = uncovered_samples
+        .iter()
+        .copied()
+        .filter(|&index| index < samples.len())
+        .collect();
+
+    let seats: Vec<[f64; 3]> = candidates
+        .iter()
+        .map(|row| row.candidate().point_mm)
+        .collect();
+    let scores =
+        score_candidates_globally(&seats, samples, &scoring_samples, radius_mm, matrix_budget);
+
+    let mut ranked: Vec<RankedRepairRow> = candidates
+        .iter()
+        .zip(scores)
+        .map(|(row, score)| RankedRepairRow {
+            id: row.id(),
+            key: (row.id().owner_island_id(), row.id().component_id()),
+            seat_mm: row.candidate().point_mm,
+            order: row.order(),
+            marginal_area_mm2: score.marginal_area_mm2,
+            scored_from: score.scored_from,
+        })
+        .collect();
+    sort_ranked_rows(&mut ranked);
+
+    let per_key = eligible_by_key
+        .into_iter()
+        .map(|(key, eligible_rows)| {
+            (
+                key,
+                KeyNomination {
+                    eligible_rows,
+                    nominated_rows: 0,
+                },
+            )
+        })
+        .collect();
+
+    Ok(RankedRepairCandidates {
+        ranked,
+        per_key,
+        route_uncovered_mm2,
+    })
+}
+
+/// The rejected seats whose coverage discs deprioritize their neighbours —
+/// **SPEC-A4 design §A.4 rule N4, Craig's ruling R13**.
+///
+/// **The measured defect.** Scores tie on absolute area, and the tie-break is
+/// pool order, which is spatially contiguous because the repair pool is built
+/// by walking the surface. So a run of equal-scoring candidates is a run of
+/// NEIGHBOURING seats, and the measured worst case is **63 seats inside a
+/// 1.04 mm box** — sixty-three candidates that are physically one seat, ranked
+/// consecutively. Under batch nomination that was invisible: they were appended
+/// together and the model was measured once. Under one-winner, rejecting seat
+/// `k` and then trying seat `k+1` 16 µm away spends a second full
+/// prepare → route → rewire → brace → structure → lower → measure pass to learn
+/// what the first pass already proved.
+///
+/// **The rule.** After a trial on row `r` is rejected, every remaining
+/// candidate whose seat lies inside `r`'s own coverage disc — `|seat(c) −
+/// seat(r)| ≤ R`, the same `R` the score is computed at — sorts after every
+/// candidate outside it. Discs accumulate, and the sort key is the COUNT of
+/// rejected discs a seat falls inside, ascending, applied BEFORE score, so
+/// "how many times has this neighbourhood already failed" is the first
+/// question.
+///
+/// **Deprioritization is not exclusion.** A deprioritized candidate stays
+/// eligible and is tried once every candidate outside the disc has been. Under
+/// ruling R10 nothing truncates the order, so completeness is preserved
+/// exactly: the loop still ends only at pool exhaustion or the zero-score
+/// guard.
+///
+/// **No new constant.** `R` is `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM`,
+/// already registered, already the radius the score is computed at, and already
+/// the radius the pre-write gate re-measures at. The disc is the rejected
+/// seat's own coverage disc, derived from existing geometry, not a knob.
+///
+/// **Why the coverage disc is the right radius, physically.** Two seats within
+/// `R` of each other cover overlapping sample sets by construction. If seat
+/// `r`'s trial was rejected because its arm could not route, or because it
+/// worsened a noncoverage count, a seat inside `r`'s disc is proposing a
+/// near-identical arm to a near-identical set of samples. The disc is the exact
+/// boundary of "this is the same proposal". Outside it, the candidate reaches
+/// samples `r` could not, and it deserves the pass.
+#[derive(Clone, Debug, Default)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) struct DiversityDiscs {
+    seats: Vec<[f64; 3]>,
+    radius_sq: f64,
+}
+
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4 rule N4: the one-winner controller consumes these; it lands in the next commit of this lane"
+)]
+impl DiversityDiscs {
+    pub(crate) fn new(radius_mm: f64) -> Self {
+        Self {
+            seats: Vec::new(),
+            radius_sq: radius_mm * radius_mm,
+        }
+    }
+
+    /// Record a rejected seat. One disc per rejection, so each later rerank
+    /// adds exactly one pass over the remaining candidates.
+    pub(crate) fn reject(&mut self, seat_mm: [f64; 3]) {
+        self.seats.push(seat_mm);
+    }
+
+    /// How many rejected coverage discs contain this seat. This IS the sort
+    /// key, and it is also §D.1's `diversity_discs_containing_seat` evidence.
+    pub(crate) fn discs_containing(&self, seat_mm: [f64; 3]) -> usize {
+        self.seats
+            .iter()
+            .filter(|&&seat| squared_distance(seat, seat_mm) <= self.radius_sq)
+            .count()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.seats.len()
+    }
+}
+
+/// Which candidate the controller tries next, and why it was chosen.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) struct ChosenCandidate {
+    pub(crate) index: usize,
+    /// **Rule N3.** True when the first-trial guarantee chose this route rather
+    /// than the global ranking, so the guarantee's cost is measurable instead
+    /// of assumed.
+    pub(crate) by_first_trial_guarantee: bool,
+    pub(crate) diversity_discs_containing_seat: usize,
+}
+
+/// **SPEC-A4 design §A.4 rule N3 plus rule N4's order — choose the one winner.**
+///
+/// **Greedy on a global area score is already area-proportional**, which is the
+/// point worth stating rather than adding machinery for: the score IS an area,
+/// so a 13.04 mm² route's best seats outscore a 0.21 mm² route's by tens of
+/// times, and with N1's cap gone a large hole draws consecutive winners until
+/// its marginal areas fall below the next route's. That needs no quota, no
+/// per-route budget and no new registered number.
+///
+/// What greedy does not give is any guarantee for a SMALL route, so there is
+/// exactly one, and no more:
+///
+/// > **First-trial guarantee.** The *serve set* is every worklist route that
+/// > (a) has not yet had a trial since its own measured uncovered area last
+/// > changed, and (b) has at least one eligible candidate whose GLOBAL score is
+/// > at or above the censor. While the serve set is non-empty the winner is the
+/// > best candidate of the serve-set route whose best candidate ranks highest,
+/// > with ties broken on larger route uncovered area then lower pool row. When
+/// > it is empty the winner is simply the highest-ranking eligible candidate.
+///
+/// **The censor is not a new number.** It is the registered A3 censor already.
+/// A route whose best global score is below it cannot, by SPEC §4, change the
+/// censored objective on its own, so a trial on it is provably wasted. This is
+/// the zero-score stop guard generalized from "covers nothing" to "cannot
+/// change the verdict"; nothing is added, raised or relaxed.
+///
+/// **Checked against rule N2.** The guarantee is what makes the task #27
+/// population safe under a single ranking, and global scoring is what makes the
+/// guarantee reachable: a dust route's seat qualifies for the serve set on the
+/// REAL hole's area, not on its own dust. `Skulker Zombie`'s 0.35 mm² and
+/// `Tavey Badger`'s 0.21 mm² both clear the 0.16 mm² threshold on the hole they
+/// close, not on the route that owns them.
+///
+/// **The limit, stated rather than argued away.** A first trial that commits
+/// consumes committed-step budget, so on a model with many worklist routes the
+/// guarantee can spend the whole registered bound on first trials and never let
+/// the largest hole take its second contact. Measured: no currently-emitting
+/// model exceeds the bound (maximum 8 routes), and every heavy refuser does
+/// (the Awakened Tree has 103). That is open item O-3 and it is Craig's ruling,
+/// not an implementation detail.
+///
+/// `ledgered` holds the rows already tried and rolled back; SPEC §6 requires
+/// exact failed rows to be excluded, and they stay excluded across a rollback.
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+pub(crate) fn choose_winner(
+    candidates: &RankedRepairCandidates,
+    ledgered: &BTreeSet<RepairRowId>,
+    discs: &DiversityDiscs,
+    served: &BTreeMap<(u32, u32), u64>,
+    censor_area_mm2: f64,
+) -> Option<ChosenCandidate> {
+    // Rule N4's key, ahead of score, exactly as R13 specifies.
+    let rank_key = |row: &RankedRepairRow| {
+        (
+            discs.discs_containing(row.seat_mm),
+            OrderedScore(row.marginal_area_mm2),
+            row.order,
+            row.key,
+        )
+    };
+
+    let live = || {
+        candidates
+            .ranked
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !ledgered.contains(&row.id))
+    };
+
+    // (a) a route not yet tried since its area last changed, AND (b) a best
+    // global score at or above the censor. Both halves are measured.
+    let in_serve_set = |row: &RankedRepairRow| {
+        if row.marginal_area_mm2 < censor_area_mm2 {
+            return false;
+        }
+        let current = candidates
+            .route_uncovered_mm2
+            .get(&row.key)
+            .copied()
+            .unwrap_or(0.0)
+            .to_bits();
+        served.get(&row.key) != Some(&current)
+    };
+
+    let best_served =
+        live()
+            .filter(|(_, row)| in_serve_set(row))
+            .min_by(|(_, left), (_, right)| {
+                rank_key(left).cmp(&rank_key(right)).then_with(|| {
+                    // Ties on the rank key break on LARGER route uncovered area,
+                    // then lower pool row — the guarantee serves the biggest
+                    // unserved hole first.
+                    let area = |row: &RankedRepairRow| {
+                        OrderedScore(
+                            candidates
+                                .route_uncovered_mm2
+                                .get(&row.key)
+                                .copied()
+                                .unwrap_or(0.0),
+                        )
+                    };
+                    area(left).cmp(&area(right))
+                })
+            });
+    if let Some((index, row)) = best_served {
+        return Some(ChosenCandidate {
+            index,
+            by_first_trial_guarantee: true,
+            diversity_discs_containing_seat: discs.discs_containing(row.seat_mm),
+        });
+    }
+
+    let (index, row) =
+        live().min_by(|(_, left), (_, right)| rank_key(left).cmp(&rank_key(right)))?;
+    Some(ChosenCandidate {
+        index,
+        by_first_trial_guarantee: false,
+        diversity_discs_containing_seat: discs.discs_containing(row.seat_mm),
+    })
+}
+
+/// A descending-by-area ordering key that is total over every `f64` the score
+/// can hold, including the zero a candidate covering nothing carries.
+/// `total_cmp` reversed, so `min_by` on it means "largest area first".
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
+)]
+struct OrderedScore(f64);
+
+impl Eq for OrderedScore {}
+impl PartialOrd for OrderedScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrderedScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0).reverse()
+    }
+}
+
 fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
     (left[0] - right[0]).mul_add(
         left[0] - right[0],
@@ -702,6 +1362,7 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CoverageSample;
 
     fn key(island_id: u32, component_id: u32, faces: &[u32]) -> BlockingPatchKey {
         BlockingPatchKey {
@@ -760,12 +1421,8 @@ mod tests {
         ] {
             for cut_ambiguous in [false, true] {
                 for assessment_failed in [false, true] {
-                    if coverage_patch_blocks_verdict(
-                        area,
-                        cut_ambiguous,
-                        assessment_failed,
-                        censor,
-                    ) {
+                    if coverage_patch_blocks_verdict(area, cut_ambiguous, assessment_failed, censor)
+                    {
                         assert!(
                             coverage_patch_needs_repair(area, cut_ambiguous, assessment_failed),
                             "area={area} cut_ambiguous={cut_ambiguous} \
@@ -834,7 +1491,12 @@ mod tests {
             "the spec censors area AT OR BELOW the censor, so equality must not block"
         );
         assert!(
-            coverage_patch_blocks_verdict(f64::from_bits(censor.to_bits() + 1), false, false, censor),
+            coverage_patch_blocks_verdict(
+                f64::from_bits(censor.to_bits() + 1),
+                false,
+                false,
+                censor
+            ),
             "one ULP above the censor is above it and must block"
         );
     }
@@ -867,11 +1529,7 @@ mod tests {
 
     #[test]
     fn islands_from_blocking_aggregates_by_island_and_component_like_the_verifier() {
-        let patches = vec![
-            key(2, 0, &[10, 11]),
-            key(2, 0, &[12]),
-            key(7, 1, &[20]),
-        ];
+        let patches = vec![key(2, 0, &[10, 11]), key(2, 0, &[12]), key(7, 1, &[20])];
         // Island 2 was nominated for twice and still has rows left; island 7
         // never had an eligible row at all. Those are the two different
         // stories the refusal must be able to tell apart.
@@ -925,8 +1583,388 @@ mod tests {
             CoverageClosureGap::NoRoutedContact
         );
         assert_eq!(
-            worse_gap(CoverageClosureGap::Finite(1.0), CoverageClosureGap::Finite(2.0)),
+            worse_gap(
+                CoverageClosureGap::Finite(1.0),
+                CoverageClosureGap::Finite(2.0)
+            ),
             CoverageClosureGap::Finite(2.0)
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // SPEC-A4 design §A.4 — the one-winner search rules N2, N3 and N4.
+    //
+    // These are decisions about ORDER over a list of (seat, route, score, pool
+    // order) tuples. Nothing below needs a mesh, a plan or a model run, and
+    // that is deliberate: routing them through a `SpecializedContactPlan` would
+    // prove the plan builder rather than the rule Craig ruled on.
+    // ---------------------------------------------------------------------
+
+    fn sample(
+        island_id: u32,
+        component_id: u32,
+        point_mm: [f64; 3],
+        area_mm2: f64,
+    ) -> CoverageSample {
+        CoverageSample {
+            island_id,
+            face_id: 0,
+            component_id,
+            point_mm,
+            area_mm2,
+        }
+    }
+
+    fn ranked_row(
+        island_id: u32,
+        component_id: u32,
+        order: usize,
+        seat_mm: [f64; 3],
+        marginal_area_mm2: f64,
+    ) -> RankedRepairRow {
+        RankedRepairRow {
+            id: RepairRowId::for_search_rule_test(island_id, component_id, order as u64),
+            key: (island_id, component_id),
+            seat_mm,
+            order,
+            marginal_area_mm2,
+            scored_from: Vec::new(),
+        }
+    }
+
+    fn candidates(rows: Vec<RankedRepairRow>) -> RankedRepairCandidates {
+        let mut route_uncovered_mm2: BTreeMap<(u32, u32), f64> = BTreeMap::new();
+        for row in &rows {
+            let entry = route_uncovered_mm2.entry(row.key).or_insert(0.0);
+            *entry = entry.max(row.marginal_area_mm2);
+        }
+        let mut ranked = rows;
+        sort_ranked_rows(&mut ranked);
+        RankedRepairCandidates {
+            ranked,
+            per_key: BTreeMap::new(),
+            route_uncovered_mm2,
+        }
+    }
+
+    const R: f64 = 6.0;
+
+    /// **Rule N2, and it is task #27's population in miniature.**
+    ///
+    /// `Skulker Zombie` refused with 0.35 mm² of REAL, above-censor uncovered
+    /// area when the worklist was censored, because the row that would have
+    /// closed the hole is owned by a sub-censor DUST route. Here the same
+    /// shape: one seat owned by route (9, 0) whose own route carries 0.02 mm²
+    /// of dust, sitting 1 mm from a 0.35 mm² hole owned by route (5, 0).
+    ///
+    /// Global scoring credits it for the hole. The `scored_from` share says so
+    /// BY NAME, which is what §D.1 exists for — the sidecar can print "this
+    /// contact closed island 5's hole" instead of leaving a reader to infer it.
+    #[test]
+    fn a_dust_routes_seat_is_credited_for_the_real_hole_it_closes() {
+        let samples = vec![
+            sample(9, 0, [0.0, 0.0, 0.0], 0.02),
+            sample(5, 0, [1.0, 0.0, 0.0], 0.35),
+        ];
+        let scoring: Vec<usize> = (0..samples.len()).collect();
+        let scores = score_candidates_globally(&[[0.0, 0.0, 0.0]], &samples, &scoring, R, 65_536);
+
+        assert!(
+            (scores[0].marginal_area_mm2 - 0.37).abs() < 1e-12,
+            "the dust route's seat must score the hole it physically covers, \
+             not only its own dust: {:?}",
+            scores[0]
+        );
+        let hole_share = scores[0]
+            .scored_from
+            .iter()
+            .find(|share| (share.island_id, share.component_id) == (5, 0))
+            .expect("the hole's route must appear in scored_from by name");
+        assert!((hole_share.area_mm2 - 0.35).abs() < 1e-12);
+    }
+
+    /// **The revert proof for rule N2.** Filter the scoring samples back to the
+    /// candidate's own route — which is exactly what production does today
+    /// (`nominate_repair_rows`) — and the same seat scores 0.02 mm², an eighth
+    /// of the registered censor. Under one global ranking it would sit below
+    /// every row on every larger route and never be reached.
+    ///
+    /// If this test ever fails, the test above has stopped proving rule N2 and
+    /// is passing for some other reason.
+    #[test]
+    fn route_local_scoring_hides_the_hole_the_global_score_finds() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let samples = vec![
+            sample(9, 0, [0.0, 0.0, 0.0], 0.02),
+            sample(5, 0, [1.0, 0.0, 0.0], 0.35),
+        ];
+        // The candidate is owned by route (9, 0), so route-local scoring sees
+        // only sample 0.
+        let route_local: Vec<usize> = samples
+            .iter()
+            .enumerate()
+            .filter(|(_, sample)| (sample.island_id, sample.component_id) == (9, 0))
+            .map(|(index, _)| index)
+            .collect();
+        let scores =
+            score_candidates_globally(&[[0.0, 0.0, 0.0]], &samples, &route_local, R, 65_536);
+        assert!((scores[0].marginal_area_mm2 - 0.02).abs() < 1e-12);
+        assert!(
+            scores[0].marginal_area_mm2 < censor,
+            "route-local scoring must leave this seat below the censor — that is \
+             the measured regression rule N2 exists to undo"
+        );
+    }
+
+    /// The tiling is a work-splitting device, never a result-changing one. Two
+    /// budgets that produce completely different tile shapes must produce
+    /// bit-identical scores and bit-identical shares.
+    #[test]
+    fn the_matrix_budget_splits_the_work_and_never_moves_the_score() {
+        let samples: Vec<CoverageSample> = (0..40_u16)
+            .map(|index| {
+                sample(
+                    u32::from(index % 3),
+                    0,
+                    [f64::from(index) * 0.25, 0.0, 0.0],
+                    0.01 * f64::from(index + 1),
+                )
+            })
+            .collect();
+        let scoring: Vec<usize> = (0..samples.len()).collect();
+        let seats: Vec<[f64; 3]> = (0..7)
+            .map(|index| [f64::from(index) * 1.5, 0.0, 0.0])
+            .collect();
+
+        let wide = score_candidates_globally(&seats, &samples, &scoring, R, 65_536);
+        let narrow = score_candidates_globally(&seats, &samples, &scoring, R, 4);
+        assert_eq!(
+            wide, narrow,
+            "the score is a physical quantity; the tile shape must not appear in it"
+        );
+    }
+
+    /// **The scores are bit-identical across a rejection**, which is the half of
+    /// §A.4's reranking claim that survived v2.1. A rejected trial drops its
+    /// child plan, so the uncovered sample set and every candidate seat are
+    /// exactly what they were — rescoring would be work with a provably
+    /// identical result, and the controller therefore only RE-SORTS.
+    #[test]
+    fn a_rejection_cannot_move_a_score_so_only_the_order_is_rebuilt() {
+        let samples = vec![
+            sample(5, 0, [0.0, 0.0, 0.0], 1.25),
+            sample(5, 0, [0.4, 0.0, 0.0], 0.75),
+        ];
+        let scoring: Vec<usize> = (0..samples.len()).collect();
+        let seats = [[0.1, 0.0, 0.0], [9.9, 0.0, 0.0]];
+        let before = score_candidates_globally(&seats, &samples, &scoring, R, 65_536);
+        let after = score_candidates_globally(&seats, &samples, &scoring, R, 65_536);
+        assert_eq!(before, after);
+        assert_eq!(
+            before[0].marginal_area_mm2.to_bits(),
+            after[0].marginal_area_mm2.to_bits()
+        );
+    }
+
+    /// **Rule N4, ruling R13 — design §E.5 case 11, the diversity fixture.**
+    ///
+    /// Two equal-scoring candidates, one 0.5 mm from the rejected seat (inside
+    /// its 6.0 mm coverage disc) and one 8 mm away (outside it). The inside one
+    /// has the LOWER pool order, so today's tie-break — score, then pool order —
+    /// picks it, which is the measured "63 seats inside a 1.04 mm box" defect.
+    /// After the rejection the winner must be the outside one.
+    #[test]
+    fn after_a_rejection_the_next_winner_is_outside_the_rejected_seats_coverage_disc() {
+        let rejected_seat = [0.0, 0.0, 0.0];
+        let inside = ranked_row(5, 0, 1, [0.5, 0.0, 0.0], 2.0);
+        let outside = ranked_row(5, 0, 2, [8.0, 0.0, 0.0], 2.0);
+        let pool = candidates(vec![inside.clone(), outside.clone()]);
+
+        let mut discs = DiversityDiscs::new(R);
+        let served = BTreeMap::new();
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+
+        // Before the rejection the contiguous neighbour wins on pool order,
+        // exactly as production ranks today.
+        let first = choose_winner(&pool, &BTreeSet::new(), &discs, &served, censor)
+            .expect("a live candidate");
+        assert_eq!(pool.ranked[first.index].id, inside.id);
+
+        // Reject it: ledger the row AND record its coverage disc.
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(inside.id);
+        discs.reject(rejected_seat);
+
+        let next = choose_winner(&pool, &ledgered, &discs, &served, censor)
+            .expect("a live candidate remains");
+        assert_eq!(
+            pool.ranked[next.index].id, outside.id,
+            "the next winner must be outside the rejected seat's own coverage disc"
+        );
+        assert_eq!(
+            next.diversity_discs_containing_seat, 0,
+            "and the record must say it was not deprioritized"
+        );
+    }
+
+    /// **The revert proof for rule N4.** Delete the disc set — which is the
+    /// controller without ruling R13 — and the very next winner is the seat
+    /// 0.5 mm from the one just rejected, paying a second full pipeline pass to
+    /// re-prove what the first pass proved. If this ever fails, the fixture
+    /// above has stopped testing N4.
+    #[test]
+    fn without_the_diversity_rule_the_next_winner_is_the_neighbouring_seat() {
+        let inside_a = ranked_row(5, 0, 1, [0.5, 0.0, 0.0], 2.0);
+        let inside_b = ranked_row(5, 0, 2, [0.516, 0.0, 0.0], 2.0);
+        let outside = ranked_row(5, 0, 3, [8.0, 0.0, 0.0], 2.0);
+        let pool = candidates(vec![inside_a.clone(), inside_b.clone(), outside]);
+
+        let no_discs = DiversityDiscs::new(R);
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(inside_a.id);
+
+        let next = choose_winner(&pool, &ledgered, &no_discs, &BTreeMap::new(), censor)
+            .expect("a live candidate remains");
+        assert_eq!(
+            pool.ranked[next.index].id, inside_b.id,
+            "without the disc set the search marches 16 µm to the next pool order"
+        );
+    }
+
+    /// **Rule N4's completeness half, pinned rather than assumed.**
+    /// Deprioritization is not exclusion: drain a fully-enclosed
+    /// neighbourhood and every demoted candidate is eventually tried. Under
+    /// ruling R10 nothing truncates the order, which is the ruling's own
+    /// consistency argument for letting diversity reorder freely.
+    #[test]
+    fn every_deprioritized_candidate_is_eventually_tried() {
+        // Five seats packed inside one 1 mm box — the measured pathology — plus
+        // two well outside it.
+        let mut rows = Vec::new();
+        for index in 0..5_u32 {
+            rows.push(ranked_row(
+                5,
+                0,
+                index as usize,
+                [f64::from(index) * 0.25, 0.0, 0.0],
+                2.0,
+            ));
+        }
+        rows.push(ranked_row(5, 0, 5, [20.0, 0.0, 0.0], 2.0));
+        rows.push(ranked_row(5, 0, 6, [40.0, 0.0, 0.0], 2.0));
+        let pool = candidates(rows);
+        let total = pool.ranked.len();
+
+        let mut discs = DiversityDiscs::new(R);
+        let mut ledgered: BTreeSet<RepairRowId> = BTreeSet::new();
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let mut demoted_and_tried = 0_usize;
+
+        // Every trial is rejected — the worst case — so the loop ends only at
+        // pool exhaustion, which is precisely what R10 says bounds it.
+        while let Some(chosen) = choose_winner(&pool, &ledgered, &discs, &BTreeMap::new(), censor) {
+            let row = &pool.ranked[chosen.index];
+            if chosen.diversity_discs_containing_seat > 0 {
+                demoted_and_tried += 1;
+            }
+            ledgered.insert(row.id);
+            discs.reject(row.seat_mm);
+        }
+
+        assert_eq!(
+            ledgered.len(),
+            total,
+            "no candidate may fall off the end of the order: deprioritization is not exclusion"
+        );
+        assert!(
+            demoted_and_tried > 0,
+            "the fixture must actually exercise demotion, or it proves nothing"
+        );
+    }
+
+    /// **Rule N3 — the first-trial guarantee.** A 0.21 mm² route (the measured
+    /// `Tavey Badger` shape, 1.3× the censor) is served before a 13.04 mm²
+    /// route takes its SECOND contact. Greedy alone would never get there.
+    #[test]
+    fn the_first_trial_guarantee_serves_a_small_route_before_the_big_route_takes_a_second() {
+        let big_first = ranked_row(74, 0, 1, [0.0, 0.0, 0.0], 13.041);
+        let big_second = ranked_row(74, 0, 2, [30.0, 0.0, 0.0], 13.041);
+        let small = ranked_row(3, 0, 3, [60.0, 0.0, 0.0], 0.21);
+        let pool = candidates(vec![big_first.clone(), big_second, small.clone()]);
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let discs = DiversityDiscs::new(R);
+
+        // Nothing served yet: the biggest unserved route goes first.
+        let first = choose_winner(&pool, &BTreeSet::new(), &discs, &BTreeMap::new(), censor)
+            .expect("a live candidate");
+        assert_eq!(pool.ranked[first.index].id, big_first.id);
+        assert!(first.by_first_trial_guarantee);
+
+        // Record that route (74, 0) has now been served at its current area,
+        // and the small route — not the big route's second seat — wins.
+        let mut served = BTreeMap::new();
+        served.insert(
+            (74_u32, 0_u32),
+            pool.route_uncovered_mm2[&(74, 0)].to_bits(),
+        );
+        let second = choose_winner(&pool, &BTreeSet::new(), &discs, &served, censor)
+            .expect("a live candidate");
+        assert_eq!(
+            pool.ranked[second.index].id, small.id,
+            "the guarantee must reach a route whose whole area is 1.6% of the big one's"
+        );
+        assert!(second.by_first_trial_guarantee);
+    }
+
+    /// The serve set's threshold is the registered A3 censor and nothing new. A
+    /// route whose best GLOBAL score is below it cannot, by SPEC §4, change the
+    /// censored objective on its own, so a trial on it is provably wasted — and
+    /// it never gets a guaranteed first trial. It stays in the pool: greedy may
+    /// still reach it, and the zero-score guard is what ends the search.
+    #[test]
+    fn a_route_that_cannot_change_the_verdict_never_enters_the_serve_set() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let real = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 1.5);
+        let dust = ranked_row(9, 0, 2, [40.0, 0.0, 0.0], censor * 0.5);
+        let pool = candidates(vec![real.clone(), dust.clone()]);
+        let discs = DiversityDiscs::new(R);
+
+        let mut served = BTreeMap::new();
+        served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
+
+        // The only unserved route is the dust one, and it is below the censor,
+        // so the serve set is EMPTY and the winner comes from the global
+        // ranking instead — with the flag saying the guarantee did not choose it.
+        let chosen = choose_winner(&pool, &BTreeSet::new(), &discs, &served, censor)
+            .expect("a live candidate");
+        assert_eq!(pool.ranked[chosen.index].id, real.id);
+        assert!(!chosen.by_first_trial_guarantee);
+    }
+
+    /// A candidate that covers nothing is still ranked — SPEC §6 keeps
+    /// zero-score rows eligible — but it can never be a serve-set first trial,
+    /// because the zero-score guard (§B.3) is the serve-set threshold's own
+    /// special case. The controller's guard is what stops the loop; this pins
+    /// that the guard is reachable, i.e. that a zero-scoring row really can
+    /// surface as the winner.
+    #[test]
+    fn a_zero_scoring_candidate_reaches_the_winner_slot_where_the_guard_can_see_it() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let nothing = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 0.0);
+        let pool = candidates(vec![nothing.clone()]);
+        let chosen = choose_winner(
+            &pool,
+            &BTreeSet::new(),
+            &DiversityDiscs::new(R),
+            &BTreeMap::new(),
+            censor,
+        )
+        .expect("the row is eligible, so it is ranked");
+        assert_eq!(pool.ranked[chosen.index].marginal_area_mm2, 0.0);
+        assert!(
+            !chosen.by_first_trial_guarantee,
+            "a route that covers nothing is below the censor and cannot be served"
         );
     }
 }
