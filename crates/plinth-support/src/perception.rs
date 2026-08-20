@@ -2396,6 +2396,16 @@ fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
 /// plan in the engine is built at the registered height today, so the two
 /// agree. If per-layer heights ever land, this is the site that has to choose,
 /// and the physical answer is the shelf's own thickness -- the plan value.
+///
+/// Disclosure: no test here can distinguish this registry read from a
+/// hardcoded literal at today's values, because `M0EvidenceConstants`
+/// exposes only `new()` -- there is no way to construct one with a
+/// different evidence set to substitute in a test. The mitigation
+/// is `the_reach_allowance_is_read_from_the_registry_not_hardcoded`, which
+/// pins `x_allowed == 12.0` and `layer_height_mm == 0.050`: a future
+/// registry change to either value flips that assertion red, even though it
+/// cannot prove today that this function reads the registry rather than a
+/// constant.
 fn registry_low_point_reach_allowance_mm(constants: &plinth_core::M0Constants) -> f64 {
     let evidence = constants.evidence();
     low_point_reach_allowance_mm(
@@ -6202,9 +6212,22 @@ mod tests {
         }
     }
 
-    /// Exact corpus parity fixture: the derivation's 57-minima table
-    /// (`docs/engineering-journal/derivations/low-point-reach-2026-08-19.md`
-    /// sec 3) reduced to the three cases that carry it.
+    /// NOT a corpus-parity check. The three reach values below are literals
+    /// copied from the instrumented `b8edcb8` dumps (derivation's 57-minima
+    /// table,
+    /// `docs/engineering-journal/derivations/low-point-reach-2026-08-19.md`
+    /// sec 3), not re-derived from a mesh here, so the test is tautological
+    /// on those values by construction. What it actually pins: (a) the
+    /// comparison direction at both ends -- `>` the allowance demands a
+    /// support, `<=` is adequate; (b) the two non-trivial margins, 1.4756x
+    /// and 0.2827x the allowance; and (c) that `region_reach_mm` takes the
+    /// max over every sampled region point rather than only the minimum's
+    /// representative point -- `reach_fixture_minimum`'s representative
+    /// point always sits inside the carrying solid, so a reach read off it
+    /// alone would read zero in every case here, and the second region point
+    /// is what the max must pick up. The real corpus-parity evidence is the
+    /// byte-identical emissions recorded in the derivation's provenance
+    /// appendix, not this fixture.
     ///
     /// MEASURED reach values, read off the instrumented `b8edcb8` dumps:
     ///

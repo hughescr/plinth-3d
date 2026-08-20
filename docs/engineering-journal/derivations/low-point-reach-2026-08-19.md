@@ -11,7 +11,7 @@ non-birth local minimum is adequately carried if and only if its reach is at mos
 height. At the registered values that is **0.0707 mm of reach**. Both inputs are read from the M0
 registry at the site. Retire `MINIMA_SUPPORT_AREA_TIPS` entirely.
 
-**Shipped in** `crates/plinth-support/src/perception.rs`, `filter_minima_by_birth_and_adequacy`.
+**Shipped in** `crates/plinth-support/src/perception.rs`, `find_local_minima`.
 
 ---
 
@@ -98,7 +98,7 @@ should not refuse geometry the machine demonstrably renders. Recorded here so a 
 document does not re-raise a settled question. The naming correction stands regardless of the
 values: a **default** is not a **minimum**, and this document had called one the other.
 
-**MEASURED.** `filter_minima_by_birth_and_adequacy` was instrumented in a throwaway worktree, every
+**MEASURED.** `find_local_minima` was instrumented in a throwaway worktree, every
 non-birth minimum dumped with its carried area and its true reach, and the same two models run with
 the tip default at 0.200 mm radius / 0.400 mm diameter and at 0.050 mm radius / 0.100 mm diameter,
 same binary otherwise:
@@ -425,7 +425,7 @@ the same thing.
 
 ## 4. What shipped
 
-**Site.** `crates/plinth-support/src/perception.rs`, `filter_minima_by_birth_and_adequacy`: the
+**Site.** `crates/plinth-support/src/perception.rs`, `find_local_minima`: the
 `minima_support_area_tips × π × tip_radius²` threshold and the `carried >= threshold` verdict are
 both gone, together with the `carried_outer_area` helper, which had no other reader.
 
@@ -525,15 +525,16 @@ by a hair-thin in-plane neck is classified non-birth, has a short reach, and is 
 adequate — while physically it is a birth island hanging on a thread, and that neck is the
 narrowest section, which is exactly what the area law exists to police.
 
-**Filed, not fixed here.** Stated in the shipped code. Closing it needs a root-width measurement
-the perception stage does not currently make.
+**Filed as task #64 (narrow-neck width amplification), not fixed here.** Stated in the shipped
+code. Closing it needs a root-width measurement the perception stage does not currently make.
 
 ### 5.4 The reach probe has no connectivity requirement (R5) — KNOWN GAP, open
 
 Stated in full in §4. Distance to *any* solid in the probe slice is not a load path; on a crowded
 plate the nearest solid below can belong to a different model. Same hole as the predicate it
 replaces, so nothing regressed — but a criterion sold as physics-derived must say where it departs
-from its own physics. **Filed, not fixed here.** Stated in the shipped code.
+from its own physics. **Filed as task #65 (connectivity requirement), not fixed here.** Stated in
+the shipped code.
 
 ### 5.5 What was not measured
 
@@ -556,7 +557,16 @@ an ASSUMED isotropic surface, it is the number that would justify a coupon plate
 Per R2 the shipped end predicts 37%, not 64% — a materially different case for spending a plate.
 Recommendation 4 is therefore **conditional**: do not authorize the coupon plate until the
 overhang-candidate face fraction is measured. That is Craig's own settled rule — size the prize
-before building the instrument (the FU-82 ruling).
+before building the instrument (the FU-82 ruling). Filed as task #66 (angle coupon).
+
+**The demanded measurement is now DONE, 2026-08-19.** The overhang-candidate face fraction was
+measured on the production-orientation path (`prepare_one` → `orient_model` →
+`DenseSweep` → `face_normals_z`) across 10 models: moving the cutoff to the conservative band
+edge (θ* = 35.3°) unflags 32% of flagged area (required-8 aggregate; 38% across all 10), and the
+loose band edge (26.6°) unflags 58% (required-8; 64% across all 10), with the smallest per-model
+effect still 24.6% of area. Evidence: `scratchpad/overhang-out/results.md`, cited in full in the
+provenance appendix below. This satisfies the condition; it does not itself reopen recommendation
+4, which is for the task that spends the plate.
 
 **Stated amendment to the correction.** The review called the measurement "a single mesh pass over
 data already in hand", half an hour of work. That is not right, and saying so does not soften the
@@ -615,3 +625,36 @@ measured.** It is not folded into this task.
   code-reader claims by grep, the byte-identical dumps, the record counts, and the 55/2 normal
   split; it re-derived the headline formula from scratch and reached the same result. Its verdict
   was SOUND-WITH-CHANGES and its eight required changes are applied in this copy (§0).
+
+**Corpus-parity evidence for the shipped reach criterion (task #62).** §3's fixture pins reach
+margins and comparison direction on three literal values (see the test-level disclosure at
+`the_corpus_reach_table_reproduces_at_the_registered_allowance`); it does not re-derive them from
+a mesh. The actual parity check is emission-level, in `scratchpad/reach-out/`:
+
+- Four models with a non-trivial minima history (Crawler Zombie, Deinonychus, Morel Mudskipper,
+  zombie-3-a) were run through `plinth prepare` twice: once on a binary built at `develop`
+  (`b8edcb8`, pre-retirement, the control) and once on a binary built at this branch's tip
+  (post-retirement, `K = sqrt(X_ALLOWED/6)` shipped). All four `.chitubox` outputs are
+  byte-identical between the two builds (`cmp` exit 0 on all four), same support-record counts on
+  each side. Logs: `logs/build-baseline.log`, `logs/build-shipped.log`, `logs/n-base.txt`,
+  `logs/n-ship.txt`, `runs/baseline/`, `runs/shipped/`.
+- Two further single-model shipped-only runs (`runs-cz-shipped/`, `runs-tv-shipped/`) reproduce
+  the exact support-record counts (380 Crawler Zombie, 314 Thorny Vegepygmy) that the perception.rs
+  reach fixture's comment block cites, tying the fixture's literals back to a real run.
+- Scoped gate reproduced clean on the shipped build: `logs/gate-workspace.log`,
+  `scoped-gate.log`, `scoped-gate-verify.log`, `scoped-gate-pipeline.log`.
+
+Together these are the evidence that the reach criterion changes **zero** corpus verdicts and
+**zero** corpus bytes at the registered allowance — the fixture in §3 is a margin/direction pin,
+not this proof.
+
+**Overhang-candidate face-fraction measurement (§5.6, task #66 precondition).** Measured
+2026-08-19 in a separate detached worktree (`plinth-wt-overhang`, removed on completion) on the
+production `prepare_one` → `orient_model` → `DenseSweep` → `face_normals_z` path, across 10
+models (8 required + 2 optional, all measured, none failed). Full method, per-model table,
+confidence checks and exact commands: `scratchpad/overhang-out/results.md` (raw data in the
+adjacent `raw.json` / `raw-repeat.json` / `raw-required.json` / `results.json`). Headline:
+required-8 aggregate unflags 32.02% of flagged area at θ* = 35.3° and 57.81% at θ* = 26.6%;
+all-10 aggregate 38.27% and 64.36% respectively (dominated by the treant, 47% of all flagged
+area). This satisfies the FU-82 sizing precondition in §5.6; it does not itself authorize the
+coupon plate.
