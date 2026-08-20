@@ -1185,6 +1185,12 @@ and Craig has ruled on how to resolve it. §B.9 is that mandate.**
 
 ### B.9 The O-7 mandate — investigate the flat rounds IN CODE before implementing §B. NEW IN v2.1
 
+> **DISCHARGED 2026-08-20, before §B was implemented. The answer is §B-O7 below,
+> and it is part of this design.** Hypothesis 2 holds: the flat rounds' contacts
+> were condemned at **quarantine** and never routed, so no measured quantity
+> could move and none did. Clause 1 stands unchanged. §B.9 is kept verbatim
+> because §B-O7 corrects one of its own predictions and the reader needs both.
+
 **What stage 0 measured, at `06cf21b`.** Of the 12 sealing models that repair at
 all, **9 sealed only by passing through at least one round that improved nothing
 measurable**. The worst, and the named victim:
@@ -1266,6 +1272,203 @@ it goes to Craig before it is implemented — it is not the implementer's to tak
 tolerance on "improves", a permitted number of flat steps, a look-ahead depth, or
 any other new registered value (R11). If neither hypothesis resolves it, the
 answer is a ruling from Craig, not a knob.
+
+---
+
+## §B-O7. The flat-round resolution — measured in code and on the model (ruling R12)
+
+**Status: RESOLVED. Hypothesis 2 (dead weight) is confirmed. Clause 1 stands
+unchanged. No new registered constant, no tolerance, no permitted number of flat
+steps, no look-ahead.** This section is the design addendum ruling R12 orders,
+written during Core against what the code says and what the model measured, and
+it is part of this design.
+
+### B-O7.1 What was measured, and how
+
+`Crawler Zombie` — R12's named victim — was re-run at this design's own base,
+`develop` @ `a8feff4`, with a throwaway trace and nothing else changed. The
+patch is kept at
+`…/scratchpad/a4-build-out/o7-instrumentation-v2.patch`; it was never committed
+and the tree it was measured from is byte-identical to `a8feff4` plus this
+document.
+
+- Binary: `target/gate/plinth`, gate profile (release semantics), built
+  2026-08-20 07:41, **after** the lane's tip commit (07:29). Provenance checked
+  on **both** axes required by this lane: mtime past the last commit, **and** the
+  unique marker string `PLINTH-O7-TRACE-MARKER-a4o7-2026-08-20` present in the
+  binary and in the trace's every row.
+- Input: `Crawler Zombie.stl`, copied read-only out of `minis-to-process/`.
+- Command: `plinth prepare --output saturn4-ultra --no-cache`, one model, one
+  process. Outcome: `emitted=1` — the model still seals at this base, so the
+  plateau reproduces on live geometry rather than from a stale record.
+- Raw trace and the consolidated reading:
+  `…/scratchpad/a4-build-out/o7/crawler2.jsonl`, `…/o7/o7-evidence.txt`.
+
+Two things were recorded per attempt that stage 0 did not have: the **CCO
+transcript's disposition counts** (routed / quarantined / unrouted-no-winner),
+and, for **every row in the frozen repair pool**, its eligibility, its
+route-local score as today's nomination computes it, and its **global** score
+under rule N2.
+
+### B-O7.2 The measurement
+
+| attempt | plan contacts | **routed** | quarantined | unrouted-no-winner | blocking patches | failing area mm² | uncovered samples |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 75 | 58 | 10 | 7 | 3 | 17.019 970 362 675 23 | 2 658 |
+| 1 | 89 | 63 | 19 | 7 | 2 | 16.625 364 190 080 948 | 2 615 |
+| 2 | 99 | **63** | 29 | 7 | 2 | 16.625 364 190 080 948 | 2 615 |
+| 3 | 109 | **63** | 38 | 8 | 2 | 16.625 364 190 080 948 | 2 615 |
+| 4 | 119 | **63** | 47 | 9 | 2 | 16.625 364 190 080 948 | 2 615 |
+| 5 | 129 | **63** | 55 | 11 | 2 | 16.625 364 190 080 948 | 2 615 |
+| 6 | 139 | 64 | 64 | 11 | 2 | 16.625 364 190 080 948 | 2 614 |
+| 7 | 148 | **65** | 72 | 11 | **0** | — sealed — | — |
+
+Read the `routed` column. **Fifty repair contacts are appended across attempts
+2–6 and the routed contact count does not move.** Every one of them is
+condemned at **quarantine**, before any arm is ever proposed: the quarantined
+count rises by exactly what the plan gained. A quarantined terminal is skipped
+in the routing cadence (`CcoController::advance_skipped_terminal`,
+`runner.rs:2723`), never becomes a routed contact, and coverage is measured over
+**routed** contacts only — the rule this module's own header states. So the
+appended rows could not move any measured quantity, and they did not.
+
+### B-O7.3 Hypothesis 1 is falsified on every quantity the measurement produces
+
+R12's clause 1 asks whether a finer measured quantity moves during the flat
+rounds. Across attempts 1 → 5 the following are **bit-identical**, not merely
+close:
+
+| quantity | attempts 1–5 |
+| --- | --- |
+| `failing_uncovered_area_mm2` (objective component 1) | `16.625364190080948` |
+| `max_patch_area_mm2` (component 2) | `16.433943572110365` |
+| `failing_patch_count` (component 3) | `2` |
+| `worst_gap_mm` (component 4) | `+inf` (`NoRoutedContact`) throughout |
+| uncensored total uncovered area (clause 3's quantity) | `16.82511320562989` |
+| **uncovered sample count** | `2615` |
+| worklist patch count | `11` |
+
+Every candidate quantity §B.9 named — including the two it did not have (the
+sample count and the per-route worst gaps) — is unchanged. **There is no finer
+granularity to refine the objective at, because nothing physical moved.** R12's
+clause 1 therefore does not apply, and the escalation it reserved for Craig (a
+change to clause 1, which is a spec reading) is **not needed and is not
+requested**.
+
+The one quantity that *did* move is the wrong direction and it matters:
+`unrouted_no_winner` climbs **7 → 11** across the plateau. The dead weight did
+not merely fail to help — it cost four terminals their winner. Under §C clause 2
+each of those steps is a **regression** and would be rejected outright. The
+one-winner controller is strictly better on this model than the batch loop, not
+merely different.
+
+### B-O7.4 Clause 2 — SHOW WHICH ROWS, as ruling R12 demands
+
+The nine rows appended in the sealing round are, by exact pool identity:
+
+> **island 9, component 0, pool orders 3976, 3977, 3978, 3979, 3980, 3981, 3982,
+> 3983, 3984** — nine consecutive rows.
+
+At the **first flat round** (round 1), every one of them was already:
+
+| | value at round 1 |
+| --- | --- |
+| eligible | **true**, all nine |
+| nominated | **false**, all nine |
+| route-local score (today's rule) | `16.797131293215315` mm², all nine |
+| **global score (rule N2)** | `16.82275036793747` mm² (eight of nine), `16.797131293215315` mm² (order 3977) |
+
+They were **eligible and unnominated, throttled out** — precisely hypothesis 2's
+prediction, and precisely the row R12 asked to be shown. The repair pool is
+frozen for the run (`derive_child` clones `repair_pool` and `coverage_samples`
+verbatim, `specialized.rs:1475`–`1477`), and the exclusion sets only ever grow,
+so a row appended at round 6 was necessarily eligible at every earlier round.
+That is a structural proof, not an inference from the trace.
+
+**And the sealing contact is ONE contact.** Attempt 7 routes **65** where
+attempt 6 routed 64: exactly one additional routed contact takes the failing
+area from 16.625 mm² to zero. Crawler Zombie needs **one committed step**, not
+nine and not six — comfortably inside the registered bound of 8 (R6, R11).
+
+### B-O7.5 The honest correction to §B.9's own expectation
+
+§B.9 predicted that if hypothesis 2 held, "the global scoring of rule N2 must
+surface the sealing rows immediately, in the first trials". **That prediction is
+half right and the design must say so rather than claim the win.**
+
+- **Right:** the sealing rows do carry a top global score from round 1 —
+  16.82 mm², which is the entire uncovered area of the model. Rule N2 ranks them
+  at the very top.
+- **Wrong:** so do 2,303 other rows. At round 1, of **5,831** eligible rows,
+  **2,304 score at or above 16.0 mm²** and 4,584 score at or above the censor.
+  The global score is an area, and every seat inside 6.0 mm of this model's one
+  large hole reaches essentially all of it. **Global scoring cannot separate a
+  seat that will route from a seat that will be quarantined**, because the score
+  measures reach and quarantine measures the stub axis.
+
+What the throttle actually did was pick, per round, a run of **spatially
+contiguous** pool orders out of that tie — round 1 picked island 9 orders
+3931–3939, round 6 picked 3976–3984 — and the first neighbourhood was condemned
+while the second was not. That is **exactly ruling R13's mechanism**: scores tie
+on absolute area, the tie-break follows pool order, and pool order is
+spatially contiguous.
+
+> **So the resolution is: clause 1 stands, rule N1 supplies the attention, rule
+> N2 puts the sealing rows in the top tie, and rule N4 — spatial diversity on
+> rejection — is what walks that tie into a routable neighbourhood instead of
+> marching 3931, 3932, 3933 … through a condemned one.** N4 is not a cost
+> optimisation on this model. It is the mechanism that closes it.
+
+Under one-winner: the winner is drawn from the 2,304-way top tie; if its contact
+is quarantined the trial covers nothing, clause 1 and clause 3 both fail, it is
+rolled back and ledgered, and **N4 deprioritizes every remaining candidate
+inside that rejected seat's own 6.0 mm coverage disc**. The next winner is a
+seat outside it. Under R10 there is no failed-tries cap, so the search cannot be
+truncated before it reaches a routable seat, and the first one that routes
+covers ~16.8 mm² and seals the model in a single commit.
+
+### B-O7.6 What this addendum does NOT claim
+
+- It does not claim Crawler Zombie emits under the new controller. That is a
+  **Prove** obligation on the model (§E.5 case 10) and it stays one. What is
+  established here is that the model needs **one** improving contact, that the
+  contact exists in the pool, that it is eligible from the first repair round,
+  and that N2+N4 are the rules that reach it.
+- It does not generalise the quarantine finding to the other eight flat-round
+  models (Morel Mudskipper, Skeleton_2, Tavey, zombie-3-a, Skulker Zombie and
+  the rest). Only Crawler Zombie — the worst measured case, and R12's named
+  victim — was traced. The others' flat rounds are **presumed** to be the same
+  dead weight and are **not measured**; Prove should read the same two columns
+  (`routed`, `unrouted_no_winner`) on each of them, which §A.8's reporting now
+  prints on every run without any instrumentation at all.
+- It does not add a rejection class for quarantine. It was tempting: a trial
+  whose own appended contact is quarantined cannot cover anything, so it could
+  be rejected after Preparation without paying route → rewire → brace →
+  structure → lower → measure. **It is not implemented, deliberately**, because
+  the measurement above disproves the inertness that would justify it —
+  `unrouted_no_winner` moved 7 → 11 while those contacts were being appended, so
+  adding a quarantined contact demonstrably changes *other* terminals' outcomes.
+  An early rejection would therefore be a guess about a plan that had not been
+  routed. It is recorded as a **follow-up with its own measurement obligation**,
+  not taken here. What is implemented is the evidence: every trial reports
+  whether its own contact was quarantined, so the class is visible in the record
+  and can be sized before anyone acts on it.
+
+### B-O7.7 Consequences recorded against the body of this design
+
+1. **§B.1 clause 1 is unchanged.** No refinement, no tie-break at a finer
+   granularity, no new quantity in the lexicographic key.
+2. **§B.9's "SHOW WHICH" obligation is discharged** by §B-O7.4 with exact pool
+   identities and their global scores.
+3. **§A.4 rule N4 is promoted from a cost mitigation to a correctness-relevant
+   search rule** on at least one currently-emitting model. §F.5's framing —
+   "N4 is expected to cut the worst case hard, and it is not measured yet" —
+   stands for cost; for Crawler Zombie's emission it is now load-bearing.
+4. **§E.5 case 10 keeps its Prove obligation**, and gains the specific thing to
+   assert: the model seals in **one** commit, and the committing row's
+   `scored_from` credits island 9 component 0.
+5. **O-7 is closed as a mandate** and remains open only as the Prove-stage
+   emission check.
 
 ---
 
@@ -2707,7 +2910,7 @@ one is implemented in the section named, not appended here.
 | --- | --- | --- |
 | **R10** | **NO failed-tries cap.** The loop gives up only when no candidate can physically help — pool exhaustion plus the zero-score guard. **Counters must never decide outcomes** (physics-first doctrine). Every run reports its tries and its wall time **LOUDLY**. | §1 (the attempt-cap clause), §A.7 (no trial cap in the stop list), **§A.8** (the reporting contract), §F.5 (the rewritten cost), §L (O-1 withdrawn) |
 | **R11** | `coverage_repair_max_attempts` counts **COMMITTED steps only**. **NO new registered constant in this lane.** No cap, gate, threshold or tolerance moves. | §1, §A.7, §F.5, §H.2, §L (O-1 withdrawn, O-2 closed on stage-0 evidence) |
-| **R12** | **O-7, the flat rounds.** 9 of 12 repair-sealing models historically sealed only through rounds that improved nothing measurable. **Investigate in code WHY before implementing §B.** If a finer measured quantity moves during them, define the strict-improvement objective at that granularity, **existing quantities only**. If the flat rounds were dead weight from per-patch nomination throttling, clause 1 stands and the global scoring must surface the sealing rows immediately — **SHOW WHICH**. **Crawler Zombie must still emit** (proven in Prove). The resolution lands as design addendum **§B-O7** during Core. | **§B.9** (the mandate, the two hypotheses, the discriminating telemetry and where to read it), §E.5 case 10, §L (O-7 rewritten) |
+| **R12** | **O-7, the flat rounds.** 9 of 12 repair-sealing models historically sealed only through rounds that improved nothing measurable. **Investigate in code WHY before implementing §B.** If a finer measured quantity moves during them, define the strict-improvement objective at that granularity, **existing quantities only**. If the flat rounds were dead weight from per-patch nomination throttling, clause 1 stands and the global scoring must surface the sealing rows immediately — **SHOW WHICH**. **Crawler Zombie must still emit** (proven in Prove). The resolution lands as design addendum **§B-O7** during Core. | **§B.9** (the mandate, the two hypotheses, the discriminating telemetry and where to read it) and **§B-O7** (the discharged resolution, measured 2026-08-20: hypothesis 2, quarantine, clause 1 unchanged, the nine sealing rows named by pool identity), §E.5 case 10, §L (O-7 closed as a mandate) |
 | **R13** | **Spatial diversity on rejection.** Scores tie on absolute area and the tie-break follows pool order, which is spatially contiguous — the measured mechanism behind 63 seats in a 1.04 mm box. After a rejected trial the next candidate must be spatially diverse, by a rule derived from existing geometry (outside the rejected seat's coverage disc) and **not** a new constant. | **§A.4 rule N4**, §A.7 (the loop), §A.4 "Reranking" (v2's no-op claim withdrawn), §D.1 (`diversity_discs_containing_seat`), §A.8 (`diversity_demotions`), §2, §F.5, §E.5 case 11 |
 | **R14** | **Termination reasons are measured defect classes** — `ClearanceMaskUnsatisfiable`, `StubReentry`, `PoolExhausted`, `NoCandidateCoversAnything`, `NoPoolRows` — **never distance claims**. Honest refusal beats fake progress. | **§E** (verified, already conformant; the three re-checks are recorded there), §E.1 |
 
@@ -2786,8 +2989,15 @@ that closes a hole §4 and §6 jointly leave open. One sentence in §6 — "a
 committed step must also strictly reduce total uncovered sample area,
 uncensored" — makes it contract. Recommended.
 
-**O-7 — A4 is a greedy hill-climb and cannot cross a plateau. PROMOTED TO A
-MANDATE. AMENDED (v2.1) — this is the top item now, and it has a named victim.**
+**O-7 — A4 is a greedy hill-climb and cannot cross a plateau. RESOLVED
+2026-08-20 as design addendum §B-O7 — hypothesis 2, measured on Crawler Zombie
+at `a8feff4`: the flat rounds' 50 contacts were condemned at quarantine and
+never routed (`routed` pinned at 63 for four consecutive rounds), so clause 1
+stands unchanged and no quantity is refined. The model needs exactly ONE
+improving contact. What remains open is only the Prove-stage emission check.**
+The v2.1 text below is kept for the record.
+
+**AMENDED (v2.1) — this is the top item now, and it has a named victim.**
 v2 filed it as "known limit, not a surprise". Stage 0 measured it and it is a
 surprise: **9 of the 12 repair-sealing models sealed only by crossing at least
 one round that improved nothing measurable**, and **Crawler Zombie plateaus for
