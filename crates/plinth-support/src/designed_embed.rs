@@ -1087,6 +1087,87 @@ fn unusable_attestation(
 // only ever certifies a tip the run is actually going to build. Re-inflating the
 // ring while emitting a thin tip is the defect, not the fix.
 
+/// **WHICH registered limit ended a growth ladder.**
+///
+/// Named rather than inferred from the number, because the disclosure has to
+/// say which limit stopped it and a reader cannot tell 0.400 from 1.000 apart
+/// by eye once the ladder has been clamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum GrowthCeilingSource {
+    /// `TIP_RADIUS_MAX_GROWN_SCAR_MM` — Craig's measured field ceiling on the
+    /// scar a grow-for-attachment rescue may leave, 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER).
+    GrownScarMaximum,
+    /// `TIP_RADIUS_MAX_LEGACY_MM` — the load law's own clamp maximum,
+    /// 1.000 mm RADIUS (2.000 mm DIAMETER).
+    LegacyTipMaximum,
+}
+
+impl GrowthCeilingSource {
+    /// The registry id, so a disclosure names the constant and not a number.
+    pub(crate) const fn constant_id(self) -> &'static str {
+        match self {
+            Self::GrownScarMaximum => "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            Self::LegacyTipMaximum => "TIP_RADIUS_MAX_LEGACY_MM",
+        }
+    }
+}
+
+/// **THE SCAR BOUND — how high a rescue may grow a tip, and what it leaves
+/// alone.**
+///
+/// Craig's ruling of 2026-08-20, on his own field data: the heaviest support he
+/// has ever needed is a **0.800 mm DIAMETER** sphere, so **0.400 mm RADIUS
+/// (0.800 mm DIAMETER)** is the largest scar he accepts on a model. It is
+/// registered as `TIP_RADIUS_MAX_GROWN_SCAR_MM`, honestly labelled an EXTERNAL
+/// REQUIREMENT — field data, not physics and not a wet-finger estimate.
+///
+/// **The distinction that matters, and the reason this is a separate limit
+/// rather than a smaller `TIP_RADIUS_MAX_LEGACY_MM`.** Two different appetites
+/// can enlarge a tip:
+///
+/// * the **LOAD LAW** — `pi r^2 >= carried_area / X`, which sizes a tip to
+///   CARRY WEIGHT and may legitimately demand up to the registered
+///   `TIP_RADIUS_MAX_LEGACY_MM` of 1.000 mm radius (2.000 mm diameter) for a
+///   genuinely heavy area. **This bound does not touch that.** A load-sized tip
+///   above 0.400 mm radius that attests is emitted exactly as before: it is not
+///   clamped, not refused, and not mentioned here.
+/// * **GROWTH FOR ATTACHMENT** — this module's ladder, which enlarges a tip
+///   BEYOND what the load law asked for purely so the attestation ring can
+///   reach solid. That excess is a scar in a place the operator did not choose,
+///   and it is what this bound limits.
+///
+/// So the ladder truncates at the SMALLER of the two limits and the refusal
+/// path names whichever one it stopped at. A contact whose cure would need a
+/// larger tip than the ceiling gets the existing disclosed ABANDONED LOAD line,
+/// with the bound named as the stopper — never a silently over-grown scar.
+///
+/// The truncation weakens no refusal in either direction: lowering a ceiling
+/// can only turn a cure into a refusal, never a refusal into a cure.
+pub(crate) fn growth_ceiling_radius_mm(
+    legacy_max_mm: f64,
+    scar_bound_mm: f64,
+) -> (f64, GrowthCeilingSource) {
+    // SABOTAGE SEAM. Ignoring the scar bound is exactly the engine before this
+    // change: the ladder runs to the legacy maximum and a rescue may leave a
+    // scar wider than any support Craig has ever needed. It sits here, at the
+    // min, because the min IS the truncation — sabotaging the ladder's own
+    // arithmetic instead would make the ladder tests disagree with themselves.
+    // The bound binds only when it is a real number strictly below the legacy
+    // maximum. `is_finite` is stated rather than left to the comparison: a NaN
+    // bound must fall back to the legacy limit, and a bare `<` on a NaN is
+    // false by accident rather than by decision.
+    if !scar_bound_disabled() && scar_bound_mm.is_finite() && scar_bound_mm < legacy_max_mm {
+        (scar_bound_mm, GrowthCeilingSource::GrownScarMaximum)
+    } else {
+        (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+    }
+}
+
+fn growth_ceiling(request: &TipGrowthRequest) -> (f64, GrowthCeilingSource) {
+    growth_ceiling_radius_mm(request.max_radius_mm, request.scar_bound_radius_mm)
+}
+
 /// The radius ratio that DOUBLES a tip's nominal interface area.
 ///
 /// `pi (sqrt(2) r)^2 = 2 pi r^2`. This is an algebraic identity of the disc, not
@@ -1106,15 +1187,18 @@ const AREA_DOUBLING_RADIUS_RATIO: f64 = std::f64::consts::SQRT_2;
 ///
 /// **The rung COUNT is not chosen.** It is
 /// `ceil(log(max / law) / log(sqrt(2)))`, fixed by this row's own law radius and
-/// the registered `tip_radius_max_legacy_mm`. Across the whole registered clamp
-/// span — `TIP_RADIUS_MAX_LEGACY_MM / TIP_RADIUS_DEFAULT_MM` = 1.0 / 0.05 = 20
-/// mm radius over mm radius (2.0 / 0.1 in diameter) — the deepest possible
-/// ladder is `ceil(2 * log2(20))` = 9 rungs. Nothing is registered and no count
-/// is hand-typed.
+/// the ceiling [`growth_ceiling`] handed it. Across the widest span the
+/// registry admits — `TIP_RADIUS_MAX_LEGACY_MM / TIP_RADIUS_DEFAULT_MM` =
+/// 1.0 / 0.05 = 20 mm radius over mm radius (2.0 / 0.1 in diameter) — the
+/// deepest possible ladder is `ceil(2 * log2(20))` = 9 rungs. Under the scar
+/// bound the span is `TIP_RADIUS_MAX_GROWN_SCAR_MM / TIP_RADIUS_DEFAULT_MM` =
+/// 0.4 / 0.05 = 8, i.e. `ceil(2 * log2(8))` = 6 rungs, so the bound makes the
+/// ladder SHORTER and never longer. Nothing is registered and no count is
+/// hand-typed.
 ///
-/// **The last rung is exactly the registered maximum**, so the sweep always
-/// terminates on a legal radius and never proposes one above the cap the owner
-/// ruled stays.
+/// **The last rung is exactly the ceiling**, so the sweep always terminates on
+/// a radius the run is allowed to build and never proposes one above the limit
+/// the owner ruled.
 ///
 /// **Ascending, first success wins, and no bisection.** Attestation is NOT
 /// monotone in radius: a wider ring can step PAST a thin feature that a
@@ -1290,8 +1374,15 @@ pub(crate) struct TipGrowthRequest {
     /// inverting by holding its rootward end at least as wide as its tip, and
     /// growth keeps that same rule rather than inventing one.
     pub(crate) opposite_end_minimum_radius_mm: f64,
-    /// The registered `tip_radius_max_legacy_mm`. The ladder ends here.
+    /// The registered `tip_radius_max_legacy_mm`, in mm RADIUS — the LOAD
+    /// LAW's own clamp maximum, carried here so the ladder can say which of
+    /// the two limits it actually stopped at.
     pub(crate) max_radius_mm: f64,
+    /// The registered `tip_radius_max_grown_scar_mm`, in mm RADIUS — Craig's
+    /// measured field ceiling, 0.400 mm RADIUS (0.800 mm DIAMETER). See
+    /// [`growth_ceiling`] for what it does and, just as importantly, what it
+    /// does not touch.
+    pub(crate) scar_bound_radius_mm: f64,
     /// PR-4's non-regression clause, carried through VERBATIM from the caller.
     ///
     /// It is deliberately NOT set by growth reaching the cap. That clause means
@@ -1370,6 +1461,14 @@ pub(crate) struct TipGrowthOutcome {
     pub(crate) row: usize,
     /// Rung zero — what the load law asked for and PR-8 refused.
     pub(crate) law_radius_mm: f64,
+    /// The largest tip this ladder was allowed to propose, mm RADIUS — the
+    /// SMALLER of the registered `tip_radius_max_grown_scar_mm` and
+    /// `tip_radius_max_legacy_mm`. Reported rather than recomputed downstream,
+    /// so the disclosure states the ceiling the run actually walked to.
+    pub(crate) growth_ceiling_radius_mm: f64,
+    /// WHICH registered constant that ceiling came from, so a refusal can name
+    /// its stopper instead of quoting a bare number.
+    pub(crate) growth_ceiling_source: GrowthCeilingSource,
     /// Every rung tried ABOVE the law radius, in the order they were tried:
     /// the ascending ladder first, then the descending refinement scan inside
     /// the bracket the ladder closed. The order is the order of measurement,
@@ -1492,15 +1591,24 @@ pub(crate) fn grow_tips_to_attest(
         samples_per_subsegment,
         policy,
     };
+    // THE CEILING, decided once per row before any rung is walked. It is the
+    // smaller of the registered scar bound and the registered legacy maximum,
+    // and it is carried into the outcome so the disclosure states the limit
+    // this run actually walked to and names the constant it came from.
+    let ceilings = requests.iter().map(growth_ceiling).collect::<Vec<_>>();
     let ladders = requests
         .iter()
-        .map(|request| tip_growth_ladder(request.law_radius_mm, request.max_radius_mm))
+        .zip(&ceilings)
+        .map(|(request, (ceiling_mm, _))| tip_growth_ladder(request.law_radius_mm, *ceiling_mm))
         .collect::<Vec<_>>();
     let mut outcomes = requests
         .iter()
-        .map(|request| TipGrowthOutcome {
+        .zip(&ceilings)
+        .map(|(request, (ceiling_mm, source))| TipGrowthOutcome {
             row: request.row,
             law_radius_mm: request.law_radius_mm,
+            growth_ceiling_radius_mm: *ceiling_mm,
+            growth_ceiling_source: *source,
             attempts: Vec::new(),
             cure: None,
         })
@@ -1721,6 +1829,8 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     /// Run zero growth rounds — see [`with_growth_rounds_disabled`].
     static TIP_GROWTH_ROUNDS_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Ignore the registered scar bound — see [`with_scar_bound_disabled`].
+    static TIP_SCAR_BOUND_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether the growth ladder is being walked. Always `true` in production: the
@@ -1753,6 +1863,40 @@ pub(crate) fn with_growth_rounds_disabled<T>(body: impl FnOnce() -> T) -> T {
     TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(true));
     let outcome = body();
     TIP_GROWTH_ROUNDS_DISABLED.with(|cell| cell.set(false));
+    outcome
+}
+
+/// Whether the registered scar bound is being honoured. Always `false` in
+/// production: the switch below exists only in a test build.
+fn scar_bound_disabled() -> bool {
+    #[cfg(test)]
+    {
+        TIP_SCAR_BOUND_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// **Test-only sabotage of the scar bound**, so one fixture can be run BOTH
+/// ways through the real production path.
+///
+/// The bound's whole claim is a counterfactual: a seat whose cure would need a
+/// tip wider than `TIP_RADIUS_MAX_GROWN_SCAR_MM` must be REFUSED, and the only
+/// way to show a refusal is the bound's doing — rather than a seat that was
+/// incurable anyway — is to lift the bound and watch the same fixture cure at
+/// an over-bound radius. A revert that deletes the truncation therefore turns
+/// the guard test red with the over-bound scar it would have built named in
+/// the failure.
+///
+/// Thread-local, and disarmed on the way out, exactly like
+/// [`with_growth_rounds_disabled`].
+#[cfg(test)]
+pub(crate) fn with_scar_bound_disabled<T>(body: impl FnOnce() -> T) -> T {
+    TIP_SCAR_BOUND_DISABLED.with(|cell| cell.set(true));
+    let outcome = body();
+    TIP_SCAR_BOUND_DISABLED.with(|cell| cell.set(false));
     outcome
 }
 
@@ -4064,6 +4208,27 @@ mod tests {
     /// literal cannot pass on its own.
     const EDGE_SEAT_CURE_RADIUS_MM: f64 = 0.081_328_874_469_857_68;
 
+    /// The registered `TIP_RADIUS_MAX_GROWN_SCAR_MM`, read rather than typed,
+    /// so a ruling that moves the bound moves these fixtures with it.
+    fn registered_scar_bound_mm() -> f64 {
+        *plinth_core::m0_constants()
+            .expect("the M0 registry constructs")
+            .evidence()
+            .tip_radius_max_grown_scar_mm()
+            .value()
+    }
+
+    /// The registered `TIP_RADIUS_MAX_LEGACY_MM` — the load law's own clamp
+    /// maximum, which is what the ladder would run to WITHOUT the scar bound.
+    fn registered_legacy_tip_max_mm() -> f64 {
+        plinth_core::m0_constants()
+            .expect("the M0 registry constructs")
+            .placeholders()
+            .tip_radius_max_legacy_mm()
+            .diagnostic()
+            .get()
+    }
+
     fn edge_seat_request(seat_y: f64) -> TipGrowthRequest {
         TipGrowthRequest {
             row: 0,
@@ -4074,7 +4239,8 @@ mod tests {
             carried_mm2: EDGE_SEAT_CARRIED_MM2,
             law_radius_mm: EDGE_SEAT_LAW_RADIUS_MM,
             opposite_end_minimum_radius_mm: 0.35,
-            max_radius_mm: 1.0,
+            max_radius_mm: registered_legacy_tip_max_mm(),
+            scar_bound_radius_mm: registered_scar_bound_mm(),
             tip_clamped_at_max: false,
         }
     }
@@ -4344,10 +4510,11 @@ mod tests {
     /// **Growth does not paper over a seat that is genuinely not there.**
     ///
     /// Move the same stub far enough past the edge that no legal tip can reach
-    /// — `2.0 + 1.5` mm, beyond the registered `tip_radius_max_legacy_mm` of
-    /// 1.0 mm radius — and the ladder must be walked to its end and then REFUSE,
-    /// with every rung on the record. A remedy that cured this one would be
-    /// inventing attachment.
+    /// — `2.0 + 1.5` mm, beyond even the registered `tip_radius_max_legacy_mm`
+    /// of 1.0 mm radius, and so beyond any ceiling growth could ever be given —
+    /// and the ladder must be walked to its end and then REFUSE, with every
+    /// rung on the record. A remedy that cured this one would be inventing
+    /// attachment.
     #[test]
     fn a_seat_no_legal_tip_can_reach_is_refused_with_the_whole_ladder_on_the_record() {
         let surface = edge_seat_box();
@@ -4359,9 +4526,237 @@ mod tests {
              radius can reach; curing it would be inventing attachment"
         );
         // Every rung tried, none attested, and the last one is exactly the
-        // registered maximum — the ladder ends on a legal radius.
+        // ceiling the run walked to — the ladder ends on a radius the run is
+        // allowed to build. Read from the outcome rather than typed, so this
+        // stays true whichever of the two registered limits binds.
         assert!(!outcomes[0].attempts.is_empty());
         assert!(outcomes[0].attempts.iter().all(|rung| !rung.attested));
-        assert_eq!(outcomes[0].attempts.last().unwrap().radius_mm, 1.0);
+        assert_eq!(
+            outcomes[0].attempts.last().unwrap().radius_mm,
+            outcomes[0].growth_ceiling_radius_mm
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // THE SCAR BOUND — TIP_RADIUS_MAX_GROWN_SCAR_MM
+    // ---------------------------------------------------------------------
+
+    /// **THE OVER-BOUND SIBLING of the edge seat.**
+    ///
+    /// The same construction as [`EDGE_OFFSET_MM`], moved further out: the seat
+    /// stands `1.25 x` the registered scar maximum past the `+y` silhouette
+    /// edge. The reach rule is unchanged — a rim ray at tip radius `r` reaches
+    /// `y = 2 + offset - r`, so the ring finds solid **iff `r > offset`** — and
+    /// with `offset = 1.25 x bound` that means:
+    ///
+    /// * **every radius the bound allows fails**, because the whole ladder is
+    ///   at or below `bound < offset`;
+    /// * **a radius above the bound would work**, because the ladder run to the
+    ///   legacy maximum contains rungs above `offset`.
+    ///
+    /// So the seat is curable in geometry and refused by policy, which is
+    /// exactly the case the bound exists to decide. The factor is stated as
+    /// arithmetic against the registered constant, never as a typed millimetre,
+    /// so a ruling that moves the bound moves this fixture with it.
+    fn over_bound_edge_offset_mm() -> f64 {
+        1.25 * registered_scar_bound_mm()
+    }
+
+    /// **A cure that would exceed Craig's scar maximum is REFUSED, and the
+    /// refusal names the bound.**
+    ///
+    /// This is the ruling of 2026-08-20 in one fixture. The seat CAN be reached
+    /// — the counterfactual below proves it, by lifting the bound and watching
+    /// the same fixture cure — but only by growing the tip past 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER), which is the heaviest support Craig has ever needed
+    /// and the largest scar he accepts. The engine's answer is therefore the
+    /// disclosed ABANDONED LOAD, with the bound NAMED as the stopper, rather
+    /// than a support the operator never agreed to.
+    ///
+    /// **If the truncation is reverted this test goes red**, and the failure
+    /// prints the over-bound scar the run would have built — radius and
+    /// diameter — instead of a bare "expected None".
+    #[test]
+    fn a_cure_that_would_exceed_the_grown_scar_maximum_is_refused_and_names_the_bound() {
+        let surface = edge_seat_box();
+        let bound_mm = registered_scar_bound_mm();
+        let offset_mm = over_bound_edge_offset_mm();
+        let seat_y = 2.0 + offset_mm;
+        let outcomes = grow_edge_seat(&surface, &edge_seat_request(seat_y));
+        assert_eq!(outcomes.len(), 1);
+        let outcome = &outcomes[0];
+
+        if let Some(cure) = outcome.cure.as_ref() {
+            panic!(
+                "THE SCAR BOUND IS NOT BEING APPLIED. This seat stands \
+                 {offset_mm} mm past the edge, so nothing at or below the \
+                 registered TIP_RADIUS_MAX_GROWN_SCAR_MM of {bound_mm} mm RADIUS \
+                 ({} mm DIAMETER) can reach it — yet growth returned a cure at \
+                 {} mm RADIUS ({} mm DIAMETER), an over-bound scar {}x the \
+                 maximum Craig ruled. That is a support wider than the heaviest \
+                 he has ever needed, cut into a model in a place he did not \
+                 choose. Rungs walked: {:?}",
+                bound_mm * 2.0,
+                cure.radius_mm,
+                cure.radius_mm * 2.0,
+                cure.radius_mm / bound_mm,
+                outcome.attempts
+            );
+        }
+
+        // THE CEILING IS THE BOUND, and it is named.
+        assert_eq!(
+            outcome.growth_ceiling_radius_mm,
+            bound_mm,
+            "the ladder's ceiling must be the registered scar maximum \
+             {bound_mm} mm radius ({} mm diameter), not the load law's own \
+             clamp",
+            bound_mm * 2.0
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source,
+            GrowthCeilingSource::GrownScarMaximum
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source.constant_id(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            "the disclosure names the constant that stopped the rescue; a bare \
+             number cannot tell an operator WHICH rule refused their support"
+        );
+
+        // THE LADDER WAS WALKED, in full, and it stopped exactly at the bound.
+        // A refusal with an unwalked ladder would be the silent quarantine
+        // grow-to-attest exists to remove.
+        assert!(
+            !outcome.attempts.is_empty(),
+            "the contact was refused without any larger tip being tried"
+        );
+        assert!(outcome.attempts.iter().all(|rung| !rung.attested));
+        assert_eq!(outcome.attempts.last().unwrap().radius_mm, bound_mm);
+        assert!(
+            outcome
+                .attempts
+                .iter()
+                .all(|rung| rung.radius_mm <= bound_mm),
+            "no rung may PROPOSE a tip above the bound, even to measure it — \
+             every rung probes at the radius it would emit: {:?}",
+            outcome.attempts
+        );
+        assert_eq!(outcome.law_radius_mm, EDGE_SEAT_LAW_RADIUS_MM);
+    }
+
+    /// **The counterfactual: without the bound, this same seat CURES — at an
+    /// over-bound scar.**
+    ///
+    /// Without this, the refusal above proves nothing about the bound. A seat
+    /// that no tip could ever reach would refuse identically, and the guard
+    /// would stay green with the whole truncation deleted and the fixture
+    /// merely unreachable. Running the SAME fixture through the SAME production
+    /// path with the bound lifted separates the two: the cure that appears is
+    /// the scar the bound is refusing, and its size is what makes the refusal
+    /// worth having.
+    #[test]
+    fn without_the_scar_bound_the_same_seat_cures_at_an_over_bound_scar() {
+        let surface = edge_seat_box();
+        let bound_mm = registered_scar_bound_mm();
+        let legacy_max_mm = registered_legacy_tip_max_mm();
+        let offset_mm = over_bound_edge_offset_mm();
+        let seat_y = 2.0 + offset_mm;
+
+        let outcomes =
+            with_scar_bound_disabled(|| grow_edge_seat(&surface, &edge_seat_request(seat_y)));
+        let outcome = &outcomes[0];
+        assert_eq!(
+            outcome.growth_ceiling_radius_mm, legacy_max_mm,
+            "with the bound lifted the ceiling falls back to the load law's own \
+             clamp maximum"
+        );
+        assert_eq!(
+            outcome.growth_ceiling_source,
+            GrowthCeilingSource::LegacyTipMaximum
+        );
+
+        let cure = outcome.cure.as_ref().unwrap_or_else(|| {
+            panic!(
+                "this fixture must be CURABLE once the bound is lifted, or the \
+                 refusal it drives says nothing about the bound: a seat nothing \
+                 could ever reach would refuse the same way. Rungs: {:?}",
+                outcome.attempts
+            )
+        });
+        assert!(
+            cure.radius_mm > bound_mm,
+            "the cure the bound refuses must genuinely exceed it: got \
+             {} mm radius ({} mm diameter) against a bound of {bound_mm} mm \
+             radius ({} mm diameter)",
+            cure.radius_mm,
+            cure.radius_mm * 2.0,
+            bound_mm * 2.0
+        );
+        assert!(
+            cure.radius_mm > offset_mm,
+            "a tip at or below the {offset_mm} mm the seat stands past the edge \
+             cannot reach the solid at all"
+        );
+        assert!(cure.radius_mm <= legacy_max_mm);
+    }
+
+    /// **The truncation itself, as arithmetic against the two registered
+    /// limits.**
+    ///
+    /// The rule is `min`, and it is stated here as the three cases rather than
+    /// exercised only through one fixture's geometry, so a ceiling that starts
+    /// picking the wrong limit is visible even if no fixture happens to
+    /// straddle it. The NAME travels with the number in every case: a
+    /// disclosure that quoted the right millimetres under the wrong constant
+    /// would still be telling the operator the wrong thing about which rule
+    /// refused their support.
+    #[test]
+    fn the_growth_ceiling_is_the_smaller_registered_limit_and_carries_its_name() {
+        let bound_mm = registered_scar_bound_mm();
+        let legacy_max_mm = registered_legacy_tip_max_mm();
+        assert!(
+            bound_mm < legacy_max_mm,
+            "the registered scar maximum {bound_mm} mm radius must sit below \
+             the load law's clamp maximum {legacy_max_mm} mm radius, or there \
+             is nothing for the truncation to do"
+        );
+
+        // The live pairing: the scar bound is the smaller, so it binds.
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, bound_mm),
+            (bound_mm, GrowthCeilingSource::GrownScarMaximum)
+        );
+        // A bound at or above the legacy maximum does not bind, and the
+        // disclosure must then name the limit that actually did.
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, legacy_max_mm),
+            (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+        );
+        assert_eq!(
+            growth_ceiling_radius_mm(legacy_max_mm, legacy_max_mm * 2.0),
+            (legacy_max_mm, GrowthCeilingSource::LegacyTipMaximum)
+        );
+
+        // And the ladder truncates there: under the bound it is SHORTER, and
+        // every rung it proposes is one the run may actually build.
+        let smallest_tip_mm = plinth_core::m0_constants()
+            .unwrap()
+            .placeholders()
+            .tip_radius_default_mm()
+            .diagnostic()
+            .get();
+        let bounded = tip_growth_ladder_for_test(smallest_tip_mm, bound_mm);
+        let unbounded = tip_growth_ladder_for_test(smallest_tip_mm, legacy_max_mm);
+        assert!(
+            bounded.len() < unbounded.len(),
+            "the bound must SHORTEN the ladder: {} rungs bounded against {} \
+             unbounded",
+            bounded.len(),
+            unbounded.len()
+        );
+        assert_eq!(*bounded.last().unwrap(), bound_mm);
+        assert!(bounded.iter().all(|radius| *radius <= bound_mm));
+        assert!(unbounded.iter().any(|radius| *radius > bound_mm));
     }
 }

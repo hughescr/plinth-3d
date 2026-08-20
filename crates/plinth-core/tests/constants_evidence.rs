@@ -6,7 +6,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 31] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 32] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
     "DECIMATION_MAX_P999_DEVIATION_MM",
@@ -34,13 +34,14 @@ const EXPECTED_EVIDENCE_IDS: [&str; 31] = [
     "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
     "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
     "TIP_DIAMETER_MIN_ALLOWED_MM",
+    "TIP_RADIUS_MAX_GROWN_SCAR_MM",
     "TIP_RADIUS_MIN_ALLOWED_MM",
     "X_ALLOWED",
     "X_STAR_CONE",
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 31] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 32] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
@@ -92,6 +93,7 @@ const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 31] = [
         "scalar",
     ),
     ("TIP_DIAMETER_MIN_ALLOWED_MM", "mm", "scalar"),
+    ("TIP_RADIUS_MAX_GROWN_SCAR_MM", "mm", "scalar"),
     ("TIP_RADIUS_MIN_ALLOWED_MM", "mm", "scalar"),
     ("X_ALLOWED", "1", "scalar"),
     ("X_STAR_CONE", "1", "interval"),
@@ -108,7 +110,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 20] = [
+const EXPECTED_SOURCES: [ExpectedSource; 21] = [
     ExpectedSource {
         constant: "LAYER_HEIGHT_DEFAULT_MM",
         kind: "project_record",
@@ -275,6 +277,15 @@ const EXPECTED_SOURCES: [ExpectedSource; 20] = [
         date: "2026-08-19",
     },
     ExpectedSource {
+        constant: "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+        kind: "owner_decision",
+        identity: "tip-grown-scar-maximum-owner-field-data",
+        record: "docs/engineering-journal/03-physics-and-constants.md",
+        locator: "§3.2",
+        precision: "exact",
+        date: "2026-08-20",
+    },
+    ExpectedSource {
         constant: "X_STAR_CONE",
         kind: "calibration_plate",
         identity: "COUPON-PLATE-5-compliant-vs-stiff",
@@ -320,7 +331,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 31);
+    assert_eq!(descriptors.len(), 32);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -336,7 +347,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (20, 11));
+    assert_eq!((measured, derived), (21, 11));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -937,5 +948,112 @@ fn the_validator_tip_minimum_was_superseded_to_the_owners_own_field_practice() {
             precision: "exact",
             date: "2026-08-19",
         },
+    );
+}
+
+/// **Craig's 2026-08-20 scar maximum, pinned in BOTH units and honestly
+/// labelled.**
+///
+/// `TIP_RADIUS_MAX_GROWN_SCAR_MM` is the largest tip a grow-for-ATTACHMENT
+/// rescue may reach: 0.400 mm RADIUS = 0.800 mm DIAMETER. Its whole authority
+/// is field data — the heaviest support Craig has ever needed is a 0.800 mm
+/// DIAMETER sphere — so this test pins the three things that could rot
+/// silently:
+///
+/// 1. **the number, in both units**, because the registry speaks RADIUS while
+///    Craig and the ChituBox UI speak DIAMETER, and a value transcribed between
+///    them without halving lands 2x wrong;
+/// 2. **the class**, `Measured` from an `owner_decision` dated exactly
+///    2026-08-20 — an honestly labelled EXTERNAL REQUIREMENT, not a `Derived`
+///    physics result and not a `Placeholder` guess. Re-labelling it `Derived`
+///    would be claiming a derivation nobody has;
+/// 3. **its RELATION to the load law's own clamp**, which is what makes it a
+///    growth bound rather than a general tip cap: it must sit strictly BELOW
+///    `TIP_RADIUS_MAX_LEGACY_MM`, so `min(bound, legacy)` is the bound and the
+///    truncation has something to do. If a later ruling raises it to or above
+///    the legacy maximum, this goes red — correctly, because at that point the
+///    growth ladder has no separate ceiling and the disclosure would start
+///    naming a constant that never binds.
+///
+/// **What it deliberately does not assert**: any physics. There is none here to
+/// assert. The note says so and this test does not pretend otherwise.
+#[test]
+fn the_grown_scar_maximum_is_craigs_field_ceiling_labelled_as_field_data() {
+    let descriptors = component().descriptors().unwrap();
+
+    let scar_max_radius_mm = scalar(&descriptors, "TIP_RADIUS_MAX_GROWN_SCAR_MM");
+    assert_eq!(
+        scar_max_radius_mm, 0.400,
+        "the grown-scar maximum is 0.400 mm RADIUS, Craig's ruling of 2026-08-20"
+    );
+    assert_eq!(
+        scar_max_radius_mm * 2.0,
+        0.800,
+        "the same maximum is 0.800 mm DIAMETER — the heaviest support Craig has \
+         ever needed, and the unit he and the slicer UI speak in"
+    );
+
+    // (2) The class. Field data recorded as an owner decision, on an exact
+    // date, with no error bar claimed for a number that has none.
+    let RegistryProvenanceView::Measured { source, err, note } =
+        descriptor(&descriptors, "TIP_RADIUS_MAX_GROWN_SCAR_MM")
+            .provenance()
+            .view()
+    else {
+        panic!(
+            "the grown-scar maximum is a Measured owner decision carrying field \
+             data — never Derived (there is no derivation) and never a bare \
+             Placeholder (there is real evidence)"
+        );
+    };
+    assert!(err.is_none());
+    assert_source(
+        source,
+        &ExpectedSource {
+            constant: "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            kind: "owner_decision",
+            identity: "tip-grown-scar-maximum-owner-field-data",
+            record: "docs/engineering-journal/03-physics-and-constants.md",
+            locator: "§3.2",
+            precision: "exact",
+            date: "2026-08-20",
+        },
+    );
+
+    // The note must say out loud what kind of number this is, must state both
+    // units, and must record the distinction that keeps the load law free.
+    for phrase in [
+        "EXTERNAL REQUIREMENT",
+        "NOT physics",
+        "0.400 mm RADIUS",
+        "0.800 mm DIAMETER",
+        "GROWTH-FOR-ATTACHMENT only",
+        "WHAT IT DOES NOT BOUND",
+        "TIP_RADIUS_MAX_LEGACY_MM",
+        "ABANDONED LOAD",
+    ] {
+        assert!(
+            note.contains(phrase),
+            "the grown-scar maximum's ledger note must say {phrase:?} — it is \
+             the difference between an honest external requirement and a number \
+             that will be mistaken for physics later"
+        );
+    }
+
+    // (3) The relation that makes it a GROWTH bound.
+    let legacy_max_radius_mm = plinth_core::m0_constants()
+        .unwrap()
+        .placeholders()
+        .tip_radius_max_legacy_mm()
+        .diagnostic()
+        .get();
+    assert!(
+        scar_max_radius_mm < legacy_max_radius_mm,
+        "the grown-scar maximum ({scar_max_radius_mm} mm radius / {} mm \
+         diameter) must sit strictly below the load law's own clamp maximum \
+         ({legacy_max_radius_mm} mm radius / {} mm diameter), or the growth \
+         ladder has no separate ceiling to truncate at",
+        scar_max_radius_mm * 2.0,
+        legacy_max_radius_mm * 2.0
     );
 }

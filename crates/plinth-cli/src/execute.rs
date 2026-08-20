@@ -372,15 +372,22 @@ fn print_model(model: &ModelPreparationReport) {
                     contact.refusal(),
                     contact.abandoned_area_mm2(),
                 );
+                // THE BOUND IS NAMED, not just quoted as a number. A refused
+                // contact's operator needs to know WHICH rule stopped the
+                // rescue: the registered scar maximum, which is Craig's field
+                // ceiling on how big a scar a rescue may leave, or the load
+                // law's own legacy clamp. Two limits 0.6 mm apart are not
+                // distinguishable by eye in a log.
                 println!(
                     "    remedies tried  tip {:.4} mm radius ({:.4} mm diameter) from the load \
                      law, then {} growth rung(s) up to the registered {:.4} mm radius \
-                     ({:.4} mm diameter); re-seat: {}",
+                     ({:.4} mm diameter), the maximum set by {}; re-seat: {}",
                     contact.law_tip_radius_mm(),
                     contact.law_tip_radius_mm() * 2.0,
                     contact.growth_rungs().len(),
                     contact.growth_ceiling_radius_mm(),
                     contact.growth_ceiling_radius_mm() * 2.0,
+                    contact.growth_ceiling_constant(),
                     contact.reseat(),
                 );
             }

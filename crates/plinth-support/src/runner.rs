@@ -548,6 +548,7 @@ pub struct AbandonedContactDisclosure {
     refusal: String,
     law_tip_radius_mm: f64,
     growth_ceiling_radius_mm: f64,
+    growth_ceiling_constant: String,
     growth_rungs: Vec<TipGrowthRungDisclosure>,
     reseat: String,
 }
@@ -581,9 +582,29 @@ impl AbandonedContactDisclosure {
     }
     /// The registered maximum the growth ladder stopped at, mm RADIUS. Stated
     /// so the disclosure names the limit and not only the failure.
+    ///
+    /// It is the SMALLER of the two registered limits — see
+    /// [`Self::growth_ceiling_constant`] for which one this is.
     #[must_use]
     pub const fn growth_ceiling_radius_mm(&self) -> f64 {
         self.growth_ceiling_radius_mm
+    }
+
+    /// **WHICH registered constant stopped the ladder**, by its registry id.
+    ///
+    /// `TIP_RADIUS_MAX_GROWN_SCAR_MM` is Craig's measured field ceiling on the
+    /// scar a grow-for-attachment rescue may leave — 0.400 mm RADIUS
+    /// (0.800 mm DIAMETER), an external requirement carrying field data rather
+    /// than physics. `TIP_RADIUS_MAX_LEGACY_MM` is the load law's own clamp
+    /// maximum, 1.000 mm radius (2.000 mm diameter).
+    ///
+    /// The name is printed rather than left to be inferred from the number,
+    /// because two limits that differ by 0.6 mm are not distinguishable by eye
+    /// in a log, and "which rule refused my support" is the question this line
+    /// exists to answer.
+    #[must_use]
+    pub fn growth_ceiling_constant(&self) -> &str {
+        &self.growth_ceiling_constant
     }
     /// Every larger tip that was tried, ascending, and what each measured. A
     /// refused contact never reaches the descending refinement scan — the scan
@@ -720,6 +741,7 @@ fn contact_attestation_disclosures(
             .to_owned(),
             law_tip_radius_mm: stub.remedy.law_radius_mm,
             growth_ceiling_radius_mm: stub.remedy.growth_ceiling_radius_mm,
+            growth_ceiling_constant: stub.remedy.growth_ceiling_constant.to_owned(),
             growth_rungs: growth_rungs(&stub.remedy.growth),
             reseat: match stub.remedy.reseat {
                 crate::initial::ReseatAvailability::NoAlternativeSeatAtThisStage => {

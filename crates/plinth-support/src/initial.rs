@@ -137,10 +137,13 @@ pub(crate) struct InitialContactRemedy {
     /// verdict. Empty means the law radius was already the registered maximum,
     /// so there was no larger legal tip to try.
     pub(crate) growth: Vec<TipGrowthAttempt>,
-    /// The registered `tip_radius_max_legacy_mm`, in mm RADIUS — the ceiling
-    /// the ladder stopped at, recorded so the disclosure states the limit and
-    /// not just the failure.
+    /// The ceiling the ladder stopped at, in mm RADIUS — the SMALLER of the
+    /// registered `tip_radius_max_grown_scar_mm` and `tip_radius_max_legacy_mm`.
+    /// Recorded so the disclosure states the limit and not just the failure.
     pub(crate) growth_ceiling_radius_mm: f64,
+    /// WHICH registered constant that ceiling is, by its registry id, so the
+    /// disclosure can name the stopper rather than quote a bare number.
+    pub(crate) growth_ceiling_constant: &'static str,
     pub(crate) reseat: ReseatAvailability,
 }
 
@@ -579,6 +582,17 @@ pub(crate) fn build_initial_contacts(
     })?;
 
     let tip_radius_max_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+    // Craig's measured field ceiling on a GROWN scar, 0.400 mm RADIUS
+    // (0.800 mm DIAMETER). It is read here and handed to growth alone. It is
+    // deliberately NOT mixed into `tip_radius_max_mm` above: that value is the
+    // LOAD LAW's clamp maximum and drives `tip_clamped_at_max`, and a load-sized
+    // tip above the scar bound is legal, unaffected and emitted as it always
+    // was. See `designed_embed::growth_ceiling`.
+    let tip_radius_max_grown_scar_mm = *m0_constants()
+        .map_err(|error| InitialContactError::Constants(error.to_string()))?
+        .evidence()
+        .tip_radius_max_grown_scar_mm()
+        .value();
     let min_shoot_r_mm = policy.min_shoot_r_mm().diagnostic().get();
 
     let native_digest = geometry.digest();
@@ -679,6 +693,7 @@ pub(crate) fn build_initial_contacts(
         attested_extent,
         &contact_policy,
         tip_radius_max_mm,
+        tip_radius_max_grown_scar_mm,
         min_shoot_r_mm,
     )?;
 
@@ -803,6 +818,12 @@ pub(crate) fn build_initial_contacts(
         .map_err(|_| InitialContactError::Allocation("area deficit evidence"))?;
 
     let cutoff = policy.min_illegal_len_mm().diagnostic().get();
+    let (fallback_growth_ceiling_mm, fallback_growth_ceiling_source) =
+        crate::designed_embed::growth_ceiling_radius_mm(
+            tip_radius_max_mm,
+            tip_radius_max_grown_scar_mm,
+        );
+    let fallback_growth_ceiling_constant = fallback_growth_ceiling_source.constant_id();
     for (((((seed, key), overlap), refusal), deficit), remedy) in seeds
         .iter()
         .zip(&keys)
@@ -823,7 +844,12 @@ pub(crate) fn build_initial_contacts(
                 remedy: remedy.clone().unwrap_or_else(|| InitialContactRemedy {
                     law_radius_mm: seed.law_r0.get(),
                     growth: Vec::new(),
-                    growth_ceiling_radius_mm: tip_radius_max_mm,
+                    // This stub never entered the ladder — it was refused for a
+                    // reason no tip radius can move (a buried seat). The ceiling
+                    // stated is nevertheless the one growth WOULD have used, so
+                    // the two disclosure paths quote the same limit.
+                    growth_ceiling_radius_mm: fallback_growth_ceiling_mm,
+                    growth_ceiling_constant: fallback_growth_ceiling_constant,
                     reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
                 }),
             });
@@ -966,7 +992,11 @@ fn attest_initial_contacts(
     geometry: &AnchorGeometryAuthority<'_>,
     extent: PositiveFiniteMm,
     policy: &ContactPolicy,
+    // `tip_radius_max_legacy_mm` — the LOAD LAW's clamp maximum, mm RADIUS.
     tip_radius_max_mm: f64,
+    // `tip_radius_max_grown_scar_mm` — Craig's field ceiling on a GROWN scar,
+    // mm RADIUS. Handed to growth alone; it bounds nothing the load law sizes.
+    tip_radius_max_grown_scar_mm: f64,
     min_shoot_r_mm: f64,
 ) -> Result<InitialAttestation, InitialContactError> {
     let mut refusals = Vec::new();
@@ -1116,6 +1146,7 @@ fn attest_initial_contacts(
             law_radius_mm: seed.law_r0.get(),
             opposite_end_minimum_radius_mm: min_shoot_r_mm,
             max_radius_mm: tip_radius_max_mm,
+            scar_bound_radius_mm: tip_radius_max_grown_scar_mm,
             tip_clamped_at_max: seed.tip_clamped_at_max,
         })
         .collect::<Vec<_>>();
@@ -1139,13 +1170,16 @@ fn attest_initial_contacts(
             remedies[index] = Some(InitialContactRemedy {
                 law_radius_mm: outcome.law_radius_mm,
                 growth: outcome.attempts.clone(),
-                growth_ceiling_radius_mm: tip_radius_max_mm,
+                growth_ceiling_radius_mm: outcome.growth_ceiling_radius_mm,
+                growth_ceiling_constant: outcome.growth_ceiling_source.constant_id(),
                 reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
             });
             let Some(cure) = outcome.cure else {
-                // The ladder ran out at the registered maximum. The refusal
-                // stands, and `build_initial_contacts` discloses it with the
-                // load it abandons and every rung recorded above.
+                // The ladder ran out at its ceiling — the registered scar bound
+                // or the registered legacy maximum, whichever is smaller. The
+                // refusal stands, and `build_initial_contacts` discloses it with
+                // the load it abandons, every rung recorded above, and the
+                // constant that stopped it NAMED.
                 continue;
             };
             // The tip the run will BUILD is the tip that attested. `r0` is the
@@ -1224,6 +1258,14 @@ fn attestation_digest(
             Some(remedy) => {
                 digest.tag(1);
                 digest.f64(remedy.growth_ceiling_radius_mm);
+                // The ceiling's NAME as well as its number: a change that swaps
+                // which registered constant bounds growth without moving the
+                // value it lands on is still a change to what the run promises,
+                // and the transcript must see it.
+                digest.u64(remedy.growth_ceiling_constant.len() as u64);
+                for byte in remedy.growth_ceiling_constant.as_bytes() {
+                    digest.tag(*byte);
+                }
                 digest.u64(remedy.growth.len() as u64);
                 for attempt in &remedy.growth {
                     digest.f64(attempt.radius_mm);
@@ -2645,8 +2687,16 @@ mod tests {
     /// edge seat in `designed_embed.rs`.
     #[test]
     fn an_incurable_refusal_is_quarantined_with_its_seat_load_and_every_remedy_disclosed() {
-        let policy = m0_constants().unwrap().placeholders();
-        let max_radius_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+        let constants = m0_constants().unwrap();
+        let policy = constants.placeholders();
+        // The ceiling a rescue may walk to: the SMALLER of the load law's own
+        // clamp maximum and Craig's registered maximum on a grown scar. Derived
+        // from the registry rather than typed, so a ruling that moves either
+        // limit moves this assertion with it.
+        let (max_radius_mm, ceiling_source) = crate::designed_embed::growth_ceiling_radius_mm(
+            policy.tip_radius_max_legacy_mm().diagnostic().get(),
+            *constants.evidence().tip_radius_max_grown_scar_mm().value(),
+        );
         let build = Fixture::new(make_raking_blade().unwrap())
             .build(ContactConstructionLimits::production())
             .unwrap();
@@ -2668,30 +2718,69 @@ mod tests {
         assert!(build.grown().is_empty());
 
         let mut abandoned_mm2 = 0.0;
+        let mut walked = 0_usize;
+        let mut already_at_or_above_ceiling = 0_usize;
         for stub in &unreachable {
-            // THE LADDER WAS WALKED, to the registered maximum, before the
-            // refusal was allowed to stand. A refusal with an unwalked ladder
-            // is the quarantine this change exists to remove.
-            assert!(
-                !stub.remedy.growth.is_empty(),
-                "terminal {} was refused without any larger tip being tried",
-                stub.terminal
-            );
+            assert!(stub.remedy.law_radius_mm > 0.0);
+            assert_eq!(stub.remedy.growth_ceiling_radius_mm, max_radius_mm);
+            if stub.remedy.law_radius_mm < max_radius_mm {
+                // THE LADDER WAS WALKED, to the ceiling, before the refusal was
+                // allowed to stand. A refusal with an unwalked ladder is the
+                // silent quarantine this change exists to remove.
+                walked += 1;
+                assert!(
+                    !stub.remedy.growth.is_empty(),
+                    "terminal {} was refused without any larger tip being tried",
+                    stub.terminal
+                );
+                assert_eq!(
+                    stub.remedy.growth.last().unwrap().radius_mm,
+                    max_radius_mm,
+                    "the ladder must be walked to {max_radius_mm} mm radius \
+                     ({} mm diameter) before a refusal stands",
+                    max_radius_mm * 2.0
+                );
+                assert!(stub
+                    .remedy
+                    .growth
+                    .iter()
+                    .all(|rung| rung.radius_mm <= max_radius_mm));
+            } else {
+                // THE OTHER HONEST OUTCOME, and it is a class rather than an
+                // accident: the LOAD LAW already sized this tip at or above the
+                // ceiling a rescue may grow to. There is no larger tip growth is
+                // allowed to propose, so the ladder is EMPTY and says so — a
+                // rung above the ceiling would be a scar the run may not build.
+                // The tip itself is untouched: `law_radius_mm` is what the load
+                // law asked for and nothing shrank it.
+                already_at_or_above_ceiling += 1;
+                assert!(
+                    stub.remedy.growth.is_empty(),
+                    "terminal {} was already sized at {} mm radius, at or above \
+                     the {max_radius_mm} mm radius ceiling, so no larger tip is \
+                     legal to propose: {:?}",
+                    stub.terminal,
+                    stub.remedy.law_radius_mm,
+                    stub.remedy.growth
+                );
+            }
             assert!(
                 stub.remedy.growth.iter().all(|rung| !rung.attested),
                 "terminal {} is recorded refused but a rung attested",
                 stub.terminal
             );
+            // The ceiling is NAMED, so the ABANDONED LOAD line can say which
+            // rule stopped the rescue rather than quoting a bare number.
             assert_eq!(
-                stub.remedy.growth.last().unwrap().radius_mm,
-                max_radius_mm,
-                "the ladder must be walked to the registered maximum {max_radius_mm} \
-                 mm radius ({} mm diameter) before a refusal stands",
-                max_radius_mm * 2.0
+                stub.remedy.growth_ceiling_constant,
+                ceiling_source.constant_id()
             );
-            assert!(stub.remedy.law_radius_mm > 0.0);
-            assert!(stub.remedy.law_radius_mm <= max_radius_mm);
-            assert_eq!(stub.remedy.growth_ceiling_radius_mm, max_radius_mm);
+            assert_eq!(
+                stub.remedy.growth_ceiling_constant, "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+                "these rescues stop at Craig's registered maximum on a grown \
+                 scar, 0.400 mm radius (0.800 mm diameter) — not at the load \
+                 law's own clamp"
+            );
             // Re-seating is recorded as UNAVAILABLE rather than left unsaid, so
             // the disclosure can never imply a remedy was skipped.
             assert_eq!(
@@ -2719,6 +2808,15 @@ mod tests {
                 stub.abandoned_mm2
             );
         }
+        // Non-vacuity on the SHAPE of the evidence: this fixture must still
+        // contain a genuinely walked ladder, or the paragraph above about
+        // walking one is asserting over an empty set.
+        assert!(
+            walked > 0,
+            "make_raking_blade must still contain at least one refusal whose \
+             ladder was actually walked; got {walked} walked and \
+             {already_at_or_above_ceiling} already at or above the ceiling"
+        );
         // Non-vacuity on the number that matters: this fixture really does
         // abandon load, so the disclosure is reporting something.
         assert!(

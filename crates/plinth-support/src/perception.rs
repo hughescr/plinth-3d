@@ -6248,6 +6248,72 @@ mod tests {
         assert!((old_max_area_mm2 / max_area_mm2 - 16.0).abs() < 1.0e-12);
     }
 
+    /// **The scar bound is for GROWTH. The LOAD LAW is untouched by it.**
+    ///
+    /// `TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm RADIUS (0.800 mm DIAMETER) is
+    /// Craig's field ceiling on the scar a grow-for-ATTACHMENT rescue may leave.
+    /// It is emphatically not a clamp on the tip-sizing law: a genuinely heavy
+    /// area needs a genuinely wide tip, and refusing to build one would be
+    /// refusing physics on the strength of a preference about scars.
+    ///
+    /// So this pins the counterpart claim to the growth guards in
+    /// `designed_embed.rs`: hand the registered load law an area that DEMANDS
+    /// more than the scar bound and check it gets what it demands. The area is
+    /// derived from the registered constants — `pi r^2 = area / X`, inverted at
+    /// the bound — never hand-typed, so a constants move carries the fixture
+    /// with it.
+    #[test]
+    fn the_load_law_may_size_a_tip_above_the_grown_scar_maximum_and_is_not_clamped_to_it() {
+        let constants = m0_constants().unwrap();
+        let placeholders = constants.placeholders();
+        let policy = FrozenTipLoadPolicy::from_placeholders(placeholders);
+        let scar_bound_radius_mm = *constants.evidence().tip_radius_max_grown_scar_mm().value();
+        let legacy_max_radius_mm = placeholders.tip_radius_max_legacy_mm().diagnostic().get();
+        assert!(
+            scar_bound_radius_mm < legacy_max_radius_mm,
+            "this test only says something while the scar maximum is BELOW the \
+             load law's own clamp maximum: {scar_bound_radius_mm} mm radius \
+             against {legacy_max_radius_mm} mm radius"
+        );
+
+        // The area at which the law asks for exactly the scar bound, inverted
+        // from the registered chain rather than typed: X = tensile / (peel *
+        // safety), and pi r^2 = area / X.
+        let x = placeholders.tensile_green_mpa().diagnostic().get() * 1.0e6
+            / (placeholders.peel_pressure_pa().diagnostic().get()
+                * placeholders.tip_safety_factor().diagnostic().get());
+        let area_at_bound_mm2 = x * std::f64::consts::PI * scar_bound_radius_mm.powi(2);
+
+        // A HEAVY area — four times that, so the law wants twice the radius.
+        let heavy_mm2 = 4.0 * area_at_bound_mm2;
+        let sized = policy.tip_radius_mm(heavy_mm2).unwrap().get();
+        assert!(
+            (sized - 2.0 * scar_bound_radius_mm).abs() < 1.0e-9,
+            "the area law must size a {heavy_mm2} mm² contact at \
+             {} mm radius ({} mm diameter) — four times the area is twice the \
+             radius — and NOT be clamped to the {scar_bound_radius_mm} mm radius \
+             ({} mm diameter) grown-scar maximum; got {sized} mm radius",
+            2.0 * scar_bound_radius_mm,
+            4.0 * scar_bound_radius_mm,
+            scar_bound_radius_mm * 2.0
+        );
+        assert!(
+            sized > scar_bound_radius_mm,
+            "a load-sized tip above the grown-scar maximum is legal; the bound \
+             applies to growth-for-attachment only"
+        );
+        // And the law's own clamp is still the only ceiling it has.
+        let crushing_mm2 = 1.0e6 * area_at_bound_mm2;
+        assert!(
+            (policy.tip_radius_mm(crushing_mm2).unwrap().get() - legacy_max_radius_mm).abs()
+                < 1.0e-12,
+            "the sizing law's ceiling is TIP_RADIUS_MAX_LEGACY_MM = \
+             {legacy_max_radius_mm} mm radius ({} mm diameter), unmoved by the \
+             grown-scar maximum",
+            legacy_max_radius_mm * 2.0
+        );
+    }
+
     #[test]
     fn shared_load_gate_pins_the_live_one_e_minus_six_tolerance() {
         let policy = m0_constants().unwrap().placeholders();

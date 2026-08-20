@@ -326,20 +326,55 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "the healthy fixture must leave no island without an owning contact; got \
          {ownerless_islands:?}"
     );
-    // PR-8, and the same argument one step over: an empty list here is the
-    // claim "every routed load in this artifact is carried by a support that
-    // was affirmatively proven attached". A refused contact is quarantined,
-    // nothing is grown in its place, and the coverage measurement's 6 mm radius
-    // cannot see a single missing claw tip — so if this ever stops being empty
+    // PR-8, and the same argument one step over. The claim being asserted is
+    // "every routed LOAD in this artifact is carried by a support that was
+    // affirmatively proven attached". A refused contact is quarantined, nothing
+    // is grown in its place, and the coverage measurement's 6 mm radius cannot
+    // see a single missing claw tip — so if any load ever stops being carried
     // on the healthy fixture the report has to say so.
+    //
+    // **The assertion is on the LOAD, not on the length of the list, since the
+    // scar bound landed (2026-08-20).** Craig's `TIP_RADIUS_MAX_GROWN_SCAR_MM`
+    // of 0.400 mm RADIUS (0.800 mm DIAMETER) refuses one contact on this
+    // fixture whose rescue would have needed a wider scar than any support he
+    // has ever printed — and that contact carries **0.000 mm²**. Demanding an
+    // empty list would demand the engine build an over-bound scar to hold up
+    // nothing. Demanding zero abandoned AREA is the check that was always
+    // meant, it still has every tooth, and it now says what it means.
     let plinth_pipeline::ContactAttestationDisclosure {
         abandoned_contacts,
         grown_contact_tips,
     } = contacts.as_ref();
-    assert!(
-        abandoned_contacts.is_empty(),
-        "the healthy fixture must abandon no routed load; got {abandoned_contacts:?}"
+    let abandoned_mm2 = abandoned_contacts
+        .iter()
+        .map(plinth_support::AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum::<f64>();
+    assert_eq!(
+        abandoned_mm2, 0.0,
+        "the healthy fixture must abandon no routed load; got {abandoned_mm2} mm² \
+         across {abandoned_contacts:?}"
     );
+    // And every refusal that IS present must name the registered limit that
+    // stopped it, in both units, so a reader can tell a policy refusal from a
+    // seat that nothing could ever reach.
+    for abandoned in abandoned_contacts {
+        assert!(
+            matches!(
+                abandoned.growth_ceiling_constant(),
+                "TIP_RADIUS_MAX_GROWN_SCAR_MM" | "TIP_RADIUS_MAX_LEGACY_MM"
+            ),
+            "an abandoned contact must name the registered maximum that stopped \
+             its rescue; got {abandoned:?}"
+        );
+        assert!(
+            abandoned
+                .growth_rungs()
+                .iter()
+                .all(|rung| rung.radius_mm() <= abandoned.growth_ceiling_radius_mm()),
+            "no rung may propose a tip above the ceiling it was walked to; got \
+             {abandoned:?}"
+        );
+    }
     // Growth is allowed to fire here and is asserted rather than assumed: every
     // grown tip must be at least the radius the load law asked for, so growth
     // can only ever have moved a tip in the conservative direction.

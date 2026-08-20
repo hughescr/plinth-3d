@@ -2341,11 +2341,12 @@ mod tests {
         let abandoned: plinth_support::AbandonedContactDisclosure = serde_json::from_str(
             r#"{"contact_id":41,"seat_mm":[1.5,-2.25,3.0],
                 "abandoned_area_mm2":2.98,"refusal":"not_attached",
-                "law_tip_radius_mm":0.05,"growth_ceiling_radius_mm":1.0,
+                "law_tip_radius_mm":0.05,"growth_ceiling_radius_mm":0.4,
+                "growth_ceiling_constant":"TIP_RADIUS_MAX_GROWN_SCAR_MM",
                 "growth_rungs":[
                     {"radius_mm":0.07071067811865475,"diameter_mm":0.1414213562373095,
                      "attested":false},
-                    {"radius_mm":1.0,"diameter_mm":2.0,"attested":false}],
+                    {"radius_mm":0.4,"diameter_mm":0.8,"attested":false}],
                 "reseat":"no_alternative_seat_at_this_stage"}"#,
         )
         .expect("an abandoned-contact disclosure deserializes as a frozen report carries it");
@@ -2422,7 +2423,13 @@ mod tests {
             .growth_rungs()
             .iter()
             .all(|rung| !rung.attested()));
-        assert_eq!(abandoned_contacts[0].growth_ceiling_radius_mm(), 1.0);
+        assert_eq!(abandoned_contacts[0].growth_ceiling_radius_mm(), 0.4);
+        // The bound is NAMED all the way through to the run report, so the
+        // ABANDONED LOAD line can say WHICH rule stopped the rescue.
+        assert_eq!(
+            abandoned_contacts[0].growth_ceiling_constant(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM"
+        );
         assert_eq!(
             abandoned_contacts[0].reseat(),
             "no_alternative_seat_at_this_stage"

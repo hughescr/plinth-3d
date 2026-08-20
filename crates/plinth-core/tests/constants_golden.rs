@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 304] = [
+const EXPECTED_CONSTANT_IDS: [&str; 305] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -297,6 +297,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 304] = [
     "THIN_FEATURE_MM",
     "TIP_DIAMETER_MIN_ALLOWED_MM",
     "TIP_RADIUS_DEFAULT_MM",
+    "TIP_RADIUS_MAX_GROWN_SCAR_MM",
     "TIP_RADIUS_MAX_LEGACY_MM",
     "TIP_RADIUS_MIN_ALLOWED_MM",
     "TIP_SAFETY_FACTOR",
@@ -318,7 +319,7 @@ fn golden_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn global_registry_is_one_complete_atomic_304_constant_publication() {
+fn global_registry_is_one_complete_atomic_305_constant_publication() {
     let first = m0_constants().expect("M0 constants registry must construct");
     let second = m0_constants().expect("M0 constants registry must construct");
     assert!(
@@ -351,7 +352,7 @@ fn global_registry_is_one_complete_atomic_304_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [20, 11, 273, 0]);
+    assert_eq!(classes, [21, 11, 273, 0]);
 }
 
 #[test]

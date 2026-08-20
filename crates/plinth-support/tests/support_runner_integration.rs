@@ -338,10 +338,41 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (65_usize, 184_usize, 14_374_106_896_419_012_910_u64),
+        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
-    // Digest re-derived 2026-08-20 for the DESCENDING REFINEMENT SCAN on
+    // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
+    // ruling of the same day: a grow-for-attachment rescue may not exceed
+    // `TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm RADIUS (0.800 mm DIAMETER),
+    // his measured field ceiling — the heaviest support he has ever needed.
+    // 65 -> 64 routed contacts, 184 -> 170 final live members,
+    // 14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963.
+    //
+    // **MEASURED, on this fixture, through this producer path.** Exactly one
+    // contact moved: contact 64, the single seat this model was growing. Its
+    // load law asked for 0.050 mm RADIUS (0.100 mm DIAMETER) and the cure the
+    // scan landed on was **0.650630996 mm RADIUS = 1.301261991 mm DIAMETER**
+    // — 1.63x Craig's field ceiling, and a scar wider than any support he has
+    // ever printed. It is now refused, disclosed as an ABANDONED LOAD naming
+    // `TIP_RADIUS_MAX_GROWN_SCAR_MM` as the stopper, and its 14 dependent
+    // members go with it.
+    //
+    // **The load abandoned by that refusal is 0.000 mm².** That is measured,
+    // not assumed: this contact carried no routed area at all, so the bound
+    // costs this model a 1.3 mm-diameter scar and buys back nothing that was
+    // holding the model up. It is the cheapest possible demonstration of the
+    // ruling and it is why the counts moving here is the right answer rather
+    // than a regression.
+    //
+    // The resulting digest is bit-identical to the pre-grow-to-attest state
+    // (4_190_462_360_230_124_963, recorded below for the 2026-08-19 tip
+    // minimum): withdrawing the one over-bound cure returns this fixture
+    // exactly to the layout it had before growth existed, which is the
+    // strongest available evidence that ONE thing changed and nothing else
+    // drifted.
+    //
+    // Superseded record — digest re-derived 2026-08-20 for the DESCENDING
+    // REFINEMENT SCAN on
     // grow-to-attest: 15_045_390_433_036_889_889 ->
     // 14_374_106_896_419_012_910.  The counts are again deliberately
     // unchanged, and the leaf diff through this same producer path is the
@@ -358,7 +389,8 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     //     (attests), 0.6506 (attests) and 0.5868 (FAILS).  The smallest
     //     attesting radius is the one built.
     // Nothing else moved: no rootward radius, no endpoint, no kind, no
-    // connectivity, and all 65 routed contact positions are bit-identical.
+    // connectivity, and all 65 routed contact positions were bit-identical AT
+    // THAT TIP — the scar bound above has since withdrawn one of those 65.
     // The coverage measurement's own numbers are bit-identical too — see the
     // toed-slab coverage golden, where the ONLY field that changed is
     // `snapshot_digest`.
@@ -671,16 +703,22 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
     // Same snapshot digest as the toed-slab closure test above, re-derived
-    // 2026-08-20 for the descending refinement scan on grow-to-attest:
-    // 15_045_390_433_036_889_889 -> 14_374_106_896_419_012_910.  ONE member
-    // moved, slot 61's terminal radius 0.800000000 -> 0.650630996 mm RADIUS;
-    // the leaf diff is recorded in full at the closure test above.  The frozen
-    // resource arithmetic below is untouched, because no count moved.
+    // 2026-08-20 for the SCAR BOUND (`TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm
+    // RADIUS / 0.800 mm DIAMETER, Craig's field ceiling):
+    // 14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963.  ONE contact
+    // moved — contact 64's cure needed 0.650630996 mm RADIUS
+    // (1.301261991 mm DIAMETER), 1.63x the ceiling, so it is refused and
+    // disclosed instead of built.  The full measurement, including the
+    // 0.000 mm² of load that refusal abandons, is recorded at the closure test
+    // above.  The frozen resource arithmetic below MOVES with the count, and
+    // is re-derived here rather than inherited.
     //
-    // Previously re-derived 2026-08-19 for the tip-minimum ruling (0.2 -> 0.05
-    // mm RADIUS, 0.4 -> 0.1 mm DIAMETER): 9_355_852_079_468_421_123 ->
-    // 4_190_462_360_230_124_963.
-    assert_eq!(snapshot.digest(), 14_374_106_896_419_012_910);
+    // Superseded records: re-derived 2026-08-20 for the descending refinement
+    // scan on grow-to-attest (15_045_390_433_036_889_889 ->
+    // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
+    // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
+    // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
+    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
@@ -697,8 +735,18 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             plan.assessment_evidence_bytes(),
             plan.assessment_phase_peak_bytes(),
         ),
+        // Re-derived 2026-08-20 with the scar bound. Only the three terms that
+        // are a function of the ROUTED CONTACT COUNT moved, which is exactly
+        // what withdrawing one over-bound contact must do and nothing more:
+        //   * route_membership_sum   74 -> 71  (the contact left three routes)
+        //   * indexed_point_count    71 -> 69
+        //   * distance_work     1_034_240 -> 1_033_728  (= query rows x points)
+        //   * logical_peak_bytes 12_624_272 -> 12_624_152
+        // The sequential peaks (30, 30), the query row count and the whole
+        // assessment phase are UNMOVED: they are functions of the mesh and the
+        // request, not of how many contacts survived.
         (
-            74, 30, 71, 30, 50_688, 1_034_240, 12_624_272, 5_879_808, 3_902_976, 8_312_832,
+            71, 30, 69, 30, 50_688, 1_033_728, 12_624_152, 5_879_808, 3_902_976, 8_312_832,
             12_215_808
         )
     );
@@ -793,10 +841,23 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             77,
             &[77],
-            0.461_625_339_971_010_6_f64.to_bits(),
+            // Re-derived 2026-08-20 with the scar bound: 0.461_625_340 ->
+            // 0.482_931_125 mm² uncovered, +0.021_305_785 mm². Islands 5 and 8
+            // are the two toe islands the withdrawn over-bound contact stood
+            // between, they move together and by the same amount, and this is
+            // the ENTIRE coverage cost of refusing that 1.301 mm-DIAMETER scar:
+            // twenty-one thousandths of a square millimetre each, on islands
+            // the gate still passes (`assessment_failed` stays false). The
+            // other seven patches are bit-identical.
+            0.482_931_124_892_749_53_f64.to_bits(),
             false,
             false,
-            2.195_345_799_537_008_7_f64.to_bits(),
+            // The worst gap on this island moves with the same withdrawal:
+            // 2.195_345_800 -> 4.380_949_641 mm, because the contact that was
+            // standing nearest these faces is the one the scar bound refused.
+            // The island's verdict is unchanged (`assessment_failed` false):
+            // the gate rules on uncovered AREA, and 0.483 mm² still passes.
+            4.380_949_640_913_765_f64.to_bits(),
         ),
         (
             6,
@@ -823,10 +884,13 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
             2,
             109,
             &[109],
-            0.461_625_339_971_010_7_f64.to_bits(),
+            // Island 8, the mirror of island 5 above, moves identically and one
+            // ULP apart: 0.461_625_340 -> 0.482_931_125 mm² uncovered, worst
+            // gap 2.195_345_800 -> 4.380_949_641 mm, verdict unchanged.
+            0.482_931_124_892_749_64_f64.to_bits(),
             false,
             false,
-            2.195_345_799_537_009_f64.to_bits(),
+            4.380_949_640_913_764_f64.to_bits(),
         ),
     ];
     assert_eq!(

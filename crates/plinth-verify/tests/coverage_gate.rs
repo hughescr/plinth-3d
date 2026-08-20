@@ -239,6 +239,47 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // steps below the ladder rung that used to be emitted — and 33.9% less interface
 // area scarred onto the model. No cap, gate, minimum, radius, tolerance or
 // registered constant was touched by this refresh.
+//
+// **Refreshed an eleventh time on 2026-08-20, for the SCAR BOUND** — Craig's
+// ruling of the same day, registered as `TIP_RADIUS_MAX_GROWN_SCAR_MM` =
+// **0.400 mm RADIUS (0.800 mm DIAMETER)**. It is an EXTERNAL REQUIREMENT
+// carrying field data, not physics: the heaviest support he has ever needed is
+// a 0.8 mm diameter sphere, so that is the largest scar a grow-for-ATTACHMENT
+// rescue may leave. The growth ladder and its refinement scan now truncate at
+// `min(this, TIP_RADIUS_MAX_LEGACY_MM)`, and a contact whose cure would exceed
+// it is refused through the disclosed ABANDONED LOAD line with the bound named
+// as the stopper.
+//
+// **This golden is that ruling's witness too, and it moves counts BACK.** The
+// one toed-slab contact grow-to-attest rescued (contact 64) needed
+// **0.650630996 mm RADIUS = 1.301261991 mm DIAMETER** — 1.63x the ceiling — so
+// it is now refused. Routed contacts 65 -> 64, final live members 184 -> 170,
+// `snapshot_digest` 14374106896419012910 -> 4190462360230124963, which is
+// bit-identical to the pre-grow-to-attest value recorded above. The frozen
+// ceilings move back with the counts they bound: route memberships 74 -> 71,
+// indexed points 71 -> 69, distance work 1034240 -> 1033728, logical peak bytes
+// 12624272 -> 12624152. Coverage row count, assessment work, scratch, evidence
+// and phase-peak bytes are unmoved.
+//
+// **What the refusal costs, measured.** The load that contact carried is
+// **0.000 mm²** — it was holding nothing up — so the whole price of the ruling
+// on this model is the coverage on the two toe islands it stood between:
+//
+// * island 5 uncovered area 0.4616253399710106 -> 0.48293112489274953 mm²,
+//   worst gap 2.1953457995370087 -> 4.380949640913765 mm
+// * island 8 uncovered area 0.4616253399710107 -> 0.48293112489274964 mm²,
+//   worst gap 2.195345799537009 -> 4.380949640913764 mm
+//
+// Both stay BELOW this test's 1.0 mm² censor, both keep
+// `assessment_failed = false`, and the report still refuses with the same 7
+// defects on the same 7 islands. So the ruling trades 0.0213 mm² of extra
+// uncovered area on each of two already-passing islands for not cutting a
+// 1.3 mm-diameter scar into the model. Every other leaf is byte-identical.
+//
+// No cap, gate, minimum, radius or tolerance was touched by this refresh, and
+// the ceilings that moved are this test's own hand-counted fixture bounds,
+// re-counted against the fixture they describe. One constant was ADDED — the
+// scar maximum above — under the owner ruling that authorized it.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
@@ -314,14 +355,14 @@ fn request(max_distance_work: usize) -> CoverageMeasurementRequest {
     CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(74, 71, 50_688, max_distance_work, 12_624_272, 5_879_808)
+        CoverageMeasurementLimits::new(71, 69, 50_688, max_distance_work, 12_624_152, 5_879_808)
             .expect("nonzero frozen limits"),
     )
     .expect("finite request")
 }
 
 fn report_json() -> String {
-    verify_json(1_034_240).expect("coverage report")
+    verify_json(1_033_728).expect("coverage report")
 }
 
 #[test]
@@ -343,7 +384,7 @@ fn public_coverage_report_is_frozen_without_evidence_loss() {
 #[test]
 fn cap_minus_one_returns_a_typed_error_without_a_report() {
     assert_eq!(
-        verify_json(1_034_239),
+        verify_json(1_033_727),
         Err(CoverageVerificationError::ResourceLimit {
             resource: "distance work".to_owned()
         })
