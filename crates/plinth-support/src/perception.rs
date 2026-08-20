@@ -2387,6 +2387,15 @@ fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
 /// The sole production reader of the low-point reach allowance, and the sole
 /// production reader of `X_ALLOWED` anywhere in the engine (task #57,
 /// registry-bypass finding, constants audit sec 2f).
+///
+/// The layer height comes from the registry, per Craig's ruling, not from the
+/// `LayerPlan`. Recorded divergence, not a defect today: the probe slice one
+/// layer down is taken at `z - layers.heights_mm()[index_at(z)]`, so if a plan
+/// ever carries per-layer heights that differ from `LAYER_HEIGHT_DEFAULT_MM`,
+/// the allowance and the probe depth stop describing the same layer. Every
+/// plan in the engine is built at the registered height today, so the two
+/// agree. If per-layer heights ever land, this is the site that has to choose,
+/// and the physical answer is the shelf's own thickness -- the plan value.
 fn registry_low_point_reach_allowance_mm(constants: &plinth_core::M0Constants) -> f64 {
     let evidence = constants.evidence();
     low_point_reach_allowance_mm(
