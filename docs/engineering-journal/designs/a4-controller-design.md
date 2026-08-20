@@ -3068,3 +3068,100 @@ roughly 7 replays of baseline selection per attempt.
   scan, and the trial count goes up under R6+R10. It belongs on §F.6's hoist
   list; it is invariant for the whole run by exactly the same argument as
   `SurfaceAnchorPool::from_geometry`.
+
+---
+
+## M. What the Core build measured (2026-08-20)
+
+Written by the implementer at the end of Core, against the code that landed.
+**This section is measurement and disclosure only. It changes no rule.** Where
+it corrects an expectation the body of this document set, it says so in place.
+
+### M.1 The three procedural fixtures, gate profile
+
+Every number below is from `cargo test -p plinth-support --profile gate --test
+a4_transactional_controller`, one process, procedural meshes built from
+`plinth_mesh::make_*` against the checked-in `corpus/baseline/*.pipeline.json`.
+**No mini was read**, so this runs on a clean worktree (task #16).
+
+| fixture | trials | commits | outcome | what it establishes |
+| --- | ---: | ---: | --- | --- |
+| `make_toed_slab` | **0** | **0** | seals, digest `4_190_462_360_230_124_963`, 64 routed / 170 live — all three unmoved | §E.5 case 6 and §G.3: a model that seals at attempt 0 never enters a transaction, so no rule in §A–§E can reach it |
+| `make_overhang_table` | **1** | **1** | seals | §G.3's predicted correction, measured: the batch loop takes three rounds appending 4/3/1 — **eight contacts** — where one contact that earned its place is enough |
+| `make_raking_blade` | **45** | 0 | refuses, pool drained, 26.2 s wall | §E.5 case 7. Refuses the SAME hole — island 5, one patch, 5.135 mm², 32× the censor — and now names a measured class |
+
+**The raking blade corroborates stage 0.** Stage 0 measured 18 eligible rows at
+one accepted state and **46 summed over the run** at `06cf21b`; the one-winner
+controller tried **45** at `a8feff4`. The shape survived the base move, as §G.1
+predicted the shapes would.
+
+### M.2 The FIRST measurement of rule N4 on real geometry
+
+§F.5 said: "N4 is expected to cut the worst case hard, and **it is not measured
+yet**. The instrument is `diversity_demotions` in §A.8." Here is the first
+reading, on the raking blade:
+
+```
+coverage-repair: trials=45 commits=0 remaining=0 wall_total=26189ms
+  wall/trial min=575ms med=581ms max=586ms
+  diversity_demotions=44 of_which_tried=44 [no_improvement=45]
+```
+
+**44 candidates were deprioritized and all 44 were tried anyway.** That is
+ruling R13's completeness promise — "deprioritization is not exclusion" —
+measured on a model rather than argued from the rule. It also says plainly what
+N4 did NOT do here: this pool is 45 rows in one small neighbourhood, so
+reordering it cannot avoid any of them and the trial count is the pool size. N4
+changes the ORDER, and on a pool with nothing outside the discs there is no
+cheaper order to find. **The Warhorse and the treant are where the cut, if any,
+will show, and those are Prove-stage runs.**
+
+### M.3 Corrections to this document's own expectations
+
+1. **§A.4 rule N4's proof obligation was satisfiable by a fixture that proved
+   nothing, and the first version of it was.** The obligation reads "one test
+   that rejects a seat and asserts the next winner lies outside that seat's
+   coverage disc while an equal-scoring neighbour inside it exists". Written
+   with two candidates, the rejection leaves exactly one live row and the
+   assertion passes whatever the sort key is. A sabotage run — zero out N4's
+   contribution to the rank key, expect red — caught it green. **The fixture
+   needs THREE rows so that two are live after the rejection.** Recorded here
+   because the obligation as written does not say so, and the next reader of
+   §A.4 would write the same broken fixture.
+2. **§A.5's digest restore has no red run, and none is available today.**
+   Removing `restore_prepared_digests` from the rejection path leaves every test
+   green, because `prepared_run_for_plan` re-stamps all five fields
+   unconditionally and nothing between trials reads them. §A.5's stated reason —
+   "the controller assembles refusal evidence *between* trials" — is a property
+   of a future reader, not of this controller. **The restore is implemented and
+   is DEFENSIVE, not proven.** It is five `u64` writes; it stays.
+3. **§C.3's clause-2 gap is now pinned at its measured size**: seven of the
+   eleven clause-2 gates have no component at all, three are matched by a house
+   count, and `Clearance` is covered only indirectly by the trial's stage
+   refusing. `plinth-pipeline/tests/a4_noncoverage_gate_drift.rs` reads which
+   gates are ported from a REAL run rather than mirroring `judge`'s match, so
+   the two lists cannot drift.
+
+### M.4 What Core did NOT do, and why
+
+* **§G.1 stage 4 is not started.** `run_support` is untouched and still the
+  production door; the transactional loop landed as `run_support_transactional`,
+  which is stage 3 verbatim. The swap needs the `attempts` re-meaning at five
+  struct sites, the FU-57 schema string to `plinth.coverage-refusal.v2`, and a
+  deliberate digest re-freeze **with the measurement beside it** — a corpus-run
+  obligation, not a code one.
+* **The §D.1 trial stream is in memory, not on the wire.** Persisting it needs
+  `RepairRowId` to gain a public wire encoding it has never had, which belongs
+  to the same stage-4 format change. It is exposed on the sealed authority and
+  is empty on the refused path, where §E.1's per-route outcomes and §A.8's
+  report carry the evidence instead.
+* **§A.8's third destination is not wired.** The operator line and the sidecar
+  copy are here; the run report's per-model line is `plinth-pipeline` wiring and
+  travels with stage 4. The operator line goes to **stderr**, because
+  `plinth-support` has no logging dependency and adding one to print one line is
+  not a trade this lane should make.
+* **Two loop guards are unexercised by any fixture**: §B.3's zero-score stop
+  (no procedural fixture has an all-zero-scoring pool) and
+  `CommitBudgetExhausted` (none needs more than the bound). Both are reachable
+  by construction and neither is proven. Prove should look for a model that
+  reaches each.
