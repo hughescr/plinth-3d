@@ -423,6 +423,82 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     // moved anywhere, all 64 routed contact positions are bit-identical,
     // and member count, kinds and connectivity are unchanged.
     assert_eq!(seats.len(), identities.len());
+    // **THE ABANDONED LOAD, ASSERTED — not left in prose.**
+    //
+    // Accepting 65 -> 64 routed contacts turns entirely on the claim above that
+    // the contact the scar bound withdraws carries **0.000 mm²**: the bound
+    // costs this model a 1.3 mm-diameter scar and buys back nothing that was
+    // holding it up. A comment cannot fail, so the claim is measured here. If a
+    // future change ever makes the bound drop a contact that IS carrying load,
+    // this fixture must go red rather than keep quoting a number nobody checks.
+    let abandoned = authority.abandoned_contacts();
+    let abandoned_mm2 = abandoned
+        .iter()
+        .map(plinth_support::AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum::<f64>();
+    assert_eq!(
+        abandoned_mm2, 0.0,
+        "the scar bound must cost this fixture no routed load; got {abandoned_mm2} mm² across \
+         {abandoned:?}"
+    );
+    // **TWO refusals, of two DIFFERENT kinds, and the fixture pins which is
+    // which.** Measured 2026-08-20, and the pair is the reason this assertion
+    // is worth writing at all:
+    //
+    //   * contact 25, seat (-5.495, -0.938, 3.750) mm — `buried_surface`. This
+    //     one predates the scar bound entirely and has nothing to do with it:
+    //     the OD-9 probe is a point on the surface normal, so NO tip radius
+    //     moves a buried seat. The ladder was never walked
+    //     (`growth_ladder_entered == false`, zero rungs) and the run report
+    //     must not let Craig's field ceiling read as the reason it is missing.
+    //   * contact 64, seat (10.928, 0.000, 6.304) mm — `not_attached`, ladder
+    //     walked, six rungs from 0.0707 to 0.4000 mm RADIUS (0.1414 to 0.8000
+    //     mm DIAMETER) and every one refused. THIS is the contact the bound
+    //     withdraws, and here naming `TIP_RADIUS_MAX_GROWN_SCAR_MM` as the
+    //     stopper is exactly true.
+    //
+    // Both abandon 0.000 mm², which the sum above already states.
+    assert_eq!(
+        abandoned.len(),
+        2,
+        "this fixture refuses exactly two contacts — one buried seat and one the scar bound \
+         withdraws; got {abandoned:?}"
+    );
+    let classes = abandoned
+        .iter()
+        .map(|contact| {
+            (
+                contact.contact_id(),
+                contact.refusal(),
+                contact.growth_ladder_entered(),
+                contact.growth_rungs().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        classes,
+        vec![
+            (25_u32, "buried_surface", false, 0_usize),
+            (64_u32, "not_attached", true, 6_usize),
+        ],
+        "a buried seat must be recorded as never having entered the ladder, and only the \
+         ladder-walked refusal may read as the bound's doing"
+    );
+    for contact in abandoned {
+        assert_eq!(
+            contact.growth_ceiling_constant(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            "both paths must quote the SAME registered limit, so the number never changes \
+             meaning between lines; got {contact:?}"
+        );
+        assert!(
+            contact
+                .growth_rungs()
+                .iter()
+                .all(|rung| rung.radius_mm() <= contact.growth_ceiling_radius_mm()),
+            "no rung may propose a tip above the ceiling; got {contact:?}"
+        );
+    }
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");

@@ -85,7 +85,7 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 25] = [
+const REQUIRED: [(&str, &str, &str); 28] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
@@ -125,6 +125,35 @@ const REQUIRED: [(&str, &str, &str); 25] = [
         "grow_tips_to_attest(",
         "the initial-contact stage no longer asks for the remedy, so a curable \
          NotAttached is quarantined and its load abandoned",
+    ),
+    // --- THE SCAR BOUND: Craig's ruling of 2026-08-20 --------------------
+    //
+    // A grow-for-attachment rescue may not leave a scar wider than
+    // TIP_RADIUS_MAX_GROWN_SCAR_MM = 0.400 mm RADIUS (0.800 mm DIAMETER), his
+    // measured field ceiling. Deleting the truncation IS behaviourally visible
+    // today (the toed slab goes 64 -> 65 routed contacts and its digest moves),
+    // so these three rows are belt-and-braces rather than the sole guard —
+    // but a rename that silently routed the ladder back to the legacy 1.000 mm
+    // maximum would otherwise be a one-word edit with no named guard, and this
+    // is the same technique the neighbouring entries use.
+    (
+        "designed_embed.rs",
+        "pub(crate) fn growth_ceiling_radius_mm(",
+        "the truncation seam is gone: the ladder no longer takes the SMALLER \
+         of the scar bound and the legacy maximum, so a rescue may leave a scar \
+         wider than any support the owner has ever printed",
+    ),
+    (
+        "designed_embed.rs",
+        "scar_bound_radius_mm",
+        "the growth request no longer CARRIES the scar bound, so the ceiling \
+         falls back to the legacy maximum however the truncation is written",
+    ),
+    (
+        "initial.rs",
+        "scar_bound_radius_mm: tip_radius_max_grown_scar_mm",
+        "the initial-contact stage no longer hands the REGISTERED scar bound to \
+         the ladder, so the bound is registered but unread",
     ),
     (
         "initial.rs",

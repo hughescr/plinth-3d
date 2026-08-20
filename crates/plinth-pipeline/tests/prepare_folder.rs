@@ -258,6 +258,16 @@ fn outcome<'a>(report: &'a PrepareReport, model: &str) -> &'a ModelPreparationOu
         .outcome
 }
 
+/// **How many contacts the healthy fixture refuses — MEASURED, 2026-08-20.**
+///
+/// Zero until Craig's scar bound landed. It is not zero now, and the reason is
+/// recorded where it is asserted: the bound refuses a rescue whose cure would
+/// have left a scar wider than any support he has ever printed, and that
+/// contact carries **0.000 mm²**. The load assertion is the one with teeth;
+/// this count is what stops a second, unrelated refusal from slipping in behind
+/// a zero-area sum now that `is_empty()` can no longer be demanded.
+const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 1;
+
 /// **The load-bearing test: a folder in, a real `.chitubox` out.**
 ///
 /// It also proves the executor's other half in the same run — the deliberately
@@ -354,10 +364,40 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "the healthy fixture must abandon no routed load; got {abandoned_mm2} mm² \
          across {abandoned_contacts:?}"
     );
+    // **What dropping `is_empty()` cost, bought back.** The load claim above is
+    // total, but on its own it would let a regression add any number of
+    // zero-load refusals without a single test going red. The COUNT is
+    // therefore pinned too: the healthy fixture refuses exactly the contacts it
+    // is measured to refuse (2026-08-20), and a new refusal — even one that
+    // abandons nothing — has to be re-derived deliberately rather than arriving
+    // unnoticed behind a zero sum.
+    assert_eq!(
+        abandoned_contacts.len(),
+        HEALTHY_FIXTURE_ABANDONED_CONTACTS,
+        "the healthy fixture's refusal count must not move without a re-derivation; got \
+         {abandoned_contacts:?}"
+    );
     // And every refusal that IS present must name the registered limit that
     // stopped it, in both units, so a reader can tell a policy refusal from a
     // seat that nothing could ever reach.
     for abandoned in abandoned_contacts {
+        // The discriminator that keeps the named limit honest. Only a
+        // `not_attached` refusal ever enters the growth ladder; a buried seat
+        // is a mesh fault no tip radius can move, and it is refused before any
+        // rung exists. Both lines quote the same registered ceiling, so without
+        // this flag an operator could read Craig's field maximum as the stopper
+        // of a rescue that was never attempted.
+        assert_eq!(
+            abandoned.growth_ladder_entered(),
+            abandoned.refusal() == "not_attached",
+            "only a not_attached refusal may be recorded as having walked the growth ladder; \
+             got {abandoned:?}"
+        );
+        assert!(
+            abandoned.growth_ladder_entered() || abandoned.growth_rungs().is_empty(),
+            "a refusal that never entered the ladder cannot have walked a rung; got \
+             {abandoned:?}"
+        );
         assert!(
             matches!(
                 abandoned.growth_ceiling_constant(),

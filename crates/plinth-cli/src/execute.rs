@@ -372,24 +372,7 @@ fn print_model(model: &ModelPreparationReport) {
                     contact.refusal(),
                     contact.abandoned_area_mm2(),
                 );
-                // THE BOUND IS NAMED, not just quoted as a number. A refused
-                // contact's operator needs to know WHICH rule stopped the
-                // rescue: the registered scar maximum, which is Craig's field
-                // ceiling on how big a scar a rescue may leave, or the load
-                // law's own legacy clamp. Two limits 0.6 mm apart are not
-                // distinguishable by eye in a log.
-                println!(
-                    "    remedies tried  tip {:.4} mm radius ({:.4} mm diameter) from the load \
-                     law, then {} growth rung(s) up to the registered {:.4} mm radius \
-                     ({:.4} mm diameter), the maximum set by {}; re-seat: {}",
-                    contact.law_tip_radius_mm(),
-                    contact.law_tip_radius_mm() * 2.0,
-                    contact.growth_rungs().len(),
-                    contact.growth_ceiling_radius_mm(),
-                    contact.growth_ceiling_radius_mm() * 2.0,
-                    contact.growth_ceiling_constant(),
-                    contact.reseat(),
-                );
+                println!("{}", remedies_tried_line(contact));
             }
         }
         ModelPreparationOutcome::Refused {
@@ -422,6 +405,58 @@ fn print_model(model: &ModelPreparationReport) {
         }
     }
     print_coverage_evidence(model);
+}
+
+/// **The `remedies tried` line under one ABANDONED LOAD, in full.**
+///
+/// A returned `String` rather than an inline `println!` for the reason the
+/// repair card's line builder is one: the wording IS the deliverable here, and
+/// a wording nothing reads back is a wording nothing checks.
+///
+/// **The registered ceiling is NAMED, not just quoted as a number.** A refused
+/// contact's operator needs to know WHICH rule stopped the rescue — the
+/// registered scar maximum, which is Craig's field ceiling on how big a scar a
+/// rescue may leave, or the load law's own legacy clamp. Two limits 0.6 mm
+/// apart are not distinguishable by eye in a log.
+///
+/// **...but a limit may be blamed only where it stopped something.** A buried
+/// seat never enters the growth ladder at all: the OD-9 probe is a point on the
+/// surface normal, so burial is a mesh fault no tip radius can move. One
+/// sentence saying the rescue climbed "up to the registered maximum" would let
+/// such an operator read Craig's field ceiling as the reason his support is
+/// missing when no rescue was ever attempted. Both branches therefore quote the
+/// same ceiling, so the number never changes meaning between two lines, and the
+/// branch that walked no rung says in words that the ceiling is not its cause.
+///
+/// Radius AND diameter at every site: this registry speaks radius and the
+/// slicer UI speaks diameter, and a number stated in one alone lands 2x wrong.
+fn remedies_tried_line(contact: &plinth_pipeline::AbandonedContactDisclosure) -> String {
+    let law_radius_mm = contact.law_tip_radius_mm();
+    let ceiling_radius_mm = contact.growth_ceiling_radius_mm();
+    if contact.growth_ladder_entered() {
+        format!(
+            "    remedies tried  tip {law_radius_mm:.4} mm radius \
+             ({:.4} mm diameter) from the load law, then {} growth rung(s) up to the \
+             registered {ceiling_radius_mm:.4} mm radius ({:.4} mm diameter), the maximum set \
+             by {}; re-seat: {}",
+            law_radius_mm * 2.0,
+            contact.growth_rungs().len(),
+            ceiling_radius_mm * 2.0,
+            contact.growth_ceiling_constant(),
+            contact.reseat(),
+        )
+    } else {
+        format!(
+            "    remedies tried  tip {law_radius_mm:.4} mm radius \
+             ({:.4} mm diameter) from the load law; NO growth rung was tried, because no tip \
+             radius can move this refusal — the registered {ceiling_radius_mm:.4} mm radius \
+             ({:.4} mm diameter) maximum from {} is NOT what stopped this one; re-seat: {}",
+            law_radius_mm * 2.0,
+            ceiling_radius_mm * 2.0,
+            contact.growth_ceiling_constant(),
+            contact.reseat(),
+        )
+    }
 }
 
 /// **FU-57.** A coverage refusal -- from either the pre-write gate or the
@@ -635,7 +670,7 @@ mod tests {
         ModelPreparationReport, UncoveredIslandSummary,
     };
 
-    use super::{coverage_lines, repair_lines};
+    use super::{coverage_lines, remedies_tried_line, repair_lines};
 
     fn report(repair: Option<RepairEvidence>) -> ModelPreparationReport {
         ModelPreparationReport {
@@ -685,6 +720,101 @@ mod tests {
         }
         // Non-vacuity: the guard can tell a present call from an absent one.
         assert!(!source.contains(&reads_third_coordinate("grown", "seat_of_nothing")));
+    }
+
+    /// One refused contact, deserialized exactly as a frozen run report carries
+    /// it, because the disclosure's fields are private to `plinth-support`.
+    ///
+    /// The numbers are the toed slab's own, MEASURED 2026-08-20 through
+    /// `plinth-support`'s public runner: contact 25 at (-5.495, -0.938, 3.750)
+    /// mm is a buried seat that never entered the ladder, and contact 64 at
+    /// (10.928, 0.000, 6.304) mm is the one the scar bound withdraws after six
+    /// rungs. Both abandon 0.0000 mm², and only the second was stopped by the
+    /// registered maximum.
+    fn refused_contact(ladder_entered: bool) -> plinth_pipeline::AbandonedContactDisclosure {
+        let (contact_id, seat, refusal, rungs) = if ladder_entered {
+            (
+                64,
+                "[10.92820323027551,0.0,6.303847577293367]",
+                "not_attached",
+                r#"[{"radius_mm":0.4,"diameter_mm":0.8,"attested":false}]"#,
+            )
+        } else {
+            (
+                25,
+                "[-5.49519052838329,-0.9375,3.75]",
+                "buried_surface",
+                "[]",
+            )
+        };
+        serde_json::from_str(&format!(
+            r#"{{"contact_id":{contact_id},"seat_mm":{seat},
+                "abandoned_area_mm2":0.0,"refusal":"{refusal}",
+                "law_tip_radius_mm":0.05,"growth_ceiling_radius_mm":0.4,
+                "growth_ceiling_constant":"TIP_RADIUS_MAX_GROWN_SCAR_MM",
+                "growth_ladder_entered":{ladder_entered},
+                "growth_rungs":{rungs},
+                "reseat":"no_alternative_seat_at_this_stage"}}"#
+        ))
+        .expect("a refused-contact disclosure deserializes as a frozen report carries it")
+    }
+
+    /// **A registered limit may be blamed only where it actually stopped
+    /// something.**
+    ///
+    /// Both wordings quote the same registered ceiling, so one number never
+    /// changes meaning between two lines. But a buried seat never enters the
+    /// growth ladder — burial is a mesh fault no tip radius moves — so a single
+    /// sentence blaming the ceiling would invite an operator to read the
+    /// owner's field limit as the reason his support is missing when no rescue
+    /// was ever attempted.
+    ///
+    /// Measured on the rendered line, not on the source text: this asserts what
+    /// the operator reads.
+    #[test]
+    fn the_refusal_line_blames_the_registered_ceiling_only_where_it_stopped_a_rescue() {
+        let walked = remedies_tried_line(&refused_contact(true));
+        assert!(
+            walked.contains("then 1 growth rung(s) up to the registered 0.4000 mm radius \
+                             (0.8000 mm diameter), the maximum set by \
+                             TIP_RADIUS_MAX_GROWN_SCAR_MM"),
+            "a rescue the registered maximum really did stop must say so: {walked}"
+        );
+        let unwalked = remedies_tried_line(&refused_contact(false));
+        assert!(
+            unwalked.contains("NO growth rung was tried"),
+            "a refusal that never entered the ladder must say no rung was tried: {unwalked}"
+        );
+        assert!(
+            unwalked.contains(
+                "the registered 0.4000 mm radius (0.8000 mm diameter) maximum from \
+                 TIP_RADIUS_MAX_GROWN_SCAR_MM is NOT what stopped this one"
+            ),
+            "the ceiling must still be stated in both units and named, and disclaimed as the \
+             cause: {unwalked}"
+        );
+        // The wording that would MISLEAD must be absent, not merely outweighed.
+        assert!(
+            !unwalked.contains("up to the registered"),
+            "a rescue that was never attempted must not read as one that climbed to the \
+             ceiling: {unwalked}"
+        );
+        assert!(
+            !walked.contains("NOT what stopped this one"),
+            "the real bound refusal must not disclaim the bound: {walked}"
+        );
+        // Both units at every site, on both branches, and the law radius the
+        // load law asked for is stated so the reader can size the gap.
+        for line in [&walked, &unwalked] {
+            assert!(
+                line.contains("tip 0.0500 mm radius (0.1000 mm diameter) from the load law"),
+                "every branch states the law radius in BOTH units: {line}"
+            );
+            assert!(
+                line.contains("re-seat: no_alternative_seat_at_this_stage"),
+                "every branch states why re-seating was not among the remedies: {line}"
+            );
+        }
     }
 
     #[test]

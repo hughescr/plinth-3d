@@ -549,6 +549,7 @@ pub struct AbandonedContactDisclosure {
     law_tip_radius_mm: f64,
     growth_ceiling_radius_mm: f64,
     growth_ceiling_constant: String,
+    growth_ladder_entered: bool,
     growth_rungs: Vec<TipGrowthRungDisclosure>,
     reseat: String,
 }
@@ -606,13 +607,35 @@ impl AbandonedContactDisclosure {
     pub fn growth_ceiling_constant(&self) -> &str {
         &self.growth_ceiling_constant
     }
+
+    /// **Whether the growth ladder was walked for this contact at all** — the
+    /// one fact that tells a refusal the registered maximum STOPPED from a
+    /// refusal it merely stood beside.
+    ///
+    /// `false` means no rung was ever proposed: the seat is buried, and burial
+    /// is a mesh fault no tip radius can move. The ceiling reported above is
+    /// still the one growth would have used, so both disclosure paths quote the
+    /// same limit, but it did not refuse this contact and a reader must not be
+    /// left to infer that it did.
+    ///
+    /// `true` with an EMPTY [`Self::growth_rungs`] is the opposite case and a
+    /// real policy refusal: the ladder ran and the ceiling left it no legal
+    /// rung, because the load law had already sized this tip at or above the
+    /// ceiling.
+    #[must_use]
+    pub const fn growth_ladder_entered(&self) -> bool {
+        self.growth_ladder_entered
+    }
     /// Every larger tip that was tried, ascending, and what each measured. A
     /// refused contact never reaches the descending refinement scan — the scan
     /// needs a bracket, and there is none without a success — so this list is
     /// the ladder alone.
     ///
-    /// Empty means there was no larger legal tip to try — the load law had
-    /// already sized this one at the registered maximum.
+    /// Empty means one of two different things, and
+    /// [`Self::growth_ladder_entered`] is what tells them apart: with the
+    /// ladder entered, there was no larger legal tip to try — the load law had
+    /// already sized this one at or above the ceiling; without it, no rung was
+    /// ever proposed, because the refusal is one no tip radius can move.
     #[must_use]
     pub fn growth_rungs(&self) -> &[TipGrowthRungDisclosure] {
         &self.growth_rungs
@@ -742,6 +765,7 @@ fn contact_attestation_disclosures(
             law_tip_radius_mm: stub.remedy.law_radius_mm,
             growth_ceiling_radius_mm: stub.remedy.growth_ceiling_radius_mm,
             growth_ceiling_constant: stub.remedy.growth_ceiling_constant.to_owned(),
+            growth_ladder_entered: stub.remedy.ladder_entered,
             growth_rungs: growth_rungs(&stub.remedy.growth),
             reseat: match stub.remedy.reseat {
                 crate::initial::ReseatAvailability::NoAlternativeSeatAtThisStage => {

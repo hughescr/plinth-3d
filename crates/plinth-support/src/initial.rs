@@ -144,6 +144,26 @@ pub(crate) struct InitialContactRemedy {
     /// WHICH registered constant that ceiling is, by its registry id, so the
     /// disclosure can name the stopper rather than quote a bare number.
     pub(crate) growth_ceiling_constant: &'static str,
+    /// **Whether the growth ladder was WALKED for this contact at all.**
+    ///
+    /// Only a `NotAttached` refusal enters the ladder. A `BuriedSurface`
+    /// refusal is one no tip radius can move, so it is refused before any rung
+    /// exists, and the ceiling recorded above is only the one growth WOULD have
+    /// used. Without this flag the two cases are indistinguishable downstream —
+    /// both carry an empty `growth` list — and the disclosure would name a
+    /// registered maximum as the stopper of a rescue that was never attempted.
+    ///
+    /// An empty `growth` with this set TRUE is a different and honest thing:
+    /// the ladder ran and had no legal rung to offer, because the load law had
+    /// already sized this tip at or above the ceiling. There the ceiling IS the
+    /// stopper.
+    ///
+    /// Deliberately NOT digested. `attestation_digest` already separates the
+    /// two cases at a coarser grain — it tags a remedy `None` (no ladder) apart
+    /// from `Some` (ladder walked) — and it runs before the fallback remedy
+    /// below is substituted, so digesting this would add a byte that cannot
+    /// vary at the point the digest is taken.
+    pub(crate) ladder_entered: bool,
     pub(crate) reseat: ReseatAvailability,
 }
 
@@ -847,9 +867,12 @@ pub(crate) fn build_initial_contacts(
                     // This stub never entered the ladder — it was refused for a
                     // reason no tip radius can move (a buried seat). The ceiling
                     // stated is nevertheless the one growth WOULD have used, so
-                    // the two disclosure paths quote the same limit.
+                    // the two disclosure paths quote the same limit — but
+                    // `ladder_entered: false` says plainly that it did not stop
+                    // this one, so the line cannot read as a policy refusal.
                     growth_ceiling_radius_mm: fallback_growth_ceiling_mm,
                     growth_ceiling_constant: fallback_growth_ceiling_constant,
+                    ladder_entered: false,
                     reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
                 }),
             });
@@ -1172,6 +1195,12 @@ fn attest_initial_contacts(
                 growth: outcome.attempts.clone(),
                 growth_ceiling_radius_mm: outcome.growth_ceiling_radius_mm,
                 growth_ceiling_constant: outcome.growth_ceiling_source.constant_id(),
+                // The ladder RAN for this row: only `NotAttached` rows are in
+                // `growth_requests`, and every one of them got a ceiling and a
+                // (possibly empty) rung list from `grow_tips_to_attest`. An
+                // empty list here means the ceiling had no legal rung to offer,
+                // which is the ceiling genuinely stopping the rescue.
+                ladder_entered: true,
                 reseat: ReseatAvailability::NoAlternativeSeatAtThisStage,
             });
             let Some(cure) = outcome.cure else {

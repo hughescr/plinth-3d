@@ -2343,6 +2343,7 @@ mod tests {
                 "abandoned_area_mm2":2.98,"refusal":"not_attached",
                 "law_tip_radius_mm":0.05,"growth_ceiling_radius_mm":0.4,
                 "growth_ceiling_constant":"TIP_RADIUS_MAX_GROWN_SCAR_MM",
+                "growth_ladder_entered":true,
                 "growth_rungs":[
                     {"radius_mm":0.07071067811865475,"diameter_mm":0.1414213562373095,
                      "attested":false},
@@ -2430,6 +2431,11 @@ mod tests {
             abandoned_contacts[0].growth_ceiling_constant(),
             "TIP_RADIUS_MAX_GROWN_SCAR_MM"
         );
+        // ...and whether that named maximum actually stopped anything. This row
+        // walked the ladder, so it did. A row that never entered the ladder
+        // carries `false` here and the run report says in words that the
+        // maximum is not the reason its support is missing.
+        assert!(abandoned_contacts[0].growth_ladder_entered());
         assert_eq!(
             abandoned_contacts[0].reseat(),
             "no_alternative_seat_at_this_stage"

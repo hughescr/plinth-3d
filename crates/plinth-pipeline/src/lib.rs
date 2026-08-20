@@ -27,6 +27,13 @@ pub use coverage_evidence::{
 // card is the one today) can match on it without taking a direct
 // `plinth-support` dependency of its own for one field's type.
 pub use plinth_support::CoverageClosureGap;
+// Same reason, for the two PR-8 contact disclosures. They are already the
+// element types of public `ContactAttestationDisclosure` fields, so they are
+// part of this crate's surface either way; without the re-export the CLI can
+// print them but cannot NAME them, which is what forces the run report's
+// refusal wording to live inline in a `println!` instead of in a line builder a
+// test can read back.
+pub use plinth_support::{AbandonedContactDisclosure, GrownContactTipDisclosure};
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
