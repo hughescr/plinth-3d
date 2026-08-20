@@ -453,6 +453,27 @@ impl RepairRunReport {
         self.wall_time_per_trial_median_ms = per_trial_ms[per_trial_ms.len() / 2];
     }
 
+    /// Print the summary line where an operator watching a long run will see
+    /// it, on every path — sealed or refused.
+    ///
+    /// **Deliberately unconditional, and deliberately not behind a verbosity
+    /// switch.** Ruling R10 removed the failed-tries cap and put visibility in
+    /// its place; a cost that is only printed when someone asks for it is a
+    /// cost that is hidden, and the trade R10 made would not hold.
+    ///
+    /// **Disclosed deviation from design §A.8.** The design names three
+    /// destinations: the run log at INFO, the FU-57 sidecar, and the run
+    /// report's per-model line. Two of the three are here — this line, and
+    /// [`crate::CoverageClosureRefusal::repair`] / the sealed authority's own
+    /// copy for the sidecar. `plinth-support` has no logging dependency (its
+    /// whole dependency list is `geom_kernel, plinth-core, plinth-hollow,
+    /// plinth-layers, plinth-mesh, rayon, serde, thiserror`), so this goes to
+    /// stderr rather than to a logger. The run report's per-model line is a
+    /// `plinth-pipeline` wiring step and travels with §G.1's stage 4.
+    pub fn log_summary(&self) {
+        eprintln!("{}", self.summary_line());
+    }
+
     /// The one INFO line an operator watching a long run must see move.
     /// Deliberately one line and deliberately unconditional: a cost that is
     /// only printed when someone asks for it is a cost that is hidden.

@@ -2038,6 +2038,7 @@ mod tests {
             reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
             islands: Vec::new(),
             history: Vec::new(),
+            repair: None,
         };
         let stop = ChainStop::new(PipelineError::SealedRun {
             model,

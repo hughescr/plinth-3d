@@ -71,8 +71,8 @@ mod coverage;
 /// and `plinth_pipeline::gates::registered_coverage_request` delegates to
 /// [`coverage_closure::registered_coverage_request`].
 pub mod coverage_closure;
-pub mod coverage_repair;
 mod coverage_measurement;
+pub mod coverage_repair;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
 // (brace/cco/rewire) are gated on the open owner decisions recorded in
@@ -130,23 +130,27 @@ use thiserror::Error;
 
 pub use coverage_closure::{
     coverage_patch_blocks_verdict, coverage_patch_needs_repair,
-    registered_coverage_censor_area_mm2, registered_coverage_request, CoverageClosureAttempt,
-    CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason, CoverageClosureRefusal,
-    CoverageClosureSetupError,
+    registered_coverage_censor_area_mm2, registered_coverage_request, BlockedCause,
+    CoverageClosureAttempt, CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason,
+    CoverageClosureRefusal, CoverageClosureSetupError, CoverageScoreShare, RouteRepairOutcome,
 };
 pub use coverage_measurement::{
     CoverageGap, CoverageMeasurement, CoverageMeasurementError, CoverageMeasurementEvidence,
     CoverageMeasurementIslandEvidence, CoverageMeasurementLimits, CoverageMeasurementPatchEvidence,
     CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
 };
+pub use coverage_repair::{
+    repair_step_outcome, CoverageRepairStep, NoncoverageComponent, NoncoverageVector,
+    RepairGateVector, RepairRunReport, RepairStepOutcome, RouteDelta,
+};
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence, FinalSupportAuthority,
-    GrownContactTipDisclosure, OwnerlessIslandDisclosure, RoutedPhysicalContactEvidence,
-    SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
-    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
-    TipGrowthRungDisclosure, UnroutedContactReason, UnroutedRegularRemoval,
-    UnroutedSpecializedContact,
+    run_support, run_support_transactional, AbandonedContactDisclosure, FinalLiveMemberEvidence,
+    FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
+    RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
+    SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,
+    SupportVerificationSnapshot, TipGrowthRungDisclosure, UnroutedContactReason,
+    UnroutedRegularRemoval, UnroutedSpecializedContact,
 };
 
 /// Request data shared by the support and raft pass.

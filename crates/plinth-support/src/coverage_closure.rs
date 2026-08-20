@@ -370,13 +370,23 @@ pub enum BlockedCause {
     /// refused by the support-to-model clearance standoff. Measured from the
     /// CCO transcript's per-terminal refusal reasons.
     ClearanceMaskUnsatisfiable { terminals: u32, standoff_mm: f64 },
-    /// **Task #52.** Every contact placed on this route was condemned BEFORE
-    /// any arm was tried, because the stub axis re-enters the model further
-    /// than the allowance. Measured from the quarantine disposition.
+    /// **Task #52.** Every contact this route placed was condemned BEFORE any
+    /// arm was tried, because the stub axis re-enters the model further than
+    /// the allowance.
     ///
-    /// It costs ZERO trials to detect, because quarantine happens before
-    /// routing.
-    StubReentry { terminals_quarantined: u32 },
+    /// Measured, not inferred: the depths are the initial build's own
+    /// `remaining_inside_axis_mm` for the condemned stubs, and `allowance_mm`
+    /// is the registered `min_illegal_len_mm` the build compared them against.
+    /// A quarantine with no condemned-stub row is NOT counted here — it was
+    /// quarantined for something else, and naming it re-entry would be the kind
+    /// of claim ruling R14 forbids.
+    StubReentry {
+        terminals_quarantined: u32,
+        depth_min_mm: f64,
+        depth_median_mm: f64,
+        depth_max_mm: f64,
+        allowance_mm: f64,
+    },
 }
 
 /// A worst routed-contact gap, projected from [`CoverageGap`] for a refusal
@@ -434,6 +444,14 @@ pub struct CoverageClosureIsland {
     /// [`Self::nominated_repair_rows`] means the pool for this island drained.
     #[serde(default)]
     pub eligible_repair_rows: usize,
+    /// **SPEC-A4 §E.1, rulings R7 and R14.** Why THIS route is still uncovered,
+    /// as a measured class rather than a distance claim.
+    ///
+    /// `None` from the batch controller, which has no per-route search to
+    /// report on; `Some` from the one-winner controller. Additive and
+    /// `serde(default)`, so an older sidecar still reads.
+    #[serde(default)]
+    pub outcome: Option<RouteRepairOutcome>,
 }
 
 /// One closure round's measured shape, kept for refusal evidence: how many
@@ -468,6 +486,15 @@ pub struct CoverageClosureRefusal {
     pub reason: CoverageClosureReason,
     pub islands: Vec<CoverageClosureIsland>,
     pub history: Vec<CoverageClosureAttempt>,
+    /// **SPEC-A4 §A.8, Craig's ruling R10 — the loud report, on the refused
+    /// path.** R10 removes the failed-tries cap and replaces it with
+    /// visibility, and that trade only holds if the visibility reaches the
+    /// record. This is the sidecar half of it.
+    ///
+    /// `None` from the batch controller, which runs no trials. Additive and
+    /// `serde(default)`, so it is not the stage-4 format change.
+    #[serde(default)]
+    pub repair: Option<crate::coverage_repair::RepairRunReport>,
 }
 
 /// One uncovered patch's routing key and exact face membership, projected out
@@ -525,6 +552,7 @@ pub(crate) fn islands_from_blocking(
                 patch_count: 1,
                 nominated_repair_rows: 0,
                 eligible_repair_rows: 0,
+                outcome: None,
             });
     }
     for (key, island) in &mut grouped {
@@ -1181,10 +1209,6 @@ impl DiversityDiscs {
             .iter()
             .filter(|&&seat| squared_distance(seat, seat_mm) <= self.radius_sq)
             .count()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.seats.len()
     }
 }
 

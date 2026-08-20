@@ -1033,9 +1033,19 @@ pub fn persist_closure_refusal(
     let islands = islands_from_closure(refusal);
     let measurement_error = match &refusal.reason {
         plinth_support::CoverageClosureReason::MeasurementRefused(detail) => Some(detail.clone()),
+        // EXHAUSTIVE, no wildcard arm, deliberately: this is the one place in
+        // the workspace that must decide what a NEW closure reason means for the
+        // sidecar, and a wildcard would decide it silently. Only a refused
+        // MEASUREMENT is a measurement error; every other reason is the
+        // controller reporting a verdict it reached, not an instrument that
+        // failed. SPEC-A4 §B.7's three one-winner reasons join the second group
+        // for exactly that reason.
         plinth_support::CoverageClosureReason::AttemptsExhausted
         | plinth_support::CoverageClosureReason::NoEligibleRepairRows
-        | plinth_support::CoverageClosureReason::RepairPlanRefused { .. } => None,
+        | plinth_support::CoverageClosureReason::RepairPlanRefused { .. }
+        | plinth_support::CoverageClosureReason::NothingToTry
+        | plinth_support::CoverageClosureReason::NoImprovingRepair { .. }
+        | plinth_support::CoverageClosureReason::CommitBudgetExhausted { .. } => None,
     };
     persist(
         model,
@@ -1180,6 +1190,7 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 5,
@@ -1191,6 +1202,7 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 2,
@@ -1202,9 +1214,11 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
             ],
             history: Vec::new(),
+            repair: None,
         };
         let islands = islands_from_closure(&refusal);
         assert_eq!(
@@ -1273,8 +1287,10 @@ mod tests {
                 patch_count: 1,
                 nominated_repair_rows: 3,
                 eligible_repair_rows: 0,
+                outcome: None,
             }],
             history: Vec::new(),
+            repair: None,
         };
         let mesh = RenderMesh {
             verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],

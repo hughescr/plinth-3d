@@ -494,6 +494,27 @@ pub struct FinalSupportAuthority<'a> {
     ownerless_islands: Vec<OwnerlessIslandDisclosure>,
     abandoned_contacts: Vec<AbandonedContactDisclosure>,
     grown_contact_tips: Vec<GrownContactTipDisclosure>,
+    /// **SPEC-A4 §A.8, ruling R10 — the loud report, on the SEALED path.**
+    /// §A.8 says "every run reports, on every path — sealed or refused", and a
+    /// model that seals after eleven trials and two commits must say so as
+    /// plainly as one that refuses.
+    ///
+    /// `None` from the batch controller, which runs no trials and would have to
+    /// invent the numbers.
+    repair_report: Option<crate::coverage_repair::RepairRunReport>,
+    /// **SPEC-A4 §D — the trial stream, in memory.**
+    ///
+    /// One row per transaction, committed or not, each naming the exact
+    /// repair-pool row it proposed, the routes its GLOBAL score came from, both
+    /// sides of all three accept clauses, and the outcome. Because a step
+    /// changes the plan by exactly ONE contact, the before/after difference IS
+    /// that contact's contribution — no inference and no apportionment.
+    ///
+    /// **Disclosed deviation from §D.2**: this is not persisted to the FU-57
+    /// sidecar in this lane, and it is empty on the refused path. Persisting it
+    /// needs `RepairRowId` to gain a public wire encoding it has never had,
+    /// which travels with §G.1's stage-4 schema change, not with the mechanism.
+    repair_steps: Vec<crate::coverage_repair::CoverageRepairStep>,
 }
 
 /// One rung of the PR-8 growth ladder, as the run report prints it.
@@ -975,6 +996,28 @@ impl FinalSupportAuthority<'_> {
         self.closure_history.len().saturating_sub(1)
     }
 
+    /// **SPEC-A4 §A.8, ruling R10** — the trial count, the commit count, the
+    /// rejection histogram, the wall time and the diversity-demotion pair for
+    /// the run that sealed.
+    ///
+    /// `None` from [`run_support`], the batch controller, which runs no trials.
+    /// These counters REPORT and none of them DECIDES: no branch of the
+    /// one-winner loop reads any of them except `committed` against the
+    /// registered bound, which is rulings R6 and R11's own rule.
+    #[must_use]
+    pub const fn repair_report(&self) -> Option<&crate::coverage_repair::RepairRunReport> {
+        self.repair_report.as_ref()
+    }
+
+    /// **SPEC-A4 §D.1** — every transaction this run attempted, in order.
+    ///
+    /// Empty from [`run_support`], the batch controller, whose attempts append
+    /// batches and therefore cannot attribute anything to a row.
+    #[must_use]
+    pub fn repair_steps(&self) -> &[crate::coverage_repair::CoverageRepairStep] {
+        &self.repair_steps
+    }
+
     /// SPEC-A3-A4 §6's removal ledger for the attempt that sealed: every
     /// regular contact the cadence did not route, with its exact
     /// candidate-pool row, its reason, and the carried area the pre-removal
@@ -1056,13 +1099,15 @@ impl FinalSupportAuthority<'_> {
     }
 
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
-        self.lowered.into_supported_model().map_err(|error| SupportRunError::Failed {
-            phase: SupportRunPhase::Lowering,
-            detail: format!(
-                "materializing the final emittable scene from the sealed authority failed: \
+        self.lowered
+            .into_supported_model()
+            .map_err(|error| SupportRunError::Failed {
+                phase: SupportRunPhase::Lowering,
+                detail: format!(
+                    "materializing the final emittable scene from the sealed authority failed: \
                  {error:?}"
-            ),
-        })
+                ),
+            })
     }
 }
 
@@ -1159,12 +1204,13 @@ pub fn run_support<'a>(
         input.max_primitive_bytes,
     );
 
-    let coverage_request = crate::coverage_closure::registered_coverage_request().map_err(
-        |error| SupportRunError::Failed {
-            phase: SupportRunPhase::Preparation,
-            detail: format!("binding the registered coverage-closure request failed: {error}"),
-        },
-    )?;
+    let coverage_request =
+        crate::coverage_closure::registered_coverage_request().map_err(|error| {
+            SupportRunError::Failed {
+                phase: SupportRunPhase::Preparation,
+                detail: format!("binding the registered coverage-closure request failed: {error}"),
+            }
+        })?;
     let radius_mm = coverage_request.radius_mm().get();
 
     let (mut context, mut plan) =
@@ -1371,14 +1417,20 @@ pub fn run_support<'a>(
                     return Err(SupportRunError::CoverageClosure(Box::new(
                         crate::coverage_closure::CoverageClosureRefusal {
                             attempts: attempt,
-                            reason: crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
-                                error.to_string(),
-                            ),
+                            reason:
+                                crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
+                                    error.to_string(),
+                                ),
                             islands: crate::coverage_closure::islands_from_blocking(
                                 &last_blocking,
                                 &tally,
                             ),
                             history,
+                            // The batch controller runs no trials, so it has
+                            // no §A.8 report to make. `None` says that; a
+                            // zeroed report would claim zero trials while the
+                            // loop appended hundreds of rows.
+                            repair: None,
                         },
                     )));
                 }
@@ -1402,32 +1454,25 @@ pub fn run_support<'a>(
             // how much area each island truly leaves uncovered. Joining them
             // anywhere else would pair a disclosure with a different run's
             // measurement.
-            let ownerless_islands = ownerless_island_disclosures(&lowered, &repair_targets);
-            // PR-8. Projected from the SEALING attempt's own initial build, for
-            // the same reason as the join above: a disclosure paired with a
-            // different attempt's attestation would name loads and radii that
-            // belong to geometry this run did not emit.
-            let (abandoned_contacts, grown_contact_tips) =
-                contact_attestation_disclosures(&lowered.structured.braced.rewired.routed.initial);
-            return Ok(FinalSupportAuthority {
+            return Ok(seal_authority(
                 lowered,
-                closure_history: history,
-                ownerless_islands,
-                abandoned_contacts,
-                grown_contact_tips,
-            });
+                &repair_targets,
+                history,
+                None,
+                Vec::new(),
+            ));
         }
         last_blocking = blocking;
 
         if attempt == max_attempts {
-            let islands =
-                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
+            let islands = crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
             return Err(SupportRunError::CoverageClosure(Box::new(
                 crate::coverage_closure::CoverageClosureRefusal {
                     attempts: attempt,
                     reason: crate::coverage_closure::CoverageClosureReason::AttemptsExhausted,
                     islands,
                     history,
+                    repair: None,
                 },
             )));
         }
@@ -1465,14 +1510,14 @@ pub fn run_support<'a>(
         }
 
         if nominations.rows.is_empty() {
-            let islands =
-                crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
+            let islands = crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
             return Err(SupportRunError::CoverageClosure(Box::new(
                 crate::coverage_closure::CoverageClosureRefusal {
                     attempts: attempt,
                     reason: crate::coverage_closure::CoverageClosureReason::NoEligibleRepairRows,
                     islands,
                     history,
+                    repair: None,
                 },
             )));
         }
@@ -1541,17 +1586,1097 @@ fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
             detail: format!("{error:?}"),
         };
     }
-    SupportRunError::CoverageClosure(Box::new(
-        crate::coverage_closure::CoverageClosureRefusal {
-            attempts: attempt,
-            reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
-                phase,
-                detail: format!("{error:?}"),
-            },
-            islands: crate::coverage_closure::islands_from_blocking(last_blocking, tally),
-            history,
+    SupportRunError::CoverageClosure(Box::new(crate::coverage_closure::CoverageClosureRefusal {
+        attempts: attempt,
+        reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
+            phase,
+            detail: format!("{error:?}"),
         },
-    ))
+        islands: crate::coverage_closure::islands_from_blocking(last_blocking, tally),
+        history,
+        repair: None,
+    }))
+}
+
+/// Build the sealed authority from the lowered run that closed.
+///
+/// Shared by both controllers so the two can never disagree about what a
+/// SEALED run discloses. The two joins here are the reason it is one function:
+///
+/// * Task #49's ownerless faces are joined to `repair_targets` — the SAME
+///   attempt's uncensored measurement of how much area each island truly leaves
+///   uncovered. Joining them anywhere else would pair a disclosure with a
+///   different run's measurement.
+/// * PR-8's abandoned contacts and grown tips are projected from the SEALING
+///   attempt's own initial build, for the same reason: a disclosure paired with
+///   a different attempt's attestation would name loads and radii belonging to
+///   geometry this run did not emit.
+fn seal_authority<'a>(
+    lowered: LoweredSupportRun<'a>,
+    repair_targets: &[crate::coverage_closure::BlockingPatchKey],
+    closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+    repair_report: Option<crate::coverage_repair::RepairRunReport>,
+    repair_steps: Vec<crate::coverage_repair::CoverageRepairStep>,
+) -> FinalSupportAuthority<'a> {
+    let ownerless_islands = ownerless_island_disclosures(&lowered, repair_targets);
+    let (abandoned_contacts, grown_contact_tips) =
+        contact_attestation_disclosures(&lowered.structured.braced.rewired.routed.initial);
+    FinalSupportAuthority {
+        lowered,
+        closure_history,
+        ownerless_islands,
+        abandoned_contacts,
+        grown_contact_tips,
+        repair_report,
+        repair_steps,
+    }
+}
+
+/// One measurement, split the two ways SPEC-A3-A4 splits it, plus the two
+/// scalars the accept test reads. Owned rather than borrowed: the measurement
+/// borrows the lowered run, and the controller must outlive it to decide.
+struct MeasuredState {
+    /// The CENSORED verdict set. Empty means the model seals.
+    blocking: Vec<crate::coverage_closure::BlockingPatchKey>,
+    /// The UNCENSORED repair worklist, a superset of `blocking` (task #27).
+    repair_targets: Vec<crate::coverage_closure::BlockingPatchKey>,
+    uncovered_samples: Vec<usize>,
+    objective: crate::CoverageObjective,
+    uncensored_uncovered_mm2: f64,
+}
+
+/// Take one routed coverage measurement against the registered gate request.
+///
+/// SPEC-A4 §1's expensive reading, deliberately: the verification inside a
+/// transaction is a FULL routed measurement at
+/// `registered_coverage_request` — the same request
+/// `plinth_pipeline::gates::registered_coverage_request` hands the pre-write
+/// gate. A cheap local re-measure around the new seat is not excluded by §6's
+/// text and is refused here for one reason: the controller must close to
+/// exactly what the gate will re-measure. Closing to a narrower promise than
+/// the gate keeps is the forgery FU-8b's doctrine forbids.
+fn measure_for_controller(
+    lowered: &LoweredSupportRun<'_>,
+    coverage_request: crate::coverage_measurement::CoverageMeasurementRequest,
+) -> Result<MeasuredState, (SupportRunPhase, String)> {
+    let snapshot = lowered.verification_snapshot().map_err(|error| {
+        note_stage_failure("CoverageMeasurement", &error);
+        (SupportRunPhase::CoverageMeasurement, format!("{error:?}"))
+    })?;
+    let measurement = snapshot
+        .measure_coverage(coverage_request)
+        .map_err(|error| {
+            note_stage_failure("CoverageMeasurement", &error);
+            (SupportRunPhase::CoverageMeasurement, error.to_string())
+        })?;
+    let censor_area_mm2 = coverage_request.patch_area_floor_mm2().get();
+    let patches = measurement.evidence().patches();
+    let mut blocking = Vec::new();
+    let mut repair_targets = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let uncovered_area_mm2 = patch.uncovered_area_mm2().get();
+        if !crate::coverage_closure::coverage_patch_needs_repair(
+            uncovered_area_mm2,
+            patch.cut_ambiguous(),
+            patch.assessment_failed(),
+        ) {
+            continue;
+        }
+        let key = crate::coverage_closure::BlockingPatchKey {
+            island_id: patch.island_id(),
+            component_id: patch.component_id(),
+            representative_face_id: patch.representative_face_id(),
+            sorted_face_ids: patch.sorted_face_ids().to_vec(),
+            uncovered_area_mm2_bits: uncovered_area_mm2.to_bits(),
+            worst_gap: patch.worst_gap().into(),
+        };
+        if crate::coverage_closure::coverage_patch_blocks_verdict(
+            uncovered_area_mm2,
+            patch.cut_ambiguous(),
+            patch.assessment_failed(),
+            censor_area_mm2,
+        ) {
+            blocking.push(key.clone());
+        }
+        repair_targets.push(key);
+    }
+    Ok(MeasuredState {
+        blocking,
+        repair_targets,
+        uncovered_samples: measurement.uncovered_sample_indices().to_vec(),
+        objective: measurement.objective(),
+        uncensored_uncovered_mm2: measurement.uncensored_uncovered_mm2(),
+    })
+}
+
+/// Either a fully lowered run, or the context handed back with the phase and
+/// detail that refused it.
+enum ChainOutcome<'a> {
+    Lowered(Box<LoweredSupportRun<'a>>),
+    Refused(Box<ChainRefusal<'a>>),
+}
+
+/// The context handed back, with the phase and detail that refused the plan.
+/// Boxed for the same reason the lowered run is: both payloads carry the one
+/// mesh/topology/`NativeSurface` context, so an unboxed enum would size every
+/// stack slot to the larger of them.
+struct ChainRefusal<'a> {
+    context: SupportRunContext<'a>,
+    phase: SupportRunPhase,
+    detail: String,
+}
+
+/// Drive one plan through the whole stage chain, and hand the context back on
+/// every failure path.
+///
+/// This is what the SPEC-A4 §A.3 seam bought. Before it, a stage that failed
+/// CONSUMED the one mesh/topology/`NativeSurface` context the machine is
+/// allowed to hold and the model died — which is why task #47's Giant Bat loses
+/// an entire model to one arm's `Brace(ClearanceViolation(1))`. Here the same
+/// failure returns the context, the trial rolls back, and the search goes on.
+fn run_stage_chain<'a>(
+    context: SupportRunContext<'a>,
+    plan: SpecializedContactPlan,
+) -> ChainOutcome<'a> {
+    macro_rules! stage {
+        ($expr:expr, $stage:literal, $phase:expr) => {
+            match $expr {
+                Ok(value) => value,
+                Err((context, error)) => {
+                    note_stage_failure($stage, &error);
+                    return ChainOutcome::Refused(Box::new(ChainRefusal {
+                        context,
+                        phase: $phase,
+                        detail: format!("{error:?}"),
+                    }));
+                }
+            }
+        };
+    }
+    let prepared = stage!(
+        prepared_run_for_plan(context, plan),
+        "Preparation",
+        SupportRunPhase::Preparation
+    );
+    let routed = stage!(
+        prepared.route_initial_cco(),
+        "Routing",
+        SupportRunPhase::Routing
+    );
+    let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
+    let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
+    let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
+    let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
+    ChainOutcome::Lowered(Box::new(lowered))
+}
+
+/// Everything one route accumulated across the whole search, so §E.1's
+/// per-route outcome is a read of counters rather than an inference.
+#[derive(Clone, Debug, Default)]
+struct RouteSearchRecord {
+    rows_tried: usize,
+    best_marginal_area_mm2: f64,
+    /// Trials whose OWN appended contact ended `UnroutedNoWinner` with every
+    /// feasible arm refused by the clearance standoff (task #51).
+    clearance_refused_terminals: u32,
+    /// Trials whose OWN appended contact was condemned at quarantine with a
+    /// measured stub-axis re-entry depth (task #52). Depths in mm, in trial
+    /// order.
+    stub_reentry_depths_mm: Vec<f64>,
+}
+
+/// The registered numbers §E.1's two defect classes are measured AGAINST.
+///
+/// Both are read from the same registry every other reader reads; neither is
+/// restated, moved or interpreted here. `standoff_mm` is the support-to-model
+/// clearance standoff the CCO's own clearance survival uses; `allowance_mm` is
+/// the `min_illegal_len_mm` the initial build compares a stub's remaining
+/// inside-axis overlap against before condemning it.
+#[derive(Clone, Copy, Debug)]
+struct BlockedCauseScales {
+    standoff_mm: f64,
+    allowance_mm: f64,
+}
+
+impl BlockedCauseScales {
+    fn read() -> Result<Self, SupportRunError> {
+        let constants = m0_constants().map_err(|error| SupportRunError::Failed {
+            phase: SupportRunPhase::Preparation,
+            detail: format!("binding the registered blocked-cause scales failed: {error}"),
+        })?;
+        let placeholders = constants.placeholders();
+        Ok(Self {
+            standoff_mm: placeholders.standoff_mm().diagnostic().get(),
+            allowance_mm: placeholders.min_illegal_len_mm().diagnostic().get(),
+        })
+    }
+}
+
+/// **SPEC-A4 §A — the one-winner transactional coverage-repair controller.**
+///
+/// One repair step is ONE repair-pool row appended to the accepted plan, the
+/// resulting child plan taken all the way through
+/// `prepared_run_for_plan → route_initial_cco → rewire → brace → structure →
+/// lower`, and one routed coverage measurement taken against the lowered
+/// result at the registered gate request. The step then either COMMITS (the
+/// child becomes the accepted plan) or ROLLS BACK (the child is dropped and the
+/// row is ledgered). That is SPEC §6's "full construct, rewire, brace/size, and
+/// verify transaction", and it is what the batch loop in [`run_support`] cannot
+/// do:
+///
+/// * **Nothing is attributable there.** An attempt that appends 266 rows and
+///   moves the area by 0.4 mm² cannot say which row did it. Here the plan
+///   changes by exactly one contact, so the before/after difference IS that
+///   contact's contribution — no inference and no apportionment (§D).
+/// * **Nothing is reversible there.** `plan = plan.append…(rows)` overwrites the
+///   parent binding on the same line. Here the plan is a persistent value and
+///   the child is a DERIVED value, so rolling back is "do not rebind `plan`"
+///   (§A.5). There is no undo log and nothing to rebuild.
+/// * **Nothing is protected there.** A row that makes a noncoverage gate worse
+///   is kept. Here clause 2 rejects it and the ledger names the component.
+///
+/// # What bounds this loop, and what does not
+///
+/// `coverage_repair_max_attempts` (registered value 8) bounds **COMMITTED steps
+/// only** — Craig's ruling R6. **There is NO failed-tries cap** — ruling R10:
+/// the loop gives up only when no candidate can physically help, which is pool
+/// exhaustion plus §B.3's zero-score guard. A counter may never decide an
+/// outcome; that is the physics-first doctrine, and a trial ceiling is exactly
+/// a counter deciding an outcome. What bounds the COST instead is rule N4
+/// (ruling R13) attacking the measured mechanism — 63 near-identical seats
+/// inside a 1.04 mm box, each costing a full pipeline pass to re-prove — and
+/// [`crate::coverage_repair::RepairRunReport`] making the residual loud instead
+/// of hidden (§A.8).
+///
+/// # Attempt 0 is not a trial
+///
+/// Attempt 0 runs the model's own plan, and its stage failures stay
+/// [`SupportRunError::Failed`], exactly as they are today and exactly as
+/// `a_stage_error_is_not_discarded_at_attempt_zero` pins. Only a plan this
+/// controller extended can produce a rollback.
+///
+/// # Errors
+///
+/// [`SupportRunError::Failed`] for an attempt-0 stage failure or a bad
+/// resource cap; [`SupportRunError::CoverageClosure`] when the search stops
+/// with blocking patches left, carrying the measured stop reason (§B.7), the
+/// per-route outcomes (§E.1) and the §A.8 report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "SPEC-A4 §A.7's loop is one decision procedure; splitting it would put \
+              the accept/rollback pairing behind a call boundary, which is the exact \
+              seam a reviewer has to see whole"
+)]
+pub fn run_support_transactional<'a>(
+    hollowed: HollowedModel,
+    request: SupportRequest,
+    input: SupportPreparationInput<'a>,
+) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
+    if !input.validate() {
+        return Err(SupportRunError::InvalidResourceCaps);
+    }
+    let min_z = hollowed
+        .mesh()
+        .verts()
+        .iter()
+        .map(|point| point[2])
+        .reduce(f64::min)
+        .ok_or(SupportRunError::InvalidDerivedFrame)?;
+    let plate_z_mm = Finite::new(min_z - request.lift_mm.get())
+        .map_err(|_| SupportRunError::InvalidDerivedFrame)?;
+    let perception_config = SupportPerceptionConfig::current(
+        plate_z_mm,
+        input.column_pitch_mm,
+        input.surface_grid_pitch_mm,
+        input.max_grid_bytes,
+        Some(input.delicacy_by_face),
+    )
+    .map_err(|error| SupportRunError::Failed {
+        phase: SupportRunPhase::Preparation,
+        detail: format!("binding registered perception thresholds failed: {error}"),
+    })?;
+    let selection_config = ContactSelectionConfig::current(
+        Some(input.delicacy_by_face),
+        input.coverage_samples_max_virtual_cells,
+        input.coverage_score_matrix_max_entries,
+        input.max_grid_bytes,
+    )
+    .map_err(|error| SupportRunError::Failed {
+        phase: SupportRunPhase::Preparation,
+        detail: format!("binding registered contact-selection policy failed: {error}"),
+    })?;
+    // R6 and R11: the registered value does not move and is not re-read
+    // differently. Only its MEANING changes — it counts committed steps.
+    let commit_budget = selection_config.coverage_repair_max_attempts();
+    let matrix_budget = selection_config.coverage_score_matrix_max_entries;
+    let scales = BlockedCauseScales::read()?;
+    let authority = SupportPreparationAuthority::new(
+        input.layers,
+        perception_config,
+        input.candidate_config,
+        input.reservations,
+        input.perception_limits,
+        selection_config,
+        input.specialized_limits,
+        input.construction_limits,
+        input.brace_penetration_limits,
+        input.raft_limits,
+        input.max_primitives,
+        input.max_primitive_bytes,
+    );
+
+    let coverage_request =
+        crate::coverage_closure::registered_coverage_request().map_err(|error| {
+            SupportRunError::Failed {
+                phase: SupportRunPhase::Preparation,
+                detail: format!("binding the registered coverage-closure request failed: {error}"),
+            }
+        })?;
+    let radius_mm = coverage_request.radius_mm().get();
+    let censor_area_mm2 = coverage_request.patch_area_floor_mm2().get();
+
+    let (context, plan) =
+        prepare_support_context(hollowed, request, authority).map_err(|error| {
+            note_stage_failure("Preparation", &error);
+            SupportRunError::Failed {
+                phase: SupportRunPhase::Preparation,
+                detail: error.to_string(),
+            }
+        })?;
+
+    // ---------------------------------------------------------------- attempt 0
+    let attempt_zero = match run_stage_chain(context, plan.clone()) {
+        ChainOutcome::Lowered(lowered) => lowered,
+        // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
+        // failure is the model's, not this controller's. It is not a rollback,
+        // it is not a coverage refusal, and it is not eligible to be one.
+        ChainOutcome::Refused(refusal) => {
+            return Err(SupportRunError::Failed {
+                phase: refusal.phase,
+                detail: refusal.detail,
+            })
+        }
+    };
+    let mut measured = match measure_for_controller(&attempt_zero, coverage_request) {
+        Ok(measured) => measured,
+        Err((_phase, detail)) => {
+            return Err(SupportRunError::CoverageClosure(Box::new(
+                crate::coverage_closure::CoverageClosureRefusal {
+                    attempts: 0,
+                    reason: crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
+                        detail,
+                    ),
+                    islands: Vec::new(),
+                    history: Vec::new(),
+                    repair: Some(crate::coverage_repair::RepairRunReport::default()),
+                },
+            )));
+        }
+    };
+
+    let mut history: Vec<crate::coverage_closure::CoverageClosureAttempt> =
+        vec![crate::coverage_closure::CoverageClosureAttempt {
+            attempt: 0,
+            blocking_patch_count: measured.blocking.len(),
+            repair_target_patch_count: measured.repair_targets.len(),
+            nominated_rows: 0,
+        }];
+
+    if measured.blocking.is_empty() {
+        // The zero-cost path, bit-identical to the batch controller's: a model
+        // whose baseline layout already covers never enters a transaction, so
+        // its digest cannot move under this change.
+        let report = crate::coverage_repair::RepairRunReport::default();
+        report.log_summary();
+        return Ok(seal_authority(
+            *attempt_zero,
+            &measured.repair_targets,
+            history,
+            Some(report),
+            Vec::new(),
+        ));
+    }
+
+    // ------------------------------------------------------------- enter repair
+    let gates_at_attempt_zero = attempt_zero.noncoverage_vector();
+    let ownerless_at_attempt_zero = attempt_zero.ownerless_face_count();
+    // The plan carried forward is the ACCEPTED one — task #49's reduced child
+    // when anything was stripped. Carrying the pre-strip plan would re-admit
+    // contacts SPEC §6 removes before rewire, bracing and repartition.
+    let (mut plan, mut context) = attempt_zero.into_plan_and_context();
+
+    let mut accepted_objective = measured.objective;
+    let mut accepted_uncensored_mm2 = measured.uncensored_uncovered_mm2;
+    let mut accepted_gates = gates_at_attempt_zero;
+    let mut accepted_ownerless = ownerless_at_attempt_zero;
+    let mut committed = 0_usize;
+
+    let mut ledger = RepairLedger::new(radius_mm);
+    // Rule N3's serve-set memory: the route's own uncovered area, by bits, at
+    // the moment it was last given a trial. A commit moves the area, which puts
+    // the route back in the serve set — that is "since its own measured
+    // uncovered area last changed", implemented rather than approximated.
+    let mut served: BTreeMap<(u32, u32), u64> = BTreeMap::new();
+    let mut route_records: BTreeMap<(u32, u32), RouteSearchRecord> = BTreeMap::new();
+    let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
+
+    let mut candidates = rank_or_refuse(
+        &plan,
+        &measured,
+        radius_mm,
+        matrix_budget,
+        &ledger.ledgered,
+        &history,
+    )?;
+    stamp_tally(&mut tally, &candidates);
+
+    loop {
+        let chosen = crate::coverage_closure::choose_winner(
+            &candidates,
+            &ledger.ledgered,
+            &ledger.discs,
+            &served,
+            censor_area_mm2,
+        );
+        let Some(chosen) = chosen else {
+            // Every candidate on the ranking has been ledgered. Under ruling
+            // R10 that is one of exactly two honest ends, and it is measured:
+            // the pool really did drain.
+            return Err(refuse(
+                if candidates.ranked.is_empty() && ledger.report.trials == 0 {
+                    crate::coverage_closure::CoverageClosureReason::NothingToTry
+                } else {
+                    crate::coverage_closure::CoverageClosureReason::NoImprovingRepair {
+                        candidates_tried: ledger.report.trials,
+                        best_remaining_score_mm2: 0.0,
+                    }
+                },
+                committed,
+                &measured,
+                &candidates,
+                &plan,
+                &mut ledger,
+                &route_records,
+                &tally,
+                history,
+                scales,
+                radius_mm,
+            ));
+        };
+        let winner = candidates.ranked[chosen.index].clone();
+
+        // §B.3's zero-score stop guard, BEFORE the transaction and not after
+        // it. `eligible_repair_rows` keeps zero-score candidates eligible on
+        // purpose; under batch nomination that was harmless padding, and under
+        // one-winner it would spend a FULL prepare → route → rewire → brace →
+        // structure → lower → measure pass to discover that a contact covering
+        // nothing improves nothing.
+        if winner.marginal_area_mm2 == 0.0 {
+            return Err(refuse(
+                crate::coverage_closure::CoverageClosureReason::NoImprovingRepair {
+                    candidates_tried: ledger.report.trials,
+                    best_remaining_score_mm2: 0.0,
+                },
+                committed,
+                &measured,
+                &candidates,
+                &plan,
+                &mut ledger,
+                &route_records,
+                &tally,
+                history,
+                scales,
+                radius_mm,
+            ));
+        }
+
+        // The ONE counter that decides anything, and rulings R6 and R11 are
+        // what make it legitimate: it bounds COMMITTED steps.
+        if committed >= commit_budget {
+            return Err(refuse(
+                crate::coverage_closure::CoverageClosureReason::CommitBudgetExhausted {
+                    committed,
+                    candidates_remaining: candidates
+                        .ranked
+                        .iter()
+                        .filter(|row| !ledger.ledgered.contains(&row.id))
+                        .count(),
+                },
+                committed,
+                &measured,
+                &candidates,
+                &plan,
+                &mut ledger,
+                &route_records,
+                &tally,
+                history,
+                scales,
+                radius_mm,
+            ));
+        }
+
+        // ------------------------------------------------------------ one trial
+        let started = std::time::Instant::now();
+        ledger.report.trials += 1;
+        if chosen.diversity_discs_containing_seat > 0 {
+            ledger.report.diversity_demotions_tried += 1;
+        }
+        let route_area_bits = candidates
+            .route_uncovered_mm2
+            .get(&winner.key)
+            .copied()
+            .unwrap_or(0.0)
+            .to_bits();
+        served.insert(winner.key, route_area_bits);
+        {
+            let record = route_records.entry(winner.key).or_default();
+            record.rows_tried += 1;
+            record.best_marginal_area_mm2 =
+                record.best_marginal_area_mm2.max(winner.marginal_area_mm2);
+        }
+
+        let digests = context.prepared_digests();
+        let before = crate::coverage_repair::RepairGateVector {
+            coverage: accepted_objective,
+            noncoverage: accepted_gates,
+            uncensored_uncovered_mm2: accepted_uncensored_mm2,
+        };
+        let mut step = crate::coverage_repair::CoverageRepairStep {
+            trial: ledger.report.trials,
+            commit: None,
+            row_id: winner.id,
+            seat_mm: winner.seat_mm,
+            source_island_id: winner.key.0,
+            source_component_id: winner.key.1,
+            scored_from: winner.scored_from.clone(),
+            marginal_area_mm2: winner.marginal_area_mm2,
+            chosen_by_first_trial_guarantee: chosen.by_first_trial_guarantee,
+            diversity_discs_containing_seat: chosen.diversity_discs_containing_seat,
+            objective_before: accepted_objective,
+            objective_after: None,
+            uncensored_before_mm2: accepted_uncensored_mm2,
+            uncensored_after_mm2: None,
+            gates_before: accepted_gates,
+            gates_after: None,
+            ownerless_faces_before: accepted_ownerless,
+            ownerless_faces_after: None,
+            own_contact_quarantined: None,
+            route_deltas: Vec::new(),
+            outcome: crate::coverage_repair::RepairStepOutcome::Committed,
+        };
+
+        // The one row this trial appends, through the one-row form that already
+        // exists and is documented byte-identical to the batch on the same id.
+        // A one-winner step HAS exactly one row by construction, so this is the
+        // batch, not a scalar-per-item defect.
+        let child = plan
+            .begin_regular_edit()
+            .and_then(|edit| edit.append_regular_repair_row(winner.id));
+        let child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                // Today this kills the model. Here it is one ledger row and the
+                // next candidate.
+                step.outcome = crate::coverage_repair::RepairStepOutcome::AppendRefused {
+                    detail: format!("{error:?}"),
+                };
+                ledger.reject(&candidates, step, &winner, started);
+                continue;
+            }
+        };
+        // The child's own contact id, so the trial can read what the cadence
+        // did with ITS contact rather than with the plan as a whole.
+        let trial_contact_id = child.contacts().last().map(|contact| contact.contact_id());
+
+        match run_stage_chain(context, child) {
+            ChainOutcome::Refused(refusal) => {
+                let ChainRefusal {
+                    context: returned,
+                    phase,
+                    detail,
+                } = *refusal;
+                context = returned;
+                // §A.5, finding S4: `prepared_run_for_plan` stamps five digest
+                // fields on the context, so a trial refused mid-chain hands
+                // back a context stamped with the REJECTED CHILD's digests.
+                // The batch loop self-heals only because its next call is
+                // always `prepared_run_for_plan`; this controller reads
+                // evidence BETWEEN trials, and evidence read off a stale digest
+                // would describe a plan that does not exist.
+                context.restore_prepared_digests(digests);
+                step.outcome =
+                    crate::coverage_repair::RepairStepOutcome::StageRefusal { phase, detail };
+                ledger.reject(&candidates, step, &winner, started);
+            }
+            ChainOutcome::Lowered(trial) => {
+                let disposition = trial_contact_id.map(|id| trial.trial_contact_disposition(id));
+                step.own_contact_quarantined = disposition.map(|disposition| {
+                    matches!(disposition, TrialContactDisposition::Quarantined { .. })
+                });
+                record_disposition(&mut route_records, winner.key, disposition);
+
+                let trial_measured = match measure_for_controller(&trial, coverage_request) {
+                    Ok(trial_measured) => trial_measured,
+                    Err((_phase, detail)) => {
+                        context = trial.into_context();
+                        context.restore_prepared_digests(digests);
+                        step.outcome =
+                            crate::coverage_repair::RepairStepOutcome::MeasurementRefused {
+                                detail,
+                            };
+                        ledger.reject(&candidates, step, &winner, started);
+                        continue;
+                    }
+                };
+                let trial_gates = trial.noncoverage_vector();
+                let trial_ownerless = trial.ownerless_face_count();
+                let after = crate::coverage_repair::RepairGateVector {
+                    coverage: trial_measured.objective,
+                    noncoverage: trial_gates,
+                    uncensored_uncovered_mm2: trial_measured.uncensored_uncovered_mm2,
+                };
+                step.objective_after = Some(trial_measured.objective);
+                step.uncensored_after_mm2 = Some(trial_measured.uncensored_uncovered_mm2);
+                step.gates_after = Some(trial_gates);
+                step.ownerless_faces_after = Some(trial_ownerless);
+                step.route_deltas = route_deltas(&measured, &trial_measured);
+
+                let outcome = crate::coverage_repair::repair_step_outcome(&after, &before);
+                if outcome != crate::coverage_repair::RepairStepOutcome::Committed {
+                    context = trial.into_context();
+                    context.restore_prepared_digests(digests);
+                    step.outcome = outcome;
+                    ledger.reject(&candidates, step, &winner, started);
+                    continue;
+                }
+
+                // ---------------------------------------------------- COMMIT
+                committed += 1;
+                step.commit = Some(committed);
+                step.outcome = crate::coverage_repair::RepairStepOutcome::Committed;
+                ledger.commit(step, started);
+                history.push(crate::coverage_closure::CoverageClosureAttempt {
+                    attempt: committed,
+                    blocking_patch_count: trial_measured.blocking.len(),
+                    repair_target_patch_count: trial_measured.repair_targets.len(),
+                    nominated_rows: 1,
+                });
+
+                if trial_measured.blocking.is_empty() {
+                    ledger.finish(&candidates);
+                    ledger.report.log_summary();
+                    return Ok(seal_authority(
+                        *trial,
+                        &trial_measured.repair_targets,
+                        history,
+                        Some(ledger.report),
+                        ledger.steps,
+                    ));
+                }
+
+                accepted_objective = trial_measured.objective;
+                accepted_uncensored_mm2 = trial_measured.uncensored_uncovered_mm2;
+                accepted_gates = trial_gates;
+                accepted_ownerless = trial_ownerless;
+                measured = trial_measured;
+                let (new_plan, new_context) = trial.into_plan_and_context();
+                plan = new_plan;
+                context = new_context;
+                // A COMMIT is the only thing that moves the uncovered sample
+                // set, so it is the only thing that needs the whole matrix
+                // rescored. A rejection re-sorts instead (rule N4), which
+                // `choose_winner` does on every call from the disc set.
+                candidates = rank_or_refuse(
+                    &plan,
+                    &measured,
+                    radius_mm,
+                    matrix_budget,
+                    &ledger.ledgered,
+                    &history,
+                )?;
+                stamp_tally(&mut tally, &candidates);
+            }
+        }
+    }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Everything the search accumulates across trials that is not the accepted
+/// state: which rows are spent, which neighbourhoods have already failed, the
+/// trial stream, and the §A.8 counters.
+///
+/// One struct because a rollback touches all of it at once, and because
+/// splitting it back into five parameters is what made `reject` an
+/// eight-argument function.
+struct RepairLedger {
+    report: crate::coverage_repair::RepairRunReport,
+    /// SPEC §6's "exact failed rows are excluded". Deliberately survives a
+    /// rollback — that is the spec's own word — and it is filled with LEDGERED
+    /// rows, which is what the batch loop's identically-named set never was.
+    ledgered: BTreeSet<RepairRowId>,
+    discs: crate::coverage_closure::DiversityDiscs,
+    /// Every candidate rule N4 has ever deprioritized, by identity.
+    ///
+    /// A SET and not a counter, because §A.8 asks "how many candidates rule N4
+    /// deprioritized" and one candidate can fall inside several rejected discs.
+    /// Counting demotions instead of candidates would inflate the instrument
+    /// that is supposed to say whether ruling R13 did any work.
+    demoted: BTreeSet<RepairRowId>,
+    steps: Vec<crate::coverage_repair::CoverageRepairStep>,
+    per_trial_ms: Vec<u64>,
+}
+
+impl RepairLedger {
+    fn new(radius_mm: f64) -> Self {
+        Self {
+            report: crate::coverage_repair::RepairRunReport::default(),
+            ledgered: BTreeSet::new(),
+            discs: crate::coverage_closure::DiversityDiscs::new(radius_mm),
+            demoted: BTreeSet::new(),
+            steps: Vec::new(),
+            per_trial_ms: Vec::new(),
+        }
+    }
+
+    /// **Roll one trial back.** The plan is a persistent value and the child was
+    /// a DERIVED value, so rolling back is "do not rebind `plan`" — there is no
+    /// undo log to replay and nothing to rebuild. What is left to do is bookkeeping:
+    /// ledger the row so SPEC §6's exclusion holds, add the rejected seat's own
+    /// coverage disc so rule N4 stops the search walking a 16 µm step to the
+    /// same proposal, and record the step so the ledger can state the case.
+    fn reject(
+        &mut self,
+        candidates: &crate::coverage_closure::RankedRepairCandidates,
+        step: crate::coverage_repair::CoverageRepairStep,
+        winner: &crate::coverage_closure::RankedRepairRow,
+        started: std::time::Instant,
+    ) {
+        *self
+            .report
+            .rejections_by_class
+            .entry(step.outcome.class().to_owned())
+            .or_insert(0) += 1;
+        self.ledgered.insert(winner.id);
+        self.discs.reject(winner.seat_mm);
+        // ONE pass over the remaining candidates per rejection, which is
+        // exactly the incremental cost §A.4 rule N4 budgets: one new disc, one
+        // sweep. On the Warhorse's 6,777 eligible rows that is ~10⁴ squared
+        // distances, three orders of magnitude below the pipeline pass the
+        // rejection just paid for.
+        for row in &candidates.ranked {
+            if !self.ledgered.contains(&row.id) && self.discs.discs_containing(row.seat_mm) > 0 {
+                self.demoted.insert(row.id);
+            }
+        }
+        self.steps.push(step);
+        self.per_trial_ms.push(elapsed_ms(started));
+    }
+
+    /// Record a committed step, which needs no disc and spends no row: the row
+    /// became a contact, so `occupied_repair_rows` excludes it from the rescore
+    /// without anything being added to `ledgered`.
+    fn commit(
+        &mut self,
+        step: crate::coverage_repair::CoverageRepairStep,
+        started: std::time::Instant,
+    ) {
+        self.report.commits += 1;
+        self.steps.push(step);
+        self.per_trial_ms.push(elapsed_ms(started));
+    }
+
+    /// Fill the §A.8 counters that are only knowable when the search stops.
+    fn finish(&mut self, candidates: &crate::coverage_closure::RankedRepairCandidates) {
+        self.report.candidates_remaining = candidates
+            .ranked
+            .iter()
+            .filter(|row| !self.ledgered.contains(&row.id))
+            .count();
+        self.report.diversity_demotions = self.demoted.len();
+        let per_trial = std::mem::take(&mut self.per_trial_ms);
+        self.report.record_trial_times(per_trial);
+    }
+}
+
+fn record_disposition(
+    route_records: &mut BTreeMap<(u32, u32), RouteSearchRecord>,
+    key: (u32, u32),
+    disposition: Option<TrialContactDisposition>,
+) {
+    let record = route_records.entry(key).or_default();
+    match disposition {
+        Some(TrialContactDisposition::UnroutedNoWinner {
+            every_feasible_arm_refused_by_clearance: true,
+        }) => {
+            record.clearance_refused_terminals =
+                record.clearance_refused_terminals.saturating_add(1);
+        }
+        Some(TrialContactDisposition::Quarantined {
+            remaining_inside_axis_mm: Some(depth),
+        }) => record.stub_reentry_depths_mm.push(depth),
+        _ => {}
+    }
+}
+
+/// Per-route before/after evidence for one transaction. Routes that did not
+/// move are omitted, so a committed step that touched one route carries one row.
+fn route_deltas(
+    before: &MeasuredState,
+    after: &MeasuredState,
+) -> Vec<crate::coverage_repair::RouteDelta> {
+    fn fold(
+        patches: &[crate::coverage_closure::BlockingPatchKey],
+    ) -> BTreeMap<(u32, u32), (f64, usize)> {
+        let mut grouped: BTreeMap<(u32, u32), (f64, usize)> = BTreeMap::new();
+        for patch in patches {
+            let entry = grouped
+                .entry((patch.island_id, patch.component_id))
+                .or_insert((0.0, 0));
+            entry.0 += f64::from_bits(patch.uncovered_area_mm2_bits);
+            entry.1 += 1;
+        }
+        grouped
+    }
+    let left = fold(&before.repair_targets);
+    let right = fold(&after.repair_targets);
+    let mut keys: BTreeSet<(u32, u32)> = left.keys().copied().collect();
+    keys.extend(right.keys().copied());
+    keys.into_iter()
+        .filter_map(|key| {
+            let (before_area, before_patches) = left.get(&key).copied().unwrap_or((0.0, 0));
+            let (after_area, after_patches) = right.get(&key).copied().unwrap_or((0.0, 0));
+            if before_area.to_bits() == after_area.to_bits() && before_patches == after_patches {
+                return None;
+            }
+            Some(crate::coverage_repair::RouteDelta {
+                island_id: key.0,
+                component_id: key.1,
+                uncensored_area_before_mm2: before_area,
+                uncensored_area_after_mm2: after_area,
+                patches_before: before_patches,
+                patches_after: after_patches,
+            })
+        })
+        .collect()
+}
+
+fn stamp_tally(
+    tally: &mut BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
+    candidates: &crate::coverage_closure::RankedRepairCandidates,
+) {
+    for (key, counts) in &candidates.per_key {
+        let entry = tally.entry(*key).or_default();
+        entry.eligible_rows = counts.eligible_rows;
+    }
+}
+
+fn rank_or_refuse(
+    plan: &SpecializedContactPlan,
+    measured: &MeasuredState,
+    radius_mm: f64,
+    matrix_budget: usize,
+    ledgered: &BTreeSet<RepairRowId>,
+    history: &[crate::coverage_closure::CoverageClosureAttempt],
+) -> Result<crate::coverage_closure::RankedRepairCandidates, SupportRunError> {
+    crate::coverage_closure::rank_repair_candidates(
+        plan,
+        &measured.repair_targets,
+        &measured.uncovered_samples,
+        radius_mm,
+        matrix_budget,
+        ledgered,
+    )
+    .map_err(|error| {
+        note_stage_failure("Preparation", &error);
+        SupportRunError::CoverageClosure(Box::new(
+            crate::coverage_closure::CoverageClosureRefusal {
+                attempts: history.len().saturating_sub(1),
+                reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
+                    phase: SupportRunPhase::Preparation,
+                    detail: format!("{error:?}"),
+                },
+                islands: Vec::new(),
+                history: history.to_vec(),
+                repair: None,
+            },
+        ))
+    })
+}
+
+/// Build the refusal: the measured stop reason, the per-route outcomes §E.1
+/// names, and the §A.8 report.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is one measured input to the refusal; bundling them into a \
+              struct would only move the same list one line up"
+)]
+fn refuse(
+    reason: crate::coverage_closure::CoverageClosureReason,
+    committed: usize,
+    measured: &MeasuredState,
+    candidates: &crate::coverage_closure::RankedRepairCandidates,
+    plan: &SpecializedContactPlan,
+    ledger: &mut RepairLedger,
+    route_records: &BTreeMap<(u32, u32), RouteSearchRecord>,
+    tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
+    history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
+    scales: BlockedCauseScales,
+    radius_mm: f64,
+) -> SupportRunError {
+    ledger.finish(candidates);
+    ledger.report.log_summary();
+
+    let mut islands = crate::coverage_closure::islands_from_blocking(&measured.blocking, tally);
+    for island in &mut islands {
+        island.outcome = Some(route_outcome(
+            (island.island_id, island.component_id),
+            candidates,
+            plan,
+            &ledger.ledgered,
+            route_records,
+            measured,
+            scales,
+            radius_mm,
+        ));
+    }
+    SupportRunError::CoverageClosure(Box::new(crate::coverage_closure::CoverageClosureRefusal {
+        // Ruling R6: the registered bound counts COMMITTED steps, so this
+        // is the honest number to carry in a field named for the bound.
+        attempts: committed,
+        reason,
+        islands,
+        history,
+        repair: Some(ledger.report.clone()),
+    }))
+}
+
+/// **SPEC-A4 §E.1, rulings R7 and R14 — why THIS route is still uncovered.**
+///
+/// Every branch reads a counter this run already kept. None of them is a
+/// distance claim: the design's v1 assigned Warhorse islands 5 and 6 "no row
+/// within radius" from worst gaps of 7.09 mm and 15.29 mm, and the island
+/// diagnosis showed 220 of 300 pool rows sit INSIDE the radius with the nearest
+/// candidate seat 0.0972 mm from the hole. "Nothing reached it" and "nothing
+/// could reach it" are different statements and only the first was measured.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the classes are decided by six independent measured inputs; passing fewer \
+              would mean deciding a class from less evidence than the run has"
+)]
+fn route_outcome(
+    key: (u32, u32),
+    candidates: &crate::coverage_closure::RankedRepairCandidates,
+    plan: &SpecializedContactPlan,
+    ledgered: &BTreeSet<RepairRowId>,
+    route_records: &BTreeMap<(u32, u32), RouteSearchRecord>,
+    measured: &MeasuredState,
+    scales: BlockedCauseScales,
+    radius_mm: f64,
+) -> crate::coverage_closure::RouteRepairOutcome {
+    use crate::coverage_closure::{BlockedCause, RouteRepairOutcome};
+
+    let pool_rows = plan
+        .all_repair_rows()
+        .iter()
+        .filter(|row| (row.id().owner_island_id(), row.id().component_id()) == key)
+        .count();
+    if pool_rows == 0 {
+        return RouteRepairOutcome::Blocked(BlockedCause::NoPoolRows);
+    }
+
+    let route_rows: Vec<&crate::coverage_closure::RankedRepairRow> = candidates
+        .ranked
+        .iter()
+        .filter(|row| row.key == key)
+        .collect();
+    let remaining = route_rows
+        .iter()
+        .filter(|row| !ledgered.contains(&row.id))
+        .count();
+    let record = route_records.get(&key).cloned().unwrap_or_default();
+
+    // The two measured defect classes, and each is claimed only when EVERY
+    // trial this route spent landed in it. A route that mixed causes reports
+    // the search outcome instead of picking a favourite.
+    if record.rows_tried > 0 {
+        if u32::try_from(record.rows_tried).unwrap_or(u32::MAX)
+            == record.clearance_refused_terminals
+        {
+            return RouteRepairOutcome::Blocked(BlockedCause::ClearanceMaskUnsatisfiable {
+                terminals: record.clearance_refused_terminals,
+                standoff_mm: scales.standoff_mm,
+            });
+        }
+        if record.stub_reentry_depths_mm.len() == record.rows_tried {
+            let mut depths = record.stub_reentry_depths_mm.clone();
+            depths.sort_by(f64::total_cmp);
+            return RouteRepairOutcome::Blocked(BlockedCause::StubReentry {
+                terminals_quarantined: u32::try_from(depths.len()).unwrap_or(u32::MAX),
+                depth_min_mm: depths[0],
+                depth_median_mm: depths[depths.len() / 2],
+                depth_max_mm: depths[depths.len() - 1],
+                allowance_mm: scales.allowance_mm,
+            });
+        }
+    }
+
+    // The zero-score class. It IS a measurement — the score — and the distance
+    // rides along as CONTEXT so a reader can see how close the pool sits
+    // without the class ever being decided by it.
+    let best_score = route_rows
+        .iter()
+        .map(|row| row.marginal_area_mm2)
+        .fold(0.0_f64, f64::max);
+    if best_score == 0.0 {
+        let samples = plan.coverage_samples();
+        let mut nearest_sq = f64::INFINITY;
+        let mut rows_within_radius = 0_usize;
+        for row in &route_rows {
+            let mut row_nearest_sq = f64::INFINITY;
+            for &index in &measured.uncovered_samples {
+                let Some(sample) = samples.get(index) else {
+                    continue;
+                };
+                let delta = [
+                    row.seat_mm[0] - sample.point_mm[0],
+                    row.seat_mm[1] - sample.point_mm[1],
+                    row.seat_mm[2] - sample.point_mm[2],
+                ];
+                let distance_sq =
+                    delta[0].mul_add(delta[0], delta[1].mul_add(delta[1], delta[2] * delta[2]));
+                row_nearest_sq = row_nearest_sq.min(distance_sq);
+            }
+            if row_nearest_sq <= radius_mm * radius_mm {
+                rows_within_radius += 1;
+            }
+            nearest_sq = nearest_sq.min(row_nearest_sq);
+        }
+        return RouteRepairOutcome::Blocked(BlockedCause::NoCandidateCoversAnything {
+            pool_rows,
+            rows_within_radius,
+            nearest_seat_to_uncovered_mm: nearest_sq.sqrt(),
+        });
+    }
+
+    if remaining == 0 && record.rows_tried > 0 {
+        return RouteRepairOutcome::Blocked(BlockedCause::PoolExhausted {
+            pool_rows,
+            occupied: pool_rows.saturating_sub(route_rows.len()),
+            ledgered: route_rows.len(),
+        });
+    }
+    if record.rows_tried > 0 {
+        return RouteRepairOutcome::TriedNoImprovement {
+            rows_tried: record.rows_tried,
+            best_marginal_area_mm2: record.best_marginal_area_mm2,
+        };
+    }
+    RouteRepairOutcome::NotReached {
+        rows_remaining: remaining,
+    }
 }
 
 /// One physical contact admitted by the finalized CCO transcript for future
@@ -2921,8 +4046,7 @@ fn route_initial_cco_state(
         // sealed its transcript and NOTHING downstream has run, so this is
         // the last moment before "rewire, bracing, carried-load repartition,
         // or coverage judgment".
-        let accepted =
-            accepted_contact_set_after_routing(&plan, &transcript, initial.forest())?;
+        let accepted = accepted_contact_set_after_routing(&plan, &transcript, initial.forest())?;
         Ok(RoutedPlanState {
             plan,
             accepted,
@@ -4126,6 +5250,31 @@ impl<'a> StructuredSupportRun<'a> {
     }
 }
 
+/// What the routing cadence did with the one contact a repair trial appended.
+///
+/// Evidence, never a decision: nothing in the accept test reads it. Design
+/// §B-O7.6 records why an early rejection on `Quarantined` is deliberately NOT
+/// implemented — over the measured plateau `unrouted_no_winner` moved 7 → 11
+/// while those contacts were being appended, so a quarantined contact
+/// demonstrably changes OTHER terminals' outcomes, and refusing before the plan
+/// is routed would be a guess about a plan nobody routed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TrialContactDisposition {
+    Routed,
+    /// Condemned before any arm was proposed. `remaining_inside_axis_mm` is the
+    /// measured stub-axis re-entry depth when the initial build's condemned
+    /// ledger holds one; `None` means the quarantine had a different cause and
+    /// this refuses to name one it did not measure.
+    Quarantined {
+        remaining_inside_axis_mm: Option<f64>,
+    },
+    UnroutedNoWinner {
+        every_feasible_arm_refused_by_clearance: bool,
+    },
+    /// The contact never appeared in the cadence at all.
+    NotInCadence,
+}
+
 impl<'a> LoweredSupportRun<'a> {
     /// Recycle the retained mesh/topology/`NativeSurface`/geometry context out
     /// of a fully lowered (but coverage-blocked) run, for the coverage-closure
@@ -4198,6 +5347,68 @@ impl<'a> LoweredSupportRun<'a> {
             .accepted
             .ownerless_faces
             .len()
+    }
+
+    /// **What the CCO did with the ONE contact a trial appended.**
+    ///
+    /// This is the per-trial evidence design §B-O7.6 requires and §E.1 measures
+    /// its blocked causes from. Every branch is a read of a record the run
+    /// already keeps — the finalized transcript's disposition for that exact
+    /// `physical_contact_id`, and, for a quarantined one, the initial build's
+    /// own condemned-stub row with its recorded re-entry depth. Nothing here is
+    /// inferred from a distance, which is ruling R14's whole rule.
+    ///
+    /// The design's §B-O7 measurement is the reason it exists: on Crawler
+    /// Zombie's five-round plateau **every one of 50 appended contacts was
+    /// condemned at quarantine**, so the routed contact count did not move and
+    /// no measured quantity could. Without this read a trial can only report
+    /// "nothing improved"; with it the record says why.
+    pub(crate) fn trial_contact_disposition(
+        &self,
+        physical_contact_id: u64,
+    ) -> TrialContactDisposition {
+        let routed = &self.structured.braced.rewired.routed;
+        let Some(row) = routed
+            .transcript
+            .rows()
+            .iter()
+            .find(|row| row.physical_contact_id() == physical_contact_id)
+        else {
+            return TrialContactDisposition::NotInCadence;
+        };
+        match row.kind() {
+            crate::cco::FinalizedDispositionKind::Routed => TrialContactDisposition::Routed,
+            crate::cco::FinalizedDispositionKind::SkippedQuarantined => {
+                // The finalized transcript deliberately keeps no quarantine
+                // REASON — only two frozen digests. The reason lives where it
+                // was measured: the initial build's condemned-stub ledger,
+                // keyed by terminal, carrying the exact remaining-inside-axis
+                // overlap that condemned it. A quarantine with no condemned row
+                // was quarantined for something other than stub re-entry, and
+                // this says so with `None` rather than guessing.
+                let terminal = row.terminal_id();
+                let remaining_inside_axis_mm = routed
+                    .initial
+                    .condemned()
+                    .iter()
+                    .find(|stub| stub.terminal == terminal)
+                    .map(|stub| stub.remaining_inside_axis_mm);
+                TrialContactDisposition::Quarantined {
+                    remaining_inside_axis_mm,
+                }
+            }
+            crate::cco::FinalizedDispositionKind::UnroutedNoWinner => {
+                let every_feasible_arm_refused_by_clearance = matches!(
+                    row.no_winner_reason(),
+                    Some(
+                        crate::cco::NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance { .. }
+                    )
+                );
+                TrialContactDisposition::UnroutedNoWinner {
+                    every_feasible_arm_refused_by_clearance,
+                }
+            }
+        }
     }
 
     /// SPEC-A4 §A.2 — recover BOTH the accepted plan and the context from a
@@ -6813,10 +8024,9 @@ mod tests {
     #[test]
     fn fu32_j5_routing_refuses_an_over_demand_seat_search_on_the_required_corpus() {
         with_prepared_table(|prepared| {
-            let refused =
-                stage_error(prepared.route_initial_cco_with_limits(
-                    RouteCcoWorkLimits::for_test(1, usize::MAX),
-                ));
+            let refused = stage_error(
+                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX)),
+            );
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat evaluations",
@@ -6836,10 +8046,9 @@ mod tests {
     #[test]
     fn fu32_j5_routing_refuses_an_over_demand_refusal_evidence_budget_on_the_required_corpus() {
         with_prepared_table(|prepared| {
-            let refused =
-                stage_error(prepared.route_initial_cco_with_limits(
-                    RouteCcoWorkLimits::for_test(usize::MAX, 1),
-                ));
+            let refused = stage_error(
+                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(usize::MAX, 1)),
+            );
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat refusal rows",
@@ -6864,8 +8073,8 @@ mod tests {
         // The charge this instance is priced at, recovered from the refusing
         // arm above rather than recomputed from a formula this test owns.
         let charged = with_prepared_table(|prepared| {
-            match stage_error(prepared
-                .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX))
+            match stage_error(
+                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX)),
             ) {
                 Err(SupportRoutingError::Limit { required, .. }) => required,
                 Err(other) => panic!("expected a limit refusal, got {other:?}"),
@@ -7167,19 +8376,27 @@ mod tests {
             let accepted_digests = prepared.context.prepared_digests();
             let context = prepared.route_initial_cco().map_or_else(
                 |(context, _error)| context,
-                |routed| routed.rewire().map_or_else(
-                    |(context, _error)| context,
-                    |rewired| rewired.brace().map_or_else(
+                |routed| {
+                    routed.rewire().map_or_else(
                         |(context, _error)| context,
-                        |braced| braced.structure().map_or_else(
-                            |(context, _error)| context,
-                            |structured| structured.lower().map_or_else(
+                        |rewired| {
+                            rewired.brace().map_or_else(
                                 |(context, _error)| context,
-                                LoweredSupportRun::into_context,
-                            ),
-                        ),
-                    ),
-                ),
+                                |braced| {
+                                    braced.structure().map_or_else(
+                                        |(context, _error)| context,
+                                        |structured| {
+                                            structured.lower().map_or_else(
+                                                |(context, _error)| context,
+                                                LoweredSupportRun::into_context,
+                                            )
+                                        },
+                                    )
+                                },
+                            )
+                        },
+                    )
+                },
             );
             assert_eq!(
                 context.prepared_digests(),
@@ -7603,9 +8820,10 @@ mod tests {
                 .iter()
                 .filter_map(|row| match row.kind() {
                     FinalizedDispositionKind::Routed => None,
-                    FinalizedDispositionKind::SkippedQuarantined => {
-                        Some((row.physical_contact_id(), UnroutedContactReason::Quarantined))
-                    }
+                    FinalizedDispositionKind::SkippedQuarantined => Some((
+                        row.physical_contact_id(),
+                        UnroutedContactReason::Quarantined,
+                    )),
                     FinalizedDispositionKind::UnroutedNoWinner => {
                         Some((row.physical_contact_id(), UnroutedContactReason::NoWinner))
                     }
@@ -7772,7 +8990,9 @@ mod tests {
                 let before_leaf = before
                     .leaf_for(id)
                     .expect("a survivor was in the routed fold too");
-                let after_leaf = after.leaf_for(id).expect("a survivor is in the accepted fold");
+                let after_leaf = after
+                    .leaf_for(id)
+                    .expect("a survivor is in the accepted fold");
                 // The sizing INPUT never falls. This is the whole safety
                 // claim, and its whole extent: an arm may learn it carries
                 // more, never less. Nothing in production reads this fold yet
@@ -7838,9 +9058,7 @@ mod tests {
                 .expect("fixture structures")
                 .lower()
                 .expect("fixture lowers");
-            let snapshot = lowered
-                .verification_snapshot()
-                .expect("fixture snapshots");
+            let snapshot = lowered.verification_snapshot().expect("fixture snapshots");
             assert_eq!(snapshot.plan_digest, accepted_digest);
             snapshot
                 .validate_integrity()
