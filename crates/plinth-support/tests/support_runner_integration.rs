@@ -1021,6 +1021,68 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 /// remaining patch below the registered censor, which the pre-write gate
 /// re-measures for itself, and the assertions below check exactly that rather
 /// than trusting the controller's own word.
+///
+/// ---
+///
+/// # FINDING 1 — this fixture is RED ON PURPOSE, and here is what it caught
+///
+/// **Under the one-winner controller this model no longer seals.** It refuses
+/// with `NoImprovingRepair { candidates_tried: 190, best_remaining_score_mm2:
+/// 0.0 }` after **190 trials and 2 commits**, leaving island 4 (component 4)
+/// at 0.2666015625 mm² and island 5 (component 5) at **0.36 mm² — the stub's
+/// hole, untouched**. The red is NOT "the expectation needs re-pinning": the
+/// expectation below is what the engine is supposed to do, and it stays until
+/// the engine does it.
+///
+/// **The step stream says exactly why, and it is neither reachability nor
+/// objective granularity.** Measured over all 190 trials, 2026-08-20:
+///
+/// 1. **The cross-route credit is scored but never delivered.** 44 of the 190
+///    trials were credited an island-5 share in `scored_from` — commit 1
+///    (0.36 of 2.22), commit 2 (0.36 of 1.0598) and 42 rejections. **Not one
+///    route delta in the whole run names island 5**, and its worst gap reads
+///    `NoRoutedContact` from first measurement to last. The two sides disagree
+///    by construction: `coverage_closure::score_candidates_globally` scores a
+///    seat against **every** uncovered sample within the 6.0 mm radius and
+///    deliberately does **not** filter by `(island_id, component_id)`, while
+///    the coverage measurement matches a sample only against routed contacts
+///    of **its own** `(island_id, component_id)` route
+///    (`fill_route_points_nearest`; the rule is written down at
+///    `runner.rs`'s `OwnerlessIslandDisclosure`). A contact seated on island
+///    4 can therefore be *paid* for island 5's hole and can never *close* it.
+///
+/// 2. **Every trial from the accepted state is arithmetic, not search.** From
+///    the post-commit-2 state, for **182 of 182** measured trials:
+///
+///    ```text
+///    island4_after = 0.9664306640625 - (own-route island-4 share, if the trial's contact routed)
+///    ```
+///
+///    That is: appending ANY repair row first destroys exactly the
+///    0.6998291015625 mm² that commit 2 had bought — whether the row routes,
+///    is quarantined, or is refused a winner, and wherever it sits, including
+///    a seat 30 mm away — and a row that routes then re-buys exactly its own
+///    -route share and nothing else. The best own-route share on the ranking
+///    IS 0.6998291015625, so the best attainable result is break-even (trials
+///    2, 4, 5 and 6 measure bit-identical objectives) and clause 1, which is
+///    strict, can never be satisfied again. The search was decided at trial 8:
+///    the loop spent 366 s over 190 trials at a measured 1.917 s median, so
+///    roughly 351 s of it went on proving an identity.
+///
+/// 3. **No accept clause other than clause 1 ever fired.** The rejection
+///    histogram is `{no_improvement: 187, stage_refusal: 1}` — clause 2
+///    (non-regression) and clause 3 (uncensored area) rejected **nothing**, so
+///    this is not an accept-clause calibration problem.
+///
+/// **Island 5's own pool cannot rescue it either.** It reports
+/// `Blocked(PoolExhausted { pool_rows: 4, occupied: 3, ledgered: 1 })`: the
+/// stub's bottom face is 0.6 mm × 0.6 mm, narrower than the candidate seat
+/// pitch (0.8125 mm on this mesh), so the pool is exactly the face's four
+/// corner seats and nothing interior. Both corners that ever became eligible
+/// were tried and both failed before any measurement — trial 3 at
+/// (10.3, 7.2, 19.0) took `unrouted_no_winner` 3 -> 4, and trial 28 at
+/// (10.3, 7.8, 19.0) killed the whole chain with
+/// `Lowering(RootRunTooShort { .. })`.
 #[test]
 fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     let hollowed = identity_hollowed(shelf_with_dust_beside_a_row_less_hole());
@@ -1033,16 +1095,29 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
         },
         support_input(&delicacy, &layers),
     )
+    // **FINDING 1's red starts here** — see the block above the test. Today
+    // this `expect` is what fails, and the message states the finding rather
+    // than the retired suspicion it replaced: the run reaches the two commits
+    // it is supposed to reach and then cannot place a third, because the
+    // island-5 share it keeps being credited for is scored across routes and
+    // measured within one. Blaming the censored worklist here would be a claim
+    // the step stream refutes — the worklist is uncensored on this path and the
+    // model still refuses.
     .expect(
-        "the stub's 0.36 mm² hole closes from a contact nominated for the censored dust patch \
-         beside it; censoring the repair worklist is what refuses this model",
+        "FINDING 1: the stub's 0.36 mm² hole must CLOSE from a contact nominated for the \
+         censored dust patch beside it. Measured 2026-08-20: the run commits twice, never moves \
+         island 5 by a single sample, and refuses with NoImprovingRepair after 190 trials",
     );
 
     let steps = authority.repair_steps();
     let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
+    // MEASURED, not aspirational: this run earns two commits — trial 1 closes
+    // island 10's 1.86 mm² and trial 7 buys back island 4's 0.6998 mm². Pinning
+    // it at 0 would have been a second, independent falsehood in a test that is
+    // already red for one reason; a red fixture has to be red for exactly one.
     assert_eq!(
         authority.coverage_repair_rounds(),
-        0, // MEASURE-ME
+        2,
         "this fixture must close in the measured number of committed steps: {steps:?}"
     );
 
@@ -1097,6 +1172,15 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     );
 
     // The closing step measures clean, which is what sealing means.
+    //
+    // **FINDING 1 keeps this assertion exactly as it stands.** It is the one
+    // that legitimately fails while the model refuses, and it is the sentence
+    // the fix has to make true: the last committed step measures
+    // `failing_patch_count: 2` today — island 4 at 0.2666015625 mm² and island
+    // 5 at 0.36 mm² — because commit 2 bought back its own route's area and was
+    // never paid the island-5 share its GLOBAL score was credited for. Relaxing
+    // this to "2" would turn the fixture green over the defect it exists to
+    // report.
     let last = committed.last().expect("at least one committed step");
     assert_eq!(
         last.objective_after
