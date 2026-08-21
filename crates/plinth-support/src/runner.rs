@@ -1567,7 +1567,41 @@ pub fn run_support<'a>(
     let mut candidates = rank_or_refuse(&plan, &measured, radius_mm, matrix_budget, &mut ledger)?;
     stamp_tally(&mut tally, &candidates);
 
+    // ---------------------------------------------------- task #67: be loud DURING
+    //
+    // The measured case for this is one line of a real run log: `zombie-3-a`
+    // spent **412 055 ms across 20 trials** and printed NOTHING until it
+    // finished (`…/scratchpad/a4-wire-out/run-candidate.log`). Ruling R10 paid
+    // for the removal of the failed-tries cap with visibility, and visibility
+    // that arrives only after the seven minutes are over is not the thing R10
+    // bought.
+    //
+    // The entry line is emitted before the first trial so that a run killed
+    // during trial 1 still leaves a non-empty log — "trials=0" is a real
+    // statement about a loop that has been entered, and it is the one an
+    // operator needs when a model appears to hang at Routing.
+    let loop_started = std::time::Instant::now();
+    let mut pacer = crate::coverage_repair::ProgressPacer::started_at(loop_started);
+    crate::coverage_repair::emit_run_line(
+        &ledger
+            .report
+            .progress_line(ledger.remaining(&candidates), 0),
+    );
+
     loop {
+        // Paced from the top of the iteration, which is the one place every
+        // path through the body reaches — including the several `continue`s a
+        // rejected trial takes. Reading the ledger's own live report means the
+        // streamed counts are the reported counts.
+        let now = std::time::Instant::now();
+        if pacer.due(ledger.report.trials, now) {
+            let remaining = ledger.remaining(&candidates);
+            let elapsed_ms = elapsed_ms(loop_started);
+            crate::coverage_repair::emit_run_line(
+                &ledger.report.progress_line(remaining, elapsed_ms),
+            );
+        }
+
         // §B.3's own quantity, measured over every row still live, not read off
         // the winner. It feeds both the stop guard below and every refusal that
         // names a remaining score, so no refusal can claim 0.00 mm² while a row
@@ -1957,13 +1991,24 @@ impl RepairLedger {
     /// `candidates` is `None` on the one path where the ranking itself refused,
     /// so there is no ranking to count remaining rows on. Everything else — the
     /// demotions and the wall times — is knowable there and is still filled.
+    /// **Eligible rows still untried, right now.**
+    ///
+    /// Task #67: the streamed progress line and the final report must not be
+    /// two counts of the same thing. [`Self::finish`] fills
+    /// `candidates_remaining` by calling THIS, and the progress line prints
+    /// what THIS returns, so `remaining=` mid-run and `remaining=` at the end
+    /// are the same expression over the same two collections.
+    fn remaining(&self, candidates: &crate::coverage_closure::RankedRepairCandidates) -> usize {
+        candidates
+            .ranked
+            .iter()
+            .filter(|row| !self.ledgered.contains(&row.id))
+            .count()
+    }
+
     fn finish(&mut self, candidates: Option<&crate::coverage_closure::RankedRepairCandidates>) {
         if let Some(candidates) = candidates {
-            self.report.candidates_remaining = candidates
-                .ranked
-                .iter()
-                .filter(|row| !self.ledgered.contains(&row.id))
-                .count();
+            self.report.candidates_remaining = self.remaining(candidates);
         }
         self.report.diversity_demotions = self.demoted.len();
         let per_trial = std::mem::take(&mut self.per_trial_ms);

@@ -15,6 +15,7 @@
 //! | `overhang_table…attribution…` | design §D.1: one step, one row, one delta. The batch loop could not produce this at all. |
 //! | `raking_blade…measured_class…` | design §E.1 and rulings R7/R14: the refusal names a MEASURED defect class per route, never a distance claim, and it names the same island at the same area the batch controller does. The class is pinned EXACTLY — see the test's own note on why "one of six" proved nothing. |
 //! | `every_run_reports…` | design §A.8 and ruling R10: no failed-tries cap, so the trial count and the wall time are LOUD on every path. |
+//! | `the_loop_streams…` | task #67: the loop is loud DURING, not only at the end — a progress line lands before the summary on both the sealed and the refused path, and the 45-trial fixture trips the trial cadence mid-run. |
 
 use std::path::PathBuf;
 
@@ -26,6 +27,7 @@ use plinth_mesh::{
     DelicacySettings, Mesh,
 };
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
+use plinth_support::coverage_repair::capture::RunLogCapture;
 use plinth_support::{
     repair_step_outcome, run_support, BlockedCause, CoverageClosureReason, FinalSupportAuthority,
     RepairGateVector, RepairStepOutcome, RouteRepairOutcome, SupportPreparationInput,
@@ -585,5 +587,122 @@ fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
         "the ranking must hold every eligible row, measured at 1,011 on this fixture; \
          {} remaining is a per-patch or per-route cap by another name: {report:?}",
         report.candidates_remaining
+    );
+}
+
+/// **Task #67 — the loop says where it has got to WHILE it is running.**
+///
+/// The measured case this exists for is one line of a real run log:
+/// `zombie-3-a` spent **412 055 ms over 20 trials** and printed nothing at all
+/// until it was over
+/// (`…/scratchpad/a4-wire-out/run-candidate.log`, 2026-08-20). Ruling R10 paid
+/// for the removal of the failed-tries cap with visibility; visibility that
+/// arrives seven minutes late is not what R10 bought.
+///
+/// Three claims, and each fails independently:
+///
+/// 1. **A progress line lands BEFORE the summary, on the sealed path.** The
+///    overhang table seals on its first trial, so what this pins is the entry
+///    line — which is exactly the line that makes a run killed during trial 1
+///    leave a non-empty log.
+/// 2. **The 30-trial cadence really fires on a live loop.** The raking blade
+///    spends 45 trials, so a correct pacer emits at entry AND at trial 30: two
+///    progress lines, not one. A pacer that never re-arms, or one wired
+///    outside the loop, gives one and fails here.
+/// 3. **The streamed counts are the reported counts.** The last progress line
+///    is compared field-by-field against the report the run returns, not
+///    against a literal: `commits` must match exactly, and the streamed
+///    `trials` must be a value the same counter passed through on its way to
+///    its final figure.
+#[test]
+fn the_loop_streams_progress_before_it_prints_its_summary() {
+    fn progress_lines(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|line| line.starts_with("coverage-repair progress:"))
+            .collect()
+    }
+    fn summary_index(lines: &[String]) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with("coverage-repair: "))
+            .unwrap_or_else(|| panic!("no summary line was emitted at all: {lines:#?}"))
+    }
+
+    // ---- the sealed path -------------------------------------------------
+    let capture = RunLogCapture::install();
+    let authority = run(
+        make_overhang_table().expect("procedural overhang table"),
+        "make_overhang_table",
+    )
+    .expect("make_overhang_table closes through repair");
+    let sealed_lines = capture.lines();
+    drop(capture);
+    let sealed_report = authority.repair_report();
+
+    let summary_at = summary_index(&sealed_lines);
+    let before_summary = progress_lines(&sealed_lines[..summary_at]);
+    assert!(
+        !before_summary.is_empty(),
+        "the sealed run printed its summary with no progress line ahead of it, which is the \
+         silence task #67 exists to end: {sealed_lines:#?}"
+    );
+    assert!(
+        before_summary[0].contains("trials=0"),
+        "the entry line is what a run killed during trial 1 leaves behind, so it must be \
+         emitted before the first trial is counted: {:?}",
+        before_summary[0]
+    );
+
+    // ---- the refused path, which is the one long enough to pace ----------
+    let capture = RunLogCapture::install();
+    let error = run(
+        make_raking_blade().expect("procedural raking blade"),
+        "make_raking_blade",
+    )
+    .err()
+    .expect("make_raking_blade refuses");
+    let refused_lines = capture.lines();
+    drop(capture);
+    let SupportRunError::CoverageClosure(refusal) = error else {
+        panic!("expected a coverage-closure refusal");
+    };
+    let refused_report = refusal.repair.expect("a refusal carries its §A.8 report");
+
+    let summary_at = summary_index(&refused_lines);
+    let before_summary = progress_lines(&refused_lines[..summary_at]);
+    assert!(
+        before_summary.len() >= 2,
+        "this fixture spends {} trials, so the 30-trial cadence must fire at least once \
+         after the entry line; {} progress line(s) means the pacer never re-armed or is \
+         wired outside the loop: {refused_lines:#?}",
+        refused_report.trials,
+        before_summary.len()
+    );
+
+    // ---- one source, held against the report the run actually returned ---
+    let last = before_summary
+        .last()
+        .expect("checked non-empty immediately above");
+    assert!(
+        last.contains(&format!("commits={}", refused_report.commits)),
+        "the streamed commit count and the reported one are the same counter, and this \
+         fixture commits nothing: {last:?} against {refused_report:?}"
+    );
+    assert!(
+        last.contains("trials=30"),
+        "the pacer fires AT the trial that trips it, so the line must carry that trial \
+         count and not a rounded or re-derived one: {last:?}"
+    );
+    assert!(
+        refused_report.trials >= 30,
+        "if this fixture stopped spending 30 trials the cadence assertion above has \
+         stopped testing anything: {refused_report:?}"
+    );
+    // The sealed path's report is read too, so the test cannot pass by only
+    // exercising the refusal.
+    assert!(
+        sealed_report.commits >= 1,
+        "the sealed fixture is here because it repairs: {sealed_report:?}"
     );
 }
