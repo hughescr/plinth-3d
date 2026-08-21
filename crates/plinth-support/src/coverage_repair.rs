@@ -51,7 +51,7 @@ use crate::CoverageObjective;
 ///
 /// Every component is a count the run already keeps. Nothing here is derived,
 /// estimated, or inferred from a distance.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoncoverageVector {
     /// Regular terminals the CCO transcript retired with no winner
     /// (`FinalizedDispositionKind::UnroutedNoWinner`).
@@ -91,7 +91,8 @@ pub struct NoncoverageVector {
 
 /// The components of [`NoncoverageVector`], exhaustively, so a ledger row can
 /// name WHICH count regressed instead of saying "something got worse".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NoncoverageComponent {
     UnroutedNoWinner,
     Quarantined,
@@ -201,7 +202,8 @@ pub struct RepairGateVector {
 /// Why a trial was not committed. Every variant is a MEASUREMENT, and each one
 /// carries the numbers that produced it so the ledger can state the case rather
 /// than assert it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepairStepOutcome {
     Committed,
     /// Measured, and the censored objective did not strictly improve.
@@ -316,14 +318,13 @@ pub fn repair_step_outcome(
 /// rows and moved the area by 0.4 mm² could not say which row did it, or that
 /// 265 rows did nothing.
 ///
-/// **Deliberately NOT `Serialize`, and it is a disclosed deviation from
-/// §D.2.** Stage 4 landed the half of the FU-57 format change the door forced
-/// — the schema string is `plinth.coverage-refusal.v2` and `attempts` now
-/// carries committed steps — but putting this STREAM on the wire needs
-/// `RepairRowId` to gain a public wire encoding it has never had, and needs the
-/// resulting payload re-frozen against measured corpus values. That is a
-/// model-run obligation, not a code one. The stream is produced, ledgered,
-/// PRINTED, and exposed on the sealed authority; persisting it is still owed.
+/// **This is the in-memory row; [`CoverageRepairStepWire`] is the one that goes
+/// on disk.** The only difference between them is `row_id`: here it is the
+/// opaque, unforgeable [`RepairRowId`] the plan editor accepts, and there it is
+/// [`crate::specialized::RepairRowWire`], the same identity as four numbers a
+/// reader can parse and nothing can act on. §D.2's persistence obligation is
+/// discharged through [`Self::to_wire`]; the opaque id's construction rule is
+/// not weakened to do it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoverageRepairStep {
     /// Every transaction attempted, committed or not, from 1.
@@ -384,6 +385,82 @@ pub struct CoverageRepairStep {
     pub outcome: RepairStepOutcome,
 }
 
+impl CoverageRepairStep {
+    /// Project this step onto the wire — SPEC-A4 §D.2's persistence, with the
+    /// opaque row identity replaced by its readable name.
+    ///
+    /// Every other field is carried VERBATIM. There is no summarisation and no
+    /// rounding here on purpose: the whole claim of §D is that the before/after
+    /// pair IS the contact's contribution, and a persisted row that had been
+    /// condensed on its way to disk would be a second measurement of the same
+    /// step rather than the step.
+    #[must_use]
+    pub fn to_wire(&self) -> CoverageRepairStepWire {
+        CoverageRepairStepWire {
+            trial: self.trial,
+            commit: self.commit,
+            row_id: self.row_id.wire(),
+            seat_mm: self.seat_mm,
+            source_island_id: self.source_island_id,
+            source_component_id: self.source_component_id,
+            scored_from: self.scored_from.clone(),
+            marginal_area_mm2: self.marginal_area_mm2,
+            chosen_by_first_trial_guarantee: self.chosen_by_first_trial_guarantee,
+            diversity_discs_containing_seat: self.diversity_discs_containing_seat,
+            objective_before: self.objective_before,
+            objective_after: self.objective_after,
+            uncensored_before_mm2: self.uncensored_before_mm2,
+            uncensored_after_mm2: self.uncensored_after_mm2,
+            gates_before: self.gates_before,
+            gates_after: self.gates_after,
+            ownerless_faces_before: self.ownerless_faces_before,
+            ownerless_faces_after: self.ownerless_faces_after,
+            own_contact_quarantined: self.own_contact_quarantined,
+            route_deltas: self.route_deltas.clone(),
+            outcome: self.outcome.clone(),
+        }
+    }
+}
+
+/// **SPEC-A4 §D.1 on the wire** — one repair transaction, as it is written to
+/// disk and read back.
+///
+/// Field-for-field [`CoverageRepairStep`], with the opaque [`RepairRowId`]
+/// replaced by [`crate::specialized::RepairRowWire`]. That single substitution
+/// is what lets this type be `Deserialize` without handing a reader the right
+/// to construct a pool identity the planner never froze.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoverageRepairStepWire {
+    /// Every transaction attempted, committed or not, from 1.
+    pub trial: usize,
+    /// Which commit this was, if it committed. `None` for a rejection.
+    pub commit: Option<usize>,
+    /// The winner, by exact pool identity.
+    pub row_id: crate::specialized::RepairRowWire,
+    pub seat_mm: [f64; 3],
+    pub source_island_id: u32,
+    pub source_component_id: u32,
+    /// Every route whose uncovered samples contributed to this row's GLOBAL
+    /// score, with each route's share. This is the field §D.2's cross-route
+    /// sentence is made of, and the reason the record can say "0.36 mm² of the
+    /// 0.46 mm² came from island 5" instead of inferring it.
+    pub scored_from: Vec<CoverageScoreShare>,
+    pub marginal_area_mm2: f64,
+    pub chosen_by_first_trial_guarantee: bool,
+    pub diversity_discs_containing_seat: usize,
+    pub objective_before: CoverageObjective,
+    pub objective_after: Option<CoverageObjective>,
+    pub uncensored_before_mm2: f64,
+    pub uncensored_after_mm2: Option<f64>,
+    pub gates_before: NoncoverageVector,
+    pub gates_after: Option<NoncoverageVector>,
+    pub ownerless_faces_before: usize,
+    pub ownerless_faces_after: Option<usize>,
+    pub own_contact_quarantined: Option<bool>,
+    pub route_deltas: Vec<RouteDelta>,
+    pub outcome: RepairStepOutcome,
+}
+
 /// One route's before/after evidence across a single transaction.
 ///
 /// **Both quantities, deliberately.** `failing_*` is the CENSORED verdict set —
@@ -394,7 +471,7 @@ pub struct CoverageRepairStep {
 /// (§B.5 clause 3) VISIBLE even when it is rejected: a step whose failing area
 /// fell to zero while the uncensored area did not move is a split caught in the
 /// act.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RouteDelta {
     pub island_id: u32,
     pub component_id: u32,
@@ -551,6 +628,172 @@ mod tests {
             noncoverage: NoncoverageVector::default(),
             uncensored_uncovered_mm2: uncensored,
         }
+    }
+
+    /// One fully populated step, with every `Option` on its `Some` arm and both
+    /// vectors non-default, so a field dropped in [`CoverageRepairStep::to_wire`]
+    /// cannot hide behind a default value that happens to match.
+    fn populated_step() -> CoverageRepairStep {
+        CoverageRepairStep {
+            trial: 7,
+            commit: Some(3),
+            row_id: RepairRowId::for_search_rule_test(5, 1, 118),
+            seat_mm: [10.4, 7.6, 19.0],
+            source_island_id: 3,
+            source_component_id: 0,
+            scored_from: vec![
+                CoverageScoreShare {
+                    island_id: 5,
+                    component_id: 1,
+                    area_mm2: 0.36,
+                },
+                CoverageScoreShare {
+                    island_id: 3,
+                    component_id: 0,
+                    area_mm2: 0.10,
+                },
+            ],
+            marginal_area_mm2: 0.46,
+            chosen_by_first_trial_guarantee: true,
+            diversity_discs_containing_seat: 2,
+            objective_before: objective(0.46, 0.36, 2, 4.0),
+            objective_after: Some(objective(0.10, 0.10, 1, 2.0)),
+            uncensored_before_mm2: 0.46,
+            uncensored_after_mm2: Some(0.10),
+            gates_before: NoncoverageVector {
+                unrouted_no_winner: 7,
+                quarantined: 2,
+                unrouted_specialized: 1,
+                load_violations: 3,
+                unsupported_specialized: 4,
+            },
+            gates_after: Some(NoncoverageVector {
+                unrouted_no_winner: 6,
+                quarantined: 2,
+                unrouted_specialized: 1,
+                load_violations: 3,
+                unsupported_specialized: 4,
+            }),
+            ownerless_faces_before: 8,
+            ownerless_faces_after: Some(5),
+            own_contact_quarantined: Some(false),
+            route_deltas: vec![RouteDelta {
+                island_id: 5,
+                component_id: 1,
+                failing_area_before_mm2: 0.36,
+                failing_area_after_mm2: 0.0,
+                uncensored_area_before_mm2: 0.36,
+                uncensored_area_after_mm2: 0.0,
+                failing_patches_before: 1,
+                failing_patches_after: 0,
+                patches_before: 1,
+                patches_after: 0,
+                worst_gap_before: Some(CoverageClosureGap::NoRoutedContact),
+                worst_gap_after: None,
+            }],
+            outcome: RepairStepOutcome::Committed,
+        }
+    }
+
+    /// **SPEC-A4 §D.2's persistence obligation, and the reason it was owed:
+    /// `RepairRowId` had no wire encoding.**
+    ///
+    /// Now it has one, and this pins both halves of the rule the encoding was
+    /// designed around:
+    ///
+    /// * the projection is LOSSLESS — every field of the step survives to the
+    ///   wire row and back through a JSON round trip, so a sealed-run ledger on
+    ///   disk is the step and not a summary of it;
+    /// * the projection is ONE-WAY — the wire row names the pool identity as
+    ///   four numbers and a provenance, and there is no path back to a
+    ///   `RepairRowId`, which is what keeps "only the specialized planner may
+    ///   construct one" true after §D.2 is discharged.
+    ///
+    /// The revert this guards: dropping a field from `to_wire` (the cheap way to
+    /// make a large ledger smaller) or deriving `Deserialize` straight onto
+    /// `RepairRowId` (the cheap way to skip the wire type). The first fails the
+    /// equality below; the second is what the wire type exists instead of.
+    #[test]
+    fn a_repair_step_reaches_the_wire_losslessly_and_names_its_row_without_granting_it() {
+        let step = populated_step();
+        let wire = step.to_wire();
+
+        let json = serde_json::to_string(&wire).expect("the wire step serializes");
+        let parsed: CoverageRepairStepWire =
+            serde_json::from_str(&json).expect("the wire step round-trips");
+        assert_eq!(parsed, wire, "the wire row must survive JSON unchanged");
+
+        // The row identity, field by field, against the id the step actually
+        // carries: a `to_wire` that stamped a placeholder identity would still
+        // round-trip, and this is what catches it.
+        assert_eq!(
+            parsed.row_id,
+            crate::specialized::RepairRowWire {
+                owner_island_id: 5,
+                candidate_id: 118,
+                face_id: 0,
+                component_id: 1,
+                source_kind: crate::specialized::RepairRowSource::Generic,
+            },
+            "the wire row must carry the pool identity, not a placeholder"
+        );
+
+        // Every other field, verbatim. Listed rather than folded into one
+        // comparison so a failure names which field the projection dropped.
+        assert_eq!(parsed.trial, step.trial);
+        assert_eq!(parsed.commit, step.commit);
+        assert_eq!(parsed.seat_mm, step.seat_mm);
+        assert_eq!(parsed.source_island_id, step.source_island_id);
+        assert_eq!(parsed.source_component_id, step.source_component_id);
+        assert_eq!(parsed.scored_from, step.scored_from);
+        assert_eq!(parsed.marginal_area_mm2, step.marginal_area_mm2);
+        assert_eq!(
+            parsed.chosen_by_first_trial_guarantee,
+            step.chosen_by_first_trial_guarantee
+        );
+        assert_eq!(
+            parsed.diversity_discs_containing_seat,
+            step.diversity_discs_containing_seat
+        );
+        assert_eq!(parsed.objective_before, step.objective_before);
+        assert_eq!(parsed.objective_after, step.objective_after);
+        assert_eq!(parsed.uncensored_before_mm2, step.uncensored_before_mm2);
+        assert_eq!(parsed.uncensored_after_mm2, step.uncensored_after_mm2);
+        assert_eq!(parsed.gates_before, step.gates_before);
+        assert_eq!(parsed.gates_after, step.gates_after);
+        assert_eq!(parsed.ownerless_faces_before, step.ownerless_faces_before);
+        assert_eq!(parsed.ownerless_faces_after, step.ownerless_faces_after);
+        assert_eq!(parsed.own_contact_quarantined, step.own_contact_quarantined);
+        assert_eq!(parsed.route_deltas, step.route_deltas);
+        assert_eq!(parsed.outcome, step.outcome);
+    }
+
+    /// **§D.2's cross-route share must be readable off the FILE, not only off
+    /// the struct.** The sidecar sentence the design asks for — "scored 0.46 mm²
+    /// of which 0.36 mm² came from island 5" — is made of `scored_from`, and a
+    /// serializer that flattened it to a single number would still round-trip a
+    /// `Vec` of one element. This reads the JSON itself.
+    #[test]
+    fn the_persisted_step_carries_the_per_route_shares_its_score_came_from() {
+        let wire = populated_step().to_wire();
+        let value = serde_json::to_value(&wire).expect("the wire step serializes");
+
+        let shares = value["scored_from"]
+            .as_array()
+            .expect("scored_from is an array on the wire");
+        assert_eq!(
+            shares.len(),
+            2,
+            "both contributing routes must reach the file: {value}"
+        );
+        assert_eq!(shares[0]["island_id"], 5);
+        assert_eq!(shares[0]["area_mm2"], 0.36);
+        assert_eq!(shares[1]["island_id"], 3);
+        assert_eq!(shares[1]["area_mm2"], 0.10);
+        // The row's OWN route is island 3 with the smaller share, which is the
+        // cross-route effect §D names: the largest contributor is not the route
+        // the row was drawn from.
+        assert_eq!(value["source_island_id"], 3);
     }
 
     /// **The anti-gaming fixture (design §E.5 case 8).** Without it clause 3 is

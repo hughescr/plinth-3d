@@ -140,8 +140,8 @@ pub use coverage_measurement::{
     CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
 };
 pub use coverage_repair::{
-    repair_step_outcome, CoverageRepairStep, NoncoverageComponent, NoncoverageVector,
-    RepairGateVector, RepairRunReport, RepairStepOutcome, RouteDelta,
+    repair_step_outcome, CoverageRepairStep, CoverageRepairStepWire, NoncoverageComponent,
+    NoncoverageVector, RepairGateVector, RepairRunReport, RepairStepOutcome, RouteDelta,
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
@@ -152,6 +152,7 @@ pub use runner::{
     SupportVerificationSnapshot, TipGrowthRungDisclosure, UnroutedContactReason,
     UnroutedRegularRemoval, UnroutedSpecializedContact,
 };
+pub use specialized::{RepairRowSource, RepairRowWire};
 
 /// Request data shared by the support and raft pass.
 #[derive(Clone, Debug, PartialEq)]

@@ -508,6 +508,47 @@ pub(crate) enum RepairRowSourceKind {
     SyntheticIsland,
 }
 
+/// The public, wire-readable NAME of one repair row — SPEC-A4 §D's "the
+/// winner, by exact pool identity", as it goes on disk.
+///
+/// **A name, never an authority.** [`RepairRowId`] stays opaque and
+/// unforgeable: only the specialized planner constructs one, and that rule is
+/// what stops a caller from handing the plan editor a row the pool never
+/// froze. This type is the other half of the same rule — it is freely
+/// constructible and freely deserializable precisely BECAUSE it cannot be
+/// turned back into a `RepairRowId` and cannot edit anything. A reader that
+/// parses a sealed-run ledger gets the four numbers that identify the row in
+/// the pool, and nothing that acts.
+///
+/// Design §D.2 named this the missing piece: "persisting it needs
+/// `RepairRowId` to gain a public wire encoding it has never had".
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct RepairRowWire {
+    /// The logical island the row was frozen for.
+    pub owner_island_id: u32,
+    /// The immutable contact candidate the row expands.
+    pub candidate_id: u64,
+    /// The coverage face the row seats against.
+    pub face_id: u32,
+    /// The topology component the row was frozen for.
+    pub component_id: u32,
+    /// Which candidate authority supplied it.
+    pub source_kind: RepairRowSource,
+}
+
+/// [`RepairRowSourceKind`] on the wire. Public and serializable for the same
+/// reason [`RepairRowWire`] is: it names a provenance, it does not grant one.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairRowSource {
+    Generic,
+    SyntheticIsland,
+}
+
 /// Opaque, stable identity of one route-expanded repair row carried in public
 /// error evidence. It can be compared, hashed, and rendered for diagnostics,
 /// but only the specialized planner may construct one. The owner, topology
@@ -535,6 +576,25 @@ impl RepairRowId {
     #[must_use]
     pub(crate) const fn component_id(self) -> u32 {
         self.component_id
+    }
+
+    /// This row's wire-readable NAME — SPEC-A4 §D's exact pool identity, in the
+    /// form a sealed-run ledger can carry to disk.
+    ///
+    /// One-way on purpose. There is no `from_wire`, and adding one would hand
+    /// every caller the construction right the opaque id exists to withhold.
+    #[must_use]
+    pub const fn wire(self) -> RepairRowWire {
+        RepairRowWire {
+            owner_island_id: self.owner_island_id,
+            candidate_id: self.candidate_id.0,
+            face_id: self.face_id,
+            component_id: self.component_id,
+            source_kind: match self.source_kind {
+                RepairRowSourceKind::Generic => RepairRowSource::Generic,
+                RepairRowSourceKind::SyntheticIsland => RepairRowSource::SyntheticIsland,
+            },
+        }
     }
 
     /// A synthetic identity for a unit test, and **only** for a unit test.
