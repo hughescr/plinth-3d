@@ -485,7 +485,10 @@ pub struct CoverageRepairStepWire {
     pub ownerless_faces_before: usize,
     pub ownerless_faces_after: Option<usize>,
     pub own_contact_quarantined: Option<bool>,
-    /// Rule N4c's class, verbatim from [`CoverageRepairStep::own_contact_condemned`].
+    /// Verbatim from [`CoverageRepairStep::own_contact_condemned`], which is
+    /// the only place this field is explained. It named "rule N4c" until
+    /// 2026-08-21; that rule was built, MEASURED HARMFUL and reverted, so it is
+    /// not in the tree and the name pointed at nothing.
     pub own_contact_condemned: Option<bool>,
     pub route_deltas: Vec<RouteDelta>,
     pub outcome: RepairStepOutcome,

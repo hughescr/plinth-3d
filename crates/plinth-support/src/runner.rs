@@ -1170,9 +1170,15 @@ fn seal_authority<'a>(
 /// surface is projected and no geometry is recomputed.
 ///
 /// A transcript row whose contact or member cannot be resolved contributes a
-/// row with `None` radii rather than being dropped: a contact that emitted and
-/// could not be described is exactly the thing this disclosure exists to make
-/// visible, and dropping it would restore the silence.
+/// row with `None` in every field it could not read, rather than being dropped:
+/// a contact that emitted and could not be described is exactly the thing this
+/// disclosure exists to make visible, and dropping it would restore the
+/// silence. **Nothing is invented to fill the gap.** An unresolved join used to
+/// be disclosed as `0.0 mm² at the origin`, which a reader cannot tell from a
+/// contact that genuinely carries nothing at a genuine seat — and this
+/// artifact's own sidecar already carries a real `carried_area_mm2 == 0` row.
+/// Zero is a legal area to read and an illegal one to invent, exactly as it is
+/// a legal radius to read and an illegal one to invent.
 fn emitted_contact_disclosures(lowered: &LoweredSupportRun<'_>) -> Vec<EmittedContactDisclosure> {
     let routed = &lowered.structured.braced.rewired.routed;
     let forest = &lowered.structured.braced.plan.forest;
@@ -1194,18 +1200,15 @@ fn emitted_contact_disclosures(lowered: &LoweredSupportRun<'_>) -> Vec<EmittedCo
         .filter(|row| row.kind() == FinalizedDispositionKind::Routed)
         .map(|row| {
             let contact_id = row.physical_contact_id();
-            let (carried_area_mm2, position_mm) = carried_by_id
-                .get(&contact_id)
-                .copied()
-                .unwrap_or((0.0, [0.0; 3]));
+            let carried = carried_by_id.get(&contact_id).copied();
             let tip_radius_mm = forest
                 .terminal_key(row.terminal_id())
                 .and_then(|key| forest.member(key))
                 .map(|member| member.terminal_radius_mm().get().get());
             EmittedContactDisclosure {
                 contact_id,
-                position_mm,
-                carried_area_mm2,
+                position_mm: carried.map(|(_, position)| position),
+                carried_area_mm2: carried.map(|(area, _)| area),
                 tip_radius_mm,
                 tip_diameter_mm: tip_radius_mm.map(|radius| radius * 2.0),
             }
@@ -2514,23 +2517,43 @@ pub struct RoutedPhysicalContactEvidence<'a> {
 ///
 /// **The tip is read at the end that TOUCHES THE MODEL, in the final live
 /// view** — the terminal's own registered member, at its terminalward end,
-/// which is where a contact stub meets the surface. That is the geometry that
-/// was emitted, not the geometry that was planned: it is read after growth,
-/// after rewire and after the brace stage's resize.
+/// which is where a contact stub meets the surface. It is the member the run
+/// went on to emit, not the one it planned: it is read after growth, after
+/// rewire and after the brace stage's resize.
 ///
-/// **This is evidence and it decides nothing.** Nothing compares a field here
-/// to anything; it exists so a byte movement can be attributed instead of
-/// argued about.
+/// **It is the MEMBER's tip radius, and the artifact's TIP record is not the
+/// same number.** `lower.rs`'s `lower_stub` builds the contact ball at
+/// `tip_ball_factor` (registered, 1.5) times this radius, so a reader diffing
+/// this field straight against a `SegmentType::TIP` record in the `.chitubox`
+/// lands 1.5x off — the same class of error the UNITS paragraph above warns
+/// about, one factor over. The relation is exact and is pinned end to end in
+/// `plinth-pipeline`'s `prepare_folder` gate, which reads the TIP records back
+/// off the written file and compares them to these radii scaled by the
+/// registered factor.
+///
+/// **This is evidence and it decides nothing.** Nothing in production compares
+/// a field here to anything; it exists so a byte movement can be attributed
+/// instead of argued about. The gate that guards it is a test, which is where
+/// a check on evidence belongs.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmittedContactDisclosure {
     /// The physical contact id, which is also its terminal id.
     pub contact_id: u64,
-    /// Where the contact sits on the model, mm.
-    pub position_mm: [f64; 3],
+    /// Where the contact sits on the model, mm. `None` when the transcript row
+    /// names a contact the accepted plan no longer holds — see
+    /// [`Self::carried_area_mm2`], which is `None` in exactly the same case and
+    /// for the same reason.
+    pub position_mm: Option<[f64; 3]>,
     /// The model area this contact is charged to carry after every removal and
-    /// repartition the sealing attempt performed, mm².
-    pub carried_area_mm2: f64,
+    /// repartition the sealing attempt performed, mm². `None` when the
+    /// transcript row's contact could not be found in the accepted plan — a
+    /// state this refuses to paper over with a zero at the origin, because
+    /// `0.0 mm²` is a legal area to READ (a routed contact charged with nothing
+    /// is ordinary, and this artifact's own sidecar carries such rows) and an
+    /// illegal one to INVENT. A reader must be able to tell "carries nothing"
+    /// from "could not be described".
+    pub carried_area_mm2: Option<f64>,
     /// The RADIUS of the member end that touches the model, mm. `None` when the
     /// terminal's member is not in the final live view — a state this refuses
     /// to paper over with a zero, because zero is a legal radius to read and an
