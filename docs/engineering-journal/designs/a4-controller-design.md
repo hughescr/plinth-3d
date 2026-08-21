@@ -887,6 +887,103 @@ compares it to anything. A machine that runs the corpus slowly must produce the
 same verdicts as one that runs it fast, or the verdicts were never about the
 model.
 
+#### A.8.1 The report is also STREAMED, not only summarised (task #67)
+
+**Measured gap.** §A.8 as written above is discharged by one line printed when
+the loop stops. On a real model that is not visibility, it is a receipt:
+`zombie-3-a` spent **412 055 ms over 20 trials** (median 18 698 ms) and printed
+nothing at all until it was over
+(`…/scratchpad/a4-wire-out/run-candidate.log`, 2026-08-20). An operator watching
+that run cannot tell a working loop from a hung one, which is the state R10's
+trade was supposed to remove.
+
+> **The loop emits a progress line every 30 trials or 60 seconds, whichever
+> comes first, and one on entry before the first trial. Each line carries
+> `trials`, `commits`, the `rejections_by_class` histogram, `remaining`, and
+> elapsed wall time, and is FLUSHED.**
+
+Three properties, and each is a test rather than an intention:
+
+1. **One source.** Every count on a progress line is read off the very
+   `RepairRunReport` the summary prints, through the same histogram renderer,
+   and `remaining` is the same expression `finish` uses. There is no second
+   tally, so a streamed count and a reported count cannot disagree. The two
+   values that are not read off the report are the two that cannot be —
+   `remaining`, which belongs to the live ranking, and elapsed time, which is a
+   wall-clock read under the rule above.
+2. **A killed run has still spoken.** The entry line lands before trial 1, and
+   every line is flushed, so a mid-run kill leaves a non-empty log.
+3. **It decides nothing.** The cadence paces a print. No branch reads it; a run
+   with every line suppressed reaches the same verdict on the same model. The
+   two cadence numbers are therefore plain module constants and are not registry
+   candidates — the physics-first doctrine's rule is about numbers that steer
+   outcomes.
+
+Sizing, so the cadence is derived rather than picked: the dust fixture's median
+trial is 1 917 ms, so 30 trials is ≈58 s; `zombie-3-a`'s is 18 698 ms, so 60 s is
+≈3 trials. One rule covers the fast loop, where the trial count trips first, and
+the slow one, where the clock does.
+
+#### A.8.2 Cheap physics screens before full passes — STOPPED, and why
+
+Task #67 also proposed a tier below the full pass: decide a candidate's fate
+cheaply, by the same physics the pipeline would decide it by, and skip the
+prepare → route → rewire → brace → structure → lower → measure pass for the ones
+already decided. **Two screens were specified and NEITHER can be built without
+either re-implementing production logic or changing a model's outcome.** They are
+recorded here rather than approximated, because a screen that is wrong is a cap
+wearing a physics costume.
+
+**Screen 1 — clearance-mask satisfiability at the seat (#51). Refused: not
+decidable at a seat, and it would mask another lane's defect.** Clearance is
+evaluated per candidate ARM, not per seat: `clearance_survival`
+(`cco.rs:3405`) sweeps the member segments of one proposed arm and a terminal is
+`AllFeasibleCandidatesRefusedByClearance` only when every generated arm fails.
+Island 5 of the Warhorse generated **31 627 feasible candidate arms** (§E.3), so
+deciding this question IS the routing work the screen exists to avoid; the only
+seat-level shortcut is the #51 arithmetic itself — "a model anchor misses by
+exactly its own radius" — and screening on that would bake a defect ruling R9
+assigns to the #51 + #26 lane into the controller, and hide it the day that lane
+fixes the mask.
+
+**Screen 2 — stub-axis re-entry (#52). Refused: §B-O7.6 already ruled against it
+WITH a measurement, and this lane's measurement does not overturn that ruling.**
+§B-O7.6 records the same idea and declines it: "It does not add a rejection class
+for quarantine … It is not implemented, deliberately, because the measurement
+above disproves the inertness that would justify it — `unrouted_no_winner` moved
+7 → 11 while those contacts were being appended, so adding a quarantined contact
+demonstrably changes *other* terminals' outcomes." It is left as "a follow-up
+with its own measurement obligation".
+
+That obligation is now discharged, and the answer is still no. On the dust
+fixture's 190-trial refusal (`…/scratchpad/dust_steps.json`):
+
+| own contact quarantined | trials | committed |
+| --- | ---: | ---: |
+| `true` | **61** (32.1 %) | **0** |
+| `false` | 128 | 2 |
+| unknown (stage refusal) | 1 | 0 |
+
+61 of 61 is a strong correlation and it is not a proof. The physics question the
+full pass decides is "does the censored objective improve with no noncoverage
+component worse", and a quarantined contact still changes the load repartition —
+hence every other contact's tip radius, hence their clearance and their routing.
+A screen would decide a *different*, cheaper question and call it the same one.
+Under the no-cap doctrine that is exactly the move that is forbidden.
+
+**What the class costs, so the size of the unclaimed prize is on the record:**
+61 trials × 1 917 ms median ≈ **117 s of the dust fixture's 366 s**. Retiring it
+needs #52 FIXED — a stub that does not re-enter is not quarantined and needs no
+screen — not screened.
+
+**What this leaves for the Warhorse.** The arithmetic task #67 asked for cannot
+be written as "pool × screen cost + survivors × full cost", because the screen
+cost is not a cheaper number: it is the full pass. The Warhorse's 6 777 eligible
+rows (§F.5) still cost 6 777 full passes in the worst case, and the rule that
+actually cuts that is N4's spatial diversity, which is already implemented and
+already instrumented by `diversity_demotions`. §A.8.1's streaming is what makes
+the cost visible while it is being paid.
+
 ---
 
 ## B. Strict improvement
