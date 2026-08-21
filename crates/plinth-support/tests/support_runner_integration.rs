@@ -1034,6 +1034,73 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 /// expectation below is what the engine is supposed to do, and it stays until
 /// the engine does it.
 ///
+/// ## Amended 2026-08-21 — task #68 contract (1) has landed, and this fixture
+/// still refuses. What moved, and what did not.
+///
+/// The append no longer replays the load partition
+/// (`perception::append_to_specialized_load_partition`): every surviving
+/// contact's carried area is bit-identical across a trial append, so no trial
+/// can hand a 546.0 mm² block to whichever contact the repartition names. That
+/// is the whole of contract (1) and it is delivered.
+///
+/// **The model does not seal, and it now measures WORSE on island 4 by a
+/// constant.** Both runs below were taken at this commit, on this fixture,
+/// with only `append_regular_repair_rows`' derivation switched — replay
+/// against incremental — so the comparison is like for like:
+///
+/// | | replay (the defect) | incremental (contract 1) |
+/// | --- | --- | --- |
+/// | trials / commits | 190 / 2 | 190 / 2 |
+/// | island 4 residual | 0.2666015625 mm² | 0.2666015625 mm² |
+/// | island 5 residual | 0.36 mm² | 0.36 mm² |
+/// | rejections | `no_improvement: 187, stage_refusal: 1` | `no_improvement: 181, stage_refusal: 7` |
+/// | island-4 area a trial measures | **≤ 0.9664306640625 mm²** | **≤ 2.2994384765625 mm²** |
+/// | `load_violations`, every state | **7** | **7** |
+/// | wall / median per trial | 368 s / 1953 ms | 367 s / 1912 ms |
+///
+/// **The shift is EXACTLY 1.3330078125 mm², in every bucket.** The trial
+/// distribution keeps its shape to the bit — the own-route re-buy offsets are
+/// unchanged (`0.9664306640625 - 0.7998046875` and
+/// `2.2994384765625 - 2.1328125` are both 0.166626 mm²) — and the whole
+/// distribution simply rises by that one constant.
+///
+/// **That constant is phantom credit, and losing it is the fix working.** The
+/// replay bought it by moving un-carriable blocks off incumbent contacts:
+/// a contact relieved of a 546.0 mm² block gets a smaller tip, clears, routes,
+/// and pays island 4. Nothing was supported by that shuffle — the block did
+/// not get lighter, it got someone else's name on it — which is the
+/// toed-slab phantom-credit pattern task #55 named. Contract (1) stops the
+/// shuffle, so the credit stops arriving, and what is left is the true state
+/// of a layout whose contacts are overloaded.
+///
+/// **What is still missing is contract (2) AT THE REPLAY SEAM, and the number
+/// that says so is `load_violations: 7`.** It is 7 in every measured state of
+/// both runs. Seven contacts carry more than the area law's single-contact
+/// maximum of 37.699 mm², and until those blocks are SPLIT where they are
+/// created rather than passed around, this fixture cannot route them however
+/// the trials are ordered. Contract (2) is delivered at the append seam
+/// (`append_to_specialized_load_partition` passes
+/// `CarriableMaximum::AreaLaw`), and is BLOCKED at the replay seam by the
+/// merge tournament's retained load delta, which indexes its arrays by
+/// eligibility row and carries one winner per row — the escalation recorded on
+/// task #68 and stated in full at `finalize_load_rows`' charge.
+///
+/// **The two commits are not in question.** Commit 1 is bit-identical across
+/// both runs (trial 1, island 10 / component 5, objective_after
+/// 1.3264306640625005). Commit 2 lands on a different equally-valued island-4
+/// seat — candidate 1077 at (7.875, 8.9375, 24.0) under the replay, candidate
+/// 1075 at (7.875, 7.3125, 24.0) under the incremental — and both leave island
+/// 4 at 0.2666015625 mm².
+///
+/// **This fixture stays RED, and for exactly one reason: neither of the two
+/// defects below has been resolved.** Item 1 (cross-route credit) is task #68's
+/// own "Defect 1", which it records as separate and needing a design framing.
+/// Item 2's identity survives with its base moved, as the table above shows.
+/// Re-pinning the `expect` to a refusal would turn this fixture green over the
+/// defect it exists to report.
+///
+/// ---
+///
 /// **The step stream says exactly why, and it is neither reachability nor
 /// objective granularity.** Measured over all 190 trials, 2026-08-20:
 ///
@@ -1058,6 +1125,20 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 ///    island4_after = 0.9664306640625 - (own-route island-4 share, if the trial's contact routed)
 ///    ```
 ///
+///    **RE-PINNED 2026-08-21, task #68 contract (1).** The identity holds
+///    unchanged in shape; only its base moved, by exactly 1.3330078125 mm²:
+///
+///    ```text
+///    island4_after = 2.2994384765625 - (own-route island-4 share, if the trial's contact routed)
+///    ```
+///
+///    …over 179 of the 190 trials (100 at 2.2994384765625, 30 at 2.1328125,
+///    27 at 2.199462890625, 5 at 2.26611328125, 2 at 2.2327880859375, 1 at
+///    2.1661376953125, and 14 still at 0.9664306640625). The paragraph below
+///    reads against the 0.9664306640625 base it was written for; the sentence
+///    it makes — that this is arithmetic and not search — is what survived the
+///    re-pin, and the amendment above says why the base moved.
+///
 ///    That is: appending ANY repair row first destroys exactly the
 ///    0.6998291015625 mm² that commit 2 had bought — whether the row routes,
 ///    is quarantined, or is refused a winner, and wherever it sits, including
@@ -1073,6 +1154,12 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 ///    histogram is `{no_improvement: 187, stage_refusal: 1}` — clause 2
 ///    (non-regression) and clause 3 (uncensored area) rejected **nothing**, so
 ///    this is not an accept-clause calibration problem.
+///
+///    **RE-PINNED 2026-08-21:** `{no_improvement: 181, stage_refusal: 7}`.
+///    Six trials moved from "measured and not better" to "the stage refused
+///    them", which is the incremental append declining to place a row rather
+///    than placing it and measuring nothing. Clauses 2 and 3 still reject
+///    **nothing**, so the sentence this item makes is unchanged.
 ///
 /// **Island 5's own pool cannot rescue it either.** It reports
 /// `Blocked(PoolExhausted { pool_rows: 4, occupied: 3, ledgered: 1 })`: the
@@ -1105,8 +1192,10 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     // model still refuses.
     .expect(
         "FINDING 1: the stub's 0.36 mm² hole must CLOSE from a contact nominated for the \
-         censored dust patch beside it. Measured 2026-08-20: the run commits twice, never moves \
-         island 5 by a single sample, and refuses with NoImprovingRepair after 190 trials",
+         censored dust patch beside it. Measured 2026-08-20 and again 2026-08-21 with task #68 \
+         contract (1) landed: the run commits twice, never moves island 5 by a single sample, \
+         and refuses with NoImprovingRepair after 190 trials. Seven contacts still carry more \
+         than the area law allows one contact to carry; see the amendment above the test",
     );
 
     let steps = authority.repair_steps();
