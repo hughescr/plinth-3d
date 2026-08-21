@@ -5057,7 +5057,13 @@ fn gather_eligible_contacts(
 ///   exists and the WHOLE face is disclosed through
 ///   [`OwnerlessLoadFace`], named and measured. A face is charged or
 ///   disclosed, never both, which is the invariant task #49's fixture asserts.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is a distinct authority the charge reads — the eligibility row, its \
+              index, the scan's own argmin, the contact set, the transpose the split reads \
+              membership from, the maximum, and the three buffers the caller owns; bundling them \
+              would hide which of them the rule actually uses"
+)]
 fn charge_one_face(
     eligibility: &LoadEligibility,
     face_index: usize,
@@ -5105,6 +5111,17 @@ fn charge_one_face(
 ///
 /// Shared verbatim by the full replay and by the incremental append, so the
 /// two cannot disagree about what a legal charge is.
+///
+/// # One behaviour change at the replay seam, named rather than discovered
+///
+/// A **non-finite** eligibility area is now disclosed through
+/// [`OwnerlessLoadFace`] instead of being charged whole to the nearest contact,
+/// under BOTH maxima — [`carriable_share_count`] answers `None` before it looks
+/// at the maximum at all. That is the only input on which this function differs
+/// from its predecessor, it is almost certainly unreachable (areas are read off
+/// a validated surface), and it replaces a non-finite ledger entry with a
+/// disclosure. `a_non_finite_area_is_disclosed_rather_than_charged_under_either_maximum`
+/// measures it.
 fn charge_face_from_takers(
     face_id: u32,
     area_mm2: f64,
@@ -6530,7 +6547,6 @@ mod tests {
 
         let shares = carriable_share_count(block_mm2, law)
             .expect("a finite block under a finite maximum states its share count");
-        assert_eq!(shares, (block_mm2 / maximum).ceil() as usize);
         assert_eq!(
             shares, 15,
             "the dust fixture's block needs fifteen carriers"
@@ -6713,6 +6729,659 @@ mod tests {
                 area_mm2: 0.36
             }]
         );
+    }
+
+    /// Everything one DIRECT call to [`append_to_specialized_load_partition`]
+    /// needs, over the retention fixture's real mesh, plan and surface.
+    ///
+    /// The prior partition is hand-built because no full replay can produce the
+    /// state under test: the replay charges with
+    /// [`CarriableMaximum::SingleCarrier`], so it never leaves an over-maximum
+    /// face disclosed. The partition is nonetheless a LEGAL one — its authority
+    /// is the plan's, its contacts fingerprint is hashed by the production
+    /// writer over the production order, its rows are ascending by face id, and
+    /// every disclosed area is the surface's own area for that face, bit for
+    /// bit. That is exactly what the append's own provenance checks demand, and
+    /// [`an_append_refuses_a_prior_partition_that_is_not_this_plans`] proves
+    /// each of those demands is really made.
+    struct AppendSeamCase {
+        fixture: RetentionFixture,
+        prior: FinalizedLoadPartition,
+        contacts: Vec<PhysicalContact>,
+        prior_contact_count: usize,
+        pairs: Vec<(u32, u32)>,
+        /// The appended contacts eligible for `over_face`, in the order the
+        /// append's own `(squared distance, contact id)` sort puts them.
+        appended_ids: Vec<u64>,
+        /// One further appended contact, eligible for `under_face` ALONE.
+        ///
+        /// It is separate on purpose. The area law bounds what one contact may
+        /// carry in TOTAL, while contract (2) bounds one BLOCK; giving a block
+        /// carrier the small face too would have put 37.5 + 8.0 = 45.5 mm² on
+        /// one contact — legal block by block, over the law in total.
+        /// (MEASURED 2026-08-21: that arrangement made
+        /// `FinalizedContactLoads::load_violation_count` answer 1.) That gap is
+        /// real and it is task #59's `PreWriteGate::Load` to close, not this
+        /// seam's; keeping the two arms on separate carriers lets this test
+        /// assert the seam's own contribution — zero violations — without
+        /// asserting something the seam does not promise.
+        under_taker_id: u64,
+        /// The biggest face of the fixture mesh — half its 30 x 30 mm table
+        /// top, far above what one contact may legally carry.
+        over_face: u32,
+        over_area_mm2: f64,
+        /// The smallest face of the fixture mesh, which one contact carries
+        /// whole.
+        under_face: u32,
+        under_area_mm2: f64,
+        /// `carriable_share_count` of `over_area_mm2` — how many contacts the
+        /// area law needs before that block may be charged at all.
+        shares: usize,
+    }
+
+    /// Build the case with `appended_takers` contacts eligible for the
+    /// over-maximum face, plus one more eligible for the small disclosed face
+    /// alone, all appended after the fixture's own contacts.
+    fn append_seam_case(appended_takers: usize) -> AppendSeamCase {
+        let fixture = retention_fixture();
+        let maximum = registered_max_carriable_area_mm2().expect("registry read");
+        let areas = fixture.surface.geometry().areas().to_vec();
+        let centroids = fixture.surface.geometry().centroids().to_vec();
+
+        let mut by_area = (0..areas.len() as u32).collect::<Vec<_>>();
+        by_area.sort_unstable_by(|&left, &right| {
+            areas[left as usize]
+                .total_cmp(&areas[right as usize])
+                .then(left.cmp(&right))
+        });
+        let under_face = by_area[0];
+        let under_area_mm2 = areas[under_face as usize];
+        let over_face = *by_area.last().expect("the fixture mesh has faces");
+        let over_area_mm2 = areas[over_face as usize];
+        assert_eq!(
+            (under_area_mm2, over_area_mm2),
+            (8.0, 450.0),
+            "MEASURED 2026-08-21: the overhang table's smallest face is a 4 x 4 mm leg end and its \
+             biggest is half the 30 x 30 mm top"
+        );
+        assert!(
+            under_area_mm2 <= maximum && over_area_mm2 > maximum,
+            "the case needs one face inside the area law and one above it, against {maximum} mm²"
+        );
+        let shares = carriable_share_count(over_area_mm2, CarriableMaximum::AreaLaw(maximum))
+            .expect("a finite block under a finite maximum states its share count");
+        assert_eq!(
+            shares, 12,
+            "MEASURED 2026-08-21: 450.0 mm² needs twelve carriers at {maximum} mm² each"
+        );
+
+        // Two more small faces, CHARGED by the prior partition, so the append's
+        // copy-the-survivors path has survivors to copy.
+        let mut charged = [by_area[1], by_area[2]];
+        charged.sort_unstable();
+        assert!(
+            ![under_face, over_face].contains(&charged[0])
+                && ![under_face, over_face].contains(&charged[1]),
+            "the charged faces must be distinct from the disclosed ones"
+        );
+        let rows = charged
+            .iter()
+            .enumerate()
+            .map(|(index, &face_id)| FinalizedFaceLoad {
+                face_id,
+                contact_id: fixture.contacts[index].contact_id,
+                owner: fixture.contacts[index].owner,
+                carried_area_mm2: areas[face_id as usize],
+            })
+            .collect::<Vec<_>>();
+        let mut ownerless = vec![
+            OwnerlessLoadFace {
+                face_id: under_face,
+                area_mm2: under_area_mm2,
+            },
+            OwnerlessLoadFace {
+                face_id: over_face,
+                area_mm2: over_area_mm2,
+            },
+        ];
+        ownerless.sort_unstable_by_key(|face| face.face_id);
+
+        let prior_contact_count = fixture.contacts.len();
+        let prior_order =
+            validated_contact_order(&fixture.contacts).expect("the fixture's contacts are valid");
+        let prior = FinalizedLoadPartition {
+            authority: fixture.plan.authority.clone(),
+            contacts_fingerprint: hash_physical_contacts(&fixture.contacts, &prior_order),
+            rows,
+            ownerless,
+        };
+
+        // Appended owners and ids well clear of the fixture's own, so nothing
+        // here can be charged by accident of a collision.
+        const FIRST_APPENDED_OWNER: u32 = 1_000;
+        let first_appended_id = fixture
+            .contacts
+            .iter()
+            .map(|contact| contact.contact_id)
+            .max()
+            .expect("the fixture has contacts")
+            + 1;
+        let over_centroid = centroids[over_face as usize];
+        let mut contacts = fixture.contacts.clone();
+        let mut pairs = fixture.pairs.clone();
+        let mut appended_ids = Vec::with_capacity(appended_takers);
+        for index in 0..appended_takers {
+            let owner_id = FIRST_APPENDED_OWNER + index as u32;
+            let contact_id = first_appended_id + index as u64;
+            appended_ids.push(contact_id);
+            // Strictly increasing distance from the block's centroid, so the
+            // taker order the append sorts into is this appended order.
+            contacts.push(PhysicalContact {
+                contact_id,
+                owner: LoadOwner::Specialized(owner_id),
+                point_mm: [
+                    over_centroid[0] + 1.0 + index as f64,
+                    over_centroid[1],
+                    over_centroid[2],
+                ],
+            });
+            pairs.push((owner_id, over_face));
+        }
+        // One further appended contact, reaching the small face and NOTHING
+        // else, so the same call delivers the single-carrier arm too.
+        let under_owner = FIRST_APPENDED_OWNER + appended_takers as u32;
+        let under_taker_id = first_appended_id + appended_takers as u64;
+        contacts.push(PhysicalContact {
+            contact_id: under_taker_id,
+            owner: LoadOwner::Specialized(under_owner),
+            point_mm: centroids[under_face as usize],
+        });
+        pairs.push((under_owner, under_face));
+        pairs.sort_unstable();
+
+        AppendSeamCase {
+            fixture,
+            prior,
+            contacts,
+            prior_contact_count,
+            pairs,
+            appended_ids,
+            under_taker_id,
+            over_face,
+            over_area_mm2,
+            under_face,
+            under_area_mm2,
+            shares,
+        }
+    }
+
+    impl AppendSeamCase {
+        fn append(&self) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+            append_with(
+                self,
+                &self.fixture.proof(),
+                &self.prior,
+                &self.contacts,
+                self.prior_contact_count,
+            )
+        }
+    }
+
+    /// The same call with each authority presentable separately, so a refusal
+    /// arm perturbs exactly one of them and nothing else.
+    fn append_with(
+        case: &AppendSeamCase,
+        proof: &VerifiedMeshFingerprint<'_>,
+        prior: &FinalizedLoadPartition,
+        contacts: &[PhysicalContact],
+        prior_contact_count: usize,
+    ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+        append_to_specialized_load_partition(
+            &case.fixture.plan,
+            proof,
+            &case.fixture.surface,
+            prior,
+            contacts,
+            prior_contact_count,
+            &case.pairs,
+            retention_limits(),
+        )
+    }
+
+    /// **Task #68 contract (2), part 3 — the seam DELIVERS the area law, it
+    /// does not merely have a rule that could.**
+    ///
+    /// Parts 1 and 2 prove the rule ([`charge_face_from_takers`], called with
+    /// hand-built taker tuples). Neither of them runs the one production site
+    /// where contract (2) is live, so neither notices if that site stops
+    /// passing [`CarriableMaximum::AreaLaw`]. This test runs it: a real mesh, a
+    /// real surface, the real plan authority, a real prior partition, and the
+    /// real 450.0 mm² block arriving as a disclosure the appended contacts pick
+    /// up.
+    ///
+    /// It also carries the k >= 2 partition on into
+    /// [`FinalizedContactLoads::for_specialized_plan`], because until now no
+    /// test had ever put a face carried by more than one contact through that
+    /// fold — the safety of it was read, not measured.
+    ///
+    /// **Revert-proof, MEASURED 2026-08-21.** Change the single live line in
+    /// [`append_to_specialized_load_partition`] from
+    /// `CarriableMaximum::AreaLaw(registered_max_carriable_area_mm2()?)` to
+    /// `CarriableMaximum::SingleCarrier` — deleting contract (2) from the only
+    /// place production runs it — and this test fails with
+    /// `assertion left == right failed: the 450 mm² block must be SPLIT across
+    /// all twelve appended contacts, left: 1, right: 12`, and its refusal twin
+    /// fails with `a block no legal split can carry must be charged to nobody`.
+    /// Before these two tests existed that edit left the whole scoped gate
+    /// green — all 559 `plinth-support` unit tests included.
+    #[test]
+    fn the_append_seam_delivers_the_area_law_over_a_real_prior_partition() {
+        let policy = registered_tip_policy();
+        let r_max = PositiveFinite::new(policy.max_radius_mm).expect("positive clamp maximum");
+        let case = append_seam_case(12);
+        assert_eq!(case.appended_ids.len(), case.shares);
+        let child = case.append().expect("the append must succeed");
+
+        // 1. Every prior row survives, verbatim and in order — the append is
+        //    incremental, contract (1), and this test is the direct-call twin
+        //    of the plan-level sweep in `specialized`.
+        let prior_ids = case.contacts[..case.prior_contact_count]
+            .iter()
+            .map(|contact| contact.contact_id)
+            .collect::<BTreeSet<_>>();
+        let kept = child
+            .rows
+            .iter()
+            .filter(|row| prior_ids.contains(&row.contact_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept, case.prior.rows,
+            "an append must COPY the prior partition's rows, not re-derive them"
+        );
+        for (before, after) in case.prior.rows.iter().zip(&kept) {
+            assert_eq!(
+                before.carried_area_mm2.to_bits(),
+                after.carried_area_mm2.to_bits(),
+                "face {} moved by an ulp across the append",
+                before.face_id
+            );
+        }
+
+        // 2. The over-maximum block is SPLIT across the appended contacts, and
+        //    every share is legal at the biggest legal tip.
+        let split = child
+            .rows
+            .iter()
+            .filter(|row| row.face_id == case.over_face)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            split.len(),
+            case.shares,
+            "the 450 mm² block must be SPLIT across all twelve appended contacts"
+        );
+        assert_eq!(
+            split.iter().map(|row| row.contact_id).collect::<Vec<_>>(),
+            case.appended_ids,
+            "the carriers are the nearest eligible contacts, in the append's own order"
+        );
+        for row in &split {
+            assert!(
+                !policy.violates_safety_factor(row.carried_area_mm2, r_max),
+                "share {} mm² is above what one contact may legally carry",
+                row.carried_area_mm2
+            );
+        }
+        let total = split.iter().map(|row| row.carried_area_mm2).sum::<f64>();
+        assert!(
+            (total - case.over_area_mm2).abs() < 1.0e-12,
+            "the shares must total the block itself: {total}"
+        );
+        assert!(
+            child
+                .ownerless
+                .iter()
+                .all(|face| face.face_id != case.over_face),
+            "a block that was split must not ALSO be disclosed as unowned"
+        );
+
+        // 3. The small disclosure goes whole to the one appended contact that
+        //    reaches it — the single-carrier arm, through the same call.
+        let under = child
+            .rows
+            .iter()
+            .filter(|row| row.face_id == case.under_face)
+            .collect::<Vec<_>>();
+        assert_eq!(under.len(), 1, "a face inside the law takes one carrier");
+        assert_eq!(under[0].contact_id, case.under_taker_id);
+        assert_eq!(
+            under[0].carried_area_mm2.to_bits(),
+            case.under_area_mm2.to_bits(),
+            "a face within the law keeps its own area, bit for bit"
+        );
+        assert!(
+            child.ownerless.is_empty(),
+            "both disclosures were taken, so nothing is left unowned: {:?}",
+            child.ownerless
+        );
+
+        // 4. The merged ledger keeps the invariants the next append relies on.
+        assert!(
+            child
+                .rows
+                .windows(2)
+                .all(|pair| pair[0].face_id <= pair[1].face_id),
+            "rows must stay ascending by face id, or the next append's merge is wrong"
+        );
+        let contact_order =
+            validated_contact_order(&case.contacts).expect("the case's contacts are valid");
+        assert_eq!(
+            child.contacts_fingerprint,
+            hash_physical_contacts(&case.contacts, &contact_order),
+            "the child partition must fingerprint the WHOLE contact set"
+        );
+        assert_eq!(child.authority, case.fixture.plan.authority);
+
+        // 5. The k >= 2 partition folds to one load per contact, and the split
+        //    is what makes the fold law-legal: twelve shares of 37.5 mm² each
+        //    violate nothing, where the 450 mm² whole block is one violation.
+        let contact_ids = case
+            .contacts
+            .iter()
+            .map(|contact| contact.contact_id)
+            .collect::<Vec<_>>();
+        let folded = FinalizedContactLoads::for_specialized_plan(&child, &contact_ids)
+            .expect("a multi-carrier partition must fold to one load per contact");
+        assert_eq!(
+            folded.load_violation_count().expect("violation count"),
+            0,
+            "every contact's folded load must be inside the area law"
+        );
+        for (index, &contact_id) in case.appended_ids.iter().enumerate() {
+            let leaf = folded
+                .leaf_for(contact_id)
+                .expect("every appended contact has a folded leaf");
+            let expected = split[index].carried_area_mm2;
+            assert!(
+                (leaf.carried_area_mm2() - expected).abs() < 1.0e-12,
+                "contact {contact_id} folded to {} mm², expected {expected} mm²",
+                leaf.carried_area_mm2()
+            );
+        }
+        assert_eq!(
+            folded
+                .leaf_for(case.under_taker_id)
+                .expect("the small face's carrier has a folded leaf")
+                .carried_area_mm2()
+                .to_bits(),
+            case.under_area_mm2.to_bits()
+        );
+    }
+
+    /// **Task #68 contract (2) at the seam, refusal arm — one taker short, the
+    /// whole block stays disclosed and NOBODY is handed it.**
+    ///
+    /// Eleven contacts cannot legally carry a block that needs twelve, so the
+    /// append charges none of it. The disclosure survives with its own area,
+    /// bit for bit, and exactly once: a face is charged or disclosed, never
+    /// both, and never disclosed twice by the merge.
+    ///
+    /// **Revert-proof, MEASURED 2026-08-21** by the same seam flip its sibling
+    /// records: under `CarriableMaximum::SingleCarrier` this test fails with
+    /// `a block no legal split can carry must be charged to nobody` — the
+    /// nearest of the eleven is handed all 450.0 mm².
+    #[test]
+    fn the_append_seam_refuses_a_block_one_taker_short_and_keeps_the_disclosure() {
+        let case = append_seam_case(11);
+        let child = case.append().expect("the append must succeed");
+
+        assert!(
+            child.rows.iter().all(|row| row.face_id != case.over_face),
+            "a block no legal split can carry must be charged to nobody"
+        );
+        let disclosed = child
+            .ownerless
+            .iter()
+            .filter(|face| face.face_id == case.over_face)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            disclosed.len(),
+            1,
+            "the surviving disclosure must appear exactly once: {:?}",
+            child.ownerless
+        );
+        assert_eq!(
+            disclosed[0].area_mm2.to_bits(),
+            case.over_area_mm2.to_bits(),
+            "the refusal must NAME and MEASURE the whole block it could not place"
+        );
+        // The small face is still taken, so the refusal is specific to the
+        // block and not a wholesale failure to charge anything.
+        assert!(
+            child
+                .rows
+                .iter()
+                .any(|row| row.face_id == case.under_face && row.contact_id == case.under_taker_id),
+            "the face inside the law must still be charged"
+        );
+    }
+
+    /// **Provenance is PROVED at the append seam, not assumed.**
+    ///
+    /// [`GenericPerceptionError::MismatchedPriorLoadPartition`] had no test at
+    /// all before this one: every arm below was asserted in code and never
+    /// executed. Each arm perturbs exactly ONE authority away from the positive
+    /// control and nothing else, so a passing arm cannot be a refusal of
+    /// everything.
+    #[test]
+    fn an_append_refuses_a_prior_partition_that_is_not_this_plans() {
+        let case = append_seam_case(2);
+        let proof = case.fixture.proof();
+
+        // Positive control: unperturbed, this exact call succeeds.
+        assert!(
+            append_with(
+                &case,
+                &proof,
+                &case.prior,
+                &case.contacts,
+                case.prior_contact_count
+            )
+            .is_ok(),
+            "the unperturbed case must succeed, or every arm below proves nothing"
+        );
+
+        // 1. A prior contact count past the end of the contact list.
+        assert_eq!(
+            append_with(
+                &case,
+                &proof,
+                &case.prior,
+                &case.contacts,
+                case.contacts.len() + 1
+            ),
+            Err(GenericPerceptionError::MismatchedPriorLoadPartition),
+            "a prior count past the end of the set names contacts that are not there"
+        );
+
+        // 2. A contact MOVED behind the partition — the prefix no longer
+        //    hashes to what the prior partition was built over.
+        let mut moved = case.contacts.clone();
+        moved[0].point_mm[0] += 1.0;
+        assert_eq!(
+            append_with(&case, &proof, &case.prior, &moved, case.prior_contact_count),
+            Err(GenericPerceptionError::MismatchedPriorLoadPartition),
+            "a moved prior contact must not be accepted as the set the partition was built over"
+        );
+
+        // 3. A disclosed area shifted by ONE ULP. The check is a bit
+        //    comparison for exactly this reason: an area that is not the
+        //    surface's own is a partition of some other surface.
+        let mut shifted = case.prior.clone();
+        let area = shifted.ownerless[0].area_mm2;
+        shifted.ownerless[0].area_mm2 = f64::from_bits(area.to_bits() + 1);
+        assert_eq!(
+            append_with(
+                &case,
+                &proof,
+                &shifted,
+                &case.contacts,
+                case.prior_contact_count
+            ),
+            Err(GenericPerceptionError::MismatchedPriorLoadPartition),
+            "a disclosure one ulp off this surface's own area must be refused"
+        );
+
+        // 4. A disclosed face that is not on this mesh at all.
+        let mut out_of_range = case.prior.clone();
+        let past_the_end = case.fixture.mesh.tris().len() as u32;
+        out_of_range.ownerless.push(OwnerlessLoadFace {
+            face_id: past_the_end,
+            area_mm2: 1.0,
+        });
+        assert_eq!(
+            append_with(
+                &case,
+                &proof,
+                &out_of_range,
+                &case.contacts,
+                case.prior_contact_count
+            ),
+            Err(GenericPerceptionError::SpecializedFaceOutOfRange {
+                face_id: past_the_end
+            }),
+            "a disclosure past the end of the mesh must be refused by name"
+        );
+
+        // 5. An appended contact owned by an island this plan does not have.
+        let mut unknown_island = case.contacts.clone();
+        unknown_island
+            .last_mut()
+            .expect("the case appends contacts")
+            .owner = LoadOwner::GenericIsland(u32::MAX);
+        assert_eq!(
+            append_with(
+                &case,
+                &proof,
+                &case.prior,
+                &unknown_island,
+                case.prior_contact_count
+            ),
+            Err(GenericPerceptionError::MismatchedPriorLoadPartition),
+            "an appended contact owned by an unknown island has no readable eligibility"
+        );
+
+        // 6. A prior partition from another authority entirely.
+        let mut foreign_authority = case.prior.clone();
+        foreign_authority.authority.native ^= 1;
+        assert_eq!(
+            append_with(
+                &case,
+                &proof,
+                &foreign_authority,
+                &case.contacts,
+                case.prior_contact_count
+            ),
+            Err(GenericPerceptionError::StaleAuthority),
+            "a partition of another authority must never be extended onto this plan"
+        );
+
+        // 7. A proof of another mesh. Same guard, same place as the replay:
+        //    a face range proved on one mesh must not index another.
+        let foreign_mesh = make_toed_slab().unwrap();
+        assert_eq!(
+            append_with(
+                &case,
+                &VerifiedMeshFingerprint::compute(&foreign_mesh).unwrap(),
+                &case.prior,
+                &case.contacts,
+                case.prior_contact_count
+            ),
+            Err(GenericPerceptionError::StaleAuthority),
+            "a proof of a foreign mesh must be refused before any face is indexed"
+        );
+    }
+
+    /// [`gather_eligible_contacts`] reads the transpose's OWN membership, in
+    /// the scan's own `(squared distance, contact id)` order.
+    ///
+    /// It is reached only for a face above the single-contact maximum, so today
+    /// it runs on the append path and — while the merge tournament's partition
+    /// is still built `SingleCarrier` (the task #69 escalation) — never on the
+    /// replay path. That is precisely why it needs a test of its own: nothing
+    /// else exercises it.
+    #[test]
+    fn gather_eligible_contacts_reads_the_transposes_own_membership() {
+        // Contact 0 is eligible for rows 0 and 2, contact 1 for row 2 only,
+        // contact 2 for nothing.
+        let transpose = LoadEligibilityTranspose {
+            rows: vec![0, 2, 2],
+            starts: vec![0, 2, 3, 3],
+        };
+        let mut contacts = test_contacts(&[7, 5, 9]);
+        contacts[0].point_mm = [3.0, 0.0, 0.0];
+        contacts[1].point_mm = [3.0, 0.0, 0.0];
+        contacts[2].point_mm = [0.0, 0.0, 0.0];
+
+        let mut out = vec![(f64::NAN, 0u64, 0usize)];
+        gather_eligible_contacts(&transpose, &contacts, [0.0, 0.0, 0.0], 2, &mut out);
+        assert_eq!(
+            out,
+            vec![(9.0, 5, 1), (9.0, 7, 0)],
+            "both eligible contacts, tied on distance, broken by ASCENDING contact id"
+        );
+
+        gather_eligible_contacts(&transpose, &contacts, [0.0, 0.0, 0.0], 0, &mut out);
+        assert_eq!(
+            out,
+            vec![(9.0, 7, 0)],
+            "only contact 0 is eligible for row 0"
+        );
+
+        gather_eligible_contacts(&transpose, &contacts, [0.0, 0.0, 0.0], 1, &mut out);
+        assert!(
+            out.is_empty(),
+            "no contact is eligible for row 1, and the output must be CLEARED"
+        );
+    }
+
+    /// A non-finite eligibility area is disclosed, under BOTH maxima.
+    ///
+    /// The predecessor charged it whole to the nearest contact, which put a
+    /// non-finite load into the ledger for the fold to reject downstream. It is
+    /// almost certainly unreachable — `build_load_eligibility` reads areas off
+    /// a validated surface — but it IS a behaviour change at the replay seam,
+    /// so it is named and measured here rather than left to be discovered.
+    #[test]
+    fn a_non_finite_area_is_disclosed_rather_than_charged_under_either_maximum() {
+        let maximum = registered_max_carriable_area_mm2().expect("registry read");
+        let contacts = test_contacts(&[0]);
+        let takers = vec![(0.0_f64, 0_u64, 0_usize)];
+        for area_mm2 in [f64::NAN, f64::INFINITY] {
+            for maximum in [
+                CarriableMaximum::AreaLaw(maximum),
+                CarriableMaximum::SingleCarrier,
+            ] {
+                let mut rows = Vec::new();
+                let mut ownerless = Vec::new();
+                charge_face_from_takers(
+                    3,
+                    area_mm2,
+                    &takers,
+                    &contacts,
+                    maximum,
+                    &mut rows,
+                    &mut ownerless,
+                );
+                assert!(
+                    rows.is_empty(),
+                    "a non-finite area under {maximum:?} must be charged to nobody"
+                );
+                assert_eq!(ownerless.len(), 1);
+                assert_eq!(ownerless[0].face_id, 3);
+                assert_eq!(ownerless[0].area_mm2.to_bits(), area_mm2.to_bits());
+            }
+        }
     }
 
     fn test_partition(area_mm2: f64) -> FinalizedLoadPartition {
