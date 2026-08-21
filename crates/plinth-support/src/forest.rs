@@ -926,8 +926,104 @@ impl Forest {
         Ok(())
     }
 
+    /// Quarantines each named member **together with everything that hangs off
+    /// it**, deepest child first, and returns every member actually condemned
+    /// in the order it was condemned.
+    ///
+    /// **Why this exists, and why it is not a weakening of
+    /// [`Forest::quarantine`]'s childless rule.** `quarantine` refuses a member
+    /// with live tree children for the same reason [`Forest::retire`] does: the
+    /// arena cannot re-anchor a child, because choosing between extending it,
+    /// splicing it onto its grandparent and condemning the subtree is a
+    /// geometric decision belonging to the caller who owns the plate frame.
+    /// This entry point is a caller making the third choice — *retire the
+    /// subtree* — explicitly, by name, at the arena's own leaf-first order. The
+    /// childless rule is untouched: every individual quarantine this performs
+    /// sees a member with no live children, because the descendants went first.
+    ///
+    /// **The second choice is not available to a model-seated arm, which is
+    /// what forces the third.** `cco::apply_model_anchor` mints the arm as a
+    /// ROOT (nothing ever sets its parent — its rootward end is seated on the
+    /// model, not on the plate) and re-parents the contact stub onto it. So the
+    /// grandparent a splice would need does not exist, and `set_parent(stub,
+    /// None)` is exactly the promotion-to-root that `retire`'s doc names as
+    /// "the one reachable path to shipping a floating support member". Cascading
+    /// is the only option the invariants leave.
+    ///
+    /// **The load argument, which is the physical one.** A condemned carrier
+    /// takes its dependants' only route to ground with it. Every member of the
+    /// subtree below a condemned member has no closed load path afterwards, so
+    /// shipping it would ship a support that holds its tip up with nothing
+    /// underneath. Condemning it is not collateral damage; it is the same
+    /// verdict, propagated to the members the verdict applies to.
+    ///
+    /// **All-or-nothing.** Every member in the union is validated active before
+    /// any state changes, so a refused sweep leaves the topology and the
+    /// terminal ledger exactly as it found them — the same property `retire`
+    /// keeps. Keys that name a member already inside another named member's
+    /// subtree are swept once, not twice, so an overlapping batch is legal.
+    ///
+    /// **Disclosure rides the records that already exist.** A cascaded member
+    /// gets an ordinary [`QuarantineRecord`], so it appears in
+    /// [`ForestReport::quarantined`] and — when it is a contact stub —
+    /// in [`Forest::terminal_quarantine`], which is what SPEC §6's removal and
+    /// the noncoverage `quarantined` component already read. No new reporting
+    /// channel is introduced and no digest gains a field: the forest digest
+    /// moves because the members left the live view, which is the honest signal.
+    pub fn quarantine_subtrees(
+        &mut self,
+        keys: &[MemberKey],
+    ) -> Result<Vec<MemberKey>, ForestError> {
+        let mut order = Vec::new();
+        let mut seen = BTreeSet::new();
+        for key in keys {
+            if seen.contains(key) {
+                continue;
+            }
+            self.require_active(*key)?;
+            self.collect_subtree_leaf_first(*key, &mut seen, &mut order)?;
+        }
+        // Validate the whole union before touching any state: a sweep that
+        // refuses halfway would leave a forest neither caller could reason
+        // about.
+        for key in &order {
+            self.require_active(*key)?;
+        }
+        for key in &order {
+            self.quarantine(*key)?;
+        }
+        Ok(order)
+    }
+
+    /// Post-order walk of `key`'s live subtree, pushing each member after its
+    /// own children so every entry is childless by the time it is quarantined.
+    ///
+    /// The forest is a tree — [`Forest::set_parent`] refuses a cycle — so the
+    /// walk terminates; `seen` is the union bookkeeping across sibling roots in
+    /// one batch, not a cycle guard.
+    fn collect_subtree_leaf_first(
+        &self,
+        key: MemberKey,
+        seen: &mut BTreeSet<MemberKey>,
+        order: &mut Vec<MemberKey>,
+    ) -> Result<(), ForestError> {
+        if !seen.insert(key) {
+            return Ok(());
+        }
+        for child in self.children_of(key) {
+            self.collect_subtree_leaf_first(child, seen, order)?;
+        }
+        order.push(key);
+        Ok(())
+    }
+
     /// Quarantines a terminal stub: it remains recorded as condemned but is
     /// structurally absent from all live tree and emission views.
+    ///
+    /// **Refuses a member with live tree children.** Use
+    /// [`Forest::quarantine_subtrees`] when the caller's verdict is meant to
+    /// carry to the dependants too; that entry point states the choice rather
+    /// than making it silently here.
     pub fn quarantine(&mut self, key: MemberKey) -> Result<(), ForestError> {
         self.require_active(key)?;
         if !self.children_of(key).is_empty() {

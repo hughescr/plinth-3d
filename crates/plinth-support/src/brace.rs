@@ -494,9 +494,33 @@ pub(crate) fn brace_fixed_point_current_parity(
             // that is inside the model at pass 1 may be resized out of it at
             // pass 2, so removing it early would delete a support the
             // controller was about to fix.
-            for key in &negative.contact_refusals {
-                working.quarantine(*key)?;
-            }
+            //
+            // OD-4, and the Giant Bat's hard failure. A refused member may be a
+            // CARRIER, not a leaf: `cco::apply_model_anchor` mints the seated
+            // arm as a root and re-parents the contact stub onto it, so every
+            // placed model-seated arm has a child by construction. A per-member
+            // `quarantine` therefore refused it — `Forest(QuarantineHasChildren)`
+            // — and that refusal travelled out of here as a hard pipeline
+            // failure, which is exactly what OD-4 forbids: "a refused
+            // genuine-contact stub routes to the existing quarantine, never a
+            // hard pipeline failure".
+            //
+            // The sweep is the honest reading of the verdict rather than a way
+            // around the arena's rule. A condemned carrier takes its dependants'
+            // only route to ground with it: the arm is a root, so its stub has
+            // no grandparent to be spliced onto, and detaching the stub is the
+            // promote-to-root move `Forest::retire` names as the one reachable
+            // path to shipping a floating member. Every member below a condemned
+            // one has no closed load path afterwards, so the same verdict
+            // applies to it, and `quarantine_subtrees` records each one with an
+            // ordinary quarantine record — which is what SPEC §6's removal and
+            // the `quarantined` noncoverage component already read.
+            //
+            // Batched, and deliberately so: the sweep resolves overlapping
+            // subtrees once (a refused stub that is itself the child of a
+            // refused arm is condemned once, not twice, and does not become an
+            // `InactiveKey` error on the second visit).
+            working.quarantine_subtrees(&negative.contact_refusals)?;
             return Ok(BraceFixedPointPlan {
                 forest: working,
                 additions,
@@ -2819,6 +2843,135 @@ mod tests {
             "the contact-declaring member"
         );
         assert!(!negatives.contact_refusals.contains(&plain));
+    }
+
+    /// **OD-4, and the Giant Bat's hard failure, in the shape that caused it.**
+    ///
+    /// MEASURED at `e9e160f`, release binary, dense orient: `Giant Bat.stl`
+    /// died at `Brace(Forest(QuarantineHasChildren))` on BOTH the drilled shell
+    /// and the substituted oriented solid, 75.77 s wall, `emitted=0 failed=1`.
+    /// The topology behind it is the one built below, and it is not an unusual
+    /// one: `cco::apply_model_anchor` mints the seated arm as a ROOT and
+    /// re-parents the contact stub onto it, so **every** placed model-seated
+    /// arm has a child by construction. Refusing that arm's contact therefore
+    /// hit `Forest::quarantine`'s childless rule every single time.
+    ///
+    /// The fixture is deliberately built from the two ends the production path
+    /// builds: a `Strut` declaring a `Rootward` contact whose rootward end sits
+    /// deep inside the model (so its exact clearance is genuinely negative),
+    /// and a registered, consumed contact `Stub` parented onto it and sitting
+    /// clear of the model (so it is not itself a refusal and the cascade is
+    /// what condemns it).
+    #[test]
+    fn a_refused_model_seated_arm_condemns_its_stub_instead_of_failing_the_run() {
+        let surface = remote_box();
+        let mut forest = Forest::new();
+
+        // The stub: clear of the box (which spans 100..110), so it contributes
+        // no negative clearance of its own. Terminal 7, registered and then
+        // consumed, exactly as growth leaves it before the CCO re-parents it.
+        let stub_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([105.0, 105.0, 114.0]).unwrap(),
+            p1_mm: finite3([105.0, 105.0, 112.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.register_terminal(7, stub_key).unwrap();
+        forest.consume_terminal(7, stub_key).unwrap();
+
+        // The seated arm: terminalward end at the stub's rootward end, rootward
+        // end buried at the box centre. This is the member the exact pass
+        // refuses.
+        let arm_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([105.0, 105.0, 112.0]).unwrap(),
+            p1_mm: finite3([105.0, 105.0, 105.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "brace-test".into(),
+                ordinal: 1,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_parent(stub_key, Some(arm_key)).unwrap();
+
+        // NON-VACUITY 1 — the arm really is the refused member, and the stub
+        // really is not. Without this the test could pass on an empty set.
+        let config = BraceConfig::current(0.05).unwrap();
+        let negatives =
+            exact_clearance_negatives(&forest, &surface, &config, test_penetration_limits())
+                .unwrap();
+        assert_eq!(
+            negatives.contact_refusals,
+            vec![arm_key],
+            "the seated arm must be the contact refusal this fixture is about"
+        );
+        assert_eq!(
+            negatives.pipeline_violations, 0,
+            "nothing here may be an unrefusable violation, or the run fails for a different reason"
+        );
+
+        // NON-VACUITY 2 — the arm has the child that used to make this fatal.
+        assert_eq!(
+            forest.children_of(arm_key),
+            vec![stub_key],
+            "the fixture must reproduce the parent/child pair, not a lone arm"
+        );
+
+        // REVERT PROOF — the arena's childless rule is UNCHANGED. If a future
+        // edit "fixes" the Bat by deleting that rule instead of cascading, this
+        // goes red, because the fix would then be a weakening of the invariant
+        // that stops a promoted child shipping as a floating support member.
+        assert_eq!(
+            forest.clone().quarantine(arm_key),
+            Err(ForestError::QuarantineHasChildren),
+            "the per-member quarantine must still refuse a carrier"
+        );
+
+        // THE BAR — the controller returns a named outcome, not an error.
+        let plan = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+        )
+        .expect(
+            "OD-4: a refused genuine-contact member routes to quarantine, never a hard failure",
+        );
+        assert_eq!(plan.termination, BraceFixedPointTermination::ContactRefused);
+        assert_eq!(plan.contact_refusals, vec![arm_key]);
+
+        // The verdict reached BOTH members, because a condemned carrier takes
+        // its dependant's only route to ground with it.
+        assert!(
+            plan.forest.member(arm_key).is_none() && plan.forest.member(stub_key).is_none(),
+            "neither the refused arm nor the stub it carried may remain live"
+        );
+        assert!(
+            plan.forest.quarantine_record(arm_key).is_some(),
+            "the refused arm is condemned, not merely retired"
+        );
+        let stub_record = plan
+            .forest
+            .quarantine_record(stub_key)
+            .expect("the cascaded stub carries an ordinary quarantine record");
+        assert_eq!(
+            stub_record.terminal_contacts,
+            vec![7],
+            "the record must name the terminal, which is how SPEC §6's removal finds it"
+        );
+        assert!(
+            plan.forest.terminal_quarantine(7).is_some(),
+            "the terminal's own lookup must resolve, or the `quarantined` noncoverage \
+             component would report this contact as merely unrouted"
+        );
     }
 
     #[test]
