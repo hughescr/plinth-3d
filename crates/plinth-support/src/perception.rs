@@ -4650,6 +4650,26 @@ fn hash_physical_contacts(contacts: &[PhysicalContact], ascending_order: &[usize
 /// appended contacts take; [`charge_face_from_takers`] is literally the same
 /// function the full replay calls.
 ///
+/// # What this costs, MEASURED 2026-08-21 — say it here rather than find it later
+///
+/// On a model whose every eligibility face is already carried, an appended
+/// contact takes **nothing**: 60 of 60 appends on the overhang table and 60 of
+/// 60 on the thin fin produced an appended contact with
+/// `carried_area_mm2 == 0.0`, exactly. That is what "only the load it newly
+/// takes" MEANS when nothing is going spare, and it is conservative for every
+/// incumbent — but it hands PR-4's area law a zero load for the new contact,
+/// so every interface is trivially sufficient and the tip is sized at the
+/// registered minimum (0.05 mm RADIUS, 0.1 mm DIAMETER). That is the condition
+/// `contact_regression_gate`'s MAJOR-7 entry names.
+///
+/// It is the SAME missing capability that stops contract (2) at the replay
+/// seam: this ledger cannot say **a face is carried by more than one contact**.
+/// Give it that and both follow at once — an over-block splits across the
+/// contacts that really hold it, and an appended contact takes its honest
+/// share of a face its neighbour is already carrying instead of taking zero.
+/// Until then the appended contact is a coverage contact that the load law
+/// grades against nothing, and this paragraph is the disclosure.
+///
 /// # Refusals
 ///
 /// The prior partition must belong to this plan and must have been built over
