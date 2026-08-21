@@ -48,8 +48,11 @@ the mask is derived at the batch site.
 
 §1.3's table gives the terminalward honest exemption as
 `(0.3 + r + 0.6 + MARGIN)/|cos|` — i.e. with `h = contact_depth_mm`. **That is not what
-landed.** `contact::seating_of` returns `OnSurface` for every `Terminalward` contact, so
-the mask is `(r_max + 0.6 + MARGIN)/|cos|`.
+landed.** `contact::seating_of` returns `OnSurface` for a `Terminalward` contact on every
+family except the brace model rung (which `seat_endpoint` genuinely seats at either end
+and which never mints a terminalward contact in production), so for the initial contact
+stub — the only production terminalward declarer — the mask is
+`(r_max + 0.6 + MARGIN)/|cos|`.
 
 **Why.** The `h` term must equal the endpoint's ACTUAL depth below the tangent plane. For
 the two seated families that depth is `contact::seat_depth_mm` by construction, because
@@ -187,32 +190,68 @@ nub BY NAME. The class dies; the real arms live.
 Piece B in place and Piece A's seat suppressed still reads `Converged`; the cause is the
 mask, not the seating.
 
-### C3. STOP AND REPORT — `make_overhang_table` no longer needs coverage repair
+### C3. The Sphere's drilled shell now SEALS AND EMITS
 
-`make_overhang_table` now seals at attempt 0: `trials = 0`, `commits = 0`,
-`candidates_remaining = 0`, where it previously committed at least one repair step and
-ranked 1,011 eligible rows. The model still runs and still seals; the coverage loop simply
-finds nothing uncovered.
+**MEASURED**, `plinth-pipeline/tests/first_artifact.rs`. The Sphere's drilled plan was
+expected to be REFUSED — the tests are named
+`corpus_sphere_drilled_plan_is_refused_before_any_file_exists` and
+`a_coverage_refusal_removes_a_stale_artifact_already_at_the_target`. It now reaches
+emission:
 
-**That is the lane's promised prize and it is also a hole in the test estate.** Four
-SPEC-A4 acceptance tests in `crates/plinth-support/tests/a4_transactional_controller.rs`
-use this fixture BECAUSE it needed repair, and they say so in their own assertion
-messages:
+```
+hollow_disposition: HollowedAndDrilled
+supported_geometry:  DrilledShellSealed
+ownerless_islands:   []
+repair_report:       trials 0, commits 0, candidates_remaining 0
+routed_contacts:     24
+final_live_members:  57
+emit:                support_record_count 138, artifact_bytes 1_270_824
+```
 
-* `every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses`
-* `a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered`
-* `the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch`
-* `the_loop_streams_progress_before_it_prints_its_summary`
+A model that did not emit now emits, with **zero uncovered islands and zero repair
+trials**. That is the strongest single piece of evidence for the lane's thesis, and it is
+the opposite failure direction from the acceptance bar (§3.6 asks that no model which
+emits today stops emitting; this is a model that starts).
 
-They are **left failing, deliberately and unmodified.** Re-freezing four SPEC-A4
-acceptance tests against a new expectation is precisely the edited-expectation OD-8
-forbids, and neutering them would delete #39's only proof that a committed repair step
-proves all three accept clauses. The `make_raking_blade` fixture still exercises the
-repair TRIAL path (45 trials, 0 commits, frozen numbers unmoved), so what is lost is the
-COMMIT path's only procedural fixture.
+Note this is a DIFFERENT path from `plinth-pipeline/src/lib.rs`'s `outcome()` helper,
+which runs `prepared_hollow` under the two delicacy fields and still stops the Sphere at
+Lowering with `RootRunTooShort` (task #29, untouched, re-recorded in C2's row).
 
-Replacing it means a new procedural fixture plus a checked-in
-`corpus/baseline/*.pipeline.json` for it — a corpus change, in #39's lane, not #51's.
+### C4. THE GATE, AND THE STOP-AND-REPORT
+
+`cargo test --workspace --profile gate --offline --no-fail-fast`, skipping the known-slow
+`a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule` by name
+(noted, not deleted):
+
+> **1,485 passed, 10 failed, 2 ignored, 1 skipped.**
+
+Clippy is clean on the workspace at `--all-targets`. `rustfmt` adds no new debt: the four
+`plinth-support` files this change touches were clean at `f9c7d07` and are clean now, and
+`cco.rs` has the same 14 pre-existing hunks it had before (task #20).
+
+**All 10 failures are one fact, and the fact is that coverage now closes where it did
+not.** Not one of them is a physics assertion, a digest, a registered constant, or a
+refusal that should have fired and did not.
+
+| test | file | what it asserts, and what happened |
+| --- | --- | --- |
+| `public_runner_closes_overhang_table_only_after_appending_repair_contacts` | `plinth-support/tests/support_runner_integration.rs` | *"this fixture must NOT close on its baseline layout — that is what makes it the success-after-repair demonstration"*. **It now closes on its baseline layout.** This is the root fact behind six of the ten. |
+| `every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses` | `plinth-support/tests/a4_transactional_controller.rs` | *"this fixture is here BECAUSE it needs repair"*. 0 trials, 0 commits, 0 remaining. |
+| `a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered` | same | "at least one step committed" — none does. |
+| `the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch` | same | ranked 1,011 eligible rows; now 0, because nothing is uncovered. |
+| `the_loop_streams_progress_before_it_prints_its_summary` | same | no progress line, because there are no trials to stream. |
+| `the_production_door_reports_what_the_one_winner_controller_spent` | `plinth-pipeline/tests/a4_production_door.rs` | *"this fixture reaches its artifact THROUGH repair"*; it now reaches it without. |
+| `the_sealed_ledger_on_disk_names_the_row_that_closed_the_hole` | same | ledger holds 0 commits, 0 trials, 0 steps. |
+| `corpus_sphere_drilled_plan_is_refused_before_any_file_exists` | `plinth-pipeline/tests/first_artifact.rs` | expects a REFUSAL; the Sphere now seals and emits (C3). |
+| `a_coverage_refusal_removes_a_stale_artifact_already_at_the_target` | same | same cause. |
+| `closure_repairs_censored_dust_because_that_repair_closes_a_real_hole` | `plinth-support/tests/support_runner_integration.rs` | pins an EXACT committed-step sequence. Repair still commits on this fixture, but on a different routed forest, so the step list moved. Distinct from the other nine and worth its own look: the recorded first trial now shows `objective_after` WORSE than `objective_before` (5.199 -> 5.899 mm²) on a step marked `chosen_by_first_trial_guarantee`. That is #39's first-trial guarantee interacting with a changed forest, not a #51 physics claim, but it should not be waved through. |
+
+**They are left failing, deliberately and unmodified.** Re-freezing acceptance tests
+against a new expectation is precisely the edited expectation OD-8 forbids, and neutering
+them would delete #39's only proof that a committed repair step proves all three accept
+clauses. Replacing the fixture means a new procedural mesh plus a checked-in
+`corpus/baseline/*.pipeline.json` — a corpus change, in #39's lane and #29's, not #51's.
+
 **This is the decision the judge must take, and it is the reason this report stops here
 rather than making it.**
 
@@ -252,5 +291,8 @@ Added by the review, all three still open and all three blocking the pieces name
 Added by this implementation:
 
 * **E-D (test estate).** `make_overhang_table` no longer needs coverage repair, so the
-  SPEC-A4 commit-path acceptance tests have no procedural fixture. See C3. Replacing it is
-  a corpus change in #39's lane.
+  SPEC-A4 commit-path acceptance tests have no procedural fixture, and the Sphere's
+  drilled plan now seals where two tests expect a refusal. See C3 and C4. Both are
+  fixed-defect movements, both are owner-visible, and both are in #39's and #29's lanes
+  rather than #51's. **The judge rules on how they are re-recorded; this lane does not
+  re-freeze them.**
