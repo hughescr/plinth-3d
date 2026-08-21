@@ -327,14 +327,14 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     };
     assert_eq!(emit.artifact_path, artifact);
     // SPEC-A4 §G.1 stage 4. The folder executor's own door reaches the
-    // one-winner transactional controller, so every artifact it produces states
-    // what the repair controller spent — `trials=0 commits=0` for a model that
-    // covered on its baseline layout. `None` is the batch loop and nothing
-    // else, which makes this the second, independent revert-proof beside
+    // one-winner controller, so every artifact it produces states what the
+    // repair controller spent — `trials=0 commits=0` for a model that covered
+    // on its baseline layout. `None` means the read in `seal_and_emit` was cut,
+    // which makes this the second, independent revert-proof beside
     // `tests/a4_production_door.rs`.
     let repair = repair_report.as_ref().expect(
         "the production door reports what coverage repair cost; `None` means `seal_and_emit` \
-         is calling `run_support` again",
+         no longer reads the ledger off the sealed authority",
     );
     assert!(
         repair.trials >= repair.commits,

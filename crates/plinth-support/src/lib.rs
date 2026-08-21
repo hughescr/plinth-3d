@@ -131,7 +131,7 @@ use thiserror::Error;
 pub use coverage_closure::{
     coverage_patch_blocks_verdict, coverage_patch_needs_repair,
     registered_coverage_censor_area_mm2, registered_coverage_request, BlockedCause,
-    CoverageClosureAttempt, CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason,
+    CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason,
     CoverageClosureRefusal, CoverageClosureSetupError, CoverageScoreShare, RouteRepairOutcome,
 };
 pub use coverage_measurement::{
@@ -145,7 +145,7 @@ pub use coverage_repair::{
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, run_support_transactional, AbandonedContactDisclosure, FinalLiveMemberEvidence,
+    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence,
     FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
     RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
     SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,

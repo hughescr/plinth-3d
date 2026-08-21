@@ -455,9 +455,9 @@ pub enum SupportRunError {
         detail: String,
     },
     /// FU-56: the coverage-closure controller could not admit every measured
-    /// island within the registered attempt bound. Boxed because
+    /// island. Boxed because
     /// [`crate::coverage_closure::CoverageClosureRefusal`] carries the whole
-    /// per-attempt history and every still-uncovered island's evidence, and
+    /// trial stream and every still-uncovered island's evidence, and
     /// an unboxed variant would put that weight on every `Result` in this
     /// crate's error path. Distinct from [`Self::Failed`]: a `Failed` phase
     /// means the sealed run itself could not be built at all, where this
@@ -490,7 +490,6 @@ pub enum SupportRunPhase {
 /// verification evidence or final consuming scene conversion.
 pub struct FinalSupportAuthority<'a> {
     lowered: LoweredSupportRun<'a>,
-    closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
     ownerless_islands: Vec<OwnerlessIslandDisclosure>,
     abandoned_contacts: Vec<AbandonedContactDisclosure>,
     grown_contact_tips: Vec<GrownContactTipDisclosure>,
@@ -498,10 +497,7 @@ pub struct FinalSupportAuthority<'a> {
     /// §A.8 says "every run reports, on every path — sealed or refused", and a
     /// model that seals after eleven trials and two commits must say so as
     /// plainly as one that refuses.
-    ///
-    /// `None` from the batch controller, which runs no trials and would have to
-    /// invent the numbers.
-    repair_report: Option<crate::coverage_repair::RepairRunReport>,
+    repair_report: crate::coverage_repair::RepairRunReport,
     /// **SPEC-A4 §D — the trial stream, in memory.**
     ///
     /// One row per transaction, committed or not, each naming the exact
@@ -509,11 +505,6 @@ pub struct FinalSupportAuthority<'a> {
     /// sides of all three accept clauses, and the outcome. Because a step
     /// changes the plan by exactly ONE contact, the before/after difference IS
     /// that contact's contribution — no inference and no apportionment.
-    ///
-    /// **Disclosed deviation from §D.2**: this is not persisted to the FU-57
-    /// sidecar in this lane, and it is empty on the refused path. Persisting it
-    /// needs `RepairRowId` to gain a public wire encoding it has never had,
-    /// which travels with §G.1's stage-4 schema change, not with the mechanism.
     repair_steps: Vec<crate::coverage_repair::CoverageRepairStep>,
 }
 
@@ -973,46 +964,38 @@ impl FinalSupportAuthority<'_> {
             .map_err(|_| SupportVerificationError::AuthorityMismatch)
     }
 
-    /// Every coverage-closure attempt this run measured, in order, ending
-    /// with the attempt that measured clean.
-    ///
-    /// **This is what makes closure-after-repair observable.** A run that
-    /// covered on its baseline layout has exactly one entry with
-    /// `nominated_rows == 0`; a run that closed only after the controller
-    /// appended repair-pool contacts has more, and the earlier entries say
-    /// how many rows each round added and how the blocking patch count fell.
-    /// Without it a successful run cannot be told apart from a run in which
-    /// the controller did nothing, which is precisely the question FU-56's
-    /// outcome claim turns on.
-    #[must_use]
-    pub fn coverage_closure_history(&self) -> &[crate::coverage_closure::CoverageClosureAttempt] {
-        &self.closure_history
-    }
-
-    /// How many repair rounds this run needed: zero when the baseline layout
+    /// How many repair contacts this run KEPT: zero when the baseline layout
     /// already covered every island.
+    ///
+    /// **Re-derived at §G.1 stage 4, from rounds to COMMITS.** It used to be
+    /// `closure_history.len() - 1` — one per pass of the batch loop, each of
+    /// which appended a whole nomination batch, so "3 rounds" could mean three
+    /// contacts or two hundred and sixty-six. Under one-winner transactions a
+    /// committed step IS one contact, so this counts contacts that earned their
+    /// place. Rejected trials are not rounds and are not counted here; they are
+    /// in [`Self::repair_steps`] and in the §A.8 report.
     #[must_use]
     pub fn coverage_repair_rounds(&self) -> usize {
-        self.closure_history.len().saturating_sub(1)
+        self.repair_report.commits
     }
 
     /// **SPEC-A4 §A.8, ruling R10** — the trial count, the commit count, the
     /// rejection histogram, the wall time and the diversity-demotion pair for
     /// the run that sealed.
     ///
-    /// `None` from [`run_support`], the batch controller, which runs no trials.
     /// These counters REPORT and none of them DECIDES: no branch of the
     /// one-winner loop reads any of them except `committed` against the
     /// registered bound, which is rulings R6 and R11's own rule.
     #[must_use]
-    pub const fn repair_report(&self) -> Option<&crate::coverage_repair::RepairRunReport> {
-        self.repair_report.as_ref()
+    pub const fn repair_report(&self) -> &crate::coverage_repair::RepairRunReport {
+        &self.repair_report
     }
 
     /// **SPEC-A4 §D.1** — every transaction this run attempted, in order.
     ///
-    /// Empty from [`run_support`], the batch controller, whose attempts append
-    /// batches and therefore cannot attribute anything to a row.
+    /// Empty when the model sealed on its baseline layout, which is a true
+    /// statement about that model rather than a missing record: it never
+    /// entered a transaction.
     #[must_use]
     pub fn repair_steps(&self) -> &[crate::coverage_repair::CoverageRepairStep] {
         &self.repair_steps
@@ -1122,504 +1105,11 @@ fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
     let _ = (stage, error);
 }
 
-/// Run the sealed preparation pipeline through the BATCH coverage-closure
-/// controller (FU-56) and return only its final authority.
-///
-/// **NOT A PRODUCTION DOOR ANY MORE — SPEC-A4 design §G.1 stage 4.** The one
-/// production call site, `plinth_pipeline::prepare::seal_and_emit`, now calls
-/// [`run_support_transactional`]. This function is retained as the batch
-/// comparison loop the frozen fixtures in
-/// `plinth-support/tests/support_runner_integration.rs`,
-/// `plinth-verify/tests/coverage_gate.rs` and
-/// `plinth-support/examples/embed_incidence_census.rs` still measure against.
-///
-/// **What is still owed before it can be deleted**, so nobody reads its
-/// survival as a decision that it stays: a deliberate corpus-wide digest
-/// re-freeze **with the measurement beside it** (§G.3), and the migration of
-/// the frozen fixtures listed above onto the new vocabulary. Design §M.4
-/// records the re-freeze as a corpus-run obligation, not a code one, so the
-/// deletion waits on a measured corpus run rather than on an opinion. The
-/// FU-57 sidecar schema string has already moved to
-/// `plinth.coverage-refusal.v2` with the door, because the wire meaning of
-/// `attempts` changed the moment production started producing it.
-///
-/// **The controller.** `prepare_support_context` builds the mesh/topology/
-/// `NativeSurface`/generic/baseline-regular authority ONCE. Each attempt then
-/// binds the current specialized plan (`prepared_run_for_plan`), routes,
-/// rewires, braces, structures and lowers it, and re-measures ROUTED coverage
-/// under [`crate::coverage_closure::registered_coverage_request`] — the SAME
-/// request the pre-write gate will use, so closing here means the gate will
-/// agree. A model whose baseline layout already covers costs exactly one
-/// pass through this loop, identically to the pre-FU-56 single-shot runner.
-/// A model that does not close within the registered
-/// `coverage_repair_max_attempts` bound (registered value 8) refuses with
-/// [`SupportRunError::CoverageClosure`] rather than silently emitting an
-/// under-covered plan — closure is achieved ONLY by appending immutable
-/// repair-pool contacts ([`crate::specialized::SpecializedContactPlanEdit::append_regular_repair_rows`]),
-/// never by relaxing the radius, the floor, or the tolerance, all three of
-/// which this function reads from the same registry the gate reads and never
-/// restates.
-///
-/// **The A3 censor applies to the verdict and not to the work.** Each attempt
-/// splits its one measurement into the censored set that decides stopping and
-/// refusing ([`crate::coverage_closure::coverage_patch_blocks_verdict`]) and
-/// the uncensored set this controller nominates repairs for
-/// ([`crate::coverage_closure::coverage_patch_needs_repair`]). Censoring the
-/// worklist as well was measured to leave real, above-censor holes unrepaired,
-/// because a contact nominated for sub-censor dust covers the hole beside it.
-pub fn run_support<'a>(
-    hollowed: HollowedModel,
-    request: SupportRequest,
-    input: SupportPreparationInput<'a>,
-) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
-    if !input.validate() {
-        return Err(SupportRunError::InvalidResourceCaps);
-    }
-    let min_z = hollowed
-        .mesh()
-        .verts()
-        .iter()
-        .map(|point| point[2])
-        .reduce(f64::min)
-        .ok_or(SupportRunError::InvalidDerivedFrame)?;
-    let plate_z_mm = Finite::new(min_z - request.lift_mm.get())
-        .map_err(|_| SupportRunError::InvalidDerivedFrame)?;
-    let perception_config = SupportPerceptionConfig::current(
-        plate_z_mm,
-        input.column_pitch_mm,
-        input.surface_grid_pitch_mm,
-        input.max_grid_bytes,
-        Some(input.delicacy_by_face),
-    )
-    .map_err(|error| SupportRunError::Failed {
-        phase: SupportRunPhase::Preparation,
-        detail: format!("binding registered perception thresholds failed: {error}"),
-    })?;
-    let selection_config = ContactSelectionConfig::current(
-        Some(input.delicacy_by_face),
-        input.coverage_samples_max_virtual_cells,
-        input.coverage_score_matrix_max_entries,
-        input.max_grid_bytes,
-    )
-    .map_err(|error| SupportRunError::Failed {
-        phase: SupportRunPhase::Preparation,
-        detail: format!("binding registered contact-selection policy failed: {error}"),
-    })?;
-    let max_attempts = selection_config.coverage_repair_max_attempts();
-    let matrix_budget = selection_config.coverage_score_matrix_max_entries;
-    let authority = SupportPreparationAuthority::new(
-        input.layers,
-        perception_config,
-        input.candidate_config,
-        input.reservations,
-        input.perception_limits,
-        selection_config,
-        input.specialized_limits,
-        input.construction_limits,
-        input.brace_penetration_limits,
-        input.raft_limits,
-        input.max_primitives,
-        input.max_primitive_bytes,
-    );
-
-    let coverage_request =
-        crate::coverage_closure::registered_coverage_request().map_err(|error| {
-            SupportRunError::Failed {
-                phase: SupportRunPhase::Preparation,
-                detail: format!("binding the registered coverage-closure request failed: {error}"),
-            }
-        })?;
-    let radius_mm = coverage_request.radius_mm().get();
-
-    let (mut context, mut plan) =
-        prepare_support_context(hollowed, request, authority).map_err(|error| {
-            note_stage_failure("Preparation", &error);
-            SupportRunError::Failed {
-                phase: SupportRunPhase::Preparation,
-                detail: error.to_string(),
-            }
-        })?;
-
-    let mut failed: BTreeSet<RepairRowId> = BTreeSet::new();
-    let mut history: Vec<crate::coverage_closure::CoverageClosureAttempt> = Vec::new();
-    // Per-`(island_id, component_id)` nomination accounting, accumulated
-    // across attempts so a refusal can say, per island, whether it was ever
-    // attempted at all — see `CoverageClosureIsland::nominated_repair_rows`.
-    let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
-    // The last attempt's blocking set, kept so a refusal raised by a stage
-    // that runs BEFORE the next measurement (the repair-extended plan failing
-    // to route, rewire, brace, structure or lower) still names the islands
-    // the controller was trying to close.
-    let mut last_blocking: Vec<crate::coverage_closure::BlockingPatchKey> = Vec::new();
-
-    for attempt in 0..=max_attempts {
-        // Every stage below is fallible, and what a failure MEANS depends on
-        // whether this controller had already extended the plan. On attempt 0
-        // the plan is the model's own and a stage failure is exactly the
-        // pre-FU-56 `Failed(phase)`. On attempt > 0 the plan carries contacts
-        // this controller appended, so the failure is the controller's own
-        // and is a coverage refusal — with the evidence FU-57 requires, and
-        // ineligible for the oriented-solid reserve, because attempt 0 proved
-        // this geometry seals.
-        // SPEC-A4 §A.3 landed the recoverable seam, so every typestate stage
-        // now hands the context back on its error path. This loop is the batch
-        // controller and still discards it — dropping the context is exactly
-        // what it did before, so no behaviour moves here; the transactional
-        // controller is what takes the recovery up.
-        macro_rules! stage {
-            ($expr:expr, $stage:literal, $phase:expr) => {
-                match $expr {
-                    Ok(value) => value,
-                    Err((_recovered_context, error)) => {
-                        note_stage_failure($stage, &error);
-                        return Err(repair_plan_or_stage_failure(
-                            attempt,
-                            $phase,
-                            &error,
-                            &last_blocking,
-                            &tally,
-                            history,
-                        ));
-                    }
-                }
-            };
-        }
-        // The coverage measurement's own snapshot is not a typestate stage: it
-        // borrows the lowered run rather than consuming it, so there is no
-        // context to hand back.
-        macro_rules! borrowed_stage {
-            ($expr:expr, $stage:literal, $phase:expr) => {
-                match $expr {
-                    Ok(value) => value,
-                    Err(error) => {
-                        note_stage_failure($stage, &error);
-                        return Err(repair_plan_or_stage_failure(
-                            attempt,
-                            $phase,
-                            &error,
-                            &last_blocking,
-                            &tally,
-                            history,
-                        ));
-                    }
-                }
-            };
-        }
-
-        let prepared = stage!(
-            prepared_run_for_plan(context, plan.clone()),
-            "Preparation",
-            SupportRunPhase::Preparation
-        );
-        // SPEC-A3-A4 §6, task #49 — the split landing. Routing applies §6's
-        // removal, and the removal can leave an island with no owning contact.
-        // That is DISCLOSED (`AcceptedContactSet::ownerless_faces`), never
-        // refused here, so this arm has no §6 special case: the condition is
-        // `CoverageGap::NoRoutedContact`, the coverage judgment downstream is
-        // what measures it, and the A4 repair loop below is what closes it.
-        //
-        // Refusing on it instead was MEASURED, release binary, one model per
-        // process, 2026-08-19, and cost four corpus models their artifacts.
-        // Measured again after this arm was written, same binary discipline,
-        // against `develop` @ 06cf21b — every one is back, and every artifact
-        // is BYTE-IDENTICAL to develop's:
-        //
-        // | model | develop | 9a9b459 | here | ownerless island disclosed |
-        // | --- | --- | --- | --- | --- |
-        // | Deinonychus | 9,915,864 B | refused | 9,915,864 B, identical | 3: 1 face, 0.000470 mm² |
-        // | Skeleton_2 | 5,587,800 B | refused | 5,587,800 B, identical | 2: 8 faces, 0.050891 mm² |
-        // | Tavey | 8,412,216 B | refused | 8,412,216 B, identical | 4: 1 face, 0.004025 mm² |
-        // | Crawler Zombie | 3,768,936 B | refused | 3,768,936 B, identical | 1: 1 face, 0.002363 mm² |
-        // | Plague Zombie | 4,283,952 B | emitted | 4,283,952 B, identical | none |
-        // | zombie-3-a | 4,052,976 B | emitted | 4,052,976 B, identical | none |
-        //
-        // On every one of the four, the disclosed ownerless area EQUALS the
-        // coverage measurement's own uncovered area for that island to six
-        // decimals — dust the registered A3 censor forgives, an order of
-        // magnitude below it. That is the whole case: the refusal was taking
-        // out models over an area the verdict was already choosing to forgive.
-        //
-        // Hard ENFORCEMENT of §6's "hard failure" sentence is deferred behind
-        // tasks #51/#52/#24 by owner ruling.
-        let routed = match prepared.route_initial_cco() {
-            Ok(value) => value,
-            Err((_context, error)) => {
-                note_stage_failure("Routing", &error);
-                return Err(repair_plan_or_stage_failure(
-                    attempt,
-                    SupportRunPhase::Routing,
-                    &error,
-                    &last_blocking,
-                    &tally,
-                    history,
-                ));
-            }
-        };
-        let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
-        let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
-        let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
-        let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
-
-        // TWO sets out of ONE measurement, and the difference between them is
-        // the whole censor rule (`coverage_closure::coverage_patch_blocks_verdict`
-        // carries the four-call-site table):
-        //
-        // * `blocking` — the patches that would REFUSE this model, censored at
-        //   the registered A3 censor. It decides when this loop may stop and
-        //   what a refusal names. Sub-censor dust is not in it, so a model
-        //   whose whole residual is dust emits, which is the censor's point.
-        // * `repair_targets` — every patch the measurement found uncovered AT
-        //   ALL, uncensored. It is the repair worklist, and it is a superset
-        //   of `blocking`.
-        //
-        // Work selection is uncensored because a contact nominated for one
-        // patch covers everything inside the coverage radius, dust patch and
-        // real hole alike; censoring the worklist deletes contacts that were
-        // incidentally closing real, above-censor holes, which is a measured
-        // regression (`Skulker Zombie` 0.35 mm², `Tavey Badger` 0.21 mm²,
-        // `zombie-3-a` 12.65 mm²). Working a censored patch can only add
-        // coverage — it can never excuse one, because the stop/refuse decision
-        // below reads `blocking` and nothing else.
-        let (blocking, repair_targets, uncovered_samples) = {
-            let snapshot = borrowed_stage!(
-                lowered.verification_snapshot(),
-                "CoverageMeasurement",
-                SupportRunPhase::CoverageMeasurement
-            );
-            match snapshot.measure_coverage(coverage_request) {
-                Ok(measurement) => {
-                    let patches = measurement.evidence().patches();
-                    let mut blocking = Vec::new();
-                    let mut repair_targets = Vec::with_capacity(patches.len());
-                    // The censor the measurement itself just used, read back
-                    // off the live request rather than re-derived, so the
-                    // controller's VERDICT can never disagree with the gate's.
-                    let censor_area_mm2 = coverage_request.patch_area_floor_mm2().get();
-                    for patch in patches {
-                        let uncovered_area_mm2 = patch.uncovered_area_mm2().get();
-                        if !crate::coverage_closure::coverage_patch_needs_repair(
-                            uncovered_area_mm2,
-                            patch.cut_ambiguous(),
-                            patch.assessment_failed(),
-                        ) {
-                            continue;
-                        }
-                        let key = crate::coverage_closure::BlockingPatchKey {
-                            island_id: patch.island_id(),
-                            component_id: patch.component_id(),
-                            representative_face_id: patch.representative_face_id(),
-                            sorted_face_ids: patch.sorted_face_ids().to_vec(),
-                            uncovered_area_mm2_bits: uncovered_area_mm2.to_bits(),
-                            worst_gap: patch.worst_gap().into(),
-                        };
-                        if crate::coverage_closure::coverage_patch_blocks_verdict(
-                            uncovered_area_mm2,
-                            patch.cut_ambiguous(),
-                            patch.assessment_failed(),
-                            censor_area_mm2,
-                        ) {
-                            blocking.push(key.clone());
-                        }
-                        repair_targets.push(key);
-                    }
-                    // The measurement's own uncovered rows, indexed into the
-                    // same `coverage_samples()` slice this plan owns. Moved
-                    // out here so nomination can score against what still
-                    // needs covering rather than re-deriving coverage beside
-                    // the one measurement.
-                    let uncovered = measurement.uncovered_sample_indices().to_vec();
-                    (blocking, repair_targets, uncovered)
-                }
-                Err(error) => {
-                    note_stage_failure("CoverageMeasurement", &error);
-                    return Err(SupportRunError::CoverageClosure(Box::new(
-                        crate::coverage_closure::CoverageClosureRefusal {
-                            attempts: attempt,
-                            reason:
-                                crate::coverage_closure::CoverageClosureReason::MeasurementRefused(
-                                    error.to_string(),
-                                ),
-                            islands: crate::coverage_closure::islands_from_blocking(
-                                &last_blocking,
-                                &tally,
-                            ),
-                            history,
-                            // The batch controller runs no trials, so it has
-                            // no §A.8 report to make. `None` says that; a
-                            // zeroed report would claim zero trials while the
-                            // loop appended hundreds of rows.
-                            repair: None,
-                        },
-                    )));
-                }
-            }
-        };
-
-        history.push(crate::coverage_closure::CoverageClosureAttempt {
-            attempt,
-            blocking_patch_count: blocking.len(),
-            repair_target_patch_count: repair_targets.len(),
-            nominated_rows: 0,
-        });
-
-        // THE VERDICT, censored: only a blocking patch can keep this loop
-        // running or refuse the model. Dust left in `repair_targets` never
-        // does either.
-        if blocking.is_empty() {
-            // Task #49. Built HERE, at the one point both halves are in hand:
-            // the accepted set knows which faces it charges to nobody, and
-            // `repair_targets` is this same attempt's uncensored measurement of
-            // how much area each island truly leaves uncovered. Joining them
-            // anywhere else would pair a disclosure with a different run's
-            // measurement.
-            return Ok(seal_authority(
-                lowered,
-                &repair_targets,
-                history,
-                None,
-                Vec::new(),
-            ));
-        }
-        last_blocking = blocking;
-
-        if attempt == max_attempts {
-            let islands = crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
-            return Err(SupportRunError::CoverageClosure(Box::new(
-                crate::coverage_closure::CoverageClosureRefusal {
-                    attempts: attempt,
-                    reason: crate::coverage_closure::CoverageClosureReason::AttemptsExhausted,
-                    islands,
-                    history,
-                    repair: None,
-                },
-            )));
-        }
-
-        // THE WORKLIST, uncensored: `repair_targets`, not `last_blocking`.
-        // The controller has already decided (above) that this model does not
-        // pass; from here it repairs every measured uncovered patch, so a
-        // repair that a censored dust patch nominates is still available to
-        // close the real hole beside it.
-        let nominations = match crate::coverage_closure::nominate_repair_rows(
-            &plan,
-            &repair_targets,
-            &uncovered_samples,
-            radius_mm,
-            matrix_budget,
-            &failed,
-        ) {
-            Ok(nominations) => nominations,
-            Err(error) => {
-                note_stage_failure("Preparation", &error);
-                return Err(repair_plan_or_stage_failure(
-                    attempt,
-                    SupportRunPhase::Preparation,
-                    &error,
-                    &last_blocking,
-                    &tally,
-                    history,
-                ));
-            }
-        };
-        for (key, counts) in &nominations.per_key {
-            let entry = tally.entry(*key).or_default();
-            entry.nominated_rows += counts.nominated_rows;
-            entry.eligible_rows = counts.eligible_rows;
-        }
-
-        if nominations.rows.is_empty() {
-            let islands = crate::coverage_closure::islands_from_blocking(&last_blocking, &tally);
-            return Err(SupportRunError::CoverageClosure(Box::new(
-                crate::coverage_closure::CoverageClosureRefusal {
-                    attempts: attempt,
-                    reason: crate::coverage_closure::CoverageClosureReason::NoEligibleRepairRows,
-                    islands,
-                    history,
-                    repair: None,
-                },
-            )));
-        }
-        if let Some(last) = history.last_mut() {
-            last.nominated_rows = nominations.rows.len();
-        }
-
-        // A row this attempt appended is `occupied` in the next plan
-        // regardless of whether the CCO transcript ends up admitting it
-        // (`occupied_repair_rows` reads the plan's own contact list, not the
-        // transcript), so it can never be re-nominated; `failed` is retained
-        // for a future controller that can also retract an unproductive
-        // addition, which this one does not yet do.
-        failed.extend(nominations.rows.iter().copied());
-
-        plan = match plan
-            .begin_regular_edit()
-            .and_then(|edit| edit.append_regular_repair_rows(&nominations.rows))
-        {
-            Ok(plan) => plan,
-            Err(error) => {
-                note_stage_failure("Preparation", &error);
-                return Err(repair_plan_or_stage_failure(
-                    attempt,
-                    SupportRunPhase::Preparation,
-                    &error,
-                    &last_blocking,
-                    &tally,
-                    history,
-                ));
-            }
-        };
-        context = lowered.into_context();
-    }
-    unreachable!("bounded coverage-closure loop returns before exhausting its own bound check")
-}
-
-/// Classify one closure-loop stage failure.
-///
-/// Attempt 0 runs the model's own plan and its failures are the pre-FU-56
-/// `Failed(phase)` verdicts, unchanged. From attempt 1 the plan carries
-/// contacts THIS controller appended, so a stage refusal is the controller's
-/// own doing: it becomes a
-/// [`crate::coverage_closure::CoverageClosureReason::RepairPlanRefused`]
-/// coverage refusal, which keeps the coverage evidence FU-57 requires and
-/// keeps the oriented-solid reserve out of a path where the geometry already
-/// proved it seals.
-fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
-    attempt: usize,
-    phase: SupportRunPhase,
-    error: &E,
-    last_blocking: &[crate::coverage_closure::BlockingPatchKey],
-    tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
-    history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
-) -> SupportRunError {
-    if attempt == 0 {
-        // FU-truthful-errors: this used to be `SupportRunError::Failed(phase)`,
-        // which threw `error` away entirely. The study that measured all
-        // seven large-mini failures found this was the run most likely to
-        // hold the real bug, because it is the one whose evidence never made
-        // it into the printed output: `error` carries the exact same detail
-        // the attempt >= 1 branch below already keeps, so there is no reason
-        // attempt 0 should be the one case that loses it.
-        return SupportRunError::Failed {
-            phase,
-            detail: format!("{error:?}"),
-        };
-    }
-    SupportRunError::CoverageClosure(Box::new(crate::coverage_closure::CoverageClosureRefusal {
-        attempts: attempt,
-        reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
-            phase,
-            detail: format!("{error:?}"),
-        },
-        islands: crate::coverage_closure::islands_from_blocking(last_blocking, tally),
-        history,
-        repair: None,
-    }))
-}
-
 /// Build the sealed authority from the lowered run that closed.
 ///
-/// Shared by both controllers so the two can never disagree about what a
-/// SEALED run discloses. The two joins here are the reason it is one function:
+/// One function rather than two inline blocks so the zero-trial seal and the
+/// seal-after-commit can never disagree about what a SEALED run discloses. The
+/// two joins here are the reason:
 ///
 /// * Task #49's ownerless faces are joined to `repair_targets` — the SAME
 ///   attempt's uncensored measurement of how much area each island truly leaves
@@ -1632,8 +1122,7 @@ fn repair_plan_or_stage_failure<E: std::fmt::Debug>(
 fn seal_authority<'a>(
     lowered: LoweredSupportRun<'a>,
     repair_targets: &[crate::coverage_closure::BlockingPatchKey],
-    closure_history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
-    repair_report: Option<crate::coverage_repair::RepairRunReport>,
+    repair_report: crate::coverage_repair::RepairRunReport,
     repair_steps: Vec<crate::coverage_repair::CoverageRepairStep>,
 ) -> FinalSupportAuthority<'a> {
     let ownerless_islands = ownerless_island_disclosures(&lowered, repair_targets);
@@ -1641,7 +1130,6 @@ fn seal_authority<'a>(
         contact_attestation_disclosures(&lowered.structured.braced.rewired.routed.initial);
     FinalSupportAuthority {
         lowered,
-        closure_history,
         ownerless_islands,
         abandoned_contacts,
         grown_contact_tips,
@@ -1734,14 +1222,53 @@ enum ChainOutcome<'a> {
     Refused(Box<ChainRefusal<'a>>),
 }
 
-/// The context handed back, with the phase and detail that refused the plan.
+/// The context handed back, with the stage that refused the plan.
 /// Boxed for the same reason the lowered run is: both payloads carry the one
 /// mesh/topology/`NativeSurface` context, so an unboxed enum would size every
 /// stack slot to the larger of them.
 struct ChainRefusal<'a> {
     context: SupportRunContext<'a>,
+    stop: RefusedStage,
+}
+
+/// Which stage refused a plan, and what it said — separated from the context it
+/// travels with so the two things the controller DOES with it can be proved.
+///
+/// **FU-truthful-errors, ported here at §G.1 stage 4.** The retired
+/// `repair_plan_or_stage_failure` used to discard `error` outright whenever
+/// `attempt == 0`, returning a bare `SupportRunError::Failed(phase)` that could
+/// not say what actually failed — exactly the attempt most likely to hold the
+/// real bug, because every other attempt already kept its error. The two
+/// projections below are the successors to that function's two branches, and
+/// `a_stage_refusal_keeps_its_detail_at_attempt_zero_and_on_a_trial` pins that
+/// both carry the same detail.
+struct RefusedStage {
     phase: SupportRunPhase,
     detail: String,
+}
+
+impl RefusedStage {
+    /// **Attempt 0 runs the model's OWN plan**, so a stage failure there is the
+    /// model's and not this controller's. It is not a rollback, it is not a
+    /// coverage refusal, and it is not eligible to be one (§A.6, §H.7).
+    fn into_attempt_zero_failure(self) -> SupportRunError {
+        SupportRunError::Failed {
+            phase: self.phase,
+            detail: self.detail,
+        }
+    }
+
+    /// **A TRIAL's plan carries a contact this controller appended**, so its
+    /// stage failure is the controller's own doing — and under §A.5 it is one
+    /// ledger row and the next candidate, not the end of the model. Task #47's
+    /// Giant Bat, which loses a whole model to one arm's
+    /// `Brace(ClearanceViolation(1))`, lands exactly here.
+    fn into_trial_rollback(self) -> crate::coverage_repair::RepairStepOutcome {
+        crate::coverage_repair::RepairStepOutcome::StageRefusal {
+            phase: self.phase,
+            detail: self.detail,
+        }
+    }
 }
 
 /// Drive one plan through the whole stage chain, and hand the context back on
@@ -1764,8 +1291,10 @@ fn run_stage_chain<'a>(
                     note_stage_failure($stage, &error);
                     return ChainOutcome::Refused(Box::new(ChainRefusal {
                         context,
-                        phase: $phase,
-                        detail: format!("{error:?}"),
+                        stop: RefusedStage {
+                            phase: $phase,
+                            detail: format!("{error:?}"),
+                        },
                     }));
                 }
             }
@@ -1839,19 +1368,23 @@ impl BlockedCauseScales {
 /// result at the registered gate request. The step then either COMMITS (the
 /// child becomes the accepted plan) or ROLLS BACK (the child is dropped and the
 /// row is ledgered). That is SPEC §6's "full construct, rewire, brace/size, and
-/// verify transaction", and it is what the batch loop in [`run_support`] cannot
-/// do:
+/// verify transaction".
 ///
-/// * **Nothing is attributable there.** An attempt that appends 266 rows and
-///   moves the area by 0.4 mm² cannot say which row did it. Here the plan
-///   changes by exactly one contact, so the before/after difference IS that
-///   contact's contribution — no inference and no apportionment (§D).
-/// * **Nothing is reversible there.** `plan = plan.append…(rows)` overwrites the
+/// **This is the ONE door to the sealed run — §G.1 stage 4 landed, and the
+/// batch loop that used to own this name is deleted.** It appended a whole
+/// nomination batch per attempt, and the three things that cost are why the
+/// spec asks for one winner at a time:
+///
+/// * **Nothing was attributable.** An attempt that appended 266 rows and moved
+///   the area by 0.4 mm² could not say which row did it. Here the plan changes
+///   by exactly one contact, so the before/after difference IS that contact's
+///   contribution — no inference and no apportionment (§D).
+/// * **Nothing was reversible.** `plan = plan.append…(rows)` overwrote the
 ///   parent binding on the same line. Here the plan is a persistent value and
 ///   the child is a DERIVED value, so rolling back is "do not rebind `plan`"
 ///   (§A.5). There is no undo log and nothing to rebuild.
-/// * **Nothing is protected there.** A row that makes a noncoverage gate worse
-///   is kept. Here clause 2 rejects it and the ledger names the component.
+/// * **Nothing was protected.** A row that made a noncoverage gate worse was
+///   kept. Here clause 2 rejects it and the ledger names the component.
 ///
 /// # What bounds this loop, and what does not
 ///
@@ -1885,7 +1418,7 @@ impl BlockedCauseScales {
               the accept/rollback pairing behind a call boundary, which is the exact \
               seam a reviewer has to see whole"
 )]
-pub fn run_support_transactional<'a>(
+pub fn run_support<'a>(
     hollowed: HollowedModel,
     request: SupportRequest,
     input: SupportPreparationInput<'a>,
@@ -1968,12 +1501,7 @@ pub fn run_support_transactional<'a>(
         // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
         // failure is the model's, not this controller's. It is not a rollback,
         // it is not a coverage refusal, and it is not eligible to be one.
-        ChainOutcome::Refused(refusal) => {
-            return Err(SupportRunError::Failed {
-                phase: refusal.phase,
-                detail: refusal.detail,
-            })
-        }
+        ChainOutcome::Refused(refusal) => return Err(refusal.stop.into_attempt_zero_failure()),
     };
     let mut measured = match measure_for_controller(&attempt_zero, coverage_request) {
         Ok(measured) => measured,
@@ -1991,32 +1519,24 @@ pub fn run_support_transactional<'a>(
                         detail,
                     ),
                     islands: Vec::new(),
-                    history: Vec::new(),
+                    steps: Vec::new(),
                     repair: Some(report),
                 },
             )));
         }
     };
 
-    let mut history: Vec<crate::coverage_closure::CoverageClosureAttempt> =
-        vec![crate::coverage_closure::CoverageClosureAttempt {
-            attempt: 0,
-            blocking_patch_count: measured.blocking.len(),
-            repair_target_patch_count: measured.repair_targets.len(),
-            nominated_rows: 0,
-        }];
-
     if measured.blocking.is_empty() {
-        // The zero-cost path, bit-identical to the batch controller's: a model
-        // whose baseline layout already covers never enters a transaction, so
-        // its digest cannot move under this change.
+        // The zero-cost path: a model whose baseline layout already covers
+        // never enters a transaction, so no rule in §A, §B, §C, §D or §E can
+        // reach it and its digest is bit-identical to the pre-controller
+        // engine's by construction rather than by luck.
         let report = crate::coverage_repair::RepairRunReport::default();
         report.log_summary();
         return Ok(seal_authority(
             *attempt_zero,
             &measured.repair_targets,
-            history,
-            Some(report),
+            report,
             Vec::new(),
         ));
     }
@@ -2050,7 +1570,6 @@ pub fn run_support_transactional<'a>(
         radius_mm,
         matrix_budget,
         &mut ledger,
-        &history,
     )?;
     stamp_tally(&mut tally, &candidates);
 
@@ -2087,7 +1606,6 @@ pub fn run_support_transactional<'a>(
                 &mut ledger,
                 &route_records,
                 &tally,
-                history,
                 scales,
                 radius_mm,
             ));
@@ -2120,7 +1638,6 @@ pub fn run_support_transactional<'a>(
                 &mut ledger,
                 &route_records,
                 &tally,
-                history,
                 scales,
                 radius_mm,
             ));
@@ -2145,7 +1662,6 @@ pub fn run_support_transactional<'a>(
                 &mut ledger,
                 &route_records,
                 &tally,
-                history,
                 scales,
                 radius_mm,
             ));
@@ -2228,20 +1744,18 @@ pub fn run_support_transactional<'a>(
             ChainOutcome::Refused(refusal) => {
                 let ChainRefusal {
                     context: returned,
-                    phase,
-                    detail,
+                    stop,
                 } = *refusal;
                 context = returned;
                 // §A.5, finding S4: `prepared_run_for_plan` stamps five digest
                 // fields on the context, so a trial refused mid-chain hands
                 // back a context stamped with the REJECTED CHILD's digests.
-                // The batch loop self-heals only because its next call is
-                // always `prepared_run_for_plan`; this controller reads
+                // The retired batch loop self-healed only because its next call
+                // was always `prepared_run_for_plan`; this controller reads
                 // evidence BETWEEN trials, and evidence read off a stale digest
                 // would describe a plan that does not exist.
                 context.restore_prepared_digests(digests);
-                step.outcome =
-                    crate::coverage_repair::RepairStepOutcome::StageRefusal { phase, detail };
+                step.outcome = stop.into_trial_rollback();
                 ledger.reject(&mut candidates, step, &winner, started);
             }
             ChainOutcome::Lowered(trial) => {
@@ -2291,12 +1805,6 @@ pub fn run_support_transactional<'a>(
                 step.commit = Some(committed);
                 step.outcome = crate::coverage_repair::RepairStepOutcome::Committed;
                 ledger.commit(step, started);
-                history.push(crate::coverage_closure::CoverageClosureAttempt {
-                    attempt: committed,
-                    blocking_patch_count: trial_measured.blocking.len(),
-                    repair_target_patch_count: trial_measured.repair_targets.len(),
-                    nominated_rows: 1,
-                });
 
                 if trial_measured.blocking.is_empty() {
                     ledger.finish(Some(&candidates));
@@ -2304,8 +1812,7 @@ pub fn run_support_transactional<'a>(
                     return Ok(seal_authority(
                         *trial,
                         &trial_measured.repair_targets,
-                        history,
-                        Some(ledger.report),
+                        ledger.report,
                         ledger.steps,
                     ));
                 }
@@ -2328,7 +1835,6 @@ pub fn run_support_transactional<'a>(
                     radius_mm,
                     matrix_budget,
                     &mut ledger,
-                    &history,
                 )?;
                 // The ranking was rebuilt from scratch, so rule N4's accumulated
                 // discs must be recharged onto it. This is the ONLY sweep that
@@ -2431,6 +1937,18 @@ impl RepairLedger {
         self.report.commits += 1;
         self.steps.push(step);
         self.per_trial_ms.push(elapsed_ms(started));
+    }
+
+    /// The whole trial stream, projected onto SPEC-A4 §D.2's wire form.
+    ///
+    /// Every trial, committed or not. A refusal that carried only its commits
+    /// would print an empty list for the model that spent 45 trials and kept
+    /// none of them, which is the exact case the record exists for.
+    fn wire_steps(&self) -> Vec<crate::coverage_repair::CoverageRepairStepWire> {
+        self.steps
+            .iter()
+            .map(crate::coverage_repair::CoverageRepairStep::to_wire)
+            .collect()
     }
 
     /// Recharge rule N4's accumulated discs onto a ranking that a COMMIT has
@@ -2587,7 +2105,6 @@ fn rank_or_refuse(
     radius_mm: f64,
     matrix_budget: usize,
     ledger: &mut RepairLedger,
-    history: &[crate::coverage_closure::CoverageClosureAttempt],
 ) -> Result<crate::coverage_closure::RankedRepairCandidates, SupportRunError> {
     crate::coverage_closure::rank_repair_candidates(
         plan,
@@ -2601,15 +2118,19 @@ fn rank_or_refuse(
         note_stage_failure("Preparation", &error);
         ledger.finish(None);
         ledger.report.log_summary();
+        let steps = ledger.wire_steps();
         SupportRunError::CoverageClosure(Box::new(
             crate::coverage_closure::CoverageClosureRefusal {
-                attempts: history.len().saturating_sub(1),
+                // Ruling R6: the field named for the registered bound carries
+                // what that bound bounds. The ledger's own commit counter is
+                // the one place that number lives.
+                attempts: ledger.report.commits,
                 reason: crate::coverage_closure::CoverageClosureReason::RepairPlanRefused {
                     phase: SupportRunPhase::Preparation,
                     detail: format!("{error:?}"),
                 },
                 islands: Vec::new(),
-                history: history.to_vec(),
+                steps,
                 repair: Some(ledger.report.clone()),
             },
         ))
@@ -2632,12 +2153,12 @@ fn refuse(
     ledger: &mut RepairLedger,
     route_records: &BTreeMap<(u32, u32), RouteSearchRecord>,
     tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
-    history: Vec<crate::coverage_closure::CoverageClosureAttempt>,
     scales: BlockedCauseScales,
     radius_mm: f64,
 ) -> SupportRunError {
     ledger.finish(Some(candidates));
     ledger.report.log_summary();
+    let steps = ledger.wire_steps();
 
     let mut islands = crate::coverage_closure::islands_from_blocking(&measured.blocking, tally);
     for island in &mut islands {
@@ -2658,7 +2179,7 @@ fn refuse(
         attempts: committed,
         reason,
         islands,
-        history,
+        steps,
         repair: Some(ledger.report.clone()),
     }))
 }
@@ -10781,29 +10302,40 @@ mod tests {
         ));
     }
 
-    /// FU-truthful-errors: `repair_plan_or_stage_failure` used to discard
-    /// `error` outright whenever `attempt == 0`, returning a bare
+    /// **FU-truthful-errors, ported to the one-winner controller at §G.1 stage
+    /// 4 — INTENT UNCHANGED, and one half of it re-derived rather than
+    /// re-asserted.**
+    ///
+    /// The retired `repair_plan_or_stage_failure` used to discard `error`
+    /// outright whenever `attempt == 0`, returning a bare
     /// `SupportRunError::Failed(phase)` that could not say what actually
-    /// failed — exactly the attempt most likely to hold the real bug, per
-    /// the study's diagnosis, because every OTHER attempt already kept its
-    /// error via the `attempt >= 1` branch below. This pins that attempt 0
-    /// keeps the same detail attempt 1 does, so a future edit that
-    /// reintroduces the discard fails here instead of only being found by
-    /// re-running hours of instrumentation on real models.
+    /// failed — exactly the attempt most likely to hold the real bug, because
+    /// every OTHER attempt already kept its error. The claim under test is the
+    /// same one it always was: **attempt 0 keeps the same detail a repair
+    /// attempt does**, so a future edit that reintroduces the discard fails
+    /// here instead of only being found by re-running hours of instrumentation
+    /// on real models.
+    ///
+    /// **What moved, and why it is not a weaker test.** Under the batch loop
+    /// the attempt-≥1 half of the pair produced a
+    /// `CoverageClosureReason::RepairPlanRefused` that KILLED THE MODEL. Under
+    /// one-winner transactions the same stage failure is a ledgered rollback
+    /// and the search goes on (§A.5, task #47), so the second projection is
+    /// `RepairStepOutcome::StageRefusal` rather than a whole-run refusal. That
+    /// is the from→to: same phase, same detail, different consequence — and the
+    /// consequence changing is the fix, not a regression.
+    ///
+    /// Both projections are read off the ONE value `run_stage_chain` produces,
+    /// so a future edit that lets the two arms disagree about the detail cannot
+    /// pass.
     #[test]
-    fn a_stage_error_is_not_discarded_at_attempt_zero() {
-        #[derive(Debug)]
-        struct DistinctiveError(&'static str);
-        let error = DistinctiveError("distinctive-marker-9f3c1e");
+    fn a_stage_refusal_keeps_its_detail_at_attempt_zero_and_on_a_trial() {
+        let stop = || RefusedStage {
+            phase: SupportRunPhase::Routing,
+            detail: format!("{:?}", "distinctive-marker-9f3c1e"),
+        };
 
-        let attempt_zero = repair_plan_or_stage_failure(
-            0,
-            SupportRunPhase::Routing,
-            &error,
-            &[],
-            &BTreeMap::new(),
-            Vec::new(),
-        );
+        let attempt_zero = stop().into_attempt_zero_failure();
         let SupportRunError::Failed { phase, detail } = attempt_zero else {
             panic!("expected SupportRunError::Failed at attempt 0, got {attempt_zero:?}");
         };
@@ -10813,26 +10345,25 @@ mod tests {
             "attempt 0 must carry the real error in its detail, got: {detail:?}"
         );
 
-        // Attempt 1 already kept this same detail before this fix; pinning
-        // both together is what makes "attempt 0 is the one that loses it"
-        // a checkable claim rather than an assertion about one branch only.
-        let attempt_one = repair_plan_or_stage_failure(
-            1,
-            SupportRunPhase::Routing,
-            &error,
-            &[],
-            &BTreeMap::new(),
-            Vec::new(),
-        );
-        let SupportRunError::CoverageClosure(refusal) = attempt_one else {
-            panic!("expected SupportRunError::CoverageClosure at attempt 1, got {attempt_one:?}");
-        };
-        let crate::coverage_closure::CoverageClosureReason::RepairPlanRefused { detail, .. } =
-            &refusal.reason
+        let trial = stop().into_trial_rollback();
+        let crate::coverage_repair::RepairStepOutcome::StageRefusal {
+            phase: trial_phase,
+            detail: trial_detail,
+        } = &trial
         else {
-            panic!("expected RepairPlanRefused, got {:?}", refusal.reason);
+            panic!("a trial's stage refusal must be a ledgered rollback, got {trial:?}");
         };
-        assert!(detail.contains("distinctive-marker-9f3c1e"));
+        assert_eq!(*trial_phase, SupportRunPhase::Routing);
+        assert_eq!(
+            *trial_detail, detail,
+            "the trial rollback must carry the SAME detail attempt 0 does; a divergence here \
+             means one of the two paths is losing the error again"
+        );
+        assert_eq!(
+            trial.class(),
+            "stage_refusal",
+            "the §A.8 histogram must be able to count this rejection by its own class"
+        );
     }
 
     /// **§D.1's `RouteDelta` carries the CENSORED and the UNCENSORED side, and

@@ -27,7 +27,7 @@ use plinth_mesh::{
 };
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
-    repair_step_outcome, run_support_transactional, BlockedCause, CoverageClosureReason,
+    repair_step_outcome, run_support, BlockedCause, CoverageClosureReason,
     FinalSupportAuthority, RepairGateVector, RepairStepOutcome, RouteRepairOutcome,
     SupportPreparationInput, SupportPreparationLimits, SupportRequest, SupportRunError,
 };
@@ -95,7 +95,7 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
     let model = hollowed(mesh, baseline);
     let delicacy: &'static [f64] = Box::leak(real_delicacy(&model).into_boxed_slice());
     let layers: &'static LayerPlan = Box::leak(Box::new(layer_plan()));
-    run_support_transactional(
+    run_support(
         model,
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
@@ -130,9 +130,7 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
         0,
         "the toed slab covers on its baseline layout, so the controller must cost it nothing"
     );
-    let report = authority
-        .repair_report()
-        .expect("the one-winner controller reports on every path");
+    let report = authority.repair_report();
     assert_eq!(
         (report.trials, report.commits),
         (0, 0),
@@ -187,7 +185,7 @@ fn every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses() 
     )
     .expect("make_overhang_table closes through repair");
 
-    let report = authority.repair_report().expect("a §A.8 report");
+    let report = authority.repair_report();
     assert!(
         report.commits >= 1,
         "this fixture is here BECAUSE it needs repair; if it stopped needing any, the test \
@@ -368,6 +366,29 @@ fn a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered
 /// diagnosis showed that inference was false — 220 of 300 pool rows sit INSIDE
 /// the radius, nearest seat 0.0972 mm from the hole. This test pins that no
 /// route outcome is a distance claim.
+///
+/// **This is now the blade's ONLY home (§G.1 stage 4).** The raking-blade half
+/// of `support_runner_integration.rs::public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure`
+/// moved here rather than being ported in place, because both files now call
+/// the same `run_support` and keeping both would run this fixture's 45 full
+/// pipeline trials twice per gate for one set of facts. Everything that half
+/// asserted is asserted here, and the vocabulary pins it carried are re-derived
+/// below with the from→to recorded:
+///
+/// * `attempts` 8 → **0** — the field counts committed steps now (ruling R6),
+///   and this model commits nothing;
+/// * `AttemptsExhausted` → **`NoImprovingRepair { candidates_tried: 45,
+///   best_remaining_score_mm2: 0.0 }`** — a measured end, not a counter's name
+///   for giving up;
+/// * `history.len() == 9` → the trial stream, 45 rows, none committed;
+/// * `nominated_repair_rows > 0` ("the evidence must say whether this island
+///   was ever attempted") → **`PoolExhausted { pool_rows: 33, occupied: 2,
+///   ledgered: 31 }`**, which says how many rows the route had, how many were
+///   already spent, and how many were tried and rolled back.
+///
+/// The censor assertions the moved half carried — island 3's 0.060 mm² censored
+/// and OUT of the refusal, island 5's 5.135 mm² above the registered censor and
+/// refusing — were already here verbatim and are unchanged.
 #[test]
 fn the_raking_blade_refuses_with_a_measured_class_per_route() {
     let error = run(
@@ -476,6 +497,22 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         "every trial that did not commit must appear in the rejection histogram, by class: \
          {report:?}"
     );
+
+    // **The trial stream reaches the refusal, and it is the whole stream.**
+    // This is what replaced `history.len() == 9`: not an aggregate per attempt
+    // but one row per transaction, and a refusal that carried only its commits
+    // would print an empty list for a model that spent 45 trials and kept none.
+    assert_eq!(
+        refusal.steps.len(),
+        report.trials,
+        "every trial must reach the record, committed or not: {} rows against {} trials",
+        refusal.steps.len(),
+        report.trials
+    );
+    assert!(
+        refusal.steps.iter().all(|step| step.commit.is_none()),
+        "this model commits nothing, so no row in its stream may claim a commit number"
+    );
 }
 
 /// **Design §A.8, ruling R10 — the price of having no failed-tries cap is that
@@ -498,7 +535,7 @@ fn every_run_reports_its_trials_and_its_wall_time_on_the_sealed_path() {
         "make_overhang_table",
     )
     .expect("make_overhang_table closes through repair");
-    let report = authority.repair_report().expect("a §A.8 report");
+    let report = authority.repair_report();
 
     assert!(report.wall_time_per_trial_min_ms <= report.wall_time_per_trial_median_ms);
     assert!(report.wall_time_per_trial_median_ms <= report.wall_time_per_trial_max_ms);
@@ -541,7 +578,7 @@ fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
         "make_overhang_table",
     )
     .expect("make_overhang_table closes through repair");
-    let report = authority.repair_report().expect("a §A.8 report");
+    let report = authority.repair_report();
 
     assert!(
         report.candidates_remaining > 100,

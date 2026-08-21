@@ -13225,20 +13225,41 @@ mod tests {
         assert_eq!(batched.finalized_load_plan_digest(), batched.digest());
     }
 
-    /// FU-56 tests #1-#3: nomination is deterministic, never nominates an
-    /// occupied or `failed` row, and stays inside a blocking patch's own
-    /// `(island_id, component_id)`.
+    /// **FU-56 tests #1–#3, ported onto the shipped ranking at §G.1 stage 4.**
+    ///
+    /// The retired `nominate_repair_rows` picked one row per patch per attempt.
+    /// `rank_repair_candidates` replaces it, and the three properties this test
+    /// was written for are properties of ELIGIBILITY, not of picking, so all
+    /// three carry over unchanged:
+    ///
+    /// * **deterministic** — repeated calls on the same plan are byte-identical;
+    /// * **never an occupied row** — a seat already held by a contact in the
+    ///   accepted plan is not offered;
+    /// * **never a ledgered row** — SPEC §6's "exact failed rows are excluded",
+    ///   which the one-winner controller fills with rows a TRIAL rolled back
+    ///   (the batch loop's identically-named set never was that);
+    /// * **only worklist routes** — a row whose own `(island_id,
+    ///   component_id)` is not on the worklist is not eligible at all.
+    ///
+    /// **The one property that legitimately changed, from→to.** The batch
+    /// version also asserted that a nominated row's SCORE stayed inside its own
+    /// key. That is rule N2's deletion (design §A.4): the score is now GLOBAL,
+    /// because a contact covers whatever falls inside its coverage radius and
+    /// does not know about island ids. Route-local scoring under-valued exactly
+    /// the rows task #27 exists to keep. The ROUTE that owns a row is unchanged
+    /// and is still asserted; only the sample set the row is scored against is
+    /// wider, and `scored_from` is what makes that visible.
     #[test]
-    fn coverage_closure_nomination_is_deterministic_and_respects_occupancy_and_failed_rows() {
+    fn coverage_closure_ranking_is_deterministic_and_respects_occupancy_and_ledgered_rows() {
         let (_mesh, _generic, plan) =
-            edit_fixture(make_overhang_table().unwrap(), "closure nomination")
+            edit_fixture(make_overhang_table().unwrap(), "closure ranking")
                 .unwrap_or_else(|error| panic!("{error}"));
 
         let mut seen_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
-        let mut blocking = Vec::new();
+        let mut worklist = Vec::new();
         for sample in plan.coverage_samples() {
             if seen_keys.insert((sample.island_id, sample.component_id)) {
-                blocking.push(crate::coverage_closure::BlockingPatchKey {
+                worklist.push(crate::coverage_closure::BlockingPatchKey {
                     island_id: sample.island_id,
                     component_id: sample.component_id,
                     representative_face_id: sample.face_id,
@@ -13248,38 +13269,38 @@ mod tests {
                 });
             }
         }
-        assert!(!blocking.is_empty(), "required fixture has coverage samples");
+        assert!(!worklist.is_empty(), "required fixture has coverage samples");
 
         // This fixture stands in for a measurement in which every sample is
-        // still uncovered, which is what the synthetic blocking set above
-        // claims. Nomination scores against exactly this set (FU-56 fix:
-        // never against covered samples on a partially covered face).
+        // still uncovered, which is what the synthetic worklist above claims.
+        // The ranking scores against exactly this set — never against covered
+        // samples on a partially covered face.
         let uncovered: Vec<usize> = (0..plan.coverage_samples().len()).collect();
-        let empty_failed = BTreeSet::new();
-        let first = crate::coverage_closure::nominate_repair_rows(
+        let empty_ledger = BTreeSet::new();
+        let first = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &uncovered,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        let second = crate::coverage_closure::nominate_repair_rows(
+        let second = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &uncovered,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
         assert_eq!(
             first, second,
-            "nomination must be byte-identical across repeated calls on the same plan"
+            "the ranking must be byte-identical across repeated calls on the same plan"
         );
         assert!(
-            !first.rows.is_empty(),
+            !first.ranked.is_empty(),
             "required fixture has at least one eligible repair row"
         );
 
@@ -13289,63 +13310,81 @@ mod tests {
             .into_iter()
             .map(|occupancy| occupancy.row_id())
             .collect();
-        for &row_id in &first.rows {
+        for row in &first.ranked {
             assert!(
-                !occupied.contains(&row_id),
-                "an occupied row must never be nominated"
+                !occupied.contains(&row.id),
+                "an occupied row must never be ranked"
             );
             assert!(
-                seen_keys.contains(&(row_id.owner_island_id(), row_id.component_id())),
-                "nomination must stay inside a blocking patch's own island/component"
+                seen_keys.contains(&(row.id.owner_island_id(), row.id.component_id())),
+                "only a row whose OWN route is on the worklist may be eligible"
             );
         }
 
-        let already_nominated = *first.rows.first().expect("checked non-empty above");
-        let mut failed_with_row = BTreeSet::new();
-        failed_with_row.insert(already_nominated);
-        let excluded = crate::coverage_closure::nominate_repair_rows(
+        let already_ranked = first.ranked.first().expect("checked non-empty above").id;
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(already_ranked);
+        let excluded = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &uncovered,
             6.0,
             65_536,
-            &failed_with_row,
+            &ledgered,
         )
         .unwrap();
         assert!(
-            !excluded.rows.contains(&already_nominated),
-            "a row recorded as failed must never be re-nominated"
+            !excluded.ranked.iter().any(|row| row.id == already_ranked),
+            "a row a trial rolled back must never be offered again — SPEC §6's exact-failed-row \
+             exclusion"
         );
-        // FU-56 (2026-08-12 fix): every blocking key is accounted for, so a
-        // refusal can say per island whether it was ever attempted at all.
+
+        // Every worklist key is accounted for, so a refusal can say per island
+        // whether it had anything to try at all. A key with zero eligible rows
+        // must still appear, with zero.
         assert_eq!(
             first.per_key.len(),
             seen_keys.len(),
-            "every blocking (island, component) key must be recorded, including keys with zero eligible rows"
+            "every worklist (island, component) key must be recorded, including keys with zero \
+             eligible rows"
         );
         for (key, counts) in &first.per_key {
-            assert!(
-                counts.nominated_rows <= counts.eligible_rows,
-                "key {key:?} nominated more rows than it had eligible"
+            let ranked_here = first.ranked.iter().filter(|row| row.key == *key).count();
+            assert_eq!(
+                ranked_here, counts.eligible_rows,
+                "key {key:?} reports {} eligible rows but {ranked_here} reached the ranking; \
+                 the count a refusal prints must be the count the search actually had",
+                counts.eligible_rows
             );
         }
     }
 
-    /// FU-56 (2026-08-12 fix): nomination scores against the samples the
-    /// measurement found UNCOVERED, never against every sample on a blocking
-    /// patch's faces. Scoring a candidate against already-covered area is how
-    /// a row beside a large covered region outranks the row that closes the
-    /// residual gap — and because the score set is fixed across attempts,
-    /// that mis-ranking burns the whole attempt bound while a viable closer
-    /// waits below it.
+    /// **FU-56's scoring fix, ported onto the shipped ranking at §G.1 stage 4 —
+    /// INTENT UNCHANGED.**
+    ///
+    /// The claim is the same one it always was: the score follows the samples
+    /// the measurement found UNCOVERED, never every sample on a worklist
+    /// patch's faces. Scoring a candidate against already-covered area is how a
+    /// row beside a large covered region outranks the row that closes the
+    /// residual gap — and because that score set does not change while the
+    /// search runs, the mis-ranking burns the whole budget while a viable
+    /// closer waits below it.
+    ///
+    /// **What moved:** the batch version compared which ROW was nominated. Here
+    /// nothing is "nominated" — the ranking holds every eligible row (rule N1)
+    /// and the controller takes the head of it — so the assertion is on the
+    /// ORDER, which is the thing the score decides, and on the score itself
+    /// falling when the uncovered set shrinks. That is a strictly stronger read
+    /// of the same property: a scorer blind to coverage state would keep both
+    /// the head row AND its score.
     #[test]
-    fn coverage_closure_nomination_scores_only_the_uncovered_samples() {
+    fn coverage_closure_ranking_scores_only_the_uncovered_samples() {
         let (_mesh, _generic, plan) =
-            edit_fixture(make_overhang_table().unwrap(), "closure nomination scoring")
+            edit_fixture(make_overhang_table().unwrap(), "closure ranking scoring")
                 .unwrap_or_else(|error| panic!("{error}"));
 
-        // One blocking key, its own faces, and two different claims about
-        // which of its samples are still uncovered.
+        // One worklist key, its own faces, and two different claims about which
+        // of its samples are still uncovered.
         let first_sample = plan.coverage_samples().first().expect("fixture samples");
         let key = (first_sample.island_id, first_sample.component_id);
         let indices_for_key: Vec<usize> = plan
@@ -13365,7 +13404,7 @@ mod tests {
             .collect();
         faces.sort_unstable();
         faces.dedup();
-        let blocking = vec![crate::coverage_closure::BlockingPatchKey {
+        let worklist = vec![crate::coverage_closure::BlockingPatchKey {
             island_id: key.0,
             component_id: key.1,
             representative_face_id: faces[0],
@@ -13374,33 +13413,55 @@ mod tests {
             worst_gap: crate::coverage_closure::CoverageClosureGap::Finite(0.5),
         }];
 
-        let empty_failed = BTreeSet::new();
-        let all_uncovered = crate::coverage_closure::nominate_repair_rows(
+        let empty_ledger = BTreeSet::new();
+        let all_uncovered = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &indices_for_key,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        // The same patch, but with only its LAST sample still uncovered: a
-        // face that is almost entirely covered with one residual gap.
+        // The same patch, but with only its LAST sample still uncovered: a face
+        // that is almost entirely covered with one residual gap.
         let residual = vec![*indices_for_key.last().expect("non-empty")];
-        let residual_only = crate::coverage_closure::nominate_repair_rows(
+        let residual_only = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &residual,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        assert!(!all_uncovered.rows.is_empty() && !residual_only.rows.is_empty());
+        assert!(!all_uncovered.ranked.is_empty() && !residual_only.ranked.is_empty());
+        assert_eq!(
+            all_uncovered.ranked.len(),
+            residual_only.ranked.len(),
+            "the ELIGIBLE set is a property of the plan and the worklist, not of the uncovered \
+             samples; only the order and the scores may move"
+        );
+
+        let broad_head = all_uncovered.ranked.first().expect("non-empty");
+        let residual_head = residual_only.ranked.first().expect("non-empty");
         assert_ne!(
-            all_uncovered.rows, residual_only.rows,
-            "the nominated row must follow the uncovered set: if it does not, the score is \
-             blind to coverage state and the controller cannot close a residual gap"
+            broad_head.id, residual_head.id,
+            "the winning row must follow the uncovered set: if it does not, the score is blind \
+             to coverage state and the controller cannot close a residual gap"
+        );
+        assert!(
+            residual_head.marginal_area_mm2 < broad_head.marginal_area_mm2,
+            "one residual sample cannot be worth as much covered area as the whole patch; a \
+             score that did not fall is a score that never read the uncovered set: {} mm² \
+             against {} mm²",
+            residual_head.marginal_area_mm2,
+            broad_head.marginal_area_mm2
+        );
+        assert!(
+            residual_head.marginal_area_mm2 > 0.0,
+            "the residual gap is still real area, and a winner that covers nothing would be \
+             stopped by §B.3's zero-score guard before it ever became a trial"
         );
     }
 

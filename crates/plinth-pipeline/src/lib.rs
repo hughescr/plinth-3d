@@ -2024,7 +2024,7 @@ mod tests {
             // sealed run under either field, and production answers that with
             // its reserve solid rather than with a different support plan.
             let outcome = |field: &[f64]| -> Result<u64, String> {
-                let authority = plinth_support::run_support_transactional(
+                let authority = plinth_support::run_support(
                     prepared_hollow(&mesh, baseline_report),
                     support.clone(),
                     limits.input(&layers, field, &[]),

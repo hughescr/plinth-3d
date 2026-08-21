@@ -56,7 +56,7 @@ use plinth_hollow::{
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
-use plinth_support::{run_support_transactional, SupportRequest, SupportRunError};
+use plinth_support::{run_support, SupportRequest, SupportRunError};
 
 use crate::coverage_evidence::{self, RenderMesh};
 use crate::{
@@ -1154,7 +1154,6 @@ fn clear_stale_coverage_evidence(target: &Path) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-
     let Some(parent) = target.parent() else {
         return Ok(());
     };
@@ -1775,7 +1774,7 @@ pub fn seal_and_emit(
     );
 
     // FU-57: a coverage-closure refusal (FU-56) is only knowable from
-    // `run_support_transactional`'s `Err`, by which point the consumed
+    // `run_support`'s `Err`, by which point the consumed
     // `HollowedModel` and its mesh are gone. The render evidence needs the
     // mesh, so this is the last point it can be captured -- see
     // [`RenderMesh`]'s own doc for why this is a real, documented per-model
@@ -1786,9 +1785,9 @@ pub fn seal_and_emit(
     // production call site of the sealed support run, and from here it is the
     // one-winner transactional controller: one repair-pool row per step, taken
     // all the way through the pipeline and either committed or rolled back,
-    // with the §A.8 report carried out below. The batch loop
-    // (`plinth_support::run_support`) is no longer reachable from production.
-    let sealed = run_support_transactional(hollowed, policy.support.clone(), input);
+    // with the §A.8 report carried out below. The batch loop this call site
+    // used to reach is deleted; there is no second controller to reach.
+    let sealed = run_support(hollowed, policy.support.clone(), input);
     let authority = sealed.map_err(|source| {
         // FU-57: only the coverage-closure refusal carries evidence this row
         // persists. Every other `SupportRunError` is a stage failure with
@@ -1856,7 +1855,7 @@ pub fn seal_and_emit(
     // path ruling R10 deleted the failed-tries cap on reported nothing about
     // what it spent. One read here reaches the artifact, the gate refusal and
     // a post-seal lowering or emit failure alike.
-    let repair_report = authority.repair_report().cloned();
+    let repair_report = Some(authority.repair_report().clone());
 
     // The pre-write gate. `judge_then_emit` judges the sealed snapshot while
     // the authority is still alive, and only a passing verdict reaches
@@ -2190,9 +2189,12 @@ mod tests {
         let model = ModelId::new("fixture");
         let refusal = plinth_support::CoverageClosureRefusal {
             attempts: 8,
-            reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+            reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                candidates_tried: 8,
+                best_remaining_score_mm2: 0.0,
+            },
             islands: Vec::new(),
-            history: Vec::new(),
+            steps: Vec::new(),
             repair: None,
         };
         let stop = ChainStop::new(PipelineError::SealedRun {
@@ -2254,9 +2256,12 @@ mod tests {
             source: plinth_support::SupportRunError::CoverageClosure(Box::new(
                 plinth_support::CoverageClosureRefusal {
                     attempts: 0,
-                    reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+                    reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                        candidates_tried: 8,
+                        best_remaining_score_mm2: 0.0,
+                    },
                     islands: Vec::new(),
-                    history: Vec::new(),
+                    steps: Vec::new(),
                     repair: Some(spent.clone()),
                 },
             )),

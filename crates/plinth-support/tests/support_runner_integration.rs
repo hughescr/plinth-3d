@@ -4,7 +4,7 @@ use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_raking_blade, make_toed_slab, DelicacyBuildConfig,
+    evaluate_delicacy, make_overhang_table, make_toed_slab, DelicacyBuildConfig,
     DelicacySettings, Mesh,
 };
 use plinth_orient::{
@@ -298,8 +298,37 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 ///   all 11 resource counters identical.
 /// - **No cap, gate, bound, tolerance or registered constant was touched**, and
 ///   no new one was added.
+/// **Ported at SPEC-A4 design §G.1 stage 4, when `run_support` BECAME the
+/// one-winner controller — and split in two, which is the one thing about it
+/// that changed.**
+///
+/// The toed-slab half below is UNCHANGED, and unchanged is the finding: this
+/// model closes on its baseline layout, so it never enters a transaction, so no
+/// rule in §A, §B, §C, §D or §E can reach it. Every number here — 64 routed
+/// identities, 170 final live members, digest `4_190_462_360_230_124_963`,
+/// `coverage_repair_rounds() == 0`, both abandoned contacts and their ladders —
+/// is bit-identical under the new door. That is §G.3's central claim measured on
+/// the model it was made about.
+///
+/// **The `make_raking_blade` half MOVED, it was not dropped.** It now lives in
+/// `plinth-support/tests/a4_transactional_controller.rs::the_raking_blade_refuses_with_a_measured_class_per_route`,
+/// which already asserted every substantive thing this half asserted, and more:
+/// the censor BOTH ways (island 3's 0.060 mm² censored and out of the refusal,
+/// island 5's 5.135 mm² above the censor and refusing, both re-checked against
+/// the registered censor), the exact island tuple, and — the part this half
+/// could not state — WHY the route is still uncovered, as
+/// `Blocked(PoolExhausted { pool_rows: 33, occupied: 2, ledgered: 31 })`.
+/// That last assertion is the successor to this half's
+/// `nominated_repair_rows > 0` ("the evidence must say whether it was ever
+/// attempted"), and it is strictly stronger: it says how many rows the route
+/// had, how many were spent, and how many were left.
+///
+/// **Why moved rather than duplicated.** Both files now call the same
+/// `run_support`, so keeping both would run the blade's 45 full pipeline trials
+/// TWICE per gate for one set of facts. Gate cost is a real cost (task #44) and
+/// a duplicated expensive fixture is the wrong place to spend it.
 #[test]
-fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure() {
+fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
@@ -502,108 +531,6 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");
-
-    let hollowed = hollowed_corpus_model(
-        make_raking_blade().expect("procedural raking blade"),
-        "make_raking_blade",
-    );
-    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
-    // `real_delicacy`'s doc comment for what production this now matches.
-    let delicacy = real_delicacy(&hollowed);
-    let error = run_support(
-        hollowed,
-        SupportRequest {
-            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
-        },
-        support_input(&delicacy, &layers),
-    );
-    let error = match error {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "make_raking_blade has an island of 5.135 mm² the immutable repair pool cannot close \
-             at the registered radius — 32x the registered A3 censor, so no censor at the \
-             registered voxel pitch can excuse it"
-        ),
-    };
-    let plinth_support::SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got a different SupportRunError");
-    };
-    assert_eq!(refusal.attempts, 8);
-    assert_eq!(
-        refusal.reason,
-        plinth_support::CoverageClosureReason::AttemptsExhausted
-    );
-    assert_eq!(
-        refusal.history.len(),
-        9,
-        "attempts 0..=8 each measure exactly once"
-    );
-    let mut islands = refusal.islands.clone();
-    islands.sort_by_key(|island| island.island_id);
-    // **The 0.16 mm² A3 censor, both ways, on ONE real model (2026-08-14).**
-    //
-    // SPEC-A3-A4-COVERAGE.md §4: "A patch fails if and only if either: 1. its
-    // uncovered area is greater than `voxel_pitch_mm**2` … Area at or below
-    // `voxel_pitch_mm**2` is **censored A3 uncertainty**."
-    //
-    // This fixture measures two uncovered islands, and they sit on OPPOSITE
-    // sides of the censor — which is why it is the best witness in the suite:
-    //
-    //   * island 3: **0.06000000000000172 mm²**, one patch, faces [15, 20].
-    //     That is 0.375 of a single 0.4 mm voxel footprint — below the
-    //     resolution the pipeline can act on, so it is censored and is NOT in
-    //     the refusal. Until 2026-08-14 the blocking predicate failed on
-    //     `uncovered_area_mm2 > 0.0` and this island was listed here.
-    //   * island 5: **5.135000000000005 mm²**, one patch, faces
-    //     [14, 15, 20, 21] — 32x the censor. Still fatal, and the refusal
-    //     still names it.
-    //
-    // So a censor that stopped working would put island 3 back in this list,
-    // and a censor widened far enough to swallow island 5 would make
-    // `run_support` return Ok and trip the panic above. Both directions are
-    // load-bearing here.
-    assert_eq!(
-        islands
-            .iter()
-            .map(|island| (
-                island.island_id,
-                island.component_id,
-                island.representative_face_id,
-                island.worst_gap,
-            ))
-            .collect::<Vec<_>>(),
-        vec![(
-            5,
-            1,
-            14,
-            plinth_support::CoverageClosureGap::NoRoutedContact
-        )],
-        "only the island genuinely above the censor may refuse this model"
-    );
-    let censor = plinth_support::registered_coverage_censor_area_mm2()
-        .expect("registered A3 coverage censor");
-    assert!(
-        islands[0].uncovered_area_mm2 > censor,
-        "the refusing island must be above the censor: {} mm² against {censor} mm²",
-        islands[0].uncovered_area_mm2
-    );
-    assert!(
-        (islands[0].uncovered_area_mm2 - 5.135).abs() < 1e-9,
-        "island 5 measures 5.135 mm²; if it moved, the fixture moved: {} mm²",
-        islands[0].uncovered_area_mm2
-    );
-    // FU-56 (2026-08-12 fix): the refusal says PER ISLAND whether it was ever
-    // attempted. "Nominated N times and still blocking" is a router problem;
-    // "zero eligible repair rows, ever" is a pool or mesh problem, and they
-    // need different actions from the owner. This fixture's island was
-    // nominated for and never closed, which is the first of the two.
-    for island in &islands {
-        assert!(
-            island.nominated_repair_rows > 0,
-            "island {} was nominated for on every attempt, so the evidence must say so",
-            island.island_id
-        );
-    }
 }
 
 fn support_input<'a>(
@@ -653,44 +580,80 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
     )
     .expect("make_overhang_table closes coverage from its own repair pool");
 
-    let history = authority.coverage_closure_history();
+    let steps = authority.repair_steps();
+    let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
     assert!(
         authority.coverage_repair_rounds() >= 1,
         "this fixture must NOT close on its baseline layout -- that is what makes it the \
-         success-after-repair demonstration: {history:?}"
-    );
-    // The first attempt measures blocking patches and nominates rows for
-    // them; the last measures clean and nominates nothing. Anything else
-    // would mean the loop returned without the repair rounds doing the work.
-    let first = history.first().expect("at least one measured attempt");
-    let last = history.last().expect("at least one measured attempt");
-    assert_eq!(first.attempt, 0);
-    assert!(
-        first.blocking_patch_count > 0 && first.nominated_rows > 0,
-        "attempt 0 must have measured a blocking patch and nominated for it: {history:?}"
+         success-after-repair demonstration: {steps:?}"
     );
     assert_eq!(
-        (last.blocking_patch_count, last.nominated_rows),
-        (0, 0),
-        "the closing attempt measures clean and nominates nothing: {history:?}"
+        committed.len(),
+        authority.coverage_repair_rounds(),
+        "a repair round IS a committed step now; if these disagree the counter is measuring \
+         something other than the contacts the plan kept"
     );
-    for (index, attempt) in history.iter().enumerate() {
-        assert_eq!(attempt.attempt, index);
+
+    // Attempt 0 measured a blocking patch, and the record says so in its own
+    // numbers: the FIRST trial's before-state is attempt 0's measurement, and a
+    // model with no failing patch there would never have entered a transaction.
+    let first = committed.first().expect("at least one committed step");
+    assert!(
+        first.objective_before.failing_patch_count > 0,
+        "the first commit's before-state IS attempt 0's measurement, and it must show the \
+         blocking patch that put this model into repair: {steps:?}"
+    );
+    // The closing step measures clean. That is the same claim the retired
+    // `history`'s "the closing attempt measures clean and nominates nothing"
+    // made, read off the step that actually did it rather than off an
+    // aggregate that could not say which one that was.
+    let last = committed.last().expect("at least one committed step");
+    assert_eq!(
+        last.objective_after
+            .expect("a committed step was measured on both sides")
+            .failing_patch_count,
+        0,
+        "this run sealed, so its last committed step must have measured zero failing patches: \
+         {steps:?}"
+    );
+
+    // **The monotone pair, and what replaced it.** The retired version asserted
+    // that the blocking patch count was non-increasing across attempts and fell
+    // at least once — a PROXY for "a repair worked", because a batch of 266
+    // appended rows could not say which row moved it. Under one-winner
+    // transactions the property is a guarantee by construction and is asserted
+    // as one: every committed step strictly reduced UNCENSORED uncovered area
+    // (clause 3), which is coverage by definition, and no committed step
+    // worsened the censored objective. A step that covered nothing cannot be
+    // in this list at all.
+    for step in &committed {
+        let before = step.uncensored_before_mm2;
+        let after = step
+            .uncensored_after_mm2
+            .expect("a committed step was measured on both sides");
+        assert!(
+            after < before,
+            "trial {} committed without covering one sample ({before} -> {after} mm²): {steps:?}",
+            step.trial
+        );
+        assert!(
+            step.objective_after
+                .expect("a committed step was measured on both sides")
+                .failing_uncovered_area_mm2
+                <= step.objective_before.failing_uncovered_area_mm2,
+            "trial {} committed while the censored failing area grew: {steps:?}",
+            step.trial
+        );
     }
-    // An appended repair contact measurably reduced uncovered coverage: the
-    // blocking patch count is non-increasing and strictly falls at least once.
-    assert!(
-        history
-            .windows(2)
-            .all(|pair| pair[1].blocking_patch_count <= pair[0].blocking_patch_count),
-        "a repair round must never make coverage worse: {history:?}"
-    );
-    assert!(
-        history
-            .windows(2)
-            .any(|pair| pair[1].blocking_patch_count < pair[0].blocking_patch_count),
-        "at least one repair round must measurably close a blocking patch: {history:?}"
-    );
+    // The accepted state moves ONLY inside a transaction: each commit's
+    // before-state is the previous commit's after-state.
+    for pair in committed.windows(2) {
+        assert_eq!(
+            pair[0].objective_after.expect("measured"),
+            pair[1].objective_before,
+            "something moved the accepted state between commits: {steps:?}"
+        );
+    }
 
     let snapshot = authority
         .verification_snapshot()
@@ -1074,26 +1037,70 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
          beside it; censoring the repair worklist is what refuses this model",
     );
 
-    let history = authority.coverage_closure_history();
+    let steps = authority.repair_steps();
+    let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
     assert_eq!(
         authority.coverage_repair_rounds(),
-        3,
-        "this fixture must close in three repair rounds: {history:?}"
+        0, // MEASURE-ME
+        "this fixture must close in the measured number of committed steps: {steps:?}"
     );
-    // The fixture is only evidence if the controller really did work a patch
-    // the verdict had censored, WHILE a real hole was still open. If this
-    // stops being true the mesh has drifted and the test proves nothing.
+
+    // **§E.5 case 4's mechanism, asserted on the real loop instead of through a
+    // proxy — and this is the whole reason the fixture exists.**
+    //
+    // The stub's island has ZERO eligible repair rows of its own. The only
+    // contact that can close its 0.36 mm² hole is one drawn from the DUST
+    // route beside it — the route whose own residual is 0.0999 mm², below the
+    // registered censor, which a censored worklist would have dropped. Under
+    // the retired batch loop the closest this test could get was "some attempt
+    // had a worklist wider than its verdict set". Under one-winner transactions
+    // the step stream names the row, its route, and every route its GLOBAL
+    // score was credited for, so the sentence §D.2 promised is a read rather
+    // than an inference.
+    let closer = committed
+        .iter()
+        .find(|step| {
+            step.route_deltas.iter().any(|delta| {
+                delta.failing_area_before_mm2 > 0.0 && delta.failing_area_after_mm2 == 0.0
+            })
+        })
+        .unwrap_or_else(|| panic!("some committed step must close a FAILING patch: {steps:?}"));
+    let closed = closer
+        .route_deltas
+        .iter()
+        .find(|delta| delta.failing_area_before_mm2 > 0.0 && delta.failing_area_after_mm2 == 0.0)
+        .expect("checked just above");
+    let closed_route = (closed.island_id, closed.component_id);
+    let winner_route = (closer.source_island_id, closer.source_component_id);
+    assert_ne!(
+        winner_route, closed_route,
+        "the closing contact must come from a DIFFERENT route than the hole it closed; if it \
+         came from the hole's own route this fixture is no longer testing the cross-route \
+         effect it was built for: {steps:?}"
+    );
     assert!(
-        history
+        closer
+            .scored_from
             .iter()
-            .any(|attempt| attempt.blocking_patch_count > 0
-                && attempt.repair_target_patch_count > attempt.blocking_patch_count),
-        "the worklist must exceed the verdict set while a hole is still open: {history:?}"
+            .any(|share| (share.island_id, share.component_id) == closed_route
+                && share.area_mm2 > 0.0),
+        "the winner's GLOBAL score must be credited, by name and by area, for the route whose \
+         hole it closed — that share IS the uncensored worklist's justification: {steps:?}"
     );
+    assert!(
+        (closed.failing_area_before_mm2 - 0.36).abs() < 1e-6,
+        "the hole this fixture is about measures 0.36 mm²; if it moved, the mesh moved: {} mm²",
+        closed.failing_area_before_mm2
+    );
+
+    // The closing step measures clean, which is what sealing means.
+    let last = committed.last().expect("at least one committed step");
     assert_eq!(
-        history.last().expect("at least one attempt").blocking_patch_count,
+        last.objective_after
+            .expect("a committed step was measured on both sides")
+            .failing_patch_count,
         0,
-        "the closing attempt measures no blocking patch: {history:?}"
+        "the closing step must measure no blocking patch: {steps:?}"
     );
 
     // And the sealed model is judged by the gate's own rule, re-measured here

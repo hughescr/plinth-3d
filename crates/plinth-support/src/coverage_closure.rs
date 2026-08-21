@@ -38,10 +38,17 @@
 //! descendant, of `runner` — cannot name. This module supplies the parts that
 //! do not need that machinery: the typed refusal evidence
 //! ([`CoverageClosureRefusal`]) FU-57 persists, the shared blocking predicate
-//! and registered request, and the batch-first nomination algorithm
-//! ([`nominate_repair_rows`]) that turns one attempt's uncovered patches — the
-//! uncensored worklist — into a deterministic, deduplicated set of repair-row
-//! ids to append.
+//! and registered request, and the SPEC-A4 §A.4 search rules
+//! ([`rank_repair_candidates`], [`rank_eligible_candidates`],
+//! [`choose_winner`]) that turn one measurement's uncovered patches — the
+//! uncensored worklist — into a deterministic global ranking of repair-pool
+//! rows and pick ONE winner from it.
+//!
+//! **The batch nominator went with the batch loop at §G.1 stage 4.**
+//! `nominate_repair_rows` picked one row per patch per attempt and returned a
+//! whole append set; there is no longer any caller that appends more than one
+//! row, and its two exclusion rules live on verbatim in
+//! [`rank_repair_candidates`], which is where its tests were moved.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,7 +56,7 @@ use plinth_core::m0_constants;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::specialized::{RepairRow, RepairRowId, SpecializedContactPlan, SpecializedError};
+use crate::specialized::{RepairRowId, SpecializedContactPlan, SpecializedError};
 use crate::{
     CoverageGap, CoverageMeasurementError, CoverageMeasurementRequest, SupportPreparationLimits,
 };
@@ -237,27 +244,6 @@ pub fn registered_coverage_censor_area_mm2() -> Result<f64, CoverageClosureSetup
 /// Why closure stopped without admitting every measured island.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CoverageClosureReason {
-    /// The registered attempt bound
-    /// (`ContactSelectionConfig::coverage_repair_max_attempts`, registered
-    /// value 8) was reached with blocking patches still measured.
-    AttemptsExhausted,
-    /// **No** patch on the worklist anywhere had an unoccupied, unfailed
-    /// repair-pool row in its own `(island_id, component_id)`, so the attempt
-    /// produced an empty nomination set and closure could not shrink anything
-    /// at all. The worklist is the UNCENSORED one
-    /// ([`coverage_patch_needs_repair`]), so a run reaches this only when even
-    /// the censored dust patches have no row left to try.
-    ///
-    /// This is deliberately the whole-attempt condition, not a per-patch one:
-    /// a model with one row-less island and one island that still has rows
-    /// keeps iterating, because refusing the moment ANY island runs dry would
-    /// abandon islands that were still closing. The per-island distinction
-    /// the owner needs — "never had a row" versus "nominated every attempt
-    /// and never closed" — is carried on
-    /// [`CoverageClosureIsland::eligible_repair_rows`] and
-    /// [`CoverageClosureIsland::nominated_repair_rows`] instead, on EVERY
-    /// refusal reason including [`Self::AttemptsExhausted`].
-    NoEligibleRepairRows,
     /// The routed-contact coverage measurement itself could not be completed.
     ///
     /// **One producer (task #49 split landing, 2026-08-19).** A short-lived
@@ -289,9 +275,15 @@ pub enum CoverageClosureReason {
     },
     /// **SPEC-A4 §B.7.** No route on the worklist had a single eligible
     /// repair-pool row at the FIRST repair step, so there was never anything
-    /// to transact. The one-winner controller's whole-model version of
-    /// [`Self::NoEligibleRepairRows`], separated from it because the batch
-    /// loop's variant also fires mid-run and this one cannot.
+    /// to transact.
+    ///
+    /// This is the successor to the retired `NoEligibleRepairRows`, and the
+    /// difference is not cosmetic: the batch variant also fired MID-RUN, after
+    /// several attempts had each appended a batch, so "no eligible rows" could
+    /// mean either "the pool was empty from the start" or "this controller
+    /// spent the pool". This one can only mean the first. Which routes remain
+    /// and why is per-route evidence ([`RouteRepairOutcome`]), not a
+    /// whole-model verdict.
     NothingToTry,
     /// **SPEC-A4 §B.7.** The honest end of a greedy search: every candidate was
     /// tried and rolled back, or the best remaining candidate's GLOBAL score is
@@ -447,52 +439,45 @@ pub struct CoverageClosureIsland {
     /// **SPEC-A4 §E.1, rulings R7 and R14.** Why THIS route is still uncovered,
     /// as a measured class rather than a distance claim.
     ///
-    /// `None` from the batch controller, which has no per-route search to
-    /// report on; `Some` from the one-winner controller. Additive and
-    /// `serde(default)`, so an older sidecar still reads.
+    /// Always `Some` from the one-winner controller, which is the only
+    /// controller. Kept `Option` and `serde(default)` so a sidecar written
+    /// before the search existed still reads.
     #[serde(default)]
     pub outcome: Option<RouteRepairOutcome>,
 }
 
-/// One closure round's measured shape, kept for refusal evidence: how many
-/// patches were still blocking when this attempt measured, and how many rows
-/// this attempt nominated in response (zero on the terminal attempt, which
-/// measures but does not nominate).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoverageClosureAttempt {
-    pub attempt: usize,
-    /// Patches that would REFUSE the model on this attempt: the censored
-    /// verdict set ([`coverage_patch_blocks_verdict`]). Zero here is what ends
-    /// the loop with a sealed authority.
-    pub blocking_patch_count: usize,
-    /// Patches this attempt was willing to WORK ON: every patch the
-    /// measurement found uncovered at all, censored or not
-    /// ([`coverage_patch_needs_repair`]). Always at least
-    /// [`Self::blocking_patch_count`]; the difference is the sub-censor dust
-    /// the controller repairs anyway, because a repair nominated for dust
-    /// covers the real hole beside it too.
-    #[serde(default)]
-    pub repair_target_patch_count: usize,
-    pub nominated_rows: usize,
-}
-
-/// The typed refusal FU-57 persists: closure could not admit every measured
-/// island within the registered attempt bound. Boxed at its one call site
+/// The typed refusal FU-57 persists: the coverage search stopped with blocking
+/// patches still measured. Boxed at its one call site
 /// ([`crate::SupportRunError::CoverageClosure`]) because it carries the whole
-/// per-attempt history and every still-uncovered island's evidence.
+/// trial stream and every still-uncovered island's evidence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoverageClosureRefusal {
+    /// **Ruling R6: COMMITTED repair steps**, not passes of a loop. The field
+    /// keeps the name of the registered bound it counts against
+    /// (`coverage_repair_max_attempts`), and that bound bounds commits.
     pub attempts: usize,
     pub reason: CoverageClosureReason,
     pub islands: Vec<CoverageClosureIsland>,
-    pub history: Vec<CoverageClosureAttempt>,
+    /// **SPEC-A4 §D — the trial stream, on the wire.**
+    ///
+    /// One row per transaction, committed or not, each naming the exact
+    /// repair-pool row it proposed, the routes its GLOBAL score came from, both
+    /// sides of all three accept clauses, and the outcome.
+    ///
+    /// **This replaced `history: Vec<CoverageClosureAttempt>` at §G.1 stage 4**,
+    /// and the replacement is the point rather than a rename. A batch attempt
+    /// row said "289 rows nominated, blocking count 3 → 3": it could not say
+    /// which row did anything, because 289 rows moved at once. A step row says
+    /// which single contact was tried, what it cost and what it changed. §D:
+    /// "there is no inference and no apportionment".
+    #[serde(default)]
+    pub steps: Vec<crate::coverage_repair::CoverageRepairStepWire>,
     /// **SPEC-A4 §A.8, Craig's ruling R10 — the loud report, on the refused
     /// path.** R10 removes the failed-tries cap and replaces it with
     /// visibility, and that trade only holds if the visibility reaches the
     /// record. This is the sidecar half of it.
     ///
-    /// `None` from the batch controller, which runs no trials. Additive and
-    /// `serde(default)`, so it is not the stage-4 format change.
+    /// Additive and `serde(default)`, so an older sidecar still reads.
     #[serde(default)]
     pub repair: Option<crate::coverage_repair::RepairRunReport>,
 }
@@ -588,225 +573,6 @@ pub(crate) struct KeyNomination {
     pub(crate) eligible_rows: usize,
     /// Rows this attempt actually nominated for this key.
     pub(crate) nominated_rows: usize,
-}
-
-/// One attempt's nomination outcome: the flat, deduplicated row list to
-/// append, plus the per-key accounting the refusal evidence needs.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Nominations {
-    pub(crate) rows: Vec<RepairRowId>,
-    pub(crate) per_key: BTreeMap<(u32, u32), KeyNomination>,
-}
-
-/// Batch-first, deterministic nomination of repair-pool rows for one attempt's
-/// patches on the repair worklist.
-///
-/// **Candidates are scored against the samples the measurement found
-/// UNCOVERED, never against every sample on a blocking patch's faces.** A
-/// blocking patch is a connected group of faces each of which has at least
-/// one uncovered sample; a face can be — and on real geometry usually is —
-/// partially covered. Scoring against every sample on those faces sums
-/// already-covered area into the score, which lets a candidate sitting beside
-/// a large covered region outrank the candidate that actually closes the
-/// residual gap, and (because the score set is fixed across attempts) makes
-/// the whole 8-round ranking walk useless rows while a viable closer waits
-/// below them. `uncovered_samples` is the measurement's own
-/// [`crate::CoverageMeasurement::uncovered_sample_indices`], the same
-/// discipline the legacy `rank_coverage_repair_rows` (`lib.rs`) applies when
-/// it scores against failing sample rows only.
-///
-/// Occupancy is read ONCE ([`SpecializedContactPlan::occupied_repair_rows`]),
-/// and the whole pool is grouped by `(island_id, component_id)` ONCE
-/// ([`SpecializedContactPlan::all_repair_rows`]) — never per patch, which is
-/// what [`SpecializedContactPlan::eligible_repair_rows`] would cost if called
-/// once per blocking patch (it re-derives occupancy on every call). Scoring
-/// within one `(island_id, component_id)` group is tiled exactly as
-/// `rank_coverage_repair_rows` (`lib.rs`) tiles it: the same registered
-/// `coverage_score_matrix_max_entries` budget, clamped to the same 65,536
-/// production ceiling, the same `sample_tile × candidate_tile` shape, and the
-/// same tie-break (score descending, then pool order ascending) — so ordering
-/// stays total and deterministic across repeated runs on the same plan.
-///
-/// One row is nominated PER patch on the worklist (not one per attempt and not
-/// one per key), up to the number of eligible rows the key actually has, so a
-/// component with several simultaneous uncovered patches can close more than
-/// one of them in a single attempt. Nominated rows are deduplicated by id
-/// AND by candidate seat point across the whole attempt, matching
-/// `append_regular_repair_row`'s own `DuplicateChildPhysicalSeat` refusal.
-///
-/// **`repair_targets` is the UNCENSORED worklist**, not the censored verdict
-/// set: the caller passes every patch the measurement found uncovered at all
-/// ([`coverage_patch_needs_repair`]), because a row nominated for sub-censor
-/// dust seats a contact that covers the real hole beside it too. See the
-/// call-site table on [`coverage_patch_blocks_verdict`].
-///
-/// # Errors
-///
-/// Propagates [`SpecializedError`] from
-/// [`SpecializedContactPlan::occupied_repair_rows`].
-pub(crate) fn nominate_repair_rows(
-    plan: &SpecializedContactPlan,
-    repair_targets: &[BlockingPatchKey],
-    uncovered_samples: &[usize],
-    radius_mm: f64,
-    matrix_budget: usize,
-    failed: &BTreeSet<RepairRowId>,
-) -> Result<Nominations, SpecializedError> {
-    let mut excluded: BTreeSet<RepairRowId> = plan
-        .occupied_repair_rows()?
-        .into_iter()
-        .map(|occupancy| occupancy.row_id())
-        .collect();
-    excluded.extend(failed.iter().copied());
-
-    // A repair-pool row's identity is source-qualified by its OWNER ISLAND
-    // (`RepairPool` doc, specialized.rs): the same physical candidate seat
-    // legally appears as a distinct `RepairRowId` under every island whose
-    // face set contains it, so excluding by row id alone does not exclude an
-    // already-occupied seat's OTHER island-owned rows. `append_regular_repair_rows`
-    // itself refuses a coincident seat with `DuplicateChildPhysicalSeat`
-    // regardless of owner, so nomination must apply that same physical-point
-    // exclusion BEFORE proposing a row, not discover it only when the append
-    // refuses. One pass over the plan's existing contacts, gathered once.
-    let mut claimed_points: Vec<[f64; 3]> = plan
-        .contacts()
-        .iter()
-        .map(|contact| contact.position_mm())
-        .collect();
-
-    let mut rows_by_key: BTreeMap<(u32, u32), Vec<&RepairRow>> = BTreeMap::new();
-    for row in plan.all_repair_rows() {
-        if excluded.contains(&row.id())
-            || claimed_points
-                .iter()
-                .any(|point| *point == row.candidate().point_mm)
-        {
-            continue;
-        }
-        rows_by_key
-            .entry((row.id().owner_island_id(), row.id().component_id()))
-            .or_default()
-            .push(row);
-    }
-
-    // Only the measurement's uncovered rows are grouped: one gathered pass
-    // over the uncovered set (never over every sample), so the scoring matrix
-    // below is sized by what still needs covering rather than by the whole
-    // island. `uncovered_samples` is ascending, so each group stays ascending
-    // and the tiling below is order-stable.
-    let samples = plan.coverage_samples();
-    let mut samples_by_key: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
-    for &index in uncovered_samples {
-        let Some(sample) = samples.get(index) else {
-            // The measurement is taken against this plan's own sample slice,
-            // so this cannot happen; skipping rather than indexing keeps a
-            // future caller mismatch from panicking inside the controller.
-            continue;
-        };
-        samples_by_key
-            .entry((sample.island_id, sample.component_id))
-            .or_default()
-            .push(index);
-    }
-
-    let mut patches_by_key: BTreeMap<(u32, u32), Vec<&BlockingPatchKey>> = BTreeMap::new();
-    for patch in repair_targets {
-        patches_by_key
-            .entry((patch.island_id, patch.component_id))
-            .or_default()
-            .push(patch);
-    }
-
-    let radius_sq = radius_mm * radius_mm;
-    let matrix_budget = matrix_budget.clamp(1, 65_536);
-    let sample_tile = ((matrix_budget as f64).sqrt() as usize).max(1);
-    let candidate_tile = (matrix_budget / sample_tile).max(1);
-
-    // `claimed_points` already carries every seat this plan's existing
-    // contacts occupy (seeded above); picking below extends it in place so a
-    // seat chosen for an earlier key in THIS attempt is excluded from every
-    // later key too.
-    let mut nominated = Nominations::default();
-
-    for (key, patches) in patches_by_key {
-        let Some(candidate_rows) = rows_by_key.get(&key) else {
-            // Recorded rather than silently skipped: "this blocking key had
-            // zero eligible repair-pool rows" is the distinction the refusal
-            // evidence must carry, and it used to leave no trace at all.
-            nominated.per_key.insert(key, KeyNomination::default());
-            continue;
-        };
-        let mut sorted_faces: Vec<u32> = patches
-            .iter()
-            .flat_map(|patch| patch.sorted_face_ids.iter().copied())
-            .collect();
-        sorted_faces.sort_unstable();
-        sorted_faces.dedup();
-        let scoring_samples: Vec<usize> = samples_by_key
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|&index| {
-                sorted_faces
-                    .binary_search(&plan.coverage_samples()[index].face_id)
-                    .is_ok()
-            })
-            .collect();
-
-        let mut scores = vec![0.0_f64; candidate_rows.len()];
-        let candidate_indices: Vec<usize> = (0..candidate_rows.len()).collect();
-        for candidate_block in candidate_indices.chunks(candidate_tile) {
-            for sample_block in scoring_samples.chunks(sample_tile) {
-                debug_assert!(candidate_block.len() * sample_block.len() <= matrix_budget);
-                for &candidate_offset in candidate_block {
-                    let point = candidate_rows[candidate_offset].candidate().point_mm;
-                    for &sample_index in sample_block {
-                        let sample = &plan.coverage_samples()[sample_index];
-                        if squared_distance(point, sample.point_mm) <= radius_sq {
-                            scores[candidate_offset] += sample.area_mm2;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut ranked: Vec<usize> = candidate_indices.clone();
-        ranked.sort_by(|&left, &right| {
-            scores[left]
-                .total_cmp(&scores[right])
-                .reverse()
-                .then_with(|| {
-                    candidate_rows[left]
-                        .order()
-                        .cmp(&candidate_rows[right].order())
-                })
-        });
-
-        let mut picked = 0usize;
-        for offset in ranked {
-            if picked >= patches.len() {
-                break;
-            }
-            let row = candidate_rows[offset];
-            let point = row.candidate().point_mm;
-            if claimed_points.contains(&point) {
-                continue;
-            }
-            claimed_points.push(point);
-            nominated.rows.push(row.id());
-            picked += 1;
-        }
-        nominated.per_key.insert(
-            key,
-            KeyNomination {
-                eligible_rows: candidate_rows.len(),
-                nominated_rows: picked,
-            },
-        );
-    }
-
-    Ok(nominated)
 }
 
 /// One route's share of a candidate's GLOBAL score — SPEC-A4 design §D.1's
