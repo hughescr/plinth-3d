@@ -13325,12 +13325,7 @@ mod tests {
         let mut ledgered = BTreeSet::new();
         ledgered.insert(already_ranked);
         let excluded = crate::coverage_closure::rank_repair_candidates(
-            &plan,
-            &worklist,
-            &uncovered,
-            6.0,
-            65_536,
-            &ledgered,
+            &plan, &worklist, &uncovered, 6.0, 65_536, &ledgered,
         )
         .unwrap();
         assert!(

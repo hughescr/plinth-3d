@@ -131,8 +131,8 @@ use thiserror::Error;
 pub use coverage_closure::{
     coverage_patch_blocks_verdict, coverage_patch_needs_repair,
     registered_coverage_censor_area_mm2, registered_coverage_request, BlockedCause,
-    CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason,
-    CoverageClosureRefusal, CoverageClosureSetupError, CoverageScoreShare, RouteRepairOutcome,
+    CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason, CoverageClosureRefusal,
+    CoverageClosureSetupError, CoverageScoreShare, RouteRepairOutcome,
 };
 pub use coverage_measurement::{
     CoverageGap, CoverageMeasurement, CoverageMeasurementError, CoverageMeasurementEvidence,
@@ -145,12 +145,12 @@ pub use coverage_repair::{
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence,
-    FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
-    RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
-    SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,
-    SupportVerificationSnapshot, TipGrowthRungDisclosure, UnroutedContactReason,
-    UnroutedRegularRemoval, UnroutedSpecializedContact,
+    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence, FinalSupportAuthority,
+    GrownContactTipDisclosure, OwnerlessIslandDisclosure, RoutedPhysicalContactEvidence,
+    SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
+    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
+    TipGrowthRungDisclosure, UnroutedContactReason, UnroutedRegularRemoval,
+    UnroutedSpecializedContact,
 };
 pub use specialized::{RepairRowSource, RepairRowWire};
 

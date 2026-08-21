@@ -27,9 +27,9 @@ use plinth_mesh::{
 };
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
-    repair_step_outcome, run_support, BlockedCause, CoverageClosureReason,
-    FinalSupportAuthority, RepairGateVector, RepairStepOutcome, RouteRepairOutcome,
-    SupportPreparationInput, SupportPreparationLimits, SupportRequest, SupportRunError,
+    repair_step_outcome, run_support, BlockedCause, CoverageClosureReason, FinalSupportAuthority,
+    RepairGateVector, RepairStepOutcome, RouteRepairOutcome, SupportPreparationInput,
+    SupportPreparationLimits, SupportRequest, SupportRunError,
 };
 
 fn hollowed(mesh: Mesh, baseline: &str) -> HollowedModel {

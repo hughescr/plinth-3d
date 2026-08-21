@@ -1564,13 +1564,7 @@ pub fn run_support<'a>(
     let mut route_records: BTreeMap<(u32, u32), RouteSearchRecord> = BTreeMap::new();
     let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
 
-    let mut candidates = rank_or_refuse(
-        &plan,
-        &measured,
-        radius_mm,
-        matrix_budget,
-        &mut ledger,
-    )?;
+    let mut candidates = rank_or_refuse(&plan, &measured, radius_mm, matrix_budget, &mut ledger)?;
     stamp_tally(&mut tally, &candidates);
 
     loop {
@@ -1829,13 +1823,8 @@ pub fn run_support<'a>(
                 // set, so it is the only thing that needs the whole matrix
                 // rescored. A rejection re-sorts instead (rule N4), which
                 // `choose_winner` does on every call from the disc set.
-                candidates = rank_or_refuse(
-                    &plan,
-                    &measured,
-                    radius_mm,
-                    matrix_budget,
-                    &mut ledger,
-                )?;
+                candidates =
+                    rank_or_refuse(&plan, &measured, radius_mm, matrix_budget, &mut ledger)?;
                 // The ranking was rebuilt from scratch, so rule N4's accumulated
                 // discs must be recharged onto it. This is the ONLY sweep that
                 // costs rows × discs, and it runs at most once per COMMIT, which

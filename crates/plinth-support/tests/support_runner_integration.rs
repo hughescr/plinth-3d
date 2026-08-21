@@ -4,8 +4,8 @@ use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_toed_slab, DelicacyBuildConfig,
-    DelicacySettings, Mesh,
+    evaluate_delicacy, make_overhang_table, make_toed_slab, DelicacyBuildConfig, DelicacySettings,
+    Mesh,
 };
 use plinth_orient::{
     run as run_orientation, BaselineSelection, OrientRequest, OrientationHistory,
@@ -1082,8 +1082,10 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
         closer
             .scored_from
             .iter()
-            .any(|share| (share.island_id, share.component_id) == closed_route
-                && share.area_mm2 > 0.0),
+            .any(
+                |share| (share.island_id, share.component_id) == closed_route
+                    && share.area_mm2 > 0.0
+            ),
         "the winner's GLOBAL score must be credited, by name and by area, for the route whose \
          hole it closed — that share IS the uncensored worklist's justification: {steps:?}"
     );
