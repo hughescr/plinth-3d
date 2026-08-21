@@ -554,6 +554,19 @@ struct RepairLedgerBody<'a> {
     /// row, its seat, every route its GLOBAL score was credited for, both sides
     /// of all three accept clauses, the per-route deltas, and the outcome.
     steps: &'a [plinth_support::CoverageRepairStepWire],
+    /// **Task #71** — one row per ROUTED contact of the plan that emitted, with
+    /// the model area it is charged to carry and the size of the tip that
+    /// carries it, as a radius AND as a diameter.
+    ///
+    /// The gap it closes is the task's own sentence: artifact bytes can move
+    /// while every disclosed field stays identical. `commits`, `trials`, the
+    /// §A.8 counters and the §D stream are all properties of the REPAIR SEARCH;
+    /// none of them is a function of the load partition or of tip sizing, so
+    /// two runs that partition the same model's load differently, or size the
+    /// same contact's tip differently, wrote different files and printed the
+    /// same summary. This is the field a reader diffs to attribute a byte
+    /// movement instead of arguing about it.
+    contacts: &'a [plinth_support::EmittedContactDisclosure],
 }
 
 /// What one sealed-run ledger write produced.
@@ -589,6 +602,7 @@ pub fn persist_sealed_repair_ledger(
     target: &Path,
     report: &plinth_support::RepairRunReport,
     steps: &[plinth_support::CoverageRepairStep],
+    contacts: &[plinth_support::EmittedContactDisclosure],
 ) -> SealedRepairLedger {
     let path = repair_ledger_path(target);
     let wire: Vec<plinth_support::CoverageRepairStepWire> = steps
@@ -602,6 +616,7 @@ pub fn persist_sealed_repair_ledger(
         trials: report.trials,
         report,
         steps: &wire,
+        contacts,
     };
     let write_error = serde_json::to_vec_pretty(&body)
         .map_err(|error| format!("sealed repair ledger could not be serialized: {error}"))

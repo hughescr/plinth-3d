@@ -378,6 +378,33 @@ pub struct CoverageRepairStep {
     /// contacts were being appended — so the class is recorded and sized here
     /// rather than acted on.
     pub own_contact_quarantined: Option<bool>,
+    /// **EVIDENCE ONLY, and the field that names the dominant cost of a repair
+    /// search.** `true` when this trial's own appended contact was CONDEMNED —
+    /// the cadence quarantined it, or retired it with no winner — so no arm was
+    /// built at that seat and the row's `marginal_area_mm2`, which is a
+    /// PREDICTION of what an arm there would cover, was never delivered.
+    ///
+    /// It is strictly wider than `own_contact_quarantined`, which names only
+    /// the quarantine half, and the difference is not academic. MEASURED,
+    /// `zombie-3-a` at `e9e160f`: of 89 rejected trials, **52 were quarantined
+    /// and 34 more were unrouted with no winner** — 86 of 89 rejections, each
+    /// one a full prepare → route → rewire → brace → structure → lower →
+    /// measure pass spent to learn that no arm was built. Reading the narrow
+    /// field alone leaves 38 % of that waste unnamed.
+    ///
+    /// **Nothing reads it to decide anything, and a ranking rule that did was
+    /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a
+    /// condemned seat's coverage disc sank the seats that WORK along with the
+    /// ones that do not: on `zombie-3-a` the first commit, which lands at trial
+    /// 6 without it, had not landed by trial 14 with it. The reason is a scale
+    /// mismatch and it is measured — the candidates in one cluster sit
+    /// **0.03 to 0.46 mm** apart while the disc is the registered
+    /// 6.0 mm coverage radius, so one condemnation swallows the whole
+    /// neighbourhood, committing rows included. The rule was reverted rather
+    /// than tuned, because tuning it means inventing a radius, and the honest
+    /// remedy is a cheap PHYSICS screen on the seat itself — see the lane
+    /// report and task #52.
+    pub own_contact_condemned: Option<bool>,
     /// Every route whose evidence moved, and by how much. Routes that did not
     /// move are omitted, so a committed step that touched one route carries one
     /// row.
@@ -416,6 +443,7 @@ impl CoverageRepairStep {
             ownerless_faces_before: self.ownerless_faces_before,
             ownerless_faces_after: self.ownerless_faces_after,
             own_contact_quarantined: self.own_contact_quarantined,
+            own_contact_condemned: self.own_contact_condemned,
             route_deltas: self.route_deltas.clone(),
             outcome: self.outcome.clone(),
         }
@@ -457,6 +485,8 @@ pub struct CoverageRepairStepWire {
     pub ownerless_faces_before: usize,
     pub ownerless_faces_after: Option<usize>,
     pub own_contact_quarantined: Option<bool>,
+    /// Rule N4c's class, verbatim from [`CoverageRepairStep::own_contact_condemned`].
+    pub own_contact_condemned: Option<bool>,
     pub route_deltas: Vec<RouteDelta>,
     pub outcome: RepairStepOutcome,
 }
@@ -918,6 +948,7 @@ mod tests {
             ownerless_faces_before: 8,
             ownerless_faces_after: Some(5),
             own_contact_quarantined: Some(false),
+            own_contact_condemned: Some(false),
             route_deltas: vec![RouteDelta {
                 island_id: 5,
                 component_id: 1,

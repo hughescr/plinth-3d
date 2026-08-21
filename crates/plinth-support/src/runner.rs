@@ -493,6 +493,8 @@ pub struct FinalSupportAuthority<'a> {
     ownerless_islands: Vec<OwnerlessIslandDisclosure>,
     abandoned_contacts: Vec<AbandonedContactDisclosure>,
     grown_contact_tips: Vec<GrownContactTipDisclosure>,
+    /// **Task #71** — per-contact carried area and emitted tip size.
+    emitted_contacts: Vec<EmittedContactDisclosure>,
     /// **SPEC-A4 §A.8, ruling R10 — the loud report, on the SEALED path.**
     /// §A.8 says "every run reports, on every path — sealed or refused", and a
     /// model that seals after eleven trials and two commits must say so as
@@ -1081,6 +1083,18 @@ impl FinalSupportAuthority<'_> {
         &self.ownerless_islands
     }
 
+    /// **Task #71** — per-contact carried area and emitted tip size, for every
+    /// contact the sealing attempt routed.
+    ///
+    /// Projected in [`seal_authority`] from the SEALING attempt's own transcript
+    /// and forest, for the same reason the abandoned-contact and grown-tip lists
+    /// are: a disclosure paired with a different attempt's geometry would name
+    /// areas and radii belonging to a plan this run did not emit.
+    #[must_use]
+    pub fn emitted_contacts(&self) -> &[EmittedContactDisclosure] {
+        &self.emitted_contacts
+    }
+
     pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
         self.lowered
             .into_supported_model()
@@ -1128,14 +1142,75 @@ fn seal_authority<'a>(
     let ownerless_islands = ownerless_island_disclosures(&lowered, repair_targets);
     let (abandoned_contacts, grown_contact_tips) =
         contact_attestation_disclosures(&lowered.structured.braced.rewired.routed.initial);
+    let emitted_contacts = emitted_contact_disclosures(&lowered);
     FinalSupportAuthority {
         lowered,
         ownerless_islands,
         abandoned_contacts,
         grown_contact_tips,
+        emitted_contacts,
         repair_report,
         repair_steps,
     }
+}
+
+/// **Task #71's projection** — one row per ROUTED contact of the sealing
+/// attempt, carrying what it is charged with and how big the tip that carries
+/// it came out.
+///
+/// The three sources are the three that own the three facts, and none of them
+/// is re-derived: the finalized transcript says which terminals routed, the
+/// ACCEPTED plan (task #49's reduced child, after every removal and
+/// repartition) says what each one carries, and the final forest says what
+/// radius its member ended up at. Reading the pre-strip plan instead would
+/// report a load partition SPEC §6 says must not exist by this point.
+///
+/// Batch-first: the contacts are indexed once and the transcript is walked
+/// once, so this is O(rows log contacts) and never O(rows x contacts). No
+/// surface is projected and no geometry is recomputed.
+///
+/// A transcript row whose contact or member cannot be resolved contributes a
+/// row with `None` radii rather than being dropped: a contact that emitted and
+/// could not be described is exactly the thing this disclosure exists to make
+/// visible, and dropping it would restore the silence.
+fn emitted_contact_disclosures(lowered: &LoweredSupportRun<'_>) -> Vec<EmittedContactDisclosure> {
+    let routed = &lowered.structured.braced.rewired.routed;
+    let forest = &lowered.structured.braced.plan.forest;
+    let accepted = routed.accepted.plan(&routed.plan);
+    let carried_by_id: BTreeMap<u64, (f64, [f64; 3])> = accepted
+        .contacts()
+        .iter()
+        .map(|contact| {
+            (
+                contact.contact_id(),
+                (contact.carried_area_mm2(), contact.position_mm()),
+            )
+        })
+        .collect();
+    routed
+        .transcript
+        .rows()
+        .iter()
+        .filter(|row| row.kind() == FinalizedDispositionKind::Routed)
+        .map(|row| {
+            let contact_id = row.physical_contact_id();
+            let (carried_area_mm2, position_mm) = carried_by_id
+                .get(&contact_id)
+                .copied()
+                .unwrap_or((0.0, [0.0; 3]));
+            let tip_radius_mm = forest
+                .terminal_key(row.terminal_id())
+                .and_then(|key| forest.member(key))
+                .map(|member| member.terminal_radius_mm().get().get());
+            EmittedContactDisclosure {
+                contact_id,
+                position_mm,
+                carried_area_mm2,
+                tip_radius_mm,
+                tip_diameter_mm: tip_radius_mm.map(|radius| radius * 2.0),
+            }
+        })
+        .collect()
 }
 
 /// One measurement, split the two ways SPEC-A3-A4 splits it, plus the two
@@ -1761,6 +1836,7 @@ pub fn run_support<'a>(
             ownerless_faces_before: accepted_ownerless,
             ownerless_faces_after: None,
             own_contact_quarantined: None,
+            own_contact_condemned: None,
             route_deltas: Vec::new(),
             outcome: crate::coverage_repair::RepairStepOutcome::Committed,
         };
@@ -1813,6 +1889,13 @@ pub fn run_support<'a>(
                 let disposition = trial_contact_id.map(|id| trial.trial_contact_disposition(id));
                 step.own_contact_quarantined = disposition.map(|disposition| {
                     matches!(disposition, TrialContactDisposition::Quarantined { .. })
+                });
+                step.own_contact_condemned = disposition.map(|disposition| {
+                    matches!(
+                        disposition,
+                        TrialContactDisposition::Quarantined { .. }
+                            | TrialContactDisposition::UnroutedNoWinner { .. }
+                    )
                 });
                 record_disposition(&mut route_records, winner.key, disposition);
 
@@ -2411,6 +2494,50 @@ fn route_outcome(
 #[derive(Clone, Copy, Debug)]
 pub struct RoutedPhysicalContactEvidence<'a> {
     contact: &'a crate::specialized::SpecializedPhysicalContact,
+}
+
+/// **Task #71 — what each emitted contact actually carries, and how big the tip
+/// that carries it is.**
+///
+/// The gap this closes, in the words of the task: *artifact bytes can move
+/// while every disclosed field stays identical*. A run report gives a record
+/// count, a coverage verdict and a repair ledger; none of them is a function of
+/// the load partition or of the tip sizing, so two runs whose per-contact
+/// carried area and tip radii differ can print the same summary and write
+/// different files. A reader could see the bytes move and had nothing to read
+/// that would say why.
+///
+/// **UNITS: `tip_radius_mm` is a RADIUS and `tip_diameter_mm` is a DIAMETER.**
+/// Both are given for the same reason [`TipGrowthRungDisclosure`] gives both:
+/// the registry speaks radius and the slicer UI speaks diameter, and a number
+/// carried between them without halving or doubling lands 2x wrong.
+///
+/// **The tip is read at the end that TOUCHES THE MODEL, in the final live
+/// view** — the terminal's own registered member, at its terminalward end,
+/// which is where a contact stub meets the surface. That is the geometry that
+/// was emitted, not the geometry that was planned: it is read after growth,
+/// after rewire and after the brace stage's resize.
+///
+/// **This is evidence and it decides nothing.** Nothing compares a field here
+/// to anything; it exists so a byte movement can be attributed instead of
+/// argued about.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmittedContactDisclosure {
+    /// The physical contact id, which is also its terminal id.
+    pub contact_id: u64,
+    /// Where the contact sits on the model, mm.
+    pub position_mm: [f64; 3],
+    /// The model area this contact is charged to carry after every removal and
+    /// repartition the sealing attempt performed, mm².
+    pub carried_area_mm2: f64,
+    /// The RADIUS of the member end that touches the model, mm. `None` when the
+    /// terminal's member is not in the final live view — a state this refuses
+    /// to paper over with a zero, because zero is a legal radius to read and an
+    /// illegal one to invent.
+    pub tip_radius_mm: Option<f64>,
+    /// The same measurement as a DIAMETER, mm. Exactly `2 x tip_radius_mm`.
+    pub tip_diameter_mm: Option<f64>,
 }
 
 /// Immutable geometry of one member in the exact final live support view.

@@ -157,7 +157,6 @@ impl Scratch {
     fn write(&self, name: &str, bytes: &[u8]) {
         std::fs::write(self.input().join(name), bytes).expect("write scratch input");
     }
-
 }
 
 /// The refusal fixture every coverage-refusal test in this file uses.
@@ -383,6 +382,65 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             .len(),
         0,
         "a model that never entered a transaction has no step to attribute"
+    );
+    // **Task #71 — the disclosure that lets a byte movement be attributed.**
+    //
+    // The gap: `commits`, `trials`, the §A.8 counters and the §D stream are all
+    // properties of the repair SEARCH. None is a function of the load partition
+    // or of tip sizing, so two runs that partition this model's load
+    // differently, or size the same contact's tip differently, wrote different
+    // artifacts and printed identical summaries. This fixture spends ZERO
+    // trials, so before this every disclosed field on it was a constant and the
+    // artifact's bytes were unexplainable by construction.
+    let contact_rows = ledger_json["contacts"]
+        .as_array()
+        .expect("the sealed ledger carries one row per routed contact");
+    assert!(
+        !contact_rows.is_empty(),
+        "a model that emitted supports must disclose the contacts that carry them: \
+         {ledger_json}"
+    );
+    for contact in contact_rows {
+        let carried = contact["carried_area_mm2"]
+            .as_f64()
+            .expect("carried_area_mm2 is a number");
+        assert!(
+            carried.is_finite() && carried >= 0.0,
+            "a carried area is a finite non-negative mm²: {contact}"
+        );
+        let radius = contact["tip_radius_mm"]
+            .as_f64()
+            .expect("an emitted contact resolves to a live member, so its tip radius is known");
+        let diameter = contact["tip_diameter_mm"]
+            .as_f64()
+            .expect("and the diameter travels beside it");
+        assert!(
+            radius > 0.0,
+            "a printed tip has a positive radius: {contact}"
+        );
+        // UNITS. The registry speaks radius and the slicer UI speaks diameter;
+        // a number carried between them without doubling lands 2x wrong, which
+        // is precisely the class of silent movement this disclosure exists to
+        // expose. Exact, not approximate: it is one multiplication by two.
+        assert!(
+            (diameter - radius * 2.0).abs() < f64::EPSILON * diameter.max(1.0),
+            "tip_diameter_mm must be exactly twice tip_radius_mm: {contact}"
+        );
+    }
+    // The disclosure covers the plan, not a sample of it: one row per routed
+    // contact, each named by its own id, so a reader diffing two runs sees an
+    // added or removed contact rather than inferring one from a byte count.
+    let mut ids: Vec<i64> = contact_rows
+        .iter()
+        .map(|contact| contact["contact_id"].as_i64().expect("a contact id"))
+        .collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        total,
+        "a contact id names one contact, so a repeated id means two rows describe the same seat"
     );
     // Task #49. This fixture's every island keeps a routed contact, so the
     // accepted contact set charges no face to nobody and the disclosure is
@@ -699,12 +757,8 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     let scratch = Scratch::new("refusal");
     refusal_fixture(&scratch, "blade");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("a refused model is a disposition, not a run failure");
+    let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
+        .expect("a refused model is a disposition, not a run failure");
 
     let ModelPreparationOutcome::Failed {
         exit_code,
@@ -791,7 +845,10 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     // pool out. The sidecar schema moves to `v2` below for exactly this reason:
     // the same field name now carries a different fact.
     assert_eq!(evidence.attempts, Some(0));
-    assert!(!evidence.islands.is_empty(), "the unclosable island must be named");
+    assert!(
+        !evidence.islands.is_empty(),
+        "the unclosable island must be named"
+    );
     // **The refusal is a real hole, not censored dust.** This is the other half
     // of the 2026-08-14 censor change (SPEC-A3-A4-COVERAGE.md §4): a model whose
     // uncovered area is genuinely above `voxel_pitch_mm²` must still be refused,
@@ -818,7 +875,10 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     // FU-56 (2026-08-12 fix): per-island nomination accounting, so the card
     // says whether an island was ever attempted at all.
     assert!(
-        evidence.islands.iter().any(|island| island.face_count() > 0),
+        evidence
+            .islands
+            .iter()
+            .any(|island| island.face_count() > 0),
         "the refused islands must name their faces"
     );
     assert!(
@@ -828,7 +888,10 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     );
     let sidecar_path = scratch.output().join("blade.coverage.json");
     assert_eq!(evidence.sidecar_path, sidecar_path);
-    assert!(sidecar_path.exists(), "the sidecar must actually be on disk");
+    assert!(
+        sidecar_path.exists(),
+        "the sidecar must actually be on disk"
+    );
     let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
     let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
     // §G.2: re-meaning `attempts` is a wire FORMAT change, not a rename, so the
@@ -901,7 +964,10 @@ fn a_model_that_starts_passing_clears_its_own_stale_coverage_evidence() {
         .expect("a model that now passes is a disposition, not a run failure");
 
     assert!(
-        matches!(outcome(&report, "mini"), ModelPreparationOutcome::Artifact { .. }),
+        matches!(
+            outcome(&report, "mini"),
+            ModelPreparationOutcome::Artifact { .. }
+        ),
         "mini must still emit; it reported {:?}",
         outcome(&report, "mini")
     );
@@ -933,12 +999,8 @@ fn a_refusal_removes_an_earlier_runs_artifact_at_the_same_target() {
     let target = scratch.output().join("blade.chitubox");
     std::fs::write(&target, b"an artifact from an earlier run").expect("plant a stale artifact");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("run");
+    let report =
+        prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json")).expect("run");
     // FU-56, 2026-08-12: `overhang` now refuses at the sealed run (coverage
     // closure), not at the gate — see
     // `a_sealed_run_refused_model_writes_no_artifact_and_exits_five` for the
@@ -1102,12 +1164,8 @@ fn every_failure_disposition_clears_an_earlier_runs_artifact_at_its_target() {
 
     // Only `blade` is pinned, so `unpinned` reaches the missing-baseline
     // refusal and `broken` never loads: three different pre-gate stops.
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("a folder of failures is still a successful run");
+    let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
+        .expect("a folder of failures is still a successful run");
 
     for (stem, target) in &planted {
         assert!(
@@ -1320,12 +1378,8 @@ fn a_coverage_closure_refusal_is_not_masked_by_an_earlier_load_failure() {
     scratch.write("aa-not-a-model.stl", b"a sidecar, or a truncated download");
     refusal_fixture(&scratch, "blade");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("run");
+    let report =
+        prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json")).expect("run");
 
     assert_eq!(
         report
@@ -1518,9 +1572,7 @@ fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_rep
     );
 
     let wall_of = |outcome: &ModelPreparationOutcome| match outcome {
-        ModelPreparationOutcome::Artifact { wall_mm, .. } => {
-            wall_mm.map(plinth_core::Finite::get)
-        }
+        ModelPreparationOutcome::Artifact { wall_mm, .. } => wall_mm.map(plinth_core::Finite::get),
         other => panic!("the fixture must reach an artifact; got {other:?}"),
     };
     assert_eq!(wall_of(&thin), Some(default_wall.get()));
@@ -1530,4 +1582,3 @@ fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_rep
         "two runs differing only in --wall-mm must not produce identical artifact records"
     );
 }
-

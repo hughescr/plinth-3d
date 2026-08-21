@@ -1925,6 +1925,7 @@ pub fn seal_and_emit(
         target,
         authority.repair_report(),
         authority.repair_steps(),
+        authority.emitted_contacts(),
     );
 
     // The pre-write gate. `judge_then_emit` judges the sealed snapshot while

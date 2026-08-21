@@ -147,7 +147,8 @@ pub use coverage_repair::{
 pub use initial::ContactConstructionLimits;
 pub use runner::{
     run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence, FinalSupportAuthority,
-    GrownContactTipDisclosure, OwnerlessIslandDisclosure, RoutedPhysicalContactEvidence,
+    EmittedContactDisclosure, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
+    RoutedPhysicalContactEvidence,
     SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
     SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
     TipGrowthRungDisclosure, UnroutedContactReason, UnroutedRegularRemoval,
