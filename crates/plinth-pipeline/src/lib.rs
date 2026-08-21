@@ -2189,7 +2189,44 @@ mod tests {
                 // re-frozen by this line, and nothing here touches the
                 // coverage radius, the patch-area floor, the zero-tolerance
                 // verdict, or any registered constant.
-                "Sphere.prepped.stl" => true,
+                //
+                // Re-recorded a SIXTH time, 2026-08-21, by #51 (the
+                // model-anchor clearance-mask convergence, PR-7 seating and
+                // the PR-3 emergence screen), true -> false, with this
+                // attribution rather than an edited expectation.
+                //
+                // **MEASURED at this tip, same process, same settings:**
+                //
+                //   measured -> Err("sealed support run failed during
+                //               Lowering: Lowering(RootRunTooShort
+                //               { member: MemberKey { slot: 40, ... } })")
+                //   zeros    -> Err("sealed support run failed during
+                //               Lowering: Lowering(RootRunTooShort
+                //               { member: MemberKey { slot: 38, ... } })")
+                //
+                // **What changed and what did not.** The Sphere still does not
+                // seal, still stops at Lowering, and still stops for the same
+                // measured reason — `RootRunTooShort`, which is task #29's
+                // known defect and is untouched here. What changed is that the
+                // two fields now name DIFFERENT members, so the refusal texts
+                // differ and the outcomes compare unequal again.
+                //
+                // The mechanism: with the mask converged, the CCO model-anchor
+                // family can clear at all, so both runs route a different
+                // forest than they did — and the delicacy field orders the
+                // candidate pool, so the two forests differ by which members
+                // exist and in what order. That is FU-38's contact-selection
+                // tie-break, still real, once again observable on this fixture
+                // — this time through the failing member's identity rather
+                // than through a sealed digest. The row is back to the state
+                // it held before the wall-target ruling pushed the Sphere's
+                // stop earlier than the stage the tie-break lives in.
+                //
+                // No pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, the zero-tolerance verdict, or any registered
+                // constant.
+                "Sphere.prepped.stl" => false,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
