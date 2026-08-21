@@ -572,7 +572,54 @@ impl RepairRunReport {
     /// stderr rather than to a logger. The run report's per-model line is a
     /// `plinth-pipeline` wiring step and travels with §G.1's stage 4.
     pub fn log_summary(&self) {
-        eprintln!("{}", self.summary_line());
+        emit_run_line(&self.summary_line());
+    }
+
+    /// **The refusal-class histogram, rendered once.**
+    ///
+    /// Both the live progress line and the final summary print this, and both
+    /// call THIS function rather than formatting the map themselves. Task #67
+    /// requires the streamed counts and the reported counts to come from one
+    /// source; two format loops over the same map would be two sources that
+    /// happen to agree today.
+    #[must_use]
+    fn histogram_text(&self) -> String {
+        self.rejections_by_class
+            .iter()
+            .map(|(class, count)| format!("{class}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// **Task #67 — the line the loop streams WHILE it is running.**
+    ///
+    /// Every count on it is read straight off `self`, which is the very
+    /// [`RepairRunReport`] [`Self::summary_line`] prints at the end: `trials`
+    /// and `commits` are incremented by the ledger as each trial lands, and
+    /// `rejections_by_class` is the same map, through the same
+    /// [`Self::histogram_text`]. There is no second tally, so a progress line
+    /// and the summary that follows it cannot disagree by construction.
+    ///
+    /// The two values that are NOT read off `self` are the two that cannot be:
+    /// `remaining` is a property of the live ranking (the ledger computes it
+    /// with the same expression its `finish` uses), and `elapsed_ms` is a
+    /// wall-clock read. Wall time is evidence and never a bound — the same rule
+    /// the summary's own wall times travel under.
+    ///
+    /// It is deliberately a DIFFERENT prefix from the summary (`…progress:`
+    /// versus `…:`), so a reader scanning a log can tell a mid-run line from
+    /// the final one without counting fields.
+    #[must_use]
+    pub fn progress_line(&self, remaining: usize, elapsed_ms: u64) -> String {
+        format!(
+            "coverage-repair progress: trials={} commits={} remaining={} \
+             elapsed={}ms [{}]",
+            self.trials,
+            self.commits,
+            remaining,
+            elapsed_ms,
+            self.histogram_text(),
+        )
     }
 
     /// The one INFO line an operator watching a long run must see move.
@@ -580,12 +627,7 @@ impl RepairRunReport {
     /// only printed when someone asks for it is a cost that is hidden.
     #[must_use]
     pub fn summary_line(&self) -> String {
-        let histogram = self
-            .rejections_by_class
-            .iter()
-            .map(|(class, count)| format!("{class}={count}"))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let histogram = self.histogram_text();
         format!(
             "coverage-repair: trials={} commits={} remaining={} \
              wall_total={}ms wall/trial min={}ms med={}ms max={}ms \
@@ -600,6 +642,147 @@ impl RepairRunReport {
             self.diversity_demotions,
             self.diversity_demotions_tried,
         )
+    }
+}
+
+/// **Task #67 — the one write the repair loop's live evidence goes through, and
+/// it is FLUSHED.**
+///
+/// Both the streamed progress lines and the final summary call this. Two
+/// obligations meet here:
+///
+/// 1. **A killed run must still have said something.** The whole point of
+///    streaming is the operator who watches a model spend 412 seconds (the
+///    measured `zombie-3-a` figure) and today sees nothing until it ends. A
+///    line that is buffered when the process dies is a line that was never
+///    printed, so the flush is explicit rather than inherited from stderr's
+///    current unbuffered-ness. If stderr is ever wrapped in a buffered writer
+///    upstream, this still holds.
+/// 2. **The write must be observable by a test.** The capture below is the
+///    only seam, it is off unless a test installs it, and it never replaces
+///    the stderr write — it is an additional mirror, so production behaviour
+///    is the same whether or not anybody is looking.
+pub(crate) fn emit_run_line(line: &str) {
+    capture::mirror(line);
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    // A failed write to a closed stderr must not take a support run down: the
+    // line is evidence, and evidence that cannot be printed is not a reason to
+    // refuse a model.
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
+}
+
+/// The test-only mirror behind [`emit_run_line`].
+///
+/// `plinth-support`'s controller tests live in an **integration** crate
+/// (`tests/a4_transactional_controller.rs`), so `#[cfg(test)]` inside this
+/// library is not enabled for them and cannot be the seam. This is therefore a
+/// real, public, opt-in recorder rather than a conditional one — and being
+/// real is what makes it honest: the production path is identical whether a
+/// recorder is installed or not, because installing one only ADDS a mirror.
+///
+/// Thread-local, because the repair loop emits from the thread that called
+/// `run_support`; the stage chain's own rayon work never emits.
+pub mod capture {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn mirror(line: &str) {
+        LINES.with(|lines| {
+            if let Some(lines) = lines.borrow_mut().as_mut() {
+                lines.push(line.to_owned());
+            }
+        });
+    }
+
+    /// Record every run line this thread emits for as long as the guard lives.
+    ///
+    /// Nesting is not supported and does not need to be: a test installs one.
+    #[derive(Debug)]
+    pub struct RunLogCapture {
+        _private: (),
+    }
+
+    impl RunLogCapture {
+        /// Start recording on this thread, discarding anything a previous
+        /// guard left behind.
+        #[must_use]
+        pub fn install() -> Self {
+            LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
+            Self { _private: () }
+        }
+
+        /// Every line emitted on this thread since `install`, in order.
+        #[must_use]
+        pub fn lines(&self) -> Vec<String> {
+            LINES.with(|lines| lines.borrow().clone().unwrap_or_default())
+        }
+    }
+
+    impl Drop for RunLogCapture {
+        fn drop(&mut self) {
+            LINES.with(|lines| *lines.borrow_mut() = None);
+        }
+    }
+}
+
+/// **Task #67 — when the loop is due to say where it has got to.**
+///
+/// > **This paces a PRINT. It decides nothing.** No branch in the controller
+/// > reads it, no candidate is admitted or refused by it, and a run whose
+/// > progress lines are all suppressed reaches the same verdict on the same
+/// > model. That is why the two cadence numbers below are plain `const`s in
+/// > this module and are NOT registry candidates: the physics-first doctrine's
+/// > rule is about numbers that steer outcomes, and these steer a line of
+/// > text.
+///
+/// The cadence is "every 30 trials or 60 seconds, whichever comes first",
+/// which is sized off measured trial costs, not guessed: the dust fixture's
+/// median trial is 1 917 ms (30 trials ≈ 58 s) and `zombie-3-a`'s is 18 698 ms
+/// (60 s ≈ 3 trials). One rule therefore covers both the fast loop, where the
+/// trial count trips first, and the slow one, where the clock does.
+#[derive(Debug)]
+pub struct ProgressPacer {
+    trials_per_line: usize,
+    interval: std::time::Duration,
+    trials_at_last_line: usize,
+    last_line_at: std::time::Instant,
+}
+
+/// Trials between progress lines when the loop is fast.
+const PROGRESS_TRIALS_PER_LINE: usize = 30;
+/// Seconds between progress lines when the loop is slow.
+const PROGRESS_INTERVAL_SECS: u64 = 60;
+
+impl ProgressPacer {
+    /// Start the pacer at `now`, having just emitted the loop's entry line.
+    #[must_use]
+    pub fn started_at(now: std::time::Instant) -> Self {
+        Self {
+            trials_per_line: PROGRESS_TRIALS_PER_LINE,
+            interval: std::time::Duration::from_secs(PROGRESS_INTERVAL_SECS),
+            trials_at_last_line: 0,
+            last_line_at: now,
+        }
+    }
+
+    /// Whether a line is due, and — when it is — remember that it was emitted.
+    ///
+    /// Takes `trials` and `now` rather than reading them, so the cadence can be
+    /// proved in a unit test at any speed without a sleep.
+    pub fn due(&mut self, trials: usize, now: std::time::Instant) -> bool {
+        let by_trials = trials.saturating_sub(self.trials_at_last_line) >= self.trials_per_line;
+        let by_clock = now.duration_since(self.last_line_at) >= self.interval;
+        if by_trials || by_clock {
+            self.trials_at_last_line = trials;
+            self.last_line_at = now;
+            return true;
+        }
+        false
     }
 }
 
@@ -1017,5 +1200,106 @@ mod tests {
         let none =
             FrozenSpecializedGateVector::coverage_only(objective(1.0, 1.0, 1, f64::INFINITY));
         assert!(coverage_key(finite) < coverage_key(none));
+    }
+
+    /// A report mid-run: two trials landed, one of each measured refusal class
+    /// the dust fixture produces, nothing committed yet.
+    fn mid_run_report() -> RepairRunReport {
+        let mut report = RepairRunReport {
+            trials: 47,
+            commits: 2,
+            ..RepairRunReport::default()
+        };
+        report
+            .rejections_by_class
+            .insert("no_improvement".to_owned(), 44);
+        report
+            .rejections_by_class
+            .insert("stage_refusal".to_owned(), 1);
+        report
+    }
+
+    /// **Task #67's one-source rule, held where it can actually break.**
+    ///
+    /// The requirement is not "the two lines look similar" — it is that the
+    /// streamed numbers and the summarised numbers are the SAME numbers. So
+    /// this asserts the shared substrings rather than a golden line: every
+    /// `class=count` pair the summary prints appears verbatim in the progress
+    /// line, and so do the trial and commit counts. A future edit that gives
+    /// either line its own tally of the same quantity fails here.
+    #[test]
+    fn a_progress_line_and_the_summary_read_the_same_counters() {
+        let report = mid_run_report();
+        let progress = report.progress_line(849, 366_035);
+        let summary = report.summary_line();
+
+        assert!(progress.contains("trials=47"), "{progress}");
+        assert!(summary.contains("trials=47"), "{summary}");
+        assert!(progress.contains("commits=2"), "{progress}");
+        assert!(summary.contains("commits=2"), "{summary}");
+        for class in ["no_improvement=44", "stage_refusal=1"] {
+            assert!(
+                progress.contains(class),
+                "progress lost {class}: {progress}"
+            );
+            assert!(summary.contains(class), "summary lost {class}: {summary}");
+        }
+        assert_eq!(report.histogram_text(), "no_improvement=44 stage_refusal=1");
+        // The remaining count is the loop's, not the report's stale copy: a
+        // progress line printed before `finish` must still say a true number.
+        assert!(progress.contains("remaining=849"), "{progress}");
+        assert!(progress.contains("elapsed=366035ms"), "{progress}");
+        // And the two lines are distinguishable in a log at a glance.
+        assert!(
+            progress.starts_with("coverage-repair progress:"),
+            "{progress}"
+        );
+        assert!(summary.starts_with("coverage-repair: "), "{summary}");
+    }
+
+    /// **The cadence: 30 trials or 60 seconds, whichever comes FIRST.**
+    ///
+    /// Proved with an injected clock rather than a sleep, so the test is not a
+    /// timing test and cannot flake on a busy machine (task #37's class of
+    /// defect, not repeated here).
+    #[test]
+    fn the_pacer_fires_on_thirty_trials_or_sixty_seconds_whichever_comes_first() {
+        let start = std::time::Instant::now();
+        let mut pacer = ProgressPacer::started_at(start);
+
+        // Neither condition met.
+        assert!(!pacer.due(29, start + std::time::Duration::from_secs(59)));
+        // Trial count trips it, well inside the interval.
+        assert!(pacer.due(30, start + std::time::Duration::from_secs(59)));
+        // Having fired, it re-arms from THIS trial count, not from zero.
+        assert!(!pacer.due(59, start + std::time::Duration::from_secs(60)));
+        assert!(pacer.due(60, start + std::time::Duration::from_secs(60)));
+
+        // The clock arm, on a loop far too slow to reach 30 trials: the
+        // measured `zombie-3-a` trial is 18 698 ms, so three trials is a
+        // minute.
+        let mut slow = ProgressPacer::started_at(start);
+        assert!(!slow.due(2, start + std::time::Duration::from_millis(37_396)));
+        assert!(slow.due(3, start + std::time::Duration::from_millis(60_000)));
+        assert!(!slow.due(4, start + std::time::Duration::from_millis(78_698)));
+        assert!(slow.due(5, start + std::time::Duration::from_millis(120_001)));
+    }
+
+    /// The capture seam records what `emit_run_line` writes, in order, and
+    /// stops recording when the guard drops — otherwise a test that installs
+    /// one would leak lines into whatever runs next on the same thread.
+    #[test]
+    fn the_run_log_capture_records_in_order_and_only_while_installed() {
+        let recorded = {
+            let capture = capture::RunLogCapture::install();
+            emit_run_line("first");
+            emit_run_line("second");
+            capture.lines()
+        };
+        assert_eq!(recorded, vec!["first".to_owned(), "second".to_owned()]);
+
+        emit_run_line("after the guard dropped");
+        let capture = capture::RunLogCapture::install();
+        assert!(capture.lines().is_empty());
     }
 }
