@@ -1986,11 +1986,6 @@ impl RepairLedger {
         }
     }
 
-    /// Fill the §A.8 counters that are only knowable when the search stops.
-    ///
-    /// `candidates` is `None` on the one path where the ranking itself refused,
-    /// so there is no ranking to count remaining rows on. Everything else — the
-    /// demotions and the wall times — is knowable there and is still filled.
     /// **Eligible rows still untried, right now.**
     ///
     /// Task #67: the streamed progress line and the final report must not be
@@ -2006,6 +2001,18 @@ impl RepairLedger {
             .count()
     }
 
+    /// Fill the §A.8 counters that are only knowable when the search stops.
+    ///
+    /// `candidates` is `None` on the one path where the ranking itself refused,
+    /// so there is no ranking to count remaining rows on. Everything else — the
+    /// demotions and the wall times — is knowable there and is still filled.
+    ///
+    /// On that one path `candidates_remaining` therefore keeps its default 0,
+    /// and that 0 is NOT a count of anything: it is the absence of a ranking.
+    /// It cannot contradict a streamed line, because the loop is never entered
+    /// on that path and no progress line is ever emitted — but a reader of the
+    /// summary alone cannot tell that 0 from "every eligible row was tried",
+    /// and §A.8.1 says so rather than leaving the reader to find out.
     fn finish(&mut self, candidates: Option<&crate::coverage_closure::RankedRepairCandidates>) {
         if let Some(candidates) = candidates {
             self.report.candidates_remaining = self.remaining(candidates);

@@ -597,14 +597,22 @@ impl RepairRunReport {
     /// [`RepairRunReport`] [`Self::summary_line`] prints at the end: `trials`
     /// and `commits` are incremented by the ledger as each trial lands, and
     /// `rejections_by_class` is the same map, through the same
-    /// [`Self::histogram_text`]. There is no second tally, so a progress line
-    /// and the summary that follows it cannot disagree by construction.
+    /// [`Self::histogram_text`]. There is no second tally, so on those three a
+    /// progress line and the summary that follows it cannot disagree by
+    /// construction.
     ///
     /// The two values that are NOT read off `self` are the two that cannot be:
     /// `remaining` is a property of the live ranking (the ledger computes it
     /// with the same expression its `finish` uses), and `elapsed_ms` is a
     /// wall-clock read. Wall time is evidence and never a bound — the same rule
     /// the summary's own wall times travel under.
+    ///
+    /// `remaining` is therefore the same EXPRESSION on both lines, but only the
+    /// summary's field is optional: `finish` fills `candidates_remaining` only
+    /// where a ranking exists to count, so a summary printed from a run whose
+    /// ranking itself refused carries 0. No progress line exists on that path
+    /// to contradict it — the loop is never entered — and §A.8.1 records the
+    /// exception rather than claiming an invariant that has one.
     ///
     /// It is deliberately a DIFFERENT prefix from the summary (`…progress:`
     /// versus `…:`), so a reader scanning a log can tell a mid-run line from

@@ -613,7 +613,12 @@ fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
 ///    is compared field-by-field against the report the run returns, not
 ///    against a literal: `commits` must match exactly, and the streamed
 ///    `trials` must be a value the same counter passed through on its way to
-///    its final figure.
+///    its final figure. `remaining` is held at BOTH ends — the summary must
+///    print the report's own `candidates_remaining`, and, while the fixture
+///    commits nothing and the ranking is therefore never rebuilt,
+///    `trials + remaining` must be the same number on every streamed line as
+///    it is on the summary. A progress line that grew a tally of its own
+///    breaks that conservation.
 #[test]
 fn the_loop_streams_progress_before_it_prints_its_summary() {
     fn progress_lines(lines: &[String]) -> Vec<&String> {
@@ -627,6 +632,17 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
             .iter()
             .position(|line| line.starts_with("coverage-repair: "))
             .unwrap_or_else(|| panic!("no summary line was emitted at all: {lines:#?}"))
+    }
+    /// Read one `key=<integer>` field back off a line the loop printed.
+    fn field(line: &str, key: &str) -> usize {
+        let tail = line
+            .split_once(&format!("{key}="))
+            .unwrap_or_else(|| panic!("no {key}= on {line:?}"))
+            .1;
+        let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+        digits
+            .parse()
+            .unwrap_or_else(|_| panic!("{key}= is not an integer on {line:?}"))
     }
 
     // ---- the sealed path -------------------------------------------------
@@ -699,6 +715,39 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
         "if this fixture stopped spending 30 trials the cadence assertion above has \
          stopped testing anything: {refused_report:?}"
     );
+
+    // ---- and `remaining` is held on the SUMMARY side too -----------------
+    //
+    // The claim §A.8.1 makes about `remaining` is that the streamed one and
+    // the reported one are the same expression over the same two collections.
+    // Asserting it needs both ends: the summary line must carry the report's
+    // own `candidates_remaining`, and the streamed lines must be that same
+    // count taken earlier. With NO commits the ranking is never rebuilt, so
+    // `trials + remaining` is conserved across every line of this run — and
+    // that conservation is what fails if the progress line ever grows a second
+    // tally of its own. (A committing fixture rebuilds the ranking, so the sum
+    // is not conserved there; the guard below keeps this honest.)
+    let summary = &refused_lines[summary_at];
+    assert_eq!(
+        field(summary, "remaining"),
+        refused_report.candidates_remaining,
+        "the summary prints the report's own candidates_remaining: {summary:?} against \
+         {refused_report:?}"
+    );
+    assert_eq!(
+        refused_report.commits, 0,
+        "the conservation check below is only valid while this fixture commits nothing: \
+         {refused_report:?}"
+    );
+    let live_rows = refused_report.trials + refused_report.candidates_remaining;
+    for line in before_summary.iter().copied() {
+        assert_eq!(
+            field(line, "trials") + field(line, "remaining"),
+            live_rows,
+            "every streamed line must count the same ranking the summary counts; \
+             {line:?} disagrees with {refused_report:?}"
+        );
+    }
     // The sealed path's report is read too, so the test cannot pass by only
     // exercising the refusal.
     assert!(
