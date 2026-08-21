@@ -897,8 +897,9 @@ nothing at all until it was over
 that run cannot tell a working loop from a hung one, which is the state R10's
 trade was supposed to remove.
 
-> **The loop emits a progress line every 30 trials or 60 seconds, whichever
-> comes first, and one on entry before the first trial. Each line carries
+> **At the top of each trial the loop asks whether 30 trials or 60 seconds have
+> passed, whichever comes first, and emits a progress line when they have; one
+> more line is emitted on entry, before the first trial. Each line carries
 > `trials`, `commits`, the `rejections_by_class` histogram, `remaining`, and
 > elapsed wall time, and is FLUSHED.**
 
@@ -907,12 +908,44 @@ Three properties, and each is a test rather than an intention:
 1. **One source.** Every count on a progress line is read off the very
    `RepairRunReport` the summary prints, through the same histogram renderer,
    and `remaining` is the same expression `finish` uses. There is no second
-   tally, so a streamed count and a reported count cannot disagree. The two
-   values that are not read off the report are the two that cannot be —
-   `remaining`, which belongs to the live ranking, and elapsed time, which is a
-   wall-clock read under the rule above.
-2. **A killed run has still spoken.** The entry line lands before trial 1, and
-   every line is flushed, so a mid-run kill leaves a non-empty log.
+   tally, so on `trials`, `commits` and the histogram a streamed count and a
+   reported count cannot disagree. The two values that are not read off the
+   report are the two that cannot be — `remaining`, which belongs to the live
+   ranking, and elapsed time, which is a wall-clock read under the rule above.
+
+   **One exception, stated rather than glossed:** the *summary's*
+   `candidates_remaining` is filled only where a ranking exists to count it on
+   — the `finish(Some(..))` paths. On the three paths without one (the
+   measurement refusal and the zero-cost seal, which print a default report,
+   and `finish(None)`, where the ranking itself refused) the field stays 0, and
+   that 0 is the absence of a ranking rather than a count of rows. It cannot
+   contradict a streamed line, because none of those paths enters the loop and
+   none of them emits a progress line — measured: the toed slab's whole log is
+   `trials=0 commits=0 remaining=0 … []`. What a reader of that summary alone
+   cannot do is tell that 0 from "every eligible row was tried"; `trials=0`
+   next to it is the tell. Making the field say so itself means making it
+   optional on the wire, which is a §D.2 report-format change and belongs to
+   whoever next opens that section, not to this task.
+2. **A killed run that reached the loop has still spoken.** The entry line
+   lands before trial 1, and every line is flushed, so a mid-run kill leaves a
+   non-empty log. The qualifier is load-bearing and is measured: a model that
+   seals at attempt 0 never enters the loop, and
+   `toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move` run
+   alone emits its summary line and nothing else.
+
+   **The gap is narrowed, not closed**, and the residue is named here so no one
+   reads this section as a promise it does not keep:
+   * `rank_or_refuse` runs BEFORE the entry line, so a hang inside ranking is
+     still total silence. Task #46 records exactly that region — the full sort
+     to keep 40, and the retained refusal rows — as an unpriced cost on the
+     Warhorse.
+   * The pacer is checked at the TOP of each trial, so the cadence's
+     granularity is bounded below by one trial's duration. The worst measured
+     trial is 34 262 ms (`zombie-3-a`), and the recorded hang modes — #48's
+     Routing charge, #29's Lowering — are INSIDE a trial. "Every 60 seconds"
+     is therefore "checked at the top of each trial, whichever of 30 trials or
+     60 seconds has passed"; a single trial that runs longer than the interval
+     delays the line by its own remaining duration.
 3. **It decides nothing.** The cadence paces a print. No branch reads it; a run
    with every line suppressed reaches the same verdict on the same model. The
    two cadence numbers are therefore plain module constants and are not registry
@@ -964,12 +997,29 @@ fixture's 190-trial refusal (`…/scratchpad/dust_steps.json`):
 | `false` | 128 | 2 |
 | unknown (stage refusal) | 1 | 0 |
 
-61 of 61 is a strong correlation and it is not a proof. The physics question the
-full pass decides is "does the censored objective improve with no noncoverage
-component worse", and a quarantined contact still changes the load repartition —
-hence every other contact's tip radius, hence their clearance and their routing.
-A screen would decide a *different*, cheaper question and call it the same one.
-Under the no-cap doctrine that is exactly the move that is forbidden.
+61 of 61 committing nothing is a strong correlation and it is not a proof — and
+the same 61 rows carry the DISPROOF of the premise a screen would need. The
+premise is that a trial whose own contact is quarantined cannot cover anything,
+so the pass can be skipped. In the measured data that premise is false:
+
+* all 61 carry a **non-zero** `marginal_area_mm2` (0.0225 – 0.36 mm²), so each
+  was scored as covering real uncovered area;
+* all 61 carry a **non-empty** `route_deltas` — the field is "every route whose
+  evidence MOVED", so every one of these trials moved a route's measured
+  evidence;
+* all 61 moved the objective, and moved it the **wrong way**: component 4's
+  failing area goes 0.2666 → 0.9664 mm² on every one of them, carrying the
+  model's total failing area 0.6266 → 1.3264 mm² and its worst patch 0.36 →
+  0.9664 mm².
+
+These trials are rejected for making the objective WORSE, not for being inert. A
+quarantined contact still changes the load repartition — hence every other
+contact's tip radius, hence their clearance and their routing — and the number
+that proves it is the 0.6998 mm² of failing area that did not exist before the
+append. The physics question the full pass decides is "does the censored
+objective improve with no noncoverage component worse"; a screen would decide a
+*different*, cheaper question and call it the same one. Under the no-cap
+doctrine that is exactly the move that is forbidden.
 
 **What the class costs, so the size of the unclaimed prize is on the record:**
 61 trials × 1 917 ms median ≈ **117 s of the dust fixture's 366 s**. Retiring it
