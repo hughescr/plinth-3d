@@ -400,13 +400,53 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         "a model that emitted supports must disclose the contacts that carry them: \
          {ledger_json}"
     );
+    // **The disclosure must not be able to move silently EITHER**, or its
+    // attribution is a misattribution — which is worse than the silence #71
+    // names, because a reader would act on it. Finiteness, positivity and the
+    // exact doubling prove a row is well FORMED; they do not prove it is TRUE.
+    // A projection that multiplied every carried area, or read the radius off
+    // the rootward end of the member instead of the terminalward end, would
+    // still print finite positive numbers and still satisfy `diameter == 2 x
+    // radius`. So each of the two substantive fields is checked against a
+    // source that does not pass through the projection that wrote it:
+    //
+    // * the RADIUS against the artifact on disk, below — the one source
+    //   downstream of growth, rewire, the brace resize, lowering and the emit;
+    // * the AREA against the registered area law, here. The area comes from the
+    //   accepted plan and the radius from the final live forest, joined only by
+    //   contact id, and the law is what ties the two together. Nothing is
+    //   re-derived: `registered_tip_radius_mm_for_carried_area` calls the same
+    //   `FrozenTipLoadPolicy::tip_radius_mm` that sized every stub, with both
+    //   registered clamps inside the answer.
+    //
+    // A tip the run GREW is the one documented exception, and it is exempted by
+    // name rather than by loosening the rule for everyone: grow-to-attest emits
+    // a radius at or above the law's, so those rows are held to `>=` and, more
+    // sharply, to agreeing exactly with the grown-tip disclosure's own reading
+    // of the same tip.
+    let grown_tip_radius_by_contact: std::collections::BTreeMap<u64, f64> = contacts
+        .as_ref()
+        .grown_contact_tips
+        .iter()
+        .map(|grown| (u64::from(grown.contact_id()), grown.emitted_tip_radius_mm()))
+        .collect();
+    let mut rows_a_carried_area_change_would_move = 0usize;
     for contact in contact_rows {
-        let carried = contact["carried_area_mm2"]
-            .as_f64()
-            .expect("carried_area_mm2 is a number");
+        let contact_id = contact["contact_id"].as_u64().expect("a contact id");
+        // `null` here is the disclosure saying "this routed row is not in the
+        // accepted plan" — a real state it must be able to say, and one the
+        // healthy fixture must never be in.
+        let carried = contact["carried_area_mm2"].as_f64().expect(
+            "an emitted contact resolves in the accepted plan, so its carried area is known; \
+             null means the transcript row named a contact the plan no longer holds",
+        );
         assert!(
             carried.is_finite() && carried >= 0.0,
             "a carried area is a finite non-negative mm²: {contact}"
+        );
+        assert!(
+            contact["position_mm"].is_array(),
+            "a contact whose area resolved must disclose the seat it resolved to: {contact}"
         );
         let radius = contact["tip_radius_mm"]
             .as_f64()
@@ -426,7 +466,49 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             (diameter - radius * 2.0).abs() < f64::EPSILON * diameter.max(1.0),
             "tip_diameter_mm must be exactly twice tip_radius_mm: {contact}"
         );
+        let law_radius_mm =
+            plinth_support::perception::registered_tip_radius_mm_for_carried_area(carried)
+                .expect("the registered area law must evaluate for a disclosed carried area");
+        if let Some(grown_radius_mm) = grown_tip_radius_by_contact.get(&contact_id) {
+            assert!(
+                (radius - grown_radius_mm).abs() <= 1.0e-12 * grown_radius_mm.max(1.0),
+                "two disclosures of the same grown tip must name the same radius: this row says \
+                 {radius} mm, the grown-tip disclosure says {grown_radius_mm} mm; {contact}"
+            );
+            assert!(
+                radius >= law_radius_mm - 1.0e-12 * law_radius_mm.max(1.0),
+                "grow-to-attest only ever moves a tip in the conservative direction, so a grown \
+                 tip is never SMALLER than the law asked for its carried area: {radius} mm \
+                 against a law radius of {law_radius_mm} mm; {contact}"
+            );
+        } else {
+            assert!(
+                (radius - law_radius_mm).abs() <= 1.0e-12 * law_radius_mm.max(1.0),
+                "a tip the run did not grow is sized by the area law from the area this row \
+                 discloses: {carried} mm² asks for {law_radius_mm} mm RADIUS and the row says \
+                 {radius} mm. The two numbers no longer belong to each other; {contact}"
+            );
+        }
+        // Non-vacuity, MEASURED rather than assumed. Both clamps are inside the
+        // law, so a row pinned at the registered minimum or maximum answers the
+        // same radius however its area moves, and a check made only of such
+        // rows would pass a tripled area in silence. This counts the rows where
+        // the law's answer DOES move when the area does, which is the only
+        // place the check has teeth. Measured 2026-08-21: 4 of the fixture's
+        // 18 rows.
+        let doubled =
+            plinth_support::perception::registered_tip_radius_mm_for_carried_area(carried * 2.0)
+                .expect("the registered area law must evaluate");
+        if doubled > law_radius_mm {
+            rows_a_carried_area_change_would_move += 1;
+        }
     }
+    assert!(
+        rows_a_carried_area_change_would_move > 0,
+        "every disclosed contact sits at a clamp, so the area law would answer the same radius \
+         however the carried areas moved and the cross-check above proves nothing on this \
+         fixture; it needs a fixture with at least one load-sized tip"
+    );
     // The disclosure covers the plan, not a sample of it: one row per routed
     // contact, each named by its own id, so a reader diffing two runs sees an
     // added or removed contact rather than inferring one from a byte count.
@@ -442,6 +524,61 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         total,
         "a contact id names one contact, so a repeated id means two rows describe the same seat"
     );
+    // **And the disclosed radii are the radii that reached the FILE.**
+    //
+    // `plinth_support`'s lowering builds each contact ball at
+    // `tip_ball_factor` x the member's terminalward radius (`lower.rs`,
+    // `lower_stub`), so every `SegmentType::TIP` record ChituBox holds is one
+    // disclosed radius scaled by one registered factor — and the factor is READ
+    // from the registry here, never written down. This is the leg that makes
+    // the disclosure a statement about the artifact rather than about the
+    // producer's own bookkeeping: a projection that read the member's ROOTWARD
+    // radius, or scaled it, satisfies every check above and fails this one.
+    //
+    // It also states the relation a reader needs and would otherwise get wrong.
+    // The disclosed radius is the MEMBER's tip radius; the record in the file
+    // is 1.5x that, so diffing the two directly lands 1.5x off.
+    let registered_tip_ball_factor = plinth_core::m0_constants()
+        .expect("the M0 registry must construct")
+        .scar_area_cap_policy()
+        .tip_ball_factor()
+        .diagnostic()
+        .get();
+    let mut tip_radii_on_disk_mm: Vec<f64> = chitubox_io::Project::open(&artifact)
+        .expect("the artifact must reopen")
+        .supports(0)
+        .expect("the artifact's support section must parse")
+        .iter()
+        .filter(|record| record.segment_type == chitubox_io::SegmentType::TIP)
+        .map(|record| f64::from(record.r_start))
+        .collect();
+    tip_radii_on_disk_mm.sort_by(f64::total_cmp);
+    let mut disclosed_ball_radii_mm: Vec<f64> = contact_rows
+        .iter()
+        .map(|contact| {
+            contact["tip_radius_mm"].as_f64().expect("a tip radius") * registered_tip_ball_factor
+        })
+        .collect();
+    disclosed_ball_radii_mm.sort_by(f64::total_cmp);
+    assert_eq!(
+        tip_radii_on_disk_mm.len(),
+        disclosed_ball_radii_mm.len(),
+        "one routed contact, one contact ball on disk: the artifact holds {} TIP records and the \
+         disclosure names {} contacts",
+        tip_radii_on_disk_mm.len(),
+        disclosed_ball_radii_mm.len()
+    );
+    for (on_disk_mm, disclosed_mm) in tip_radii_on_disk_mm.iter().zip(&disclosed_ball_radii_mm) {
+        // The container stores binary32, so the comparison is at f32 resolution
+        // and no finer. Nothing is being loosened: this is the width of the
+        // number the file can hold.
+        assert!(
+            (on_disk_mm - disclosed_mm).abs() <= f64::from(f32::EPSILON) * disclosed_mm.max(1.0),
+            "the tip radii on disk are the disclosed radii scaled by the registered ball factor \
+             {registered_tip_ball_factor}; got {tip_radii_on_disk_mm:?} on disk against \
+             {disclosed_ball_radii_mm:?} disclosed"
+        );
+    }
     // Task #49. This fixture's every island keeps a routed contact, so the
     // accepted contact set charges no face to nobody and the disclosure is
     // empty. Asserted rather than ignored: an empty list here is the claim

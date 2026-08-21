@@ -4948,6 +4948,41 @@ pub(crate) fn registered_max_carriable_area_mm2() -> Result<f64, GenericPercepti
     Ok(FrozenTipLoadPolicy::from_placeholders(constants.placeholders()).max_carriable_area_mm2())
 }
 
+/// The area law's tip RADIUS, in mm, for one contact charged with `area_mm2`.
+///
+/// **A READ of the shipping law, not a second copy of it.** It calls the same
+/// [`FrozenTipLoadPolicy::tip_radius_mm`] every contact stub is sized by, built
+/// from the same registered placeholders, so a caller cannot drift from what
+/// the engine builds. Both registered clamps are INSIDE the answer, exactly
+/// where production applies them: an area above the single-contact maximum
+/// comes back at `r_max` rather than at the unclamped law radius, and an area
+/// at or near zero comes back at the registered minimum. Nothing new is
+/// registered and nothing here decides anything.
+///
+/// **Why it is public.** [`crate::EmittedContactDisclosure`] states a contact's
+/// carried area and the radius of the tip that carries it as two INDEPENDENTLY
+/// sourced numbers — the area from the accepted plan, the radius from the final
+/// live forest — joined only by contact id. The law is what ties them together,
+/// so without a way to evaluate it a reader can check that each field is a
+/// number but not that the two still belong to each other. The `prepare_folder`
+/// gate uses it for exactly that.
+///
+/// UNITS: `area_mm2` is an AREA in mm²; the answer is a RADIUS in mm.
+pub fn registered_tip_radius_mm_for_carried_area(
+    area_mm2: f64,
+) -> Result<f64, GenericPerceptionError> {
+    let constants = m0_constants().map_err(|error| {
+        GenericPerceptionError::Perception(SupportPerceptionError::RegisteredConstantsUnavailable(
+            error.to_string(),
+        ))
+    })?;
+    Ok(
+        FrozenTipLoadPolicy::from_placeholders(constants.placeholders())
+            .tip_radius_mm(area_mm2)?
+            .get(),
+    )
+}
+
 /// What one contact may legally be charged for a single face — task #68
 /// contract (2).
 ///
