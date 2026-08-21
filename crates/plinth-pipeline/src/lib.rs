@@ -530,6 +530,22 @@ pub enum ModelPreparationOutcome {
         /// this enum has to be moved with.
         #[serde(default)]
         repair_report: Option<Box<plinth_support::RepairRunReport>>,
+        /// **SPEC-A4 §D.2 — where this artifact's EXACT attribution was
+        /// written.**
+        ///
+        /// `repair_report` above says what the controller spent; this says
+        /// where to read what it BOUGHT, contact by contact: which repair-pool
+        /// row was appended on which trial, which routes its global score came
+        /// from, and which route's failing patch it closed. The stream is too
+        /// large to inline in a run report — a model that spends thousands of
+        /// trials carries thousands of rows — so the report carries the path,
+        /// the counts and any write error, and the file carries §D.
+        ///
+        /// `None` means the sealed run wrote no ledger; since this landed no
+        /// production path produces that. `default` for the same reason the
+        /// fields above are.
+        #[serde(default)]
+        repair_ledger: Option<crate::coverage_evidence::SealedRepairLedger>,
     },
     Stopped {
         after: StageStop,
@@ -1521,6 +1537,7 @@ mod tests {
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
                         repair_report: None,
+                        repair_ledger: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1612,6 +1629,7 @@ mod tests {
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
                         repair_report: None,
+                        repair_ledger: None,
                     },
                 ),
                 model("refused", refused),

@@ -318,6 +318,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         ownerless_islands,
         contacts,
         repair_report,
+        repair_ledger,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -339,6 +340,49 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     assert!(
         repair.trials >= repair.commits,
         "every commit is a trial: {repair:?}"
+    );
+
+    // **SPEC-A4 §D.2 — the sealed-run attribution reaches DISK, on a model that
+    // spent nothing.**
+    //
+    // This half is the awkward one and it is the half worth pinning here: the
+    // toed slab covers on its baseline layout, so its ledger is honestly empty.
+    // Writing nothing at all would make "this model paid nothing" and "nobody
+    // wrote it down" look identical on disk, which is the same distinction §A.8
+    // prints a line of zeros for. Before this landed, `seal_and_emit` deleted
+    // any stale sidecar on the way in and wrote NOTHING for a sealing model, so
+    // an emitting model's attribution existed nowhere.
+    let ledger = repair_ledger
+        .as_ref()
+        .expect("an emitting model must record where its repair ledger was written");
+    assert_eq!(
+        ledger.path,
+        scratch.output().join("mini.coverage.repair.json"),
+        "the ledger belongs beside the artifact, at the model's own stem"
+    );
+    assert_eq!(ledger.write_error, None, "the ledger must reach disk");
+    assert_eq!(
+        (ledger.trials, ledger.commits, ledger.steps),
+        (0, 0, 0),
+        "the toed slab covers on its baseline layout, so its ledger is honestly empty"
+    );
+    let ledger_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&ledger.path).expect("the sealed repair ledger must exist on disk"),
+    )
+    .expect("the sealed repair ledger must be valid JSON");
+    assert_eq!(
+        ledger_json["schema"], "plinth.coverage-repair.v1",
+        "the ledger carries its own versioned schema tag, as the refusal sidecar does"
+    );
+    assert_eq!(ledger_json["model"], "mini");
+    assert_eq!(ledger_json["commits"], 0);
+    assert_eq!(
+        ledger_json["steps"]
+            .as_array()
+            .expect("steps is an array even when empty")
+            .len(),
+        0,
+        "a model that never entered a transaction has no step to attribute"
     );
     // Task #49. This fixture's every island keeps a routed contact, so the
     // accepted contact set charges no face to nobody and the disclosure is

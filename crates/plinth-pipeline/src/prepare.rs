@@ -749,6 +749,14 @@ pub struct ChainOutcome {
     /// is the marker: `None` here means the sealed run came from a controller
     /// that keeps no repair ledger, which since stage 4 is no production path.
     pub repair_report: Option<plinth_support::RepairRunReport>,
+    /// **SPEC-A4 §D.2 on the SEALED path** — where this model's exact
+    /// attribution was written, and whether the write succeeded.
+    ///
+    /// The file itself carries the stream; this row is the receipt, so a reader
+    /// of the run report alone knows the path to open and whether anything
+    /// stopped it from being written. `None` only on a report shape that never
+    /// reached a sealed run.
+    pub repair_ledger: Option<crate::coverage_evidence::SealedRepairLedger>,
     /// PR-8 grow-to-attest: the contacts this run refused with the load each
     /// abandons, and the contacts whose tips it grew to keep them. Carried out
     /// to the run report for the same reason as the field above -- a support
@@ -1154,6 +1162,20 @@ fn clear_stale_coverage_evidence(target: &Path) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+
+    // **SPEC-A4 §D.2's sealed-run twin, cleared for exactly the reason the
+    // sidecar above is.** `<model>.coverage.repair.json` names which contact
+    // closed which hole on the run that wrote it. Left behind, the next reader
+    // takes one run's attribution for another's — and a repair ledger is more
+    // misleading stale than a refusal is, because it describes a plan that was
+    // printed.
+    let ledger = coverage_evidence::repair_ledger_path(target);
+    match std::fs::remove_file(&ledger) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
     let Some(parent) = target.parent() else {
         return Ok(());
     };
@@ -1857,6 +1879,30 @@ pub fn seal_and_emit(
     // a post-seal lowering or emit failure alike.
     let repair_report = Some(authority.repair_report().clone());
 
+    // **SPEC-A4 §D.2, the SEALED half — and this line is the whole of it.**
+    //
+    // The step stream lives on the authority and dies with it one frame from
+    // here, so this is the last moment §D's exact attribution exists at all.
+    // Until now nothing wrote it: `clear_stale_coverage_evidence` deleted any
+    // stale sidecar on the way in and a sealing model left NOTHING, so "which
+    // contact closed which hole" was answerable for a refused model and not for
+    // one whose plan was about to be printed.
+    //
+    // Written before the pre-write gate deliberately. The controller had
+    // already sealed and already spent by the time the gate speaks, and a gate
+    // refusal does not un-spend it; a reader of a gate-refused model gets the
+    // refusal sidecar AND the ledger of the run that produced the plan it
+    // refused.
+    //
+    // A write failure is data, never control flow (the FU-57 rule): the model
+    // is not un-emitted because an evidence file could not be written.
+    let repair_ledger = coverage_evidence::persist_sealed_repair_ledger(
+        model,
+        target,
+        authority.repair_report(),
+        authority.repair_steps(),
+    );
+
     // The pre-write gate. `judge_then_emit` judges the sealed snapshot while
     // the authority is still alive, and only a passing verdict reaches
     // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
@@ -1960,6 +2006,7 @@ pub fn seal_and_emit(
         // The same single read as the refused path above — see the comment at
         // the `judge_then_emit` call.
         repair_report,
+        repair_ledger: Some(repair_ledger),
         abandoned_contacts: gated.abandoned_contacts,
         grown_contact_tips: gated.grown_contact_tips,
         routed_contacts: gated.routed_contacts,
@@ -2002,6 +2049,9 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // SPEC-A4 §A.8: the artifact emitted, and this is what the repair
         // controller spent to get it there.
         repair_report: outcome.repair_report.map(Box::new),
+        // SPEC-A4 §D.2: and this is where to read what it BOUGHT — which
+        // contact closed which hole, on the model that emitted.
+        repair_ledger: outcome.repair_ledger,
         // PR-8: the artifact emitted, and these are the loads it does not
         // carry and the tips it grew in order to carry the rest.
         contacts: Box::new(crate::ContactAttestationDisclosure {
@@ -2623,6 +2673,13 @@ mod tests {
                 diversity_demotions: 44,
                 diversity_demotions_tried: 44,
                 ..plinth_support::RepairRunReport::default()
+            }),
+            repair_ledger: Some(crate::coverage_evidence::SealedRepairLedger {
+                path: std::path::PathBuf::from("deinonychus.coverage.repair.json"),
+                commits: 3,
+                trials: 45,
+                steps: 45,
+                write_error: None,
             }),
             abandoned_contacts: vec![abandoned.clone()],
             grown_contact_tips: vec![grown.clone()],

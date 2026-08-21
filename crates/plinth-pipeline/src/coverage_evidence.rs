@@ -240,6 +240,19 @@ pub fn render_file_prefix(target: &Path) -> Option<String> {
     Some(format!("{stem}.coverage.island-"))
 }
 
+/// The SEALED-run repair ledger's path for one model:
+/// `<target-stem>.coverage.repair.json`, beside the `.chitubox` target.
+///
+/// **A twin of [`sidecar_path`], not a second writer of it.** The refusal
+/// sidecar means one thing — "this model was refused, and here is the coverage
+/// evidence" — and a reader that found one beside an emitted artifact would
+/// have to guess. This file means the other thing: "this model sealed, and here
+/// is what the repair controller did to get there."
+#[must_use]
+pub fn repair_ledger_path(target: &Path) -> PathBuf {
+    target.with_extension("coverage.repair.json")
+}
+
 fn worse_gap(left: CoverageClosureGap, right: CoverageClosureGap) -> CoverageClosureGap {
     match (left, right) {
         (CoverageClosureGap::NoRoutedContact, _) | (_, CoverageClosureGap::NoRoutedContact) => {
@@ -501,6 +514,113 @@ fn write_sidecar(path: &Path, inputs: SidecarWrite<'_>) -> Result<(), String> {
             path.display()
         )
     })
+}
+
+// --- Sealed-run repair ledger --------------------------------------------
+
+/// The wire schema tag of the SEALED-run repair ledger.
+///
+/// **Versioned the same way the refusal sidecar is**, and for the same reason:
+/// this file's whole content is SPEC-A4 §D's exact attribution, and §D's rows
+/// carry meanings a reader must not guess at. `.v1` is honest here — the refusal
+/// sidecar is at `.v2` because one of ITS fields changed meaning, and this file
+/// has no earlier shape to be confused with.
+const REPAIR_LEDGER_SCHEMA: &str = "plinth.coverage-repair.v1";
+
+/// The sealed-run repair ledger, as it goes on disk — **SPEC-A4 §D.2 for a
+/// model that EMITS**.
+///
+/// Before this, `prepare.rs` deleted any stale coverage sidecar on the way in
+/// and wrote nothing at all for a model that sealed, so the exact attribution
+/// §D promises existed only in memory and only until the authority was
+/// consumed. A reader asking "which contact closed which hole on this model"
+/// could be answered for a REFUSED model and not for a successful one — which
+/// is the wrong way round, because the successful one is the plan that gets
+/// printed.
+#[derive(Serialize)]
+struct RepairLedgerBody<'a> {
+    schema: &'a str,
+    model: &'a str,
+    /// **Ruling R6**: repair steps that COMMITTED, which is what the registered
+    /// `coverage_repair_max_attempts` bound bounds. Hoisted out of `report` so
+    /// the one number a reader wants first is the first one they see.
+    commits: usize,
+    /// Every transaction attempted, committed or not.
+    trials: usize,
+    /// §A.8's counters in full: the rejection histogram by class, the wall
+    /// times, rule N4's demotion pair, and the rows left on the ranking.
+    report: &'a plinth_support::RepairRunReport,
+    /// §D's stream: one row per transaction, each naming the exact repair-pool
+    /// row, its seat, every route its GLOBAL score was credited for, both sides
+    /// of all three accept clauses, the per-route deltas, and the outcome.
+    steps: &'a [plinth_support::CoverageRepairStepWire],
+}
+
+/// What one sealed-run ledger write produced.
+///
+/// **A write failure is data, not control flow** — the same rule the refusal
+/// evidence follows. A model that emitted is not un-emitted because its
+/// evidence file could not be written; the failure is recorded and travels out
+/// on the run report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SealedRepairLedger {
+    pub path: PathBuf,
+    /// Ruling R6's number, the same one inside the file.
+    pub commits: usize,
+    pub trials: usize,
+    /// How many step rows reached the file. Equal to `trials`; carried so a
+    /// reader of the report alone can tell a truncated ledger from a short run.
+    pub steps: usize,
+    pub write_error: Option<String>,
+}
+
+/// Persist the SEALED-run repair ledger for one model — SPEC-A4 §D.2's
+/// attribution, for a model that reached its artifact.
+///
+/// **Written for every model that seals, including one that spent nothing.** A
+/// ledger reading `commits: 0, trials: 0, steps: []` says "this model covered
+/// on its baseline layout and the controller cost it nothing", which is a
+/// measurement. Writing no file at all would say only "nobody left a note",
+/// and those two must not look alike — the same reason §A.8 prints a line of
+/// zeros rather than staying quiet.
+#[must_use]
+pub fn persist_sealed_repair_ledger(
+    model: &ModelId,
+    target: &Path,
+    report: &plinth_support::RepairRunReport,
+    steps: &[plinth_support::CoverageRepairStep],
+) -> SealedRepairLedger {
+    let path = repair_ledger_path(target);
+    let wire: Vec<plinth_support::CoverageRepairStepWire> = steps
+        .iter()
+        .map(plinth_support::CoverageRepairStep::to_wire)
+        .collect();
+    let body = RepairLedgerBody {
+        schema: REPAIR_LEDGER_SCHEMA,
+        model: model.as_str(),
+        commits: report.commits,
+        trials: report.trials,
+        report,
+        steps: &wire,
+    };
+    let write_error = serde_json::to_vec_pretty(&body)
+        .map_err(|error| format!("sealed repair ledger could not be serialized: {error}"))
+        .and_then(|bytes| {
+            std::fs::write(&path, bytes).map_err(|error| {
+                format!(
+                    "sealed repair ledger could not be written to {}: {error}",
+                    path.display()
+                )
+            })
+        })
+        .err();
+    SealedRepairLedger {
+        path,
+        commits: report.commits,
+        trials: report.trials,
+        steps: wire.len(),
+        write_error,
+    }
 }
 
 // --- Renders -------------------------------------------------------------
