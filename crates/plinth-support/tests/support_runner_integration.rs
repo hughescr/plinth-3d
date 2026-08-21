@@ -298,6 +298,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 ///   all 11 resource counters identical.
 /// - **No cap, gate, bound, tolerance or registered constant was touched**, and
 ///   no new one was added.
+///
 /// **Ported at SPEC-A4 design §G.1 stage 4, when `run_support` BECAME the
 /// one-winner controller — and split in two, which is the one thing about it
 /// that changed.**
