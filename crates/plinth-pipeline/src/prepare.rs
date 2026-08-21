@@ -2051,7 +2051,7 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         repair_report: outcome.repair_report.map(Box::new),
         // SPEC-A4 §D.2: and this is where to read what it BOUGHT — which
         // contact closed which hole, on the model that emitted.
-        repair_ledger: outcome.repair_ledger,
+        repair_ledger: outcome.repair_ledger.map(Box::new),
         // PR-8: the artifact emitted, and these are the loads it does not
         // carry and the tips it grew in order to carry the rest.
         contacts: Box::new(crate::ContactAttestationDisclosure {

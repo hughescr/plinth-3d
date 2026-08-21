@@ -543,9 +543,12 @@ pub enum ModelPreparationOutcome {
         ///
         /// `None` means the sealed run wrote no ledger; since this landed no
         /// production path produces that. `default` for the same reason the
-        /// fields above are.
+        /// fields above are. Boxed for the same reason `repair_report` above
+        /// is: a `PathBuf`, three counts and an owned error string inline are
+        /// weight every OTHER variant of this enum has to be moved with, and
+        /// only `Artifact` ever carries one.
         #[serde(default)]
-        repair_ledger: Option<crate::coverage_evidence::SealedRepairLedger>,
+        repair_ledger: Option<Box<crate::coverage_evidence::SealedRepairLedger>>,
     },
     Stopped {
         after: StageStop,
