@@ -755,3 +755,116 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
         "the sealed fixture is here because it repairs: {sealed_report:?}"
     );
 }
+
+/// **The judge's streaming-silence note — a run says which stage it is in.**
+///
+/// MEASURED at `e9e160f`, release binary: `Giant Bat.stl` printed nothing at
+/// all to stderr for 75.77 s and then failed, and on the bigger corpus models
+/// the first line an operator sees is the repair loop's own entry line, four to
+/// five minutes in. Everything before it — preparation, routing, rewire,
+/// bracing, structure, lowering — was silent, so a run that is working and a
+/// run that is wedged looked identical.
+///
+/// Three claims, and the third is the one that keeps the cure from being worse
+/// than the disease:
+///
+/// 1. every stage of attempt 0 is named, in the order the chain runs them;
+/// 2. all of them precede the repair loop's first line, which is the silence
+///    being ended; and
+/// 3. a repair TRIAL announces nothing. `make_raking_blade` spends 45 trials
+///    through the same chain, so if trials announced there would be 46 of each
+///    stage line and the progress line R10 paid for would be buried under 276
+///    lines of noise. Exactly one of each is the assertion.
+#[test]
+fn attempt_zero_names_every_stage_it_enters_and_the_trials_stay_quiet() {
+    fn stage_lines(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|line| line.starts_with("stage: "))
+            .collect()
+    }
+
+    let capture = RunLogCapture::install();
+    let error = run(
+        make_raking_blade().expect("procedural raking blade"),
+        "make_raking_blade",
+    )
+    .err()
+    .expect("make_raking_blade refuses");
+    let lines = capture.lines();
+    drop(capture);
+    let SupportRunError::CoverageClosure(refusal) = error else {
+        panic!("expected a coverage-closure refusal");
+    };
+    let report = refusal.repair.expect("a refusal carries its §A.8 report");
+
+    // NON-VACUITY. Claim 3 is about trials, so the fixture must spend some.
+    assert!(
+        report.trials >= 2,
+        "this fixture is here because it spends many trials through the same stage chain; \
+         with {} the suppression claim below proves nothing: {report:?}",
+        report.trials
+    );
+
+    let stages = stage_lines(&lines);
+    assert!(
+        !stages.is_empty(),
+        "no stage line was emitted at all, which is the silence this exists to end: {lines:#?}"
+    );
+
+    // Claim 1 — every stage, once, in chain order.
+    let expected = [
+        "Preparation",
+        "Routing",
+        "Rewire",
+        "Brace",
+        "Structure",
+        "Lowering",
+        "CoverageMeasurement",
+    ];
+    let named: Vec<String> = stages
+        .iter()
+        .map(|line| {
+            line.split_once("entering ")
+                .unwrap_or_else(|| panic!("a stage line must name its stage: {line:?}"))
+                .1
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("a stage line must carry its elapsed: {line:?}"))
+                .0
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        named, expected,
+        "attempt 0's stages must be named exactly once each, in the order the chain runs \
+         them; anything else means a trial announced itself or a stage went quiet: {lines:#?}"
+    );
+
+    // Claim 2 — the stage stream comes before the repair loop's first word.
+    let first_repair = lines
+        .iter()
+        .position(|line| line.starts_with("coverage-repair"))
+        .expect("the repair loop speaks on this fixture");
+    let last_stage = lines
+        .iter()
+        .rposition(|line| line.starts_with("stage: "))
+        .expect("checked non-empty above");
+    assert!(
+        last_stage < first_repair,
+        "every attempt-0 stage line must land before the repair loop's first line — that \
+         ordering IS the silence being ended: {lines:#?}"
+    );
+
+    // Every line carries an elapsed, and it is evidence rather than a bound:
+    // nothing here compares it to anything, and neither does production.
+    for line in &stages {
+        let elapsed = line
+            .split_once("elapsed=")
+            .unwrap_or_else(|| panic!("a stage line must carry its elapsed: {line:?}"))
+            .1;
+        assert!(
+            elapsed.ends_with("ms") && elapsed.trim_end_matches("ms").parse::<u64>().is_ok(),
+            "elapsed must be a plain millisecond count: {line:?}"
+        );
+    }
+}

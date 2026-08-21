@@ -653,6 +653,56 @@ impl RepairRunReport {
     }
 }
 
+/// **The judge's streaming-silence note — a run says which stage it is in,
+/// while it is still in it.**
+///
+/// MEASURED, `e9e160f`, release binary: `Giant Bat.stl` printed **nothing at
+/// all** to stderr for 75.77 s and then failed; on the bigger models the first
+/// line an operator sees is the repair loop's own entry line, four to five
+/// minutes in. Everything before it — orientation, hollowing, drilling,
+/// preparation, routing, rewire, bracing, structure, lowering — is silent, so a
+/// run that is working and a run that is wedged look identical.
+///
+/// **This is print-only, and that is a rule, not an accident.** No branch reads
+/// a stage line, no stage line is compared to anything, and the clock it prints
+/// is wall time — evidence, never a bound, the same rule
+/// [`RepairRunReport`]'s own wall times travel under. A machine that runs the
+/// corpus slowly must produce the same verdicts as one that runs it fast.
+///
+/// It deliberately goes through [`emit_run_line`], which is the repair loop's
+/// own write: one flushed stderr write, one test mirror, so a killed run has
+/// still said where it got to and a test can see it. A second write path would
+/// be a second thing to keep flushed.
+///
+/// **The scope is on the line because the clocks are different.** Each clock
+/// times its own scope from its own start — the pipeline's is per model, the
+/// support run's is per support run — so a reader never has to guess which zero
+/// an elapsed is measured from.
+#[derive(Debug)]
+pub struct StageClock {
+    started: std::time::Instant,
+    scope: String,
+}
+
+impl StageClock {
+    #[must_use]
+    pub fn start(scope: impl Into<String>) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            scope: scope.into(),
+        }
+    }
+
+    /// Announce that `stage` is being entered, with this clock's elapsed.
+    pub fn entering(&self, stage: &str) {
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        emit_run_line(&format!(
+            "stage: {} entering {stage} elapsed={elapsed_ms}ms",
+            self.scope
+        ));
+    }
+}
+
 /// **Task #67 — the one write the repair loop's live evidence goes through, and
 /// it is FLUSHED.**
 ///

@@ -1279,12 +1279,25 @@ impl RefusedStage {
 /// allowed to hold and the model died — which is why task #47's Giant Bat loses
 /// an entire model to one arm's `Brace(ClearanceViolation(1))`. Here the same
 /// failure returns the context, the trial rolls back, and the search goes on.
+/// `announce` carries the judge's stage stream and NOTHING else: when it is
+/// `Some`, each stage prints one line before it starts. Attempt 0 passes a
+/// clock because that is the silence an operator sits through — minutes of it
+/// on a big model, with the repair loop's own entry line still to come. Every
+/// repair TRIAL passes `None`, because six lines times five hundred trials is
+/// not visibility, it is noise that buries the progress line R10 paid for.
+///
+/// It is a parameter rather than a flag read from somewhere, so the choice is
+/// visible at both call sites and no branch below can reach it.
 fn run_stage_chain<'a>(
     context: SupportRunContext<'a>,
     plan: SpecializedContactPlan,
+    announce: Option<&crate::coverage_repair::StageClock>,
 ) -> ChainOutcome<'a> {
     macro_rules! stage {
-        ($expr:expr, $stage:literal, $phase:expr) => {
+        ($expr:expr, $stage:literal, $phase:expr) => {{
+            if let Some(clock) = announce {
+                clock.entering($stage);
+            }
             match $expr {
                 Ok(value) => value,
                 Err((context, error)) => {
@@ -1298,7 +1311,7 @@ fn run_stage_chain<'a>(
                     }));
                 }
             }
-        };
+        }};
     }
     let prepared = stage!(
         prepared_run_for_plan(context, plan),
@@ -1496,13 +1509,20 @@ pub fn run_support<'a>(
         })?;
 
     // ---------------------------------------------------------------- attempt 0
-    let attempt_zero = match run_stage_chain(context, plan.clone()) {
+    //
+    // The judge's streaming-silence note. Attempt 0 is the long quiet stretch:
+    // Preparation, Routing, Rewire, Brace, Structure and Lowering all run here
+    // before the repair loop's own entry line can exist, and on a big model
+    // that is four to five minutes of nothing. Every line below is print-only.
+    let stage_clock = crate::coverage_repair::StageClock::start("support");
+    let attempt_zero = match run_stage_chain(context, plan.clone(), Some(&stage_clock)) {
         ChainOutcome::Lowered(lowered) => lowered,
         // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
         // failure is the model's, not this controller's. It is not a rollback,
         // it is not a coverage refusal, and it is not eligible to be one.
         ChainOutcome::Refused(refusal) => return Err(refusal.stop.into_attempt_zero_failure()),
     };
+    stage_clock.entering("CoverageMeasurement");
     let mut measured = match measure_for_controller(&attempt_zero, coverage_request) {
         Ok(measured) => measured,
         Err((_phase, detail)) => {
@@ -1768,7 +1788,10 @@ pub fn run_support<'a>(
         // did with ITS contact rather than with the plan as a whole.
         let trial_contact_id = child.contacts().last().map(|contact| contact.contact_id());
 
-        match run_stage_chain(context, child) {
+        // `None`: a trial's six stage lines times hundreds of trials would bury
+        // the progress line rather than reveal anything. The loop's own paced
+        // line is the trial-scale instrument.
+        match run_stage_chain(context, child, None) {
             ChainOutcome::Refused(refusal) => {
                 let ChainRefusal {
                     context: returned,

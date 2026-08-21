@@ -1006,6 +1006,18 @@ fn prepare_one(
         );
     }
 
+    // **The judge's streaming-silence note, model side.** Everything from here
+    // to the support run's own first line is silent today: load, mesh repair,
+    // decimation, the dense orientation sweep and the hollow-and-drill stage.
+    // MEASURED at `e9e160f`: `Giant Bat.stl` printed nothing to stderr for
+    // 75.77 s and then failed, and on the big models the first line an operator
+    // sees is the repair loop's, four to five minutes in.
+    //
+    // Print-only, through `plinth-support`'s own flushed write so a killed run
+    // has still said where it got to. No branch reads a stage line; the elapsed
+    // it carries is wall time, which is evidence and never a bound.
+    let clock = plinth_support::StageClock::start(format!("model {model}"));
+    clock.entering("Load");
     let mesh = match load_binary_stl(source_path, WeldPolicy::None) {
         Ok(mesh) => mesh,
         Err(source) => {
@@ -1044,9 +1056,11 @@ fn prepare_one(
     // bit-identical with the reason in `RepairEvidence::actions_skipped`, and
     // every stage below judges the model exactly as it did before this stage
     // existed.
+    clock.entering("MeshRepair");
     let (mesh, evidence) = plinth_mesh::repair_mesh(&mesh).into_parts();
     repair = Some(evidence);
 
+    clock.entering("Decimation");
     let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,
         Err(source) => {
@@ -1089,6 +1103,7 @@ fn prepare_one(
         );
     }
 
+    clock.entering("Orientation");
     let oriented = match orient_model(
         model,
         decimated,
@@ -1382,6 +1397,10 @@ pub fn run_from_oriented(
     let hollow_error_reserve_mesh = oriented.mesh().clone();
     let hollow_error_reserve_history = oriented.history().clone();
 
+    // Its own clock, scoped to the hollow-and-drill stage it times. This is the
+    // longest silent stretch on a big model before the sealed run starts.
+    let clock = plinth_support::StageClock::start(format!("model {model}"));
+    clock.entering("Hollow");
     let output = match hollow_stage(oriented, &policy.hollow) {
         Ok(output) => output,
         // OQ-1's anticipated case, reached for the first time by the Weeping
@@ -1809,6 +1828,11 @@ pub fn seal_and_emit(
     // all the way through the pipeline and either committed or rolled back,
     // with the §A.8 report carried out below. The batch loop this call site
     // used to reach is deleted; there is no second controller to reach.
+    // Its own clock, scoped to the sealed run, because that is the span it
+    // times; `run_support` starts a second one for the stage chain inside it,
+    // and both lines say which scope they are measured from.
+    let clock = plinth_support::StageClock::start(format!("model {model}"));
+    clock.entering("SealedSupportRun");
     let sealed = run_support(hollowed, policy.support.clone(), input);
     let authority = sealed.map_err(|source| {
         // FU-57: only the coverage-closure refusal carries evidence this row
@@ -1908,6 +1932,7 @@ pub fn seal_and_emit(
     // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
     // no file at `target` at all. There is no override parameter and there is
     // not going to be one.
+    clock.entering("PreWriteGateAndEmit");
     let gated = match crate::judge_then_emit(
         model,
         authority,
