@@ -1941,17 +1941,13 @@ fn exact_clearance_rows(
             //
             // MAJOR-6. The mask's depth term must reflect this member's ACTUAL
             // seating state, not the seating state of the one family PR-1
-            // happens to seat. Only brace model rungs are seated; a CCO
-            // model-anchor strut's `p1` IS the raw seat point and a bifurcation
-            // half inherits its host's endpoint, so for those the endpoint
-            // stands ON the plane and there is no depth to divide out.
-            // Including `h` for them over-masks by h/|cos| (~0.6-1.1 mm of the
-            // member silently exempted from the distance test). PR-7 seats the
-            // CCO family; `contact::seating_of` is the single place that
-            // decision is recorded, so the two changes stay coherent.
+            // happens to seat. `contact::seating_of` is the single place that
+            // decision is recorded and `contact::placed_mask_inset_mm` is the
+            // single statement of the mask, so this site, `cco::clearance_rows`
+            // and `rewire::validate_changed_geometry` cannot drift again (#36).
+            // PR-7 seats the CCO model anchor's `Rootward` end, and this site
+            // picked that up for free when `seating_of` learned the family.
             let policy = config.contact_policy();
-            let seat = contact::seat_depth_mm(abs_cos_raw, radius, &policy, false);
-            let mask_seat = contact::seating_of(member.kind()).mask_seat_depth_mm(seat);
             let r_max = member
                 .terminal_radius_mm()
                 .get()
@@ -1960,8 +1956,14 @@ fn exact_clearance_rows(
             // A degenerate incidence yields no mask. Masking nothing is the
             // conservative disposition here: the row is then fully distance
             // checked rather than exempted, and PR-3/PR-9 refuse it upstream.
-            let inset =
-                contact::mask_extent_mm(mask_seat, r_max, abs_cos_raw, &policy).unwrap_or(0.0);
+            let inset = contact::placed_mask_inset_mm(
+                contact::seating_of(member.kind(), end),
+                abs_cos_raw,
+                radius,
+                r_max,
+                &policy,
+            )
+            .unwrap_or(0.0);
             crate::census_record!({
                 crate::census::record_embed(
                     abs_cos_raw,
@@ -3040,21 +3042,31 @@ mod tests {
     /// MAJOR-6 regression: the exact-clearance mask must reflect each member's
     /// ACTUAL seating state.
     ///
-    /// A CCO model-anchor strut's rootward end IS the raw projected seat point,
-    /// so its axis station at arc distance `u*` stands `u*|cos|` above the
-    /// plane, not `u*|cos| - h`. The mask therefore carries no `h` term for it.
-    /// The check is end-to-end through the real kernel: on a planar seat the
-    /// correct mask makes `segment_clearance` read exactly `MARGIN`
-    /// (= process resolution, 0.05 mm at a 0.05 mm layer). Including `h` would
-    /// push the first checked station 0.3 mm further out and the row would read
-    /// 0.35 mm — 0.3 mm of the member silently exempted from the distance test.
+    /// An endpoint that sits ON the projected surface point has its axis
+    /// station at arc distance `u*` standing `u*|cos|` above the plane, not
+    /// `u*|cos| - h`, so the mask carries no `h` term for it. The check is
+    /// end-to-end through the real kernel: on a planar seat the correct mask
+    /// makes `segment_clearance` read exactly `MARGIN` (= process resolution,
+    /// 0.05 mm at a 0.05 mm layer). Including `h` would push the first checked
+    /// station 0.3 mm further out and the row would read 0.35 mm — 0.3 mm of
+    /// the member silently exempted from the distance test.
+    ///
+    /// **THE SUBJECT MOVED WITH PR-7.** This test used `MemberKind::Strut` with
+    /// a `Rootward` contact, because that WAS the unseated family: a CCO
+    /// model-anchor strut's `p1` was the raw seat point. `apply_model_anchor`
+    /// now seats it, so that pair is `Seated` and carrying the `h` term for it
+    /// is correct. The unseated case is taken from a family that genuinely is
+    /// one — a bifurcation `cco_upper` half — and the complementary half, that
+    /// the SEATED family reads MARGIN too when its endpoint really is seated,
+    /// is asserted alongside it. Between them they pin both directions of
+    /// `contact::seating_of`, which is the only place the decision is recorded.
     #[test]
     fn an_unseated_contact_is_not_over_masked_by_the_seat_depth() {
         let mut forest = Forest::new();
         let strut = forest.add_member(contact_member(
             [0.0, 0.0, 6.0],
             [0.0, 0.0, 0.0],
-            MemberKind::Strut,
+            MemberKind::Other("cco_upper".to_owned()),
             ContactEnd::Rootward,
             0,
         ));
@@ -3077,30 +3089,94 @@ mod tests {
         // Discrimination: the rejected alternative (h included) reads
         // MARGIN + default_contact_depth_mm = 0.35, an order of magnitude away.
         assert!(clearance < margin + config.contact_depth_mm / 2.0);
+
+        // The complementary half. A PR-7-seated CCO model anchor — the same
+        // geometry with its endpoint pushed inward by the PR-1 depth, which is
+        // what `apply_model_anchor` now mints — reads exactly MARGIN too,
+        // BECAUSE the mask carries the `h` term for it. Take the `h` term away
+        // and this row under-masks by `h/|cos|` and reads 0.05 - 0.3 = -0.25.
+        let policy = config.contact_policy();
+        let mut seated_forest = Forest::new();
+        let seat = contact::seat_depth_mm(1.0, 0.65, &policy, false);
+        let anchor = seated_forest.add_member(contact_member(
+            [0.0, 0.0, 6.0],
+            [0.0, 0.0, -seat],
+            MemberKind::Strut,
+            ContactEnd::Rootward,
+            0,
+        ));
+        let seated_rows =
+            exact_clearance_rows(&seated_forest, &surface, &config, test_penetration_limits())
+                .unwrap();
+        let (_, seated_clearance) = seated_rows
+            .iter()
+            .copied()
+            .find(|(key, _)| *key == anchor)
+            .expect("the seated anchor is a live non-stub row");
+        assert!(
+            (seated_clearance - margin).abs() < 1.0e-9,
+            "a PR-7-seated anchor must read exactly MARGIN = {margin}, got {seated_clearance}"
+        );
     }
 
-    /// The seating classifier is keyed on the DESIGN FAMILY (OD-3), recomputed
-    /// per stage and never stored, and PR-1 seats exactly one family today.
+    /// The seating classifier is keyed on the DESIGN FAMILY plus the declaring
+    /// END (OD-3), recomputed per stage and never stored.
+    ///
+    /// **THIS TEST MOVED WITH PR-7, AND ITS MOVEMENT IS THE CHANGE'S
+    /// SIGNATURE.** It used to assert that `MemberKind::Strut` and
+    /// `Other("cco_upper")` are `OnSurface` — that was the single most explicit
+    /// pin of "PR-7 is not landed". `cco::apply_model_anchor` now seats the
+    /// strut's rootward end with `contact::seat_endpoint`, so a `Rootward`
+    /// `Strut` contact is `Seated`.
+    ///
+    /// Everything else in the table is UNCHANGED, and each row is load-bearing:
+    ///
+    /// * a `Terminalward` `Strut` contact stays `OnSurface`. #52 (the initial
+    ///   contact stub's designed embed) is a different rule and is not in this
+    ///   commit; classifying that end `Seated` would add an `h` term to a mask
+    ///   for a depth no `seat_endpoint` produced;
+    /// * `Other("cco_upper")` stays `OnSurface` at both ends. A bifurcation
+    ///   upper half inherits its HOST's kind, so a bifurcated model anchor is
+    ///   still a `Strut` and still classified `Seated` by the `Strut` row —
+    ///   `cco_upper` is not the family that carries a model seat;
+    /// * every non-strut kind stays `OnSurface`, because no other family calls
+    ///   `seat_endpoint`.
     #[test]
     fn seating_follows_the_design_family() {
         use crate::contact::{seating_of, ContactSeating, MODEL_RUNG_FAMILY};
+        // The brace model rung is seated at either end (PR-1).
+        for end in [ContactEnd::Rootward, ContactEnd::Terminalward] {
+            assert_eq!(
+                seating_of(&MemberKind::Other(MODEL_RUNG_FAMILY.to_owned()), end),
+                ContactSeating::Seated
+            );
+        }
+        // PR-7 — the CCO model anchor, at the end that carries its seat.
         assert_eq!(
-            seating_of(&MemberKind::Other(MODEL_RUNG_FAMILY.to_owned())),
-            ContactSeating::Seated
+            seating_of(&MemberKind::Strut, ContactEnd::Rootward),
+            ContactSeating::Seated,
+            "PR-7 seats the CCO model anchor's rootward end"
+        );
+        // ... and only at that end.
+        assert_eq!(
+            seating_of(&MemberKind::Strut, ContactEnd::Terminalward),
+            ContactSeating::OnSurface,
+            "a terminalward strut contact is the #52 designed embed, not a PR-1 seat"
         );
         for kind in [
-            MemberKind::Strut,
             MemberKind::Brace,
             MemberKind::Shoot,
             MemberKind::Trunk,
             MemberKind::Stub,
             MemberKind::Other("cco_upper".to_owned()),
         ] {
-            assert_eq!(
-                seating_of(&kind),
-                ContactSeating::OnSurface,
-                "{kind:?} is not seated by PR-1"
-            );
+            for end in [ContactEnd::Rootward, ContactEnd::Terminalward] {
+                assert_eq!(
+                    seating_of(&kind, end),
+                    ContactSeating::OnSurface,
+                    "{kind:?} at {end:?} is not seated by PR-1"
+                );
+            }
         }
         // The depth term is present for a seated member and absent otherwise.
         assert!((ContactSeating::Seated.mask_seat_depth_mm(0.3) - 0.3).abs() < 1e-15);

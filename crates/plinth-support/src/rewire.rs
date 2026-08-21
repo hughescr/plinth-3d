@@ -114,12 +114,15 @@ struct Config {
     roll_window: usize,
     roll_eps: f64,
     work_budget: Option<u64>,
-    contact_depth_mm: f64,
     standoff_mm: f64,
+    /// The run's own process resolution — the PR-1(a) seat minimum and the PR-2
+    /// mask MARGIN. It is a property of THIS RUN, not a registry constant, so
+    /// it arrives as an argument.
+    process_resolution_mm: f64,
 }
 
 impl Config {
-    fn current() -> Result<Self, RewireError> {
+    fn current(process_resolution_mm: f64) -> Result<Self, RewireError> {
         let constants =
             m0_constants().map_err(|error| RewireError::Constants(error.to_string()))?;
         let p = constants.placeholders();
@@ -136,8 +139,8 @@ impl Config {
                 .diagnostic()
                 .enabled_value()
                 .map(|value| value.get()),
-            contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
             standoff_mm: p.standoff_mm().diagnostic().get(),
+            process_resolution_mm,
         };
         for (actual, expected, name) in [
             (config.twig_mm, 0.5_f64, "REWIRE_TWIG_MERGE_LEN_MM"),
@@ -177,7 +180,7 @@ pub(crate) fn optimize(
     forest: &mut Forest,
     request: RewireRequest<'_>,
 ) -> Result<RewireReport, RewireError> {
-    let config = Config::current()?;
+    let config = Config::current(request.process_resolution_mm)?;
     forest.validate()?;
     let initial_volume_ml = total_volume_ml(forest)?;
     let mut current_volume_ml = initial_volume_ml;
@@ -864,8 +867,15 @@ fn validate_changed_geometry(
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
     let mut r1 = Vec::new();
-    let mut i0 = Vec::new();
-    let mut i1 = Vec::new();
+    // #36/#51 — the contact-declaring rows, resolved into PR-2 masks below in
+    // ONE batched projection rather than each taking the flat inset pair this
+    // site used to build. See `contact::placed_mask_inset_mm`.
+    let mut contacts: Vec<(
+        usize,
+        crate::forest::ContactEnd,
+        crate::contact::ContactSeating,
+        f64,
+    )> = Vec::new();
     for key in after.live_tree_members() {
         let member = after.member(key).ok_or(ForestError::InactiveKey(key))?;
         if before.member(key) == Some(member) {
@@ -882,27 +892,75 @@ fn validate_changed_geometry(
         )? {
             return Ok(false);
         }
+        if let Some(end) = member.model_contact_end() {
+            contacts.push((
+                p0.len(),
+                end,
+                crate::contact::seating_of(member.kind(), end),
+                match end {
+                    crate::forest::ContactEnd::Terminalward => {
+                        member.terminal_radius_mm().get().get()
+                    }
+                    crate::forest::ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
+                },
+            ));
+        }
         p0.push(member.p0_mm().map(Finite::get));
         p1.push(member.p1_mm().map(Finite::get));
         r0.push(member.terminal_radius_mm().get().get());
         r1.push(member.rootward_radius_mm().get().get());
-        i0.push(
-            if member.model_contact_end() == Some(crate::forest::ContactEnd::Terminalward) {
-                config.contact_depth_mm
-            } else {
-                0.0
-            },
-        );
-        i1.push(
-            if member.model_contact_end() == Some(crate::forest::ContactEnd::Rootward) {
-                config.standoff_mm
-            } else {
-                0.0
-            },
-        );
     }
     if p0.is_empty() {
         return Ok(true);
+    }
+    let mut i0 = vec![0.0; p0.len()];
+    let mut i1 = vec![0.0; p0.len()];
+    if !contacts.is_empty() {
+        let policy = contact_policy(config)?;
+        let points = contacts
+            .iter()
+            .map(|(row, end, _, _)| match end {
+                crate::forest::ContactEnd::Terminalward => p0[*row],
+                crate::forest::ContactEnd::Rootward => p1[*row],
+            })
+            .collect::<Vec<_>>();
+        // ONE projection for the whole changed set, alongside the one
+        // `segment_clearance` that was already here.
+        let (_, _, _, normals) = geometry.surface().project(&points);
+        let mut claimed = vec![0.0_f64; p0.len()];
+        for ((row, end, seating, end_radius_mm), normal) in contacts.iter().zip(normals) {
+            let axis = sub(p1[*row], p0[*row]);
+            let length = norm(axis);
+            if length <= 0.0 {
+                return Ok(false);
+            }
+            let abs_cos = dot(scale(axis, 1.0 / length), normal).abs();
+            let r_max = r0[*row].max(r1[*row]);
+            // PR-2. A degenerate incidence has no finite mask; this pass
+            // VALIDATES an already-accepted move rather than screening a
+            // tournament, so it refuses the move rather than exempting the row.
+            let Some(mask) = crate::contact::placed_mask_inset_mm(
+                *seating,
+                abs_cos,
+                *end_radius_mm,
+                r_max,
+                &policy,
+            ) else {
+                return Ok(false);
+            };
+            claimed[*row] += mask;
+            match end {
+                crate::forest::ContactEnd::Terminalward => i0[*row] = mask,
+                crate::forest::ContactEnd::Rootward => i1[*row] = mask,
+            }
+            // PR-3, at the same site as the mask that makes it necessary. A
+            // mask that consumes the segment makes `seg_clear_one` return
+            // `INFINITY`; validating a move on that number would be validating
+            // nothing.
+            if !crate::contact::emerges(claimed[*row], length, &policy) {
+                return Ok(false);
+            }
+        }
     }
     crate::census_record!(crate::census::record_segment_batch(
         "rewire_clearance",
@@ -917,6 +975,21 @@ fn validate_changed_geometry(
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &i0, &i1)
         .map_err(|e| RewireError::Native(e.to_string()))?;
     Ok(clearances.into_iter().all(|value| value >= 0.0))
+}
+
+/// The PR-1..PR-4 policy this stage validates under — every number the
+/// registered one, plus THIS RUN's process resolution.
+fn contact_policy(config: &Config) -> Result<crate::contact::ContactPolicy, RewireError> {
+    let constants = m0_constants().map_err(|e| RewireError::Constants(e.to_string()))?;
+    let p = constants.placeholders();
+    Ok(crate::contact::ContactPolicy {
+        floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
+        process_resolution_mm: config.process_resolution_mm,
+        standoff_mm: p.standoff_mm().diagnostic().get(),
+        min_free_span_mm: p.min_illegal_len_mm().diagnostic().get(),
+        ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
+        tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(p),
+    })
 }
 
 fn within_cone(p0: [f64; 3], p1: [f64; 3], radius: f64) -> Result<bool, RewireError> {
@@ -1146,7 +1219,7 @@ mod tests {
 
     #[test]
     fn frozen_order_prioritizes_single_stub_degenerate_and_uses_python_ties() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         let root = forest.add_member(member(
             [0.0, 0.0, 1.0],
@@ -1179,7 +1252,7 @@ mod tests {
 
     #[test]
     fn degenerate_retire_splices_children_and_dead_member_never_contributes() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         let parent = forest.add_member(member(
             [0.0, 0.0, 1.0],
@@ -1240,7 +1313,7 @@ mod tests {
 
     #[test]
     fn degenerate_root_retire_grounds_its_children_and_the_forest_still_lowers() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         // The spliced case above with `deg` on the plate and no parent: its
         // rootward end is the grounded one and its children hang off the
@@ -1312,7 +1385,7 @@ mod tests {
 
     #[test]
     fn constants_and_disabled_budget_pin_exact_search_contract() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         assert_eq!(cfg.twig_mm.to_bits(), 0.5f64.to_bits());
         assert_eq!(cfg.degenerate_mm.to_bits(), 1e-4f64.to_bits());
         assert_eq!(cfg.max_slide_evals, 50);
@@ -1365,7 +1438,7 @@ mod tests {
             &before,
             &grown,
             &authority,
-            &Config::current().unwrap(),
+            &Config::current(0.05).unwrap(),
         )
         .unwrap());
         assert_eq!(
@@ -1377,7 +1450,7 @@ mod tests {
     #[test]
     fn live_prune_root_reanchor_and_optimizer_paths_are_transactional() {
         with_far_authority(|authority| {
-            let cfg = Config::current().unwrap();
+            let cfg = Config::current(0.05).unwrap();
 
             let mut prune = Forest::new();
             let short = prune.add_member(member(
@@ -1571,7 +1644,7 @@ mod tests {
             let walk = ordered_slide_search(
                 &junction_member,
                 &child_members,
-                &Config::current().unwrap(),
+                &Config::current(0.05).unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -1581,7 +1654,7 @@ mod tests {
                 junction,
                 &authority,
                 &BTreeSet::new(),
-                &Config::current().unwrap(),
+                &Config::current(0.05).unwrap(),
             )
             .unwrap();
             println!(

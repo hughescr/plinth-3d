@@ -7536,10 +7536,23 @@ mod tests {
             );
             assert_eq!(
                 braced.brace_plan().termination,
-                // The required runner corpus currently exercises the
-                // production Unplaceable path; it does not reach the frozen
-                // third-pass IterationLimit branch.
-                crate::brace::BraceFixedPointTermination::Unplaceable
+                // **MOVED BY #51: `Unplaceable` -> `Converged`, 2026-08-21.**
+                //
+                // ATTRIBUTED, not assumed. Re-running this fixture with the
+                // mask convergence in place but PR-7's seat suppressed still
+                // reads `Converged`, and re-running it with the retired flat
+                // inset pair reads `Unplaceable`, so the cause is the mask
+                // (#51 Piece B) and not the seating (Piece A).
+                //
+                // The mechanism: with the flat rootward inset the model-anchor
+                // family could not clear on any geometry, so this corpus routed
+                // more of its load down plate descents, and the brace fixed
+                // point ran out of placeable rungs. With the family admitted
+                // the routed forest is different and the fixed point converges.
+                // `Converged` is the better of the two named outcomes; the
+                // corpus still does not reach the frozen third-pass
+                // IterationLimit branch.
+                crate::brace::BraceFixedPointTermination::Converged
             );
         });
     }

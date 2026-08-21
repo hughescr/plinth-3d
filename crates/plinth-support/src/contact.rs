@@ -64,27 +64,110 @@ impl ContactSeating {
     }
 }
 
-/// Recompute a member's seating state from its DESIGN FAMILY.
+/// Recompute a member's seating state from its DESIGN FAMILY plus the END that
+/// declares the contact.
 ///
 /// Per OD-3 this is recomputed per stage from kind plus policy and is NEVER
-/// stored on `Member`, so no digest and no golden moves.
+/// stored on `Member`, so no digest and no golden moves for THIS reason.
 ///
-/// PR-1 seats exactly one family today: the brace model rung
-/// (`brace.rs` `gather_candidates`, which builds its `p1` with
-/// [`seat_endpoint`]).  Every other family that declares a model contact —
-/// notably the CCO model-anchor strut (`cco::apply_model_anchor`, whose `p1` IS
-/// the raw seat point) and any bifurcation half that inherits from one — sits ON
-/// the surface.  A bifurcation upper half keeps its host's `p1` AND its host's
-/// kind, so the classification follows the geometry automatically.
+/// Two families are seated:
 ///
-/// PR-7 will seat the CCO family; when it lands, that family moves to `Seated`
-/// here and the `h` term becomes correct for it by the same rule rather than by
-/// a second, divergent decision.
-pub(crate) fn seating_of(kind: &MemberKind) -> ContactSeating {
-    match kind {
-        MemberKind::Other(family) if family == MODEL_RUNG_FAMILY => ContactSeating::Seated,
+/// * the brace model rung (`brace.rs` `gather_candidates`, which builds its
+///   `p1` with [`seat_endpoint`]), at either end; and
+/// * **PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT`** — the CCO model-anchor strut, at
+///   its `Rootward` end.  `cco::apply_model_anchor` now builds that `p1` with
+///   [`seat_endpoint`] too, so the family's geometry and this classifier move
+///   together.
+///
+/// **Why the CCO anchor is keyed on `MemberKind::Strut` + `ContactEnd::Rootward`
+/// rather than on a new family name (design §3.1, option A1).**  `kind` is
+/// stored on `Member` and digested; minting the anchor as
+/// `MemberKind::Other("model_anchor")` would move the forest digest of every
+/// committed model anchor for a reason that is not geometry.  A1 moves no
+/// stored field, so the digest movement this change produces is attributable to
+/// the seated endpoint alone.  `cco::apply_model_anchor` is the only production
+/// mint of a `Rootward` model contact on a `Strut`, and a `debug_assert` there
+/// plus the source-text guard in `tests/retired_formula_guard.rs` keep that key
+/// unambiguous.  A2 (the self-documenting family name) is recorded as a
+/// follow-up, not smuggled in here.
+///
+/// A bifurcation upper half keeps its host's `p1` AND its host's kind, and
+/// `inherited_upper_contact_end` keeps a `Rootward` declaration on the upper
+/// half only, so a bifurcated model anchor stays classified `Seated` by the
+/// same rule with no second decision (`cco.rs` `apply_bifurcation`).
+///
+/// A `Terminalward` contact — the initial contact stub — is NOT seated by this
+/// rule: `initial.rs` mints `p0 = position - unit * contact_depth_mm`, a
+/// designed embed along the contact normal, not a [`seat_endpoint`] call.  It
+/// therefore keeps `OnSurface`, and the mask carries no `h` term for it.  #52
+/// (Piece D) owns that end; it is deliberately out of this commit.
+pub(crate) fn seating_of(kind: &MemberKind, end: ContactEnd) -> ContactSeating {
+    match (kind, end) {
+        (MemberKind::Other(family), _) if family == MODEL_RUNG_FAMILY => ContactSeating::Seated,
+        (MemberKind::Strut, ContactEnd::Rootward) => ContactSeating::Seated,
         _ => ContactSeating::OnSurface,
     }
+}
+
+/// PR-2 for one ALREADY-PLACED member end — the single statement of the
+/// clearance-mask inset, shared by every site that builds a
+/// `segment_clearance` inset pair.
+///
+/// This is #36's convergence and #51's fix.  Before it, three call sites
+/// (`cco::clearance_rows`, `rewire::validate_changed_geometry`, and the
+/// terminalward half of both) used a FLAT inset pair — `contact_depth_mm`
+/// terminalward, `standoff_mm` rootward — while `brace.rs` used the PR-2 mask.
+/// The flat rootward inset is what made the model-anchor clearance test
+/// unsatisfiable: with the seat ON the surface and the last tested station
+/// exactly `standoff` from it, `clr = d_min - (r_max + standoff) <= -r_max`,
+/// unconditionally, on any geometry.
+///
+/// `abs_cos` is the incidence of the PLACED axis against the surface normal at
+/// the contact point; these members are already placed, so the observed
+/// incidence IS the one the mask must use (the same rule `brace.rs`'s exact
+/// pass follows).  The seat depth is RECOMPUTED here from the design family
+/// plus policy rather than stored on `Member` (OD-3), which is why no digest
+/// moves for the mask's sake.
+///
+/// Returns `None` at a degenerate incidence, where the mask genuinely diverges.
+/// The two dispositions of `None` are deliberately different and both are
+/// correct for their site: `brace.rs`'s exact pass masks NOTHING (the row is
+/// then fully distance-checked, and PR-3 refused it at candidacy), while the
+/// CCO/rewire candidacy screen REFUSES, because that screen IS this family's
+/// PR-3 and there is no earlier gate behind it.
+/// `seating` comes from [`seating_of`]; it is taken as a value rather than
+/// re-derived from `&MemberKind` so a caller that must precompute it (the CCO
+/// candidacy path builds its rows inside a `rayon` map, away from the surface)
+/// records the SAME classification the exact pass will use.
+pub(crate) fn placed_mask_inset_mm(
+    seating: ContactSeating,
+    abs_cos: f64,
+    end_radius_mm: f64,
+    member_r_max_mm: f64,
+    policy: &ContactPolicy,
+) -> Option<f64> {
+    let seat = seat_depth_mm(abs_cos, end_radius_mm, policy, false);
+    let mask_seat = seating.mask_seat_depth_mm(seat);
+    mask_extent_mm(mask_seat, member_r_max_mm, abs_cos, policy)
+}
+
+/// PR-3, as one predicate — "the member must EMERGE from its own contact
+/// mask(s), with enough free span left for the distance check to return a
+/// verdict at all".
+///
+/// `min_free_span_mm` is the engine's own registered resolution for the latter
+/// (`axis_illegal_rows` cannot flag a free span shorter than it), so no new
+/// constant is invented.
+///
+/// This exists as a named predicate because PR-2 without PR-3 is not a
+/// tightening OR a loosening — it is an ERASURE.  A mask that grows past the
+/// member's own length hands `seg_clear_one` a degenerate segment, and the
+/// kernel returns `INFINITY` (`queries.rs:1786-1788`): the member is then
+/// admitted having never been distance-tested at all.  Any site that adopts
+/// [`placed_mask_inset_mm`] must therefore also apply this, and
+/// [`admit`] calls it rather than restating the inequality.
+pub(crate) fn emerges(total_mask_mm: f64, seated_length_mm: f64, policy: &ContactPolicy) -> bool {
+    total_mask_mm <= seated_length_mm - policy.min_free_span_mm
 }
 
 /// `sqrt(1 - c^2)`, clamped so float noise at `|c| = 1` cannot produce a NaN.
@@ -407,7 +490,7 @@ pub(crate) fn admit(
     // return a verdict at all.  `min_free_span_mm` is the engine's own
     // registered resolution for the latter (`axis_illegal_rows` cannot flag a
     // free span shorter than it), so no new constant is invented.
-    if mask + other_end_mask_mm > seated_length_mm - policy.min_free_span_mm {
+    if !emerges(mask + other_end_mask_mm, seated_length_mm, policy) {
         return Err(ContactRefusal::GrazingIncidence {
             mask_mm: mask,
             length_mm: seated_length_mm,
@@ -705,6 +788,99 @@ mod tests {
         // why the defect was invisible to every flat fixture.
         assert!((legacy_clearances[0] - p.process_resolution_mm).abs() < 1.0e-12);
         assert!(legacy_clearances[3] < p.process_resolution_mm - 0.1);
+    }
+
+    /// **#51 / #36 — Piece B is an ADMISSION at both ends, at every incidence.**
+    ///
+    /// The retired flat pair was `contact_depth_mm = 0.300 mm` terminalward and
+    /// `standoff_mm = 0.600 mm` rootward. `placed_mask_inset_mm` must exceed
+    /// both, unconditionally, or Piece B is a tightening in disguise and
+    /// inherits the FU-87 zero-candidate hazard.
+    ///
+    /// DERIVED, and re-derived here rather than taken: `|cos| <= 1`, so
+    /// `u* = (h + r_max + standoff + MARGIN)/|cos| >= h + r_max + standoff +
+    /// MARGIN`. Rootward (seated, `h = 0.3`) that is `>= 1.35 > 0.6`.
+    /// Terminalward (`h = 0`, see the next test) it is `>= 1.00 > 0.3`. A
+    /// LARGER inset tests LESS of the member, so a candidate can only move from
+    /// refused to admitted — which is why PR-3 has to land with it.
+    #[test]
+    fn the_converged_mask_exceeds_the_retired_flat_pair_at_every_incidence() {
+        const RETIRED_TERMINALWARD_FLAT_MM: f64 = 0.3;
+        const RETIRED_ROOTWARD_FLAT_MM: f64 = 0.6;
+        let p = policy();
+        for &abs_cos in &[1.0_f64, 0.9, 0.5, 0.2, 0.05, 0.001] {
+            for &r_end in &[0.05_f64, 0.35, 0.8] {
+                for &r_max in &[0.35_f64, 0.45, 0.8] {
+                    let rootward =
+                        placed_mask_inset_mm(ContactSeating::Seated, abs_cos, r_end, r_max, &p)
+                            .expect("finite mask");
+                    let terminalward =
+                        placed_mask_inset_mm(ContactSeating::OnSurface, abs_cos, r_end, r_max, &p)
+                            .expect("finite mask");
+                    assert!(
+                        rootward > RETIRED_ROOTWARD_FLAT_MM,
+                        "rootward mask {rootward} must exceed the retired flat \
+                         {RETIRED_ROOTWARD_FLAT_MM} (|cos| = {abs_cos})"
+                    );
+                    assert!(
+                        terminalward > RETIRED_TERMINALWARD_FLAT_MM,
+                        "terminalward mask {terminalward} must exceed the retired flat \
+                         {RETIRED_TERMINALWARD_FLAT_MM} (|cos| = {abs_cos})"
+                    );
+                    // The seated end always claims MORE than the unseated one,
+                    // by exactly `h/|cos|` — the term whose absence was MAJOR-6.
+                    let h = seat_depth_mm(abs_cos, r_end, &p, false);
+                    assert!(
+                        (rootward - terminalward - h / abs_cos).abs() < 1e-9,
+                        "the seated/unseated difference must be exactly h/|cos|"
+                    );
+                }
+            }
+        }
+        // At normal incidence with the CCO anchor's own radii: 1.40 mm
+        // rootward against the retired 0.60 mm, and 1.10 mm terminalward
+        // against the retired 0.30 mm.
+        assert!(
+            (placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap() - 1.40)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (placed_mask_inset_mm(ContactSeating::OnSurface, 1.0, 0.35, 0.45, &p).unwrap() - 1.10)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    /// PR-3 stated once, and `admit` delegating to it rather than restating the
+    /// inequality.
+    #[test]
+    fn emergence_is_one_predicate_and_admit_delegates_to_it() {
+        let p = policy();
+        assert!(emerges(1.40, 1.45, &p));
+        assert!(!emerges(1.40, 1.4499, &p));
+        // The boundary is exactly `mask + min_free_span`.
+        assert!(emerges(1.40, 1.40 + p.min_free_span_mm, &p));
+        assert!(!emerges(1.40, 1.40 + p.min_free_span_mm - 1e-12, &p));
+
+        // `admit` must refuse exactly where `emerges` says no, with the mask it
+        // actually computed.
+        let site = ContactSite {
+            end: ContactEnd::Rootward,
+            end_radius_mm: 0.35,
+            member_r_max_mm: 0.45,
+            abs_cos_incidence: 1.0,
+            carried_mm2: 0.0,
+            member_length_mm: 1.44,
+        };
+        let mask = placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap();
+        assert!(!emerges(mask, 1.44, &p));
+        assert!(matches!(
+            admit(&site, &p, 1.0, 1.44, 0.0, false, false),
+            Err(ContactRefusal::GrazingIncidence { .. })
+        ));
+        assert!(emerges(mask, 1.46, &p));
+        assert!(admit(&site, &p, 1.0, 1.46, 0.0, false, false).is_ok());
     }
 
     #[test]

@@ -1277,6 +1277,31 @@ pub enum AnchorFootRefusalReason {
     /// When PR-7 seats this family, the witness refuses at candidacy like the
     /// other two contact families and this reason becomes unreachable.
     SeatNotAttached,
+    /// **PR-3 `CONTACT_EMERGENCE_ADMISSIBILITY` at CCO/rewire candidacy.**
+    ///
+    /// The member cannot leave its own contact mask: the PR-2 mask the row
+    /// claims, plus whatever its other end claims, does not leave
+    /// `min_illegal_len_mm` of free span for the distance check to return a
+    /// verdict on. A member that cannot emerge is not a member.
+    ///
+    /// **This refusal is the price of the #51 mask fix and must never be
+    /// separated from it.** PR-2 without PR-3 is not a loosening — it is an
+    /// ERASURE. `NativeSurface::seg_clear_one` returns `INFINITY` when the
+    /// insets consume the segment (`queries.rs:1786-1788`), so a mask that
+    /// grows past the member's own length admits an arm that was never
+    /// distance-tested at all. At 80 degrees of incidence the rootward mask is
+    /// 7.47 mm against a 2.5 mm stub; the untested band is not marginal.
+    /// Before the mask converged, `brace.rs` was the only family with a PR-3
+    /// screen (`contact::admit`, its single production caller); the CCO and
+    /// rewire families had none, and `within_cone` does not substitute for one
+    /// because it measures the PARENT axis, not the surface normal.
+    SeatGrazingIncidence,
+    /// **PR-2** — the incidence at this contact is numerically zero, so the
+    /// mask diverges and no finite exemption solves the kernel's criterion.
+    /// The correct disposition is refusal, not a cosine floor (which is what
+    /// OD-8 retired: a floor makes the mask SMALLER and the check STRICTER,
+    /// and hides the divergence behind a constant inset).
+    SeatDegenerateIncidence,
     /// FU-88 — this candidate's own proposed geometry could not carry the seat
     /// attestation, so there was nothing to measure. On the corpus it is an
     /// anchor arm shorter than the one process resolution (0.050 mm) the
@@ -1345,6 +1370,26 @@ impl AnchorFootRefusal {
         Self {
             provenance,
             reason: AnchorFootRefusalReason::SeatGeometryUnusable,
+        }
+    }
+
+    /// PR-3 — the candidacy refusal channel for a model anchor that cannot
+    /// emerge from its own contact mask, and for the degenerate-incidence case
+    /// where the mask has no finite value.
+    ///
+    /// Same narrowness as the channels above: crate-private, mintable only by
+    /// the CCO stage, and able to carry only the two contact-physics reasons.
+    pub(crate) const fn seat_emergence(
+        provenance: AnchorCandidateProvenance,
+        degenerate: bool,
+    ) -> Self {
+        Self {
+            provenance,
+            reason: if degenerate {
+                AnchorFootRefusalReason::SeatDegenerateIncidence
+            } else {
+                AnchorFootRefusalReason::SeatGrazingIncidence
+            },
         }
     }
 }
