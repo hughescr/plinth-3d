@@ -1498,13 +1498,38 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             });
             next_contact_id = contact_id.checked_add(1);
         }
-        self.derive_child(contacts, next_contact_id)
+        let appended = contacts.len() - self.plan.contacts.len();
+        self.derive_child_from(contacts, next_contact_id, Some(appended))
     }
 
     fn derive_child(
         &self,
+        contacts: Vec<SpecializedPhysicalContact>,
+        next_contact_id: Option<u64>,
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        self.derive_child_from(contacts, next_contact_id, None)
+    }
+
+    /// Derive a child plan.
+    ///
+    /// `appended` is `Some(n)` exactly when the child's contact vector is this
+    /// plan's own contact vector with `n` contacts pushed onto the end and
+    /// nothing else changed — the repair-append seam, and the only shape task
+    /// #68 contract (1) covers. Then the child's load partition is EXTENDED
+    /// from this plan's (`perception::append_to_specialized_load_partition`):
+    /// every surviving contact keeps its charge bit for bit and only the
+    /// appended contacts are charged, so a trial append cannot move a load
+    /// block onto a contact that was routing.
+    ///
+    /// `None` is the general edit — removal, or any derivation that is not a
+    /// pure append — where the finalizer is replayed over the whole set,
+    /// because a removal really does free the load its contacts were carrying
+    /// and somebody has to take it or the disclosure has to say nobody did.
+    fn derive_child_from(
+        &self,
         mut contacts: Vec<SpecializedPhysicalContact>,
         next_contact_id: Option<u64>,
+        appended: Option<usize>,
     ) -> Result<SpecializedContactPlan, SpecializedError> {
         // An edit never runs selected-to-specialized consolidation.  It only
         // proves the retained records and replays the one authoritative load
@@ -1523,21 +1548,35 @@ impl<'a> SpecializedContactPlanEdit<'a> {
         // FU-8f phase G2: an edit replay is a one-shot path, not the gate's
         // per-round loop, so it hashes its own mesh here.  Threading a proof
         // in would change this public edit boundary for no saving.
-        let load_partition = finalize_specialized_load_partition(
-            &self.plan.generic_authority,
-            &VerifiedMeshFingerprint::compute(&self.plan.mesh_authority)?,
-            &self.surface,
-            &load_inputs.contacts,
-            &load_inputs.specialized_owner_faces,
-            LoadFinalizeLimits {
-                max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
-                // Already a remaining budget carved out of the batch-materialized
-                // cap upstream, so it is the whole bound here: coefficient 0.
-                max_operations_floor: load_inputs.remaining_load_operations,
-                operations_per_batch_unit: 0,
-            },
-            None,
-        )?;
+        let verified_mesh = VerifiedMeshFingerprint::compute(&self.plan.mesh_authority)?;
+        let limits = LoadFinalizeLimits {
+            max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
+            // Already a remaining budget carved out of the batch-materialized
+            // cap upstream, so it is the whole bound here: coefficient 0.
+            max_operations_floor: load_inputs.remaining_load_operations,
+            operations_per_batch_unit: 0,
+        };
+        let load_partition = match appended {
+            Some(appended) => crate::perception::append_to_specialized_load_partition(
+                &self.plan.generic_authority,
+                &verified_mesh,
+                &self.surface,
+                &self.plan.load_partition,
+                &load_inputs.contacts,
+                contacts.len() - appended,
+                &load_inputs.specialized_owner_faces,
+                limits,
+            )?,
+            None => finalize_specialized_load_partition(
+                &self.plan.generic_authority,
+                &verified_mesh,
+                &self.surface,
+                &load_inputs.contacts,
+                &load_inputs.specialized_owner_faces,
+                limits,
+                None,
+            )?,
+        };
         for row in load_partition.rows() {
             let contact = contacts
                 .iter_mut()
@@ -13086,6 +13125,232 @@ mod tests {
             stale.begin_regular_edit(),
             Err(SpecializedError::StaleRepairPool)
         ));
+    }
+
+    /// **Task #68 contract (1) — A TRIAL APPEND CHARGES ONLY WHAT IT NEWLY
+    /// TAKES, and moves nothing else by a single bit.**
+    ///
+    /// The predecessor derived every trial child by replaying
+    /// `finalize_specialized_load_partition` over the whole contact set
+    /// (`runner.rs:1754` -> `specialized.rs` `derive_child` -> the recompute at
+    /// the fold). The membership probe of 2026-08-21 measured what that costs
+    /// on the dust fixture: appending ANY repair row, anywhere — including a
+    /// seat 30 mm away — moved a 546.0 mm² face onto contact 52, the very
+    /// contact providing island 4's coverage; contact 52 then failed routing on
+    /// clearance and the 0.6998291015625 mm² the previous commit had bought
+    /// evaporated. 182 trials out of 182, bit-exact, three probe runs
+    /// identical.
+    ///
+    /// So this asserts the whole invariant, not a symptom of it: after an
+    /// append, every pre-existing contact is the SAME RECORD — same carried
+    /// area to the bit, same seat, same normal, same primary identity, same
+    /// route list, same demands — and every prior load row survives verbatim
+    /// with only the appended contact naming any new one.
+    ///
+    /// **Why that settles the routing cadence too, without re-sorting
+    /// anything here.** `initial::routing_order` sorts stub seeds by
+    /// `(p1[2], carried_mm2 descending, terminal)`. Every one of those three
+    /// keys is a function of the fields asserted below — the seat, the carried
+    /// area, and the contact's own identity — so a cadence built from
+    /// survivors that are bit-identical is bit-identical. Re-implementing that
+    /// comparator here would test a copy of the rule instead of the rule.
+    ///
+    /// **The fixture, and why it is the THIN FIN.** A fixture only proves this
+    /// if its replay would really have moved something, so the four procedural
+    /// specialized fixtures were measured on the pre-change tree, 2026-08-21,
+    /// over their first 60 unoccupied pool rows each:
+    ///
+    /// | fixture | contacts | load rows | appends that moved a survivor's load |
+    /// | --- | --- | --- | --- |
+    /// | overhang table | 95 | 14 | 0 / 60 |
+    /// | toed slab | 73 | 7 | 0 / 60 |
+    /// | raking blade | 40 | 13 | 0 / 60 |
+    /// | **thin fin** | **19** | **2** | **21 / 60** |
+    ///
+    /// The first three are silent because their eligibility is coarse — 7 to 14
+    /// faces against 40 to 95 contacts, so a new seat almost never becomes the
+    /// nearest for any of them. The thin fin has TWO load faces and 19
+    /// contacts, and an appended seat wins one of them better than a third of
+    /// the time. Sweeping rows one at a time across both a silent fixture and
+    /// the loud one is deliberate: the table shows the common case is
+    /// untouched, and the fin is the revert-proof half.
+    ///
+    /// **Revert-proof, MEASURED 2026-08-21:** with `append_regular_repair_rows`
+    /// routed back through the unconditional replay
+    /// (`derive_child_from(.., None)`) this test fails on the very first thin-fin
+    /// row, and it fails LOUDLY rather than by an ulp: `thin fin: contact 2
+    /// carried 40 mm² and now carries 0 mm²`. The appended seat takes the whole
+    /// face off its incumbent, which is exactly the hand-to-hand pass task #68
+    /// measured 182 times on the dust fixture.
+    #[test]
+    fn an_append_moves_no_other_contacts_load_route_or_cadence_key() {
+        for (mesh, name) in [
+            (make_overhang_table().unwrap(), "overhang table"),
+            (make_thin_fin().unwrap(), "thin fin"),
+        ] {
+            let (_mesh, _generic, plan) =
+                edit_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
+            let routes = plan
+                .contacts()
+                .iter()
+                .filter_map(|contact| contact.regular_routes().first().copied())
+                .map(|route| (route.owner_island_id(), route.component_id()))
+                .collect::<BTreeSet<_>>();
+            let mut rows = Vec::new();
+            for (owner_island_id, component_id) in routes {
+                rows.extend(
+                    plan.eligible_repair_rows(owner_island_id, component_id, &BTreeSet::new())
+                        .unwrap()
+                        .into_iter()
+                        .filter(|row| {
+                            plan.contacts()
+                                .iter()
+                                .all(|contact| contact.position_mm() != row.candidate().point_mm)
+                        })
+                        .map(|row| row.id()),
+                );
+            }
+            assert!(
+                rows.len() >= 60,
+                "{name}: the sweep needs unoccupied pool rows to append"
+            );
+            let mut appended_rows = 0usize;
+            for &row in rows.iter().take(60) {
+                let child = plan
+                    .begin_regular_edit()
+                    .unwrap()
+                    .append_regular_repair_row(row)
+                    .unwrap_or_else(|error| panic!("{name}: append {row:?} refused: {error:?}"));
+                appended_rows += 1;
+                assert_append_charged_only_what_it_newly_took(&plan, &child, name);
+            }
+            assert_eq!(appended_rows, 60, "{name}: every swept row must append");
+        }
+    }
+
+    /// The whole of task #68 contract (1), asserted on one parent/child pair.
+    fn assert_append_charged_only_what_it_newly_took(
+        plan: &SpecializedContactPlan,
+        child: &SpecializedContactPlan,
+        name: &str,
+    ) {
+        assert_eq!(child.contacts().len(), plan.contacts().len() + 1);
+        let appended_id = child
+            .contacts()
+            .last()
+            .expect("the child has the appended contact")
+            .contact_id();
+
+        // 1. Every other contact is the same record, to the bit.
+        for (before, after) in plan.contacts().iter().zip(child.contacts()) {
+            assert_eq!(before.contact_id(), after.contact_id());
+            assert_eq!(
+                before.carried_area_mm2().to_bits(),
+                after.carried_area_mm2().to_bits(),
+                "{name}: contact {} carried {} mm² and now carries {} mm²; an append must charge \
+                 the new row only what it NEWLY takes",
+                before.contact_id(),
+                before.carried_area_mm2(),
+                after.carried_area_mm2()
+            );
+            assert_eq!(before.contact_id(), after.contact_id());
+            assert_eq!(
+                before.carried_area_mm2().to_bits(),
+                after.carried_area_mm2().to_bits(),
+                "contact {} carried {} mm² and now carries {} mm²; an append must charge the new \
+                 row only what it NEWLY takes",
+                before.contact_id(),
+                before.carried_area_mm2(),
+                after.carried_area_mm2()
+            );
+            assert_eq!(before.position_mm(), after.position_mm());
+            assert_eq!(before.normal(), after.normal());
+            assert_eq!(before.seat_provenance(), after.seat_provenance());
+            assert_eq!(before.primary_regular(), after.primary_regular());
+            assert_eq!(
+                before.regular_routes(),
+                after.regular_routes(),
+                "{name}: contact {}'s route list moved",
+                before.contact_id()
+            );
+            assert_eq!(before.demands(), after.demands());
+        }
+
+        // 2. Every prior load row survives verbatim, and nothing but the
+        //    appended contact appears in a new one.
+        let kept = child
+            .load_partition()
+            .rows()
+            .iter()
+            .filter(|row| row.contact_id != appended_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            plan.load_partition().rows().to_vec(),
+            "{name}: an append must copy the prior partition's rows, not re-derive them"
+        );
+
+        // 3. The appended contact takes only load nothing carried before, and
+        //    the ledger conserves: charged + disclosed is unchanged except for
+        //    what the appended contact newly picked up.
+        let before_charged = plan
+            .load_partition()
+            .rows()
+            .iter()
+            .map(|row| row.carried_area_mm2)
+            .sum::<f64>();
+        let after_charged = child
+            .load_partition()
+            .rows()
+            .iter()
+            .map(|row| row.carried_area_mm2)
+            .sum::<f64>();
+        assert!(
+            after_charged >= before_charged,
+            "{name}: an append can only ever ADD charge: {before_charged} -> {after_charged}"
+        );
+        let before_disclosed = plan
+            .load_partition()
+            .ownerless_faces()
+            .iter()
+            .map(|face| face.area_mm2)
+            .sum::<f64>();
+        let after_disclosed = child
+            .load_partition()
+            .ownerless_faces()
+            .iter()
+            .map(|face| face.area_mm2)
+            .sum::<f64>();
+        assert!(
+            after_disclosed <= before_disclosed,
+            "{name}: an append can only ever REDUCE what nothing carries: {before_disclosed} -> \
+             {after_disclosed}"
+        );
+        assert!(
+            ((after_charged - before_charged) - (before_disclosed - after_disclosed)).abs()
+                < 1.0e-12,
+            "{name}: what the appended contact gained must be exactly what the disclosure lost"
+        );
+
+        // 4. Contract (2) at this seam: the appended contact is never handed a
+        //    block above the area law's single-contact maximum.
+        let maximum = crate::perception::registered_max_carriable_area_mm2()
+            .expect("registered area law maximum");
+        for row in child
+            .load_partition()
+            .rows()
+            .iter()
+            .filter(|row| row.contact_id == appended_id)
+        {
+            assert!(
+                row.carried_area_mm2 <= maximum,
+                "{name}: face {} charged {} mm² to the appended contact; the law allows {maximum} \
+                 mm² on one contact",
+                row.face_id,
+                row.carried_area_mm2
+            );
+        }
     }
 
     /// FU-56 test #6: `append_regular_repair_rows(&[r])` is byte-identical to
