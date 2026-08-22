@@ -192,6 +192,7 @@ the mesh.
 | `3fe332b` | **§8 step 1.** `ForestState::seat_zones`, `set_seat_zone` / `seat_zone`, the resize-survival and digest-inertness tests. |
 | `005d56b` | **§8 step 2.** `ContactPolicy::demanded_gap_mm` and the named `ClearanceStage`; all four production `segment_clearance` sites read their stage's registered demand. §9.3. |
 | `8b6cb14` | **Challenge finding E**, note text only: the retired `seg_clear_one` name in the `STANDOFF_MM` provenance, its ledger twin, §3.5 and twelve live source comments. |
+| this pass | **Challenge findings B1–B4 and N1** — the Bat movement recorded and controlled, the parked state pinned by a test, the two unpinned tier reads pinned, and `retired_formula_guard` strengthened so a production fork cannot hide behind a test-module occurrence. §10. |
 
 ---
 
@@ -199,11 +200,12 @@ the mesh.
 
 Written out because the next pass should not have to re-derive it.
 
-**STATUS (2026-08-22, wiring pass).** Steps 1 and 2 have landed; steps 3–7 have
-not. Read §9 BEFORE step 3: it records what the pass measured, including two
-places where this list is incomplete as written (§9.4 names a fourth creation
-site and a bifurcation inheritance rule; §9.5 names a batch-limits question that
-needs an owner).
+**STATUS (2026-08-22, after the challenge).** Steps 1 and 2 have landed; steps
+3–7 have not, and **this tip is NOT mergeable on its own** — §10 records why, in
+what state it is parked, and what clears the park. Read §9 BEFORE step 3: it
+records what the wiring pass measured, including two places where this list is
+incomplete as written (§9.4 names a fourth creation site and a bifurcation
+inheritance rule; §9.5 names a batch-limits question that needs an owner).
 
 1. **`Forest`** — **DONE** (`3fe332b`). Add `seat_zones: BTreeMap<MemberKey, Arc<[u32]>>` to
    `ForestState`; `set_seat_zone` / `seat_zone`; leave `digest()` alone. Confirm
@@ -350,3 +352,179 @@ trivial bound — or (b) a real production authority beside
 `brace_penetration_limits` on `SupportPreparationLimits`, which is a caller
 authority rather than a registered constant but is still a NUMBER someone must
 own. RAISED, NOT DECIDED.
+
+---
+
+## 10. The parked state — what this tip IS, and what it is not
+
+The challenge of 2026-08-22 rejected the tip on four blocking findings. All four
+are answered here. Everything in this section is MEASURED at this branch tip
+unless it says INFERRED.
+
+**THE ORDER QUESTION, SETTLED.** Step 2 landed the FINAL demand of 0.300 mm
+ahead of steps 3–5, which are what make the predicate it feeds grade a TRUE gap.
+That order is not a merge-ready state and is not claimed to be one: **this tip
+must not merge until §8 steps 3–5 land.** It is parked rather than reverted
+because the pieces already in — the registry entries, the kernel's
+face-excluding clearance, the seat-zone module, the one-predicate-two-demands
+wiring — are the ones steps 3–5 build on, and unwinding them would cost the
+whole lane to buy back a state nobody is shipping from either. The judge holds
+the merge; this section is what the judge holds it against.
+
+### 10.1 Finding B1 — the Giant Bat moved, with its control
+
+MEASURED 2026-08-22 on `Giant Bat.stl`, `saturn4-ultra`, `--no-cache`, `gate`
+profile, one machine, back to back. The two binaries differ by exactly one line —
+`BraceConfig::contact_policy`'s `ClearanceStage::Final` arm reading
+`self.final_clearance_gap_mm` (tip) versus `self.standoff_mm` (control):
+
+| | control — FINAL = `STANDOFF_MM` 0.600 | tip — FINAL = `FINAL_CLEARANCE_GAP_MM` 0.300 |
+| --- | --- | --- |
+| outcome | REFUSED at `Structure` | passes `Structure`, `Lowering`, `CoverageMeasurement` |
+| detail | hollow shell `TerminalEvidenceMismatch { terminal: 298 }`; substituted solid `{ terminal: 187 }` | enters coverage repair at `remaining=6221` |
+| exit | 5 | did not terminate |
+| wall | 75.1 s | stopped by the operator at 915.4 s |
+
+At 915.4 s the tip run stood at `trials=42 commits=0 remaining=6179
+[no_improvement=42]`. The rate is exact and flat: **one ranking candidate
+consumed per trial, 21.79 s per trial, zero commits**. INFERRED from that rate,
+exhausting the 6,221-candidate ranking would take **≈ 37.4 hours**, and ruling
+R10 removed the failed-trial cap, so nothing shorter bounds it.
+
+**The cause is the demand and only the demand** — the control is the same tree
+with that one line reverted and it reproduces the refusal exactly. The direction
+is Craig-authorized ("corpus artifacts, pins and canaries may move BOTH
+directions; 0.3 final legalizes"), and the movement itself is the authorized
+kind: arms the old 0.600 refused are now legal, so the model gets past
+`Structure` instead of dying there. What is NOT acceptable is the landing place.
+A 75-second honest refusal became a 37-hour walk that commits nothing, inside the
+coverage-repair subsystem whose controller tests are 4-of-8 known red (`#39`).
+
+**This is a NEW value of record, not a fix.** `EMISSION-CANARY-LEDGER.md` carries
+it. Task `#47` already owns "Giant Bat: `Brace(ClearanceViolation(1))` on the
+coverage-REPAIR path"; the run above is the same model reaching the same
+subsystem from the other side, and the 0-commit walk belongs to `#39`'s
+transactional-repair lane, not to this one. Do not tune the demand to make the
+Bat refuse again — the design note's own instruction stands: **do not try to make
+the Bat emit, and do not try to make it refuse either.** Report what IS.
+
+The other three models of the run set are **byte-identical** to the lane base;
+see the ledger rows.
+
+### 10.2 Finding B2 — the honesty precondition is NOT met, and that is now pinned
+
+`FINAL_CLEARANCE_GAP_MM`'s provenance registers an HONESTY PRECONDITION: the
+number only means what it says because the test it feeds grades a TRUE gap. At
+this tip it does not. `brace.rs` `exact_clearance_rows` still computes the
+retired radius-proportional PR-2 mask and still hands it to the kernel as insets
+(that is §8 step 5, unlanded), so the tested STATION SET still moves with the
+radius.
+
+MEASURED through the production final pass, one axis at `|cos| = 0.2`, one
+foreign panel, both radii on the SAME axis against the SAME surface:
+
+| | thin `r = 0.20 mm` | fat `r = 0.90 mm` |
+| --- | --- | --- |
+| FINAL = 0.300 (this tip) | **−0.45 → REFUSED** | **+0.05 → LEGAL** |
+| FINAL = 0.600 (pre-ruling) | −0.75 → refused | −0.25 → refused |
+
+The thinner, cleaner arm is refused and the fatter, closer one is legal. And the
+loosening is not order-neutral: at the pre-ruling single demand both rows
+refused, so **step 2 landing alone converts a both-refused pair into an inverted
+accept of the fatter arm.**
+
+This is pinned in the tree, not argued in prose:
+`brace::tests::the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired`
+asserts the inversion and prints both readings. **It is expected to go RED when
+steps 3–5 land** — under the frozen-zone rule monotonicity is a THEOREM (§3), so
+the correct successor assertion is `thin >= fat` on the same fixture. The test's
+own message says so. That makes the parked state a trip-wire rather than a note
+somebody has to remember to re-read.
+
+The registry says the same thing where a reader of the constant will meet it:
+`FINAL_CLEARANCE_GAP_MM`'s provenance note and §3.5's row both now carry the
+precondition's STATUS and these numbers. No VALUE moved for it, and none should
+— the value is not the defect, the predicate is.
+
+### 10.3 Finding B3 — the two unpinned tier reads, pinned
+
+Ruling R-1495 and the two-tier split name four production reads. Two were
+already loud under sabotage; two were silent — the challenger switched them and
+the entire scoped estate stayed green. Both now have a test that goes red, and
+each red-run was performed rather than assumed:
+
+| site | tier | pinned by | sabotage that turns it RED |
+| --- | --- | --- | --- |
+| `brace::exact_clearance_rows` | FINAL | pre-existing (2 tests) | Final arm → `standoff_mm` |
+| `rewire::validate_changed_geometry` | PLACEMENT | pre-existing (1 test) | `demanded_gap_mm` → 0.300 |
+| `cco::clearance_survival` | PLACEMENT | **NEW** `cco::tests::clearance_survival_prunes_at_the_placement_demand_not_the_final_one` | `seat_contact_policy`'s `demanded_gap_mm` → `FINAL_CLEARANCE_GAP_MM`; verdict flips `Distance` → `Survives` |
+| `brace::evaluate_candidates` (R-1495) | PLACEMENT | **NEW** `brace::tests::evaluate_candidates_prunes_at_the_placement_demand_not_the_final_one` | `ClearanceStage::Placement` → `Final`; viability flips `false` → `true` |
+
+Both new tests use the two-tier fixture §8 step 6 names, built so the answer is
+strictly between the two demands and cannot be reached by either by accident: a
+0.45 mm TRUE gap read back FROM THE KERNEL at demand 0, asserted to satisfy
+`0.300 < 0.45 < 0.600` against the REGISTRY rather than against literals, plus a
+control row that survives at both tiers so a uniformly-refusing fixture cannot
+pass by accident. The `cco` fixture deliberately declares NO model contact, so
+its insets are zero and no mask can be blamed for the verdict — the demand is the
+only thing under test.
+
+### 10.4 Finding B4 — the convergence guard could be satisfied by a test
+
+`retired_formula_guard`'s positive half scanned the whole file. `cco.rs`'s own
+`#[cfg(test)] mod tests` calls `placed_mask_inset_mm` twice, so a production fork
+could pass the guard on the strength of a test occurrence. MEASURED both ways on
+the same sabotage — the production call at `cco.rs` replaced by a locally
+re-implemented mask built from `seat_depth_mm` + `mask_extent_mm`:
+
+* the OLD whole-file scan: **GREEN** (the guard saw the test module's calls);
+* the NEW `production_only` scan: **RED**, naming `cco.rs`.
+
+`production_only` cuts the source at the module-level `#[cfg(test)] mod …`. It
+is deliberately narrow — it matches only an UNINDENTED `#[cfg(test)]` whose next
+line is an unindented `mod `, because `cco.rs` carries two item-level
+`#[cfg(test)]` attributes at lines 41 and 50, in the middle of production text,
+and cutting at the first attribute of any kind would amputate the file. A file
+with no inline test module is scanned whole, which is the safe direction.
+
+Two tests keep the strengthening honest: a synthetic fixture that is the defect
+in miniature (production body forks the mask, `mod tests` still names the helper)
+and a check that every `CONVERGED` file really does have a test module for the
+cut to bite on — otherwise the fix would be inert.
+
+**This had to land BEFORE §8 step 5**, which deletes exactly those production
+calls. Step 5 must delete the `CONVERGED` rows deliberately and say why, not have
+the guard quietly keep passing.
+
+### 10.5 Finding N1 — the R-1495 site was absent from all three records
+
+`brace::evaluate_candidates` is a placement reader by ruling and named none of
+the three places the placement demand is recorded. All now name it, with the
+ruling and with the test that pins it: `STANDOFF_MM`'s provenance note
+(`placeholders.rs`), its ledger `normative` twin
+(`m0-constants-source-ledger.json`), §3.5's row, and the same omission in
+`FINAL_CLEARANCE_GAP_MM`'s note. The generated Markdown golden was re-emitted by
+its producer and the diff is exactly two rows, with both VALUES untouched at
+0.600 and 0.300.
+
+### 10.6 Inherited from the challenge, for step 4
+
+The challenger verified independently — record it here so step 4 does not have to
+re-derive it, because the flood fill rests on it entirely:
+`plinth_support::validate_perception_input` builds
+`build_face_topology(mesh, WeldPolicy::ExactBits)` and refuses any closed-solid
+cut flag, and `NativeSurface::from_indexed(mesh.verts(), mesh.tris())` indexes
+faces in the same triangle order. So `surface.project`'s face ID and
+`topology.neighbors` address the SAME faces, and adjacency is not fragmented.
+
+### 10.7 What clears the park
+
+§8 steps 3–5, in that order, with §9.4's full creation-site inventory and §9.5's
+batch-limits question answered by an owner. When they land:
+
+1. `brace::tests::the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired`
+   goes red — flip it to `thin >= fat` and say so in the commit message.
+2. `FINAL_CLEARANCE_GAP_MM`'s precondition STATUS paragraph and §3.5's row come
+   out, replaced by the commit that made the precondition true.
+3. The Giant Bat is re-run and re-recorded. It may still refuse, it may still
+   walk; either is an honest answer and neither is a target.
