@@ -32,6 +32,7 @@ pub struct M0EvidenceConstants {
     decimation_max_absolute_deviation_mm: Derived<f64>,
     decimation_max_p999_deviation_mm: Derived<f64>,
     decimation_max_p99_deviation_mm: Derived<f64>,
+    final_clearance_gap_mm: Measured<f64>,
     layer_height_default_mm: Measured<f64>,
     load_sharing: Measured<LoadSharing>,
     minima_drop_interior_faces: Measured<bool>,
@@ -195,6 +196,17 @@ impl M0EvidenceConstants {
                 ["DECIMATION_MAX_P999_DEVIATION_MM"],
                 "Typical-deviation ceiling at the 99th percentile for the decimation downstream-utility witness: DECIMATION_MAX_P999_DEVIATION_MM / 2 = 0.0095 mm, half an addressable step of the coarser printer axis, which is the quantization half-step the printer already introduces. Numerically identical to the search's PIXEL_PITCH_Y_UM × DECIMATION_P99_FACTOR and separately declared for the same reason its p99.9 sibling is: the search factor is a non-AcceptSafe selected fraction. Pinned bit-for-bit against that product by decimation_witness_bounds_agree_with_the_search_policy_bounds in crates/plinth-decimate/src/lib.rs.",
             ),
+            final_clearance_gap_mm: Measured::new(
+                0.300,
+                EvidenceSource::owner_decision(
+                    EvidenceId::new("final-clearance-demanded-gap-owner-field-data")?,
+                    "docs/engineering-journal/03-physics-and-constants.md",
+                    "§3.5",
+                    exact_date("2026-08-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- field data, NOT physics. Craig ruling 2026-08-22, field experience: 0.3mm gap features are preserved fine in prints. THE QUANTITY: a TRUE surface-to-surface gap in mm -- the shortest distance from the arm's own SOLID SURFACE to the model surface, i.e. the kernel's axis-to-surface distance MINUS the arm radius at the nearest station. It is not a centreline distance and not a radius; a number carried between the two lands one arm-radius wrong. WHAT IT DECIDES: the FINAL clearance pass, and only that pass -- the one whose verdict actually refuses an arm. Today that is brace::exact_clearance_rows and the grading of load-assigned radii, over BOTH contact-declaring members (struts, model rungs, CCO model anchors) and non-contact members (shoots, transients), which are graded full-length against the whole surface. WHAT IT IS NOT: the placement-family search margin. STANDOFF_MM (0.600 mm) grades CCO candidacy clearance_survival and rewire changed-set validation, where the demand PRUNES a search and refuses nothing final; a candidate it drops leaves the tournament, it does not condemn a contact. The two demands are deliberately different numbers with deliberately different jobs, and the ONE predicate reads whichever its stage registered -- see the two-tier ruling of 2026-08-22 and STANDOFF_MM's own entry. WHY THIS IS THE ONLY REFUSING NUMBER: a search margin may be generous because its cost is a lost candidate; the final demand's cost is a refused model, so it must be the number the owner will actually accept off the plate. No physics derives 0.300 mm and none is claimed for it. It is registered as an honestly-labelled external requirement so that a future coupon measurement of gap-feature preservation supersedes it rather than colliding with it. HONESTY PRECONDITION: this number only means what it says because the clearance test it feeds grades a TRUE gap. Before the honest-exemption change of 2026-08-22 the test skipped a radius-proportional length of every contact-declaring arm and read its verdict at the boundary station, so the graded quantity was neither the true gap nor a fixed function of it; the measured audit (.git/mask-honesty-evidence) found the old rule excusing an arm 0.242 mm INSIDE the model while refusing a same-axis thinner arm with 0.569 mm of real gap. A demanded gap registered against that predicate would have been a number about nothing.",
+            )?,
             layer_height_default_mm: Measured::new(
                 0.050,
                 EvidenceSource::project_record(
@@ -384,6 +396,17 @@ impl M0EvidenceConstants {
         &self.decimation_max_p99_deviation_mm
     }
 
+    /// The TRUE surface-to-surface gap, in mm, the FINAL clearance pass
+    /// demands between an arm's solid surface and the model.
+    ///
+    /// 0.300 mm, Craig's ruling of 2026-08-22 from field experience. This is
+    /// the only refusing clearance number; `STANDOFF_MM` (0.600 mm) is the
+    /// placement-family SEARCH margin and refuses nothing final.
+    #[must_use]
+    pub const fn final_clearance_gap_mm(&self) -> &Measured<f64> {
+        &self.final_clearance_gap_mm
+    }
+
     #[must_use]
     pub const fn layer_height_default_mm(&self) -> &Measured<f64> {
         &self.layer_height_default_mm
@@ -531,7 +554,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 32], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 33], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -556,6 +579,12 @@ impl M0EvidenceConstants {
                 "mm",
                 SCALAR,
                 &self.decimation_max_p99_deviation_mm,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("FINAL_CLEARANCE_GAP_MM"),
+                "mm",
+                SCALAR,
+                &self.final_clearance_gap_mm,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("LAYER_HEIGHT_DEFAULT_MM"),

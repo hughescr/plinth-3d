@@ -6,11 +6,12 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 32] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 33] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
     "DECIMATION_MAX_P999_DEVIATION_MM",
     "DECIMATION_MAX_P99_DEVIATION_MM",
+    "FINAL_CLEARANCE_GAP_MM",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LOAD_SHARING",
     "MINIMA_DROP_INTERIOR_FACES",
@@ -41,11 +42,12 @@ const EXPECTED_EVIDENCE_IDS: [&str; 32] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 32] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 33] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P99_DEVIATION_MM", "mm", "scalar"),
+    ("FINAL_CLEARANCE_GAP_MM", "mm", "scalar"),
     ("LAYER_HEIGHT_DEFAULT_MM", "mm", "scalar"),
     ("LOAD_SHARING", "1", "load_sharing"),
     ("MINIMA_DROP_INTERIOR_FACES", "1", "scalar"),
@@ -110,7 +112,16 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 21] = [
+const EXPECTED_SOURCES: [ExpectedSource; 22] = [
+    ExpectedSource {
+        constant: "FINAL_CLEARANCE_GAP_MM",
+        kind: "owner_decision",
+        identity: "final-clearance-demanded-gap-owner-field-data",
+        record: "docs/engineering-journal/03-physics-and-constants.md",
+        locator: "§3.5",
+        precision: "exact",
+        date: "2026-08-22",
+    },
     ExpectedSource {
         constant: "LAYER_HEIGHT_DEFAULT_MM",
         kind: "project_record",
@@ -331,7 +342,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 32);
+    assert_eq!(descriptors.len(), 33);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -347,7 +358,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (21, 11));
+    assert_eq!((measured, derived), (22, 11));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -1056,4 +1067,117 @@ fn the_grown_scar_maximum_is_craigs_field_ceiling_labelled_as_field_data() {
         scar_max_radius_mm * 2.0,
         legacy_max_radius_mm * 2.0
     );
+}
+
+/// The two-tier demanded gaps (Craig's ruling of 2026-08-22).
+///
+/// The engine grades clearance at two stages with two different demands and
+/// ONE predicate. This test pins the numbers, their ORDER, and the labelling
+/// that keeps them from being mistaken for each other — because the whole
+/// point of the split is that only one of them refuses.
+#[test]
+fn the_two_tier_demanded_gaps_are_a_pruning_0_6_and_a_refusing_0_3() {
+    let descriptors = component().descriptors().unwrap();
+
+    // (1) The FINAL demand: the only refusing clearance number in the engine.
+    let final_gap_mm = scalar(&descriptors, "FINAL_CLEARANCE_GAP_MM");
+    assert_eq!(
+        final_gap_mm, 0.300,
+        "the final demanded gap is 0.300 mm of TRUE surface-to-surface \
+         clearance, Craig's ruling of 2026-08-22"
+    );
+
+    // (2) The PLACEMENT demand: a search margin, registered separately.
+    let placement_gap_mm = plinth_core::m0_constants()
+        .unwrap()
+        .placeholders()
+        .standoff_mm()
+        .diagnostic()
+        .get();
+    assert_eq!(placement_gap_mm, 0.600);
+    assert!(
+        final_gap_mm < placement_gap_mm,
+        "the refusing demand ({final_gap_mm} mm) must sit strictly BELOW the \
+         pruning demand ({placement_gap_mm} mm). Inverted, the search would \
+         admit candidates the final pass refuses and the two-tier split would \
+         cost emissions instead of saving them"
+    );
+
+    // (3) The class. Field data recorded as an owner decision, exact date, no
+    // error bar claimed for a number that has none.
+    let RegistryProvenanceView::Measured { source, err, note } =
+        descriptor(&descriptors, "FINAL_CLEARANCE_GAP_MM")
+            .provenance()
+            .view()
+    else {
+        panic!(
+            "the final demanded gap is a Measured owner decision carrying field \
+             data — never Derived (there is no derivation) and never a bare \
+             Placeholder (there is real evidence)"
+        );
+    };
+    assert!(err.is_none());
+    assert_source(
+        source,
+        &ExpectedSource {
+            constant: "FINAL_CLEARANCE_GAP_MM",
+            kind: "owner_decision",
+            identity: "final-clearance-demanded-gap-owner-field-data",
+            record: "docs/engineering-journal/03-physics-and-constants.md",
+            locator: "§3.5",
+            precision: "exact",
+            date: "2026-08-22",
+        },
+    );
+
+    // (4) The note must say what kind of number it is, what quantity it grades,
+    // which stage it decides, and which stage it does NOT.
+    for phrase in [
+        "EXTERNAL REQUIREMENT",
+        "NOT physics",
+        "0.3mm gap features are preserved fine in prints",
+        "TRUE surface-to-surface gap",
+        "WHAT IT DECIDES",
+        "WHAT IT IS NOT",
+        "STANDOFF_MM",
+    ] {
+        assert!(
+            note.contains(phrase),
+            "the final demanded gap's note must say {phrase:?} — it is the \
+             difference between an honest external requirement and a number \
+             that will be mistaken for physics later"
+        );
+    }
+
+    // (5) The PLACEMENT demand's own label. Before 2026-08-22 this entry said
+    // only "legacy clearance policy", which is what let a search margin be
+    // mistaken for a refusing gate. The relabel is part of the ruling, so it is
+    // pinned here rather than left to prose review.
+    let registry = plinth_core::m0_constants().unwrap().registry();
+    let standoff = registry
+        .get(&plinth_core::ConstantId::from("STANDOFF_MM"))
+        .expect("STANDOFF_MM must be published");
+    let RegistryProvenanceView::Placeholder {
+        note: standoff_note,
+    } = standoff.provenance().view()
+    else {
+        panic!("STANDOFF_MM is a Placeholder: no measurement derives 0.600 mm");
+    };
+    for phrase in [
+        "PLACEMENT-FAMILY",
+        "SEARCH MARGIN",
+        "prunes",
+        "refuses nothing final",
+        "FINAL_CLEARANCE_GAP_MM",
+        "CENTERLINE",
+        "ONE PREDICATE, TWO DEMANDS",
+    ] {
+        assert!(
+            standoff_note
+                .to_lowercase()
+                .contains(&phrase.to_lowercase()),
+            "the placement demand's note must say {phrase:?} — a bare \"legacy\" \
+             label is exactly how a pruning margin gets read as a refusing gate"
+        );
+    }
 }
