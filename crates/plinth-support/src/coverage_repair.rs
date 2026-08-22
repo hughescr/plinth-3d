@@ -386,11 +386,32 @@ pub struct CoverageRepairStep {
     ///
     /// It is strictly wider than `own_contact_quarantined`, which names only
     /// the quarantine half, and the difference is not academic. MEASURED,
-    /// `zombie-3-a` at `e9e160f`: of 89 rejected trials, **52 were quarantined
-    /// and 34 more were unrouted with no winner** — 86 of 89 rejections, each
-    /// one a full prepare → route → rewire → brace → structure → lower →
-    /// measure pass spent to learn that no arm was built. Reading the narrow
-    /// field alone leaves 38 % of that waste unnamed.
+    /// `zombie-3-a` (`trials=92 commits=3`, the two persisted sidecars that
+    /// carry this field agreeing exactly, and two older ones agreeing on
+    /// everything they do carry): of 89 rejected trials, **52 were quarantined
+    /// and 37 more were unrouted with no winner** — that is **89 of 89**
+    /// rejections, every one a full prepare → route → rewire → brace →
+    /// structure → lower → measure pass spent to learn that no arm was built
+    /// at that seat. Reading the narrow field alone leaves **42 %** of that
+    /// waste unnamed. The remaining three steps are the three commits, whose
+    /// contacts were not condemned.
+    ///
+    /// **This paragraph previously said 34, "86 of 89" and 38 %, attributed to
+    /// `e9e160f`.** Those numbers are not reproducible: the field did not exist
+    /// at `e9e160f`, whose persisted sidecar carries `null` here, and the runs
+    /// that do carry it measure 37. The error looks like subtracting the three
+    /// committed trials twice. Corrected against the persisted
+    /// `*.coverage.repair.json` sidecars rather than re-derived by argument.
+    ///
+    /// **The two halves are different problems and only one of them is
+    /// understood.** The 52 are condemned before any arm is proposed. The 37
+    /// end at ROUTING with no winning arm, before any brace, resize or
+    /// path-level state exists, so the "acceptance depends on post-brace state"
+    /// argument that covers the 52 says nothing about them. Which of the 37 are
+    /// the `every_feasible_arm_refused_by_clearance` sub-class is NOT measured:
+    /// the run computes that flag but the sidecar does not persist it per step.
+    /// See `docs/engineering-journal/designs/candidacy-exact-mask-2026-08-21.md`
+    /// §F.
     ///
     /// **Nothing reads it to decide anything, and a ranking rule that did was
     /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a

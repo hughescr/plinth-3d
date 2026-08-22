@@ -204,12 +204,15 @@ three persisted sidecars do not reproduce. The corrected numbers, MEASURED on `z
 | share of the 89 rejections that built no arm at their seat | 86 of 89 | **89 of 89** |
 | share of the waste the narrow field leaves unnamed | 38 % | **42 %** (37/89) |
 
-Sources, all three agreeing exactly (`trials=92 commits=3`, 52 / 37 / 3):
-`.../scratchpad/chal-zombie/out/zombie-3-a.coverage.repair.json`,
-`.../scratchpad/seat-consol-out/runs/out-zombie3a-tip/zombie-3-a.coverage.repair.json`, and
-the challenge lane's own re-run. The 3 remaining steps are the 3 commits, whose contacts
-were not condemned. The likely origin of "34" is subtracting the 3 committed trials twice
-(89 − 52 − 3).
+**Sources, stated exactly.** Four persisted `zombie-3-a.coverage.repair.json` sidecars
+survive. All four agree on `trials=92`, `commits=3` and **52 quarantined**. **Two** of them
+carry `own_contact_condemned` at all, and both give **37**:
+`.../scratchpad/chal-zombie/out/` and `.../scratchpad/seat-consol-out/runs/out-zombie3a-tip/`.
+The other two predate the field — `.../seat-consol-out/zombie3a/out/` and the `e9e160f`
+baseline `.../seat-consol-out/runs/out-zombie3a-base/` — and carry `null` in every step,
+which is also why the "at `e9e160f`" attribution cannot be right: the field did not exist
+there. The 3 remaining steps are the 3 commits, whose contacts were not condemned. The
+likely origin of "34" is subtracting the 3 committed trials twice (89 − 52 − 3).
 
 **Two consequences, both stated rather than acted on.**
 
