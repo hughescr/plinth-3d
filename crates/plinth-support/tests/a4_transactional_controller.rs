@@ -515,6 +515,114 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         refusal.steps.iter().all(|step| step.commit.is_none()),
         "this model commits nothing, so no row in its stream may claim a commit number"
     );
+
+    // **The 37, on the wire** — `candidacy-exact-mask-2026-08-21.md` §F.
+    //
+    // §F measured that 37 of `zombie-3-a`'s 89 rejected trials ended
+    // `UnroutedNoWinner` on their own appended contact — a class that ends at
+    // ROUTING, before any brace or resize exists — and could not say which of
+    // them were the `every_feasible_arm_refused_by_clearance` sub-class: the run
+    // computed that flag and the step stream dropped it.
+    //
+    // **The revert this guards** is the one-line kind, and it is exactly the one
+    // that had already happened: stop filling `own_contact_no_winner` in the
+    // runner, or leave it off `to_wire`, or off the wire struct, and every
+    // digest, every gate verdict and every artifact byte stays identical while
+    // the class becomes unmeasurable again. These rows ARE the sidecar's
+    // `closure.steps` — the pipeline embeds this list verbatim — so a field that
+    // survives here survives to disk.
+    //
+    // The blade spends 45 trials and keeps none, so this runs against a real,
+    // populated stream rather than a hand-built row.
+    let json = serde_json::to_value(&refusal.steps).expect("the wire steps serialize");
+    let rows = json.as_array().expect("the stream is an array");
+    assert_eq!(rows.len(), refusal.steps.len());
+
+    let mut no_winner_rows = 0_usize;
+    let mut clearance_refused_rows = 0_usize;
+    for (row, step) in rows.iter().zip(&refusal.steps) {
+        assert!(
+            row.as_object()
+                .expect("a step is a JSON object")
+                .contains_key("own_contact_no_winner"),
+            "every step row must carry the no-winner disclosure key, present or null: {row}"
+        );
+
+        // The `UnroutedNoWinner` class, named from the two fields that already
+        // existed: condemned, but not at quarantine. That is exactly the 37's
+        // definition in §F, so the disclosure must be on those rows and on no
+        // others — a projection that filled it everywhere would report a
+        // routing stage for a contact that never reached routing.
+        let in_class =
+            step.own_contact_condemned == Some(true) && step.own_contact_quarantined == Some(false);
+        assert_eq!(
+            step.own_contact_no_winner.is_some(),
+            in_class,
+            "the disclosure belongs on exactly the trials whose own contact was condemned \
+             without being quarantined: {row}"
+        );
+        let Some(evidence) = step.own_contact_no_winner else {
+            assert!(row["own_contact_no_winner"].is_null());
+            continue;
+        };
+        no_winner_rows += 1;
+        if evidence.every_feasible_arm_refused_by_clearance {
+            clearance_refused_rows += 1;
+        }
+
+        // The flag and the stage are the same fact read twice, so a projection
+        // that filled either from a constant breaks the tie between them.
+        let wire = &row["own_contact_no_winner"];
+        let stage = wire["stage"]
+            .as_str()
+            .expect("a row that got no arm names the stage the router stopped at");
+        assert_eq!(
+            wire["every_feasible_arm_refused_by_clearance"],
+            serde_json::json!(stage == "all_feasible_candidates_refused_by_clearance"),
+            "the flag the judge ordered persisted and the stage it was read from must agree: \
+             {wire}"
+        );
+        assert_eq!(
+            wire["every_feasible_arm_refused_by_clearance"],
+            serde_json::json!(evidence.every_feasible_arm_refused_by_clearance),
+            "and the JSON must carry the same flag the step does: {wire}"
+        );
+        // `null` is a real answer — "the sealed reason has no such field" — and
+        // it must stay distinguishable from a zero the cadence never wrote.
+        assert_eq!(
+            wire["candidates_generated"].is_null(),
+            stage == "no_candidates_generated",
+            "only the empty-batch stage has no generated count to read: {wire}"
+        );
+        assert_eq!(
+            !wire["candidates_feasible"].is_null(),
+            stage == "all_feasible_candidates_refused_by_clearance",
+            "only the stage that reached the clearance test counted feasible arms: {wire}"
+        );
+        assert!(
+            wire["anchor_seat_refusals_recorded"].is_u64(),
+            "every stage retains a seat-refusal list, so its length is always disclosed: {wire}"
+        );
+    }
+
+    // **MEASURED on this fixture, 2026-08-22, and stated as a value rather than
+    // a range.** Of the blade's 45 trials, **37 end `UnroutedNoWinner` on their
+    // own appended contact and all 37 are the clearance sub-class**; the other
+    // 8 are outside the class and exercise the `null` half. So both halves of
+    // the disclosure are covered by real geometry here, which is what a
+    // hand-built row cannot do.
+    //
+    // A frozen pair, not a lower bound, because a moved number is a moved
+    // diagnosis: if this fixture stops being 37-of-45-all-clearance, the class
+    // §F sized has changed shape on the one procedural model that reproduces
+    // it, and that has to be re-measured rather than re-accepted. (The blade's
+    // 37 and `zombie-3-a`'s 37 are unrelated counts that happen to coincide.)
+    assert_eq!(
+        (no_winner_rows, clearance_refused_rows),
+        (37, 37),
+        "measured 2026-08-22: 37 of the blade's 45 trials retire their own contact unrouted, \
+         and every one of them because the standoff refused every feasible arm"
+    );
 }
 
 /// **Design §A.8, ruling R10 — the price of having no failed-tries cap is that

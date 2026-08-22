@@ -141,8 +141,8 @@ pub use coverage_measurement::{
 };
 pub use coverage_repair::{
     repair_step_outcome, CoverageRepairStep, CoverageRepairStepWire, NoncoverageComponent,
-    NoncoverageVector, RepairGateVector, RepairRunReport, RepairStepOutcome, RouteDelta,
-    StageClock,
+    NoncoverageVector, OwnContactNoWinnerEvidence, OwnContactNoWinnerStage, RepairGateVector,
+    RepairRunReport, RepairStepOutcome, RouteDelta, StageClock,
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{

@@ -408,10 +408,10 @@ pub struct CoverageRepairStep {
     /// end at ROUTING with no winning arm, before any brace, resize or
     /// path-level state exists, so the "acceptance depends on post-brace state"
     /// argument that covers the 52 says nothing about them. Which of the 37 are
-    /// the `every_feasible_arm_refused_by_clearance` sub-class is NOT measured:
-    /// the run computes that flag but the sidecar does not persist it per step.
-    /// See `docs/engineering-journal/designs/candidacy-exact-mask-2026-08-21.md`
-    /// §F.
+    /// the `every_feasible_arm_refused_by_clearance` sub-class is answered by
+    /// [`Self::own_contact_no_winner`], which persists that flag and the counts
+    /// the same transcript row already holds beside it. See
+    /// `docs/engineering-journal/designs/candidacy-exact-mask-2026-08-21.md` §F.
     ///
     /// **Nothing reads it to decide anything, and a ranking rule that did was
     /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a
@@ -426,11 +426,98 @@ pub struct CoverageRepairStep {
     /// remedy is a cheap PHYSICS screen on the seat itself — see the lane
     /// report and task #52.
     pub own_contact_condemned: Option<bool>,
+    /// **EVIDENCE ONLY — the OTHER half of `own_contact_condemned`, named.**
+    ///
+    /// `Some` exactly when this trial's own appended contact reached the
+    /// routing cadence and came out `UnroutedNoWinner`; `None` on every other
+    /// step, including a trial that never reached a measurement at all, and
+    /// `own_contact_condemned` is what tells those two apart.
+    ///
+    /// See [`OwnContactNoWinnerEvidence`] for what the fields are and for the
+    /// rule that every one of them is READ off the transcript row the run
+    /// already wrote, never recomputed here.
+    pub own_contact_no_winner: Option<OwnContactNoWinnerEvidence>,
     /// Every route whose evidence moved, and by how much. Routes that did not
     /// move are omitted, so a committed step that touched one route carries one
     /// row.
     pub route_deltas: Vec<RouteDelta>,
     pub outcome: RepairStepOutcome,
+}
+
+/// **Where the router stopped, for ONE contact that got no arm.**
+///
+/// This is the vocabulary `crate::cco::NoWinnerEvidence` already uses, carried
+/// out under its own names. It is a DISCLOSURE of which variant the routing
+/// cadence sealed on that terminal, not a second classification of it: the
+/// mapping is one variant to one value and there is no judgment in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnContactNoWinnerStage {
+    /// The anchor batch was empty — no arm was ever proposed to refuse.
+    NoCandidatesGenerated,
+    /// Arms were proposed and every one of them failed feasibility before the
+    /// clearance stage was reached.
+    NoFeasibleCandidate,
+    /// Arms were proposed, some were feasible, and the clearance standoff
+    /// refused every feasible one. This is task #51's shape.
+    AllFeasibleCandidatesRefusedByClearance,
+}
+
+/// **EVIDENCE ONLY. Why the router built no arm at this trial's own seat.**
+///
+/// The design record (`candidacy-exact-mask-2026-08-21.md` §F) measured that on
+/// `zombie-3-a` **37 of 89** rejected trials ended `UnroutedNoWinner` on their
+/// own appended contact — a class that ends at ROUTING, before any brace,
+/// resize or path-level state exists — and recorded that the run computed
+/// `every_feasible_arm_refused_by_clearance` but never persisted it, so nobody
+/// could say which of the 37 were task #51's shape. This type is that
+/// disclosure and nothing more.
+///
+/// **Every field is a READ, never a derivation.** The routing cadence seals a
+/// `crate::cco::NoWinnerEvidence` onto the transcript row when a terminal
+/// retires with no winner, and that value already holds the candidate counts
+/// and the retained refusal rows. `crate::runner` projects them out at the one
+/// site that reads the row. Nothing here recounts candidates, re-runs a
+/// clearance test, or infers a count from a distance.
+///
+/// **Nothing reads it to decide anything.** No accept clause, no ranking rule
+/// and no gate takes this value as an input; it travels on the step and is
+/// written to the sealed repair ledger. That is the physics-first doctrine's
+/// own line: a number that steers is a cap, a number that is printed is
+/// evidence.
+///
+/// **The `Option`s say "the record does not hold this", never "zero".** A
+/// `NoCandidatesGenerated` row has no `candidates_generated` field to read —
+/// its variant name IS the count — so this discloses `None` rather than
+/// writing a 0 the cadence never wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnContactNoWinnerEvidence {
+    /// **The judge's flag, persisted by name.** Exactly the value
+    /// `crate::runner::TrialContactDisposition::UnroutedNoWinner` has always
+    /// carried: `true` when the sealed reason is
+    /// [`OwnContactNoWinnerStage::AllFeasibleCandidatesRefusedByClearance`].
+    /// It is redundant with `stage` on purpose — `stage` is the wider
+    /// disclosure this change adds, and this is the field the measurement was
+    /// ordered on.
+    pub every_feasible_arm_refused_by_clearance: bool,
+    /// Which sealed reason the row carried. `None` means the transcript row was
+    /// `UnroutedNoWinner` with no reason attached at all, which is a different
+    /// statement from any of the three stages and is recorded as one.
+    pub stage: Option<OwnContactNoWinnerStage>,
+    /// How many arms the router proposed at this terminal. `None` on the
+    /// `NoCandidatesGenerated` stage, which carries no such field.
+    pub candidates_generated: Option<usize>,
+    /// How many of those survived feasibility. `None` on every stage but
+    /// `AllFeasibleCandidatesRefusedByClearance`, which is the only one that
+    /// reached the clearance test and therefore the only one that counted them.
+    pub candidates_feasible: Option<usize>,
+    /// How many anchor-seat refusal rows the cadence RETAINED for this
+    /// terminal — a length of the list it already holds, not a re-tally of
+    /// anything. Every stage carries this list.
+    pub anchor_seat_refusals_recorded: usize,
+    /// How many anchor-foot refusal rows it retained. `None` on
+    /// `NoCandidatesGenerated`, which has no foot stage to refuse at.
+    pub anchor_foot_refusals_recorded: Option<usize>,
 }
 
 impl CoverageRepairStep {
@@ -465,6 +552,7 @@ impl CoverageRepairStep {
             ownerless_faces_after: self.ownerless_faces_after,
             own_contact_quarantined: self.own_contact_quarantined,
             own_contact_condemned: self.own_contact_condemned,
+            own_contact_no_winner: self.own_contact_no_winner,
             route_deltas: self.route_deltas.clone(),
             outcome: self.outcome.clone(),
         }
@@ -511,6 +599,12 @@ pub struct CoverageRepairStepWire {
     /// 2026-08-21; that rule was built, MEASURED HARMFUL and reverted, so it is
     /// not in the tree and the name pointed at nothing.
     pub own_contact_condemned: Option<bool>,
+    /// Verbatim from [`CoverageRepairStep::own_contact_no_winner`], which is
+    /// the only place this field is explained. It splits the `UnroutedNoWinner`
+    /// half of `own_contact_condemned` into the stages the routing cadence
+    /// already sealed, so the class §F sized at 37 of 89 can be read off the
+    /// file instead of guessed at.
+    pub own_contact_no_winner: Option<OwnContactNoWinnerEvidence>,
     pub route_deltas: Vec<RouteDelta>,
     pub outcome: RepairStepOutcome,
 }
@@ -973,6 +1067,14 @@ mod tests {
             ownerless_faces_after: Some(5),
             own_contact_quarantined: Some(false),
             own_contact_condemned: Some(false),
+            own_contact_no_winner: Some(OwnContactNoWinnerEvidence {
+                every_feasible_arm_refused_by_clearance: true,
+                stage: Some(OwnContactNoWinnerStage::AllFeasibleCandidatesRefusedByClearance),
+                candidates_generated: Some(40),
+                candidates_feasible: Some(12),
+                anchor_seat_refusals_recorded: 118,
+                anchor_foot_refusals_recorded: Some(12),
+            }),
             route_deltas: vec![RouteDelta {
                 island_id: 5,
                 component_id: 1,
@@ -1060,8 +1162,131 @@ mod tests {
         assert_eq!(parsed.ownerless_faces_before, step.ownerless_faces_before);
         assert_eq!(parsed.ownerless_faces_after, step.ownerless_faces_after);
         assert_eq!(parsed.own_contact_quarantined, step.own_contact_quarantined);
+        assert_eq!(parsed.own_contact_condemned, step.own_contact_condemned);
+        assert_eq!(parsed.own_contact_no_winner, step.own_contact_no_winner);
         assert_eq!(parsed.route_deltas, step.route_deltas);
         assert_eq!(parsed.outcome, step.outcome);
+    }
+
+    /// **The 37 must be readable off the FILE, field by field.**
+    ///
+    /// `candidacy-exact-mask-2026-08-21.md` §F measured that 37 of `zombie-3-a`'s
+    /// 89 rejected trials ended `UnroutedNoWinner` on their own appended
+    /// contact, and recorded that nobody could say which of them were task #51's
+    /// `every_feasible_arm_refused_by_clearance` sub-class — the run computed the
+    /// flag and the sidecar dropped it. This reads the JSON a sealed run writes.
+    ///
+    /// **The revert this guards** is the one-line kind and it is exactly the one
+    /// §F was bitten by: leave the field off `to_wire`, or off the wire struct,
+    /// or let the runner stop filling it, and every digest, every gate verdict
+    /// and every artifact byte stays identical while the class goes back to
+    /// being unmeasurable. Each assertion below is on a distinct field, so a
+    /// failure names which one the projection dropped rather than saying only
+    /// that something moved.
+    ///
+    /// The `Option`s are asserted as VALUES, not merely as present: `None` here
+    /// means "the sealed reason had no such field", and a projection that wrote
+    /// `0` instead would be inventing a count the routing cadence never took.
+    #[test]
+    fn the_persisted_step_names_why_no_arm_was_built_at_its_own_seat() {
+        let wire = populated_step().to_wire();
+        let value = serde_json::to_value(&wire).expect("the wire step serializes");
+
+        let no_winner = &value["own_contact_no_winner"];
+        assert!(
+            !no_winner.is_null(),
+            "a step whose own contact got no arm must say so on the wire: {value}"
+        );
+        assert_eq!(
+            no_winner["every_feasible_arm_refused_by_clearance"],
+            serde_json::json!(true),
+            "the flag the run already computes must reach the file under its own name: \
+             {no_winner}"
+        );
+        assert_eq!(
+            no_winner["stage"], "all_feasible_candidates_refused_by_clearance",
+            "and the sealed reason's own variant name must travel with it: {no_winner}"
+        );
+        assert_eq!(
+            no_winner["candidates_generated"],
+            serde_json::json!(40),
+            "how many arms were proposed is evidence the cadence already held: {no_winner}"
+        );
+        assert_eq!(
+            no_winner["candidates_feasible"],
+            serde_json::json!(12),
+            "and how many of them were feasible is what makes 'clearance refused every one' a \
+             measurement instead of a label: {no_winner}"
+        );
+        assert_eq!(
+            no_winner["anchor_seat_refusals_recorded"],
+            serde_json::json!(118)
+        );
+        assert_eq!(
+            no_winner["anchor_foot_refusals_recorded"],
+            serde_json::json!(12)
+        );
+    }
+
+    /// **A stage that recorded no such count must write `null`, never `0`.**
+    ///
+    /// `NoCandidatesGenerated` has no `candidates_generated` field to read — its
+    /// variant name IS the count — and a projection that filled the hole with a
+    /// zero would make "the cadence proposed nothing" indistinguishable from
+    /// "the cadence proposed nothing and we know it", which is the same
+    /// distinction §A.8.1 refuses to blur for `candidates_remaining`.
+    #[test]
+    fn a_stage_that_recorded_no_count_discloses_null_rather_than_zero() {
+        let mut step = populated_step();
+        step.own_contact_no_winner = Some(OwnContactNoWinnerEvidence {
+            every_feasible_arm_refused_by_clearance: false,
+            stage: Some(OwnContactNoWinnerStage::NoCandidatesGenerated),
+            candidates_generated: None,
+            candidates_feasible: None,
+            anchor_seat_refusals_recorded: 7,
+            anchor_foot_refusals_recorded: None,
+        });
+        let value = serde_json::to_value(step.to_wire()).expect("the wire step serializes");
+        let no_winner = &value["own_contact_no_winner"];
+
+        assert_eq!(no_winner["stage"], "no_candidates_generated");
+        assert!(
+            no_winner["candidates_generated"].is_null(),
+            "an unrecorded count is null: {no_winner}"
+        );
+        assert!(
+            no_winner["candidates_feasible"].is_null(),
+            "an unrecorded count is null: {no_winner}"
+        );
+        assert!(
+            no_winner["anchor_foot_refusals_recorded"].is_null(),
+            "this stage never reached a foot to refuse at: {no_winner}"
+        );
+        assert_eq!(
+            no_winner["anchor_seat_refusals_recorded"],
+            serde_json::json!(7),
+            "the list it DOES hold is disclosed by its length: {no_winner}"
+        );
+    }
+
+    /// **A step whose own contact was not `UnroutedNoWinner` writes `null`, and
+    /// the key is still there.** The reader has to be able to tell "this trial
+    /// is not in the 37" from "this file predates the disclosure", and only a
+    /// present key can say the first.
+    #[test]
+    fn a_step_outside_the_no_winner_class_still_carries_the_key() {
+        let mut step = populated_step();
+        step.own_contact_no_winner = None;
+        let value = serde_json::to_value(step.to_wire()).expect("the wire step serializes");
+
+        assert!(
+            value
+                .as_object()
+                .expect("a step is a JSON object")
+                .contains_key("own_contact_no_winner"),
+            "the key must be written even when there is nothing to say: {value}"
+        );
+        assert!(value["own_contact_no_winner"].is_null());
     }
 
     /// **§D.2's cross-route share must be readable off the FILE, not only off

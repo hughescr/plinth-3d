@@ -1840,6 +1840,7 @@ pub fn run_support<'a>(
             ownerless_faces_after: None,
             own_contact_quarantined: None,
             own_contact_condemned: None,
+            own_contact_no_winner: None,
             route_deltas: Vec::new(),
             outcome: crate::coverage_repair::RepairStepOutcome::Committed,
         };
@@ -1897,9 +1898,17 @@ pub fn run_support<'a>(
                     matches!(
                         disposition,
                         TrialContactDisposition::Quarantined { .. }
-                            | TrialContactDisposition::UnroutedNoWinner { .. }
+                            | TrialContactDisposition::UnroutedNoWinner(_)
                     )
                 });
+                // The VALUE the cadence sealed, carried straight onto the step.
+                // Not recomputed here and not summarised on the way: this is
+                // the same `OwnContactNoWinnerEvidence` the disposition holds.
+                step.own_contact_no_winner =
+                    disposition.and_then(|disposition| match disposition {
+                        TrialContactDisposition::UnroutedNoWinner(evidence) => Some(evidence),
+                        _ => None,
+                    });
                 record_disposition(&mut route_records, winner.key, disposition);
 
                 let trial_measured = match measure_for_controller(&trial, coverage_request) {
@@ -2139,9 +2148,9 @@ fn record_disposition(
 ) {
     let record = route_records.entry(key).or_default();
     match disposition {
-        Some(TrialContactDisposition::UnroutedNoWinner {
-            every_feasible_arm_refused_by_clearance: true,
-        }) => {
+        Some(TrialContactDisposition::UnroutedNoWinner(evidence))
+            if evidence.every_feasible_arm_refused_by_clearance =>
+        {
             record.clearance_refused_terminals =
                 record.clearance_refused_terminals.saturating_add(1);
         }
@@ -5145,11 +5154,81 @@ pub(crate) enum TrialContactDisposition {
     Quarantined {
         remaining_inside_axis_mm: Option<f64>,
     },
-    UnroutedNoWinner {
-        every_feasible_arm_refused_by_clearance: bool,
-    },
+    /// Routed and retired with no winning arm. The payload is the transcript
+    /// row's OWN sealed `NoWinnerEvidence`, projected — it carries the
+    /// `every_feasible_arm_refused_by_clearance` flag this variant has always
+    /// held, plus the sibling counts the same row already holds beside it.
+    UnroutedNoWinner(crate::coverage_repair::OwnContactNoWinnerEvidence),
     /// The contact never appeared in the cadence at all.
     NotInCadence,
+}
+
+/// **Project one transcript row's sealed no-winner reason onto the wire — a
+/// READ, in the strict sense.**
+///
+/// Every value below is copied out of the `NoWinnerEvidence` the routing
+/// cadence already built and sealed onto the row; the only arithmetic is
+/// `Vec::len` on lists this function borrows and does not walk. No candidate is
+/// re-counted, no clearance test is re-run, and no count is invented for a
+/// variant that does not carry one — a field the sealed reason has no place for
+/// comes out `None`, never `0`. That distinction is why the disclosure is
+/// trustworthy at all: a `0` a reader could not tell from "unrecorded" would be
+/// a second measurement wearing the first one's clothes.
+///
+/// `None` in, `None` stage out: a finalized `UnroutedNoWinner` row is always
+/// sealed with a reason, but this refuses to name one it was not given, and it
+/// reports `every_feasible_arm_refused_by_clearance: false` there — byte for
+/// byte what the `matches!` this replaced returned on the same input.
+fn disclose_no_winner_evidence(
+    reason: Option<&crate::cco::NoWinnerEvidence>,
+) -> crate::coverage_repair::OwnContactNoWinnerEvidence {
+    use crate::coverage_repair::{OwnContactNoWinnerEvidence, OwnContactNoWinnerStage};
+
+    match reason {
+        None => OwnContactNoWinnerEvidence {
+            every_feasible_arm_refused_by_clearance: false,
+            stage: None,
+            candidates_generated: None,
+            candidates_feasible: None,
+            anchor_seat_refusals_recorded: 0,
+            anchor_foot_refusals_recorded: None,
+        },
+        Some(crate::cco::NoWinnerEvidence::NoCandidatesGenerated {
+            anchor_seat_refusals,
+        }) => OwnContactNoWinnerEvidence {
+            every_feasible_arm_refused_by_clearance: false,
+            stage: Some(OwnContactNoWinnerStage::NoCandidatesGenerated),
+            candidates_generated: None,
+            candidates_feasible: None,
+            anchor_seat_refusals_recorded: anchor_seat_refusals.len(),
+            anchor_foot_refusals_recorded: None,
+        },
+        Some(crate::cco::NoWinnerEvidence::NoFeasibleCandidate {
+            candidates_generated,
+            anchor_seat_refusals,
+            anchor_refusals,
+        }) => OwnContactNoWinnerEvidence {
+            every_feasible_arm_refused_by_clearance: false,
+            stage: Some(OwnContactNoWinnerStage::NoFeasibleCandidate),
+            candidates_generated: Some(*candidates_generated),
+            candidates_feasible: None,
+            anchor_seat_refusals_recorded: anchor_seat_refusals.len(),
+            anchor_foot_refusals_recorded: Some(anchor_refusals.len()),
+        },
+        Some(crate::cco::NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+            candidates_generated,
+            candidates_feasible,
+            anchor_seat_refusals,
+            anchor_refusals,
+        }) => OwnContactNoWinnerEvidence {
+            every_feasible_arm_refused_by_clearance: true,
+            stage: Some(OwnContactNoWinnerStage::AllFeasibleCandidatesRefusedByClearance),
+            candidates_generated: Some(*candidates_generated),
+            candidates_feasible: Some(*candidates_feasible),
+            anchor_seat_refusals_recorded: anchor_seat_refusals.len(),
+            anchor_foot_refusals_recorded: Some(anchor_refusals.len()),
+        },
+    }
 }
 
 impl<'a> LoweredSupportRun<'a> {
@@ -5275,15 +5354,9 @@ impl<'a> LoweredSupportRun<'a> {
                 }
             }
             crate::cco::FinalizedDispositionKind::UnroutedNoWinner => {
-                let every_feasible_arm_refused_by_clearance = matches!(
+                TrialContactDisposition::UnroutedNoWinner(disclose_no_winner_evidence(
                     row.no_winner_reason(),
-                    Some(
-                        crate::cco::NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance { .. }
-                    )
-                );
-                TrialContactDisposition::UnroutedNoWinner {
-                    every_feasible_arm_refused_by_clearance,
-                }
+                ))
             }
         }
     }
@@ -10702,9 +10775,16 @@ mod tests {
     }
 
     fn clearance_refused() -> Option<TrialContactDisposition> {
-        Some(TrialContactDisposition::UnroutedNoWinner {
-            every_feasible_arm_refused_by_clearance: true,
-        })
+        Some(TrialContactDisposition::UnroutedNoWinner(
+            disclose_no_winner_evidence(Some(
+                &crate::cco::NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                    candidates_generated: 40,
+                    candidates_feasible: 12,
+                    anchor_seat_refusals: Vec::new(),
+                    anchor_refusals: Vec::new(),
+                },
+            )),
+        ))
     }
 
     fn quarantined_at(depth_mm: f64) -> Option<TrialContactDisposition> {
@@ -10873,9 +10953,13 @@ mod tests {
     #[test]
     fn an_unrouted_terminal_refused_for_another_reason_is_not_task_51s_class() {
         let scales = BlockedCauseScales::read().expect("the registered blocked-cause scales");
-        let record = folded_route_record(&[Some(TrialContactDisposition::UnroutedNoWinner {
-            every_feasible_arm_refused_by_clearance: false,
-        })]);
+        let record = folded_route_record(&[Some(TrialContactDisposition::UnroutedNoWinner(
+            disclose_no_winner_evidence(Some(&crate::cco::NoWinnerEvidence::NoFeasibleCandidate {
+                candidates_generated: 40,
+                anchor_seat_refusals: Vec::new(),
+                anchor_refusals: Vec::new(),
+            })),
+        ))]);
         assert_eq!(
             (record.rows_tried, record.clearance_refused_terminals),
             (1, 0)
@@ -10885,6 +10969,156 @@ mod tests {
             measured_defect_class(&record, scales),
             None,
             "no winner for some other reason is not the clearance mask being unsatisfiable"
+        );
+    }
+
+    /// **The disclosure is a READ of the sealed reason, one variant at a time.**
+    ///
+    /// `candidacy-exact-mask-2026-08-21.md` §F sized a class it could not name:
+    /// 37 of `zombie-3-a`'s 89 rejected trials ended `UnroutedNoWinner`, and
+    /// which of them were the `every_feasible_arm_refused_by_clearance` sub-class
+    /// was unmeasured because the run computed the flag and threw it away. This
+    /// pins the projection that now keeps it.
+    ///
+    /// **What could silently go wrong, and what each case catches.** The whole
+    /// value of the disclosure is that it re-measures nothing, so the failure
+    /// mode is not a crash — it is a plausible number in the wrong field. So
+    /// every case below reads a DIFFERENT sealed reason and checks the exact
+    /// values that came out of it, including which fields must stay `None`:
+    ///
+    /// * `NoCandidatesGenerated` carries no candidate counts, so writing `0`
+    ///   there would turn "unrecorded" into "measured zero";
+    /// * `NoFeasibleCandidate` counts what was generated but never reached the
+    ///   clearance test, so a feasible count there would be invented;
+    /// * only `AllFeasibleCandidatesRefusedByClearance` may set the flag, which
+    ///   is the whole distinction task #51's instrument rests on;
+    /// * the seat and foot refusal counts must come from the two DIFFERENT
+    ///   lists — swapping them is the classic projection defect, and the
+    ///   asymmetric lengths below (nine seat rows against no foot row) catch it
+    ///   while still keeping `Some(0)` distinct from `None`.
+    #[test]
+    fn the_no_winner_disclosure_reads_each_sealed_reason_without_inventing_a_count() {
+        use crate::coverage_repair::OwnContactNoWinnerStage;
+
+        let seat_rows = |count: usize| -> Vec<crate::anchor::AnchorSeatRefusal> {
+            (0..count)
+                .map(|index| crate::anchor::AnchorSeatRefusal {
+                    sample_index: index,
+                    source_sample_face_id: u32::try_from(index).expect("a small index"),
+                    reason: crate::anchor::AnchorSeatRefusalReason::TooShort,
+                    first_hit_t: None,
+                })
+                .collect()
+        };
+
+        let none_generated = disclose_no_winner_evidence(Some(
+            &crate::cco::NoWinnerEvidence::NoCandidatesGenerated {
+                anchor_seat_refusals: seat_rows(5),
+            },
+        ));
+        assert_eq!(
+            none_generated,
+            crate::coverage_repair::OwnContactNoWinnerEvidence {
+                every_feasible_arm_refused_by_clearance: false,
+                stage: Some(OwnContactNoWinnerStage::NoCandidatesGenerated),
+                candidates_generated: None,
+                candidates_feasible: None,
+                anchor_seat_refusals_recorded: 5,
+                anchor_foot_refusals_recorded: None,
+            },
+            "an empty anchor batch records five seat refusals and no candidate count at all"
+        );
+
+        let none_feasible =
+            disclose_no_winner_evidence(Some(&crate::cco::NoWinnerEvidence::NoFeasibleCandidate {
+                candidates_generated: 40,
+                anchor_seat_refusals: seat_rows(9),
+                anchor_refusals: Vec::new(),
+            }));
+        assert_eq!(
+            none_feasible,
+            crate::coverage_repair::OwnContactNoWinnerEvidence {
+                every_feasible_arm_refused_by_clearance: false,
+                stage: Some(OwnContactNoWinnerStage::NoFeasibleCandidate),
+                candidates_generated: Some(40),
+                candidates_feasible: None,
+                anchor_seat_refusals_recorded: 9,
+                anchor_foot_refusals_recorded: Some(0),
+            },
+            "arms were proposed and none was feasible, so there is no feasible count to read \
+             and the flag stays false"
+        );
+
+        let clearance = disclose_no_winner_evidence(Some(
+            &crate::cco::NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                candidates_generated: 40,
+                candidates_feasible: 12,
+                anchor_seat_refusals: seat_rows(9),
+                anchor_refusals: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            clearance,
+            crate::coverage_repair::OwnContactNoWinnerEvidence {
+                every_feasible_arm_refused_by_clearance: true,
+                stage: Some(OwnContactNoWinnerStage::AllFeasibleCandidatesRefusedByClearance),
+                candidates_generated: Some(40),
+                candidates_feasible: Some(12),
+                anchor_seat_refusals_recorded: 9,
+                anchor_foot_refusals_recorded: Some(0),
+            },
+            "task #51's shape: twelve feasible arms existed and the standoff refused every one"
+        );
+
+        // A row with no sealed reason at all. The `matches!` this projection
+        // replaced returned `false` on exactly this input, and the flag must not
+        // move because the disclosure grew fields around it.
+        let unreasoned = disclose_no_winner_evidence(None);
+        assert_eq!(
+            unreasoned,
+            crate::coverage_repair::OwnContactNoWinnerEvidence {
+                every_feasible_arm_refused_by_clearance: false,
+                stage: None,
+                candidates_generated: None,
+                candidates_feasible: None,
+                anchor_seat_refusals_recorded: 0,
+                anchor_foot_refusals_recorded: None,
+            },
+            "a row that named no reason gets no stage, and the flag reads false as it always did"
+        );
+    }
+
+    /// **The disclosure changed no decision — the flag still drives the fold,
+    /// and only from the clearance stage.**
+    ///
+    /// `record_disposition` is the one place the flag is READ, and it is the
+    /// seam an evidence-only change could break without any test noticing: fold
+    /// on the wrong stage and task #51's instrument starts counting terminals
+    /// that were never near the clearance test. The three stages are folded
+    /// here through the production function and only one of them may count.
+    #[test]
+    fn only_the_clearance_stage_folds_into_task_51s_counter() {
+        let no_candidates = folded_route_record(&[Some(
+            TrialContactDisposition::UnroutedNoWinner(disclose_no_winner_evidence(Some(
+                &crate::cco::NoWinnerEvidence::NoCandidatesGenerated {
+                    anchor_seat_refusals: Vec::new(),
+                },
+            ))),
+        )]);
+        assert_eq!(
+            (
+                no_candidates.rows_tried,
+                no_candidates.clearance_refused_terminals
+            ),
+            (1, 0),
+            "an empty anchor batch is not the clearance mask refusing anything"
+        );
+
+        let clearance = folded_route_record(&[clearance_refused(); 3]);
+        assert_eq!(
+            (clearance.rows_tried, clearance.clearance_refused_terminals),
+            (3, 3),
+            "and every clearance-refused trial still counts, exactly as before the disclosure"
         );
     }
 }
