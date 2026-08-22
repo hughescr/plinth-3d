@@ -1,24 +1,39 @@
 # Land the stub where it strikes the model — DESIGN
 
 > **Provenance.** First written 2026-08-22 against `feature/a4-controller @ f50a45b` and
-> committed as `aae1559`. **That version was reviewed UNSOUND and its recovery table is
-> withdrawn.** This is the repair. It is re-graded on new measured evidence (probe P1,
-> `.git/land-at-strike-p1-evidence/`) and re-anchored on the clearance work that has since
-> landed (`d6e4310`, `33f93f4`, `1c646aa`). **DOCS ONLY. No production code and no test code
-> changed. Nothing was built in the main checkout; the probe lived in a throwaway detached
-> worktree that was removed after the run.**
+> committed as `aae1559`; that version was reviewed UNSOUND and re-written as `10b0bd8`,
+> which the same reviewer graded SOUND-WITH-CHANGES and whose four required changes it
+> carries. **This text is the AMENDMENT that folds Craig's four rulings of 2026-08-22
+> (R1–R4, §0.1), and it moves the recovery table again — upward.** It is re-graded on the
+> same measured evidence (probe P1, `.git/land-at-strike-p1-evidence/`) with a new grader
+> (`regrade-r134.ts`, same directory) and re-anchored on the clearance work that has landed
+> (`d6e4310`, `33f93f4`, `1c646aa`, `e74ab97`, `3fe332b`). **DOCS ONLY. No production code
+> and no test code changed, and nothing under `crates/` was touched, built or staged — that
+> tree belongs to the wire-clearance lane while this amendment was written.**
 >
 > **No cap, gate, threshold, tolerance or registered constant is moved, widened or
-> bypassed by anything proposed here.** Every number this design uses is already in the
-> registry.
+> bypassed by anything proposed here, and no constant is minted.** Every number this design
+> uses is already in the registry, and the one derived quantity that is new to this text —
+> the load-sized embed depth — is the engine's own `ball_seat_factor`
+> (`contact.rs:186`, DERIVED, PR-1 clause (c)) evaluated at the registered
+> `BALL_FACTOR_FOOT`.
 >
-> **What changed between `aae1559` and this text, in one paragraph.** The old grading
-> measured the struck wall along the stub's own axis and never ran the foot-ball check it
-> named. Probe P1 supplies the incidence where the shaft *enters* the material and asks the
-> engine's own breach machinery whether the foot fits. On those numbers the rule recovers
-> **80 of 208 measured records, not 120**, and **island 74 — the island this lane was opened
-> for — is refused**. The rule is still worth having. The document that priced it was not
-> honest, and this one says so at the top rather than in a footnote.
+> **What changed between `10b0bd8` and this text, in one paragraph.** `10b0bd8` graded every
+> landed foot as a *standard* foot: 0.3 mm deep whatever it carried, with a ball 1.4 × its
+> radius driven centre-deep into the struck wall. Craig ruled that wrong (R1): the foot's
+> radius **and its depth** derive from the load, so a strut carrying a small load in a thin
+> crevice gets a small anchor. He also ruled that a seat may go as deep as it likes but is
+> **truncated at the opposite face** (R4), which makes punch-through impossible by
+> construction and retires the foot-ball breach *refusal*. On those two rulings the rule
+> recovers **129 of 208 measured records, not 80** — 467.07 mm² against 279.18 mm² — **and
+> island 74, the island this lane was opened for, now lands.** No record that recovered at
+> `10b0bd8` is lost: the change is a strict admission.
+>
+> **The one number a reader should carry away with a caveat attached.** Island 74 lands with
+> **zero margin** — its anchor's capacity equals its demand to nine decimal places, because
+> the load law sized the shaft and the seat law sizes the seat to match the shaft. 46 of the
+> 129 recovered records are in that state, and it is a property of the engine's sizing law,
+> not of this rule (§4.6, §6.5).
 >
 > **Evidence labels.** **MEASURED** — a number a run produced. **DERIVED** — closed form
 > from MEASURED or registered inputs. **INFERRED** — reasoning from a recorded fact, not
@@ -36,8 +51,9 @@
 > touches the model. *PR-2 mask* — the retired rule that exempted a length of a member's axis
 > from its clearance test. *OD-8* — the standing order that a change which moves an output
 > digest must stop and report the movement. *FU-87* — the ruling that a routed model-anchored
-> strut must be at least 5 mm long. *E-A, E-B, E-C, E-E* — open escalations, each named where
-> it is used.
+> strut must be at least 5 mm long. *E-A, E-B, E-C, E-D, E-E* — open escalations, each named
+> where it is used. *Anchor* — the buried part of a seat: the end ball plus the depth it is
+> driven to. *Truncation* — R4's rule that a seat stops at the model's opposite face.
 
 ---
 
@@ -45,168 +61,206 @@
 
 ### The one-line version
 
-The engine throws away every support stub that runs into the model. Your instruction is to
-stop throwing them away and stand them on what they hit. That instinct is right, and the
-measurement supports it: **204 of 208 condemned stubs leave the model cleanly, cross air,
-and hit something else.** But when the six tests are applied in honest units, the rule
-recovers **80 of the 208 records, not 120**, and **it does not recover island 74**. Island 74's
-stub would have to plant a foot ball 1.65 mm across in a wall 0.34 mm thick; the engine's own
-check says that ball comes out the far side by 0.24 mm.
+The engine throws away every support stub that runs into the model. Your instruction was to
+stop throwing them away and stand them on what they hit. Your four rulings of 2026-08-22 then
+told the grading to stop sizing every landed foot as if it were a standard 0.3 mm foot, and to
+stop condemning a seat for being deep when it can simply be cut off at the far face. On those
+rulings the rule recovers **129 of the 208 records — 467.07 mm² — and island 74 lands.**
 
 ### The recovery table, up front, with island 74 first
 
-**ISLAND 74 — REFUSED.** At the production plan its whole 13.019 mm² rests on one condemned
-stub, terminal 162. That stub strikes the model 1.040 mm out from its contact. The material it
-strikes is **0.341 mm thick measured perpendicular to the surface it enters** (the earlier
-document said 0.463 mm, which was the run along the stub's own slanted axis, not a thickness).
-A 0.3 mm-deep foot would fit that depth. **The foot's ball does not fit.** The load island 74
-carries sizes the foot at 0.588 mm radius, which gives a designed foot ball of 0.823 mm radius
-— 1.65 mm across. The engine's own `sphere_breach` measures the far wall at 0.581 mm from the
-ball centre and reports **BREACHED, poke depth 0.241 mm**. The ball goes through.
+**ISLAND 74 — RECOVERED, WITH ZERO MARGIN.** At the production plan its whole 13.019 mm² rests
+on one condemned stub, terminal 162. That stub strikes the model 1.040 mm out from its contact,
+in material **0.341 mm thick measured perpendicular to the face it enters**. Under R1 the foot
+it needs is not a 0.3 mm-deep foot. Its load sizes the shaft at `r0 = 0.5877 mm`, and the depth
+that makes the seat exactly as strong as that shaft is
+`ball_seat_factor(1.4) × 0.5877 = 0.2469 mm` — the engine's own PR-1 clause (c), evaluated at
+the registered foot ball factor. **0.2469 mm fits inside 0.3414 mm**, so R4's truncation does
+not even bind, the seat never reaches the opposite face, and no ball can come out of it. The
+seat's minimal separating cut is `0.5877 mm` and its capacity is
+`12 × π × 0.5877² =` **13.018786 mm²**, against a demand of **13.018786 mm²**.
 
-*Does any foot fit?* **No — not one that can carry island 74's load.** DERIVED from the
-MEASURED far-wall distance: the breach clears only if the foot ball radius drops to about
-0.63 mm, which caps the foot radius at about 0.451 mm, which caps what that foot can carry at
-about **10.9 mm²**. Island 74 needs 13.019 mm². **So island 74 moves to the re-aim class.** It
-has to be turned to strike something thicker, or seated somewhere else. This design does not
-recover it and must not be read as recovering it.
+**Read that last line twice.** The capacity-to-demand ratio is **0.999999999** — it passes
+under the same relative tolerance the area law itself is compared under, and it has **no
+margin at all**. That is not a coincidence and not a fudge: the load law sizes the shaft to
+exactly carry the load, and the seat law sizes the seat to exactly match the shaft. **46 of the
+129 recovered records, and 7 of the 9 at the production plan, sit at exactly 1.000.** Every one
+of them is a foot whose radius was not clamped up to `MIN_SHOOT_R_MM`. This is a property of
+the engine's own sizing law, not of this rule — but this rule is the first thing that makes it
+visible, and §6.5 discloses it rather than burying it.
 
-208 stub records were measured on the Rotting Warhorse across 7 re-plans (77 distinct stub
-shapes). "Production plan" is the state the run settles into — 18 condemned stubs, and the
-plan that would actually be printed.
+**The second thing about island 74 you should see.** Its foot ball is 1.645 mm across and the
+wall is 0.341 mm thick, so at the 42° the stub strikes at, the *ball* reaches 0.463 mm below
+the entry face — past the opposite face. Under R4 it is truncated there. What is left is a plug
+that spans the wall. **The area law prices the joint and prices it as sufficient. Nothing in
+the engine prices the wall around the plug.** That is escalation **E-D** (§4.7), it is E-A
+wearing a new hat, and it is the one place where this document's arithmetic stops.
+
+208 stub records were measured on the Rotting Warhorse across 7 re-plans (**79** distinct stub
+shapes — `10b0bd8` said 77; its shape key read a field its own grader never set and silently
+degraded to counting distinct carried areas, of which there are exactly 77). "Production plan"
+is the state the run settles into — 18 condemned stubs, and the plan that would actually be
+printed.
 
 | what the stub does | records | shapes | carried area | production plan | verdict |
 | --- | ---: | ---: | ---: | ---: | --- |
-| **Strikes, and a foot genuinely fits** | **80** (38.5 %) | 36 | 279.18 mm² | **5 stubs, 36.68 mm²** | **the rule recovers it** |
-| Strikes, but no foot fits where it hit | 72 (34.6 %) | 24 | 368.02 mm² | 7 stubs, 51.88 mm² | must re-aim (§5) |
+| **Strikes, and the load-sized anchor carries** | **129** (62.0 %) | 57 | **467.07 mm²** | **9 stubs, 64.65 mm²** | **the rule recovers it** |
+| Strikes, and the anchor cannot carry there | 25 (12.0 %) | 6 | 182.24 mm² | 3 stubs, 23.91 mm² | must re-aim (§5) |
 | Its own tip never reaches the model | 52 (25.0 %) | 15 | 107.50 mm² | 6 stubs, 13.05 mm² | a different defect (§7) |
-| Its own seat runs deep through the model | 4 (1.9 %) | 3 | 3.42 mm² | **0 stubs** | stays condemned (§8) |
-| **total** | **208** | **77** | **758.12 mm²** | **18, 101.61 mm²** | |
+| Its own seat is truncated; nothing beyond it | 2 (1.0 %) | 1 | 1.31 mm² | **0 stubs** | legal outright under R4 (§8) |
+| **total** | **208** | **79** | **758.12 mm²** | **18, 101.61 mm²** | |
 
-**Against the table you were shown on 2026-08-22.** That table claimed 120 records and
-465.10 mm². Of those 120, **80 still recover and 40 do not**: 29 strike walls thinner than the
-foot they would plant, 9 plant a foot ball that comes out the far side, and 2 would put their
-foot above their own contact. **No record the old grading refused is recovered by the new
-one** — the six-test grading is a strict tightening of the three-test one, not a re-shuffle.
+**Against the table you were shown at `10b0bd8`.** That table was 80 records and 279.18 mm².
+**All 80 still recover — not one is lost — and 49 more join them**, 187.89 mm². They arrive
+from four places: 34 were refused by the flat 0.3 mm wall clause R1 abolishes (99.88 mm²), 11
+by the foot-ball breach R4 makes impossible (85.21 mm²), 2 by both (2.74 mm²), and 2 by the
+crevice-width cutoff R3 abolishes (0.07 mm²). Two more come out of the deep-seat class R4
+dissolves. **Every one of your four rulings is an admission. None of them can newly refuse
+anything, on this model or any other** — which is exactly what makes the staging in §10 cheap
+(§13 item 4).
+
+**The class that used to decide the answer is gone.** At `10b0bd8` one clause — "the struck
+wall must be at least `DEFAULT_CONTACT_DEPTH_MM` thick" — refused 59 of 152 candidates and
+278.28 mm², and it was machinery that existed nowhere in the engine, built here, reusing an
+along-axis embed depth as a perpendicular wall minimum. **R1 deletes that clause outright.**
+What replaces it is not a threshold at all: it is the load-sized anchor's own capacity, graded
+by `contact::area_sufficient` on `ball_cut_radius_mm` — the engine's existing predicate on the
+engine's existing formula. The wall requirement is now **load-dependent, as it should be**: a
+**0.063 mm** wall carries a 0.818 mm² load and is admitted; a **0.122 mm** wall is refused for a
+4.306 mm² load. No constant decides that. The physics does.
 
 **The prize is not only this model.** On `zombie-3-a`, **52 of 92** coverage-repair trials
 (56 %) fail in this same class — the stub is condemned before any arm is even proposed, and
 that model records **zero** clearance refusals in the brace stage. MEASURED
 (`.git/mask-honesty-evidence/zombie3a-clearance-evidence.txt`). We have not run the probe on
-`zombie-3-a`, so we cannot say how many of its 52 pass the foot tests. **INFERRED**: the class
-matches; the split does not, and on this model the split turned out to be much worse than the
-first grading claimed.
+`zombie-3-a`, so we cannot say how many of its 52 pass the anchor test. **INFERRED**: the class
+matches; the split does not.
 
-### What you must authorize — four things
+---
 
-**1. The rule itself.** A stub whose shaft runs into the model stops at the first strike, with
-its foot standing on the struck surface, when a foot genuinely fits there. This is a support
-that runs model to model. It is legal under your three-seat ruling (plate, model surface, or
-another support). *This ask is unchanged from the first version and it is the sound part.*
-One clause of one test decides most of that outcome: the perpendicular wall minimum — test
-(a)(i), which exists nowhere in the engine until this design (§2.3) — is what turns 135
-recoverable records into 80; drop it and the rule recovers 546.11 mm² instead of 279.18 mm².
-**Ratifying this ask ratifies that clause.**
+## §0.1 THE RECORD OF RULINGS — all four decided, nothing pending
 
-**2. That these bridges are permanent, priced honestly.** MEASURED: **0 of 80** recovered
-struts sit in a crevice as wide as 2.5 mm, the only removal-ergonomics number the project has —
-and the registry says of that number *"selected without measurement"*. Nothing in the engine
-models a cutting tool, so we cannot compute whether a blade reaches them. **On the honest
-reading every one of these struts stays on the model forever.**
+These four are the entire content of this amendment. They are recorded here verbatim, with
+what each one changed and what it cost or bought, so that no later reader has to reconstruct
+them from a transcript.
 
-At the production plan that is **5 struts, 4.79 mm³ of resin (0.0048 mL), and 10 new
-scars — a foot scar and a tip scar each — totalling 15.256 mm².** Both scars are new: today
-the stub is condemned, so it is not printed and leaves no mark at all. The honest baseline is
-zero, not "a smaller scar".
+---
 
-| strut | foot scar | tip scar | across (foot / tip) | inside the 2.0 mm² allowance? |
-| --- | ---: | ---: | --- | --- |
-| t87 | 2.110 | 2.448 | 1.64 / 1.77 mm | **no — both clear only via the KAPPA branch** |
-| t142 | 0.964 | 1.369 | 1.11 / 1.32 mm | yes |
-| t157 | 1.936 | 2.041 | 1.57 / 1.61 mm | foot yes; **tip no — KAPPA branch** |
-| t173 | 0.917 | 0.167 | 1.08 / 0.46 mm | yes |
-| t215 | 1.553 | 1.750 | 1.41 / 1.49 mm | yes |
-| **total** | **7.480** | **7.775** | **15.256 mm² over 10 scars** | **3 of 10 exceed 2.0 mm²** |
+**R1 — LOAD-SIZED ANCHORS. RULED.**
 
-The scar rule has two allowances and takes the larger: a flat `A_ABS_MM2 = 2.0 mm²`, and
-`KAPPA × the designed ball area`, which grows with the radius. **Three of these ten scars are
-above the 2.0 mm² you ratified and are legal only because the second allowance is larger for a
-fat foot.** You ratified 2.0 mm² with the reason *"caps the scar at 1.60 mm equivalent
-diameter… inside the buff/fill/paint class"*. Two of these are 1.77 mm and 1.61 mm across.
-**You price this.** The design reports it. It does not gate on it.
+> *"If these struts are all under 2.5mm inside crevices then they're likely extremely thin and
+> don't need a full 0.3mm to land in. They won't likely be removed or even really very visible
+> so I think that as long as the physics says they'll be supported they can have much smaller
+> anchors."*
 
-**3. Decline a permission you already granted — and understand what declining does.**
-SPEC-EMBED-POLICY says a designed embed end may run as deep as it likes into the model. That
-permission was written on the condition that a separate "thin-feature-span check" catches
-shells being perforated. **That check does not exist in this engine.** That is escalation E-C,
-and it has blocked this work since 2026-08-21.
+**What it changed.** The foot's radius **and its embed depth** both derive from the carried
+load. The radius already did — `FrozenTipLoadPolicy` grows `r0` until the tip attests, and the
+foot is `max(r0, MIN_SHOOT_R_MM)`. The depth did not: `10b0bd8` used
+`DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` for every foot and then demanded 0.3 mm of perpendicular
+wall to put it in. **That clause is deleted.** The depth is now
+`h_design = ball_seat_factor(BALL_FACTOR_FOOT) × r_foot = 0.4202041 × r_foot`, which runs
+**0.147 – 0.247 mm** over the recovered population — the depth at which the seat's own minimal
+separating cut is exactly the shaft it serves. The wall test becomes *"does this wall
+accommodate the anchor THIS load requires"*, graded by `contact::area_sufficient` on
+`ball_cut_radius_mm`. §2.3(a), §2.8.
 
-Two corrections to how this was put to you the first time:
+**What it bought.** +34 records / 99.88 mm² directly, and it is what lets island 74 land. It
+also removes escalation item 14 of `10b0bd8` — the "new machinery" the reviewer objected to —
+because there is no longer a wall threshold to justify. **And it shrank every scar**: the
+largest scar on the whole recovered population is now **1.478 mm²**, against 2.448 mm² before;
+**0 of 129** recovered records carry a scar above the ratified `A_ABS_MM2 = 2.0 mm²`, against 12
+before (§6.3). Escalation item 2 of `10b0bd8` is dissolved, not deferred.
 
-* **On the stub path, declining changes nothing at runtime.** `initial.rs:1542`'s
-  0.05 mm cutoff already condemns exactly the population the proposed rule would condemn.
-  This is a **spec correction**, not a tightening. It is still worth doing — a spec that grants
-  a permission its guard was never built for is a trap for the next implementer — but it should
-  be sold as what it is.
-* **Declining it for stubs alone does not close E-C.** The permission's own scope line names
-  three families: *"contact-stub tips, strut/rung feet, model-rung ends"*. Declining it for one
-  answers a third of one half of E-C's question. **The ask is therefore to decline it at spec
-  scope, for all three families.** Measured cost on this model: 4 records, 3.42 mm², **zero at
-  the production plan**, and two of those four are already illegal under the existing
-  scar-dimension rule. The true cost is one shape, 1.03 mm², and that shape is a support
-  through a 0.139 mm shell, which we should not want.
+**What it cost.** One disclosure: 46 of 129 recovered feet have capacity exactly equal to
+demand (§6.5). And it opens E-D (§4.7).
 
-* **The thin-wall guard E-C wanted already exists — for landed feet.** Test (a)(i) (§2.3) is
-  that check, built here under another name: it refuses 59 of the 152 landing candidates on wall
-  thickness alone. E-C's residual scope after this design is not stub tips — it is the *other*
-  consumers of the no-depth-cap permission, above all the PR-2 placed-mask exemption's six
-  consumers, already handed to the bundle lane below.
+---
 
-  **Out of scope here, named so it is not lost:** this does not touch the PR-2 placed-mask
-  exemption that arms and braces use, which is larger, has no depth cap at all, and has six
-  live consumers. That belongs to the clearance bundle lane (§8.5).
+**R2 — PERMANENCE. ACCEPTED AS DISCLOSED.**
 
-**4. NEW ASK — rule on the sub-0.3 mm crevices.** Your own field line says gaps below 0.3 mm
-may weld shut in the cured part. MEASURED: **14 of the 80 recovered records sit in crevices
-narrower than that** — 69.37 mm², **24.8 % of everything the rule recovers** — and at the
-production plan it is **1 of the 5**, t157, crevice 0.174 mm, carrying 9.974 mm², **27.2 % of
-the production prize**. Five distinct shapes, at 0.116, 0.117, 0.174, 0.180 and 0.196 mm.
+No gate. The per-strut disclosure record of §6.2 stands as written, and the numbers move with
+the population: at the production plan it is now **9 struts, 8.318 mm³ of resin (0.0083 mL), 18
+new scars totalling 15.249 mm², none above 2.0 mm², reach `PermanentUnlessMeasured` on all 9**.
+Nothing in the engine models a cutting tool, so "permanent" stays the honest label and
+escalation E-B (measure a flush cutter) stays open. **The aggregate scar area is unchanged
+while the strut count nearly doubled** — the load-sized anchors are that much smaller.
 
-If those crevices weld shut, then for those struts the welded crevice is what holds the island
-up, the strut would have been unnecessary, **and it is still permanent and still leaves two
-scars.** Cost with no benefit. The project has a ratified print minimum for solid material
-(`PRINT_FLOOR_CHORD_MM = 0.08 mm`, *"2.6-4.1 px foliage knife-edges that cannot print as
-coherent material"*) and this design uses it. It has **no** print minimum for a void, so it has
-no basis for claiming a 0.116 mm crevice exists in the cured part at all.
+---
 
-**Refuse there, or report and land anyway?** This design does not decide it. You are the only
-person with the field data that answers it.
+**R3 — SUB-0.3 mm CREVICES. RULED.**
+
+> *"If resin seals anyways then the strut adds no extra resin. So this is moot I think."*
+
+**What it changed.** Crevice width never refuses. Test (b) — `crevice ≥ MIN_ILLEGAL_LEN_MM` —
+becomes a disclosure field. Each landed strut still reports its crevice; none is refused for it.
+**The width-refusal class is gone entirely.**
+
+**What it bought.** 2 records / 0.065 mm² directly — the two tangential grazes that emerge for
+46 µm. The larger effect is that the 18 recovered records sitting below your 0.30 mm field line
+are now **landed and disclosed** rather than left as an open question: 69.54 mm², **14.9 % of
+recovery** (it was 24.8 % of a smaller recovery), and **1 of 9 at the production plan** — t157,
+crevice 0.174 mm, 9.974 mm², **15.4 % of the production prize** (it was 27.2 %). §6.4 lists all
+seven distinct widths.
+
+---
+
+**R4 — TRUNCATION. RULED. This replaces the whole E-C remove-versus-build question.**
+
+> *"A seat should be allowed to go as deep into the model as it likes, but it should not come
+> out the other side of the model so if the seat wants to go deeper than the thickness of the
+> model, it should get truncated at the opposite face — it should not create a scar on the
+> backside because that provides no additional support so there's no need for it to extend
+> beyond the model anyway."*
+
+**What it changed.** SPEC-EMBED-POLICY's no-depth-cap sentence is **rewritten, not withdrawn**
+(§8.4). Depth stays unlimited; the seat is **truncated at the opposite face**. A seat or foot,
+**ball included**, never exits. There is no backside scar. **Punch-through is impossible BY
+CONSTRUCTION**, and the construction is computable from the penetration intervals already
+measured — the interval *is* the model's extent along the seat's own line, so truncating at its
+far end is a clamp, not a test.
+
+**What it bought.** The foot-ball breach *refusal* is retired: +11 records / 85.21 mm², island
+74 among them. The deep-seat class is dissolved: its 4 records become 2 legal outright and 2
+that land. **And E-C's constructed regression stops existing.** E-C said a support could
+perforate a thin shell and stay legal; under R4 the seat stops at the shell's far face, so the
+perforation is not reachable. The Rotting Warhorse's one real instance — `t225`, a 0.139 mm
+shell — needs only **0.063 mm** of that shell under R1, so it never gets near the far face at
+all, and its truncated seat carries its load with the area law's own verdict (§8.3).
+
+**What it cost.** E-D (§4.7): 65 of 129 recovered records have their load-designed ball clipped
+by the opposite face, and the clipped anchor is a plug spanning the wall. The area law prices
+the joint. Nothing prices the wall around the plug.
+
+---
 
 ### What you are NOT being asked to authorize
 
-* **No constant moves.** Not one. Everything used is registered.
-* **No new constant is introduced.**
-* **The load-path question stays open, and this design does not widen it.** When a strut
-  stands on the model, the model carries the load onward. Whether that is safe is escalation
-  E-A, opened 2026-08-21 by the model-seated-arm work that already landed — not by this
-  design. This rule adds instances to an exposure that is already live.
+* **No constant moves and no constant is minted.** `ball_seat_factor` is an existing DERIVED
+  function of an existing registered constant, evaluated at another existing registered
+  constant. `ball_breach_eps_mm` is no longer read at all on this path.
+* **The load-path question stays open, and R4 makes it larger, which is said out loud.** When a
+  strut stands on the model, the model carries the load onward. Whether that is safe is
+  escalation E-A, opened 2026-08-21 by the model-seated-arm work that already landed. This rule
+  adds 129 instances to it, and E-D is the sharpest of them.
 * **Nothing is wired to the removal apparatus.** The six `GRIP_*` constants stay dead.
 
-### What it costs if you say yes
+### What it costs to build
 
 The change is in initial contact minting, so **every model in the corpus is affected**. The
-staged plan (§10) puts a **measure-only stage first**: the landing is computed and recorded for
-every condemned stub on every corpus model, and nothing moves. You see the real recovery table
-for the whole corpus before one triangle of geometry changes.
+staged plan (§10) still puts a **measure-only stage first**: the landing is computed and
+recorded for every condemned stub on every corpus model, and nothing moves. You see the real
+recovery table for the whole corpus before one triangle of geometry changes.
 
-One correction to the first version's staging. It asked for stage 1 to be **bit-identical on
-every model** *and* to sweep the stub's whole surface rather than just its centreline. Those two
-cannot both hold: sweeping more of the surface finds more material, more material condemns more
-stubs, and the output moves. **The production sweep stays centreline-only through stage 1**, and
-the wider sweep runs beside it as a report that decides nothing. Turning the wider sweep on for
-real is its own stage with its own gate, because it is the one part of this work that can newly
-refuse a stub **on a model that has no condemned stub today** — and its cost has never been
-measured against the cap it would charge (§10.2, stage 1b).
+**Two staging facts that follow from the rulings.**
+
+1. **All three behavioural rulings are admissions.** R1 relaxes a threshold to a physics test,
+   R3 removes a refusal, R4 converts a refusal into a clamp. **None of them can newly refuse a
+   stub on any model.** The only part of this work that can newly refuse anything is the rim
+   sweep (`rays_all`), which is stage 1b, is separately gated, and is unchanged by the rulings.
+2. **Implementation starts after the wire-clearance lane finishes.** That lane owns
+   `crates/plinth-support/` right now — `brace.rs`, `cco.rs`, `contact.rs`, `designed_embed.rs`,
+   `initial.rs`, `rewire.rs`, `runner.rs` are all live in its tree — and this rule's stage 2 and
+   stage 3 both land in files it is editing. §10.0 states the sequence.
 
 ---
 
@@ -253,7 +307,7 @@ refutes that premise:
 | --- | --- |
 | the deep run starts at the seat (anchored) | **204 of 208 do not.** Only 4 records have their condemning run starting at the seat |
 | `r_x ≈ 0.30 mm` | 0.0867 – 0.5877 mm; island 74's production stub is **0.5877** |
-| island 74 becomes routable by scar arithmetic | it does not become routable at all — the foot ball breaches (§0) |
+| island 74 becomes routable by scar arithmetic | it becomes routable, but **not by scar arithmetic** — the scar rules refuse nothing anywhere in this population. It lands because R1 sizes its anchor from its load and R4 stops any seat exiting (§0, §4.6) |
 
 **The gap between the seat and the strike is air.** The stub leaves the model cleanly, crosses
 a gap, and hits something else. That is not a deep seat and it is not a scar problem. It is a
@@ -270,12 +324,19 @@ stub that has arrived somewhere. That reading is what this design keeps.
 Two steps, ordered:
 
 > **LAND-AT-STRIKE (primary).** A stub whose outward shaft strikes the model **terminates at
-> the first strike**, with its foot seated on the struck surface, **when all six tests of §2.3
-> pass**. The result is a support that runs model to model.
+> the first strike**, with its foot seated on the struck surface **at the depth its own load
+> requires, truncated at the opposite face**, when all the tests of §2.3 pass. The result is a
+> support that runs model to model.
 >
-> **Fallback.** When the strike point fails a foot test the stub re-aims, by the
+> **Fallback.** When the strike point cannot carry the load the stub re-aims, by the
 > owner-ratified cone search in `docs/engineering-journal/specs/SPEC-P8-RELOCATE.md` §3.1
 > **R1**.
+
+**A naming collision to keep straight.** Craig's rulings are numbered R1–R4 in this document
+(§0.1). `SPEC-P8-RELOCATE`'s ratified ladder is also called R1 → R2 → R3, and its **R1 is the
+re-aim**. Where this document says "the re-aim", it means the spec's R1; where it says "R1" on
+its own it means Craig's load-sized-anchor ruling. Every occurrence below is written so the
+sense is unambiguous from the sentence, and the fallback is always called *the re-aim*.
 
 **A note on naming, and why the first version's names were withdrawn.** That version called
 these "RULE 1" and "RULE 2". `SPEC-P8-RELOCATE` already has a ratified ladder called
@@ -285,8 +346,10 @@ here are therefore named, not numbered, and the fallback is referred to by its s
 
 Landing is cheaper than re-aiming in every sense where it applies: it preserves the contact
 point exactly, it preserves the contact direction exactly, it shortens the member, it needs no
-candidate search, and it needs no re-route. **On the corrected grading it applies to fewer than
-half of the population**, which makes the fallback the larger job, not the smaller one (§5).
+candidate search, and it needs no re-route. **Under the rulings it applies to 62 % of the
+population and 9 of the 18 production stubs**, which puts the two lanes back the way the first
+version had them — landing is the larger prize and the re-aim is the residue (§5). That
+reversal is a direct consequence of R1 and R4 and of nothing else.
 
 ---
 
@@ -310,12 +373,16 @@ Let `s*` be the **first strike**: the smallest `s > δ` at which the shaft re-en
 Then:
 
 * **crevice** `= s* − δ` — the measured air the stub crosses.
-* **landed length** `L' = s* + δ` — the strut runs from the island contact to a foot seated
-  `δ` deep in the struck surface.
 * **radii.** `r_tip = r0` (load-law sized, §2.6) and `r_foot = max(r0, MIN_SHOOT_R_MM)` — the
-  identical rule `initial.rs:655-657` already applies, over the shorter span. The frustum is
-  `r(s) = r_tip + (r_foot − r_tip)·s/L'`, growing from tip to foot.
-* everything beyond `s = s* + δ` is **cut away and does not exist**. Crossings out there
+  identical rule `initial.rs:655-657` already applies, over the shorter span.
+* **the foot's advance, under R1 and R4.** The foot does **not** advance a fixed `δ` past the
+  strike. It advances `t = h_eff / cosang_entry`, where `h_eff` is the load-sized, truncated
+  perpendicular embed depth of §2.8. **MEASURED over the recovered population:** `t` runs
+  0.148 – 1.503 mm, median 0.271 mm, and `t / chord` never exceeds **1.000** — R4's truncation
+  in one number.
+* **landed length** `L' = s* + t`. **MEASURED:** 0.574 – 2.800 mm, median 1.410 mm. The frustum
+  is `r(s) = r_tip + (r_foot − r_tip)·s/L'`, growing from tip to foot.
+* everything beyond `s = s* + t` is **cut away and does not exist**. Crossings out there
   vanish with it.
 
 ### §2.2 Print-minimum moot strikes are ridden through, not landed on
@@ -326,70 +393,84 @@ cannot print as coherent material."* Material that cannot print cannot be stood 
 crossing is **not** a strike; the shaft rides through it, and it is still counted and reported
 in the moot bucket the amendment requires.
 
-**The mirror question, asked here because §0 ask 4 depends on it.** The project has that
+**The mirror question, asked here because R3 (§0.1) answered it.** The project has that
 minimum for solid and none for air. At 2.6-4.1 px per 0.08 mm, a 0.116 mm crevice is four to
 six pixels of air between two curing walls. This design uses the solid minimum and **discloses**
 that it has no equivalent for the void (§6.4).
 
-### §2.3 The six tests, in honest units
+### §2.3 The tests, after the rulings
 
-A strike becomes a foot when **all six** hold. Five of the six are an existing predicate or an
-existing formula — clause (a)(i) is not.
+A strike becomes a foot when **all of (a), (c), (e) and (f)** hold. **(b) is now a disclosure
+and never refuses** (R3). **(d) is not a separate test any more**: it *is* (a), because R1 made
+the anchor's own capacity the thing that decides (§2.5).
 
-**Test (a)(i) is new machinery, not a citation.** Nothing in the engine or in SPEC-EMBED-POLICY
-compares a perpendicular wall thickness to anything: `sphere_breach` returns
-`nearest_wall_thickness_mm`, but before this design no caller reads it, and SPEC-EMBED-POLICY's
-rules 1-4 contain no wall minimum. **(a)(i) is the thin-feature-span check escalation E-C names,
-built here for landed feet under another name.** Its derivation is direct, not borrowed: the foot
-embeds `DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` perpendicular into the struck face, so the face must
-itself hold at least 0.3 mm of perpendicular material for the foot to seat inside it rather than
-pass through it. The constant is reused in its own native meaning — an embed depth demanding its
-own depth of material to embed into — not repurposed as a new number.
+**Every test is an existing predicate or an existing formula. That was not true at `10b0bd8`,
+and R1 is what made it true.** `10b0bd8`'s test (a)(i) compared a perpendicular wall thickness
+to `DEFAULT_CONTACT_DEPTH_MM`. Nothing in the engine or in SPEC-EMBED-POLICY does that; the
+reviewer's substantive required change was that the document say so. **R1 deletes the clause
+instead.** The wall no longer faces a threshold — it faces the anchor the load asks for, and
+that comparison is `contact::area_sufficient` on `contact::ball_cut_radius_mm`, both of which
+the engine already has and already uses.
 
 | # | test | statement | how it is measured |
 | --- | --- | --- | --- |
-| **(a)** | **a foot genuinely fits the struck material** | **two clauses, both required.** (i) the **perpendicular** wall thickness at the strike is at least `DEFAULT_CONTACT_DEPTH_MM` (0.3 mm); (ii) the foot ball is not breached | (i) is `chord × cosang_entry`, with `cosang_entry` **MEASURED by P1** at the interval's entry face — which is exactly the crossing SPEC-EMBED-POLICY names for a foot-anchored interval. (ii) is `NativeSurface::sphere_breach` at the foot endpoint with `ball_factor_foot = 1.4`, the same call `anchor.rs:1607-1630` makes and the same refusal `AnchorFootRefusalReason::FootBallBreached` |
-| **(b)** | **the stub really left the model** | crevice `≥ ContactPolicy::min_free_span_mm` (0.05 mm, sourced from `MIN_ILLEGAL_LEN_MM`) | measured directly on the interval sweep — see §2.4 |
-| **(c)** | **scar pricing at both ends** | SPEC-EMBED-POLICY rules 1-3 at the foot **and** at the contact tip | `transit_measurement::calculate_scar_diagnostic` (`transit_measurement.rs:301-368`). Graded here on the MEASURED incidence and the MEASURED distance `d`, not on a worst case |
-| **(d)** | **the foot interface carries the island's load** | `contact::area_sufficient(carried_mm2, r_eff, policy)` with `r_eff = ball_cut_radius_mm(r_foot, δ, 1.4)` | `contact.rs:442`, already called inside `contact::admit`. See §2.5 for the half that does **not** exist |
+| **(a)** | **the load-sized, truncated anchor carries the load** | one clause. Size the anchor from the load (`r_foot`, `h_design`), truncate it at the opposite face (`h_eff = min(h_design, W)`), and ask the area law whether the resulting minimal separating cut carries `carried_mm2` | `W = chord × cosang_entry` with `cosang_entry` **MEASURED by P1** at the interval's entry face; `h_design = ball_seat_factor(BALL_FACTOR_FOOT) × r_foot` (`contact.rs:186`, DERIVED); `a_eff = ball_cut_radius_mm(r_foot, h_eff, 1.4)` (`contact.rs:197`); the verdict is `contact::area_sufficient(carried_mm2, a_eff, policy)` (`contact.rs:485`). **§2.8 derives it.** |
+| **(b)** | **the crevice** | **DISCLOSED, NEVER REFUSED (R3).** The crevice width is recorded per strut | measured directly on the interval sweep — see §2.4 |
+| **(c)** | **scar pricing at both ends** | SPEC-EMBED-POLICY rules 1-3 at the foot **and** at the contact tip, at the R1 depths | `transit_measurement::calculate_scar_diagnostic` (`transit_measurement.rs:301-368`). Graded here on the MEASURED incidence and on the anchor's own cut disc, not on a worst case. Under R4 there is no backside patch to grade — the seat does not reach one |
+| **(d)** | ~~the foot interface carries the island's load~~ | **FOLDED INTO (a).** It was `area_sufficient` on `ball_cut_radius_mm(r_foot, δ, 1.4)` with `δ` fixed at 0.3 mm; R1 makes the depth a variable and the same predicate becomes the whole of (a) | see §2.5 for the half of the load path that still does **not** exist |
 | **(e)** | **the strut's own narrowest section carries the load** | the area law at the tip | `FrozenTipLoadPolicy` (`perception.rs:636-644`) already sized `r0` from `carried_mm2` at ratio 12. See §2.6 |
 | **(f)** | **build order** | the foot must be **below** the contact in Z | the same sense `anchor.rs:1063` already applies to a model-anchor seat, and `cco.rs:4967` to a routing junction — see §3.6 |
 
-**Why test (a) is stated in two clauses and both are run.** The first version stated both and
-graded only the first, and graded that one on the run of the axis inside the material rather
-than on a thickness. Those are different numbers whenever the shaft is not perpendicular, and
-they differ by `1/cos`. On this population the median entry incidence is 0.592, so the axial
-run overstates the wall by about 70 % at the middle of the distribution. The correction is
-decisive:
+**What the tests now refuse, MEASURED over the 154 landing candidates:**
 
 ```
-MEASURED over the 152 landing candidates
-  axial chord >= 0.3 mm                     122 / 152
-  PERPENDICULAR wall >= 0.3 mm               93 / 152     -> (a)(i) refuses 59, 278.281 mm2
-  foot ball not breached                    139 / 152     -> (a)(ii) refuses 13,  94.450 mm2
-  perpendicular wall  min 0.014  p25 0.136  med 0.365  p75 0.863  max 1.891 mm
-  entry incidence     min 0.062  p25 0.383  med 0.592  p75 0.714  max 0.997
+  (a) load-sized truncated anchor capacity   refuses  23 / 154   175.662 mm2
+  (b) crevice width          [R3]            refuses   0 / 154     0.000 mm2
+  (c) scar rules, either end                 refuses   0 / 154     0.000 mm2
+  (e) tip section area law                   refuses   0 / 154     0.000 mm2
+  (f) foot above its own contact             refuses   2 / 154     6.576 mm2
+
+  first-and-only failure:  a:anchor-capacity  23  175.662 mm2
+                           f:foot-above        2    6.576 mm2
 ```
 
-**Clause (ii) is not a refinement of clause (i); it is a different question.** Clause (i) asks
-whether the material is deep enough to seat 0.3 mm into. Clause (ii) asks whether the *ball* on
-the end of the foot comes out the other side, in **any** direction within 25° of the inward
-normal — which is not the stub's direction. Island 74 passes (i) at 0.341 mm and fails (ii)
-with a 0.241 mm poke. Nine of the thirteen breaches pass (i).
+**Say it plainly, as the reviewer required of the previous version: (c) and (e) refuse nothing
+on this model, and (b) can no longer refuse anything anywhere.** The rule is decided by (a),
+with two hangers caught by (f). If the corpus numbers move at stage 1, (a) is where to look.
 
-**Why (a)(i) is not redundant with the engine's own ball check.** Of the 55 records that (a)(i)
-alone refuses, `sphere_breach` returns **no finite wall at all on 49 of the 55** (0.61 mm on the
-other 6) — the breach cone, cast narrow from the ball centre, misses a knife-edge struck at
-grazing incidence. Those 55 records have entry cosang median 0.352 (min 0.062) and perpendicular
-wall median 0.094 mm (min 0.014 mm). The ball check catches a fat foot breaching a nominal wall
-(island 74); the thickness clause catches a foot on a knife-edge the cone cannot see. The two
-clauses cover different blind spots; both are needed.
+**The wall requirement is load-dependent, and that is the whole of R1.** There is no threshold
+to quote. MEASURED, at the two ends of the overlap:
 
-**A caution about `nearest_wall_thickness_mm`.** The kernel measures it from the **ball centre**
-to the far wall along that cone, not from the near face and not along the stub axis, and it is
-**infinite** when no far wall lies within the ball's reach. It is the right number for the
-breach question and the wrong number for "how thick is this wall". This design uses each for
-what it measures and never swaps them.
+```
+  narrowest wall that still carries : W = 0.0630 mm carrying 0.8178 mm2   (b0 t15,  r0 0.1473)
+  widest wall that is still refused : W = 0.1220 mm for     4.3058 mm2   (b0 t14,  r0 0.3380)
+```
+
+A wall half as thick is admitted for a load five times smaller. `10b0bd8`'s flat 0.3 mm would
+have refused both.
+
+**What happened to the foot-ball breach check.** `10b0bd8` ran
+`NativeSurface::sphere_breach` at the foot endpoint with `ball_factor_foot = 1.4`, which is what
+`anchor.rs:1607-1630` does for a model anchor, and refused 13 of 152 records including island
+74. **R4 retires that refusal**, and the reason is geometric, not a relaxation:
+
+* `anchor.rs:1606-1608` centres the foot ball on `seat.snapped_point_mm` — **the surface point
+  itself**. A ball centred on the surface is driven `R_b` deep, so it demands `R_b` of wall in
+  every direction. For island 74 that is 0.823 mm of wall, and it had 0.341 mm. Of course it
+  breached.
+* Under R1 the foot is no longer driven centre-deep. It is driven to `h_design`, which for
+  island 74 is 0.247 mm, and the ball's centre ends up **0.360 mm outside the model, in the
+  crevice**. The ball is a bulb hanging in the air with a cap of it buried. That is the
+  parameterization `contact.rs:186` already documents for a stub tip — *"a ball of radius
+  `f*r_tip` whose south pole sits at `p0`"* — applied to a foot.
+* Under R4 the seat is truncated at the opposite face, so **`breached` cannot be true**. There
+  is nothing left for `sphere_breach` to detect. The predicate is not weakened; it is
+  unreachable. `ball_breach_eps_mm` is no longer read on this path.
+
+**What that leaves, and it is not nothing.** The buried cap's *lateral* reach at oblique
+incidence is `h_eff + R_b·(1 − cosang_entry)`, which for 65 of the 129 recovered records exceeds
+`W`. Those anchors are truncated into plugs that span the wall. **§4.7 is that disclosure and it
+is escalation E-D.**
 
 ### §2.4 Test (b): what happened to `emerges`, and what replaced it
 
@@ -410,7 +491,7 @@ threshold.
 `crates/plinth-support/src/seat_zone.rs`, whose rule is *"EXEMPT A TARGET, NEVER A LENGTH. Test
 the FULL axis (`inset0 = inset1 = 0`) against the whole surface EXCEPT the seat's own contact
 zone."* With `inset0 = inset1 = 0`, `emerges(0, seated_length, policy)` reduces to
-`0 ≤ seated_length − 0.05`, which every landed strut passes — the shortest is 0.716 mm. The
+`0 ≤ seated_length − 0.05`, which every landed strut passes — the shortest is 0.574 mm. The
 defect §2.4 was written to fix stops existing at the final pass. **Landing a second
 family-specific clearance predicate for no behavioural gain is exactly what
 `retired_formula_guard.rs` exists to prevent**, and exactly what §10.3 proposes to extend that
@@ -441,12 +522,12 @@ at, and that is the one thing a reviewer should refuse** (§9.3).
 Craig's ruling is that the test is a **closed load path per physics**. That splits in two.
 
 **The half that exists.** Does the foot interface carry the load it is handed? That is the area
-law, and `contact::area_sufficient` (`contact.rs:442`) is exactly it. It is already called
-inside `contact::admit` for every other contact. **MEASURED: it refuses 0 of 152.** DERIVED, and
-worth recording because it explains why: for a foot at depth `δ`, `r_eff² = 2·1.4·r_foot·δ − δ²`,
-and with `r_foot = max(r0, 0.35)` the test holds for every `r0` up to about 0.714 mm. The
-largest `r0` in this population is 0.588. The test would bite on a fatter tip, and it is not
-vacuous — it simply does not bind here.
+law, and `contact::area_sufficient` (`contact.rs:485`) is exactly it. It is already called
+inside `contact::admit` for every other contact. **At `10b0bd8` it refused 0 of 152, because
+the depth was pinned at 0.3 mm and 0.3 mm is generous for every radius in this population.
+Under R1 the depth is no longer generous — it is exactly what the load asks for — so the same
+predicate now decides the whole rule and refuses 23 of 154.** That is the same code doing more
+work, not new code. §2.8 is its derivation.
 
 **The half that does not exist.** Does the *struck feature* carry that load onward to its own
 supports? Nothing tests this. `propagate_carried` (`cco.rs:4703-4726`) walks parent-ward and
@@ -470,7 +551,7 @@ on E-A.
 
 MEASURED, from the probe: the engine's implied area ratio, recovered from the data rather than
 retyped, is **12.000000** — `tensile_pa / (pressure_pa · SF) = 0.288e6 / (3000 · 8)`. Tip radii
-come out of the same law, so the test holds to rounding: **it refuses 0 of 152.** (An earlier
+come out of the same law, so the test holds to rounding: **it refuses 0 of 154.** (An earlier
 pass of this re-grade appeared to refuse 44; that was an absolute epsilon reading the probe's
 nine-decimal rounding as a physics failure. The comparison is relative. Recorded so the number
 is not rediscovered as a finding.)
@@ -535,24 +616,143 @@ plate-descent stub with no parent; `initial.rs:1097` collects an ungradable comm
 third gap**, distinct from the family-keying check §10.2 stage 2 already names, and it is now
 escalation §12 item 10.
 
+### §2.8 THE LOAD → ANCHOR DERIVATION, in full, with no new constant
+
+This is R1's whole content. It is written out because it is the one piece of machinery this
+document adds, and because the previous version's equivalent piece was the thing the review
+called out.
+
+**What is already registered, and what is therefore not derived here.**
+
+* The **foot radius is already load-designed.** `FrozenTipLoadPolicy::tip_radius_mm`
+  (`perception.rs:636-644`) grows `r0` until the tip attests under the area law at the engine's
+  implied ratio `X = tensile_pa / (pressure_pa × SF) = 0.288e6 / (3000 × 8) = 12`. MEASURED from
+  the probe rather than retyped: **12.000000**. The foot is then
+  `r_foot = max(r0, MIN_SHOOT_R_MM)`, the rule `initial.rs:655-657` already applies. So R1's
+  first half — "the foot radius derives from the load" — is **already true in the engine** and
+  nothing is proposed for it. The recorded `r_x` per record *is* the load-designed foot.
+* The **ball is registered**: `R_b = BALL_FACTOR_FOOT × r_foot`, `BALL_FACTOR_FOOT = 1.4`.
+* The **anchor's engaged area is registered**: `contact::ball_cut_radius_mm(r, h, f)` returns
+  `sqrt(2·f·r·h − h²)`, documented at `contact.rs:191-196` as *"the ACTUAL minimal separating
+  cut at the seat plane, which is what the area-ratio law must be evaluated on"*, for a ball of
+  radius `f·r` **whose south pole sits at the member end** and a seat plane at depth `h`.
+* The **verdict predicate is registered**: `contact::area_sufficient(carried, r_eff, policy)`
+  (`contact.rs:485`) is `!violates_safety_factor`, i.e. `carried ≤ X·π·r_eff²`.
+
+**The open half was the depth.** Given a load, how deep must the anchor go? The engine already
+answers it, for the stub tip, and the answer has a name.
+
+> `contact::ball_seat_factor` (`contact.rs:186`), **DERIVED, never hardcoded**:
+> *"Requiring that cut disc to be no narrower than the shaft above it (`a >= r_tip`) gives
+> `h >= r_tip * (f - sqrt(f^2 - 1))`."*
+
+That is PR-1 clause (c). It is pinned by unit test at `f = BALL_FACTOR_STUB = 1.5`, where it is
+`0.3819660112501051`. Evaluated at the foot's own registered factor `f = BALL_FACTOR_FOOT = 1.4`
+it is **`0.4202041028867288`**. So:
+
+> **`h_design = ball_seat_factor(BALL_FACTOR_FOOT) × r_foot = 0.4202041 × r_foot`**
+
+**Why that is the right depth and not an arbitrary one.** Two conditions must hold at the seat,
+and one of them implies the other:
+
+1. **Capacity.** `carried ≤ X·π·a²`, i.e. `a ≥ r_req` where `r_req = sqrt(carried / (X·π))`.
+   Solving `2·R_b·h − h² ≥ r_req²` gives `h ≥ R_b − sqrt(R_b² − r_req²)`.
+2. **Neck consistency (PR-1 clause (c)).** `a ≥ r_foot`, giving `h ≥ ball_seat_factor(f)·r_foot`.
+
+Grow-to-attest makes `r_req ≤ r0 ≤ r_foot`, so condition 2 always implies condition 1, and
+`h_design` is the depth the engine would build. **When `h_design` fits, the anchor's capacity is
+`X·π·r_foot²` — exactly the shaft's own capacity, which is exactly what the load required.** No
+margin is added and none is invented. That equality is why 46 of 129 recovered records show
+capacity/demand = 1.000 (§6.5).
+
+**R4 supplies the cap.** The model's extent along the seat's own line is the penetration
+interval, and its perpendicular projection is `W = chord × cosang_entry`. R4 truncates there:
+
+> **`h_eff = min(h_design, W)`**, and then
+> **(a) passes iff `carried ≤ X·π·ball_cut_radius_mm(r_foot, h_eff, 1.4)²`.**
+
+`h_eff ≤ W` is a clamp, not a test, so **the seat cannot reach the opposite face, cannot exit,
+and cannot leave a backside scar. Punch-through is impossible by construction**, and the
+construction reads one measured interval. When truncation binds, the seat is shallower than the
+design wants and the area law says whether what is left still carries. MEASURED: truncation
+binds on **40 of 154** candidates (189.233 mm²) and **17 of those 40 still carry** their load.
+
+**The two depths, and which one this design changes.** `h` above is the *perpendicular* depth of
+the seat below the entry face, because that is the plane `ball_cut_radius_mm`'s closed form cuts.
+The member advances along its own axis, so its axial advance is `t = h / cosang_entry`, and
+`h_eff ≤ W` is the same inequality as `t ≤ chord`. Both are recorded per strut (§6.2).
+
+**Scope, stated so it is not assumed wider than it is.** R1's law is applied here **at the
+foot**. It applies equally at the contact tip — the tip's own embed is
+`DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` regardless of what it carries, and
+`ball_seat_factor(1.5) × r0` would be 0.019 – 0.225 mm — but **this design does not change the
+tip embed**, because `p0 = position − unit·depth` is where every contact in the corpus starts,
+and moving it moves the condemnation window (`initial.rs:1542` measures the remaining overlap
+*from* the designed embed) on every model. That is a separate change with a separate blast
+radius and it is §12 item 15. The one place the tip's own load-sized depth is computed in this
+document is §8.3, where it settles E-C's instance, and there the verdict is the same either way.
+
+**Is a new physical relation needed? No — with one named exception.** Every step above is an
+existing registered constant, an existing DERIVED function, or an existing predicate. The
+exception is **E-D** (§4.7): when truncation clips the ball, the anchor stops being a
+half-space seat, and `ball_cut_radius_mm`'s closed form is a half-space formula. That gap is
+disclosed, bracketed with two conservative alternatives, and escalated — **not papered over,
+and not closed by minting a constant.**
+
 ---
 
 ## §3. THE SCAR BOUND — what it buys, and what it does not decide
 
-### §3.1 The claim
+### §3.1 The claim, and what R1 did to its premise
 
-> **DERIVED.** A foot seated exactly `δ = DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` into the struck
-> surface, on a member whose foot radius is at least `MIN_SHOOT_R_MM = 0.35 mm`, satisfies
-> SPEC-EMBED-POLICY rules 1, 2 and 3 **at every incidence angle and at every radius in the
-> registered range**. The same holds at the contact tip.
+`10b0bd8` claimed a closed-form bound:
 
-**MEASURED confirmation, now on real incidences rather than a worst case: test (c) refuses 0 of
-152.** The bound holds and the sweep that proved it was not optimistic.
+> ~~**DERIVED.** A foot seated exactly `δ = DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` into the struck
+> surface … satisfies SPEC-EMBED-POLICY rules 1, 2 and 3 at every incidence angle and at every
+> radius in the registered range.~~
 
-**But its role in this design is smaller than the first version claimed**, and that matters.
-§3.4 says what it is.
+**That proof's premise is gone.** Its whole argument (§3.2) turned on `T` being *pinned* at
+0.3 mm, which let both `min()` terms be bounded by constants. Under R1 the seat's axial run is
+`t = h_eff / cosang_entry`, which is not a constant — it is bounded above only by the
+interval's own chord, which R4 supplies. **So the closed-form claim is withdrawn as a proof and
+replaced by two things, one measured and one owed.**
 
-### §3.2 The proof
+**MEASURED, over the 129 recovered records, at the R1 depths:**
+
+```
+  seat axial run t          min 0.1475  p25 0.2170  med 0.2709  p75 0.3412  max 1.5031 mm
+  t / chord                 min 0.0778  p25 0.1768  med 0.3690  p75 0.8286  max 1.0000
+  foot L_scar               min 0.5955  p25 0.8468  med 0.9125  p75 1.2029  max 1.8810 mm   (cap 2.500)
+  tip  L_scar               min 0.1768  p25 0.3785  med 0.5371  p75 0.9571  max 1.2645 mm   (cap 2.500)
+  foot A_patch / A_max      min 0.1574  p25 0.2547  med 0.2895  p75 0.4630  max 0.5927
+  tip  A_patch / A_max      min 0.0153  p25 0.0653  med 0.0960  p75 0.3854  max 0.5047
+  foot A_anchor / neck      min 1.1691  p25 1.6737  med 1.8604  p75 2.0000  max 2.0000      (needs >= 1)
+  tip  A_anchor / neck      min 1.1974  p25 2.0000  med 2.4665  p75 2.9508  max 16.4790     (needs >= 1)
+```
+
+**Test (c) refuses 0 of 154, with more headroom than before, not less.** Worst rule-1 ratio
+0.593 (it was 0.841 at the old depths); worst `L_scar` 1.881 mm against a 2.500 mm cap (it was
+2.300 mm in the sweep); worst rule-3 ratio 1.169 (it was 1.2105 over the recovered population,
+so this one tightened slightly and is still clear). **The load-sized anchor is smaller in every
+scar dimension, which is the direct reason no scar anywhere in the recovered population now
+exceeds `A_ABS_MM2 = 2.0 mm²` (§6.3).**
+
+**What is owed.** The falsification sweep of §3.3 was run over `(r0, r_x)` with `T` fixed. It
+must be re-run over `(r0, r_x, T)` with `T` free in `[ball_seat_factor(1.4)·r_foot / 1,
+chord]`, before any implementation claims a bound rather than a measurement. **This document
+claims a measurement.** It is stage 1's job to produce the corpus version of it, and §10.4's
+sabotage set is what stops the bound being asserted without one.
+
+**And its role in this design is smaller than `aae1559` claimed**, which §3.4 already said and
+which R1 makes sharper: the scar rules refuse nothing, before or after.
+
+### §3.2 The proof — kept for its formulas, retired as a proof
+
+**Read this subsection as the definition of the scar quantities, not as a live guarantee.**
+Every step below assumes `T = δ = 0.3 mm`, which R1 replaced. The formulas are unchanged and
+still normative; the conclusions are superseded by §3.1's measurement and by the re-run §3.1
+names as owed.
+
 
 Write `T` for the length of the seat interval — pinned at `δ` by construction — `r_x` for the
 frustum radius at the surface crossing, `r_end` for the end radius, `R_b` for the ball radius,
@@ -595,18 +795,24 @@ incidence. Failures: 0. Worst rule 1 ratio 0.841. Worst `L_scar` 2.300 mm. Worst
 
 **The honest caveat, and a second one the first version did not state.** The rule-3 worst case at
 ratio 1.000 is a sweep artifact: it needs `r_x = r_end` with the ball wholly proud of the
-surface, which the real parameterization forbids. Evaluated over the real 120-record
-parameterization the minimum ratio is 1.2105. An implementation **must** compare with `>=`, as
-`recorded_constraints` already does, and **must** derive `r_x` from the landed frustum rather
-than the original 2.8 mm one.
+surface, which the real parameterization forbids. Evaluated over the real 129-record
+parameterization at the R1 depths the minimum ratio is **1.1691**. An implementation **must**
+compare with `>=`, as `recorded_constraints` already does, and **must** derive `r_x` from the
+landed frustum rather than the original 2.8 mm one.
 
-**The second caveat is the load-bearing one.** `A_ball = π(R_b² − d²)` is a **half-space
-formula**. It credits a spherical cap buried in one surface with no far side at all. Over the
-recovered population that term supplies most of the anchor area, so rule 3 leans on a formula
-that assumes the ball does not come out the other side. **That assumption is exactly what test
-(a)(ii) checks, and test (a)(ii) refuses 13 of 152 records.** The theorem is correct arithmetic;
-it is only applicable where the breach check has already passed. **Rule 3 must never be read as
-evidence that a foot fits. That is the breach check's job, and it is now run.**
+**The second caveat is the load-bearing one, and R4 answered half of it.** `A_ball` is a
+**half-space formula**: it credits a spherical cap buried in one surface with no far side at
+all. Over the recovered population that term supplies most of the anchor area.
+
+* **Along the seat's own line, R4 makes the assumption true by construction.** The seat is
+  truncated at the opposite face, so the cap's own depth never reaches a far side. At
+  `10b0bd8` this was policed by the foot-ball breach check, which refused 13 of 152. It is now
+  a clamp instead of a test.
+* **Laterally, it is still an assumption, and that is E-D.** At oblique incidence the buried
+  cap reaches `h_eff + R_b·(1 − cosang_entry)` below the entry face, which exceeds `W` on 65 of
+  the 129 recovered records. Where it does, the half-space picture is wrong: the anchor is a
+  plug spanning the wall, not a cap in a half-space. **Rule 3 must never be read as evidence
+  that a foot fits.** §4.7 brackets what that costs.
 
 ### §3.4 What the bound does and does not buy
 
@@ -614,15 +820,19 @@ It buys: test (c) is not a binding test, so the recovery rate is decided by geom
 stub strike thick enough material, at a good enough angle, in the right direction? — rather than
 by scar arithmetic. That is the right shape.
 
-It does not buy: **any claim that the landed struts are cheap.** The first version drew that
-inference and it does not follow. The bound proves each scar is *legal*. It says nothing about
-how large it is, and §0's table shows three of ten scars above the flat 2.0 mm² allowance,
-legal only through the radius-scaled second allowance.
+It does not buy: **any claim that the landed struts are cheap.** `aae1559` drew that inference
+and it does not follow. The bound proves each scar is *legal*. It says nothing about how large
+it is. **R1 is what made them small** — at the load-sized depths not one scar in the recovered
+population exceeds the flat 2.0 mm² allowance, where at `10b0bd8` twelve did and three of the
+ten production scars cleared only through the radius-scaled `KAPPA` branch. That is a
+measurement, not a bound, and it can move on another model.
 
-It does not buy: **any claim about the aggregate scar.** The bound bounds one scar. Five struts
-make ten scars, and each pair sits within a fraction of a millimetre of the other on either side
-of a crevice. **Nothing in the registry bounds a scar population**, and this design does not
-invent one — it discloses (§6).
+It does not buy: **any claim about the aggregate scar.** The bound bounds one scar. Nine struts
+make eighteen scars, and each pair sits within a fraction of a millimetre of the other on either
+side of a crevice. **Nothing in the registry bounds a scar population**, and this design does not
+invent one — it discloses (§6). Note the shape of the trade R1 produced: **the aggregate is
+essentially unchanged (15.249 mm² against 15.256 mm²) while the number of struts went from 5 to
+9.** Each mark is smaller; there are more of them.
 
 **And it does not buy the sentence the first version drew from it.** That version wrote:
 *"Landing does not merely rescue the stub; it makes the scar smaller."* Three things are wrong
@@ -669,18 +879,18 @@ exist yet is a **hanger**: at the moment the island prints, the strut holds noth
 contributes is a second scar. Nothing in the scar rules, the area law or the crevice measurement
 can see the difference.
 
-**MEASURED, over the 152 landing candidates:**
+**MEASURED, over the 154 landing candidates, at the R1 foot positions:**
 
 ```
-foot BELOW contact : 150 / 152
-foot ABOVE contact :   2 / 152
-dz (foot_z - contact_z): min -2.713  p25 -1.831  median -1.372  max +0.441 mm
-over the 80 RECOVERED: dz min -2.023  max -0.520 mm   (no near-degenerate cases)
+foot BELOW contact : 152 / 154
+foot ABOVE contact :   2 / 154
 ```
 
 Both hangers are island 74's small sub-patch, terminals 189 (re-plan 0) and 167 (re-plan 1),
-`dz = +0.441 mm`, `carried = 3.288 mm²` each. **They must be refused, and test (f) is what
-refuses them.**
+`carried = 3.288 mm²` each. The load-sized foot advances less far along the axis than the old
+0.3 mm foot did, so their `dz` moved from `+0.441 mm` to **`+0.355 mm`** — smaller, still
+positive, still hangers. **They must be refused, and test (f) is what refuses them.** They are
+also the only two records in the whole population that any test other than (a) refuses.
 
 **Statement, using the existing idiom and no new constant:**
 
@@ -696,13 +906,12 @@ Reusing an existing hardcoded epsilon is recorded here as small, known debt.
 1. **Whether the struck face is itself an unsupported overhang at that layer.** The foot is
    below the contact, so (f) passes, but the surface it lands on may be downward-facing with
    nothing under it when it prints. The strut then props one island on another. **P1 records the
-   struck face's outward normal, so this is now MEASURED**: of the 80 recovered records, **4
-   land on downward-facing material** (`normal_z < 0`), carrying 3.120 mm²; the struck-face
-   normal z runs min −0.130, p25 0.418, median 0.638, max 0.984. **At the production plan it is
-   0 of 5.** So on this model the concern is real but small. It is reported, not gated: whether a
+   struck face's outward normal, so this is now MEASURED**: of the 129 recovered records, **6
+   land on downward-facing material** (`normal_z < 0`), carrying 3.143 mm². **At the production
+   plan it is 0 of 9.** So on this model the concern is real but small. It is reported, not gated: whether a
    downward-facing struck face is disqualifying is a question about the *receiving* feature's own
    support, which is E-A's territory, and inventing a gate here would pre-empt Craig's ruling.
-2. **Whether the foot lands on a different connected component.** Nothing in the six tests asks
+2. **Whether the foot lands on a different connected component.** Nothing in §2.3's tests asks
    whether the struck surface belongs to the same body as the contact. `NativeSurface` is the
    whole scene. On a multi-part plate — the stated goal of this project — a landed strut would
    weld two separate minis together and every test in §2.3 would pass. **P1 cannot see this**;
@@ -716,184 +925,286 @@ Reusing an existing hardcoded epsilon is recorded here as small, known debt.
 
 ### §4.1 Method
 
-`.git/land-at-strike-p1-evidence/regrade.ts`, run against that directory's raw JSONL. For each
-of the 208 condemned records: sort its intervals; find the seat interval (start within
-`TOL_MM = 0.05` of `p0`); classify the record by what its **seat** does; then, for the records
-whose seat is sound, find the first firm strike beyond `δ` (skipping print-minimum moot
-crossings) and apply **all six** tests.
+`.git/land-at-strike-p1-evidence/regrade-r134.ts`, run against that directory's raw JSONL — the
+same evidence `10b0bd8` used, re-graded under R1, R3 and R4. `regrade.ts`, the `10b0bd8`
+grader, is kept beside it unmodified so the two tables can be diffed record by record, and
+`compare-r134.ts` does exactly that.
 
-Three method corrections against the first version:
+For each of the 208 condemned records: sort its intervals; find the seat interval (start within
+`TOL_MM = 0.05` of `p0`); apply R4 to that seat; then find the first firm strike beyond `δ`
+(skipping print-minimum moot crossings) and apply the tests of §2.3.
 
-* **All six tests are in the classifier.** The first version's classifier was
-  `ok = tA && tB && tC`, with (d), (e) and (f) reported separately in prose. Its headline table
-  therefore counted two records that its own §4.5 said were refused.
-* **A stub whose own tip never reaches the model, or whose own seat runs deep, is not a landing
-  candidate whatever its shaft does further out.** The first version's classifier and this one
-  agree on that; it is restated because a mid-repair version of this re-grade briefly let a
-  strike re-classify such a record, and the resulting partition was wrong. Recorded so the error
-  is not repeated.
-* **Every constant is read at its registered value and none is moved.** The engine's implied area
-  ratio is recovered from the data (12.000000) rather than retyped.
+Four method points, three carried forward and one new:
 
-### §4.2 The corrected recovery table
+* **Every test is in the classifier.** `ok = tA && tB && tC && tE && tF`, with `tB ≡ true` by
+  R3 and `tD` folded into `tA` by R1. Nothing is reported in prose that the table does not
+  count.
+* **A stub whose own tip never reaches the model is not a landing candidate whatever its shaft
+  does further out.** Unchanged, and it still holds 52 records out of the rule's reach (§7).
+* **A stub whose own seat runs deep IS now a candidate.** This is R4's doing: the seat is
+  truncated at the opposite face rather than condemned, so the record rejoins the population.
+  Four records move; two of them then need no landing at all.
+* **Every constant is read at its registered value and none is moved or minted.** The engine's
+  implied area ratio is recovered from the data (12.000000) rather than retyped, and
+  `ball_seat_factor` is computed from its registered factors rather than transcribed.
+
+**One correction to `10b0bd8`'s own bookkeeping.** Its shape count was defined as the number of
+distinct `(carried area, condemning overlap)` pairs, but its grader never wrote the overlap onto
+the row, so the key silently degraded to carried-area-only. Under the stated definition the
+population has **79** shapes, not 77. (77 is the number of distinct carried areas, which is why
+the wrong number looked plausible.) The corrected counts are in §4.2 and they sum.
+
+### §4.2 The recovery table under R1 + R3 + R4
 
 | class | records | shapes | carried mm² | share |
 | --- | ---: | ---: | ---: | ---: |
-| **LANDS — all six tests pass** | **80** | 36 | **279.176** | 38.5 % |
-| **STRIKES BUT MUST RE-AIM** | 72 | 24 | 368.023 | 34.6 % |
+| **LANDS — every test passes** | **129** | 57 | **467.067** | 62.0 % |
+| **STRIKES, ANCHOR CANNOT CARRY — must re-aim** | 25 | 6 | 182.239 | 12.0 % |
 | **TIP NEVER EMBEDS — a different defect** | 52 | 15 | 107.498 | 25.0 % |
-| **SEAT RUNS DEEP — stays condemned** | 4 | 3 | 3.421 | 1.9 % |
-| **total** | **208** | **77** | **758.118** | |
+| **SEAT TRUNCATED, NOTHING BEYOND — legal outright** | 2 | 1 | 1.314 | 1.0 % |
+| **total** | **208** | **79** | **758.118** | |
 
-A *shape* here is one (carried area, condemning overlap) pair, defined once over the whole
-population so the per-class counts sum to the total. The first version reported 78 by summing
-per-class sets; the population has 77.
-
-### §4.3 Why the strikers fail
+**Against `10b0bd8`'s 80 / 279.176, record by record (`compare-r134.ts`):**
 
 ```
-per-test refusals over the 152 landing candidates
-  (a)(i)  perpendicular wall < 0.3 mm      59   278.281 mm2
-  (a)(ii) foot ball breaches               13    94.450 mm2
-  (b)     crevice < 0.05 mm                 2     0.065 mm2
-  (c)     scar rules, either end            0     0.000 mm2
-  (d)     foot interface area law           0     0.000 mm2
-  (e)     tip section area law              0     0.000 mm2
-  (f)     foot above its own contact        2     6.576 mm2
+  LOST   (recovered at 10b0bd8, refused now) :  0 records,   0.000 mm2
+  GAINED (refused at 10b0bd8, recovered now) : 49 records, 187.891 mm2
+     refused by (a)(i), the flat 0.3 mm wall  : 34 records,  99.881 mm2   <- R1
+     refused by (a)(ii), the foot-ball breach : 11 records,  85.207 mm2   <- R4
+     refused by both                          :  2 records,   2.738 mm2
+     refused by (b), crevice < 0.05 mm        :  2 records,   0.065 mm2   <- R3
+     classed DEEP_PLUG, condemned outright    :  2 records,   2.106 mm2   <- R4
+```
+
+**This is a strict admission, and that is the single most important structural fact about the
+rulings.** Nothing that recovered before is refused now. Nothing that any test refused before is
+refused by a *different* test now. Each ruling deletes a refusal and nothing replaces it.
+
+### §4.3 Why the residue fails
+
+```
+per-test refusals over the 154 landing candidates
+  (a)  load-sized truncated anchor capacity   23   175.662 mm2
+  (b)  crevice width           [R3: inert]     0     0.000 mm2
+  (c)  scar rules, either end                  0     0.000 mm2
+  (e)  tip section area law                    0     0.000 mm2
+  (f)  foot above its own contact              2     6.576 mm2
 
 first-and-only failure, by combination
-  wall only                    55   266.932 mm2
-  breach only                   9    83.100 mm2
-  wall AND breach               4    11.349 mm2
-  crevice only                  2     0.065 mm2
+  anchor capacity only         23   175.662 mm2
   build order only              2     6.576 mm2
 ```
 
-**Read that as the design's own summary of itself.** The rule is decided almost entirely by
-test (a) — whether the struck material is thick enough, and whether the foot's ball fits inside
-it. The scar rules, both area laws and build order together refuse 4 records. The first version
-graded on the three tests that refuse nothing and omitted the one that refuses everything.
+**The partition is now clean in a way it was not before.** Every re-aim is a re-aim for one of
+exactly two reasons: the material where the stub struck cannot hold an anchor that carries the
+load, or the stub is a hanger. There is no residual "thin wall" class, because thin is no longer
+a category — it is an input to a capacity calculation.
 
-**Say it plainly: tests (c), (d) and (e) each refuse 0 of the 152 landing candidates.** Test (a)
-decides 68 of the 72 re-aims on its own (55 wall-only, 9 breach-only, 4 both); (b) and (f) decide
-2 each. The scar rules, the foot area law and the tip area law decide nothing on this model.
+**And the walls that refuse are genuinely knife-edges.** MEASURED over the 23 capacity failures:
+`W` runs min 0.014, p25 0.014, median 0.037, p75 0.049, **max 0.122 mm**. Every one is under
+twice the ratified print minimum for solid material. The reviewer's grazing-incidence
+justification for `10b0bd8`'s wall clause is preserved in full — those knife-edges are still
+refused — but it is now delivered by physics rather than by a borrowed constant.
+
+**Say it plainly, as the reviewer required: (c) and (e) refuse nothing, and (b) can no longer
+refuse anything.** Test (a) decides 23 of the 25 re-aims on its own; (f) decides 2. The scar
+rules and the tip area law decide nothing on this model.
 
 ### §4.4 Per re-plan
 
-| re-plan | condemned | lands | re-aim | tip never embeds | seat runs deep | carried | landed carried |
+| re-plan | condemned | lands | re-aim | tip never embeds | seat truncated, no landing | carried | landed carried |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 59 | 28 | 18 | 11 | 2 | 128.07 | 49.06 |
-| 1 | 57 | 26 | 18 | 11 | 2 | 120.41 | 46.31 |
-| 2 | 18 | 5 | 7 | 6 | 0 | 101.61 | 36.68 |
-| 3 | 18 | 5 | 7 | 6 | 0 | 101.61 | 36.68 |
-| 4 | 19 | 5 | 8 | 6 | 0 | 102.77 | 36.68 |
-| 5 | 19 | 6 | 7 | 6 | 0 | 102.03 | 37.09 |
-| **6 (production plan)** | **18** | **5** | **7** | **6** | **0** | **101.61** | **36.68** |
+| 0 | 59 | 42 | 5 | 11 | 1 | 128.07 | 69.47 |
+| 1 | 57 | 40 | 5 | 11 | 1 | 120.41 | 72.79 |
+| 2 | 18 | 9 | 3 | 6 | 0 | 101.61 | 64.65 |
+| 3 | 18 | 9 | 3 | 6 | 0 | 101.61 | 64.65 |
+| 4 | 19 | 10 | 3 | 6 | 0 | 102.77 | 65.81 |
+| 5 | 19 | 10 | 3 | 6 | 0 | 102.03 | 65.06 |
+| **6 (production plan)** | **18** | **9** | **3** | **6** | **0** | **101.61** | **64.65** |
 
-The production plan is stable across re-plans 2-6. The seat-runs-deep class **vanishes** once the
-controller re-plans: it exists only in the first two.
+The production plan is stable across re-plans 2-6, as before. The seat-truncated class still
+exists only in the first two re-plans.
 
 ### §4.5 The production plan, stub by stub
 
 ```
-LANDS  (5 stubs, 36.678 mm2)
-  t87  isl 69  carried 11.879  wall 0.895  cos_in 0.978  crevice 1.585  L' 2.185  no breach
-  t142 isl 70  carried  5.984  wall 1.887  cos_in 0.907  crevice 0.419  L' 1.019  no breach
-  t157 isl 71  carried  9.974  wall 0.302  cos_in 0.592  crevice 0.174  L' 0.774  no breach
-  t173 isl  0  carried  0.825  wall 0.701  cos_in 0.617  crevice 1.364  L' 1.964  no breach
-  t215 isl 48  carried  8.016  wall 0.374  cos_in 0.625  crevice 1.004  L' 1.604  no breach
+LANDS  (9 stubs, 64.647 mm2)                         W = model thickness along the seat's line
+  t87  isl 69  carried 11.879  W 0.895  h_des 0.236  h_eff 0.236   cap 11.879  crevice 1.585  L' 2.126
+  t100 isl  8  carried  0.715  W 0.094  h_des 0.147  h_eff 0.094*  cap  3.137  crevice 0.782  L' 1.464
+  t142 isl 70  carried  5.984  W 1.887  h_des 0.167  h_eff 0.167   cap  5.984  crevice 0.419  L' 0.904
+  t157 isl 71  carried  9.974  W 0.302  h_des 0.216  h_eff 0.216   cap  9.974  crevice 0.174  L' 0.839
+  t162 isl 74  carried 13.019  W 0.341  h_des 0.247  h_eff 0.247   cap 13.019  crevice 0.740  L' 1.375  <- ISLAND 74
+  t173 isl  0  carried  0.825  W 0.701  h_des 0.147  h_eff 0.147   cap  4.618  crevice 1.364  L' 1.902
+  t186 isl  0  carried  6.306  W 0.177  h_des 0.172  h_eff 0.172   cap  6.306  crevice 1.156  L' 1.799
+  t215 isl 48  carried  8.016  W 0.374  h_des 0.194  h_eff 0.194   cap  8.016  crevice 1.004  L' 1.614
+  t281 isl 68  carried  7.929  W 0.210  h_des 0.193  h_eff 0.193   cap  7.929  crevice 0.763  L' 1.352
+                                                      * = truncated at the opposite face by R4
 
-MUST RE-AIM  (7 stubs, 51.882 mm2)
-  t100 isl  8  carried  0.715  wall 0.094   too thin
-  t154 isl 66  carried 12.661  wall 0.037   too thin
-  t162 isl 74  carried 13.019  wall 0.341   FOOT BALL BREACHES, poke 0.241   <- ISLAND 74
-  t186 isl  0  carried  6.306  wall 0.177   too thin
-  t229 isl 65  carried  6.800  wall 0.014   too thin
-  t231 isl  3  carried  4.453  wall 0.049   too thin
-  t281 isl 68  carried  7.929  wall 0.210   too thin
+MUST RE-AIM  (3 stubs, 23.914 mm2)
+  t154 isl 66  carried 12.661  W 0.037  h_eff 0.037  capacity  2.228  -- anchor cannot carry
+  t229 isl 65  carried  6.800  W 0.014  h_eff 0.014  capacity  0.621  -- anchor cannot carry
+  t231 isl  3  carried  4.453  W 0.049  h_eff 0.049  capacity  1.727  -- anchor cannot carry
 
-TIP NEVER EMBEDS  (6 stubs, 13.053 mm2) — see §7
+TIP NEVER EMBEDS  (6 stubs, 13.053 mm2) — see §7, unchanged
   t115 isl 47  1.962     t256 isl  7  1.419     t273 isl 51  3.258
   t275 isl 72  3.434     t277 isl 51  2.742     t284 isl  7  0.238
 ```
 
-Note t157: it lands, and its struck wall is **0.302 mm** — 2 µm above the requirement — while
-its crevice is **0.174 mm**, inside Craig's weld line. It carries 9.974 mm², 27.2 % of the
-production prize. It is the single most marginal recovered strut in the plan and it is the one
-§0 ask 4 is really about.
+**Four stubs moved from re-aim to lands: t100, t162, t186, t281**, 27.969 mm² between them.
+t100 is the only production strut whose seat R4 truncates — it wants 0.147 mm and the wall gives
+it 0.094 mm, which still carries its 0.715 mm² with a capacity of 3.137 mm².
+
+Note t157 again, because `10b0bd8` made it the marginal case: at the old flat depth its wall
+cleared 0.300 mm by 2 µm. Under R1 it asks for 0.216 mm of a 0.302 mm wall and clears by 86 µm.
+**It is no longer marginal on wall thickness at all** — what it still is, is the production
+strut sitting in a 0.174 mm crevice, and R3 is why it lands and is disclosed rather than left
+open.
 
 ### §4.6 Island 74, in full
 
-Nine condemned records touch island 74 across the seven re-plans. **None of them lands.** Two
+Nine condemned records touch island 74 across the seven re-plans. **Seven of them land.** Two
 distinct shapes:
 
-| shape | re-plans | carried | strike | axial chord | cos at entry | **wall** | foot ball `R_b` | engine far wall | **poke** | verdict |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| t184 / t162 | 0-6 | 8.996 → **13.019** | 1.0398 | 0.4629 | 0.7374 | **0.3414** | 0.6839 → **0.8227** | 0.5815 | 0.102 → **0.241** | **BREACHED — refused by (a)(ii)** |
-| t189 / t167 | 0-1 only | 3.288 | 0.4550 | 0.7386 | 0.9632 | 0.7113 | 0.4900 | 0.4429 | 0.000 | **foot ABOVE contact — refused by (f)** |
+| shape | re-plans | carried | `r0 = r_foot` | `R_b` | axial chord | cos at entry | `W` | `h_design` | `h_eff` | `a_eff` | capacity | verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| t184 / t162 | 0-1 | 8.996 | 0.4885 | 0.6839 | 0.4629 | 0.7374 | 0.3413 | 0.2053 | 0.2053 | 0.4885 | 8.9955 | **LANDS** |
+| t162 | **2-6** | **13.019** | 0.5877 | 0.8227 | 0.4629 | 0.7374 | 0.3413 | 0.2469 | 0.2469 | 0.5877 | **13.0188** | **LANDS** |
+| t189 / t167 | 0-1 only | 3.288 | 0.2953 | 0.4900 | 0.7386 | 0.9627 | 0.7110 | 0.1471 | 0.1471 | 0.3500 | 4.6181 | **foot ABOVE contact — refused by (f)** |
 
-The scar rules **pass** on the production shape: `A_patch 2.460 / A_max 2.658` (through the KAPPA
-branch), `L_scar 1.475 / 2.500`, `A_anchor 3.192 ≥ neck 1.085`. Build order passes,
-`dz = −1.339`. Test (d) and test (e) pass. **It is refused by one test, and that test is the one
-the first version did not run.**
-
-**Answer to the question that started this lane: no, not by landing.** Island 74's stub strikes
-material 0.341 mm thick, and the foot the load requires puts a 1.65 mm ball into it that comes
-out the far side by 0.241 mm. DERIVED from the MEASURED far-wall distance of 0.5815 mm, plus the
-registered breach epsilon `ball_breach_eps_mm = 0.05` (`placeholders.rs:991`): the breach clears
-only for a foot ball radius `R_b ≤ 0.5815 + 0.05 = 0.6315 mm`, which caps the foot radius at
-`r_foot ≤ 0.451 mm`, which gives a ball-cut radius of `0.5375 mm` and a capacity of about
-**10.888 mm²**. Island 74 needs 13.019 mm². **No foot that can carry the island fits in the wall
-the stub hit. Island 74 must be re-aimed or re-seated, and that is SPEC-P8-RELOCATE's job, not
-this rule's.**
-
-### §4.7 Spreads over the recovered population
+**Answer to the question that started this lane: yes, by landing — and by exactly the two
+rulings that were made for it.** `10b0bd8` refused island 74 because the foot the load required
+put a 1.645 mm ball centre-deep into a 0.341 mm wall and the engine's own `sphere_breach`
+reported it 0.241 mm out the far side. R1 says the foot is not driven centre-deep; it is driven
+`ball_seat_factor(1.4) × 0.5877 = 0.2469 mm`, which is 72 % of the wall it hit. R4 says that
+even if it wanted more, it would stop at the far face rather than come through it. On those two
+rulings the stub lands, and the arithmetic is:
 
 ```
-crevice                    min 0.116  p25 0.419  median 0.815  p75 1.270  max 1.807 mm
-landed length L'           min 0.716  p25 1.019  median 1.415  p75 1.870  max 2.407 mm
-PERPENDICULAR struck wall  min 0.302  p25 0.399  median 0.807  p75 1.069  max 1.891 mm
-axial chord                min 0.510  p25 0.857  median 1.184  p75 1.814  max 2.383 mm
-entry incidence cosang     min 0.204  p25 0.591  median 0.625  p75 0.907  max 0.997
-foot scar A_patch          min 0.642  p25 0.795  median 0.884  p75 1.553  max 2.110 mm2
-tip  scar A_patch          min 0.033  p25 0.101  median 0.167  p75 1.625  max 2.448 mm2
-carried area               min 0.002  p25 0.413  median 0.915  p75 7.940  max 11.879 mm2
+  demand    carried_mm2                                = 13.018786 mm2
+  shaft     r0 from FrozenTipLoadPolicy at X = 12       =  0.587651 mm
+  foot      r_foot = max(r0, MIN_SHOOT_R_MM)            =  0.587651 mm   (not clamped)
+  ball      R_b = BALL_FACTOR_FOOT * r_foot             =  0.822712 mm
+  wall      W = chord 0.462902 * cos_entry 0.737412     =  0.341350 mm
+  depth     h_design = ball_seat_factor(1.4) * r_foot   =  0.246933 mm
+  R4        h_eff = min(h_design, W)                    =  0.246933 mm   NOT TRUNCATED
+  cut       a_eff = ball_cut_radius_mm(r_foot, h_eff)   =  0.587651 mm
+  capacity  X * pi * a_eff^2                            = 13.018786 mm2
+  ratio     capacity / demand                           =  0.999999999
+```
 
-crevice >= SPACING_FLOOR_MM (2.5 mm)      :   0 / 80
-crevice <  0.30 mm (Craig's weld line)    :  14 / 80   69.369 mm2
-records carrying a scar above 2.0 mm2     :  12 / 80
-records landing on downward-facing material:  4 / 80    3.120 mm2
+**The margin is zero, and the design says so rather than rounding it away.** `a_eff` comes out
+exactly equal to `r_foot` because that is what `ball_seat_factor` is *for* — it is the depth at
+which the seat matches the shaft. And the shaft was sized to exactly carry the load. So the
+anchor carries the load exactly, no more, and the pass is delivered by the same relative
+tolerance the area law is compared under everywhere else in the engine (test (e) needs it for
+the same reason: the probe records `r0` to nine decimals). **If a reviewer wants a margin here,
+the place to put it is the load law's own safety factor, which is already inside `X = 12`, not a
+new number bolted onto this rule.** §6.5 discloses the whole zero-margin population.
+
+**What island 74 does NOT get from this.** Its foot ball is 1.645 mm across in a 0.341 mm wall,
+so at 42° the buried cap reaches 0.463 mm below the entry face and R4 truncates it: **the anchor
+is a plug that spans the wall.** The joint is priced. The wall around the plug is not. That is
+E-D (§4.7), and island 74 is its largest instance. Under the two conservative brackets of §4.7
+island 74 does **not** land (capacity 7.181 mm² or 4.889 mm² against 13.019 mm² demanded), so
+**this is the record whose verdict the gap actually decides**, and the design reports both
+numbers rather than choosing the flattering one.
+
+### §4.7 E-D — the derivation gap, bracketed
+
+**Where the arithmetic stops.** `ball_cut_radius_mm` is a half-space formula. It prices a cap
+buried in one surface with no far side. R4 guarantees no far side **along the seat's own line**.
+It does not guarantee one **laterally**: at incidence `c` the buried cap reaches
+`h_eff + R_b·(1 − c)` below the entry face, and where that exceeds `W` the anchor is truncated
+into a plug spanning the wall rather than a cap in a half-space.
+
+**MEASURED:**
+
+```
+  recovered records whose foot ball is clipped by the opposite face : 65 / 129   314.362 mm2
+  at the production plan                                            :  6 / 9      45.959 mm2
+                                                (t100 t157 t162 t186 t215 t281; t87 t142 t173 are not)
+```
+
+**Why the design grades the way it does, and why that is not the flattering choice by default.**
+Truncating a ball at the far face removes material on the deep side. It does **not** reduce the
+minimal separating cut at the entry plane, which is what the area law is evaluated on — if
+anything the entry-plane cut of an obliquely driven ball is *larger* than the closed form
+credits. So a "conservative" grading that docks capacity for clipping would be **inventing a
+penalty**, not applying an existing law conservatively. What clipping really does is move the
+failure mode: from the joint, which the area law prices, to **the wall around the plug, which
+nothing prices**. That is E-A's question — *does the struck feature carry the load onward?* —
+with a sharper instance and a bigger count.
+
+**The bracket, so the exposure is a number and not a worry.** Two alternative truncation
+geometries, both computable from the same measured evidence, both stricter than the one this
+design uses:
+
+| grading | what it assumes | records | carried |
+| --- | --- | ---: | ---: |
+| **as graded** (§2.8) | the seat is capped at `W`; the entry-plane cut is what carries | **129** | **467.067 mm²** |
+| ball must fit uncut | credit only the depth whose whole ball stays inside `W` | 70 | 154.654 mm² |
+| inscribed sphere | cap the depth at the interval's MEASURED `max_depth` — the largest sphere that fits inside the struck feature anywhere on the strike interval | 93 | 177.092 mm² |
+
+**So E-D is worth up to 59 records and 312 mm², and it is the widest open number in this
+document.** It is escalation §12 item 16. Note that both brackets fall *below* `10b0bd8`'s
+80 / 279.18, so this is not a case where the answer is "somewhere between the old and the new
+table" — the gap is genuinely two-sided and only a physical answer closes it.
+
+**What would close it.** Not a constant. Either (i) a kernel query for the minimal separating
+cut of a truncated seat, which is a real geometric quantity the kernel could compute, or
+(ii) Craig's ruling that a plug spanning a wall is acceptable — which is the same ruling E-A
+wants and which stage 1's corpus instance count is meant to inform.
+
+### §4.8 Spreads over the recovered population
+
+```
+crevice                    min 0.046  p25 0.432  median 0.782  p75 1.162  max 2.344 mm
+landed length L'           min 0.574  p25 0.991  median 1.410  p75 1.799  max 2.800 mm
+seat depth h_eff           min 0.063  p25 0.147  median 0.147  p75 0.193  max 0.247 mm
+wall W at the strike       min 0.063  p25 0.210  median 0.399  p75 0.895  max 1.891 mm
+entry incidence cosang     min 0.084  p25 0.486  median 0.617  p75 0.737  max 0.997
+foot scar A_patch          min 0.315  p25 0.509  median 0.579  p75 0.926  max 1.478 mm2
+tip  scar A_patch          min 0.031  p25 0.131  median 0.192  p75 0.771  max 1.463 mm2
+carried area               min 0.002  p25 0.475  median 1.187  p75 7.929  max 13.019 mm2
+capacity / demand          min 1.000  p25 1.000  median 3.466  p75 9.718  max 2760.9
+
+crevice >= SPACING_FLOOR_MM (2.5 mm)       :   0 / 129
+crevice <  0.30 mm (Craig's weld line)     :  18 / 129   69.535 mm2   [R3: landed and disclosed]
+records carrying a scar above 2.0 mm2      :   0 / 129
+records landing on downward-facing material:   6 / 129    3.143 mm2
+records whose foot ball is clipped (E-D)   :  65 / 129  314.362 mm2
+records at capacity/demand = 1.000         :  46 / 129  405.076 mm2
 ```
 
 ---
 
-## §5. THE RE-AIM FALLBACK, AND WHY IT IS NOW THE LARGER JOB
+## §5. THE RE-AIM FALLBACK, NOW THE SMALLER JOB AGAIN
 
 ### §5.1 What is left for re-aim
 
-**72 records, 24 distinct shapes, 368.023 mm² carried; 7 stubs and 51.882 mm² at the production
-plan — including island 74.** They divide by first-and-only failure as follows, and not one of
-them is a scar failure:
+**25 records, 6 distinct shapes, 182.239 mm² carried; 3 stubs and 23.914 mm² at the production
+plan — and island 74 is no longer among them.** They divide by first-and-only failure into
+exactly two rows:
 
 | reason | records | carried | reading |
 | --- | ---: | ---: | --- |
-| the struck material is thinner than a standard foot | 55 | 266.932 | firm material, above the 0.08 mm print minimum, but under the 0.3 mm foot depth: foliage knife-edges |
-| the foot ball would come out the far side | 9 | 83.100 | the depth fits; the ball does not. **Island 74 is here** |
-| both of the above | 4 | 11.349 | |
-| the crevice is under 0.05 mm | 2 | 0.065 | the stub grazes tangentially, emerges for 46 µm, then plunges into thick solid |
+| the anchor the load requires cannot be built in the material struck | 23 | 175.662 | `W` runs 0.014 – 0.122 mm: firm material above the 0.08 mm print minimum, but knife-edges. The refusal is a capacity calculation, not a threshold |
 | the foot would sit above its own contact | 2 | 6.576 | the hangers of §3.6 |
 
-**This is a clean, physical partition**, and it is what the first version got wrong twice over:
-it put all 32 of its re-aim class in the "too thin" row when 2 were the tangential graze, and it
-had 40 records in the wrong class entirely.
+**This is a cleaner partition than `10b0bd8`'s five rows**, and the reason is R1: "the wall is
+too thin" and "the ball does not fit" and "the crevice is too narrow" were three different
+proxies for one question, which is whether the load can be carried where the stub arrived.
+There is now one question and it is answered in the units of the thing being decided.
 
-**Re-aim now carries more of the load than landing does** — 368 mm² against 279 mm², and 7 of 18
-production stubs against 5. The first version projected 3 of 18. That reverses the two lanes'
-priority and §10 restages accordingly.
+**Re-aim carries far less than landing does** — 182 mm² against 467 mm², and 3 of 18 production
+stubs against 9. `10b0bd8` had it at 7 of 18 and called re-aim the larger lane; the rulings
+reverse that back. §10 restages accordingly, and the practical consequence is that **stage 5
+(re-aim) is now a residue lane, not the main event.**
 
-### §5.2 The dependency on SPEC-P8-RELOCATE R1, stated honestly
+### §5.2 The dependency on SPEC-P8-RELOCATE's R1 (the re-aim), stated honestly
 
-R1 is adopted unchanged in its search, its pinned enumerations (`P8_REAIM_POLAR_DEG =
+**Throughout this subsection "R1" means the SPEC's re-aim ladder step, not Craig's load-sized
+anchor ruling** (§1.3). The re-aim is adopted unchanged in its search, its pinned enumerations (`P8_REAIM_POLAR_DEG =
 (0, 10, 20, 30)`, `P8_REAIM_AZIMUTH_DEG = (0..315 step 45)`, `P8_REAIM_LENGTH_FACTORS =
 (1.0, 0.75, 0.5)`, ≤ 75 candidates), its global lexicographic minimum, and its resin guards. All
 five `P8_REAIM_*` values and the pocket pad stay exactly where they are.
@@ -928,13 +1239,15 @@ recorded, not amended.
 
 ### §5.3 What stays honestly condemned
 
-**Four records, three distinct shapes, 3.421 mm², zero at the production plan.** These are the
-deep seats of §8. After landing and re-aim, and setting aside the tip defect of §7, the honestly
-condemned residue on the Rotting Warhorse is **empty at the production plan** — but only if
-re-aim succeeds on all seven of its stubs, which is not measured and must not be assumed.
+**Nothing, on this model, for a seat reason.** R4 dissolved the deep-seat class: its 4 records
+become 2 that are legal outright and 2 that land (§8.3). After landing and re-aim, and setting
+aside the tip defect of §7, the honestly condemned residue on the Rotting Warhorse is **empty at
+the production plan** — but only if re-aim succeeds on all three of its remaining stubs, which
+is not measured and must not be assumed.
 
-The `BlockedCause::StubReentry` class (`coverage_closure.rs:375-381`) must therefore **survive**
-— it stays the right name for the residue.
+The `BlockedCause::StubReentry` class (`coverage_closure.rs:375-381`) must therefore still
+**survive** — it stays the right name for whatever the re-aim cannot place, and stage 2's gate
+requires it to fire non-zero on this model until stage 5 lands.
 
 ---
 
@@ -965,16 +1278,23 @@ Emitted for every landed strut, alongside its existing condemnation/route record
 
 | field | value | derived from |
 | --- | --- | --- |
-| `crevice_width_mm` | `s* − δ` | MEASURED, the interval sweep |
-| `strut_length_mm` | `L' = s* + δ` | DERIVED |
-| `strut_r_tip_mm`, `strut_r_foot_mm` | `r0`, `max(r0, MIN_SHOOT_R_MM)` | DERIVED |
-| `struck_wall_perpendicular_mm` | `chord × cosang_entry` | MEASURED |
+| `crevice_width_mm` | `s* − δ` | MEASURED, the interval sweep. **R3: disclosed, never gates** |
+| `strut_length_mm` | `L' = s* + t` | DERIVED |
+| `strut_r_tip_mm`, `strut_r_foot_mm` | `r0`, `max(r0, MIN_SHOOT_R_MM)` | DERIVED, load-sized |
+| `struck_wall_perpendicular_mm` | `W = chord × cosang_entry` | MEASURED |
+| `anchor_depth_design_mm` | `h_design = ball_seat_factor(1.4) × r_foot` | DERIVED, §2.8. **R1** |
+| `anchor_depth_effective_mm`, `anchor_truncated` | `h_eff = min(h_design, W)`, and whether the `min` bound | DERIVED. **R4** |
+| `anchor_cut_radius_mm`, `anchor_capacity_mm2`, `anchor_margin` | `a_eff`, `X·π·a_eff²`, `capacity / carried` | `ball_cut_radius_mm` + `area_sufficient`. **`anchor_margin = 1.000` is expected, not an error — §6.5** |
 | `struck_face_normal_z` | the struck face's outward normal, Z component | MEASURED, P1 |
 | `foot_ball_radius_mm` | `BALL_FACTOR_FOOT · r_foot` | registered, 1.4 |
-| `foot_ball_breached`, `foot_poke_depth_mm` | the engine's own verdict | MEASURED, plumbed |
+| `foot_ball_clipped`, `ball_reach_mm` | whether `h_eff + R_b(1 − cosang_entry) > W`, and by how much | DERIVED. **This is E-D's per-record disclosure and it must be emitted** |
 | `strut_volume_mm3`, `in_crevice_volume_mm3` | frustum volumes | DERIVED |
-| `tip_scar_mm2`, `foot_scar_mm2`, and which allowance each clears through | §3's formulas on measured inputs | DERIVED |
+| `tip_scar_mm2`, `foot_scar_mm2`, and which allowance each clears through | §3's formulas on measured inputs at the R1 depths | DERIVED |
 | `reach` | `Unknown` if `crevice_width_mm ≥ SPACING_FLOOR_MM`, else `PermanentUnlessMeasured` | **the only registered removal-ergonomics distance, used for disclosure only** |
+
+**`foot_ball_breached` and `foot_poke_depth_mm` are gone from this record**, because R4 makes
+them constants: `false` and `0.0`. Emitting a field that can only take one value is how a
+retired check comes back to life by accident.
 
 **`reach` never gates anything.** It is a label on a report. The two values are deliberately
 named so that neither reads as a clean bill of health: even the wide case is `Unknown`, because
@@ -982,50 +1302,104 @@ named so that neither reads as a clean bill of health: even the wide case is `Un
 
 ### §6.3 What the measurement says
 
-**MEASURED, production plan (5 landed struts):**
+**MEASURED, production plan (9 landed struts), at the R1 depths:**
 
 ```
- t87  crevice 1.585  L' 2.185  r 0.561 -> 0.561  wall 0.895  foot scar 2.110  tip scar 2.448
- t142 crevice 0.419  L' 1.019  r 0.398 -> 0.398  wall 1.887  foot scar 0.964  tip scar 1.369
- t157 crevice 0.174  L' 0.774  r 0.514 -> 0.514  wall 0.302  foot scar 1.936  tip scar 2.041
- t173 crevice 1.364  L' 1.964  r 0.148 -> 0.350  wall 0.701  foot scar 0.917  tip scar 0.167
- t215 crevice 1.004  L' 1.604  r 0.461 -> 0.461  wall 0.374  foot scar 1.553  tip scar 1.750
+ t87  crevice 1.585  L' 2.126  r 0.561 -> 0.561  h_eff 0.236  foot scar 1.261 [KAPPA]  tip scar 1.333 [KAPPA]  across 1.267 / 1.303 mm
+ t100 crevice 0.782  L' 1.464  r 0.181 -> 0.350  h_eff 0.094  foot scar 0.487 [A_ABS]  tip scar 0.163 [A_ABS]  across 0.787 / 0.455 mm
+ t142 crevice 0.419  L' 0.904  r 0.398 -> 0.398  h_eff 0.167  foot scar 0.646 [A_ABS]  tip scar 0.762 [A_ABS]  across 0.907 / 0.985 mm
+ t157 crevice 0.174  L' 0.839  r 0.514 -> 0.514  h_eff 0.216  foot scar 1.207 [KAPPA]  tip scar 1.152 [KAPPA]  across 1.240 / 1.211 mm
+ t162 crevice 0.740  L' 1.375  r 0.588 -> 0.588  h_eff 0.247  foot scar 1.478 [KAPPA]  tip scar 1.463 [KAPPA]  across 1.372 / 1.365 mm
+ t173 crevice 1.364  L' 1.902  r 0.180 -> 0.350  h_eff 0.147  foot scar 0.540 [A_ABS]  tip scar 0.170 [A_ABS]  across 0.829 / 0.466 mm
+ t186 crevice 1.156  L' 1.799  r 0.409 -> 0.409  h_eff 0.172  foot scar 0.805 [A_ABS]  tip scar 0.771 [A_ABS]  across 1.013 / 0.991 mm
+ t215 crevice 1.004  L' 1.614  r 0.461 -> 0.461  h_eff 0.194  foot scar 0.954 [A_ABS]  tip scar 0.945 [A_ABS]  across 1.102 / 1.097 mm
+ t281 crevice 0.763  L' 1.352  r 0.459 -> 0.459  h_eff 0.193  foot scar 0.926 [A_ABS]  tip scar 0.186 [A_ABS]  across 1.086 / 0.487 mm
 
- total resin           4.790 mm3 = 0.0048 mL
- new model scars       10 scars (a foot and a tip per strut), 15.256 mm2
- above A_ABS_MM2 = 2.0 3 of 10, clearing only through the KAPPA allowance
- reach                 5 / 5  PermanentUnlessMeasured
+ total resin           8.318 mm3 = 0.0083 mL
+ new model scars       18 scars (a foot and a tip per strut), 15.249 mm2
+ above A_ABS_MM2 = 2.0 0 of 18            <- it was 3 of 10 at 10b0bd8
+ largest single scar   1.478 mm2, 1.372 mm across   <- it was 2.448 mm2, 1.77 mm across
+ reach                 9 / 9  PermanentUnlessMeasured
+ ball clipped (E-D)    6 / 9, carrying 45.959 mm2
 ```
 
-Over the whole 80-record recovered population: **0 of 80** crevices reach 2.5 mm. The widest is
-1.807 mm. **On the honest reading every landed strut on this model is permanent.**
+**The trade R1 produced, stated plainly for pricing.** The strut count went from 5 to 9 and the
+carried area from 36.68 mm² to 64.65 mm². **The aggregate scar area did not move** — 15.249 mm²
+against 15.256 mm² — because every anchor is shallower and narrower. **Not one of the 18 scars
+needs the `KAPPA` allowance to be legal**, where three of ten did before, and the largest is now
+1.37 mm across against the 1.60 mm equivalent diameter Craig ratified `A_ABS_MM2` on. Escalation
+item 2 of `10b0bd8` — *"three of ten production scars exceed the 2.0 mm² allowance"* — is
+**dissolved by R1**, and over the whole 129-record recovered population the count above 2.0 mm²
+is **0**.
+
+Over the whole 129-record recovered population: **0 of 129** crevices reach 2.5 mm. The widest is
+2.344 mm. **On the honest reading every landed strut on this model is permanent**, which is what
+R2 accepts as disclosed.
 
 ### §6.4 The four things a reader should not conclude
 
-1. **Not "the scars are fine because each is under 2.0 mm²".** Three of ten are not. Those clear
-   only through `KAPPA × A_design`, which grows with the foot radius, and the 2.0 mm² allowance
-   was ratified for *one* scar with the reason *"caps the scar at 1.60 mm equivalent
-   diameter… inside the buff/fill/paint class"*. t87's tip scar is 1.77 mm across.
-2. **Not "0.0048 mL is negligible".** The resin volume is negligible. The visual result of five
-   permanent bridges across five crevices on a mini is a different question, and it is not a
-   volume question. And **nothing registered bounds a scar population.**
+1. **Not "the scars are fine because they are all under 2.0 mm² now".** They are — 0 of 18 at
+   production, 0 of 129 over the whole recovered population, largest 1.478 mm² and 1.372 mm
+   across, comfortably inside the *"1.60 mm equivalent diameter… inside the buff/fill/paint
+   class"* rationale Craig ratified `A_ABS_MM2` on. **But that is a measurement on one model at
+   one set of loads, not a bound.** §3.1 withdrew the bound; a fatter load on another model
+   raises `r_foot`, raises `R_b`, and can put a scar back over 2.0 mm² through the `KAPPA`
+   branch. Stage 1 is what turns this into a corpus number.
+2. **Not "0.0083 mL is negligible".** The resin volume is negligible. The visual result of nine
+   permanent bridges across nine crevices on a mini is a different question, and it is not a
+   volume question. And **nothing registered bounds a scar population.** There are now 18 marks
+   where `10b0bd8` costed 10.
 3. **Not "we can measure our way out of this cheaply".** The flush-cutter measurement is
    escalation **E-B**, still open.
-4. **Not "the crevice is definitely there".** 14 of 80 recovered records sit in crevices below
-   Craig's 0.3 mm field line, 69.369 mm² — 24.8 % of the recovered area — and 1 of 5 at the
-   production plan carrying 27.2 % of the prize. The project has a ratified print minimum for
-   solid and none for air, so it has no basis for claiming a 0.116 mm crevice survives curing. If
-   it welds shut, the weld holds the island up, the strut was unnecessary, **and the strut is
-   still permanent and still leaves two scars.** That is §0 ask 4 and this design does not decide
-   it. Per strut, the sub-0.3 mm cases are:
+4. **Not "the crevice is definitely there" — but R3 has ruled that it does not matter.** 18 of
+   129 recovered records sit in crevices below Craig's 0.3 mm field line, 69.535 mm² — **14.9 %
+   of the recovered area** — and 1 of 9 at the production plan carrying **15.4 % of the prize**.
+   R3's ruling is that if the resin seals, the strut adds no resin, so the case is moot: **land
+   them, disclose each, refuse none.** Both shares fell relative to `10b0bd8` (24.8 % and 27.2 %)
+   because the recovered population grew around them, not because any of them went away. The
+   seven distinct widths are:
 
-   | shape | crevice | struck wall | carried | present at production? |
+   | shape | crevice | wall `W` | carried | present at production? |
    | --- | ---: | ---: | ---: | --- |
+   | t147 / t128 | 0.0463 | 1.351 | 0.033 / 0.033 | no — **and these two are what R3 admits outright**, below `MIN_ILLEGAL_LEN_MM` |
    | t82 / t73 (island 0) | 0.1156 | 1.281 | 2.589 / 0.256 | no |
-   | t156 / t136 (island 25) | 0.1173 | 1.463 | 0.084 | no |
-   | t178 / t157 (islands 70, 71) | 0.1741 | 0.302 | 7.940 → **9.974** | **yes — t157** |
+   | t156 / t136 (island 25) | 0.1173 | 1.463 | 0.084 / 0.084 | no |
+   | t64 / t57 | 0.1181 | 0.203 | 0.050 / 0.050 | no |
+   | t178 / t157 (islands 70, 71) | 0.1741 | 0.302 | 7.940 → **9.974** | **yes — t157, 5 re-plans** |
    | t117 (island 16) | 0.1798 | 1.891 | 0.340 | no |
-   | t119 / t105 (islands 19, 17) | 0.1963 | 1.120 | 0.132 | no |
+   | t119 / t105 (islands 19, 17) | 0.1963 | 1.120 | 0.132 / 0.132 | no |
+
+5. **Not "island 74 is safely recovered".** It lands, at a capacity-to-demand ratio of
+   0.999999999, with its anchor truncated into a plug spanning a 0.341 mm wall. Two of the three
+   gradings in §4.7 refuse it. **It is the record E-D decides.**
+
+### §6.5 The zero-margin disclosure — new, and owed
+
+**MEASURED: 46 of the 129 recovered records, 405.076 mm², have `capacity / demand` equal to
+1.000 to nine decimal places. At the production plan it is 7 of 9** — every strut except t100
+and t173, which are exactly the two whose foot radius was clamped up to `MIN_SHOOT_R_MM`.
+
+This is not a defect in the grading and it is not a coincidence. It is the composition of two
+laws the engine already has:
+
+* `FrozenTipLoadPolicy` grows `r0` until `X·π·r0² ≥ carried` and stops. **The shaft carries the
+  load exactly.**
+* `ball_seat_factor` sets the seat depth so the seat's minimal cut equals the shaft's radius.
+  **The seat carries what the shaft carries, exactly.**
+
+So an unclamped landed strut has **no margin anywhere along its load path beyond the safety
+factor already inside `X = 12`** (`tensile / (pressure × SF)`, `SF = 8`). Whether that is
+enough is not this design's question — it is the same question every contact in the engine
+already answers the same way — **but this rule is the first thing that makes the equality
+visible at both ends of one member, and it must be said rather than discovered later.**
+
+Two consequences an implementer must not get wrong:
+
+1. **The comparison must be relative, not absolute.** An absolute epsilon reads the ninth
+   decimal as a physics failure and refuses 46 records. §2.6 records the same trap for test (e);
+   this is the second instance of it.
+2. **Nothing may quietly add margin here.** Rounding `h_design` up, or padding `a_eff`, changes
+   the recovery table while looking like a robustness fix. §10.4's sabotage set pins it.
 
 ---
 
@@ -1072,8 +1446,9 @@ tips are outside the model but well inside their own designed balls.
   far end changes nothing about that. §4.1's classifier enforces this.
 * **The repair now needs its own test, because the ratified one does not bite.** That is a real
   finding and a real cost, and it is escalation §12 item 12.
-* **The prize is real but it is an upper bound, not a number.** 34 of the 52 (77.885 mm²) also
-  pass all six tests *where their shaft currently is*. The first version reported the analogous
+* **The prize is real but it is an upper bound, not a number.** Re-measured under R1 and R4:
+  **38 of the 52 (79.991 mm²)** would carry a load-sized truncated anchor *where their shaft
+  currently is* — it was 34 at `10b0bd8`. The first version reported the analogous
   figure as *"the prize is real and conditional"*. It is weaker than that. The repair for an
   averaged normal that points the wrong way is to change `unit` — which changes the **direction
   of the ray**, which voids every interval in the record: the strike station, the chord, the
@@ -1086,9 +1461,9 @@ tips are outside the model but well inside their own designed balls.
 
 ---
 
-## §8. E-C DISPOSITION — decline the permission, at spec scope, and say what declining does
+## §8. E-C DISPOSITION — R4 REWRITES THE PERMISSION. It is not withdrawn.
 
-### §8.1 The question, restated
+### §8.1 The question, restated, and the ruling that answers it
 
 SPEC-EMBED-POLICY says: *"There is NO depth cap on the tip-anchored interval itself: a deep
 perpendicular plug into thick solid has a small crossing patch and, per the owner's idempotence
@@ -1100,91 +1475,125 @@ thin-feature-span check."*
 2.0 mm hollow shell at 72° passes rules 1-3, is anchored so rule 4 is moot, and a **6.7 mm shell
 perforation becomes legal** where today's 0.05 mm cutoff refuses it.
 
-### §8.2 Is the deep-embed grading exercised at all after the rule lands?
+`10b0bd8` asked Craig to **withdraw** the permission at spec scope, for all three families it
+names. **He did not withdraw it. He rewrote it (R4):**
 
-**Almost never, and here is the honest accounting of "almost".**
+> *"A seat should be allowed to go as deep into the model as it likes, but it should not come
+> out the other side of the model so if the seat wants to go deeper than the thickness of the
+> model, it should get truncated at the opposite face — it should not create a scar on the
+> backside because that provides no additional support so there's no need for it to extend
+> beyond the model anyway."*
 
-1. **A landed foot has `T = δ = 0.3 mm` exactly.** The landing rule pins it: the member ends at
-   `s* + δ`, below `s*` it is in air, so the solid interval anchored to the foot endpoint runs
-   exactly δ. **DERIVED, not assumed.**
-2. **The contact tip has `T = δ` too**, whenever the seat interval ends at the nominal surface —
-   which is MEASURED true for 152 of the 156 records that have a seat at all. **That is 97.4 % of
-   one model, which is a measurement, not a construction.** It becomes a construction after
-   stage 4 (§10.2), which is the right thing to say and the first version did not say it.
-3. **Re-aim candidates are NOT landed** — see §5.2. The first version's third "by construction"
-   was an unratified amendment to SPEC-P8-RELOCATE R1. **It is withdrawn, and §8.4's ask is
-   written so that nothing depends on it.**
+**That is a better answer than withdrawal, and the reason is worth stating.** Withdrawal would
+have banned deep seats in thick solid, where they are harmless and where the permission's own
+idempotence argument is correct. What E-C actually feared was **exiting** — the shell
+perforation. R4 bans exactly that, and bans it as a construction rather than a test: the seat is
+clamped at the far face, so there is no depth at which the hazard exists. **The permission keeps
+what it was for and loses what it was dangerous for.**
 
-**The only population with `T > δ` today is the stub whose own seat runs deep.** 4 records, 3
-distinct shapes, 3.421 mm², **zero at the production plan**.
+### §8.2 What the rewritten sentence says
 
-### §8.3 Do the 4 deep seats need the permission?
+> **SPEC-EMBED-POLICY, rewritten sentence.** *There is NO depth cap on the tip-anchored interval
+> itself: a deep perpendicular plug into thick solid has a small crossing patch and, per the
+> owner's idempotence ruling, no further physical consequence. **The interval is TRUNCATED at
+> the model's opposite face. A designed embed end — seat, foot, ball included — never exits the
+> model and never creates a patch on a face other than the one it entered. Punch-through is
+> therefore impossible by construction, not by check, and the construction is the penetration
+> interval itself: the interval IS the model's extent along the seat's own line, so the clamp is
+> `depth <= interval`.** The thin-feature-span check named by the previous text is not built and
+> is not needed for this family; thin walls are protected by rule 4, by this truncation, and —
+> for a landed foot — by the anchor's own capacity test.*
+
+**Three consequences, in order of how much they matter.**
+
+1. **E-C's constructed regression stops existing.** There is no legal 6.7 mm shell perforation,
+   because there is no legal perforation of any depth. The `t225` instance the Rotting Warhorse
+   actually contains is graded in §8.3 and it does not perforate either.
+2. **The scope objection is answered in full.** `10b0bd8` conceded that declining for stubs alone
+   answers *"a third of one half"* of E-C, because the permission's scope line names three
+   families — *"contact-stub tips, strut/rung feet, model-rung ends"*. **R4 is written at the
+   permission, so it reaches all three.** It is not a stub-family rule.
+3. **On the stub path it is still not a runtime tightening** — and that remains worth saying
+   plainly rather than selling it as safety. `initial.rs:1542`'s `remaining_illegal_axis_overlap`
+   against the 0.05 mm cutoff at `:1553` already condemns this population, and the engine's
+   implementation of rules 1-3 rolls into
+   `diagnostic_constraints_hold_under_recorded_policy` (`transit_measurement.rs:900`), **whose
+   getter has zero callers**, and whose entry point `runner.rs:2819-2821` documents itself as
+   *"intentionally not an acceptance, clearance, or defect boundary."* R4 is a **spec repair plus
+   a geometry clamp**. Its runtime effect on this model is to make four previously condemned
+   records legal, not to refuse anything.
+
+**A spec edit must reach both implementations.** There is a second implementation of the scar
+formulas in `plinth-metrics/src/scar.rs`, with its own pinned test
+`closed_form_patch_uses_anchored_length_and_never_applies_an_area_cap`
+(`plinth-metrics/src/scar.rs:3426`). If the edit does not reach it, engine and auditor diverge.
+This was true of the withdrawal ask and it is true of the rewrite.
+
+**A constants note owed under the physics-first doctrine.** R4 mints nothing. The clamp's right
+operand is the measured interval; there is no tolerance and no new epsilon. `MIN_ILLEGAL_LEN_MM`
+is *not* reused a third time as a seat-depth tolerance — `10b0bd8`'s ask needed that reuse and
+carried a derivation for it. **The rewrite does not need it, and the reuse is withdrawn with the
+ask.**
+
+### §8.3 The four deep seats, re-graded under R4 — and E-C's one real instance
 
 They are the one place in the measurement where the recorded incidence is at exactly the station
 SPEC-EMBED-POLICY wants, so they can be graded **exactly**.
 
-| record | carried | `T` | exited | `r_x` | `cosang` | rule 1 | rule 2 | rule 3 | verdict |
-| --- | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- |
-| r0 t96 / r1 t88 | 0.657 | 2.487 | yes | 0.326 | 0.191 | 1.743 / 2.000 pass | **`L_scar = 3.138 > 2.500` FAIL** | pass | **already ILLEGAL under the existing rules** |
-| r0 t225 / r1 t200 | 1.027 / 1.080 | 0.849 | yes | 0.221 | 0.164 | 0.568 / 2.000 pass | 1.291 / 2.500 pass | pass | **LEGAL under rules 1-3 — E-C's hazard, one instance** |
+| record | carried | seat run `T` | exited | wall along the seat | `r0` | R1 depth it needs | verdict under R4 |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| r0 t96 / r1 t88 | 0.657 | 2.487 | yes | 0.474 | 0.1320 | **0.0504** | **LEGAL. Nothing firm beyond it — no landing needed.** Class `SEAT_TRUNCATED_NO_LANDING` |
+| r0 t225 / r1 t200 | 1.027 / 1.080 | 0.849 | yes | **0.139** | 0.1650 | **0.0630** | **LEGAL, and it does not perforate.** It then strikes again at `W = 0.484` and **LANDS** |
 
-**Read the second row carefully.** `exited = true` on the seat interval means the shaft went in
-one side and out the other. Chord 0.849 mm at `cosang = 0.164` gives a perpendicular wall
-thickness of **0.139 mm**. That is a 0.139 mm shell, perforated by a support, and rules 1-3 wave
-it through because the interval is anchored so rule 4 does not apply. **E-C's constructed
-regression is real, and the Rotting Warhorse contains it — one shape, twice, and not in the
-production plan.**
+**Read the second row twice, because it is E-C's hazard and it has stopped being one.** `t225`
+runs 0.849 mm through a shell that is **0.139 mm thick** at `cosang = 0.164`, and it exits. That
+is the shell perforation E-C constructed, present in a real model. Two independent things now
+prevent it:
 
-The first row matters just as much in the other direction: the existing scar-dimension rule
-**already catches the deeper plug** without any thin-feature check.
+* **R1 makes it unnecessary.** `t225` carries 1.027 mm². The anchor that load requires is
+  `ball_seat_factor(1.5) × 0.1650 = 0.0630 mm` deep. **It needs 45 % of the shell and never goes
+  near the far face.** The 0.849 mm run was never a load requirement — it was a fixed 0.3 mm
+  embed along an axis that happened to graze a shell.
+* **R4 would stop it even if R1 did not.** Had the load wanted more than 0.139 mm, the seat would
+  truncate at the far face. Its capacity there would be
+  `12 × π × ball_cut_radius_mm(0.165, 0.139, 1.5)² = 1.865 mm²`, still above the 1.027 mm² it
+  carries. **Either reading gives the same verdict, which is why this document does not need to
+  settle whether R1 also applies at the contact tip** (§2.8, scope).
 
-### §8.4 The ask, corrected in two ways
+The first row matters in the other direction, and its `10b0bd8` reading is superseded: it was
+graded *"already ILLEGAL under the existing rules"* because `L_scar = 3.138 > 2.500` at a 2.487 mm
+seat run. **Under R4 the seat is not 2.487 mm.** It is `0.0504 mm` deep — 4 % of what it was —
+so `L_scar` collapses and the scar-dimension rule stops binding. `10b0bd8` was pricing a seat
+nobody would build.
 
-> **Ask.** SPEC-EMBED-POLICY's no-depth-cap permission is **withdrawn at spec scope, for all
-> three designed-embed-end families it names** (contact-stub tips, strut/rung feet, model-rung
-> ends). A designed embed end's own anchored interval must end within `MIN_ILLEGAL_LEN_MM` of the
-> designed embed depth; if it runs deeper the member is illegal. The thin-feature-span check is
-> **not built**, and does not need to be, because the permission it was written to guard is gone.
+**Measured cost of R4 on this model: none. Measured benefit: 4 records, 3.421 mm², from
+condemned to legal**, of which 2 land and 2 need nothing at all. **Zero at the production plan
+either way.**
 
-Why this shape of ask, in four lines:
+### §8.4 What is now closed, and what is not
 
-* **On the stub path it is a spec correction, not a runtime tightening.** `initial.rs:1542`'s
-  `remaining_illegal_axis_overlap`, compared against the 0.05 mm cutoff at `:1553`, already
-  condemns exactly this population. The engine's implementation of rules 1-3 rolls into
-  `diagnostic_constraints_hold_under_recorded_policy` (`transit_measurement.rs:900`), **whose
-  getter has zero callers**, and whose entry point `runner.rs:2819-2821` documents itself as
-  *"intentionally not an acceptance, clearance, or defect boundary."* The first version's own
-  bullet conceded the point — *"at worst identical and never wider"* — while the memo sold it as
-  a safety tightening. Say it plainly. It is still worth doing: a spec that grants a permission
-  whose guard was never built is a trap for the next implementer, and a spec correction is the
-  cheapest possible way to defuse it.
-* **Declining it for stubs alone does not close E-C**, because the permission's scope line names
-  three families and E-C's own text is labelled `(scope)` and asks *"Which half do we build?"*.
-  Declining for one family answers a third of one half. Hence "at spec scope".
-* **It costs a measured 4 records, 3.42 mm², and zero at the production plan.** Two of those four
-  are already illegal under the existing scar-dimension rule. The true cost of declining is **one
-  shape**, `t225`, 1.03 mm² — a 0.139 mm shell perforation which we should not want.
-* **It does not depend on anything unratified.** §5.2's R1 amendment is not part of this ask.
-* **The thin-wall guard E-C wanted already exists — for landed feet.** Test (a)(i) (§2.3) is
-  that check, built here under another name, and it refuses 59 of 152 landing candidates on wall
-  thickness alone. E-C's residual scope after this design is not stub tips; it is the other two
-  named families this ask still reaches in name only (strut/rung feet, model-rung ends) and,
-  more concretely, the PR-2 placed-mask exemption's six consumers named in §8.5, already handed
-  to the bundle lane.
+**Closed by R4:**
 
-**A spec edit must reach both implementations.** There is a second implementation of these
-formulas in `plinth-metrics/src/scar.rs`, with its own pinned test
-`closed_form_patch_uses_anchored_length_and_never_applies_an_area_cap`
-(`plinth-metrics/src/scar.rs:3426`). If the edit does not reach it, engine and auditor diverge.
+* E-C's regression, at spec scope, for all three designed-embed-end families.
+* The stub half of E-C, which `10b0bd8` could only answer for one family.
+* The `MIN_ILLEGAL_LEN_MM` third reuse, withdrawn with the ask that needed it.
 
-**A constants note owed under the physics-first doctrine.** `MIN_ILLEGAL_LEN_MM` is registered as
-a *sliver-length* cutoff. It is already reused as `min_free_span_mm`. This ask reuses it a third
-time, as a *seat-depth* tolerance. The derivation is: all three ask the same physical question —
-"is this length of axis long enough to be a real feature rather than a numerical sliver?" — and
-the seat-depth use is the same question about the same axis in the same units. That sentence is
-the whole derivation and it is stated here rather than left implicit.
+**NOT closed, and it must never be claimed as closed:**
 
-### §8.5 What this ask does NOT reach, named for the bundle lane
+* **The PR-2 placed-mask exemption** (§8.5). It has six live consumers, it decides outcomes
+  today, and R4 does not touch it. This is the larger half of E-C and it belongs to the
+  clearance bundle.
+* **E-D** (§4.7). R4 stops a seat *exiting*; it does not price the wall around a seat that has
+  been truncated into a plug. That is new with the rulings and it is escalation §12 item 16.
+
+**And one thing `10b0bd8` claimed that is now simply gone.** It argued that its test (a)(i) was
+*"the thin-feature-span check E-C names, built here under another name"*, refusing 59 of 152
+candidates on wall thickness. **R1 deleted that clause.** So the design no longer builds a
+thin-feature-span check under any name — it builds a capacity test, which is a different thing
+and answers a different question. E-C's residual scope is therefore exactly the PR-2 mask, and
+nothing else in this document.
+
+### §8.5 What R4 does NOT reach, named for the bundle lane
 
 A larger, parallel exemption is untouched by anything here. The **PR-2 placed mask**
 (`contact.rs:391-407`) exempts an anchored region of a member's axis from the distance test with
@@ -1220,10 +1629,15 @@ commits have landed on `feature/a4-controller`:
   `faces_near_segments_batch`.
 * `1c646aa` adds `crates/plinth-support/src/seat_zone.rs` — the frozen seat zone — and its rule.
 
-**Not yet wired.** At `1c646aa` `seat_zone` is reached only by `lib.rs`'s `mod` line,
-`FINAL_CLEARANCE_GAP_MM` has no reader outside the registry, and `brace.rs:1246/1279` still set
-their insets from `contact::mask_extent_mm`. So this section describes the mechanism as
-committed, and the wiring it needs is that lane's remaining work, not this one's.
+Two more have landed since: `e74ab97` proves the seat zone stops at a crevice on a manifold
+bridge, and `3fe332b` carries the frozen seat zone on a `Forest` side table (#36).
+
+**Still being wired, by that lane, right now.** At the time this amendment was written the lane
+owned `crates/plinth-support/` with `brace.rs`, `cco.rs`, `contact.rs`, `designed_embed.rs`,
+`initial.rs`, `rewire.rs` and `runner.rs` all modified in its tree. **Nothing here was built,
+edited or staged against that tree.** So this section describes the mechanism as committed, the
+wiring it needs is that lane's remaining work, and **the sequencing consequence is in §10.0: this
+rule's implementation starts after that lane finishes.**
 
 ### §9.1 The quantity the final tier demands, and what it means for a landed strut
 
@@ -1242,16 +1656,18 @@ departure demands a step discontinuity, which no straight arm can supply."*
 **A landed strut is that argument with no middle.** The measured geometry leaves no room for one:
 
 ```
-strut total length      0.716 - 2.407 mm   (median 1.415), of which 0.3 mm is inside the model at EACH end
-crevice                 0.116 - 1.807 mm   (median 0.815)
-crevice < 0.6 mm        37 / 80
-crevice < 0.3 mm        14 / 80
-crevice >= 2.5 mm        0 / 80
+strut total length      0.574 - 2.800 mm   (median 1.410), with a LOAD-SIZED anchor at each end
+seat depth h_eff        0.063 - 0.247 mm   (median 0.147)   <- R1: no longer a fixed 0.3 mm
+crevice                 0.046 - 2.344 mm   (median 0.782)
+crevice < 0.3 mm         18 / 129
+crevice >= 2.5 mm         0 / 129
 ```
 
-At the median the strut crosses 0.82 mm of air with a body 0.35 – 0.59 mm in radius. There is no
+At the median the strut crosses 0.78 mm of air with a body 0.35 – 0.59 mm in radius. There is no
 station in that span from which a 0.3 mm true gap to *both* crevice walls could be measured,
-because the walls are what the strut is standing on.
+because the walls are what the strut is standing on. **R1 makes this worse, not better**: the
+anchors are shallower, so a larger fraction of each strut's length is out in the crevice where
+the gap is zero at both ends.
 
 **Demanding a positive gap there is the #51 error again**, in a new place: a finite clearance is
 demanded in a region that is contact by construction. The two-tier ruling does not create this
@@ -1283,6 +1699,19 @@ two faces it declared" from "buried in a third one".
 > member seated at both ends needs **two** zones, with **different** band radii — the frustum
 > grows toward the foot — merged into **one sorted, deduplicated slice** for its row.
 >
+> **This dependency is now two-sided and both sides know about it.** #36's own wiring work needs
+> the same two-zone shape for members it is already routing, and this design's doubly-seated
+> struts cannot be admitted without it. It should therefore be built **once, in #36, before this
+> rule's stage 2**, and not twice. §10.0 sequences it. Recording it here so that neither lane
+> can land a single-zone `SeatZoneRequest` and discover the other's requirement afterwards.
+>
+> **R1 sharpens the band-radius half of the requirement.** The two band radii are no longer
+> "`r_tip` and `r_foot` at a fixed 0.3 mm depth". The foot's zone is frozen around an anchor
+> whose depth is `h_eff` — 0.063 to 0.247 mm, per strut, load-sized and possibly truncated — so
+> the band radius must be derived from the same `h_eff` the anchor test used, not from a
+> constant. An implementation that freezes the foot zone at `DEFAULT_CONTACT_DEPTH_MM` will
+> exempt more surface than the seat occupies.
+>
 > The kernel side is already general: `segment_clearance_excluding`
 > (`queries.rs:1974-1984`) takes `excluded_faces: &[&[u32]]`, one slice per row, so a union is
 > expressible there today. **The support side is what must change**, either by allowing two
@@ -1306,9 +1735,11 @@ and the rule depends on **all three**:
    been. **The exemption removes more distance testing from the crevice than the retired mask did,
    so this requirement is stronger now, not weaker. Without it, the rule exempts a region nothing
    has looked at, and that is the one thing a reviewer should refuse.**
-2. **The scar bound at both ends (§3), plus the breach check (§2.3(a)(ii)).** The bound is
-   unconditional for a standard-depth foot; the breach check is what makes the bound's half-space
-   ball term applicable (§3.3).
+2. **The scar rules at both ends (§3), plus R4's truncation.** The bound is no longer
+   unconditional — R1 freed the depth, so §3.1 downgraded the closed form from a proof to a
+   measurement with a re-run owed. What makes the half-space ball term applicable along the
+   seat's own line is now **R4's clamp**, not a check (§3.3). Laterally it is still an
+   assumption, and that is E-D.
 3. **The residue disclosure (§6).** What the exemption declines to gate on, the report must name.
 
 ### §9.4 What the bundle makes easier, and the requirement restated
@@ -1328,13 +1759,42 @@ builds it.
 
 ## §10. THE STAGED LANDING PLAN
 
-**No new registered constant is proposed at any stage.** Every value is registered:
-`DEFAULT_CONTACT_DEPTH_MM`, `MIN_ILLEGAL_LEN_MM`, `MIN_SHOOT_R_MM`, `BALL_FACTOR_FOOT`,
-`BALL_FACTOR_STUB`, `A_ABS_MM2`, `KAPPA`, `L_SCAR_MAX_MM`, `PRINT_FLOOR_CHORD_MM`, `TOL_MM`,
-`TIP_RADIUS_MAX_LEGACY_MM`, `ball_breach_eps_mm`, and `SPACING_FLOOR_MM` for disclosure only.
-Three hardcoded epsilons are reused rather than registered — `1e-9` for the Z comparison,
-`BELOW_LEVEL_EPS_MM`, and `FOOT_BREACH_HALF_DEG` / `FOOT_BREACH_CONE_RAYS`. All are recorded as
-existing debt, not introduced.
+**No new registered constant is proposed at any stage, and none is minted.** Every value is
+registered: `DEFAULT_CONTACT_DEPTH_MM` (now only the *tip's* designed embed), `MIN_ILLEGAL_LEN_MM`,
+`MIN_SHOOT_R_MM`, `BALL_FACTOR_FOOT`, `BALL_FACTOR_STUB`, `A_ABS_MM2`, `KAPPA`, `L_SCAR_MAX_MM`,
+`PRINT_FLOOR_CHORD_MM`, `TOL_MM`, `TIP_RADIUS_MAX_LEGACY_MM`, and `SPACING_FLOOR_MM` for
+disclosure only. **`ball_breach_eps_mm` drops off this list** — R4 makes the breach check
+unreachable on this path, so nothing reads it here. The one derived quantity is
+`ball_seat_factor(BALL_FACTOR_FOOT)`, an existing DERIVED function of an existing registered
+constant (§2.8). Two hardcoded epsilons are reused rather than registered — `1e-9` for the Z
+comparison and `BELOW_LEVEL_EPS_MM` — and `FOOT_BREACH_HALF_DEG` / `FOOT_BREACH_CONE_RAYS` are no
+longer reached. All are recorded as existing debt, not introduced.
+
+### §10.0 SEQUENCING — this work starts after the wire-clearance lane
+
+**The wire-clearance lane (#36) owns `crates/plinth-support/` and is actively committing to it.**
+Nothing in this design may be implemented until that lane completes, for three reasons, and the
+first is the one that would actually break something:
+
+1. **Stage 3 is that lane's work, and stage 2 cannot be accepted without it.** A doubly-seated
+   member with one frozen seat zone is refused by the very exemption meant to admit it (§9.2).
+   The two-zone `SeatZoneRequest` extension has to exist first. It is also wanted by #36's own
+   wiring, so building it there is cheaper than building it twice.
+2. **The files collide directly.** Stage 1 and stage 2 both edit `initial.rs`; the disclosure
+   record touches `runner.rs`; the seat-zone union touches `contact.rs` and `seat_zone.rs`.
+   Every one of those is live in the other lane's tree.
+3. **The measure-only stage is only honest against a settled clearance model.** Stage 1's whole
+   value is a corpus recovery table that does not move; recording it against a half-wired
+   two-tier clearance rule would produce a table that has to be re-measured anyway.
+
+**Order:** #36 completes and merges → stage 3's two-zone extension is available → stage 1
+(measure only) → stage 1b (rim sweep, separately gated) → stage 2 (geometry moves) → stage 4
+(the SPEC-EMBED-POLICY sentence rewrite, which is doc-only and may go earlier) → stage 5 (re-aim)
+→ stage 6 (the tip defect, independent throughout).
+
+**The measure-only stage stays first among this design's own stages.** That was true at
+`10b0bd8` and the rulings do not change it: R1, R3 and R4 all move the *verdict*, and a verdict
+change is exactly what a measure-only stage is for.
 
 ### §10.1 Blast radius, honestly, before the stages
 
@@ -1360,10 +1820,17 @@ model, or is 38.5 % a Warhorse number?
 
 **Stage 1 — compute the landing, record it, land nothing.** `initial.rs` computes the landing
 candidate for every stub it condemns and records it on the existing `CondemnedInitialStub` row:
-strike station, axial chord, **perpendicular wall**, entry incidence, entry face normal, crevice,
-landed length, both radii, **the foot-ball breach verdict and poke depth**, both scar verdicts and
-which allowance each clears through, the build-order verdict, and the §6.2 disclosure fields. The
-stub is **still quarantined**. `BlockedCause::StubReentry` still fires.
+strike station, axial chord, **wall `W`**, entry incidence, entry face normal, crevice,
+**`h_design`, `h_eff`, whether truncation bound, `a_eff`, the anchor capacity and the
+capacity/demand margin**, landed length, both radii, **whether the foot ball is clipped and by
+how much (E-D)**, both scar verdicts and which allowance each clears through, the build-order
+verdict, and the §6.2 disclosure fields. The stub is **still quarantined**.
+`BlockedCause::StubReentry` still fires.
+
+**Stage 1 now carries three questions it did not carry at `10b0bd8`**, and they are the reason
+it is worth running before anything moves: (i) does the corpus reproduce the 62 % recovery, or
+is that a Warhorse number; (ii) how many corpus records sit at capacity/demand = 1.000 (§6.5);
+(iii) how many have a clipped ball, which is the instance count E-D and E-A both need.
 
 > **The production condemnation sweep stays CENTRELINE-ONLY through this stage.** This is the
 > correction that makes stage 1 honest. The first version's gate asked for the emitted artifact to
@@ -1408,30 +1875,35 @@ corpus model, with margin, unmodified; the newly-condemned population is enumera
 a from→to attribution; `make_overhang_table` still emits; `make_toed_slab` is bit-identical or
 attributed.
 
-**Stage 2 — land it (geometry moves; OD-8 stop-and-report).** The stub whose landing passed all
-six tests is shortened to `L'`, its free end is seated in the struck surface, and it is **not**
-quarantined. Minted as `MemberKind::Strut` so that `contact::seating_of` (`contact.rs:104-110`)
-classifies its rootward end as `Seated` with no change to that function. **Implementation check,
-not asserted here:** confirm no lowering, emit or brace path keys on `MemberKind::Stub` in a way
-that a `Strut` would miss — and, separately, that no parentless-terminal path errors (§2.7(ii)).
+**Stage 2 — land it (geometry moves; OD-8 stop-and-report).** The stub whose landing passed the
+tests is shortened to `L' = s* + h_eff / cosang_entry`, its free end is seated in the struck
+surface **at the load-sized, truncated depth `h_eff`**, and it is **not** quarantined. Minted as
+`MemberKind::Strut` so that `contact::seating_of` (`contact.rs:104-110`) classifies its rootward
+end as `Seated` with no change to that function. **Implementation checks, not asserted here:**
+confirm no lowering, emit or brace path keys on `MemberKind::Stub` in a way that a `Strut` would
+miss; that no parentless-terminal path errors (§2.7(ii)); and **that the emitted foot geometry
+uses `h_eff`, not `DEFAULT_CONTACT_DEPTH_MM`** — the single most likely way for R1 to be
+implemented in the report and lost in the geometry.
 **Gate G2:** no model that emits today stops emitting; every moved digest carries a from→to
 attribution; `make_toed_slab` bit-identical or attributed; `StubReentry` reports the expected
-non-zero residue on the Warhorse production plan — **not zero**, because 7 of its 18 stubs need
-re-aim and stage 4 has not landed.
+non-zero residue on the Warhorse production plan — **not zero**, because 3 of its 18 stubs need
+re-aim and 6 belong to the tip defect, and neither stage 5 nor stage 6 has landed.
 
-**Stage 3 — the clearance-bundle extension (§9.2).** Two seat zones and their union, owned by #36.
+**Stage 3 — the clearance-bundle extension (§9.2). PRECEDES stage 2 and is owned by #36.**
+Two seat zones with per-end band radii derived from each end's own `h_eff`, and their union.
 **Stage 2 cannot be accepted without it**, because a doubly-seated member with one zone is refused
-by the very exemption that is supposed to admit it. Sequenced here so the dependency is visible;
-the work is that lane's.
+by the very exemption that is supposed to admit it. §10.0 puts it in the order.
 
-**Stage 4 — withdraw the deep-embed permission at spec scope (§8).** A spec edit plus the matching
-edit in `plinth-metrics/src/scar.rs`. Behaviourally a no-op on the stub path. It is what makes
-step 2 of §8.2 a construction rather than a 97.4 % measurement.
+**Stage 4 — rewrite the deep-embed permission (§8.2).** A spec edit plus the matching edit in
+`plinth-metrics/src/scar.rs`. **The sentence is rewritten, not deleted**: depth stays unlimited,
+truncation at the opposite face is added, punch-through becomes impossible by construction. It is
+doc-plus-clamp, it is behaviourally an admission on the stub path (4 records here move from
+condemned to legal), and it may land before stage 2 because it depends on nothing.
 
 **Stage 5 — re-aim, per SPEC-P8-RELOCATE §3.1 R1.** Behind stage 2, because until stage 2 lands we
-do not know how many stubs still need steering. **The measurement says 7 of 18 at the production
-plan, including island 74 — not 3.** This is now the larger of the two lanes and should be
-resourced as such.
+do not know how many stubs still need steering. **The measurement now says 3 of 18 at the
+production plan, and island 74 is no longer among them** — `10b0bd8` said 7 including island 74.
+This is back to being the smaller of the two lanes and should be resourced as such.
 
 **Stage 6 — the tip-embed defect (§7).** A separate lane, not bundled, not blocked by any of the
 above. **It now needs its own test**, because the ratified detached-tip rule does not catch it.
@@ -1440,8 +1912,8 @@ above. **It now needs its own test**, because the ratified detached-tip rule doe
 
 | pin | file:line | what it pins | movement |
 | --- | --- | --- | --- |
-| `terminalward_embed_classifies_clean_transit_and_buried_boundaries` | `initial.rs:1897` | the scalar overlap rule, including a `{0.2, 0.6}` case called "transit" | **MOVES at stage 2.** That case is a strike at `s = 0.2`, inside the designed embed, so it is a deep seat and stage 4 condemns it. The test becomes the classification pin for seat / strike / deep seat |
-| `real_stacked_obstruction_accepts_cutoff_and_condemns_above_it` | `initial.rs:2461` | the 0.05 mm cutoff against a real obstruction below a downward stub | **MOVES at stage 2, and it is the acceptance test.** The obstruction is exactly a strike. **Must be re-derived under all six tests and its expectation re-argued, never edited** |
+| `terminalward_embed_classifies_clean_transit_and_buried_boundaries` | `initial.rs:1897` | the scalar overlap rule, including a `{0.2, 0.6}` case called "transit" | **MOVES at stage 2.** That case is a strike at `s = 0.2`, inside the designed embed, so it is a deep seat — and under R4 stage 4 **truncates** it rather than condemning it, which is a different expectation from the one `10b0bd8` recorded. The test becomes the classification pin for seat / strike / truncated seat |
+| `real_stacked_obstruction_accepts_cutoff_and_condemns_above_it` | `initial.rs:2461` | the 0.05 mm cutoff against a real obstruction below a downward stub | **MOVES at stage 2, and it is the acceptance test.** The obstruction is exactly a strike. **Must be re-derived under the tests of §2.3 and its expectation re-argued, never edited.** Note that under R1 its verdict depends on what the fixture carries, so the fixture must state its load |
 | `real_table_build_materializes_exact_registered_stub_geometry_and_ledger` | `initial.rs:2024` | the exact minted `p1` | **UNCHANGED** for stubs that do not strike; a landed stub needs its own sibling assertion |
 | `buried_free_ends_quarantine_and_retain_both_ledger_records_and_loads` | `initial.rs:2562` | quarantine keeps the ledger row and the abandoned load | **UNCHANGED** — the residue still quarantines |
 | `a_route_whose_every_trial_was_quarantined_reports_task_52s_class` | `runner.rs:10831` | `BlockedCause::StubReentry` construction | **UNCHANGED as a unit contract.** The class survives for the residue |
@@ -1460,17 +1932,20 @@ guard owes a sabotage proof:
 | id | sabotage | required consequence |
 | --- | --- | --- |
 | **S1** | make the landing function always return `None` | a named fixture flips from LANDED back to CONDEMNED, and `StubReentry` fires. Proves the landing is what recovers it |
-| **S2** | grade test (a)(i) on the axial chord instead of the perpendicular wall | a fixture that strikes a 0.15 mm wall at a shallow angle lands. **This is the review's F1, made into a test**, and it is the single most load-bearing guard in the set |
-| **S3** | remove test (a)(ii), the foot-ball breach | **island 74's own t162 shape lands**, and a separate assertion catches the foot ball 0.241 mm out the far side. This is the finding that turned the recovery table over; it must not be able to come back silently |
+| **S2** | grade the wall `W` on the axial chord instead of `chord × cosang_entry` | a fixture that strikes a 0.15 mm knife-edge at a shallow angle lands. **This is the review's F1, made into a test.** R1 changed what `W` is compared against; it did not change what `W` is, so this guard survives the rulings unchanged and is still the most load-bearing one in the set |
+| **S3** | size the anchor depth at `DEFAULT_CONTACT_DEPTH_MM` instead of `ball_seat_factor(1.4) × r_foot` | **at least one fixture's verdict changes in each direction**: a small-load strut in a thin wall stops landing (the depth is now too big for the wall), and the recovery count for the fixture set moves. **This is R1 made into a test**, and it is the guard against R1 being implemented in the disclosure record and forgotten in the geometry |
 | **S4** | remove test (f) | island 74's `t189` shape lands with its foot **above** its contact |
 | **S5** | set `rays_all = false` after stage 1b | a fixture whose axis crosses air but whose flank does not must stop being refused. **Requires a purpose-built fixture; none exists** |
-| **S6** | grade the landed foot with the *original* 2.8 mm frustum instead of `L'` | `r_x` is read at the wrong station and at least one scar verdict changes |
-| **S7** | restore the deep-seat permission (undo stage 4) | the `t225` shape — a 0.139 mm shell perforated at `cosang = 0.164` — becomes legal. **This is E-C's regression, made into a test** |
+| **S6** | defeat R4's truncation — let the seat take `h_design` regardless of `W` | **a deep seat perforates.** A fixture whose seat wants more depth than the model is thick must, un-sabotaged, be TRUNCATED with `exits = false` and no backside patch; sabotaged, it must produce a seat that exits the opposite face. **This is R4 made into a test, and it replaces `10b0bd8`'s S7** ("restore the deep-seat permission"), which no longer has a meaning because the permission was rewritten rather than withdrawn |
+| **S7** | grade the landed foot with the *original* 2.8 mm frustum instead of `L'` | `r_x` is read at the wrong station and at least one scar verdict changes. *(This was S6 at `10b0bd8`; the ruling names the truncation case S6, so the two swapped ids. Nothing outside this document referenced either.)* |
 | **S8** | give a doubly-seated member only one seat zone | every landed strut is refused. Proves §9.2's union is load-bearing rather than tidy |
+| **S9** | compare the anchor capacity to the demand with an **absolute** epsilon | **46 of the 129 recovered records stop landing**, island 74 among them. Proves §6.5's zero-margin population is real and that the relative comparison is load-bearing rather than sloppy |
+| **S10** | add any margin to `h_design` or `a_eff` — round up, pad, clamp to a minimum | the recovery count *rises or falls* against the recorded table. **A margin here is a silent policy change wearing the costume of a robustness fix** (§6.5) |
 
-**S2, S3 and S7 must not be skipped.** S2 and S3 are the two defects that made the first version
-of this document unsound. S7 is the only durable record of why the deep-seat permission was
-withdrawn.
+**S2, S3, S6 and S9 must not be skipped.** S2 is the defect that made `aae1559` unsound. S3 and
+S6 are the only durable record of what R1 and R4 actually changed. S9 is the only thing standing
+between §6.5's disclosure and a future "harmless" epsilon change that quietly deletes a third of
+the recovery.
 
 **Non-vacuity first, in every case.** Each sabotage test asserts the *un*-sabotaged fixture
 reaches the state under test before it asserts the sabotage changes it — the shape
@@ -1486,7 +1961,8 @@ reaches the state under test before it asserts the sabotage changes it — the s
 | **P1b — the rim-swept crevice.** The sweep is centreline-only | The rule is not honest without it (§9.3). It could close crevices and shrink the recovery table further | The same probe with `rays_all = true`, **run beside the production sweep, not instead of it**. Measure the charge against `ContactConstructionLimits::production()` at the same time | Gate G1b. Decides whether the 80 is really 80, and whether the flip is affordable at all |
 | **P2 — `zombie-3-a`'s 52.** Its 52 stub-reentry quarantines have no interval data | It is 56 % of that model's repair-trial waste, and it is the evidence that this class is not one model's quirk | Run probe P1 on `zombie-3-a`. It already has a bit-identical reference artifact to check against | Grades the second model. Extends or refutes the 38.5 % recovery rate |
 | **P3 — the flush-cutter.** No tool model exists anywhere (§6.1) | Decides whether "permanent" is a real word for these struts or a conservative label | Not a print. Measure blade thickness, included angle, and the narrowest crevice the tool actually enters, on an existing printed part | Escalation **E-B**. Retires or grounds a `reach` flag that is currently prose |
-| **P4 — does a sub-0.3 mm crevice survive curing?** | §0 ask 4. 24.8 % of the recovered area and 27.2 % of the production prize sit below Craig's field line | Craig's own field data, or one printed coupon with a graded slot series. The project has a print minimum for solid and none for air | Decides whether the rule refuses or merely reports below 0.3 mm |
+| ~~**P4 — does a sub-0.3 mm crevice survive curing?**~~ | **RULED (R3), not measured.** Craig's answer: *"If resin seals anyways then the strut adds no extra resin. So this is moot."* Land, disclose, never refuse on width | — | — |
+| **P6 — the truncated anchor's real separating cut (E-D).** New, and the widest open number in the document | 65 of 129 recovered records have their load-designed ball clipped by the opposite face; the two conservative brackets put recovery at 70 / 154.65 mm² or 93 / 177.09 mm² against the graded 129 / 467.07 mm². **Island 74's verdict is inside that band** | Not a print. A kernel query for the minimal separating cut of a seat truncated by a second surface — the same machinery `sphere_breach` already casts, asked a different question — or Craig's ruling that a plug spanning a wall is acceptable, which is E-A's ruling | Escalation **E-D**. Decides up to 59 records and 312 mm², and decides island 74 |
 | **P5 — why 52 stub tips sit in air (§7)**, now that rule 3 does not catch them | 25 % of the population, and the ratified test that was supposed to cover it does not | Record the face normal at the contact position and compare it with the averaged `unit` the mint uses | Settles the averaged-normal cause and tells the tip lane what test it needs |
 | **E-A — does the struck feature carry the load onward?** | Not measurable by probe; it is a doctrine question (§2.5) | none — it is Craig's ruling, informed by stage 1's instance count | Decides whether tasks #64 / #65 are blockers or neighbours |
 
@@ -1494,26 +1970,41 @@ reaches the state under test before it asserts the sabotage changes it — the s
 
 ## §12. ESCALATIONS, COLLECTED
 
-1. **The permanence of every landed strut (§6).** 0 of 80 crevices reach the only
-   removal-ergonomics number the project has. Pricing decision, not technical.
-2. **Three of ten production scars exceed the 2.0 mm² allowance (§0 ask 2, §6.4).** They clear
-   only through the radius-scaled `KAPPA` allowance. The 2.0 mm² was ratified with a stated
-   1.60 mm-diameter rationale, and two of these are wider than that.
-3. **The sub-0.3 mm crevices (§0 ask 4, §6.4).** 14 of 80, 24.8 % of the recovered area, 1 of 5
-   at production carrying 27.2 % of the prize. **A new ask, not in the first version.**
-4. **Withdrawing the deep-seat permission at spec scope (§8.4).** It closes the stub half of E-C
-   and is a spec correction, not a runtime tightening. **The design recommends withdrawing.**
-5. **E-C is NOT closed by this design alone (§8.5).** The PR-2 placed-mask exemption, with six
-   live consumers, is untouched and belongs to the clearance bundle.
-6. **E-A remains open and this design adds instances to it (§2.5).** Not opened by this design.
-   Counted at stage 1 before it is committed.
+**Items 1–4 and 14 are CLOSED by Craig's four rulings.** They are kept, struck through, with
+what closed them, because an escalation that vanishes without a recorded disposition is how the
+same argument gets had twice.
+
+1. ~~**The permanence of every landed strut (§6).**~~ **CLOSED by R2: accepted as disclosed.**
+   0 of 129 crevices reach `SPACING_FLOOR_MM`. The per-strut disclosure record stands; no gate.
+   E-B (measure a flush cutter) stays open as a *measurement*, not as a blocker.
+2. ~~**Three of ten production scars exceed the 2.0 mm² allowance.**~~ **DISSOLVED by R1.** The
+   load-sized anchors are smaller: **0 of 18 production scars and 0 of 129 over the whole
+   recovered population exceed `A_ABS_MM2 = 2.0 mm²`**, largest 1.478 mm² / 1.372 mm across,
+   inside the 1.60 mm equivalent-diameter rationale the allowance was ratified on. **This is a
+   measurement, not a bound** (§3.1, §6.4 item 1) — stage 1 must reproduce it on the corpus.
+3. ~~**The sub-0.3 mm crevices.**~~ **CLOSED by R3: land, disclose, never refuse on width.**
+   18 of 129, 14.9 % of the recovered area, 1 of 9 at production carrying 15.4 % of the prize
+   (§6.4 item 4).
+4. ~~**Withdrawing the deep-seat permission at spec scope.**~~ **SUPERSEDED by R4: the permission
+   is REWRITTEN, not withdrawn** (§8.2). Depth stays unlimited; the seat truncates at the
+   opposite face; punch-through is impossible by construction. It reaches all three families the
+   permission names, so the scope objection is answered in full.
+5. **E-C is NOT closed by the rulings alone (§8.5).** The PR-2 placed-mask exemption, with six
+   live consumers, is untouched and belongs to the clearance bundle. **This is now E-C's entire
+   residual scope**, because R1 also deleted the thin-feature-span check `10b0bd8` had built
+   under another name.
+6. **E-A remains open and the rulings add instances to it (§2.5).** Not opened by this design.
+   Counted at stage 1 before it is committed. **The count went from 80 to 129, and E-D is the
+   sharpest 65 of them.**
 7. **`rays_all = true` is a real cost, a two-site flip, and a refusal change (§10.2 stage 1b).**
    Its binding cap is `ContactConstructionLimits::production().max_work_items = 4_000_000`, which
    doctrine forbids raising, and **the charge has never been measured**. Failure refuses the whole
    model at initial contact construction.
-8. **Build order becomes a member rule for the first time (§3.6).** Two of 152 measured landings
-   need it. It is the third instance of an idiom the engine already applies at `cco.rs:4967` and
-   `anchor.rs:1063`, but promoting it to a member rule is an owner-visible move.
+8. **Build order becomes a member rule for the first time (§3.6).** Two of 154 measured landings
+   need it, and after the rulings they are **the only two records any test other than the anchor
+   capacity refuses**. It is the third instance of an idiom the engine already applies at
+   `cco.rs:4967` and `anchor.rs:1063`, but promoting it to a member rule is an owner-visible
+   move.
 9. **The FU-87 minimum-arm screen refuses 100 % of this design's output (§2.7(i)).** Answered in
    the first version by declaring landed struts out of scope. It is a ruling, and the screen sits
    one line below the build-order clause this design *does* adopt.
@@ -1526,44 +2017,77 @@ reaches the state under test before it asserts the sabotage changes it — the s
     needs a test that does not exist.
 13. **`MemberKind::Stub` → `MemberKind::Strut` moves member digests (§10.2 stage 2).** OD-8
     applies.
-14. **Test (a)(i), the perpendicular wall minimum, is new machinery (§2.3).** It does not exist in
-    the engine or in SPEC-EMBED-POLICY. It is a thin-feature-span check for landed feet, built
-    here. It refuses 59 of 152 candidates (278.281 mm²), 55 of them where the engine's own ball
-    check passes, and it reuses `DEFAULT_CONTACT_DEPTH_MM` — an along-axis embed depth — as a
-    perpendicular wall minimum. Whether that is the right constant is an owner question. It may
-    also be partial progress on E-C's other half, which should be recorded rather than discovered
-    later.
+14. ~~**Test (a)(i), the perpendicular wall minimum, is new machinery (§2.3).**~~ **DELETED by
+    R1.** There is no wall minimum any more, so there is no borrowed constant to justify and no
+    thin-feature-span check built under another name. The reviewer's substantive required change
+    against `10b0bd8` was that this clause be named and escalated; the ruling removed the clause
+    instead. **Every test in §2.3 is now an existing predicate or an existing formula.**
+15. **R1's law is applied at the foot and NOT at the contact tip (§2.8, scope).** The tip's embed
+    stays `DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` regardless of load, where the same law would give
+    0.019 – 0.225 mm. Moving it moves `p0` for every contact in the corpus and widens the
+    condemnation window at `initial.rs:1542` on models that have no condemned stub today, so it
+    is a separate change with a separate blast radius. **Named so that "R1 was implemented" is
+    never read as covering both ends.** On this model both readings give the same verdict for
+    every affected record (§8.3).
+16. **E-D — the truncated anchor's separating cut is not priced (§4.7). NEW, and the widest open
+    number in the document.** 65 of 129 recovered records (314.362 mm²), 6 of 9 at the production
+    plan, have their load-designed ball clipped by the opposite face, making the anchor a plug
+    spanning the wall. `ball_cut_radius_mm` is a half-space formula. The joint is priced; the
+    wall around the plug is not. The two conservative brackets put recovery at 70 / 154.65 mm² or
+    93 / 177.09 mm², **both below `10b0bd8`'s 80 / 279.18**, and **island 74's verdict is inside
+    the band.** Closing it needs a kernel query or Craig's E-A ruling — **not a constant.**
 
 ---
 
 ## §13. WHAT A REVIEWER SHOULD CHECK FIRST
 
-1. **Re-derive test (a) in both clauses.** Take one recovered record and one refused one from
-   `.git/land-at-strike-p1-evidence/full-intervals.jsonl` and confirm that
-   `chord × entry_cosang` is the perpendicular wall and that `foot_ball_breached` came out of the
-   kernel rather than out of the script. **If the grading is in the wrong units again, everything
-   downstream is wrong again.**
-2. **Re-derive island 74's refusal.** `t162`: axial chord 0.462902, entry incidence 0.737412,
-   wall 0.341356; foot ball radius 0.822711; engine far wall 0.581480; poke 0.241231.
-   That is the whole verdict.
+1. **Re-derive test (a) end to end on island 74.** `t162` at re-plan 6: axial chord 0.462902,
+   entry incidence 0.737412, so `W = 0.341350`. `r0 = r_foot = 0.587651`,
+   `R_b = 1.4 × r_foot = 0.822712`, `h_design = (1.4 − sqrt(0.96)) × r_foot = 0.246933`,
+   `h_eff = min(0.246933, 0.341350) = 0.246933`,
+   `a_eff = sqrt(2 × 1.4 × 0.587651 × 0.246933 − 0.246933²) = 0.587651`,
+   `capacity = 12 × π × 0.587651² = 13.018786` against `carried = 13.018786`. **If that does not
+   reproduce, the whole table is wrong.** Then confirm `ball_seat_factor` is read from
+   `contact.rs:186` and not transcribed, and that `0.4202041028867288` is what it returns at 1.4.
+2. **Check that `a_eff = r_foot` is a construction and not a bug.** It is what
+   `ball_seat_factor` is defined to produce (§2.8). If a reviewer sees the two numbers agree to
+   six decimals and assumes a copy-paste error, they will "fix" the grading and lose 46 records.
+   §6.5 exists for this reason and S9 pins it.
 3. **Confirm the sweep is centreline-only.** `initial.rs:1359` passes `rays_all = false`;
    `queries.rs:90` makes `n_offset_rays` inert when it is; every one of the 1,926 probe interval
-   rows carries `ray = -1`.
-4. **Check that the rule is an admission and only an admission for stubs.** MEASURED: of 1,500
-   surviving contact records, 7 have a crossing beyond the embed and **0** have a firm one — all
-   seven chords are 0.0293 mm, under the 0.08 mm print minimum. **Then check that this is false of
-   stage 1b**, which is the point of separating it.
-5. **Check that the scar bound is not doing work it cannot do.** §3.3: `A_ball` is a half-space
-   formula, and it supplies most of the anchor area. It is only applicable where the breach check
-   has passed.
-6. **Re-derive the E-C arithmetic (§8.3).** `t225`'s seat interval has `exited = true` and
-   `0.849 × 0.164 = 0.139 mm`.
-7. **Check the staging.** Stage 1 is measure-only **only if** the production sweep stays
-   centreline-only. If stage 1 moves one digit of one digest, the stage boundary is wrong.
+   rows carries `ray = -1`. **Unchanged by the rulings** — none of R1, R3 or R4 touches the sweep.
+4. **Check that all three behavioural rulings are admissions.** `compare-r134.ts` reports
+   **0 records lost** against `10b0bd8` and 49 gained, each attributed to the test that refused
+   it. MEASURED, separately: of 1,500 surviving contact records, 7 have a crossing beyond the
+   embed and **0** have a firm one — all seven chords are 0.0293 mm, under the 0.08 mm print
+   minimum. **Then check that this is false of stage 1b**, which is the point of separating it,
+   and note that stage 1b is now the *only* part of this work that can newly refuse anything.
+5. **Check that the scar formulas are not doing work they cannot do.** §3.1 withdrew the closed
+   form as a proof — its `T = δ` premise is gone — and replaced it with a measurement plus an
+   owed re-run over `(r0, r_x, T)`. If a later text quotes §3.2's conclusions as a bound, it is
+   quoting a retired argument.
+6. **Re-derive E-C's instance under R4 (§8.3).** `t225`'s seat interval has `exited = true` and
+   `0.849 × 0.164 = 0.139 mm` of shell. Then check that its load-sized tip anchor needs
+   `ball_seat_factor(1.5) × 0.165 = 0.0630 mm` of that 0.139 mm, so it does not reach the far
+   face at all — and that even at the far face its capacity, 1.865 mm², exceeds the 1.027 mm² it
+   carries.
+7. **Check the staging, in both directions.** Stage 1 is measure-only **only if** the production
+   sweep stays centreline-only; if stage 1 moves one digit of one digest, the stage boundary is
+   wrong. And §10.0: **nothing may be implemented while the wire-clearance lane owns
+   `crates/`**, because stage 3 is that lane's work and stage 2 cannot be accepted without it.
+8. **Check E-D honestly (§4.7).** The graded table (129 / 467.07 mm²) and both conservative
+   brackets (70 / 154.65, 93 / 177.09) come from the same evidence and the same script. A
+   reviewer who wants to test whether this document is arguing for its own conclusion should
+   start by checking that the brackets are reported at all, and that island 74 is named as the
+   record they decide.
 
 ---
 
-## APPENDIX — how the adversarial review's findings were folded
+## APPENDIX A — how the adversarial review's findings were folded
+
+> **Read this appendix as history.** It records how the review of `aae1559` was folded into
+> `10b0bd8`, and **every number in it is `10b0bd8`'s.** Craig's four rulings then moved most of
+> them. Appendix B carries the forward view; where the two disagree, Appendix B is current.
 
 The review of `aae1559` is at `scratchpad/land-at-strike-out/review.md`. Its verdict was UNSOUND
 with the recommendation *"do not ratify this document; do not abandon the rule."* This is the fold.
@@ -1594,3 +2118,27 @@ the engine has no Z-ordering rule anywhere. There are two — `cco.rs:4967` and 
 idiom rather than a novelty, which strengthens it, and it is what makes finding F7 sharper than
 the review knew: the screen the design proposes to decline is the next clause of the same
 qualification chain.
+
+---
+
+## APPENDIX B — the re-verdict's four required changes, and what the rulings did to them
+
+The re-verdict of `10b0bd8` (`scratchpad/land-at-strike-out/review.md`, "RE-VERDICT — 2026-08-22")
+graded the repair **SOUND-WITH-CHANGES (4)** and recommended *"ratify after change (1); the other
+three are edits, not blockers."* All four were folded at `10b0bd8`. **Three of them have since
+been overtaken by Craig's rulings, and the record should say so rather than leave a reader
+looking for machinery that no longer exists.**
+
+| change | as folded at `10b0bd8` | after R1–R4 |
+| --- | --- | --- |
+| **(1)** name test (a)(i) as new machinery, escalate it, and give it the grazing-incidence justification | §2.3 rewritten, §12 item 14 added, the 55-of-55 blind-spot analysis included | **OVERTAKEN by R1. The clause is deleted.** There is no wall minimum, no borrowed constant, and no thin-feature-span check under another name. §12 item 14 is struck through with its disposition. The grazing-incidence *outcome* survives: knife-edges are still refused, by a capacity calculation, with `W` from 0.014 to 0.122 mm across the 23 refusals |
+| **(2)** add (a)(i) to §12 | added verbatim | **struck through, with why** |
+| **(3)** show the `ball_breach_eps_mm` step in §8's capacity derivation | added | **OVERTAKEN by R4.** The breach check is unreachable, `ball_breach_eps_mm` is no longer read on this path, and the derivation it belonged to — "what is the largest foot that clears the breach" — has no question left to answer |
+| **(4)** say that three of the six tests refuse nothing | said in §4.3 | **STILL SAID, and it is now four of five.** (b) cannot refuse anything at all under R3; (c) and (e) refuse 0 of 154; (a) decides 23 and (f) decides 2 |
+
+**One thing the re-verdict got right that the rulings did not change.** Its §1 reproduced the
+`10b0bd8` grading independently, from the raw JSONL, without importing the grader — and caught
+its own `kind` filter bug in the process. **This amendment's table has been diffed record by
+record against that reproduced grading** (`compare-r134.ts`): 0 lost, 49 gained, each gain
+attributed to the specific test that refused it before. That is the check a reader should run
+first if they doubt the 129.
