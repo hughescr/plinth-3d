@@ -64,6 +64,16 @@ const RETIRED_FLAT_INSET: [(&str, &str); 2] = [
 /// Requiring the shared helper does: a site that stops calling it has either
 /// deleted its clearance screen or built its own mask, and both are exactly the
 /// drift #36 recorded and #51 paid for.
+///
+/// **The positive half reads PRODUCTION text only** (challenge finding B4,
+/// 2026-08-22). It used to scan the whole file, and `cco.rs`'s own
+/// `#[cfg(test)] mod tests` calls `placed_mask_inset_mm` twice — so the
+/// production call could be replaced by a locally re-implemented mask and this
+/// guard stayed GREEN, satisfied by the test module. MEASURED: forking the
+/// production call left the guard green; renaming only the two test-module
+/// occurrences turned it red, which isolates the mechanism. `production_only`
+/// cuts the module-level test module off before the scan, so a production fork
+/// can no longer hide behind a test occurrence.
 const CONVERGED: [(&str, &str); 3] = [
     ("brace.rs", "contact::placed_mask_inset_mm"),
     ("cco.rs", "placed_mask_inset_mm"),
@@ -90,6 +100,36 @@ fn code_only(line: &str) -> &str {
         Some(index) => &line[..index],
         None => line,
     }
+}
+
+/// The prefix of `source` that precedes the module-level `#[cfg(test)] mod …`,
+/// or the whole source when the file has no such module.
+///
+/// Deliberately narrow: it matches ONLY an unindented `#[cfg(test)]` whose next
+/// line is an unindented `mod `. `cco.rs` carries two item-level `#[cfg(test)]`
+/// attributes at lines 41 and 50 — a test-only struct and its constructor, in
+/// the middle of production text — and cutting at the first attribute of any
+/// kind would amputate the file and make this guard fail for no defect.
+///
+/// A file whose inline tests move elsewhere simply gets its whole text scanned,
+/// which is the safe direction: the guard can then only over-report.
+fn production_only(source: &str) -> &str {
+    let lines: Vec<&str> = source.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if *line == "#[cfg(test)]"
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| next.starts_with("mod "))
+        {
+            // Byte offset of this line inside `source`, taken from the slice
+            // itself rather than accumulated from line lengths, so no
+            // assumption about line endings can put the cut off a character
+            // boundary.
+            let start = line.as_ptr() as usize - source.as_ptr() as usize;
+            return &source[..start];
+        }
+    }
+    source
 }
 
 #[test]
@@ -159,17 +199,20 @@ fn every_clearance_site_goes_through_the_one_shared_mask() {
         let path = support_src().join(file);
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("guarded source {file} must be readable: {error}"));
-        let reached = source.lines().any(|line| code_only(line).contains(needle));
+        let reached = production_only(&source)
+            .lines()
+            .any(|line| code_only(line).contains(needle));
         assert!(
             reached,
-            "{file} no longer calls `{needle}`. Every site that builds a \
-             `segment_clearance` inset pair for a contact-declaring member must \
-             use the ONE shared PR-2 mask (`contact::placed_mask_inset_mm`). \
-             Three sites diverging from it is defect #36; the rootward half of \
-             that divergence is #51, which made the model-anchor clearance test \
-             unsatisfiable by exactly the arm's own radius. If this site no \
-             longer needs a clearance screen, delete the row from CONVERGED and \
-             say why."
+            "{file} no longer calls `{needle}` in PRODUCTION code. Every site \
+             that builds a `segment_clearance` inset pair for a \
+             contact-declaring member must use the ONE shared PR-2 mask \
+             (`contact::placed_mask_inset_mm`). Three sites diverging from it is \
+             defect #36; the rootward half of that divergence is #51, which made \
+             the model-anchor clearance test unsatisfiable by exactly the arm's \
+             own radius. An occurrence inside `#[cfg(test)] mod tests` does NOT \
+             satisfy this guard (challenge finding B4). If this site no longer \
+             needs a clearance screen, delete the row from CONVERGED and say why."
         );
     }
 }
@@ -182,6 +225,69 @@ fn the_positive_guard_would_notice_a_site_that_stopped_converging() {
     assert!(!absent.contains("placed_mask_inset_mm"));
     // ...and it really does read live code, not prose.
     assert!(code_only("/// calls placed_mask_inset_mm").is_empty());
+}
+
+/// **Challenge finding B4, as a mechanism test rather than an argument.**
+///
+/// A production fork must not be able to hide behind a call the file's own test
+/// module still makes. The fixture is the defect in miniature: the production
+/// body re-implements the mask inline, and only `mod tests` still names the
+/// shared helper.
+#[test]
+fn the_positive_guard_ignores_a_call_that_only_exists_in_the_test_module() {
+    let forked = "\
+fn clearance_rows() {
+    let mask = depth + (radius + standoff) / abs_cos;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_test_that_still_calls_the_shared_helper() {
+        let mask = crate::contact::placed_mask_inset_mm(seating, c, r, m, &p);
+    }
+}
+";
+    // The whole file DOES name the helper — this is why the un-truncated scan
+    // stayed green while the production call was gone.
+    assert!(forked.contains("placed_mask_inset_mm"));
+    // Production text alone does not.
+    assert!(!production_only(forked).contains("placed_mask_inset_mm"));
+
+    // ... and the truncation is not indiscriminate: an item-level
+    // `#[cfg(test)]` in the middle of production text (the `cco.rs:41` shape)
+    // must NOT cut the file.
+    let item_level = "\
+#[cfg(test)]
+pub(crate) struct TestOnlyThing;
+
+fn clearance_rows() {
+    let mask = crate::contact::placed_mask_inset_mm(seating, c, r, m, &p);
+}
+";
+    assert!(production_only(item_level).contains("placed_mask_inset_mm"));
+
+    // A file with no inline test module is scanned whole.
+    let no_tests = "fn f() { placed_mask_inset_mm(); }\n";
+    assert_eq!(production_only(no_tests), no_tests);
+}
+
+/// The truncation must actually bite on the real files, or B4's fix is inert.
+#[test]
+fn every_converged_file_really_has_the_test_module_the_guard_cuts_off() {
+    for (file, _) in CONVERGED {
+        let path = support_src().join(file);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("guarded source {file} must be readable: {error}"));
+        assert!(
+            production_only(&source).len() < source.len(),
+            "{file} has no module-level `#[cfg(test)] mod …`, so the positive \
+             guard is scanning the whole file and a production fork could once \
+             again be satisfied by a test-module occurrence (challenge finding \
+             B4). If this file's tests legitimately moved out of the crate \
+             source, say so here and adjust `production_only`."
+        );
+    }
 }
 
 #[test]
