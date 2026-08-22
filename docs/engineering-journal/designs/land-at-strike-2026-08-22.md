@@ -103,6 +103,10 @@ first grading claimed.
 its foot standing on the struck surface, when a foot genuinely fits there. This is a support
 that runs model to model. It is legal under your three-seat ruling (plate, model surface, or
 another support). *This ask is unchanged from the first version and it is the sound part.*
+One clause of one test decides most of that outcome: the perpendicular wall minimum — test
+(a)(i), which exists nowhere in the engine until this design (§2.3) — is what turns 135
+recoverable records into 80; drop it and the rule recovers 546.11 mm² instead of 279.18 mm².
+**Ratifying this ask ratifies that clause.**
 
 **2. That these bridges are permanent, priced honestly.** MEASURED: **0 of 80** recovered
 struts sit in a crevice as wide as 2.5 mm, the only removal-ergonomics number the project has —
@@ -151,6 +155,12 @@ Two corrections to how this was put to you the first time:
   the production plan**, and two of those four are already illegal under the existing
   scar-dimension rule. The true cost is one shape, 1.03 mm², and that shape is a support
   through a 0.139 mm shell, which we should not want.
+
+* **The thin-wall guard E-C wanted already exists — for landed feet.** Test (a)(i) (§2.3) is
+  that check, built here under another name: it refuses 59 of the 152 landing candidates on wall
+  thickness alone. E-C's residual scope after this design is not stub tips — it is the *other*
+  consumers of the no-depth-cap permission, above all the PR-2 placed-mask exemption's six
+  consumers, already handed to the bundle lane below.
 
   **Out of scope here, named so it is not lost:** this does not touch the PR-2 placed-mask
   exemption that arms and braces use, which is larger, has no depth cap at all, and has six
@@ -323,8 +333,18 @@ that it has no equivalent for the void (§6.4).
 
 ### §2.3 The six tests, in honest units
 
-A strike becomes a foot when **all six** hold. Each is an existing predicate or an existing
-formula.
+A strike becomes a foot when **all six** hold. Five of the six are an existing predicate or an
+existing formula — clause (a)(i) is not.
+
+**Test (a)(i) is new machinery, not a citation.** Nothing in the engine or in SPEC-EMBED-POLICY
+compares a perpendicular wall thickness to anything: `sphere_breach` returns
+`nearest_wall_thickness_mm`, but before this design no caller reads it, and SPEC-EMBED-POLICY's
+rules 1-4 contain no wall minimum. **(a)(i) is the thin-feature-span check escalation E-C names,
+built here for landed feet under another name.** Its derivation is direct, not borrowed: the foot
+embeds `DEFAULT_CONTACT_DEPTH_MM = 0.3 mm` perpendicular into the struck face, so the face must
+itself hold at least 0.3 mm of perpendicular material for the foot to seat inside it rather than
+pass through it. The constant is reused in its own native meaning — an embed depth demanding its
+own depth of material to embed into — not repurposed as a new number.
 
 | # | test | statement | how it is measured |
 | --- | --- | --- | --- |
@@ -356,6 +376,14 @@ whether the material is deep enough to seat 0.3 mm into. Clause (ii) asks whethe
 the end of the foot comes out the other side, in **any** direction within 25° of the inward
 normal — which is not the stub's direction. Island 74 passes (i) at 0.341 mm and fails (ii)
 with a 0.241 mm poke. Nine of the thirteen breaches pass (i).
+
+**Why (a)(i) is not redundant with the engine's own ball check.** Of the 55 records that (a)(i)
+alone refuses, `sphere_breach` returns **no finite wall at all on 49 of the 55** (0.61 mm on the
+other 6) — the breach cone, cast narrow from the ball centre, misses a knife-edge struck at
+grazing incidence. Those 55 records have entry cosang median 0.352 (min 0.062) and perpendicular
+wall median 0.094 mm (min 0.014 mm). The ball check catches a fat foot breaching a nominal wall
+(island 74); the thickness clause catches a foot on a knife-edge the cone cannot see. The two
+clauses cover different blind spots; both are needed.
 
 **A caution about `nearest_wall_thickness_mm`.** The kernel measures it from the **ball centre**
 to the far wall along that cone, not from the near face and not along the stub axis, and it is
@@ -746,6 +774,10 @@ test (a) — whether the struck material is thick enough, and whether the foot's
 it. The scar rules, both area laws and build order together refuse 4 records. The first version
 graded on the three tests that refuse nothing and omitted the one that refuses everything.
 
+**Say it plainly: tests (c), (d) and (e) each refuse 0 of the 152 landing candidates.** Test (a)
+decides 68 of the 72 re-aims on its own (55 wall-only, 9 breach-only, 4 both); (b) and (f) decide
+2 each. The scar rules, the foot area law and the tip area law decide nothing on this model.
+
 ### §4.4 Per re-plan
 
 | re-plan | condemned | lands | re-aim | tip never embeds | seat runs deep | carried | landed carried |
@@ -807,11 +839,13 @@ the first version did not run.**
 
 **Answer to the question that started this lane: no, not by landing.** Island 74's stub strikes
 material 0.341 mm thick, and the foot the load requires puts a 1.65 mm ball into it that comes
-out the far side by 0.241 mm. DERIVED from the MEASURED far-wall distance of 0.5815 mm: the
-breach clears only for a foot ball at or under about 0.63 mm radius, which means a foot radius at
-or under about 0.451 mm, which can carry about 10.9 mm². Island 74 needs 13.019 mm². **No foot
-that can carry the island fits in the wall the stub hit. Island 74 must be re-aimed or re-seated,
-and that is SPEC-P8-RELOCATE's job, not this rule's.**
+out the far side by 0.241 mm. DERIVED from the MEASURED far-wall distance of 0.5815 mm, plus the
+registered breach epsilon `ball_breach_eps_mm = 0.05` (`placeholders.rs:991`): the breach clears
+only for a foot ball radius `R_b ≤ 0.5815 + 0.05 = 0.6315 mm`, which caps the foot radius at
+`r_foot ≤ 0.451 mm`, which gives a ball-cut radius of `0.5375 mm` and a capacity of about
+**10.888 mm²**. Island 74 needs 13.019 mm². **No foot that can carry the island fits in the wall
+the stub hit. Island 74 must be re-aimed or re-seated, and that is SPEC-P8-RELOCATE's job, not
+this rule's.**
 
 ### §4.7 Spreads over the recovered population
 
@@ -1131,6 +1165,12 @@ Why this shape of ask, in four lines:
   are already illegal under the existing scar-dimension rule. The true cost of declining is **one
   shape**, `t225`, 1.03 mm² — a 0.139 mm shell perforation which we should not want.
 * **It does not depend on anything unratified.** §5.2's R1 amendment is not part of this ask.
+* **The thin-wall guard E-C wanted already exists — for landed feet.** Test (a)(i) (§2.3) is
+  that check, built here under another name, and it refuses 59 of 152 landing candidates on wall
+  thickness alone. E-C's residual scope after this design is not stub tips; it is the other two
+  named families this ask still reaches in name only (strut/rung feet, model-rung ends) and,
+  more concretely, the PR-2 placed-mask exemption's six consumers named in §8.5, already handed
+  to the bundle lane.
 
 **A spec edit must reach both implementations.** There is a second implementation of these
 formulas in `plinth-metrics/src/scar.rs`, with its own pinned test
@@ -1486,6 +1526,13 @@ reaches the state under test before it asserts the sabotage changes it — the s
     needs a test that does not exist.
 13. **`MemberKind::Stub` → `MemberKind::Strut` moves member digests (§10.2 stage 2).** OD-8
     applies.
+14. **Test (a)(i), the perpendicular wall minimum, is new machinery (§2.3).** It does not exist in
+    the engine or in SPEC-EMBED-POLICY. It is a thin-feature-span check for landed feet, built
+    here. It refuses 59 of 152 candidates (278.281 mm²), 55 of them where the engine's own ball
+    check passes, and it reuses `DEFAULT_CONTACT_DEPTH_MM` — an along-axis embed depth — as a
+    perpendicular wall minimum. Whether that is the right constant is an owner question. It may
+    also be partial progress on E-C's other half, which should be recorded rather than discovered
+    later.
 
 ---
 
