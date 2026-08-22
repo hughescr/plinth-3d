@@ -238,16 +238,19 @@ credited with, for the exit direction.
 
 WHAT THIS CLAMP DOES NOT BOUND, stated so it is never read as closed.
 The clamp is scalar and acts along ONE direction — the seat's own line.
-It does not bound the buried ball's LATERAL reach at oblique incidence.
-At entry incidence `cosang` a ball of radius `R_b` driven to depth `h`
-reaches `h + R_b * (1 - cosang)` below the entry face; where that exceeds
-the perpendicular wall thickness the anchor is a plug SPANNING the wall
-rather than a cap in a half-space. Rules 1-3 price the joint at the entry
-plane; nothing in this spec prices the wall around such a plug. That is
-open escalation E-D
-(`land-at-strike-2026-08-22.md` section 4.7), measured at 65 of 129
-recovered landed-foot records on the Rotting Warhorse probe. This
-amendment does not close it and must not be cited as closing it.
+It does not bound the buried ball's LATERAL reach at oblique incidence,
+AT EITHER END OF THE MEMBER. At entry incidence `cosang` a ball of radius
+`R_b` driven to depth `h` reaches `h + R_b * (1 - cosang)` below the entry
+face; where that exceeds the perpendicular wall thickness the anchor is a
+plug SPANNING the wall rather than a cap in a half-space. Rules 1-3 price
+the joint at the entry plane; nothing in this spec prices the wall around
+such a plug. That is open escalation E-D
+(`land-at-strike-2026-08-22.md` section 4.7), measured at 81 instances on
+the Rotting Warhorse probe: 65 of 129 recovered landed-foot records
+(314.362 mm2) and 16 tip-seat records by the identical formula
+(52.176 mm2 of them recovered), one record clipped at both ends and
+counted once per end. This amendment does not close it and must not be
+cited as closing it.
 
 IMPLEMENTATION NOTE. A spec edit must reach BOTH implementations. The
 second implementation of the scar formulas is `plinth-metrics/src/scar.rs`,
