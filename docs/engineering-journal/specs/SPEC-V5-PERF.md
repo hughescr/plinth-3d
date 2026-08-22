@@ -326,7 +326,7 @@ only on POSITION writes (tree.py:94–95) — is **unsound for members with
   the scalar rule keeps the certificate valid.
 - Under a nonzero inset, the certified clearance envelope is
   `r_max = max(r_lo, r_hi)` at the INSET endpoints (queries.rs
-  `seg_clear_one`), which can be strictly below `max(r0, r1)`; a later
+  `seg_clear_one_excluding`), which can be strictly below `max(r0, r1)`; a later
   taper redistribution that stays under the scalar `cert_radius` can
   raise the true envelope above what was checked.
 - Radius decrease with fixed positions is REACHABLE on embed-end members:
@@ -398,7 +398,7 @@ Cached pure functions (purity by the Locality lemma + kernel reads):
 
 **Skip rule** for a dirty member with current radii/insets against a cached
 clearance result (kernel formula: `clr = best_d(sub-segment) − (r_max +
-standoff)`, `seg_clear_one`, with `r_max` the max of the linearly-tapered
+standoff)`, `seg_clear_one_excluding`, with `r_max` the max of the linearly-tapered
 radius at the two inset endpoints):
 
 ```
@@ -811,7 +811,7 @@ The following challenges were REJECTED or materially narrowed:
 
 - **R1 (Codex) — "a scalar maximum cannot certify a tapered profile"
   in general**: REJECTED for `embed_end is None` members. The kernel
-  does not check pointwise taper: `seg_clear_one` (queries.rs) computes
+  does not check pointwise taper: `seg_clear_one_excluding` (queries.rs) computes
   ONE uniform envelope `r_max = max(r_lo, r_hi)` over the checked span
   and thresholds `best_d − (r_max + standoff)`. With insets identically
   0 (non-embed), the checked domain is the full span and the checked
