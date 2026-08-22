@@ -113,6 +113,12 @@ pub(crate) mod rewire;
     reason = "crate-private sealed preparation is consumed by the pending support controller"
 )]
 pub(crate) mod runner;
+#[allow(
+    dead_code,
+    reason = "the frozen seat zone lands one commit ahead of the clearance sites that read it; \
+              docs/engineering-journal/designs/honest-exemption-2026-08-22.md section 8 names them"
+)]
+pub(crate) mod seat_zone;
 pub mod specialized;
 pub mod transient;
 #[allow(
