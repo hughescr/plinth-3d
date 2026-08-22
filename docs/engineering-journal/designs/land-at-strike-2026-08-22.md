@@ -23,17 +23,28 @@
 > radius driven centre-deep into the struck wall. Craig ruled that wrong (R1): the foot's
 > radius **and its depth** derive from the load, so a strut carrying a small load in a thin
 > crevice gets a small anchor. He also ruled that a seat may go as deep as it likes but is
-> **truncated at the opposite face** (R4), which makes punch-through impossible by
-> construction and retires the foot-ball breach *refusal*. On those two rulings the rule
+> **truncated at the opposite face** (R4), which makes punch-through impossible **along the
+> seat's own line** and retires the foot-ball breach *refusal*. On those two rulings the rule
 > recovers **129 of 208 measured records, not 80** — 467.07 mm² against 279.18 mm² — **and
-> island 74, the island this lane was opened for, now lands.** No record that recovered at
-> `10b0bd8` is lost: the change is a strict admission.
+> island 74, the island this lane was opened for, lands AS GRADED — contingent on E-D.** No
+> record that recovered at `10b0bd8` is lost: the change is a strict admission.
 >
-> **The one number a reader should carry away with a caveat attached.** Island 74 lands with
-> **zero margin** — its anchor's capacity equals its demand to nine decimal places, because
-> the load law sized the shaft and the seat law sizes the seat to match the shaft. 46 of the
-> 129 recovered records are in that state, and it is a property of the engine's sizing law,
-> not of this rule (§4.6, §6.5).
+> **The one thing a reader must carry away.** R4's clamp is scalar and acts along one
+> direction. It does **not** bound the buried ball's *lateral* reach, and on 65 of the 129
+> recovered records that reach exceeds the wall — the anchor is a plug spanning the wall
+> rather than a cap in a half-space. That is escalation **E-D** (§4.7), it is open, and it
+> decides island 74. **This document states that once and states it the same way
+> everywhere**; where the previous draft said the retired breach predicate had become
+> "unreachable", that sentence was refuted by this document's own §4.7 measurement and is
+> deleted (§2.3).
+>
+> **The second thing.** The capacity-to-demand ratio at a landed foot is an **identity, not a
+> grade**: for a foot the load law sized, `capacity / demand` is 1.000 by construction. What
+> decides test (a) is a depth clause — **the wall must be at least
+> `ball_seat_factor(1.4) × r_foot` deep, perpendicular to the face the stub enters** — and
+> its only way to refuse is truncation. 46 of the 129 recovered records read exactly 1.000
+> for that reason, and it is a property of the engine's sizing law, not of this rule
+> (§4.6, §6.5).
 >
 > **Evidence labels.** **MEASURED** — a number a run produced. **DERIVED** — closed form
 > from MEASURED or registered inputs. **INFERRED** — reasoning from a recorded fact, not
@@ -65,36 +76,52 @@ The engine throws away every support stub that runs into the model. Your instruc
 stop throwing them away and stand them on what they hit. Your four rulings of 2026-08-22 then
 told the grading to stop sizing every landed foot as if it were a standard 0.3 mm foot, and to
 stop condemning a seat for being deep when it can simply be cut off at the far face. On those
-rulings the rule recovers **129 of the 208 records — 467.07 mm² — and island 74 lands.**
+rulings the rule recovers, **as graded, 129 of the 208 records — 467.07 mm² — and island 74
+lands. Both numbers are contingent on one open escalation, E-D, and the bracket is printed
+below the table rather than left to §4.7.**
 
 ### The recovery table, up front, with island 74 first
 
-**ISLAND 74 — RECOVERED, WITH ZERO MARGIN.** At the production plan its whole 13.019 mm² rests
-on one condemned stub, terminal 162. That stub strikes the model 1.040 mm out from its contact,
-in material **0.341 mm thick measured perpendicular to the face it enters**. Under R1 the foot
-it needs is not a 0.3 mm-deep foot. Its load sizes the shaft at `r0 = 0.5877 mm`, and the depth
-that makes the seat exactly as strong as that shaft is
-`ball_seat_factor(1.4) × 0.5877 = 0.2469 mm` — the engine's own PR-1 clause (c), evaluated at
-the registered foot ball factor. **0.2469 mm fits inside 0.3414 mm**, so R4's truncation does
-not even bind, the seat never reaches the opposite face, and no ball can come out of it. The
-seat's minimal separating cut is `0.5877 mm` and its capacity is
-`12 × π × 0.5877² =` **13.018786 mm²**, against a demand of **13.018786 mm²**.
+**ISLAND 74 — RECOVERED AS GRADED, CONTINGENT ON E-D.** At the production plan its whole
+13.019 mm² rests on one condemned stub, terminal 162. That stub strikes the model 1.040 mm out
+from its contact, in material **0.341 mm thick measured perpendicular to the face it enters**.
+There are two questions about that wall. **This design answers the first and does not answer
+the second.**
 
-**Read that last line twice.** The capacity-to-demand ratio is **0.999999999** — it passes
-under the same relative tolerance the area law itself is compared under, and it has **no
-margin at all**. That is not a coincidence and not a fudge: the load law sizes the shaft to
-exactly carry the load, and the seat law sizes the seat to exactly match the shaft. **46 of the
-129 recovered records, and 7 of the 9 at the production plan, sit at exactly 1.000.** Every one
-of them is a foot whose radius was not clamped up to `MIN_SHOOT_R_MM`. This is a property of
-the engine's own sizing law, not of this rule — but this rule is the first thing that makes it
-visible, and §6.5 discloses it rather than burying it.
+**The DEPTH question — answered, with margin.** Under R1 the foot island 74 needs is not a
+0.3 mm-deep foot. Its load sizes the shaft at `r0 = 0.5877 mm`, and the wall the anchor demands
+is `ball_seat_factor(1.4) × r_foot = 0.4202 × 0.5877 =` **0.2469 mm**, measured perpendicular
+to the face the stub enters. **It has 0.3414 mm. That is 38 % to spare** — a real margin and a
+comfortable one, and it is the number to ask for. R4's truncation does not bind here: the seat
+does not reach the opposite face along its own line.
 
-**The second thing about island 74 you should see.** Its foot ball is 1.645 mm across and the
-wall is 0.341 mm thick, so at the 42° the stub strikes at, the *ball* reaches 0.463 mm below
-the entry face — past the opposite face. Under R4 it is truncated there. What is left is a plug
-that spans the wall. **The area law prices the joint and prices it as sufficient. Nothing in
-the engine prices the wall around the plug.** That is escalation **E-D** (§4.7), it is E-A
-wearing a new hat, and it is the one place where this document's arithmetic stops.
+**Do not read the capacity ratio as the margin.** The grading also reports
+`capacity / demand = 0.999999999` for this record, and **that number is an identity, not a
+grade.** The load law grows the shaft until it just carries the load and stops; the seat law
+sets the seat depth so the seat is exactly as strong as that shaft. Divide one by the other and
+you get 1.000, every time, for every foot big enough to escape the minimum-radius clamp. **For
+a foot the load law sized, test (a) reduces exactly — with no approximation — to
+`W >= ball_seat_factor(1.4) × r_foot`.** It is a truncation detector: the only way it can
+refuse is for the wall to be too thin to take the depth the load asks for. 46 of the 129
+recovered records read exactly 1.000 because of that identity, and the other 83 get their
+apparent margin (up to **2760.9**) from the `MIN_SHOOT_R_MM` clamp, not from the wall. §6.5
+carries the algebra; §4.6 works island 74 by hand.
+
+**The LATERAL question — NOT answered. This is E-D, and it decides island 74.** Its foot ball
+is 1.645 mm across, so at the 42° the stub strikes at, the *ball* reaches **0.4630 mm** below
+the entry face into a **0.3413 mm** wall — **1.36 × the wall**. R4 truncates it there, and what
+is left is a plug spanning the wall. **The area law prices the joint at the entry plane and
+prices it as sufficient. Nothing in the engine prices the wall around the plug**, because R4's
+clamp is scalar and acts along the seat's own line only. That is escalation **E-D** (§4.7), it
+is E-A wearing a new hat, and it is where this document's arithmetic stops. **Under both
+conservative readings of E-D island 74 is REFUSED** — capacity 7.181 mm² or 4.889 mm² against
+13.019 mm² demanded.
+
+**Why island 74 flipped, stated correctly.** At `10b0bd8` it **passed** the flat 0.3 mm wall
+clause (0.3414 ≥ 0.300) and was refused by the foot-ball breach check alone. MEASURED. So R1
+lowered a demand island 74 already met, and **its recovery is 100 % attributable to retiring
+the breach refusal (R4)** — which is exactly the check E-D re-opens. The sentence that explains
+the recovery and the sentence that names the risk are the same sentence.
 
 208 stub records were measured on the Rotting Warhorse across 7 re-plans (**79** distinct stub
 shapes — `10b0bd8` said 77; its shape key read a field its own grader never set and silently
@@ -110,14 +137,41 @@ printed.
 | Its own seat is truncated; nothing beyond it | 2 (1.0 %) | 1 | 1.31 mm² | **0 stubs** | legal outright under R4 (§8) |
 | **total** | **208** | **79** | **758.12 mm²** | **18, 101.61 mm²** | |
 
+> **THE BRACKET ON THE FIRST ROW — read it with the table, not after it.** The 129 / 467.07 is
+> **as graded**. If E-D rules that a ball clipped by the far face does not anchor, the same
+> evidence and the same script give **70 / 154.65** (ball must fit uncut) or **93 / 177.09**
+> (inscribed sphere) — **both BELOW the 80 / 279.18 you were shown last week**, and **island 74
+> is refused by both**. E-D is open (§4.7, §12 item 16). The honest range for this work is
+> therefore two-sided: somewhere between worse than last week's table and 467 mm², and only a
+> physical answer closes it.
+
 **Against the table you were shown at `10b0bd8`.** That table was 80 records and 279.18 mm².
-**All 80 still recover — not one is lost — and 49 more join them**, 187.89 mm². They arrive
-from four places: 34 were refused by the flat 0.3 mm wall clause R1 abolishes (99.88 mm²), 11
-by the foot-ball breach R4 makes impossible (85.21 mm²), 2 by both (2.74 mm²), and 2 by the
-crevice-width cutoff R3 abolishes (0.07 mm²). Two more come out of the deep-seat class R4
-dissolves. **Every one of your four rulings is an admission. None of them can newly refuse
-anything, on this model or any other** — which is exactly what makes the staging in §10 cheap
-(§13 item 4).
+**All 80 still recover — not one is lost — and 49 more join them**, 187.891 mm². MEASURED,
+attributed to the clause that refused each one at `10b0bd8`, and it sums:
+
+```
+  flat 0.3 mm wall clause  [R1 abolishes it]      34 records    99.881 mm2
+  foot-ball breach refusal [R4 retires it]         9 records    83.100 mm2
+  refused by BOTH of the above                     2 records     2.738 mm2
+  crevice-width cutoff     [R3 abolishes it]       2 records     0.065 mm2
+  the deep-seat class      [R4 dissolves it]       2 records     2.106 mm2
+  ---------------------------------------------------------------------
+  gained                                          49 records   187.891 mm2
+```
+
+*(An earlier draft printed the ball bucket as 11 / 85.21 and then added "two more" from the
+deep-seat class. That double-counted the deep-seat pair — 2 records and 2.106 mm² — and summed
+to 51 against a measured 49. Corrected here.)*
+
+**Every one of your four rulings is an admission. On this model none of them can newly refuse
+anything** — which is what makes the staging in §10 cheap (§13 item 4). **That claim is bounded
+to this model, and here is the crossover to watch for at stage 1.** R1 replaces a flat 0.300 mm
+wall demand with `0.4202041 × r_foot`, which **exceeds** 0.300 mm as soon as
+`r_foot > 0.713939 mm` — reached by the load law at **carried > 19.216 mm²** — and the registry
+permits `r_foot` up to 1.0 mm (demanding 0.4202 mm of wall). On the Rotting Warhorse the
+largest carried area is 13.019 mm² and every one of the 154 striking candidates demands between
+**0.147 and 0.247 mm**, so the claim holds here with room. **It is not established for the
+corpus, and stage 1 is exactly where a counter-example would appear.**
 
 **The class that used to decide the answer is gone.** At `10b0bd8` one clause — "the struck
 wall must be at least `DEFAULT_CONTACT_DEPTH_MM` thick" — refused 59 of 152 candidates and
@@ -174,6 +228,18 @@ before (§6.3). Escalation item 2 of `10b0bd8` is dissolved, not deferred.
 **What it cost.** One disclosure: 46 of 129 recovered feet have capacity exactly equal to
 demand (§6.5). And it opens E-D (§4.7).
 
+**KNOWING DISCLOSURE — which way R1 moved the wall test.** R1 replaced a flat **0.300 mm**
+wall demand with `0.4202041 × r_foot`. **On this model that demands LESS wall at every single
+strike, not more.** MEASURED over all 154 striking candidates the demand runs **0.147 –
+0.247 mm**; over the 46 unclamped feet the load law itself sized it runs **0.166 – 0.247 mm**.
+**Not one candidate on the Rotting Warhorse asks for 0.300 mm or more.** R1 did not re-base the
+wall test here — **it loosened it, in every case.** That is consistent with what you asked for
+(*"as long as the physics says they'll be supported they can have much smaller anchors"*), and
+it is the direction this document treats as intended; it is recorded here so the direction is
+on the record as **chosen knowingly** rather than discovered later. The crossover where the new
+rule becomes the stricter one is `r_foot > 0.713939 mm`, i.e. `carried > 19.216 mm²` (§0), and
+stage 1 is where the corpus would show it.
+
 ---
 
 **R2 — PERMANENCE. ACCEPTED AS DISCLOSED.**
@@ -213,23 +279,38 @@ seven distinct widths.
 > beyond the model anyway."*
 
 **What it changed.** SPEC-EMBED-POLICY's no-depth-cap sentence is **rewritten, not withdrawn**
-(§8.4). Depth stays unlimited; the seat is **truncated at the opposite face**. A seat or foot,
-**ball included**, never exits. There is no backside scar. **Punch-through is impossible BY
-CONSTRUCTION**, and the construction is computable from the penetration intervals already
-measured — the interval *is* the model's extent along the seat's own line, so truncating at its
-far end is a clamp, not a test.
+(§8.2, §8.4). Depth stays unlimited; the seat is **truncated at the opposite face**. A seat or
+foot, **ball included**, never exits. There is no backside scar. **Punch-through along the
+seat's own line is impossible BY CONSTRUCTION**, and the construction is computable from the
+penetration intervals already measured — the interval *is* the model's extent along that line,
+so truncating at its far end is a clamp, not a test.
 
-**What it bought.** The foot-ball breach *refusal* is retired: +11 records / 85.21 mm², island
-74 among them. The deep-seat class is dissolved: its 4 records become 2 legal outright and 2
-that land. **And E-C's constructed regression stops existing.** E-C said a support could
-perforate a thin shell and stay legal; under R4 the seat stops at the shell's far face, so the
-perforation is not reachable. The Rotting Warhorse's one real instance — `t225`, a 0.139 mm
-shell — needs only **0.063 mm** of that shell under R1, so it never gets near the far face at
-all, and its truncated seat carries its load with the area law's own verdict (§8.3).
+**The spec is EDITED, not proposed.** `docs/engineering-journal/specs/SPEC-EMBED-POLICY.md`
+carries the amendment as of this commit: the no-depth-cap paragraph is amended in place, the
+retired conditional (*"thin walls are protected by rule 4 and the thin-feature-span check"*) is
+kept visible as history, and a **TRUNCATION amendment (OWNER RULED 2026-08-22)** section quotes
+your ruling verbatim as the authority, in the same shape the file's PRINT-FLOOR amendment uses.
+**The code half is NOT done**: the clamp must still reach the engine and the second scar
+implementation in `plinth-metrics/src/scar.rs` (§10.2 stage 4, §10.3). Until it does, the spec
+is ahead of the code, and both the spec section and §8.4 say so.
+
+**What it bought.** The foot-ball breach *refusal* is retired: **+9 records / 83.100 mm²**
+directly (a further 2 / 2.738 mm² were refused by the breach *and* the wall clause), island 74
+among them. The deep-seat class is dissolved: its 4 records become 2 legal outright and 2 that
+land.
+
+**What it did NOT buy, corrected.** An earlier draft said E-C's constructed regression *"stops
+existing"*. **It does not. It becomes an instance of E-D**, which is a defensible position and
+a different sentence. Graded by this document's own §4.7 lateral formula, the Rotting
+Warhorse's real instance `t225` reaches **0.2700 mm into a 0.1391 mm shell — 1.94 × the wall**,
+against island 74's **1.36 ×**. R4 stops it *exiting*; it does not stop it *spanning*. §8.3
+grades t225 and island 74 by the same rule, side by side.
 
 **What it cost.** E-D (§4.7): 65 of 129 recovered records have their load-designed ball clipped
 by the opposite face, and the clipped anchor is a plug spanning the wall. The area law prices
-the joint. Nothing prices the wall around the plug.
+the joint. Nothing prices the wall around the plug. **The cheapest way to turn that from a
+bracket into a measurement is §4.7's stage-1 addition: keep the `sphere_breach` QUERY, retire
+only its REFUSAL, and record the wall thickness it already computes.**
 
 ---
 
@@ -237,7 +318,8 @@ the joint. Nothing prices the wall around the plug.
 
 * **No constant moves and no constant is minted.** `ball_seat_factor` is an existing DERIVED
   function of an existing registered constant, evaluated at another existing registered
-  constant. `ball_breach_eps_mm` is no longer read at all on this path.
+  constant. `ball_breach_eps_mm` stops being a *refusing* input on this path; under §4.7.1 it
+  is still read at its registered value to produce the E-D disclosure.
 * **The load-path question stays open, and R4 makes it larger, which is said out loud.** When a
   strut stands on the model, the model carries the load onward. Whether that is safe is
   escalation E-A, opened 2026-08-21 by the model-seated-arm work that already landed. This rule
@@ -255,7 +337,11 @@ recovery table for the whole corpus before one triangle of geometry changes.
 
 1. **All three behavioural rulings are admissions.** R1 relaxes a threshold to a physics test,
    R3 removes a refusal, R4 converts a refusal into a clamp. **None of them can newly refuse a
-   stub on any model.** The only part of this work that can newly refuse anything is the rim
+   stub on THIS model** — MEASURED, 0 lost of 80. R3 and R4 cannot newly refuse anywhere, by
+   construction. **R1 is the one with a crossover**: its `0.4202041 × r_foot` demand exceeds the
+   old flat 0.300 mm once `r_foot > 0.713939 mm` (`carried > 19.216 mm²`), which the Rotting
+   Warhorse never reaches but the registry permits. **Bound the claim to the measured model and
+   let stage 1 settle the corpus.** The only part of this work that can newly refuse anything is the rim
    sweep (`rays_all`), which is stage 1b, is separately gated, and is unchanged by the rulings.
 2. **Implementation starts after the wire-clearance lane finishes.** That lane owns
    `crates/plinth-support/` right now — `brace.rs`, `cco.rs`, `contact.rs`, `designed_embed.rs`,
@@ -438,6 +524,29 @@ the engine already has and already uses.
 on this model, and (b) can no longer refuse anything anywhere.** The rule is decided by (a),
 with two hangers caught by (f). If the corpus numbers move at stage 1, (a) is where to look.
 
+**And say the count honestly once: THE SIX TESTS ARE FOUR.** Under R3, (b) is `true`
+unconditionally. Under R1, (d) *is* (a). So the live set is **(a), (c), (e), (f)** — and for a
+foot the load law sized, (e) is the same identity as (a) (§6.5). **Four tests honestly named
+beats six with two of them inert.** The six-row table above is kept because a reader of
+`10b0bd8` needs the correspondence, not because there are six tests.
+
+**One thing test (a) costs to build, priced honestly.** `ball_seat_factor` and
+`ball_cut_radius_mm` are live production code (`contact.rs:186`, `:197`) — that claim holds,
+and **no constant is minted**. But both production call sites hardcode `policy.ball_factor_stub`
+(`contact.rs:357`, `:545`), and `ContactPolicy` (`contact.rs:208-263`) carries **no foot-factor
+field at all**. Clause (a) needs `ball_seat_factor(BALL_FACTOR_FOOT)` and
+`ball_cut_radius_mm(r_foot, h_eff, 1.4)`, which is **a new `ContactPolicy` field plus a
+call-site branch**. That is new plumbing over existing formulas, and it should be priced as
+plumbing rather than as a call into machinery as it stands.
+
+**A related fact about the foot ball, so §2.3's argument is read on the right terms.** For a
+landed foot **no ball is emitted at all**: `lower.rs:294-296` routes only `MemberKind::Stub` to
+`lower_stub`, a model-anchored `Strut` falls through to a plain frustum, and
+`AnchorFootCertificate::foot_ball_radius_mm` has zero non-test readers. **The foot ball is a
+validation proxy for the frustum's lateral bulk, not emitted geometry.** R4 re-parameterizes an
+object that is never built. That does not make the argument wrong — but on the proxy's terms
+the cone sweep *is* the point of the proxy, which is why the paragraph above matters.
+
 **The wall requirement is load-dependent, and that is the whole of R1.** There is no threshold
 to quote. MEASURED, at the two ends of the overlap:
 
@@ -463,14 +572,30 @@ have refused both.
   crevice**. The ball is a bulb hanging in the air with a cap of it buried. That is the
   parameterization `contact.rs:186` already documents for a stub tip — *"a ball of radius
   `f*r_tip` whose south pole sits at `p0`"* — applied to a foot.
-* Under R4 the seat is truncated at the opposite face, so **`breached` cannot be true**. There
-  is nothing left for `sphere_breach` to detect. The predicate is not weakened; it is
-  unreachable. `ball_breach_eps_mm` is no longer read on this path.
+* Under R4 the seat is truncated at the opposite face, so **no seat exits along its own
+  line**. That is what the clamp bounds, and it is all the clamp bounds.
 
-**What that leaves, and it is not nothing.** The buried cap's *lateral* reach at oblique
-incidence is `h_eff + R_b·(1 − cosang_entry)`, which for 65 of the 129 recovered records exceeds
-`W`. Those anchors are truncated into plugs that span the wall. **§4.7 is that disclosure and it
-is escalation E-D.**
+**WHAT R4 DOES NOT DO, said here because §0 repeats this section.** A previous draft of this
+subsection said *"`breached` cannot be true… the predicate is not weakened; it is
+unreachable."* **That was wrong, and this document's own §4.7 refutes it.** `sphere_breach`
+does not test along the seat's line. `queries.rs:2948-2973` (`cone_thickness`, called from
+`breach_one` at `:3007`) sweeps a **cone** of inward orientations —
+`FOOT_BREACH_HALF_DEG = 25.0`, `FOOT_BREACH_CONE_RAYS = 8` (`anchor.rs:32`, `:34`) — precisely
+to catch **lateral and oblique** far-wall reach, which a scalar clamp on one direction cannot
+bound. The buried cap's lateral reach at oblique incidence is `h_eff + R_b·(1 − cosang_entry)`,
+and **MEASURED, it exceeds `W` on 65 of the 129 records this rule recovers, 314.362 mm², 67.3 %
+of the recovery.** That is the state `breached` exists to report.
+
+**So state the retirement on its real terms.** The check catches a real hazard; the hazard's
+measured extent is 65 / 129 and 314.362 mm²; and retiring the *refusal* is **an owner-ruled
+acceptance of that hazard**, not the removal of a dead check. §4.7 is the disclosure and it is
+escalation **E-D**. `ball_breach_eps_mm` is no longer read as a *refusing* input on this path.
+
+**And the refusal is the only part that has to go.** §4.7 carries the one-line mechanism that
+keeps the query: run `sphere_breach` at the landed foot exactly as `anchor.rs:1610-1619` does,
+ignore `breached` as a verdict, and **record `nearest_wall_thickness_mm` on the disclosure
+record**. The kernel already computes it and the engine already discards it
+(`anchor.rs:1403-1425`).
 
 ### §2.4 Test (b): what happened to `emerges`, and what replaced it
 
@@ -671,9 +796,11 @@ interval, and its perpendicular projection is `W = chord × cosang_entry`. R4 tr
 > **`h_eff = min(h_design, W)`**, and then
 > **(a) passes iff `carried ≤ X·π·ball_cut_radius_mm(r_foot, h_eff, 1.4)²`.**
 
-`h_eff ≤ W` is a clamp, not a test, so **the seat cannot reach the opposite face, cannot exit,
-and cannot leave a backside scar. Punch-through is impossible by construction**, and the
-construction reads one measured interval. When truncation binds, the seat is shallower than the
+`h_eff ≤ W` is a clamp, not a test, so **the seat cannot reach the opposite face along its own
+line, cannot exit there, and cannot leave a backside scar. Punch-through in that one direction
+is impossible by construction**, and the construction reads one measured interval. **The clamp
+is scalar and bounds nothing else**: the ball's lateral reach `h_eff + R_b·(1 − cosang_entry)`
+exceeds `W` on 65 of the 129 recovered records, which is E-D (§4.7). When truncation binds, the seat is shallower than the
 design wants and the area law says whether what is left still carries. MEASURED: truncation
 binds on **40 of 154** candidates (189.233 mm²) and **17 of those 40 still carry** their load.
 
@@ -1092,22 +1219,45 @@ rulings the stub lands, and the arithmetic is:
   ratio     capacity / demand                           =  0.999999999
 ```
 
-**The margin is zero, and the design says so rather than rounding it away.** `a_eff` comes out
-exactly equal to `r_foot` because that is what `ball_seat_factor` is *for* — it is the depth at
-which the seat matches the shaft. And the shaft was sized to exactly carry the load. So the
-anchor carries the load exactly, no more, and the pass is delivered by the same relative
-tolerance the area law is compared under everywhere else in the engine (test (e) needs it for
-the same reason: the probe records `r0` to nine decimals). **If a reviewer wants a margin here,
-the place to put it is the load law's own safety factor, which is already inside `X = 12`, not a
-new number bolted onto this rule.** §6.5 discloses the whole zero-margin population.
+**That ratio is an IDENTITY, and the margin that decides the record is the wall.** `a_eff`
+comes out exactly equal to `r_foot` because that is what `ball_seat_factor` is *for* — it is
+the depth at which the seat matches the shaft — and the shaft was sized to exactly carry the
+load. The ratio therefore measures nothing about the wall it was driven into. **The number
+that decides island 74 is the depth clause:**
+
+```
+  wall demanded  h_design = ball_seat_factor(1.4) * r_foot  =  0.246933 mm
+  wall present   W        = chord * cos_entry               =  0.341350 mm
+  margin         W / h_design                               =  1.3824   (38 % to spare)
+```
+
+MEASURED. §6.5 proves the reduction algebraically and shows that the two predicates select
+identical sets over all 46 unclamped strikers.
+
+**A correction owed on the tolerance, because the previous draft cited it wrongly.** This pass
+is *not* delivered by a "relative tolerance the area law is compared under everywhere else in
+the engine". The engine's incumbent comparison is **absolute**: `perception.rs:651` is
+`realized_sf < self.required_safety_factor - 1.0e-6`, i.e. an absolute 1e-6 on `SF = 8`, which
+is a *relative* 1.25e-7 — about eight times tighter than the 1e-6 relative tolerance this
+document's grader used. **No record sits in the gap** (the minimum ratio over the whole
+recovered population is 0.999999998119, a shortfall of 1.9e-9), so no verdict moves — but the
+factual claim was wrong, it is corrected here and in §6.5, and it is what made sabotage test S9
+a no-op (§10.4).
+
+**If a reviewer wants a margin here, the place to put it is the load law's own safety factor,
+which is already inside `X = 12`, not a new number bolted onto this rule.** §6.5 discloses the
+whole zero-margin population.
 
 **What island 74 does NOT get from this.** Its foot ball is 1.645 mm across in a 0.341 mm wall,
-so at 42° the buried cap reaches 0.463 mm below the entry face and R4 truncates it: **the anchor
-is a plug that spans the wall.** The joint is priced. The wall around the plug is not. That is
-E-D (§4.7), and island 74 is its largest instance. Under the two conservative brackets of §4.7
-island 74 does **not** land (capacity 7.181 mm² or 4.889 mm² against 13.019 mm² demanded), so
-**this is the record whose verdict the gap actually decides**, and the design reports both
-numbers rather than choosing the flattering one.
+so at 42° the buried cap reaches **0.4630 mm** below the entry face — **1.36 × the wall** — and
+R4 truncates it there: **the anchor is a plug that spans the wall.** The joint is priced. The
+wall around the plug is not. That is E-D (§4.7), and island 74 is **its largest instance by
+carried area** — though not its worst by reach: 48th of the 65 clipped records ranked by
+`reach / W`, where the worst is `b0 t15 / b1 t14` at **6.51 ×** (0.4103 mm of reach into a
+0.0630 mm wall) and the median is 1.94 ×. Under the two conservative brackets of §4.7 island 74
+does **not** land (capacity 7.181 mm² or 4.889 mm² against 13.019 mm² demanded), so **this is
+the record whose verdict the gap actually decides**, and the design reports both numbers rather
+than choosing the flattering one.
 
 ### §4.7 E-D — the derivation gap, bracketed
 
@@ -1121,9 +1271,29 @@ into a plug spanning the wall rather than a cap in a half-space.
 
 ```
   recovered records whose foot ball is clipped by the opposite face : 65 / 129   314.362 mm2
+                                                                       (67.3 % of the recovery)
   at the production plan                                            :  6 / 9      45.959 mm2
                                                 (t100 t157 t162 t186 t215 t281; t87 t142 t173 are not)
+  production records surviving "ball must fit uncut"                :  3 / 9      18.688 mm2
+
+  lateral reach / wall, over the 65 clipped   : min 1.13   median 1.94   max 6.51
+  worst:  b0 t15 / b1 t14   reach 0.4103 mm into W = 0.0630 mm   =  6.51 x
 ```
+
+**EVERY clipped record is graded by the SAME rule, including E-C's one.** The two records this
+document has been asked about most sit in the same table, on the same formula:
+
+| record | what it is | `h_eff` | `R_b` | `cosang` | reach `h_eff + R_b(1−c)` | wall | reach / wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **`t225`** (§8.3) | E-C's constructed regression, made real | 0.0630 | 0.2475 | 0.1638 | **0.2700 mm** | **0.1391 mm** | **1.94 ×** |
+| **island 74** `t162` (§4.6) | the record this lane was opened for | 0.2469 | 0.8227 | 0.7374 | **0.4630 mm** | **0.3413 mm** | **1.36 ×** |
+
+**`t225` is the worse of the two, and it is the one an earlier draft wrote up as not
+perforating.** At `cosang = 0.1638` its shaft is 80.6° off the surface normal, where "depth
+along the axis" and "wall remaining" are barely related quantities — which is exactly why the
+lateral term exists. So **E-C's constructed regression does not stop existing. It becomes an
+E-D instance like the other 64**, which is a defensible position and a different sentence.
+§8.3 says so.
 
 **Why the design grades the way it does, and why that is not the flattering choice by default.**
 Truncating a ball at the far face removes material on the deep side. It does **not** reduce the
@@ -1154,6 +1324,45 @@ table" — the gap is genuinely two-sided and only a physical answer closes it.
 cut of a truncated seat, which is a real geometric quantity the kernel could compute, or
 (ii) Craig's ruling that a plug spanning a wall is acceptable — which is the same ruling E-A
 wants and which stage 1's corpus instance count is meant to inform.
+
+### §4.7.1 THE ONE-LINE MECHANISM — how E-D stops being a bracket, for free
+
+**ADOPTED as a stage-1 addition** (§10.2), because it costs one batch that is already paid for
+and mints nothing.
+
+> **Keep the `sphere_breach` QUERY on the landed-foot path. Retire only its REFUSAL. Record
+> `nearest_wall_thickness_mm` on every landed foot's disclosure record.**
+
+**Both quantities already exist and are already thrown away.** `AnchorFootCertificate` declares
+`nearest_wall_thickness_mm` and `poke_depth_mm` at `anchor.rs:1403-1404`, exposes them at
+`:1421-1427`, and constructs them from the kernel's own outputs at `:1632-1636` — and
+**MEASURED by direct search, nothing anywhere in `crates/` reads either accessor.** The batch
+call at `anchor.rs:1610-1619` is one whole-batch `sphere_breach` per invocation, already
+charged today, and probe P1 already plumbs its three outputs verbatim (§1.1). Retiring the
+refusal means ignoring `breached` as a verdict; it does not mean deleting the call.
+
+**What the recorded number actually is, stated exactly so nobody over-reads it.**
+`queries.rs:2948-2973` returns the minimum far-wall distance over a 25° / 8-ray inward cone —
+the lateral quantity E-D is about, not an along-axis depth. Two sentinel cases must be carried
+through rather than smoothed: when the ball does not reach the surface at all
+(`r - nd <= eps_mm`, `queries.rs:2995-2997`) the kernel returns `+inf`, and when the cone finds
+no far wall the value is also `+inf`. **`+inf` means "no wall found in the cone", never
+"infinitely thick"**, and the disclosure record must say which.
+
+**What it buys, in one sentence each.**
+
+* **E-D becomes a corpus measurement at stage 1** instead of a 59-record / 312 mm² bracket, at
+  no new cost and with no new constant.
+* **It gives sabotage test S6 something real to assert on** (§10.4). Without it S6 has no
+  production predicate answering *"does this seat exit the far face"* — that query IS E-D — so
+  S6 can only be written tautologically.
+* **It answers the question nothing else now answers.** With the refusal gone, **nothing in the
+  engine bounds the residual wall past a landed foot.** MEASURED on the 64 recovered records
+  whose ball is *not* clipped, residual wall runs **min 0.1863 mm, median 0.6418 mm** — none
+  below the project's own 0.08 mm print minimum, and the population is bimodal: either the ball
+  sits comfortably inside, or it is clipped and is an E-D instance. **No third case on this
+  model.** That is a measured absence, not a structural guarantee, and the corpus is where a
+  counter-example would appear.
 
 ### §4.8 Spreads over the recovered population
 
@@ -1379,6 +1588,35 @@ R2 accepts as disclosed.
 1.000 to nine decimal places. At the production plan it is 7 of 9** — every strut except t100
 and t173, which are exactly the two whose foot radius was clamped up to `MIN_SHOOT_R_MM`.
 
+**THE TEST'S ALGEBRAIC FORM — this is the sentence the rest of §6.5 was one step short of.**
+For a foot whose radius the load law set (`r_foot = r0 >= MIN_SHOOT_R_MM`, so the clamp did not
+bind), the predicate
+
+```
+  carries(carried_mm2, a_eff)   where  a_eff = ball_cut_radius_mm(r_foot, min(h_design, W), 1.4)
+```
+
+reduces, **with no approximation**, to
+
+```
+  W  >=  ball_seat_factor(1.4) x r_foot   =   0.4202041 x r_foot
+```
+
+VERIFIED: the two predicates select **identical sets** over all 46 unclamped strikers. So test
+(a) is not an anchor test wearing a wall's clothes — **it is a wall test wearing the load law's
+clothes**, and it is a *truncation detector*: the only way it can refuse is for `W` to be too
+thin to take the depth the load asks for. Three consequences, all MEASURED:
+
+* **46 records read exactly 1.000.** All unclamped, all untruncated. **The ratio is an identity
+  — it carries no information about the wall.** It is not a near miss and not a fudge.
+* **83 records read above 1.000, up to 2760.9.** Every one has its foot radius clamped *up* to
+  `MIN_SHOOT_R_MM`, so the margin comes from the clamp. **Also no information about the wall.**
+* **The wall enters only through `h_eff = min(h_design, W)`.** 23 candidates are refused that
+  way; 17 recovered records are truncated and still carry because the clamp gave them headroom.
+
+**A reader checking a record by hand should compare `W` against `0.4202041 x r_foot`, and read
+`W / h_design` as the margin.** For island 74: 0.341350 / 0.246933 = 1.3824, 38 % to spare.
+
 This is not a defect in the grading and it is not a coincidence. It is the composition of two
 laws the engine already has:
 
@@ -1393,11 +1631,27 @@ enough is not this design's question — it is the same question every contact i
 already answers the same way — **but this rule is the first thing that makes the equality
 visible at both ends of one member, and it must be said rather than discovered later.**
 
+**WHICH TOLERANCE THIS WAS GRADED UNDER, and the correction it forces.** This document's
+grader compares at **relative 1e-6**. The engine's incumbent comparison is **absolute**:
+`violates_safety_factor` (`perception.rs:651`) is
+`realized_sf < self.required_safety_factor - 1.0e-6`, an absolute 1e-6 on `SF = 8` — a relative
+1.25e-7, about **eight times tighter**. **They are not the same number, and earlier drafts of
+§0 and §4.6 described the incumbent as relative. It is not.** MEASURED: **zero recovered
+records sit in the gap** (minimum ratio 0.999999998119, a shortfall of 1.9e-9), so no verdict
+moves either way — but the claim was wrong about cited code, and it is what made sabotage test
+S9 a no-op (§10.4).
+
 Two consequences an implementer must not get wrong:
 
-1. **The comparison must be relative, not absolute.** An absolute epsilon reads the ninth
-   decimal as a physics failure and refuses 46 records. §2.6 records the same trap for test (e);
-   this is the second instance of it.
+1. **The comparison must carry enough slack for f64 residue, and it must be stated in the units
+   it is made in.** The load-bearing fact is that `a_eff ≡ r_foot` holds to about 1e-16 of f64
+   residue, comfortably inside the 1.25e-7 relative slack `perception.rs:651` already provides.
+   **The sabotage that bites is setting that epsilon to 0.0, not swapping relative for
+   absolute** — the incumbent is already absolute. An epsilon of exactly 0 drops the **24**
+   recovered records whose ratio falls below 1.000 (220.002 mm²), island 74 among them; an
+   absolute 1e-9 mm² epsilon on the capacity comparison drops **17** (150.213 mm²). **The
+   number is a function of the epsilon and is never 46.** §2.6 records the same class of trap
+   for test (e).
 2. **Nothing may quietly add margin here.** Rounding `h_design` up, or padding `a_eff`, changes
    the recovery table while looking like a robustness fix. §10.4's sabotage set pins it.
 
@@ -1491,7 +1745,18 @@ perforation. R4 bans exactly that, and bans it as a construction rather than a t
 clamped at the far face, so there is no depth at which the hazard exists. **The permission keeps
 what it was for and loses what it was dangerous for.**
 
-### §8.2 What the rewritten sentence says
+### §8.2 What the rewritten sentence says — AND IT IS NOW WRITTEN
+
+**Status, stated before the text, because a previous draft claimed this edit and had not made
+it.** `docs/engineering-journal/specs/SPEC-EMBED-POLICY.md` **is amended as of this commit.**
+Three things landed there, in the shape the file's own PRINT-FLOOR amendment established: the
+`Status:` header names the TRUNCATION amendment; the no-depth-cap paragraph is amended in place
+and its retired conditional (*"thin walls are protected by rule 4 and the thin-feature-span
+check"*) is kept visible as history; and a **TRUNCATION amendment (OWNER RULED 2026-08-22)**
+section quotes Craig's ruling verbatim as the authority, gives the normative statement, and
+names what the clamp does **not** bound (E-D). **The code half is future work** — §10.2 stage 4
+and §10.3's `plinth-metrics/src/scar.rs` pin. Until it lands the spec is ahead of the engine,
+and both texts say so.
 
 > **SPEC-EMBED-POLICY, rewritten sentence.** *There is NO depth cap on the tip-anchored interval
 > itself: a deep perpendicular plug into thick solid has a small crossing patch and, per the
@@ -1506,9 +1771,14 @@ what it was for and loses what it was dangerous for.**
 
 **Three consequences, in order of how much they matter.**
 
-1. **E-C's constructed regression stops existing.** There is no legal 6.7 mm shell perforation,
-   because there is no legal perforation of any depth. The `t225` instance the Rotting Warhorse
-   actually contains is graded in §8.3 and it does not perforate either.
+1. **E-C's constructed regression stops being an EXIT and becomes an E-D instance.** There is
+   no legal seat that *comes out the far side*, at any depth, because the clamp forbids it. But
+   the clamp is scalar and E-C's hazard has a lateral half: graded by §4.7's own formula the
+   Rotting Warhorse's real instance `t225` reaches **1.94 × its wall** — worse than island 74's
+   1.36 × — so what is left is a full-thickness plug in a 0.139 mm shell whose plug happens to
+   sit flush. **An earlier draft said the regression "stops existing" and that `t225` "does not
+   perforate". Both are withdrawn.** The honest statement is that R4 converts E-C's exit into an
+   accepted, disclosed, owner-ruled instance of E-D. §8.3 grades it.
 2. **The scope objection is answered in full.** `10b0bd8` conceded that declining for stubs alone
    answers *"a third of one half"* of E-C, because the permission's scope line names three
    families — *"contact-stub tips, strut/rung feet, model-rung ends"*. **R4 is written at the
@@ -1543,22 +1813,46 @@ SPEC-EMBED-POLICY wants, so they can be graded **exactly**.
 | record | carried | seat run `T` | exited | wall along the seat | `r0` | R1 depth it needs | verdict under R4 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- |
 | r0 t96 / r1 t88 | 0.657 | 2.487 | yes | 0.474 | 0.1320 | **0.0504** | **LEGAL. Nothing firm beyond it — no landing needed.** Class `SEAT_TRUNCATED_NO_LANDING` |
-| r0 t225 / r1 t200 | 1.027 / 1.080 | 0.849 | yes | **0.139** | 0.1650 | **0.0630** | **LEGAL, and it does not perforate.** It then strikes again at `W = 0.484` and **LANDS** |
+| r0 t225 / r1 t200 | 1.027 / 1.080 | 0.849 | yes | **0.139** | 0.1650 | **0.0630** | **LEGAL as graded — its seat does not EXIT, but it SPANS. An E-D instance at 1.94 × its wall.** It then strikes again at `W = 0.484` and **LANDS** |
 
-**Read the second row twice, because it is E-C's hazard and it has stopped being one.** `t225`
-runs 0.849 mm through a shell that is **0.139 mm thick** at `cosang = 0.164`, and it exits. That
-is the shell perforation E-C constructed, present in a real model. Two independent things now
-prevent it:
+**Read the second row twice, because it is E-C's hazard and it has CHANGED SHAPE rather than
+gone away.** `t225` runs 0.849 mm through a shell that is **0.139 mm thick** at
+`cosang = 0.164`, and it exits today. That is the shell perforation E-C constructed, present in
+a real model. Under R1 and R4 the exit stops:
 
-* **R1 makes it unnecessary.** `t225` carries 1.027 mm². The anchor that load requires is
-  `ball_seat_factor(1.5) × 0.1650 = 0.0630 mm` deep. **It needs 45 % of the shell and never goes
-  near the far face.** The 0.849 mm run was never a load requirement — it was a fixed 0.3 mm
-  embed along an axis that happened to graze a shell.
-* **R4 would stop it even if R1 did not.** Had the load wanted more than 0.139 mm, the seat would
-  truncate at the far face. Its capacity there would be
+* **R1 makes the deep run unnecessary.** `t225` carries 1.027 mm². The anchor that load
+  requires is `ball_seat_factor(1.5) × 0.1650 = 0.0630 mm` deep — **45 % of the shell, measured
+  along the seat's own line.** The 0.849 mm run was never a load requirement; it was a fixed
+  0.3 mm embed along an axis that happened to graze a shell.
+* **R4 would stop it even if R1 did not.** Had the load wanted more than 0.139 mm, the seat
+  would truncate at the far face. Its capacity there would be
   `12 × π × ball_cut_radius_mm(0.165, 0.139, 1.5)² = 1.865 mm²`, still above the 1.027 mm² it
   carries. **Either reading gives the same verdict, which is why this document does not need to
   settle whether R1 also applies at the contact tip** (§2.8, scope).
+
+**AND NOW THE PART AN EARLIER DRAFT GOT WRONG, graded by the same rule as island 74.** *"It
+needs 45 % of the shell and never goes near the far face"* is an **along-axis** statement, and
+at `cosang = 0.1638` the shaft is **80.6° off the surface normal**, where along-axis depth and
+remaining wall are barely related quantities. §4.7's lateral formula, applied to `t225` exactly
+as it is applied to island 74:
+
+```
+  t225        reach = 0.0630 + 0.2475 x (1 - 0.1638) = 0.2700 mm  into W = 0.1391 mm  = 1.94 x
+  island 74   reach = 0.2469 + 0.8227 x (1 - 0.7374) = 0.4630 mm  into W = 0.3413 mm  = 1.36 x
+  (r1 t200, the same shape one re-plan later: 0.2769 mm into 0.1391 mm = 1.99 x)
+```
+
+**`t225` is the worse of the two.** So the claim that E-C's regression *"does not perforate"* is
+**withdrawn**: what R4 removes is the *exit* and the backside scar; what remains is a plug
+spanning a 0.139 mm shell. **`t225` is an E-D instance, and it belongs in the same table as
+island 74 — which is where §4.7 now puts it.** That is a defensible disposition and a
+disclosed one; it is not the disposition "the hazard stopped existing".
+
+*(For scale, and against over-reading `t225` as the worst case in the document: over the 65
+clipped **landed-foot** records the reach/wall ratio runs 1.13 × to **6.51 ×**, median 1.94 ×.
+`t225` is a tip seat, not a foot, and it sits at the median of the foot population rather than
+above it. The point is not that `t225` is extreme — it is that it was graded by a different
+rule from island 74, and the difference favoured the conclusion.)*
 
 The first row matters in the other direction, and its `10b0bd8` reading is superseded: it was
 graded *"already ILLEGAL under the existing rules"* because `L_scar = 3.138 > 2.500` at a 2.487 mm
@@ -1574,11 +1868,19 @@ either way.**
 
 **Closed by R4:**
 
-* E-C's regression, at spec scope, for all three designed-embed-end families.
+* **The EXIT half of E-C's regression**, at spec scope, for all three designed-embed-end
+  families. Not the whole regression — see the first bullet of the next list.
 * The stub half of E-C, which `10b0bd8` could only answer for one family.
 * The `MIN_ILLEGAL_LEN_MM` third reuse, withdrawn with the ask that needed it.
+* **The spec-text half of the ask.** The amendment is written into
+  `docs/engineering-journal/specs/SPEC-EMBED-POLICY.md` at this commit (§8.2). **The code half
+  is not**: stage 4 must carry the clamp into the engine and into
+  `plinth-metrics/src/scar.rs`, and until it does, engine and auditor are behind the spec.
 
 **NOT closed, and it must never be claimed as closed:**
+
+* **The SPANNING half of E-C's regression.** R4 stops a seat exiting; it does not stop a seat
+  spanning a thin shell laterally. `t225` spans at 1.94 × its wall (§8.3). That half is E-D.
 
 * **The PR-2 placed-mask exemption** (§8.5). It has six live consumers, it decides outcomes
   today, and R4 does not touch it. This is the larger half of E-C and it belongs to the
@@ -1763,12 +2065,15 @@ builds it.
 registered: `DEFAULT_CONTACT_DEPTH_MM` (now only the *tip's* designed embed), `MIN_ILLEGAL_LEN_MM`,
 `MIN_SHOOT_R_MM`, `BALL_FACTOR_FOOT`, `BALL_FACTOR_STUB`, `A_ABS_MM2`, `KAPPA`, `L_SCAR_MAX_MM`,
 `PRINT_FLOOR_CHORD_MM`, `TOL_MM`, `TIP_RADIUS_MAX_LEGACY_MM`, and `SPACING_FLOOR_MM` for
-disclosure only. **`ball_breach_eps_mm` drops off this list** — R4 makes the breach check
-unreachable on this path, so nothing reads it here. The one derived quantity is
-`ball_seat_factor(BALL_FACTOR_FOOT)`, an existing DERIVED function of an existing registered
-constant (§2.8). Two hardcoded epsilons are reused rather than registered — `1e-9` for the Z
-comparison and `BELOW_LEVEL_EPS_MM` — and `FOOT_BREACH_HALF_DEG` / `FOOT_BREACH_CONE_RAYS` are no
-longer reached. All are recorded as existing debt, not introduced.
+disclosure only. **`ball_breach_eps_mm` stops being a REFUSING input** — R4 retires the breach
+refusal, not the query — but under §4.7.1 the query is kept and the constant is still read, at
+its registered value, to produce the E-D disclosure. Same for `FOOT_BREACH_HALF_DEG` and
+`FOOT_BREACH_CONE_RAYS`: still reached, still at their registered values, now feeding a
+measurement instead of a verdict. **Nothing on this list is moved, widened or bypassed; one of
+them changes job.** The one derived quantity is `ball_seat_factor(BALL_FACTOR_FOOT)`, an
+existing DERIVED function of an existing registered constant (§2.8). Two hardcoded epsilons are
+reused rather than registered — `1e-9` for the Z comparison and `BELOW_LEVEL_EPS_MM`. All are
+recorded as existing debt, not introduced.
 
 ### §10.0 SEQUENCING — this work starts after the wire-clearance lane
 
@@ -1826,6 +2131,15 @@ capacity/demand margin**, landed length, both radii, **whether the foot ball is 
 how much (E-D)**, both scar verdicts and which allowance each clears through, the build-order
 verdict, and the §6.2 disclosure fields. The stub is **still quarantined**.
 `BlockedCause::StubReentry` still fires.
+
+> **Stage 1 also carries §4.7.1, and it is the cheapest item in this plan.** Keep the
+> `sphere_breach` query at the landed foot, retire only its refusal, and record
+> `nearest_wall_thickness_mm` (and `poke_depth_mm`) per landed foot. The batch is already paid
+> for and both fields are already computed and discarded (`anchor.rs:1403-1425`, `:1632-1636`).
+> **This is what turns E-D from a 59-record / 312 mm² bracket into a corpus measurement**, and
+> it is a **prerequisite for sabotage tests S6 and S11** (§10.4), which have nothing real to
+> assert on without it. Carry `+inf` through as *"no wall found in the cone"*, never as
+> *"infinitely thick"*.
 
 **Stage 1 now carries three questions it did not carry at `10b0bd8`**, and they are the reason
 it is worth running before anything moves: (i) does the corpus reproduce the 62 % recovery, or
@@ -1894,11 +2208,15 @@ Two seat zones with per-end band radii derived from each end's own `h_eff`, and 
 **Stage 2 cannot be accepted without it**, because a doubly-seated member with one zone is refused
 by the very exemption that is supposed to admit it. §10.0 puts it in the order.
 
-**Stage 4 — rewrite the deep-embed permission (§8.2).** A spec edit plus the matching edit in
-`plinth-metrics/src/scar.rs`. **The sentence is rewritten, not deleted**: depth stays unlimited,
-truncation at the opposite face is added, punch-through becomes impossible by construction. It is
-doc-plus-clamp, it is behaviourally an admission on the stub path (4 records here move from
-condemned to legal), and it may land before stage 2 because it depends on nothing.
+**Stage 4 — carry the rewritten deep-embed permission into the CODE (§8.2). The SPEC HALF IS
+DONE.** `SPEC-EMBED-POLICY.md` is amended at this commit: depth stays unlimited, truncation at
+the opposite face is added, punch-through along the seat's own line becomes impossible by
+construction, and the amendment section names E-D as what the clamp does *not* bound. **What
+remains is code**: the clamp in the engine plus the matching edit in `plinth-metrics/src/scar.rs`
+(§10.3's pin). It is behaviourally an admission on the stub path (4 records here move from
+condemned to legal), and it may land before stage 2 because it depends on nothing. **Until it
+lands, the spec is ahead of the engine and the auditor, and that divergence is the thing a
+reviewer should check first at this stage.**
 
 **Stage 5 — re-aim, per SPEC-P8-RELOCATE §3.1 R1.** Behind stage 2, because until stage 2 lands we
 do not know how many stubs still need steering. **The measurement now says 3 of 18 at the
@@ -1936,16 +2254,21 @@ guard owes a sabotage proof:
 | **S3** | size the anchor depth at `DEFAULT_CONTACT_DEPTH_MM` instead of `ball_seat_factor(1.4) × r_foot` | **at least one fixture's verdict changes in each direction**: a small-load strut in a thin wall stops landing (the depth is now too big for the wall), and the recovery count for the fixture set moves. **This is R1 made into a test**, and it is the guard against R1 being implemented in the disclosure record and forgotten in the geometry |
 | **S4** | remove test (f) | island 74's `t189` shape lands with its foot **above** its contact |
 | **S5** | set `rays_all = false` after stage 1b | a fixture whose axis crosses air but whose flank does not must stop being refused. **Requires a purpose-built fixture; none exists** |
-| **S6** | defeat R4's truncation — let the seat take `h_design` regardless of `W` | **a deep seat perforates.** A fixture whose seat wants more depth than the model is thick must, un-sabotaged, be TRUNCATED with `exits = false` and no backside patch; sabotaged, it must produce a seat that exits the opposite face. **This is R4 made into a test, and it replaces `10b0bd8`'s S7** ("restore the deep-seat permission"), which no longer has a meaning because the permission was rewritten rather than withdrawn |
-| **S7** | grade the landed foot with the *original* 2.8 mm frustum instead of `L'` | `r_x` is read at the wrong station and at least one scar verdict changes. *(This was S6 at `10b0bd8`; the ruling names the truncation case S6, so the two swapped ids. Nothing outside this document referenced either.)* |
+| **S6** | defeat R4's truncation — let the seat take `h_design` regardless of `W` | **REWRITTEN so it is not a tautology. Assert on the RECORDED `nearest_wall_thickness_mm` (§4.7.1), not on `h_eff`.** Un-sabotaged, a fixture whose seat wants more depth than the model is thick must record a **finite** `nearest_wall_thickness_mm` from the kernel's cone sweep and emit **no patch on any face but the entry face**; sabotaged, the same fixture's recorded thickness must fall below the ball radius (the kernel's own breach condition, `t < r - eps`) and a backside patch must appear. **Why the rewrite:** the production rule is `h_eff = min(h_design, W)` and the old assertion `h_eff <= W` is `min(a,b) <= b` — it tests `f64::min`, not model geometry — and it was phrased on an `exits` flag that **no production predicate answers**. That query IS E-D. **So §4.7.1 is a PREREQUISITE for S6, not a follow-up**, and S6 must not be written until the recording lands or it will be written in the tautological form and pass forever |
+| **S7** | grade the landed foot with the *original* 2.8 mm frustum instead of `L'` | `r_x` is read at the wrong station and the foot scar verdict changes. **NON-VACUITY IS MEASURED, and the witnesses are NAMED: `b0 t15` and `b1 t14`** (the same shape at re-plans 0 and 1, carried 0.8178 mm², `W = 0.0630 mm`) — **2 of the 129 recovered records flip**, and no others do. **The fixture must reproduce one of those two**, because the recovered set otherwise has comfortable scar headroom (worst `A_patch / A_max` 0.593, worst `L_scar` 1.881 mm against 2.5) and an unnamed fixture goes vacuous the first time the fixture set changes. *(This was S6 at `10b0bd8`; the ruling names the truncation case S6, so the two swapped ids. Nothing outside this document referenced either.)* |
 | **S8** | give a doubly-seated member only one seat zone | every landed strut is refused. Proves §9.2's union is load-bearing rather than tidy |
-| **S9** | compare the anchor capacity to the demand with an **absolute** epsilon | **46 of the 129 recovered records stop landing**, island 74 among them. Proves §6.5's zero-margin population is real and that the relative comparison is load-bearing rather than sloppy |
+| **S9** | ~~compare the anchor capacity to the demand with an **absolute** epsilon~~ → **set the capacity-comparison epsilon to 0.0** | **CORRECTED, twice over. The old sabotage was a no-op and the old consequence was a wrong number.** (i) The incumbent comparison **already is absolute** — `perception.rs:651` is `realized_sf < required_safety_factor - 1.0e-6` — so "make it absolute" changes nothing; the sabotage that bites is removing the slack entirely. (ii) The old consequence, *"46 of the 129 recovered records stop landing"*, is never right for any epsilon: MEASURED, a **zero-slack** comparison drops the **24** records whose ratio falls below 1.000 (220.002 mm², island 74 among them), and an absolute 1e-9 mm² epsilon drops **17** (150.213 mm²). **Assert against a NAMED FIXTURE, not a population count**: island 74's shape (ratio 0.999999999227) must land un-sabotaged and stop landing at zero slack. What the test pins is that `a_eff ≡ r_foot` holds to ~1e-16 of f64 residue, comfortably inside the 1.25e-7 relative slack `perception.rs:651` already provides |
 | **S10** | add any margin to `h_design` or `a_eff` — round up, pad, clamp to a minimum | the recovery count *rises or falls* against the recorded table. **A margin here is a silent policy change wearing the costume of a robustness fix** (§6.5) |
+| **S11** | **NEW.** suppress the clipped-ball disclosure — stop emitting `foot_ball_clipped`, `ball_reach_mm` and `nearest_wall_thickness_mm` (§4.7.1, §11 P6) | a fixture whose ball reaches past the far face **stops reporting it, and the recovered count does not move.** That is the whole point: **E-D is the widest open number in this document and nothing else in the set pins its disclosure.** A disclosure that can be deleted without a single verdict changing is a disclosure that will be deleted. Un-sabotaged the fixture must report `clipped = true` with a finite reach and a finite recorded wall thickness |
 
-**S2, S3, S6 and S9 must not be skipped.** S2 is the defect that made `aae1559` unsound. S3 and
-S6 are the only durable record of what R1 and R4 actually changed. S9 is the only thing standing
-between §6.5's disclosure and a future "harmless" epsilon change that quietly deletes a third of
-the recovery.
+**S2, S3, S6, S9 and S11 must not be skipped.** S2 is the defect that made `aae1559` unsound.
+S3 and S6 are the only durable record of what R1 and R4 actually changed. S9 is the only thing
+standing between §6.5's disclosure and a future "harmless" epsilon change that quietly deletes
+24 records. **S11 is the only revert-proof on the one number Craig is told decides island 74.**
+
+**Two of these have a build order.** S6 and S11 both assert on §4.7.1's recorded fields, so
+**§4.7.1 lands at stage 1 before either test is written.** Writing S6 first is how it ends up
+tautological.
 
 **Non-vacuity first, in every case.** Each sabotage test asserts the *un*-sabotaged fixture
 reaches the state under test before it asserts the sabotage changes it — the shape
@@ -1962,7 +2285,7 @@ reaches the state under test before it asserts the sabotage changes it — the s
 | **P2 — `zombie-3-a`'s 52.** Its 52 stub-reentry quarantines have no interval data | It is 56 % of that model's repair-trial waste, and it is the evidence that this class is not one model's quirk | Run probe P1 on `zombie-3-a`. It already has a bit-identical reference artifact to check against | Grades the second model. Extends or refutes the 38.5 % recovery rate |
 | **P3 — the flush-cutter.** No tool model exists anywhere (§6.1) | Decides whether "permanent" is a real word for these struts or a conservative label | Not a print. Measure blade thickness, included angle, and the narrowest crevice the tool actually enters, on an existing printed part | Escalation **E-B**. Retires or grounds a `reach` flag that is currently prose |
 | ~~**P4 — does a sub-0.3 mm crevice survive curing?**~~ | **RULED (R3), not measured.** Craig's answer: *"If resin seals anyways then the strut adds no extra resin. So this is moot."* Land, disclose, never refuse on width | — | — |
-| **P6 — the truncated anchor's real separating cut (E-D).** New, and the widest open number in the document | 65 of 129 recovered records have their load-designed ball clipped by the opposite face; the two conservative brackets put recovery at 70 / 154.65 mm² or 93 / 177.09 mm² against the graded 129 / 467.07 mm². **Island 74's verdict is inside that band** | Not a print. A kernel query for the minimal separating cut of a seat truncated by a second surface — the same machinery `sphere_breach` already casts, asked a different question — or Craig's ruling that a plug spanning a wall is acceptable, which is E-A's ruling | Escalation **E-D**. Decides up to 59 records and 312 mm², and decides island 74 |
+| **P6 — the truncated anchor's real separating cut (E-D).** New, and the widest open number in the document | 65 of 129 recovered records have their load-designed ball clipped by the opposite face; the two conservative brackets put recovery at 70 / 154.65 mm² or 93 / 177.09 mm² against the graded 129 / 467.07 mm². **Island 74's verdict is inside that band, and so is `t225`'s (§8.3)** | **Most of it is already paid for — see §4.7.1.** Keep the `sphere_breach` query at the landed foot, retire only the refusal, and record `nearest_wall_thickness_mm` (`anchor.rs:1403-1425`, computed and discarded today). That measures the instance count and the lateral reach corpus-wide at stage 1 with no new query and no new constant. What is left after it is the *pricing*: a kernel query for the minimal separating cut of a seat truncated by a second surface, or Craig's ruling that a plug spanning a wall is acceptable, which is E-A's ruling | Escalation **E-D**. Decides up to 59 records and 312 mm², and decides island 74. **Pinned by sabotage test S11** (§10.4) — per-record fields `foot_ball_clipped`, `ball_reach_mm` and `nearest_wall_thickness_mm` must be emitted, and S11 is what makes "must be emitted" mean something |
 | **P5 — why 52 stub tips sit in air (§7)**, now that rule 3 does not catch them | 25 % of the population, and the ratified test that was supposed to cover it does not | Record the face normal at the contact position and compare it with the averaged `unit` the mint uses | Settles the averaged-normal cause and tells the tip lane what test it needs |
 | **E-A — does the struck feature carry the load onward?** | Not measurable by probe; it is a doctrine question (§2.5) | none — it is Craig's ruling, informed by stage 1's instance count | Decides whether tasks #64 / #65 are blockers or neighbours |
 
@@ -1986,9 +2309,11 @@ same argument gets had twice.
    18 of 129, 14.9 % of the recovered area, 1 of 9 at production carrying 15.4 % of the prize
    (§6.4 item 4).
 4. ~~**Withdrawing the deep-seat permission at spec scope.**~~ **SUPERSEDED by R4: the permission
-   is REWRITTEN, not withdrawn** (§8.2). Depth stays unlimited; the seat truncates at the
-   opposite face; punch-through is impossible by construction. It reaches all three families the
-   permission names, so the scope objection is answered in full.
+   is REWRITTEN, not withdrawn, and the rewrite is now IN THE SPEC FILE** (§8.2). Depth stays
+   unlimited; the seat truncates at the opposite face; punch-through **along the seat's own
+   line** is impossible by construction. It reaches all three families the permission names, so
+   the scope objection is answered in full. **Closed at spec scope only** — the code half is
+   stage 4 (item 18), and the *lateral* half of the same hazard is E-D (item 16).
 5. **E-C is NOT closed by the rulings alone (§8.5).** The PR-2 placed-mask exemption, with six
    live consumers, is untouched and belongs to the clearance bundle. **This is now E-C's entire
    residual scope**, because R1 also deleted the thin-feature-span check `10b0bd8` had built
@@ -2036,6 +2361,23 @@ same argument gets had twice.
     wall around the plug is not. The two conservative brackets put recovery at 70 / 154.65 mm² or
     93 / 177.09 mm², **both below `10b0bd8`'s 80 / 279.18**, and **island 74's verdict is inside
     the band.** Closing it needs a kernel query or Craig's E-A ruling — **not a constant.**
+    **Measuring it needs neither**: §4.7.1 records `nearest_wall_thickness_mm` at stage 1 off a
+    batch already paid for. **R4's clamp does not bound this**, `sphere_breach`'s cone sweep is
+    what does (§2.3), and **`t225` — E-C's regression instance — is an E-D record too, at
+    1.94 × its wall** (§8.3). Pinned by S11.
+
+17. **The foot-factor plumbing in `ContactPolicy` is new code, not an existing call site
+    (§2.3).** `ball_seat_factor` and `ball_cut_radius_mm` are live, and **no constant is
+    minted** — but `ContactPolicy` (`contact.rs:208-263`) has no foot-factor field, and both
+    production call sites hardcode `ball_factor_stub` (`contact.rs:357`, `:545`). Clause (a)
+    needs a new field plus a call-site branch. Named so that "the machinery already exists" is
+    never read as "there is nothing to build".
+
+18. **The spec is amended; the engine and the auditor are not (§8.2, §10.2 stage 4).**
+    `SPEC-EMBED-POLICY.md` carries the TRUNCATION amendment at this commit. Until stage 4 lands
+    the clamp in the engine **and** in `plinth-metrics/src/scar.rs`, the two disagree, and a
+    reader who checks the code against the spec will find the spec ahead. That is a recorded,
+    dated divergence, not a silent one.
 
 ---
 
@@ -2049,16 +2391,23 @@ same argument gets had twice.
    `capacity = 12 × π × 0.587651² = 13.018786` against `carried = 13.018786`. **If that does not
    reproduce, the whole table is wrong.** Then confirm `ball_seat_factor` is read from
    `contact.rs:186` and not transcribed, and that `0.4202041028867288` is what it returns at 1.4.
-2. **Check that `a_eff = r_foot` is a construction and not a bug.** It is what
-   `ball_seat_factor` is defined to produce (§2.8). If a reviewer sees the two numbers agree to
-   six decimals and assumes a copy-paste error, they will "fix" the grading and lose 46 records.
-   §6.5 exists for this reason and S9 pins it.
+2. **Check that `a_eff = r_foot` is a construction and not a bug — then check that nobody is
+   reading the ratio as a margin.** It is what `ball_seat_factor` is defined to produce (§2.8).
+   If a reviewer sees the two numbers agree to six decimals and assumes a copy-paste error, they
+   will "fix" the grading and lose records. **The corollary matters more:** for an unclamped
+   foot, test (a) reduces exactly to `W >= 0.4202041 × r_foot`, so the capacity ratio measures
+   nothing about the wall and must never be quoted as a margin. §6.5 carries the algebra; S9,
+   as corrected, pins it against a named fixture rather than a population count.
 3. **Confirm the sweep is centreline-only.** `initial.rs:1359` passes `rays_all = false`;
    `queries.rs:90` makes `n_offset_rays` inert when it is; every one of the 1,926 probe interval
    rows carries `ray = -1`. **Unchanged by the rulings** — none of R1, R3 or R4 touches the sweep.
-4. **Check that all three behavioural rulings are admissions.** `compare-r134.ts` reports
-   **0 records lost** against `10b0bd8` and 49 gained, each attributed to the test that refused
-   it. MEASURED, separately: of 1,500 surviving contact records, 7 have a crossing beyond the
+4. **Check that all three behavioural rulings are admissions ON THIS MODEL, and check the one
+   crossover.** `compare-r134.ts` reports **0 records lost** against `10b0bd8` and 49 gained,
+   each attributed to the test that refused it — and the five gain buckets must sum to 49 and
+   187.891 mm² (§0). **Then check R1's crossover**: its wall demand passes 0.300 mm at
+   `r_foot > 0.713939 mm`, i.e. `carried > 19.216 mm²`, which this model never reaches. The
+   admission claim is bounded to the measured model for that reason.
+   MEASURED, separately: of 1,500 surviving contact records, 7 have a crossing beyond the
    embed and **0** have a firm one — all seven chords are 0.0293 mm, under the 0.08 mm print
    minimum. **Then check that this is false of stage 1b**, which is the point of separating it,
    and note that stage 1b is now the *only* part of this work that can newly refuse anything.
@@ -2066,20 +2415,27 @@ same argument gets had twice.
    form as a proof — its `T = δ` premise is gone — and replaced it with a measurement plus an
    owed re-run over `(r0, r_x, T)`. If a later text quotes §3.2's conclusions as a bound, it is
    quoting a retired argument.
-6. **Re-derive E-C's instance under R4 (§8.3).** `t225`'s seat interval has `exited = true` and
-   `0.849 × 0.164 = 0.139 mm` of shell. Then check that its load-sized tip anchor needs
-   `ball_seat_factor(1.5) × 0.165 = 0.0630 mm` of that 0.139 mm, so it does not reach the far
-   face at all — and that even at the far face its capacity, 1.865 mm², exceeds the 1.027 mm² it
-   carries.
+6. **Re-derive E-C's instance under R4 (§8.3), and then apply the LATERAL formula to it.**
+   `t225`'s seat interval has `exited = true` and `0.849 × 0.164 = 0.139 mm` of shell. Its
+   load-sized tip anchor needs `ball_seat_factor(1.5) × 0.165 = 0.0630 mm` of that 0.139 mm
+   **along its own line**, and even at the far face its capacity, 1.865 mm², exceeds the
+   1.027 mm² it carries. **Then check the part that decides whether E-C is closed:**
+   `reach = 0.0630 + 0.2475 × (1 − 0.1638) = 0.2700 mm` into a 0.1391 mm shell — **1.94 ×**,
+   against island 74's 1.36 ×. If a later text says `t225` "does not perforate", it is quoting
+   a withdrawn sentence.
 7. **Check the staging, in both directions.** Stage 1 is measure-only **only if** the production
    sweep stays centreline-only; if stage 1 moves one digit of one digest, the stage boundary is
    wrong. And §10.0: **nothing may be implemented while the wire-clearance lane owns
    `crates/`**, because stage 3 is that lane's work and stage 2 cannot be accepted without it.
-8. **Check E-D honestly (§4.7).** The graded table (129 / 467.07 mm²) and both conservative
-   brackets (70 / 154.65, 93 / 177.09) come from the same evidence and the same script. A
-   reviewer who wants to test whether this document is arguing for its own conclusion should
-   start by checking that the brackets are reported at all, and that island 74 is named as the
-   record they decide.
+8. **Check E-D honestly (§4.7), and check it for CONSISTENCY, not just for presence.** The
+   graded table (129 / 467.07 mm²) and both conservative brackets (70 / 154.65, 93 / 177.09)
+   come from the same evidence and the same script. A reviewer who wants to test whether this
+   document is arguing for its own conclusion should check three things in order: **(i)** the
+   brackets are printed with the §0 table, not two sections later; **(ii)** island 74 is named
+   as a record they decide, and its heading says CONTINGENT; **(iii)** **every clipped record is
+   graded by the same rule** — search the whole document for any sentence claiming a seat "does
+   not perforate", "cannot breach", or that a predicate is "unreachable". **There should be
+   none.** The previous draft contained all three, and each one flattered the conclusion.
 
 ---
 
@@ -2133,7 +2489,7 @@ looking for machinery that no longer exists.**
 | --- | --- | --- |
 | **(1)** name test (a)(i) as new machinery, escalate it, and give it the grazing-incidence justification | §2.3 rewritten, §12 item 14 added, the 55-of-55 blind-spot analysis included | **OVERTAKEN by R1. The clause is deleted.** There is no wall minimum, no borrowed constant, and no thin-feature-span check under another name. §12 item 14 is struck through with its disposition. The grazing-incidence *outcome* survives: knife-edges are still refused, by a capacity calculation, with `W` from 0.014 to 0.122 mm across the 23 refusals |
 | **(2)** add (a)(i) to §12 | added verbatim | **struck through, with why** |
-| **(3)** show the `ball_breach_eps_mm` step in §8's capacity derivation | added | **OVERTAKEN by R4.** The breach check is unreachable, `ball_breach_eps_mm` is no longer read on this path, and the derivation it belonged to — "what is the largest foot that clears the breach" — has no question left to answer |
+| **(3)** show the `ball_breach_eps_mm` step in §8's capacity derivation | added | **PARTLY OVERTAKEN by R4, and the round-3 review corrected how.** R4 retires the breach **refusal**, so the derivation it belonged to — "what is the largest foot that clears the breach" — has no refusing question left to answer. **It does NOT make the check unreachable**: the cone sweep still finds the lateral reach on 65 of 129 records (§2.3), and under §4.7.1 `ball_breach_eps_mm` is still read, at its registered value, to produce the E-D disclosure |
 | **(4)** say that three of the six tests refuse nothing | said in §4.3 | **STILL SAID, and it is now four of five.** (b) cannot refuse anything at all under R3; (c) and (e) refuse 0 of 154; (a) decides 23 and (f) decides 2 |
 
 **One thing the re-verdict got right that the rulings did not change.** Its §1 reproduced the
@@ -2142,3 +2498,56 @@ its own `kind` filter bug in the process. **This amendment's table has been diff
 record against that reproduced grading** (`compare-r134.ts`): 0 lost, 49 gained, each gain
 attributed to the specific test that refused it before. That is the check a reader should run
 first if they doubt the 129.
+
+---
+
+## APPENDIX C — the ROUND-3 re-verdict (UNSOUND), and where each change landed
+
+The round-3 review of `eb64c83` (`scratchpad/land-at-strike-out/review.md`, "ROUND 3
+RE-VERDICT") reproduced every number in this document independently — its own grader `rv4.ts`,
+written from the raw JSONL — and then graded the document **UNSOUND** on four blocking findings
+in its §H, over and above the five required changes in its §D. **The arithmetic was never in
+question. The defect was that the document argued both sides of its own central question and
+printed the flattering side in §0.** All nine changes are folded below. **Every number in this
+appendix has been re-measured from the same evidence before it was written down; none is copied
+from the review on trust.**
+
+| # | required change | where it landed | what it moved |
+| --- | --- | --- | --- |
+| **1** | §0's recovery table must carry the bracket; island 74's verdict must read CONTINGENT | §0 table + block-quoted bracket; §0 island-74 heading; §4.6 | Heading is now **"RECOVERED AS GRADED, CONTINGENT ON E-D"**. The bracket (70 / 154.65, 93 / 177.09, both below `10b0bd8`'s 80 / 279.18) sits **with** the table, and island 74's refusal under both readings is named there |
+| **2** | replace the 0.999999999 framing with the test's algebraic form | §0; §4.6; **§6.5** | Test (a) for an unclamped foot reduces exactly to `W >= 0.4202041 × r_foot`, VERIFIED to select identical sets over all 46 unclamped strikers. The ratio is named an **identity, not a grade**; the 83 above-1.000 records are attributed to the `MIN_SHOOT_R_MM` clamp (max 2760.9); island 74 is reported as **0.3414 mm of wall against 0.2469 demanded, 38 % to spare** |
+| **3** | correct §0's attribution of island 74's flip | §0, new closing paragraph of the island-74 block | MEASURED: at `10b0bd8` island 74 **passed** the flat 0.3 mm clause (0.3414 ≥ 0.300) and was refused by the breach alone. **The flip is 100 % attributable to retiring the breach refusal** — the check E-D re-opens |
+| **4** | fix the double-count in §0's gained breakdown | §0, the gained block | Was 34 + 11 + 2 + 2 + "two more" = 51 against a measured 49. Now **34 wall (99.881) + 9 ball (83.100) + 2 both (2.738) + 2 crevice (0.065) + 2 deep-seat (2.106) = 49 / 187.891**, and it sums. The deep-seat pair was counted twice |
+| **5** | withdraw or bound *"none of them can newly refuse anything, on this model or any other"* | §0; §0.1 R1 | **Bounded to this model**, with the crossover stated: R1's demand exceeds 0.300 mm at `r_foot > 0.713939 mm`, i.e. `carried > 19.216 mm²`; the registry permits `r_foot` to 1.0 mm. All 154 candidates here demand 0.147 – 0.247 mm. Stage 1 is where a counter-example would appear |
+| **6** | **delete §2.3's *"`breached` cannot be true… the predicate is unreachable"*** | **§2.3**, rewritten; §0; §0.1 R4 | **The blocking finding.** `sphere_breach` sweeps a 25° / 8-ray **cone** (`queries.rs:2948-2973`, `anchor.rs:32`, `:34`) to catch lateral reach, which a scalar clamp cannot bound — and the lateral reach exceeds `W` on **65 of 129** recovered records. §2.3 now states §4.7's position: the check catches a real hazard, the extent is 65 / 129 and 314.362 mm², and retiring the **refusal** is an owner-ruled acceptance of it. §0 repeats **that** |
+| **7** | re-grade `t225` with §4.7's lateral formula; withdraw *"it does not perforate"* | **§8.3**, rewritten; §8.2 consequence 1; §4.7's side-by-side table; §12 item 16; §13 item 6 | `t225` reaches **0.2700 mm into a 0.1391 mm shell = 1.94 ×**, against island 74's **1.36 ×**. Both are now graded by the same rule in the same table. **E-C's regression does not "stop existing" — it becomes an E-D instance**, which is a defensible position and a different sentence |
+| **8** | say *"proposed"*, not *"rewritten"*, about SPEC-EMBED-POLICY | **`docs/engineering-journal/specs/SPEC-EMBED-POLICY.md`** — the file itself; §8.2; §8.4; §10.2 stage 4; §12 item 18 | **Folded by making the claim TRUE rather than by weakening it**, per Craig's R4 ruling. The spec now carries a TRUNCATION amendment section quoting the ruling verbatim and dated, the no-depth-cap paragraph is amended in place with its retired conditional kept visible, and the `Status:` header names the amendment. **The code half is explicitly still future work** (stage 4 + the `plinth-metrics/src/scar.rs` pin), and three places say so |
+| **9** | fix S6 and S9; name S7's two witnesses | **§10.4** | **S6** rewritten to assert on the recorded `nearest_wall_thickness_mm` (§4.7.1) instead of `h_eff <= W`, which was `min(a,b) <= b` — a test of `f64::min`. **S9** corrected twice: `perception.rs:651` is **already absolute**, so the old sabotage was a no-op, and the old consequence (46) is wrong for every epsilon — zero slack drops **24**, absolute 1e-9 mm² drops **17**; it now asserts against a named fixture. **S7** confirmed non-vacuous and its witnesses named: **`b0 t15` and `b1 t14`**, the only 2 of 129 that flip. **S11 added**, the first revert-proof on the E-D disclosure |
+
+**Folded beyond the numbered list, from the review's §A, §E, §F and §H5:**
+
+* **§4.7.1 is new and it is the one-line mechanism the review asked for** — keep the
+  `sphere_breach` query, retire only the refusal, record `nearest_wall_thickness_mm`
+  (`anchor.rs:1403-1425`, computed and discarded today, **zero readers anywhere in `crates/`**,
+  verified by direct search). Adopted as a **stage-1 addition** (§10.2) and made a prerequisite
+  for S6 and S11.
+* **The tolerance description is corrected** in §0, §4.6 and §6.5: the incumbent comparison is
+  **absolute** (`realized_sf < required_sf - 1.0e-6`), about eight times tighter than the
+  grader's relative 1e-6, and **no record sits in the gap** (min ratio 0.999999998119).
+* **"The six tests are four"** — (b) is inert under R3, (d) *is* (a) under R1 — said once, in
+  §2.3.
+* **The `ContactPolicy` foot-factor plumbing is priced as plumbing** (§2.3, §12 item 17), and
+  the foot ball is named as a **validation proxy** that `lower.rs:294-296` never emits.
+* **The residual-wall absence is recorded as measured, not guaranteed** (§4.7.1): the 64
+  unclipped recovered records run min 0.1863 mm, median 0.6418 mm, none below the 0.08 mm print
+  minimum, and the population is bimodal with no third case on this model.
+
+**One correction to the round-3 review, recorded for symmetry.** Its §H2 called `t225` *"the
+worst clipping case in the document, by a wide margin"*. Re-measured: over the 65 clipped
+**landed-foot** records the reach/wall ratio runs **1.13 × to 6.51 ×, median 1.94 ×**, and the
+worst is `b0 t15` / `b1 t14` at **6.51 ×** (0.4103 mm of reach into a 0.0630 mm wall). `t225`
+is a tip seat and sits at the median of the foot population. **This does not weaken the finding
+— it strengthens it.** The defect was never that `t225` is extreme; it was that `t225` was
+graded by a different rule from island 74, and the difference favoured the conclusion. That is
+now fixed, and the fix reveals that the clipped population reaches considerably further than
+either worked example.
