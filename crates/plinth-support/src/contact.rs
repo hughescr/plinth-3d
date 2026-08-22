@@ -161,7 +161,7 @@ pub(crate) fn placed_mask_inset_mm(
 ///
 /// This exists as a named predicate because PR-2 without PR-3 is not a
 /// tightening OR a loosening — it is an ERASURE.  A mask that grows past the
-/// member's own length hands `seg_clear_one` a degenerate segment, and the
+/// member's own length hands `seg_clear_one_excluding` a degenerate segment, and the
 /// kernel returns `INFINITY` (`queries.rs:1786-1788`): the member is then
 /// admitted having never been distance-tested at all.  Any site that adopts
 /// [`placed_mask_inset_mm`] must therefore also apply this, and
@@ -407,7 +407,7 @@ pub(crate) fn seat_endpoint(
 ///
 /// `u* = (h + r_max + standoff + MARGIN) / |cos(theta)|`
 ///
-/// The kernel's `seg_clear_one` builds AXIS points at the mask stations,
+/// The kernel's `seg_clear_one_excluding` builds AXIS points at the mask stations,
 /// interpolates the radii there, and tests
 /// `seg_surface_min(a, b) >= r_lo.max(r_hi) + standoff`.  It is a sphere-swept
 /// capsule criterion, NOT a tilted-end-disc criterion — so there is no
@@ -705,7 +705,7 @@ mod tests {
     /// PR-2 mask to `segment_clearance` as `inset1` exactly as `brace.rs` does,
     /// and asserts the number the kernel hands back.
     ///
-    /// Mechanism being pinned: `seg_clear_one` walks `inset0` in from `p0` and
+    /// Mechanism being pinned: `seg_clear_one_excluding` walks `inset0` in from `p0` and
     /// `inset1` in from `p1`, evaluates `seg_surface_min` on the surviving axis
     /// segment, and subtracts `r_lo.max(r_hi) + standoff`.  The axis station at
     /// arc distance `u*` from an endpoint seated `h` below the tangent plane

@@ -1260,7 +1260,7 @@ fn gather_candidates(
                 // hard failure (OD-4). Under the retired floored formula these rows
                 // were instead admitted unconditionally: the floor made the mask
                 // smaller and the check stricter, and any rung whose insets
-                // over-masked the segment took `seg_clear_one`'s INFINITY
+                // over-masked the segment took `seg_clear_one_excluding`'s INFINITY
                 // trivially-clear branch.
                 Err(_) => continue,
             };

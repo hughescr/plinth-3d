@@ -2153,7 +2153,7 @@ impl NativeSurface {
     }
 
     // ---- penetration intervals -------------------------------------------
-    // Same rationale as `seg_clear_one` above: the per-member primitive
+    // Same rationale as `seg_clear_one_excluding` above: the per-member primitive
     // behind the batched `penetration_intervals_batch` entry point
     // (SPEC-EMBED-POLICY rule-4 transit detection) -- every argument is the
     // geometry + sampling config a single interval extraction needs.

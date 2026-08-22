@@ -1286,7 +1286,7 @@ pub enum AnchorFootRefusalReason {
     ///
     /// **This refusal is the price of the #51 mask fix and must never be
     /// separated from it.** PR-2 without PR-3 is not a loosening — it is an
-    /// ERASURE. `NativeSurface::seg_clear_one` returns `INFINITY` when the
+    /// ERASURE. `NativeSurface::seg_clear_one_excluding` returns `INFINITY` when the
     /// insets consume the segment (`queries.rs:1786-1788`), so a mask that
     /// grows past the member's own length admits an arm that was never
     /// distance-tested at all. At 80 degrees of incidence the rootward mask is

@@ -3528,7 +3528,7 @@ impl ClearanceVerdict {
 /// `brace.rs` uses at its own exact pass.
 ///
 /// **PR-3 is not optional here (design review F1).** PR-2 enlarges the exempt
-/// region; when the mask exceeds the member's own length `seg_clear_one`
+/// region; when the mask exceeds the member's own length `seg_clear_one_excluding`
 /// returns `INFINITY` and the member is admitted having never been tested. The
 /// emergence rule is what keeps the enlarged exemption from becoming an
 /// erasure, so it lands in the same commit as the mask and at the same site.
@@ -7371,7 +7371,7 @@ mod tests {
     /// ERASURE.**
     ///
     /// A grazing model anchor's PR-2 mask diverges as `1/|cos|`. Once it
-    /// exceeds the member's own length `seg_clear_one` returns `INFINITY`
+    /// exceeds the member's own length `seg_clear_one_excluding` returns `INFINITY`
     /// (`queries.rs:1786-1788`) and the arm is admitted having never been
     /// distance-tested at all. That is the hazard Piece B creates and PR-3
     /// closes, and it is the reason the two land in the same commit.
@@ -8338,7 +8338,7 @@ mod tests {
     /// ever won in corpus history was 0.054-0.596 mm, because the retired flat
     /// `standoff_mm` inset admitted NOTHING ELSE: an arm longer than 0.600 mm
     /// was measured and refused by exactly its own radius, and an arm shorter
-    /// than it was never measured at all (`seg_clear_one` returns `INFINITY`).
+    /// than it was never measured at all (`seg_clear_one_excluding` returns `INFINITY`).
     /// The mask convergence closes that escape hatch, and PR-3 refuses the nub
     /// **by name** — `SeatGrazingIncidence`, not an anonymous clearance
     /// failure — because a 0.55 mm arm cannot emerge from its own 1.6 mm

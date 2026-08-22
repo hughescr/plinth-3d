@@ -957,7 +957,7 @@ fn validate_changed_geometry(
                 crate::forest::ContactEnd::Rootward => i1[*row] = mask,
             }
             // PR-3, at the same site as the mask that makes it necessary. A
-            // mask that consumes the segment makes `seg_clear_one` return
+            // mask that consumes the segment makes `seg_clear_one_excluding` return
             // `INFINITY`; validating a move on that number would be validating
             // nothing.
             if !crate::contact::emerges(claimed[*row], length, &policy) {

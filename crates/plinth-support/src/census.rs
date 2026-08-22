@@ -63,7 +63,7 @@ pub struct AnchorRow {
 }
 
 /// One row handed to `NativeSurface::segment_clearance`, with the
-/// `seg_clear_one` INFINITY predicate evaluated locally (identical arithmetic,
+/// `seg_clear_one_excluding` INFINITY predicate evaluated locally (identical arithmetic,
 /// no kernel change).
 #[derive(Clone, Copy, Debug)]
 pub struct SegRow {
@@ -886,7 +886,7 @@ pub(crate) fn record_segment_batch(
                 p1s[index][2] - p0s[index][2],
             ];
             let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
-            // Exactly `seg_clear_one`'s two INFINITY predicates.
+            // Exactly `seg_clear_one_excluding`'s two INFINITY predicates.
             let degenerate = length < 1e-9;
             let usable = (length - inset1s[index]) - inset0s[index];
             census.segs.push(SegRow {
