@@ -187,7 +187,11 @@ the mesh.
 |---|---|
 | `d6e4310` | **Part B registry.** `FINAL_CLEARANCE_GAP_MM` = 0.300 (new, Measured/owner_decision, EXTERNAL REQUIREMENT); `STANDOFF_MM` relabelled honestly, value untouched. Ledger, generated golden, §3.5. Registry 305 → 306. |
 | `33f93f4` | **Kernel.** `segment_clearance_excluding` (per-row global-face exclusion; `segment_clearance` delegates to it with an empty set, so the demanded-gap arithmetic has ONE statement) and `faces_near_segments_batch` (the band, one batched call per row set, refuses rather than truncating). 9 tests. |
-| *this* | **`plinth-support::seat_zone`.** `freeze_seat_zones` — one batched band call plus a parallel flood fill per row — and the freeze/monotonicity tests. |
+| `1c646aa` | **`plinth-support::seat_zone`.** `freeze_seat_zones` — one batched band call plus a parallel flood fill per row — and the freeze/monotonicity tests. |
+| `e74ab97` | **Challenge finding A**, folded in ahead of the wiring it gates: the manifold-bridge fixture, and the rule's measured boundary. §9.1–9.2. |
+| `3fe332b` | **§8 step 1.** `ForestState::seat_zones`, `set_seat_zone` / `seat_zone`, the resize-survival and digest-inertness tests. |
+| `005d56b` | **§8 step 2.** `ContactPolicy::demanded_gap_mm` and the named `ClearanceStage`; all four production `segment_clearance` sites read their stage's registered demand. §9.3. |
+| `8b6cb14` | **Challenge finding E**, note text only: the retired `seg_clear_one` name in the `STANDOFF_MM` provenance, its ledger twin, §3.5 and twelve live source comments. |
 
 ---
 
@@ -195,15 +199,26 @@ the mesh.
 
 Written out because the next pass should not have to re-derive it.
 
-1. **`Forest`** — add `seat_zones: BTreeMap<MemberKey, Arc<[u32]>>` to
+**STATUS (2026-08-22, wiring pass).** Steps 1 and 2 have landed; steps 3–7 have
+not. Read §9 BEFORE step 3: it records what the pass measured, including two
+places where this list is incomplete as written (§9.4 names a fourth creation
+site and a bifurcation inheritance rule; §9.5 names a batch-limits question that
+needs an owner).
+
+1. **`Forest`** — **DONE** (`3fe332b`). Add `seat_zones: BTreeMap<MemberKey, Arc<[u32]>>` to
    `ForestState`; `set_seat_zone` / `seat_zone`; leave `digest()` alone. Confirm
    `apply_resize` preserves keys (it must, or the freeze cannot survive a
    resize — this is the property under test).
 
-2. **`ContactPolicy`** — add `demanded_gap_mm`. `brace.rs:70` sets
-   `final_clearance_gap_mm`; `cco.rs:4304` sets `standoff_mm`. Every
+2. **`ContactPolicy`** — **DONE** (`005d56b`). Add `demanded_gap_mm`. `brace.rs:70`
+   sets `final_clearance_gap_mm`; `cco.rs:4304` sets `standoff_mm`. Every
    `segment_clearance*` call passes `policy.demanded_gap_mm` rather than
-   `config.standoff_mm`.
+   `config.standoff_mm`. *As landed:* `brace.rs:70` takes a NAMED
+   `contact::ClearanceStage`, because the brace pass is the one stage that reads
+   BOTH demands — `evaluate_candidates` is PLACEMENT under ruling R-1495 and
+   `exact_clearance_rows` is FINAL — and a bare number at those two sites could
+   silently swap them. `standoff_mm` stays a separate field: the PR-2 mask's
+   standoff term is a different quantity from the demand and did not move.
 
 3. **`FaceTopology` threading** — `brace_fixed_point_current_parity` →
    `brace_pass_current_parity` → the model-rung builder; `cco` routing →
@@ -241,3 +256,97 @@ them): the Bat's crevice arms grade against TRUE gaps ≈ 0.291 mm (slot 250 fin
 radius) and < 0.439 mm (slot 377 final radius) and are LIKELY STILL REFUSED at
 0.300 — which is honest; its island needs the land-at-strike fix, a different
 lane. Do not try to make the Bat emit.
+
+---
+
+## 9. Wiring progress, and what the wiring pass MEASURED
+
+Steps 1 and 2 have landed. Steps 3–7 have not. Everything below is a MEASURED
+fact from the pass that landed them, recorded here so the next pass inherits it
+rather than rediscovering it.
+
+### 9.1 Finding A — the gate held
+
+The challenge required the connectivity separator to be tested where it matters
+BEFORE the wiring landed: on a MANIFOLD bridging fixture rather than on the two
+disjoint sheets `a_zone_stops_at_the_crevice_and_never_crosses_to_the_foreign_wall`
+uses, which cannot cross because nothing joins them.
+
+`a_zone_stops_at_the_crevice_on_a_manifold_bridge_where_the_walls_really_are_connected`
+(`seat_zone.rs`) is that fixture: a U-channel — near wall, floor, far wall — one
+connected sheet, 0.4 mm seat radius (so a 1.0 mm band) across a 1.2 mm crevice.
+Each ingredient is asserted, not assumed: an unrestricted fill from the seat face
+reaches the far wall (it IS a bridge); the band contains far-wall faces (the test
+is not vacuous); the connecting path is 5 mm below the arm and outside the band.
+
+**VERDICT: the flood fill HELD.** The frozen zone is near-wall faces only — no
+floor face, no far-wall face. Deleting the one line that keeps the fill inside
+the band turns this test RED while the old disjoint-sheet test stays GREEN, which
+is the finding demonstrated rather than argued.
+
+### 9.2 The rule's boundary, measured
+
+`the_zone_does_span_the_channel_when_the_band_itself_contains_the_connecting_path`
+is the opposite pole of the same fixture: with the arm lying along the bottom of
+the crevice, the band swallows the corner where floor meets far wall, and the
+zone is then the WHOLE band — 13 near + 16 floor + 11 far = 40 faces.
+
+This is §2 read literally and it is the rule's boundary: the exemption is bounded
+by the band and by nothing else. An arm jammed into the bottom of a 1.2 mm
+crevice forgives both its walls. It is pinned so that any later narrowing of the
+zone — a normal test, a geodesic radius, a floor-facing exclusion — has a test it
+must revisit BY NAME.
+
+### 9.3 `axis_illegal_rows`' admission window moves with the demand
+
+MEASURED while landing step 2. `brace::axis_illegal_rows` admits a row to the
+penetration-interval batch only when its clearance sits in `[0, 0.1)` or its
+midpoint is inside the model. That window is expressed in CLEARANCE, so it MOVES
+when the demanded gap moves: at `STANDOFF_MM` it meant "true gap in
+[0.600, 0.700)", and at `FINAL_CLEARANCE_GAP_MM` it means "true gap in
+[0.300, 0.400)".
+
+On the required runner corpus that emptied the batch: it had occupants of the
+first band and none of the second, so the transit screen now examines nothing
+there, and `brace_penetration_cap_minus_one_fails_closed_at_runner_boundary` went
+VACUOUS rather than red. It was replaced by two tests that cannot
+(`brace::a_capped_penetration_batch_refuses_rather_than_skipping_the_transit_screen`
+constructs its own admitted row;
+`runner::the_callers_brace_penetration_authority_is_the_one_the_brace_stage_spends`
+reads the authority back out).
+
+The 0.1 is the same defect SHAPE as challenge finding D one level over — a screen
+expressed in a quantity that moves when a demand moves. NAMED, NOT FIXED: it is
+not this change's to move, and no constant moved for it.
+
+### 9.4 Step 4's creation-site inventory is INCOMPLETE as written
+
+§8 step 4 names two mints and the candidacy rows. The honest inventory of members
+that reach a clearance grading site carrying `model_contact_end().is_some()` is
+larger, and step 5 must not land until every one of them freezes a `Z` — a
+contact-declaring row with no frozen zone exempts NOTHING and is then graded over
+its own designed embed, which refuses it:
+
+* `brace.rs` model rungs (`append_candidate`, `MemberKind::Other(MODEL_RUNG_FAMILY)`,
+  `Rootward`) — as written;
+* `cco::apply_model_anchor` (`MemberKind::Strut`, `Rootward`) — as written;
+* `cco::apply_bifurcation` — the upper half INHERITS the host's `Rootward`
+  declaration and the host's `p1`, i.e. the same seat. It must inherit the host's
+  frozen zone (an `Arc` clone, no native call); the contact was created once and
+  the freeze belongs to the contact, not to the member;
+* `initial.rs::stub_member` (`MemberKind::Stub`, `Terminalward`) — NOT in §8 and
+  it must be. Stubs are excluded from `brace::exact_clearance_rows` by kind, but
+  NOT from `cco::clearance_rows`, which walks `live_tree_members` and keeps every
+  CHANGED member. A stub is a designed 0.3 mm embed; graded full-length with no
+  zone it refuses itself, and CCO growth would lose its candidates wholesale.
+
+### 9.5 The batch limits for `freeze_seat_zones` need an owner, not an invention
+
+`NearFaceBatchLimits` is caller-owned by construction, and this lane is under a
+standing "no new constant, cap, gate, threshold or tolerance" restriction. The
+two honest options are (a) a mesh-derived bound — `max_faces_per_row =
+topology.n_faces()`, which cannot refuse a legitimate band but is only the
+trivial bound — or (b) a real production authority beside
+`brace_penetration_limits` on `SupportPreparationLimits`, which is a caller
+authority rather than a registered constant but is still a NUMBER someone must
+own. RAISED, NOT DECIDED.
