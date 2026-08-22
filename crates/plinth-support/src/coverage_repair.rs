@@ -407,11 +407,17 @@ pub struct CoverageRepairStep {
     /// understood.** The 52 are condemned before any arm is proposed. The 37
     /// end at ROUTING with no winning arm, before any brace, resize or
     /// path-level state exists, so the "acceptance depends on post-brace state"
-    /// argument that covers the 52 says nothing about them. Which of the 37 are
-    /// the `every_feasible_arm_refused_by_clearance` sub-class is answered by
-    /// [`Self::own_contact_no_winner`], which persists that flag and the counts
-    /// the same transcript row already holds beside it. See
-    /// `docs/engineering-journal/designs/candidacy-exact-mask-2026-08-21.md` §F.
+    /// argument that covers the 52 says nothing about them.
+    ///
+    /// **Which of the 37 are the `every_feasible_arm_refused_by_clearance`
+    /// sub-class: MEASURED 2026-08-22, and it is ALL of them.** 37 true, 0
+    /// false, every one at stage
+    /// `AllFeasibleCandidatesRefusedByClearance` — not one had an empty anchor
+    /// batch and not one ran out of feasible arms (42 to 106 proposed, 37 to 102
+    /// feasible, never zero). Arms existed, most were feasible, and the
+    /// clearance standoff refused every one, which is task #51's shape end to
+    /// end. [`Self::own_contact_no_winner`] is the field that says so, and
+    /// `candidacy-exact-mask-2026-08-21.md` §F.1 records the run.
     ///
     /// **Nothing reads it to decide anything, and a ranking rule that did was
     /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a

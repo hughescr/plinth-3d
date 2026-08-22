@@ -226,16 +226,91 @@ likely origin of "34" is subtracting the 3 committed trials twice (89 − 52 −
   exists. Nothing in §C's argument reaches them, and closing item 2 on §C's reasoning alone
   left 42 % of the named waste unexplained.
 
-**What is measured about the 37, and what is not.** MEASURED: there are 37, and each one is
-`UnroutedNoWinner` on its own appended contact. NOT MEASURED: how many of the 37 are the
-`every_feasible_arm_refused_by_clearance` sub-class (task #51's shape) rather than some
-other no-winner cause. The run already computes that flag —
+**What was measured about the 37, and what was not — ANSWERED 2026-08-22.** When this
+section was written the flag existed in the run and nowhere else:
 `TrialContactDisposition::UnroutedNoWinner { every_feasible_arm_refused_by_clearance }`
-(`runner.rs:5148`), folded per route by `record_disposition` (`runner.rs:2135`) — but the
-sidecar does not persist it per step, and `report.rejections_by_class` names only
-`no_improvement`. **The cheap next step is one evidence-only disclosure of that existing
-flag plus one `zombie-3-a` run, not a guess.** Until it exists, no screen for the 37 should
-be designed, because nobody knows yet which physics question it would have to ask.
+(`runner.rs:5148`) was folded per route by `record_disposition` (`runner.rs:2135`) and
+thrown away, and `report.rejections_by_class` named only `no_improvement`. The prescribed
+next step — one evidence-only disclosure of that existing flag plus one `zombie-3-a` run —
+was taken at `1d5696b`, and §F.1 records what it read.
+
+---
+
+### §F.1. The 37, measured: **37 clearance-refused, 0 anything else**
+
+**The split is not a split.** Of the 37 rejected trials whose own appended contact retired
+`UnroutedNoWinner`, **every single one** is
+`every_feasible_arm_refused_by_clearance = true`, stage
+`all_feasible_candidates_refused_by_clearance`. Not one is `NoCandidatesGenerated` and not
+one is `NoFeasibleCandidate`. The class §F could only size is task #51's shape end to end.
+
+**What the disclosed evidence actually says, per trial.** The routing cadence records, on
+the same transcript row, how many arms it proposed at that terminal and how many survived
+feasibility. Over the 37:
+
+| quantity | range over the 37 |
+| --- | ---: |
+| arms proposed (`candidates_generated`) | 42 – 106 |
+| arms feasible (`candidates_feasible`) | 37 – 102 |
+| trials with **zero** feasible arms | **0** |
+| retained anchor-**seat** refusal rows | 68 447 – 69 552 |
+| retained anchor-**foot** refusal rows | 0 – 40 |
+
+So the story is the same one 37 times, and it is not "there was nowhere to put an arm":
+**arms were proposed, most of them were feasible, and the clearance standoff then refused
+every last one.** Three samples, read off the file:
+
+* **trial 3** (island 0, pool row 1607, `generic`) — 42 proposed, **37 feasible**, 0 foot
+  refusals recorded, 69 552 seat refusals. Every one of the 37 feasible arms died at
+  clearance.
+* **trial 28** (island 4, pool row 1567, `synthetic_island`) — 106 proposed, **101
+  feasible**, 40 foot refusals, 69 154 seat refusals. 101 feasible arms, no winner.
+* **trial 62** (island 8, pool row 1784, `synthetic_island`) — 106 proposed, **102
+  feasible**, 40 foot refusals, 68 532 seat refusals. The widest candidate set in the run,
+  and it still ends with no arm.
+
+The other sub-class is empty, so there is no second story to tell. That absence is the
+finding: nothing here is a candidate-generation problem.
+
+**Two things the disclosure makes visible that were not being looked for.**
+
+* **The foot-refusal list does not account for the refusals.** On all 37 rows,
+  `anchor_foot_refusals_recorded` is strictly SMALLER than `candidates_feasible`, and on 9
+  of them it is exactly **40** — the retained foot-refusal list is bounded, so it names only
+  some of the arms that were refused. Any reading of "why" that counts foot-refusal rows
+  will undercount. Task #46 already owns the retention question; this is a second reason to
+  care about it.
+* **The 37 are concentrated, not spread.** They fall on three routes —
+  island 0 (3 trials, 3–5), island 4 (5 trials, 15–28), island 8 (**29** trials, 31–90).
+  Nearly four fifths of the class is one route being retried.
+* **Three of the 37 IMPROVED the no-winner gate and were still rejected.** Trials 3, 4 and
+  5 move `unrouted_no_winner` **5 → 4** while their own contact goes unrouted, so the
+  appended contact let two other terminals route; the remaining 34 move it 3 → 4. All 37
+  are rejected as `no_improvement` on coverage, which is clause 1 doing its job — and it
+  means "the trial's own contact got no arm" and "the trial made the plan worse" are
+  genuinely different facts on this model.
+
+**Provenance.** Binary built at `1d5696b`, mtime `2026-08-22 02:05:59 -0700`, postdating
+the commit (`02:04:19`); marker strings `own_contact_no_winner` and
+`all_feasible_candidates_refused_by_clearance` PRESENT in it and ABSENT from the
+`2026-08-21 13:36` binary that produced the reference run. Model
+`zombie-3-a.stl` sha256 `6df16e5…dccb6`, the same file both runs read.
+
+**The disclosure is evidence-only, proved rather than asserted.** The emitted artifact is
+**bit-identical** to the reference run — md5 `518b346faec0d71b7cdaf05ebeacb89f`, 3 719 400
+bytes, 210 support records. `trials=92 commits=3 remaining=433 diversity_demotions=2185
+of_which_tried=91 [no_improvement=89]`, commits at trials **6 / 29 / 92** carrying
+**23.186291036967194 / 21.755392239274766 / 9.097347268043432 mm²**, and 52 quarantined —
+every one unchanged. Stronger: strip the four wall-time fields (which are evidence, never a
+bound) and the new field from both sidecars and the two files are **byte-identical**,
+md5 `91e23b9108d46d199fe0b2a5d174540b`. Only the sidecar gained anything.
+
+**No screen is designed here, and §F.1 does not authorize one.** The judge's order was the
+measurement, and the measurement is what §F.1 is. What it changes is that the question a
+screen would have to ask is now a NAMED one — "will the clearance standoff refuse every
+feasible arm at this seat?" — instead of an unknown. It is still a physics question nobody
+has posed, and it is still owned by task #51, whose own record says the model-anchor
+clearance mask is unsatisfiable.
 
 **One constraint on any such screen is already MEASURED, and it is a real one.** At the
 promotion site (`runner.rs:1822`–`1873`) the trial loop holds only `winner.id`,
