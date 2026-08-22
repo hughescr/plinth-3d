@@ -5,6 +5,7 @@
 //! types make reversing that convention a type error.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use geom_kernel::SurfaceTriangleSoupDigest;
 use plinth_core::{Finite, PositiveFinite};
@@ -371,6 +372,27 @@ struct ForestState {
     braces: BTreeSet<MemberKey>,
     quarantined: BTreeMap<MemberKey, QuarantineRecord>,
     dead: BTreeSet<MemberKey>,
+    /// The FROZEN seat zone `Z` of every contact-declaring member: the global
+    /// face IDs its own seat forgives, sorted ascending and deduplicated
+    /// (`crate::seat_zone`).
+    ///
+    /// A SIDE TABLE, deliberately, and deliberately outside [`Forest::digest`]
+    /// and off `Member` (honest-exemption design, section 6):
+    ///
+    /// * `Member` is `Serialize` and feeds the run's disclosed geometry. A
+    ///   frozen face list is an implementation detail of a VERDICT, not
+    ///   geometry, and on `Member` it would land in front of every artifact
+    ///   consumer.
+    /// * `digest()` hashes explicit fields, so a side table cannot move a digest
+    ///   by accident. That is what makes "a model with no affected arms stays
+    ///   bit-identical" provable BY INSPECTION rather than by running a corpus.
+    /// * `MemberKey` carries a generation beside its slot, so a recycled slot
+    ///   yields a different key: a stale entry is unreachable, never wrong.
+    ///
+    /// The freeze must survive a resize, and it does because a resize is
+    /// `set_radii` on the SAME keys (`brace::apply_resize`) — pinned by
+    /// `a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius`.
+    seat_zones: BTreeMap<MemberKey, Arc<[u32]>>,
 }
 
 /// Opaque, LIFO checkpoint token.
@@ -546,6 +568,40 @@ impl Forest {
     #[must_use]
     pub fn member(&self, key: MemberKey) -> Option<&Member> {
         self.active_slot(key).and_then(|slot| slot.member.as_ref())
+    }
+
+    /// Freeze this member's seat zone `Z` — the global faces its OWN seat
+    /// forgives, computed once at contact creation from the creation radius.
+    ///
+    /// "Freeze" is the whole rule. Nothing recomputes a zone from a later
+    /// radius: the monotonicity theorem (a thinner arm can never grade worse
+    /// than a fatter one on the same axis) holds precisely because the tested
+    /// face set does not move when the radius does. A second call for the same
+    /// key REPLACES the entry, which is what a re-minted contact on a recycled
+    /// generation needs; a resize never calls this at all.
+    #[allow(
+        dead_code,
+        reason = "the side table lands one commit ahead of the creation sites that freeze into \
+                  it and the grading sites that read it; docs/engineering-journal/designs/\
+                  honest-exemption-2026-08-22.md section 8 steps 4 and 5 name them"
+    )]
+    pub(crate) fn set_seat_zone(&mut self, key: MemberKey, zone: Arc<[u32]>) {
+        self.state.seat_zones.insert(key, zone);
+    }
+
+    /// This member's frozen seat zone, or `None` if it never declared a
+    /// contact.
+    ///
+    /// `None` means "exempt nothing": the row is then graded against the WHOLE
+    /// surface, which is the strict direction and the correct one for a member
+    /// with no seat of its own.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "same as `set_seat_zone`: the reader is the grading site of section 8 step 5"
+    )]
+    pub(crate) fn seat_zone(&self, key: MemberKey) -> Option<&Arc<[u32]>> {
+        self.state.seat_zones.get(&key)
     }
 
     #[must_use]
@@ -1561,6 +1617,61 @@ mod tests {
             model_contact_end: None,
             carried_mm2: finite(1.0),
         })
+    }
+
+    /// The freeze has to survive the resize, or it is not a freeze.
+    ///
+    /// A resize is `set_radii` on the SAME `MemberKey` (`brace::apply_resize`),
+    /// so the side table is untouched by construction — and that is exactly the
+    /// property the monotonicity theorem rests on. Recompute `Z` from the final
+    /// radius instead and a fatter arm claims a wider band, a wider band
+    /// swallows more faces, and the fatter arm is graded against strictly LESS
+    /// surface than a thin one on the same axis: the retired skip-length's
+    /// inversion, rebuilt one level up.
+    #[test]
+    fn a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        forest.set_seat_zone(key, Arc::from(vec![3_u32, 11, 42]));
+
+        forest
+            .set_radii(
+                key,
+                TerminalEndRadius::new(radius(1.7)),
+                RootwardEndRadius::new(radius(1.7)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            forest.seat_zone(key).map(|zone| zone.to_vec()),
+            Some(vec![3, 11, 42]),
+            "a resize must not move the frozen zone"
+        );
+    }
+
+    /// The side table is invisible to the digest, which is what makes "a model
+    /// with no affected arms stays bit-identical" provable by inspection.
+    #[test]
+    fn freezing_a_seat_zone_does_not_move_the_forest_digest() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        let before = forest.digest();
+        forest.set_seat_zone(key, Arc::from(vec![7_u32, 9]));
+        assert_eq!(
+            forest.digest(),
+            before,
+            "the frozen face list is an implementation detail of a VERDICT, not \
+             disclosed geometry: it must not reach the digest"
+        );
+    }
+
+    /// A member that declared no contact has no zone, and `None` is read as
+    /// "exempt nothing" — the strict direction.
+    #[test]
+    fn a_member_with_no_contact_has_no_zone_and_therefore_exempts_nothing() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        assert!(forest.seat_zone(key).is_none());
     }
 
     #[test]
