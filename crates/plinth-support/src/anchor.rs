@@ -192,13 +192,29 @@ impl GeometryFingerprint {
 /// checks. Callers cannot overwrite the digest stored by a native surface.
 pub struct AnchorGeometryAuthority<'a> {
     surface: &'a NativeSurface,
+    /// **#36 step 3 — the face adjacency the honest contact exemption needs.**
+    ///
+    /// The topology was always an INPUT here: `new` validates it, binds its
+    /// content digest into the fingerprint, and then dropped the reference.
+    /// The seat-zone flood fill needs that same adjacency at every creation
+    /// site, and this is the one already-checked authority all of them hold —
+    /// so retaining what was already validated is strictly cheaper than
+    /// threading a second, unbound `&FaceTopology` down three call chains, and
+    /// it makes the surface and the adjacency provably the SAME pair the
+    /// fingerprint attests rather than two arguments a caller could mismatch.
+    ///
+    /// The identity the fill rests on: `validate_perception_input` builds this
+    /// with `WeldPolicy::ExactBits`, and `NativeSurface::from_indexed` indexes
+    /// faces in the same triangle order, so `surface.project`'s face ID and
+    /// `topology.neighbors` address the same faces.
+    topology: &'a FaceTopology,
     fingerprint: GeometryFingerprint,
 }
 
 impl<'a> AnchorGeometryAuthority<'a> {
     pub fn new(
         mesh: &Mesh,
-        topology: &FaceTopology,
+        topology: &'a FaceTopology,
         surface: &'a NativeSurface,
     ) -> Result<Self, AnchorSearchError> {
         validate_face_topology(topology)
@@ -211,6 +227,7 @@ impl<'a> AnchorGeometryAuthority<'a> {
         let native_triangle_soup_digest = validate_surface_matches_mesh(mesh, surface)?;
         Ok(Self {
             surface,
+            topology,
             fingerprint: GeometryFingerprint {
                 mesh_sha256: actual_mesh,
                 topology_sha256: topology.content_digest().to_owned(),
@@ -223,6 +240,14 @@ impl<'a> AnchorGeometryAuthority<'a> {
     #[must_use]
     pub const fn surface(&self) -> &NativeSurface {
         self.surface
+    }
+
+    /// The validated face adjacency this authority binds — #36's seat-zone
+    /// flood fill reads it, and reads it from HERE so it cannot be handed a
+    /// topology the fingerprint never attested.
+    #[must_use]
+    pub(crate) const fn topology(&self) -> &FaceTopology {
+        self.topology
     }
 
     #[must_use]

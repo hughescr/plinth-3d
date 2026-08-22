@@ -4727,6 +4727,11 @@ fn brace_state(
         let plan = brace_fixed_point_current_parity(
             state.routed.initial.forest(),
             geometry.surface(),
+            // #36 step 3. The face adjacency the seat-zone freeze walks, taken
+            // from the one authority that already validated it against this
+            // exact surface and mesh — the runner constructs no second
+            // topology (`SupportRunContext::topology`).
+            geometry.topology(),
             context.frame.plate_z_mm(),
             context.brace_penetration_limits(),
             // PR-1/PR-2 need the run's OWN process resolution: the seat floor
@@ -7280,7 +7285,16 @@ mod tests {
         }
     }
 
-    fn remote_brace_surface() -> NativeSurface {
+    /// #36 — the face adjacency for the SAME indexed mesh
+    /// `remote_brace_surface` builds its surface from.
+    fn remote_brace_topology() -> plinth_mesh::FaceTopology {
+        let (vertices, faces) = remote_brace_parts();
+        let mesh = plinth_mesh::Mesh::new(vertices, faces).expect("remote brace fixture mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("remote brace fixture topology")
+    }
+
+    fn remote_brace_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let vertices = vec![
             [100.0, 100.0, 100.0],
             [110.0, 100.0, 100.0],
@@ -7305,6 +7319,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn remote_brace_surface() -> NativeSurface {
+        let (vertices, faces) = remote_brace_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -7809,6 +7828,7 @@ mod tests {
         let converged = brace_fixed_point_current_parity(
             &Forest::new(),
             &remote_brace_surface(),
+            &remote_brace_topology(),
             plate,
             brace_penetration_limits(),
             0.05,
@@ -7821,6 +7841,7 @@ mod tests {
         let unplaceable = brace_fixed_point_current_parity(
             &forest,
             &remote_brace_surface(),
+            &remote_brace_topology(),
             plate,
             brace_penetration_limits(),
             0.05,
@@ -7837,6 +7858,7 @@ mod tests {
         let linked_plan = brace_fixed_point_current_parity(
             &linked,
             &remote_brace_surface(),
+            &remote_brace_topology(),
             plate,
             brace_penetration_limits(),
             0.05,

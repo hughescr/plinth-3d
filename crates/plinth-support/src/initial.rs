@@ -450,6 +450,13 @@ pub(crate) enum InitialContactError {
     UnattestableContactDepth { depth_mm: f64, margin_mm: f64 },
     #[error("contact attestation batch failed: {0}")]
     Attestation(DesignedMaskError),
+    /// #36. The stub family's frozen seat zones could not be computed. This is
+    /// a BATCH-level failure — a starved band admission or a mesh/topology
+    /// disagreement — and never a statement about any one contact, so it takes
+    /// the same channel every other batch integrity failure here takes rather
+    /// than quarantining a stub.
+    #[error("initial stub seat-zone freeze failed: {0}")]
+    SeatZone(crate::seat_zone::SeatZoneError),
 }
 
 struct StubSeed {
@@ -614,6 +621,11 @@ pub(crate) fn build_initial_contacts(
         .tip_radius_max_grown_scar_mm()
         .value();
     let min_shoot_r_mm = policy.min_shoot_r_mm().diagnostic().get();
+    // `STANDOFF_MM` — the PLACEMENT standoff, and the second term of the frozen
+    // seat-zone band radius `r_seat + standoff_placement` (design §2). It is
+    // the mask formula's own standoff, NOT a demanded gap; the two-tier ruling
+    // of 2026-08-22 separated those and this is the former.
+    let standoff_mm = policy.standoff_mm().diagnostic().get();
 
     let native_digest = geometry.digest();
     let mut seeds = Vec::new();
@@ -822,6 +834,24 @@ pub(crate) fn build_initial_contacts(
     for seed in &seeds {
         keys.push(forest.add_member(stub_member(seed)));
     }
+    // **The honest contact exemption, creation site 1 of 4 (#36, design §8
+    // step 4 / §9.4).** A stub is a designed `contact_depth_mm` embed: it is
+    // legitimately inside the material it is seated in, so its own seat zone
+    // must be exempt or the full-axis grading of §8 step 5 refuses every stub
+    // for its own design.
+    //
+    // The stub family was NOT in §8's original inventory and had to be added:
+    // `brace::exact_clearance_rows` excludes `MemberKind::Stub` by kind, but
+    // `cco::clearance_rows` does not — it walks `live_tree_members` and keeps
+    // every CHANGED member — so an unfrozen stub self-refuses there and CCO
+    // growth loses its candidates wholesale.
+    //
+    // Frozen HERE rather than at seed time because grow-to-attest can still
+    // raise `r0` above, and the frozen band radius must be the radius the
+    // contact is MINTED with. Cost is one batched projection plus one batched
+    // band call for the whole run, riding the same stage boundary as the
+    // attestation batches; a per-stub call would be the batch-first defect.
+    freeze_stub_seat_zones(&mut forest, &seeds, &keys, geometry, standoff_mm)?;
     for (seed, key) in seeds.iter().zip(&keys) {
         forest.register_terminal(seed.terminal, *key)?;
     }
@@ -952,6 +982,70 @@ pub(crate) fn build_initial_contacts(
         scratch_bytes,
         all_terminals_registered_before_quarantine: true,
     })
+}
+
+/// **#36 — freeze the stub family's seat zones, one batch for the whole run.**
+///
+/// `Z` is the connected component, containing the seat's own face, of the faces
+/// within `r_seat + standoff_placement` of the stub's axis (design §2). For a
+/// stub the contact end is `Terminalward`, so `r_seat` is `seed.r0` — the tip
+/// radius the run will EMIT, after grow-to-attest, which is why this runs at
+/// the mint and not at seed time.
+///
+/// The seat FACE comes from one batched `project` over the seats. That is the
+/// same rule `brace::exact_clearance_rows` and `cco::clearance_survival` use to
+/// resolve a contact's surface normal, so the face this forgives is the face
+/// those sites would have measured the seat against — the identity the flood
+/// fill rests on. `validate_perception_input` builds the retained topology with
+/// `WeldPolicy::ExactBits` and `NativeSurface::from_indexed` indexes faces in
+/// the same triangle order, so `project`'s face ID and `topology.neighbors`
+/// address the SAME faces (design §10.6, verified independently by the
+/// challenger and re-recorded there).
+///
+/// A projection that lands off the mesh (`face_id < 0`, which `project` returns
+/// for an empty or degenerate surface) is left UNFROZEN rather than guessed at:
+/// no zone means "exempt nothing", which is the strict direction.
+fn freeze_stub_seat_zones(
+    forest: &mut Forest,
+    seeds: &[StubSeed],
+    keys: &[MemberKey],
+    geometry: &AnchorGeometryAuthority<'_>,
+    standoff_mm: f64,
+) -> Result<(), InitialContactError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let seats = seeds.iter().map(|seed| seed.seat_mm).collect::<Vec<_>>();
+    // ONE projection for the whole run.
+    let (_, _, face_ids, _) = geometry.surface().project(&seats);
+    let mut rows = Vec::new();
+    let mut requests = Vec::new();
+    for ((seed, key), face_id) in seeds.iter().zip(keys).zip(&face_ids) {
+        let Ok(seat_face_id) = u32::try_from(*face_id) else {
+            continue;
+        };
+        rows.push(*key);
+        requests.push(crate::seat_zone::SeatZoneRequest {
+            p0_mm: seed.p0.map(Finite::get),
+            p1_mm: seed.p1.map(Finite::get),
+            seat_face_id,
+            // FROZEN: the contact end's radius at the moment of the mint, plus
+            // the placement standoff. A later resize must never rewrite it —
+            // that freeze is what makes monotonicity a theorem (design §3).
+            band_radius_mm: seed.r0.get() + standoff_mm,
+        });
+    }
+    // ONE band call plus a parallel flood fill per row.
+    let zones = crate::seat_zone::freeze_production_seat_zones(
+        geometry.surface(),
+        geometry.topology(),
+        &requests,
+    )
+    .map_err(InitialContactError::SeatZone)?;
+    for (key, zone) in rows.into_iter().zip(zones) {
+        forest.set_seat_zone(key, zone);
+    }
+    Ok(())
 }
 
 /// The exact member one stub seed becomes.

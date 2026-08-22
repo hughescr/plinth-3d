@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, PenetrationBatchError, PenetrationBatchLimits};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_mesh::FaceTopology;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -263,6 +264,12 @@ pub(crate) enum BraceError {
     Compatibility(#[from] LegacyCompatibilityError),
     #[error(transparent)]
     Sizing(#[from] MemberSizingError),
+    /// #36. A frozen seat zone could not be computed. Like every other
+    /// batch-level failure here this is a statement about the BATCH — a starved
+    /// band admission or a mesh/topology disagreement — never about any one
+    /// rung, so it fails the pass rather than dropping a candidate.
+    #[error("brace seat-zone freeze failed: {0}")]
+    SeatZone(String),
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +333,17 @@ struct PlacementCandidate {
     kind: BraceAdditionKind,
     rods: Vec<Rod>,
     printable: bool,
+    /// **#36 — the frozen seat zone `Z`, for a candidate that declares a model
+    /// contact.** `None` for a cross-link, which has no seat and must be graded
+    /// against the whole surface.
+    ///
+    /// It is frozen in `gather_candidates`, at the ONE moment this family has a
+    /// creation radius and a seat face together, and it travels on the
+    /// candidate so that `evaluate_candidates` (the PLACEMENT grading site) and
+    /// `append_candidate` (the mint) read the SAME face set. A zone recomputed
+    /// between those two would be the retired skip-length's inversion rebuilt
+    /// one level up (design §3).
+    seat_zone: Option<std::sync::Arc<[u32]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +361,13 @@ struct ProjectedModelCandidate {
     raw: RawModelCandidate,
     point: [f64; 3],
     normal: [f64; 3],
+    /// **#36 — the global face the seat projected onto.** The projection that
+    /// resolves `point` and `normal` already computes it and used to discard
+    /// it; capturing it is what lets the seat zone be frozen without a second
+    /// native call. `None` only when the projection landed off the mesh, which
+    /// leaves the rung unfrozen and therefore graded against everything — the
+    /// strict direction.
+    seat_face_id: Option<u32>,
 }
 
 /// Port of the live `compute_needs` plus candidate placement, without mutating
@@ -351,6 +376,7 @@ struct ProjectedModelCandidate {
 pub(crate) fn brace_pass_current_parity(
     forest: &Forest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     plate_z_mm: Finite,
     report: &TransientReport,
     penetration_limits: PenetrationBatchLimits,
@@ -372,7 +398,7 @@ pub(crate) fn brace_pass_current_parity(
     let CandidateGather {
         candidates,
         attestation_digest: contact_attestation_digest,
-    } = gather_candidates(forest, surface, &need_batch.needs, &config)?;
+    } = gather_candidates(forest, surface, topology, &need_batch.needs, &config)?;
     let viable = evaluate_candidates(surface, &candidates, &config, penetration_limits)?;
     let mut planned = forest.clone();
     let mut additions = Vec::new();
@@ -453,6 +479,7 @@ pub(crate) fn brace_pass_current_parity(
 pub(crate) fn brace_fixed_point_current_parity(
     forest: &Forest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     plate_z_mm: Finite,
     penetration_limits: PenetrationBatchLimits,
     process_resolution_mm: f64,
@@ -470,6 +497,7 @@ pub(crate) fn brace_fixed_point_current_parity(
         let plan = brace_pass_current_parity(
             &working,
             surface,
+            topology,
             plate_z_mm,
             &report,
             penetration_limits,
@@ -647,6 +675,13 @@ fn append_candidate(
             .checked_add(1)
             .ok_or(BraceError::CountNotRepresentable)?;
         let key = forest.add_brace(Member::new(spec.clone()));
+        // **#36 — the mint half of creation site 2.** The zone was frozen in
+        // `gather_candidates` from this rung's creation radius and its own seat
+        // face; here it is bound to the key the grading sites will look it up
+        // by. Nothing recomputes it, which is the whole rule (design §3).
+        if let Some(zone) = candidate.seat_zone.as_ref() {
+            forest.set_seat_zone(key, std::sync::Arc::clone(zone));
+        }
         additions.push(BraceAddition {
             key,
             kind: candidate.kind,
@@ -1071,6 +1106,7 @@ struct CandidateGather {
 fn gather_candidates(
     forest: &Forest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     needs: &[Need],
     config: &BraceConfig,
 ) -> Result<CandidateGather, BraceError> {
@@ -1082,6 +1118,10 @@ fn gather_candidates(
     // candidate ORDER is unchanged for every rung that attests.
     let mut model_candidates = Vec::new();
     let mut seat_rows = Vec::new();
+    // #36 — one seat-zone request per model-rung candidate, row-aligned with
+    // `model_candidates`. `None` where the seat's projection landed off the
+    // mesh; see `ProjectedModelCandidate::seat_face_id`.
+    let mut seat_zone_rows: Vec<Option<crate::seat_zone::SeatZoneRequest>> = Vec::new();
     for (need_index, need) in needs.iter().enumerate() {
         let mut sites = vec![(need.host, need.z_mm)];
         sites.extend(need.alternatives.iter().copied());
@@ -1117,6 +1157,9 @@ fn gather_candidates(
                     kind: BraceAdditionKind::CrossLink,
                     printable: rods_printable(&rods)?,
                     rods,
+                    // A cross-link declares no model contact, so it forgives
+                    // nothing and is graded against the whole surface.
+                    seat_zone: None,
                 });
                 rank += 1;
             }
@@ -1136,8 +1179,17 @@ fn gather_candidates(
     let mut projected_model = Vec::new();
     if !raw_model.is_empty() {
         let probes = raw_model.iter().map(|row| row.centroid).collect::<Vec<_>>();
-        let (_, projected, _, normals) = surface.project(&probes);
-        for ((raw, p1), normal) in raw_model.into_iter().zip(projected).zip(normals) {
+        // #36 — the third return is the projected FACE, which this call has
+        // always computed and always thrown away. It is the seat's own face,
+        // and the seat zone is the connected component of the band that
+        // contains it.
+        let (_, projected, face_ids, normals) = surface.project(&probes);
+        for (((raw, p1), face_id), normal) in raw_model
+            .into_iter()
+            .zip(projected)
+            .zip(face_ids)
+            .zip(normals)
+        {
             if (p1[2] - raw.z_mm).abs() > config.model_rung_z_tolerance_mm + HEIGHT_TOLERANCE_MM {
                 continue;
             }
@@ -1145,6 +1197,7 @@ fn gather_candidates(
                 raw,
                 point: p1,
                 normal,
+                seat_face_id: u32::try_from(face_id).ok(),
             });
         }
     }
@@ -1292,11 +1345,27 @@ fn gather_candidates(
             // PR-8 and OD-9 are what this family is gated on.
             carried_mm2: 0.0,
         });
+        // #36 — this rung's seat-zone request, gathered here and frozen in ONE
+        // batch below, on the same stage boundary as the seat-attestation batch
+        // it rides beside. The band radius is FROZEN at this rung's creation
+        // radius: `config.brace_radius_mm` is both `r0` and `r1` for this
+        // family, so the contact end's radius and `r_max` are the same number
+        // today — and the freeze is what keeps that true if they ever diverge.
+        seat_zone_rows.push(projected.seat_face_id.map(|seat_face_id| {
+            crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: seated_point,
+                seat_face_id,
+                band_radius_mm: radius.get() + config.standoff_mm,
+            }
+        }));
         model_candidates.push(PlacementCandidate {
             need_index: projected.raw.need_index,
             site_index: projected.raw.site_index,
             rank: projected.raw.rank,
             kind: BraceAdditionKind::ModelRung,
+            // Filled in below, once the whole pass's zones are frozen together.
+            seat_zone: None,
             rods: vec![Rod {
                 p0,
                 p1: seated_point,
@@ -1341,14 +1410,39 @@ fn gather_candidates(
     // placed member to quarantine and nothing to fail. It loses its tournament
     // entry and the pass continues.
     let attestation = attest_model_rung_seats(surface, &seat_rows, config)?;
-    for (candidate, attested) in model_candidates
+    // **#36 creation site 2 of 4 — freeze this pass's rung seat zones.**
+    //
+    // ONE band call plus a parallel flood fill for the whole pass, on the same
+    // stage boundary as the attestation batch above. The rows are frozen for
+    // every candidate, including the ones the attestation is about to drop:
+    // splitting the batch on the attestation verdict would price a second
+    // native call to save a few tens of faces, and the dropped candidates are
+    // discarded one line later anyway.
+    let zone_requests = seat_zone_rows.iter().flatten().copied().collect::<Vec<_>>();
+    let mut frozen =
+        crate::seat_zone::freeze_production_seat_zones(surface, topology, &zone_requests)
+            .map_err(|error| BraceError::SeatZone(error.to_string()))?
+            .into_iter();
+    for ((mut candidate, attested), request) in model_candidates
         .into_iter()
         .zip(&attestation.attested_by_row)
+        .zip(&seat_zone_rows)
     {
+        // `flatten()` above kept the requests in row order, so the same walk in
+        // the same order re-pairs each zone with the candidate that asked for
+        // it. A row whose projection landed off the mesh asked for nothing and
+        // stays unfrozen — graded against the whole surface.
+        if request.is_some() {
+            candidate.seat_zone = frozen.next();
+        }
         if *attested {
             candidates.push(candidate);
         }
     }
+    debug_assert!(
+        frozen.next().is_none(),
+        "every frozen seat zone must be claimed by the candidate that requested it"
+    );
     candidates
         .sort_by_key(|candidate| (candidate.need_index, candidate.site_index, candidate.rank));
     Ok(CandidateGather {
@@ -2252,6 +2346,19 @@ mod tests {
     use crate::forest::Owner;
     use geom_kernel::NativeSurfaceConfig;
 
+    /// #36 — the retained-topology half of a fixture.
+    ///
+    /// Built with `WeldPolicy::ExactBits`, the same policy
+    /// `plinth_support::validate_perception_input` uses in production, so the
+    /// face IDs `NativeSurface::project` returns for this mesh and the
+    /// adjacency `topology.neighbors` walks address the SAME faces. A fixture
+    /// that welded differently would silently fragment the seat zone.
+    fn fixture_topology(vertices: Vec<[f64; 3]>, faces: Vec<[u32; 3]>) -> FaceTopology {
+        let mesh = plinth_mesh::Mesh::new(vertices, faces).expect("fixture mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("fixture topology")
+    }
+
     fn test_penetration_limits() -> PenetrationBatchLimits {
         PenetrationBatchLimits {
             max_rows: usize::MAX,
@@ -2306,7 +2413,7 @@ mod tests {
     }
 
     /// A slab whose top face is exactly the plane `z = 0`.
-    fn flat_table() -> NativeSurface {
+    fn flat_table_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const H: f64 = 20.0;
         let vertices = vec![
             [-H, -H, -10.0],
@@ -2332,6 +2439,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn flat_table() -> NativeSurface {
+        let (vertices, faces) = flat_table_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2341,6 +2453,14 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh `flat_table` builds its
+    /// surface from. The seat-zone flood fill walks it, and it must be the same
+    /// mesh or the face IDs `project` returns address nothing.
+    fn flat_table_topology() -> FaceTopology {
+        let (vertices, faces) = flat_table_parts();
+        fixture_topology(vertices, faces)
     }
 
     /// The two-tier ruling, read through the REGISTRY rather than restated.
@@ -2537,7 +2657,7 @@ mod tests {
         );
     }
 
-    fn remote_box() -> NativeSurface {
+    fn remote_box_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let vertices = vec![
             [100.0, 100.0, 100.0],
             [110.0, 100.0, 100.0],
@@ -2562,6 +2682,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn remote_box() -> NativeSurface {
+        let (vertices, faces) = remote_box_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2573,7 +2698,15 @@ mod tests {
         .unwrap()
     }
 
-    fn near_wall_box() -> NativeSurface {
+    /// #36 — the face adjacency for the SAME indexed mesh `remote_box` builds its
+    /// surface from. The seat-zone flood fill walks it, and it must be the same
+    /// mesh or the face IDs `project` returns address nothing.
+    fn remote_box_topology() -> FaceTopology {
+        let (vertices, faces) = remote_box_parts();
+        fixture_topology(vertices, faces)
+    }
+
+    fn near_wall_box_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let vertices = vec![
             [4.0, -1.0, 8.0],
             [5.0, -1.0, 8.0],
@@ -2598,6 +2731,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn near_wall_box() -> NativeSurface {
+        let (vertices, faces) = near_wall_box_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2607,6 +2745,14 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh `near_wall_box` builds its
+    /// surface from. The seat-zone flood fill walks it, and it must be the same
+    /// mesh or the face IDs `project` returns address nothing.
+    fn near_wall_box_topology() -> FaceTopology {
+        let (vertices, faces) = near_wall_box_parts();
+        fixture_topology(vertices, faces)
     }
 
     /// `near_wall_box` with its model-facing wall RAKED, so the surface normal
@@ -2621,7 +2767,7 @@ mod tests {
     /// orders of magnitude above `HEIGHT_TOLERANCE_MM` = 1e-9.  Everything else
     /// (extent, grid pitch, distance from the host axis) matches the fixture
     /// that already yields a model rung, so the only variable is the rake.
-    fn raked_wall_box() -> NativeSurface {
+    fn raked_wall_box_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let vertices = vec![
             [4.0, -1.0, 8.0],
             [5.0, -1.0, 8.0],
@@ -2646,6 +2792,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn raked_wall_box() -> NativeSurface {
+        let (vertices, faces) = raked_wall_box_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2657,7 +2808,15 @@ mod tests {
         .unwrap()
     }
 
-    fn enclosing_box() -> NativeSurface {
+    /// #36 — the face adjacency for the SAME indexed mesh `raked_wall_box` builds its
+    /// surface from. The seat-zone flood fill walks it, and it must be the same
+    /// mesh or the face IDs `project` returns address nothing.
+    fn raked_wall_box_topology() -> FaceTopology {
+        let (vertices, faces) = raked_wall_box_parts();
+        fixture_topology(vertices, faces)
+    }
+
+    fn enclosing_box_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let vertices = vec![
             [0.0, 0.0, 0.0],
             [20.0, 0.0, 0.0],
@@ -2682,6 +2841,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn enclosing_box() -> NativeSurface {
+        let (vertices, faces) = enclosing_box_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2691,6 +2855,14 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh `enclosing_box` builds its
+    /// surface from. The seat-zone flood fill walks it, and it must be the same
+    /// mesh or the face IDs `project` returns address nothing.
+    fn enclosing_box_topology() -> FaceTopology {
+        let (vertices, faces) = enclosing_box_parts();
+        fixture_topology(vertices, faces)
     }
 
     #[test]
@@ -2883,6 +3055,9 @@ mod tests {
                     z_mm: 0.0,
                     centroid: [rank as f64, 0.0, 0.0],
                 },
+                // This fixture exercises the six-anchor retention cap, which
+                // never reaches a seat-zone freeze.
+                seat_face_id: None,
                 point: [rank as f64, 0.0, 0.0],
                 normal: [1.0, 0.0, 0.0],
             })
@@ -2921,6 +3096,7 @@ mod tests {
                     contact: None,
                 }],
                 printable: true,
+                seat_zone: None,
             },
             PlacementCandidate {
                 need_index: 1,
@@ -2937,6 +3113,7 @@ mod tests {
                     contact: None,
                 }],
                 printable: true,
+                seat_zone: None,
             },
         ];
         let viable =
@@ -2965,7 +3142,10 @@ mod tests {
     /// The flat table PLUS one small foreign panel, welded into ONE surface, so
     /// a grazing arm has something to be graded against that is not the surface
     /// it is seated in.
-    fn table_with_foreign_panel(lo: [f64; 3], hi: [f64; 3]) -> NativeSurface {
+    fn table_with_foreign_panel_parts(
+        lo: [f64; 3],
+        hi: [f64; 3],
+    ) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const H: f64 = 40.0;
         let box_faces = [
             [0, 2, 1],
@@ -3008,6 +3188,11 @@ mod tests {
         for face in box_faces {
             faces.push([base + face[0], base + face[1], base + face[2]]);
         }
+        (vertices, faces)
+    }
+
+    fn table_with_foreign_panel(lo: [f64; 3], hi: [f64; 3]) -> NativeSurface {
+        let (vertices, faces) = table_with_foreign_panel_parts(lo, hi);
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -3017,6 +3202,13 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh
+    /// `table_with_foreign_panel` builds its surface from.
+    fn table_with_foreign_panel_topology(lo: [f64; 3], hi: [f64; 3]) -> FaceTopology {
+        let (vertices, faces) = table_with_foreign_panel_parts(lo, hi);
+        fixture_topology(vertices, faces)
     }
 
     /// **PARKED STATE, PINNED — the FINAL pass does not yet grade a true gap**
@@ -3179,6 +3371,7 @@ mod tests {
                 contact: None,
             }],
             printable: true,
+            seat_zone: None,
         };
 
         // NON-VACUITY, from the kernel: at a demand of zero the number IS the
@@ -3236,6 +3429,7 @@ mod tests {
         let plan = brace_fixed_point_current_parity(
             &forest,
             &remote_box(),
+            &remote_box_topology(),
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
@@ -3365,6 +3559,7 @@ mod tests {
     #[test]
     fn a_refused_model_seated_arm_condemns_its_stub_instead_of_failing_the_run() {
         let surface = remote_box();
+        let topology = remote_box_topology();
         let mut forest = Forest::new();
 
         // The stub: clear of the box (which spans 100..110), so it contributes
@@ -3438,6 +3633,7 @@ mod tests {
         let plan = brace_fixed_point_current_parity(
             &forest,
             &surface,
+            &topology,
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
@@ -3496,6 +3692,7 @@ mod tests {
         let plan = brace_pass_current_parity(
             &forest,
             &remote_box(),
+            &remote_box_topology(),
             plate,
             &report,
             test_penetration_limits(),
@@ -3679,8 +3876,9 @@ mod tests {
             alternatives: Vec::new(),
         }];
         let surface = near_wall_box();
+        let topology = near_wall_box_topology();
         let config = BraceConfig::current(0.05).unwrap();
-        let candidates = gather_candidates(&forest, &surface, &needs, &config)
+        let candidates = gather_candidates(&forest, &surface, &topology, &needs, &config)
             .unwrap()
             .candidates;
         let model = candidates
@@ -3888,8 +4086,9 @@ mod tests {
             alternatives: Vec::new(),
         }];
         let surface = raked_wall_box();
+        let topology = raked_wall_box_topology();
         let config = BraceConfig::current(0.05).unwrap();
-        let candidates = gather_candidates(&forest, &surface, &needs, &config)
+        let candidates = gather_candidates(&forest, &surface, &topology, &needs, &config)
             .unwrap()
             .candidates;
         let model = candidates
@@ -3943,6 +4142,7 @@ mod tests {
             let plan = brace_pass_current_parity(
                 &forest,
                 &remote_box(),
+                &remote_box_topology(),
                 plate,
                 &report,
                 test_penetration_limits(),

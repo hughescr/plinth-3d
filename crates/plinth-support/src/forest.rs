@@ -579,14 +579,26 @@ impl Forest {
     /// face set does not move when the radius does. A second call for the same
     /// key REPLACES the entry, which is what a re-minted contact on a recycled
     /// generation needs; a resize never calls this at all.
-    #[allow(
-        dead_code,
-        reason = "the side table lands one commit ahead of the creation sites that freeze into \
-                  it and the grading sites that read it; docs/engineering-journal/designs/\
-                  honest-exemption-2026-08-22.md section 8 steps 4 and 5 name them"
-    )]
     pub(crate) fn set_seat_zone(&mut self, key: MemberKey, zone: Arc<[u32]>) {
         self.state.seat_zones.insert(key, zone);
+    }
+
+    /// Remove and return this member's frozen zone — the MOVE half of a
+    /// contact declaration changing hands.
+    ///
+    /// `cco::apply_bifurcation` is the one caller. Splitting a host that
+    /// declares a `Rootward` contact gives the contact to the UPPER half (it
+    /// keeps `p1`, the seat) and clears it from the lower one. The zone belongs
+    /// to the CONTACT, so it has to travel with the declaration rather than be
+    /// recomputed for the new member — recomputing it from the upper half's own
+    /// radius is exactly the un-freezing the monotonicity theorem forbids
+    /// (design §3).
+    ///
+    /// Taking rather than copying also keeps the table honest: a member with no
+    /// contact must forgive nothing, and a stale entry left behind on the lower
+    /// half would exempt faces for a member that no longer has a seat.
+    pub(crate) fn take_seat_zone(&mut self, key: MemberKey) -> Option<Arc<[u32]>> {
+        self.state.seat_zones.remove(&key)
     }
 
     /// This member's frozen seat zone, or `None` if it never declared a
@@ -598,7 +610,9 @@ impl Forest {
     #[must_use]
     #[allow(
         dead_code,
-        reason = "same as `set_seat_zone`: the reader is the grading site of section 8 step 5"
+        reason = "the creation sites that freeze into the table land one commit ahead of the \
+                  grading sites that read it; docs/engineering-journal/designs/\
+                  honest-exemption-2026-08-22.md section 8 step 5 names them"
     )]
     pub(crate) fn seat_zone(&self, key: MemberKey) -> Option<&Arc<[u32]>> {
         self.state.seat_zones.get(&key)

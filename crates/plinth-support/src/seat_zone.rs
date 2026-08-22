@@ -114,6 +114,68 @@ impl From<NearFaceBatchError> for SeatZoneError {
     }
 }
 
+/// The batch limits every production freeze runs under, DERIVED from this run's
+/// own mesh and its own row set — no registered constant, no invented number.
+///
+/// **Why this shape, and what was rejected.** The design note's §9.5 raised the
+/// question and named two options: (a) a mesh-derived bound, or (b) a fresh
+/// numeric authority beside `brace_penetration_limits` on
+/// `SupportPreparationLimits`. The orchestrator's ruling of 2026-08-22 was to
+/// MIRROR the existing bounded-batch family — `PenetrationBatchLimits`,
+/// `ContactConstructionLimits::production()` — deriving values the way theirs
+/// were derived, and to STOP rather than invent a genuinely new number.
+///
+/// Reading those values' provenance is what settles it. Every one of them is
+/// registered as an *"Inherited unmeasured cap … Codex-era 73e7c13; registered
+/// by FU-8g phase H3, which records the inherited number without ratifying
+/// it"*. Their derivation is INHERITANCE, and this batch family has nothing to
+/// inherit: there is no Codex-era near-face number anywhere in the tree.
+/// Mirroring the family literally would therefore mean typing three fresh
+/// numbers and registering them as "unmeasured" — precisely the invention the
+/// ruling forbids. So the ruling's own escape clause applies, and option (a) is
+/// what lands: it invents NOTHING.
+///
+/// **What it bounds, honestly.** A band cannot contain more faces than the mesh
+/// has, so `max_faces_per_row = topology.n_faces()` is the exact worst case and
+/// cannot refuse a legitimate band. That makes it a TRUE STATEMENT of the
+/// ceiling rather than a tuning lever, which is the physics-first doctrine's
+/// requirement: a limit may prune work, never decide an outcome. The peak it
+/// admits is `rows × n_faces × 4` bytes — at the Weeping Treant's scale (553
+/// contacts, 429,120 faces) 949 MB worst case, against a measured realistic
+/// zone of tens of faces (§6 prices 553 × 200 faces at ≈ 0.45 MB) and the
+/// 100 GB machine ceiling. The worst case is affordable and is stated rather
+/// than hidden.
+///
+/// **Fail-closed is inherited, not restated.** `faces_near_segments_batch`
+/// refuses rather than truncating — a partial band would silently shrink a seat
+/// exemption and turn the blind spot back on — and this constructor changes
+/// none of that.
+pub(crate) fn production_limits(topology: &FaceTopology, rows: usize) -> NearFaceBatchLimits {
+    let faces = topology.n_faces();
+    NearFaceBatchLimits {
+        max_rows: rows,
+        max_faces_per_row: faces,
+        // Saturating, so an absurd row count yields `usize::MAX` rather than a
+        // wrapped-around tiny cap that would refuse an honest batch.
+        max_total_faces: rows.saturating_mul(faces),
+    }
+}
+
+/// [`freeze_seat_zones`] at this run's own derived limits — the entry point
+/// every production creation site uses, so no site chooses its own bound.
+pub(crate) fn freeze_production_seat_zones(
+    surface: &NativeSurface,
+    topology: &FaceTopology,
+    requests: &[SeatZoneRequest],
+) -> Result<Vec<Arc<[u32]>>, SeatZoneError> {
+    freeze_seat_zones(
+        surface,
+        topology,
+        requests,
+        production_limits(topology, requests.len()),
+    )
+}
+
 /// Freeze one zone per request, in ONE batched band call plus a parallel flood
 /// fill per row.
 ///

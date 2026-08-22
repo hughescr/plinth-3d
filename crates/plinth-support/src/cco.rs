@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::NativeSurface;
 use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_mesh::FaceTopology;
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -1006,6 +1007,12 @@ pub(crate) enum CcoError {
     Anchor(#[from] AnchorSearchError),
     #[error(transparent)]
     Transient(#[from] TransientError),
+    /// #36. A frozen seat zone could not be computed. A BATCH-level failure —
+    /// a starved band admission or a mesh/topology disagreement — and never a
+    /// statement about one candidate, so it fails the terminal rather than
+    /// silently dropping an anchor from the tournament.
+    #[error("CCO seat-zone freeze failed: {0}")]
+    SeatZone(String),
 }
 
 #[derive(Clone, Debug)]
@@ -1026,6 +1033,18 @@ enum Descriptor {
         /// and frozen here so a rewire replay re-evaluates the same geometry
         /// without re-deriving it from the run's process resolution.
         seated_point_mm: [f64; 3],
+        /// **#36 creation site 3 of 4 — the FROZEN seat zone `Z`.**
+        ///
+        /// The whole face set this anchor's own seat forgives, computed once
+        /// per seat in [`generate_descriptors`] and carried here for the same
+        /// reason `seated_point_mm` is: `apply_model_anchor` runs TWICE for a
+        /// winner — once inside the candidate tournament and once replayed
+        /// against the live forest — and the two must install the identical
+        /// zone or the candidacy screen and the committed geometry disagree.
+        /// Carrying the finished zone rather than the face ID is what makes
+        /// that identity structural: the replay does an `Arc` clone, never a
+        /// native call and never a recompute.
+        seat_zone: std::sync::Arc<[u32]>,
     },
     Bifurcate {
         host: MemberKey,
@@ -1702,6 +1721,7 @@ impl CcoController {
         forest: &mut Forest,
         request: &TerminalCcoRequest,
         surface: &NativeSurface,
+        topology: &FaceTopology,
         process_resolution_mm: f64,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
@@ -1717,6 +1737,7 @@ impl CcoController {
             forest,
             request,
             surface,
+            topology,
             Vec::new(),
             Vec::new(),
             None,
@@ -1798,6 +1819,7 @@ impl CcoController {
             forest,
             request,
             context.route.geometry().surface(),
+            context.route.geometry().topology(),
             discovery.into_seats(),
             anchor_seat_refusals,
             Some(&context),
@@ -1920,6 +1942,10 @@ impl CcoController {
             Some(hosts),
             false,
             anchor_route.process_resolution_mm,
+            anchor_route.geometry.surface(),
+            // #36 step 3 — the adjacency the seat-zone fill walks, from the one
+            // authority that already bound it to this surface and mesh.
+            anchor_route.geometry.topology(),
         )?;
         let descriptors_generated = descriptors.len();
         let evaluated =
@@ -3198,6 +3224,7 @@ fn grow_terminal_inner(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     mut seats: Vec<QualifiedAnchorSeat>,
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
@@ -3219,6 +3246,8 @@ fn grow_terminal_inner(
         cached_hosts,
         true,
         process_resolution_mm,
+        surface,
+        topology,
     )?;
     let candidates_generated = descriptors.len();
     let snapshot = forest.clone();
@@ -3840,6 +3869,11 @@ impl RewireCandidateBatch {
 /// as an argument rather than from the registry because a layer height is a
 /// property of THIS RUN, exactly as the seat attestation's claimed extent
 /// already is.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is read; the surface and topology arrived together with #36's \
+              seat-zone freeze and are the same validated pair the caller already holds"
+)]
 fn generate_descriptors(
     forest: &Forest,
     request: &TerminalCcoRequest,
@@ -3848,6 +3882,8 @@ fn generate_descriptors(
     cached_hosts: Option<Vec<MemberKey>>,
     include_plate_spiral: bool,
     process_resolution_mm: f64,
+    surface: &NativeSurface,
+    topology: &FaceTopology,
 ) -> Result<Vec<Descriptor>, CcoError> {
     let se = request.stub_end_mm().map(Finite::get);
     let mut out = vec![Descriptor::Plate {
@@ -3873,6 +3909,12 @@ fn generate_descriptors(
     if !anchor_seats.is_empty() {
         let policy = seat_contact_policy(process_resolution_mm)?;
         let radius = config.min_shoot_radius_mm.get();
+        // #36 — one seat-zone request per anchor seat, gathered in this loop
+        // and frozen in ONE batched call below. Seat discovery already resolved
+        // and SNAPPED every seat's face, so no fresh projection is needed here
+        // and none is made; a per-seat band call would be the batch-first
+        // defect this stage's whole pipeline is written to avoid.
+        let mut zone_requests = Vec::with_capacity(anchor_seats.len());
         for (seat_index, seat) in anchor_seats.iter().enumerate() {
             let point_mm = seat.point_mm().map(Finite::get);
             let normal = seat.normal().map(Finite::get);
@@ -3896,11 +3938,44 @@ fn generate_descriptors(
             let seat_depth = crate::contact::seat_depth_mm(abs_cos, radius, &policy, false);
             let (seated_point_mm, _, _) =
                 crate::contact::seat_endpoint(point_mm, normal, se, seat_depth);
+            zone_requests.push(crate::seat_zone::SeatZoneRequest {
+                p0_mm: se,
+                p1_mm: seated_point_mm,
+                seat_face_id: seat.snapped_face_id(),
+                // FROZEN at the anchor's creation radius. `min_shoot_radius_mm`
+                // is what `apply_model_anchor` mints the rootward (contact) end
+                // with; `size_tapered_without_tree_fanin` may raise it
+                // afterwards, and the band must NOT follow — a band that grew
+                // with the radius would swallow more surface for a fatter arm
+                // and rebuild the inversion this change exists to retire
+                // (design §3).
+                band_radius_mm: radius + policy.standoff_mm,
+            });
             out.push(Descriptor::ModelAnchor {
                 seat_index,
                 point_mm,
                 seated_point_mm,
+                // Placeholder; every one is replaced from the batch below
+                // before this function returns.
+                seat_zone: std::sync::Arc::from(Vec::new()),
             });
+        }
+        // THE one batched band call plus parallel flood fill for this terminal.
+        let frozen =
+            crate::seat_zone::freeze_production_seat_zones(surface, topology, &zone_requests)
+                .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        // `out` ends with exactly one `ModelAnchor` per request, pushed in the
+        // same order, so the tail of `out` re-pairs with `frozen` by position.
+        let anchors = out.len() - frozen.len();
+        for (descriptor, zone) in out[anchors..].iter_mut().zip(frozen) {
+            let Descriptor::ModelAnchor { seat_zone, .. } = descriptor else {
+                return Err(CcoError::InvalidGeometry(
+                    "generate_descriptors: the seat-zone tail of the descriptor list is not \
+                     entirely model anchors"
+                        .to_owned(),
+                ));
+            };
+            *seat_zone = zone;
         }
     }
     let hosts = cached_hosts
@@ -3991,9 +4066,11 @@ fn apply_and_size(
             size_bifurcation_candidate(candidate, request, *host)?;
         }
         Descriptor::ModelAnchor {
-            seated_point_mm, ..
+            seated_point_mm,
+            seat_zone,
+            ..
         } => {
-            if !apply_model_anchor(candidate, request, *seated_point_mm, config)? {
+            if !apply_model_anchor(candidate, request, *seated_point_mm, seat_zone, config)? {
                 return Ok(false);
             }
             let strut = candidate.parent_of(request.stub).ok_or_else(|| {
@@ -4336,6 +4413,7 @@ fn apply_model_anchor(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     seated_point_mm: [f64; 3],
+    seat_zone: &std::sync::Arc<[u32]>,
     config: &Config,
 ) -> Result<bool, CcoError> {
     let stub_end = request.stub_end_mm().map(Finite::get);
@@ -4372,6 +4450,18 @@ fn apply_model_anchor(
         "apply_model_anchor is the only production mint of a Rootward model \
          contact on a Strut; contact::seating_of keys PR-7 on that pair"
     );
+    // **#36 creation site 3 of 4 — the freeze, at the mint.**
+    //
+    // The zone was computed once per seat in `generate_descriptors`, from THIS
+    // anchor's creation radius and its own snapped seat face, and travels on
+    // the descriptor. Installing it is an `Arc` clone: no native call, nothing
+    // recomputed, and bit-identical between the candidate application and the
+    // winner's replay against the live forest — which matters, because the
+    // commit path re-runs `apply_and_size` on the live forest and throws the
+    // candidate forest away. A zone derived from the forest being written into
+    // could differ between those two runs; one carried on the descriptor
+    // cannot.
+    forest.set_seat_zone(strut, std::sync::Arc::clone(seat_zone));
     forest.set_parent(request.stub, Some(strut))?;
     Ok(true)
 }
@@ -4518,6 +4608,21 @@ fn apply_bifurcation(
     )?;
     if host.model_contact_end() == Some(ContactEnd::Rootward) {
         forest.set_model_contact_end(host_key, None)?;
+        // **#36 creation site 4 of 4 — INHERIT, never recompute.**
+        //
+        // `upper` keeps the host's `p1`, which is the host's seat: it is the
+        // SAME contact, not a new one, so it keeps the same frozen zone. Taking
+        // it moves the entry rather than copying it, which is what the rule
+        // requires in both directions — the upper half must forgive exactly
+        // what the contact always forgave, and the lower half, which no longer
+        // declares a contact, must forgive nothing.
+        //
+        // An `Arc` move. No native call, and emphatically no re-freeze from
+        // `upper`'s own interpolated radius: that would be the recompute the
+        // monotonicity theorem forbids (design §3).
+        if let Some(zone) = forest.take_seat_zone(host_key) {
+            forest.set_seat_zone(upper, zone);
+        }
     }
     // The split partitions the declaration; it never duplicates it. `host_key`
     // keeps a Terminalward contact (it still owns p0), `upper` keeps a
@@ -6627,7 +6732,7 @@ mod tests {
         let mut grown = CcoController::default();
         assert_incremental_equals_rebuilt(&grown);
         grown
-            .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_incremental_equals_rebuilt(&grown);
 
@@ -6637,7 +6742,7 @@ mod tests {
         let (mut forest, request, surface) = no_winner_fixture();
         let mut unrouted = CcoController::default();
         unrouted
-            .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_incremental_equals_rebuilt(&unrouted);
 
@@ -6926,12 +7031,24 @@ mod tests {
         let (mut grown_forest, request, surface) = growth_fixture();
         let mut grown = CcoController::default();
         grown
-            .grow_terminal_for_test(&mut grown_forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(
+                &mut grown_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05,
+            )
             .unwrap();
         let grown_digest = grown.digest();
         let grown_forest_digest = grown_forest.digest();
         assert!(matches!(
-            grown.grow_terminal_for_test(&mut grown_forest, &request, &surface, 0.05),
+            grown.grow_terminal_for_test(
+                &mut grown_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(grown.digest(), grown_digest);
@@ -6952,7 +7069,13 @@ mod tests {
             .unwrap();
         let skipped_digest = skipped_first.digest();
         assert!(matches!(
-            skipped_first.grow_terminal_for_test(&mut live_forest, &request, &surface, 0.05),
+            skipped_first.grow_terminal_for_test(
+                &mut live_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(skipped_first.digest(), skipped_digest);
@@ -7160,6 +7283,29 @@ mod tests {
         ));
     }
 
+    /// #36 — the face adjacency for the SAME tetrahedron `growth_fixture`
+    /// builds its surface from, welded by the production policy
+    /// (`WeldPolicy::ExactBits`) so `project`'s face IDs and the adjacency the
+    /// seat-zone fill walks address the same faces.
+    fn growth_topology() -> FaceTopology {
+        let (vertices, triangles) = growth_fixture_parts();
+        let mesh = plinth_mesh::Mesh::new(vertices, triangles).expect("growth fixture mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("growth fixture topology")
+    }
+
+    fn growth_fixture_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        (
+            vec![
+                [100.0, 100.0, 100.0],
+                [101.0, 100.0, 100.0],
+                [100.0, 101.0, 100.0],
+                [100.0, 100.0, 101.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+    }
+
     fn growth_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
         let finite = |value| Finite::new(value).unwrap();
         let positive = |value| PositiveFinite::new(value).unwrap();
@@ -7178,13 +7324,7 @@ mod tests {
         let request =
             TerminalCcoRequest::bind(&forest, 7, BuildFrame::new(finite(0.0), positive(5.0)))
                 .unwrap();
-        let vertices = vec![
-            [100.0, 100.0, 100.0],
-            [101.0, 100.0, 100.0],
-            [100.0, 101.0, 100.0],
-            [100.0, 100.0, 101.0],
-        ];
-        let triangles = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let (vertices, triangles) = growth_fixture_parts();
         let surface = NativeSurface::from_indexed(
             &vertices,
             &triangles,
@@ -7588,7 +7728,7 @@ mod tests {
         let before = forest.digest();
         let mut controller = CcoController::default();
         let outcome = controller
-            .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
 
         assert!(outcome.winner.is_none());
@@ -7630,7 +7770,13 @@ mod tests {
         .unwrap();
         assert!(!view.keys().contains(&request.stub));
         assert!(matches!(
-            controller.grow_terminal_for_test(&mut forest, &request, &surface, 0.05),
+            controller.grow_terminal_for_test(
+                &mut forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
     }
@@ -8388,6 +8534,10 @@ mod tests {
                 // against a new endpoint. PR-7's seating is exercised where it
                 // lives, by `generate_descriptors` and its own tests.
                 seated_point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: this vector pins the family equations
+                // and the generation/price ledger, not the seat exemption, so
+                // it forgives nothing. An empty zone is the STRICT direction.
+                seat_zone: std::sync::Arc::from(Vec::new()),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -8928,6 +9078,10 @@ mod tests {
                 // against a new endpoint. PR-7's seating is exercised where it
                 // lives, by `generate_descriptors` and its own tests.
                 seated_point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: this vector pins the family equations
+                // and the generation/price ledger, not the seat exemption, so
+                // it forgives nothing. An empty zone is the STRICT direction.
+                seat_zone: std::sync::Arc::from(Vec::new()),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -8997,7 +9151,7 @@ mod tests {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
         let outcome = CcoController::default()
-            .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         let winner = outcome.winner.expect("plate descent survives");
         assert_eq!(winner.family, CandidateFamily::PlateDescent);
@@ -9014,7 +9168,7 @@ mod tests {
         let before = forest.digest();
         let outer = forest.checkpoint();
         CcoController::default()
-            .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_ne!(forest.digest(), before);
         forest.rollback(outer).unwrap();
@@ -9028,7 +9182,7 @@ mod tests {
             let (mut forest, request, surface) = growth_fixture();
             let mut controller = CcoController::default();
             let outcome = controller
-                .grow_terminal_for_test(&mut forest, &request, &surface, 0.05)
+                .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
                 .unwrap();
             println!(
                 "CCO_SWEEP_DIGEST={:016x}:{:016x}:{}:{}",
