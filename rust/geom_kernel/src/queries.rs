@@ -204,6 +204,83 @@ impl std::fmt::Display for BatchInputError {
 
 impl std::error::Error for BatchInputError {}
 
+/// Caller-owned hard limits for [`NativeSurface::faces_near_segments_batch`].
+///
+/// The per-row cap is what bounds peak memory: the batch cannot hold more than
+/// `max_rows * max_faces_per_row * 4` bytes of face IDs, and both numbers are
+/// the caller's own, so the ceiling is knowable before the call. The total cap
+/// charges the REALIZED sum rather than that product, so an ordinary batch is
+/// not refused for a worst case it never reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NearFaceBatchLimits {
+    pub max_rows: usize,
+    pub max_faces_per_row: usize,
+    pub max_total_faces: usize,
+}
+
+/// Why [`NativeSurface::faces_near_segments_batch`] refused.
+///
+/// Every variant is a refusal BEFORE or DURING collection, never a truncation:
+/// a partial band would silently shrink a seat exemption and turn a blind spot
+/// back on, so the batch fails loudly instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NearFaceBatchError {
+    /// A companion slice did not match the batch length.
+    BatchInput(BatchInputError),
+    /// More rows than the caller's own row cap.
+    RowLimitExceeded { required: usize, limit: usize },
+    /// One row's band exceeded the per-row face cap mid-walk.
+    RowFaceLimitExceeded { row: usize, limit: usize },
+    /// The realized total across all rows exceeded the batch cap.
+    TotalFaceLimitExceeded { required: usize, limit: usize },
+    /// The realized total did not fit a `usize`.
+    TotalFaceArithmeticOverflow,
+    /// A band radius was negative or not finite.
+    InvalidRadius { row: usize, within_mm: f64 },
+    /// A segment endpoint carried a non-finite component.
+    NonFinitePoint { row: usize, axis: usize },
+}
+
+impl From<BatchInputError> for NearFaceBatchError {
+    fn from(error: BatchInputError) -> Self {
+        Self::BatchInput(error)
+    }
+}
+
+impl std::fmt::Display for NearFaceBatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BatchInput(error) => write!(formatter, "{error}"),
+            Self::RowLimitExceeded { required, limit } => write!(
+                formatter,
+                "faces_near_segments_batch: {required} rows exceeds the row limit {limit}"
+            ),
+            Self::RowFaceLimitExceeded { row, limit } => write!(
+                formatter,
+                "faces_near_segments_batch: row {row} collected more than {limit} faces"
+            ),
+            Self::TotalFaceLimitExceeded { required, limit } => write!(
+                formatter,
+                "faces_near_segments_batch: {required} collected faces exceeds the batch limit {limit}"
+            ),
+            Self::TotalFaceArithmeticOverflow => write!(
+                formatter,
+                "faces_near_segments_batch: collected face total does not fit a usize"
+            ),
+            Self::InvalidRadius { row, within_mm } => write!(
+                formatter,
+                "faces_near_segments_batch: row {row} band radius {within_mm} is negative or not finite"
+            ),
+            Self::NonFinitePoint { row, axis } => write!(
+                formatter,
+                "faces_near_segments_batch: row {row} endpoint axis {axis} is not finite"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NearFaceBatchError {}
+
 /// Caller-owned hard limits for [`NativeSurface::penetration_intervals_batch_bounded`].
 ///
 /// The limits describe the whole batch, not one Rayon worker. Before any
@@ -1708,7 +1785,27 @@ impl NativeSurface {
     }
 
     /// Exact minimum distance from segment [a,b] to the surface (branch & bound).
+    ///
+    /// One statement, two callers: this is [`Self::seg_surface_min_excluding`]
+    /// with nothing excluded. The whole-surface and the face-excluded distance
+    /// can therefore never disagree by arithmetic, only by the face set they
+    /// were handed -- which is the property the honest-exemption rule rests on.
     pub(crate) fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3) {
+        self.seg_surface_min_excluding(a, b, &[])
+    }
+
+    /// Exact minimum distance from segment `[a,b]` to the surface MINUS a set
+    /// of global face IDs.
+    ///
+    /// `excluded` must be SORTED ascending; membership is one binary search per
+    /// triangle actually tested, and an empty set costs one `is_empty` branch.
+    ///
+    /// The branch-and-bound prune stays exact under exclusion. `box_box_dist`
+    /// is a lower bound over EVERY face in a subtree, so it is still a lower
+    /// bound over the subset that survives exclusion; dropping faces can only
+    /// raise the true minimum, never lower it, so a subtree the full-surface
+    /// walk could skip is a subtree this walk can skip too.
+    pub(crate) fn seg_surface_min_excluding(&self, a: V3, b: V3, excluded: &[u32]) -> (f64, V3) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut best_d = f64::INFINITY;
@@ -1726,6 +1823,12 @@ impl NativeSurface {
                     let start = node.a as usize;
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
+                        if !excluded.is_empty() {
+                            let global = self.mesh.face_ids()[tid as usize];
+                            if excluded.binary_search(&global).is_ok() {
+                                continue;
+                            }
+                        }
                         let (d, pt) = self.seg_tri_dist(a, b, tid as usize);
                         if d < best_d {
                             best_d = d;
@@ -1764,8 +1867,14 @@ impl NativeSurface {
     // and every field is read at every call site. Not a candidate for the
     // batch-first hot-path rule either: this is the per-item primitive the
     // BATCHED caller already amortizes over (see `segment_clearance` below).
+    ///
+    /// ONE PREDICATE. `excluded` empty is the whole-surface test, so the
+    /// demanded-gap arithmetic (`best_d - (r_max + standoff)`) has exactly one
+    /// statement in the kernel and cannot fork between a stage that exempts
+    /// faces and one that does not. Only two things vary per caller: which
+    /// faces are in the set, and what number `standoff` carries.
     #[allow(clippy::too_many_arguments)]
-    fn seg_clear_one(
+    fn seg_clear_one_excluding(
         &self,
         p0: V3,
         p1: V3,
@@ -1774,6 +1883,7 @@ impl NativeSurface {
         standoff: f64,
         inset0: f64,
         inset1: f64,
+        excluded: &[u32],
     ) -> (f64, V3) {
         let nan3: V3 = [f64::NAN; 3];
         let d = sub(p1, p0);
@@ -1793,15 +1903,15 @@ impl NativeSurface {
         let r_hi = r0 + (r1 - r0) * (s_hi / l);
         let r_max = r_lo.max(r_hi);
         let thresh = r_max + standoff;
-        let (best_d, best_pt) = self.seg_surface_min(a, b);
+        let (best_d, best_pt) = self.seg_surface_min_excluding(a, b, excluded);
         let clr = best_d - thresh;
         // clearance-vs-0 threshold band (spec sec 5.4 item 3)
         self.band_check(clr, 0.0);
         (clr, best_pt)
     }
 
-    // Same rationale as `seg_clear_one` immediately above: this is that
-    // primitive's batched (SoA) entry point, one argument per per-member
+    // Same rationale as `seg_clear_one_excluding` immediately above: this is
+    // that primitive.s batched (SoA) entry point, one argument per per-member
     // input array plus the shared `standoff` -- the established batch shape,
     // not a candidate for bundling.
     #[allow(clippy::too_many_arguments)]
@@ -1815,18 +1925,84 @@ impl NativeSurface {
         inset0s: &[f64],
         inset1s: &[f64],
     ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
+        self.segment_clearance_excluding(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            standoff,
+            inset0s,
+            inset1s,
+            &[], //
+        )
+    }
+
+    /// [`Self::segment_clearance`] with a PER-ROW set of global face IDs the
+    /// distance test must not see.
+    ///
+    /// `excluded_faces` is either empty -- which is exactly
+    /// [`Self::segment_clearance`], and the reason that entry point delegates
+    /// here rather than repeating the loop -- or one SORTED, deduplicated slice
+    /// of global face IDs per row, in row order.
+    ///
+    /// WHAT THIS IS FOR, and what it deliberately is not. A contact-declaring
+    /// arm is legitimately inside the material it is seated in, so its own seat
+    /// zone must be exempt or every seated arm refuses itself. The exemption
+    /// that does that honestly names the FACES it forgives and tests the rest of
+    /// the axis in full. The exemption it replaces named a LENGTH of axis --
+    /// a radius-proportional skip measured from the seat -- and everything
+    /// inside that length, foreign features included, went untested. A length
+    /// is not a target: a fatter arm skipped further, so the same axis could
+    /// pass at a radius that put it 0.242 mm inside the model and refuse at a
+    /// thinner one with 0.569 mm of real gap (`.git/mask-honesty-evidence`).
+    /// Exempting a face set cannot invert that way, because the set does not
+    /// move when the radius does.
+    ///
+    /// COST. One batched call per row set, the same shape and the same
+    /// parallelism as the unrestricted entry point; the exclusion costs one
+    /// binary search per triangle the walk would otherwise have tested, and
+    /// nothing at all on a row with an empty set.
+    ///
+    /// The caller owns sortedness. An unsorted slice is not rejected here --
+    /// this is the inner loop of the clearance stage and a per-row validation
+    /// pass would price a check the two production callers already satisfy by
+    /// construction -- it simply fails to exclude, which is the SAFE direction:
+    /// an unexcluded face can only make the verdict stricter.
+    // Same signature rationale as `segment_clearance` above, plus one slice of
+    // per-row exclusions; every field is read at every call site.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_clearance_excluding(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+        excluded_faces: &[&[u32]],
+    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
         let n = p0s.len();
         BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
         BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
         BatchInputError::require_len("segment_clearance", "r1s", n, r1s.len())?;
         BatchInputError::require_len("segment_clearance", "inset0s", n, inset0s.len())?;
         BatchInputError::require_len("segment_clearance", "inset1s", n, inset1s.len())?;
+        if !excluded_faces.is_empty() {
+            BatchInputError::require_len(
+                "segment_clearance",
+                "excluded_faces",
+                n,
+                excluded_faces.len(),
+            )?;
+        }
         let res: Vec<(f64, V3)> = par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
-                    self.seg_clear_one(
-                        p0s[i], p1s[i], r0s[i], r1s[i], standoff, inset0s[i], inset1s[i],
+                    let excluded = excluded_faces.get(i).copied().unwrap_or(&[]);
+                    self.seg_clear_one_excluding(
+                        p0s[i], p1s[i], r0s[i], r1s[i], standoff, inset0s[i], inset1s[i], excluded,
                     )
                 })
                 .collect()
@@ -1838,6 +2014,142 @@ impl NativeSurface {
             pt.push(p);
         }
         Ok((clr, pt))
+    }
+
+    /// Every global face ID within `within_mm[i]` of segment `i`, one batched
+    /// BVH walk per row and ONE call for the whole row set.
+    ///
+    /// This is the band step of the honest contact exemption: the seat's own
+    /// contact zone is the connected component, containing the seat's own face,
+    /// of the faces this returns. The flood fill that picks that component out
+    /// belongs to the caller, which owns the mesh's face adjacency; the kernel
+    /// owns only the geometric band.
+    ///
+    /// Each row's IDs come back SORTED ascending and deduplicated, which is the
+    /// order [`Self::segment_clearance_excluding`] requires.
+    ///
+    /// LIMITS. `max_rows` and `max_faces_per_row` are checked before and during
+    /// the walk, so the batch's peak memory is bounded by
+    /// `rows * max_faces_per_row * 4` bytes and is knowable from the caller's
+    /// own numbers before any allocation. `max_total_faces` is checked against
+    /// the REALIZED total, not against `rows * max`, so it charges what the walk
+    /// actually collected.
+    pub fn faces_near_segments_batch(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        within_mm: &[f64],
+        limits: NearFaceBatchLimits,
+    ) -> Result<Vec<Vec<u32>>, NearFaceBatchError> {
+        let n = p0s.len();
+        BatchInputError::require_len("faces_near_segments_batch", "p1s", n, p1s.len())?;
+        BatchInputError::require_len("faces_near_segments_batch", "within_mm", n, within_mm.len())?;
+        if n > limits.max_rows {
+            return Err(NearFaceBatchError::RowLimitExceeded {
+                required: n,
+                limit: limits.max_rows,
+            });
+        }
+        for (row, within) in within_mm.iter().enumerate() {
+            if !within.is_finite() || *within < 0.0 {
+                return Err(NearFaceBatchError::InvalidRadius {
+                    row,
+                    within_mm: *within,
+                });
+            }
+        }
+        for (row, point) in p0s.iter().chain(p1s.iter()).enumerate() {
+            for (axis, component) in point.iter().enumerate() {
+                if !component.is_finite() {
+                    return Err(NearFaceBatchError::NonFinitePoint {
+                        row: row % n.max(1),
+                        axis,
+                    });
+                }
+            }
+        }
+
+        let rows: Vec<Result<Vec<u32>, NearFaceBatchError>> = par::run(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|row| {
+                    self.faces_near_segment(
+                        p0s[row],
+                        p1s[row],
+                        within_mm[row],
+                        row,
+                        limits.max_faces_per_row,
+                    )
+                })
+                .collect()
+        });
+
+        let mut out = Vec::with_capacity(n);
+        let mut total = 0_usize;
+        for row in rows {
+            let faces = row?;
+            total = total
+                .checked_add(faces.len())
+                .ok_or(NearFaceBatchError::TotalFaceArithmeticOverflow)?;
+            out.push(faces);
+        }
+        if total > limits.max_total_faces {
+            return Err(NearFaceBatchError::TotalFaceLimitExceeded {
+                required: total,
+                limit: limits.max_total_faces,
+            });
+        }
+        Ok(out)
+    }
+
+    /// One row of [`Self::faces_near_segments_batch`].
+    ///
+    /// `box_box_dist` is a lower bound over every face in a subtree, so a
+    /// subtree whose bound already exceeds `within_mm` cannot contain a face in
+    /// the band and is skipped whole. The test is `<=` so a face exactly at the
+    /// band edge is IN the band -- the exemption must not depend on a knife
+    /// edge, and admitting the boundary face only ever makes the exemption
+    /// larger by one face of the seat's own zone, never smaller.
+    fn faces_near_segment(
+        &self,
+        a: V3,
+        b: V3,
+        within_mm: f64,
+        row: usize,
+        max_faces: usize,
+    ) -> Result<Vec<u32>, NearFaceBatchError> {
+        let smin = box_min(a, b);
+        let smax = box_max(a, b);
+        let mut found: Vec<u32> = Vec::new();
+        let mut stack: Vec<i32> = vec![0];
+        while let Some(ni) = stack.pop() {
+            let node = &self.bvh.nodes[ni as usize];
+            if box_box_dist(smin, smax, node.bmin, node.bmax) > within_mm {
+                continue;
+            }
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let (d, _) = self.seg_tri_dist(a, b, tid as usize);
+                    if d <= within_mm {
+                        if found.len() >= max_faces {
+                            return Err(NearFaceBatchError::RowFaceLimitExceeded {
+                                row,
+                                limit: max_faces,
+                            });
+                        }
+                        found.push(self.mesh.face_ids()[tid as usize]);
+                    }
+                }
+            } else {
+                stack.push(node.a);
+                stack.push(node.b);
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        Ok(found)
     }
 
     // ---- penetration intervals -------------------------------------------
