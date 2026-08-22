@@ -420,4 +420,298 @@ mod tests {
         let zone = zones[0].as_ref();
         assert!(zone.windows(2).all(|pair| pair[0] < pair[1]));
     }
+
+    // ---- the manifold bridging fixture -----------------------------------
+    //
+    // `crevice_parts` above separates its two walls by CONSTRUCTION: they share
+    // no vertex, so no adjacency joins them and a flood fill could not cross if
+    // it tried. That fixture therefore proves the exemption is bounded on a
+    // mesh where nothing needed bounding, which is not where the rule has to
+    // hold. On a real mini the two walls of a crevice ARE one surface — they
+    // meet at the bottom of the slot — so the only thing that can keep the
+    // seat's zone off the foreign wall is that the connecting path lies OUTSIDE
+    // the band.
+    //
+    // The fixture below is that mesh: a U-channel whose near wall, floor and
+    // far wall are one connected sheet, at the measured scale of the defect
+    // (0.4 mm seat radius, so a 1.0 mm band; a 1.2 mm crevice, so the far wall
+    // is inside that band). It is the gate on the whole exemption: if the fill
+    // reaches the far wall along the bridge, the separator does not separate.
+
+    /// A U-channel cross-section extruded along `y`, as one connected sheet.
+    ///
+    /// The cross-section is walked in `(x, z)`: down the near wall at `x = 0`
+    /// from `z = 10` to `z = 0`, across the floor to `x = 1.2`, then up the far
+    /// wall. Consecutive cross-section points share an extruded edge, so the
+    /// whole sheet is edge-connected from the near wall to the far wall THROUGH
+    /// the floor — the bridge the separator has to survive.
+    fn channel_section() -> Vec<[f64; 2]> {
+        let mut section = Vec::new();
+        for step in 0..=20 {
+            section.push([0.0, 10.0 - 0.5 * f64::from(step)]);
+        }
+        for step in 1..=4 {
+            section.push([0.3 * f64::from(step), 0.0]);
+        }
+        for step in 1..=20 {
+            section.push([1.2, 0.5 * f64::from(step)]);
+        }
+        section
+    }
+
+    /// Extrude a cross-section along `y` in 1 mm steps, two triangles per quad.
+    ///
+    /// Quad `(segment, strip)` owns faces `2*(segment*10 + strip)` and `+1`, but
+    /// no test below depends on that arithmetic: faces are identified by where
+    /// they are in space, which is what the geometry argument is actually about.
+    fn extruded_parts(section: &[[f64; 2]]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let strips = 10_u32;
+        let mut vertices = Vec::new();
+        for point in section {
+            for strip in 0..=strips {
+                vertices.push([point[0], f64::from(strip), point[1]]);
+            }
+        }
+        let row = strips + 1;
+        let mut faces = Vec::new();
+        for segment in 0..(section.len() as u32 - 1) {
+            for strip in 0..strips {
+                let a = segment * row + strip;
+                let b = a + 1;
+                let c = (segment + 1) * row + strip;
+                let d = c + 1;
+                faces.push([a, c, d]);
+                faces.push([a, d, b]);
+            }
+        }
+        (vertices, faces)
+    }
+
+    fn channel() -> (NativeSurface, FaceTopology, Vec<[f64; 3]>) {
+        let (vertices, faces) = extruded_parts(&channel_section());
+        let mut tris = Vec::new();
+        let mut centroids = Vec::new();
+        for face in &faces {
+            let mut centroid = [0.0_f64; 3];
+            for index in face {
+                let vertex = vertices[*index as usize];
+                tris.extend_from_slice(&vertex);
+                for axis in 0..3 {
+                    centroid[axis] += vertex[axis] / 3.0;
+                }
+            }
+            centroids.push(centroid);
+        }
+        let mesh = Mesh::new(vertices, faces).expect("channel mesh");
+        (
+            build_from_tris(tris),
+            build_face_topology(&mesh, WeldPolicy::ExactBits).expect("channel topology"),
+            centroids,
+        )
+    }
+
+    /// The face whose centroid is nearest `point` — how every face in these
+    /// tests is named, so no assertion depends on triangulation order.
+    fn face_nearest(centroids: &[[f64; 3]], point: [f64; 3]) -> u32 {
+        let mut best = (f64::INFINITY, 0_u32);
+        for (index, centroid) in centroids.iter().enumerate() {
+            let distance = (0..3)
+                .map(|axis| (centroid[axis] - point[axis]).powi(2))
+                .sum::<f64>();
+            if distance < best.0 {
+                best = (distance, index as u32);
+            }
+        }
+        best.1
+    }
+
+    fn on_near_wall(centroid: &[f64; 3]) -> bool {
+        centroid[0] < 0.05
+    }
+
+    fn on_far_wall(centroid: &[f64; 3]) -> bool {
+        centroid[0] > 1.15
+    }
+
+    fn on_floor(centroid: &[f64; 3]) -> bool {
+        centroid[2] < 0.05
+    }
+
+    /// The whole connected component of the seat face over the FULL topology —
+    /// no band restriction at all.
+    ///
+    /// This is how the fixture proves it is a bridge rather than two sheets: if
+    /// this reaches the far wall, the walls really are one surface and the only
+    /// thing that can hold the zone back is the band.
+    fn unrestricted_component(topology: &FaceTopology, seat_face_id: u32) -> BTreeSet<u32> {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![seat_face_id];
+        seen.insert(seat_face_id);
+        while let Some(face) = stack.pop() {
+            let Some(neighbors) = topology.neighbors(face as usize) else {
+                continue;
+            };
+            for &neighbor in neighbors {
+                if seen.insert(neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+        }
+        seen
+    }
+
+    /// FINDING A — the gate on the whole honest exemption.
+    ///
+    /// A 0.4 mm-radius arm seated in a 1.2 mm crevice claims a band of
+    /// `0.4 + STANDOFF_MM = 1.0 mm`. That band REACHES the far wall: at the
+    /// arm's outboard end the far wall is 0.7 mm away. The two walls are one
+    /// connected sheet — the fixture asserts that directly — and the path that
+    /// connects them runs down to the floor at `z = 0`, five millimetres below
+    /// the arm and therefore OUTSIDE the band.
+    ///
+    /// So every ingredient of the failure is present except the crossing. If the
+    /// fill crossed here, the seat exemption would forgive the opposite wall of
+    /// the crevice — which is the exact geometry both measured Giant Bat
+    /// refusals stand on — and the honest exemption would have rebuilt the blind
+    /// spot it was written to close.
+    #[test]
+    fn a_zone_stops_at_the_crevice_on_a_manifold_bridge_where_the_walls_really_are_connected() {
+        let (surface, topology, centroids) = channel();
+        let seat_face = face_nearest(&centroids, [0.0, 5.0, 5.0]);
+        assert!(
+            on_near_wall(&centroids[seat_face as usize]),
+            "the seat face must be on the near wall"
+        );
+
+        // The fixture IS a bridge: unrestricted connectivity reaches the far
+        // wall. Without this the test would prove nothing that
+        // `crevice_parts`'s two disjoint sheets did not already prove.
+        let whole = unrestricted_component(&topology, seat_face);
+        assert!(
+            whole
+                .iter()
+                .any(|face| on_far_wall(&centroids[*face as usize])),
+            "the fixture must be a MANIFOLD BRIDGE — near wall, floor and far \
+             wall one connected sheet — or the separator is not being tested"
+        );
+
+        // A 0.4 mm arm seated 0.35 mm into the near wall at z = 5, leaning out
+        // across the crevice. Band = 0.4 + 0.6 = 1.0 mm.
+        let p0_mm = [-0.35, 5.0, 5.0];
+        let p1_mm = [0.5, 5.0, 7.5];
+        let band_radius_mm = 1.0;
+        let band = surface
+            .faces_near_segments_batch(&[p0_mm], &[p1_mm], &[band_radius_mm], uncapped())
+            .expect("band");
+        assert!(
+            band[0]
+                .iter()
+                .any(|face| on_far_wall(&centroids[*face as usize])),
+            "the BAND must contain far-wall faces, or the test is vacuous: it \
+             would then be measuring a band that never reached the foreign \
+             feature rather than a separator that held"
+        );
+        assert!(
+            !band[0]
+                .iter()
+                .any(|face| on_floor(&centroids[*face as usize])),
+            "the connecting path (the floor at z = 0) must lie OUTSIDE the \
+             band — that is the configuration finding A names"
+        );
+
+        let zones = freeze_seat_zones(
+            &surface,
+            &topology,
+            &[SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: seat_face,
+                band_radius_mm,
+            }],
+            uncapped(),
+        )
+        .expect("zones");
+        let zone = zones[0].as_ref();
+
+        assert!(!zone.is_empty(), "the seat's own wall must still be exempt");
+        let foreign = zone
+            .iter()
+            .filter(|face| !on_near_wall(&centroids[**face as usize]))
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            foreign.is_empty(),
+            "the frozen zone swallowed {} face(s) that are not on the seat's \
+             own wall: {foreign:?}. The far wall of a crevice is a FOREIGN \
+             FEATURE and must stay graded — both measured Giant Bat refusals \
+             are exactly this geometry. A zone that crosses the crevice on a \
+             manifold mesh is the retired skip-length's blind spot rebuilt.",
+            foreign.len()
+        );
+    }
+
+    /// The other side of the same fixture, and the rule's BOUNDARY — measured,
+    /// not argued.
+    ///
+    /// Move the same 0.4 mm arm down until it lies along the bottom of the
+    /// crevice and the band swallows the corner where the floor meets the far
+    /// wall. Now the connecting path is INSIDE the band, connectivity no longer
+    /// separates anything, and the zone spans the whole channel: near wall,
+    /// floor and far wall together.
+    ///
+    /// This is not a defect in the implementation. It is §2 read literally: the
+    /// exemption is bounded by the band, and by nothing else. It is pinned here
+    /// so the boundary is a fact with a fixture behind it rather than folklore,
+    /// and so any later narrowing of the zone — a normal test, a geodesic
+    /// radius, a floor-facing exclusion — has a test it must revisit BY NAME
+    /// rather than silently invalidate.
+    ///
+    /// MEASURED at the numbers below: band = 13 near + 16 floor + 11 far = 40
+    /// faces, and the zone is all 40.
+    #[test]
+    fn the_zone_does_span_the_channel_when_the_band_itself_contains_the_connecting_path() {
+        let (surface, topology, centroids) = channel();
+        let seat_face = face_nearest(&centroids, [0.0, 5.0, 0.3]);
+        assert!(on_near_wall(&centroids[seat_face as usize]));
+
+        let p0_mm = [-0.35, 5.0, 0.3];
+        let p1_mm = [0.65, 5.0, 0.45];
+        let band = surface
+            .faces_near_segments_batch(&[p0_mm], &[p1_mm], &[1.0], uncapped())
+            .expect("band");
+        assert!(
+            band[0]
+                .iter()
+                .any(|face| on_floor(&centroids[*face as usize])),
+            "this configuration must put the connecting path INSIDE the band, \
+             which is what makes it the opposite pole of the finding-A fixture"
+        );
+
+        let zones = freeze_seat_zones(
+            &surface,
+            &topology,
+            &[SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: seat_face,
+                band_radius_mm: 1.0,
+            }],
+            uncapped(),
+        )
+        .expect("zones");
+        let zone = zones[0].as_ref();
+        assert_eq!(
+            zone,
+            band[0].as_slice(),
+            "with the connecting path inside the band the whole band is one \
+             component, so the zone IS the band. The exemption is bounded by \
+             the band and by nothing else — an arm jammed into the bottom of a \
+             1.2 mm crevice forgives both its walls."
+        );
+        let far = zone
+            .iter()
+            .filter(|face| on_far_wall(&centroids[**face as usize]))
+            .count();
+        assert_eq!(far, 11, "and the far wall is 11 of those faces");
+    }
 }
