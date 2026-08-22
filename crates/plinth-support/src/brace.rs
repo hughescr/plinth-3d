@@ -53,7 +53,12 @@ struct BraceConfig {
     twin_single_xy_mm: f64,
     max_unbraced_radius_mm: f64,
     contact_depth_mm: f64,
+    /// `STANDOFF_MM` — the PR-2 mask's standoff term, and the PLACEMENT-stage
+    /// demanded gap.
     standoff_mm: f64,
+    /// `FINAL_CLEARANCE_GAP_MM` — the FINAL-stage demanded gap, and the only
+    /// refusing clearance number in the engine (Craig's ruling, 2026-08-22).
+    final_clearance_gap_mm: f64,
     ball_factor_foot: f64,
     ball_breach_epsilon_mm: f64,
     min_illegal_len_mm: f64,
@@ -66,12 +71,32 @@ struct BraceConfig {
 }
 
 impl BraceConfig {
-    /// The PR-1..PR-4 policy this brace pass evaluates contacts under.
-    fn contact_policy(&self) -> ContactPolicy {
+    /// The PR-1..PR-4 policy this brace pass evaluates contacts under, at the
+    /// demanded gap of ONE named stage.
+    ///
+    /// The brace pass is the only stage that reads BOTH demands, which is why
+    /// the stage is an argument here and a constant everywhere else:
+    ///
+    /// * `evaluate_candidates` grades a per-`(need, site)` tournament and
+    ///   refuses no model, so it is PLACEMENT (`STANDOFF_MM`, 0.600 mm). Ruling
+    ///   R-1495 of 2026-08-22: prune-harder-than-accept is the intended
+    ///   asymmetry, and `Unplaceable` is an accepted termination.
+    /// * `exact_clearance_rows` is the verdict that condemns an arm, so it is
+    ///   FINAL (`FINAL_CLEARANCE_GAP_MM`, 0.300 mm).
+    ///
+    /// Sites that attest or admit a contact rather than grade its distance
+    /// (`attest_seats_batch`, `contact::admit`) read no demanded gap at all;
+    /// they take the FINAL policy because the contact they are admitting will
+    /// be graded by the final pass.
+    fn contact_policy(&self, stage: contact::ClearanceStage) -> ContactPolicy {
         ContactPolicy {
             floor_depth_mm: self.contact_depth_mm,
             process_resolution_mm: self.process_resolution_mm,
             standoff_mm: self.standoff_mm,
+            demanded_gap_mm: match stage {
+                contact::ClearanceStage::Placement => self.standoff_mm,
+                contact::ClearanceStage::Final => self.final_clearance_gap_mm,
+            },
             min_free_span_mm: self.min_illegal_len_mm,
             ball_factor_stub: self.ball_factor_stub,
             tip_load: self.tip_load,
@@ -110,6 +135,7 @@ impl BraceConfig {
             max_unbraced_radius_mm: p.max_unbraced_shaft_r_mm().diagnostic().get(),
             contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
             standoff_mm: p.standoff_mm().diagnostic().get(),
+            final_clearance_gap_mm: *constants.evidence().final_clearance_gap_mm().value(),
             ball_factor_foot: p.ball_factor_foot().diagnostic().get(),
             ball_breach_epsilon_mm: p.ball_breach_eps_mm().diagnostic().get(),
             min_illegal_len_mm: p.min_illegal_len_mm().diagnostic().get(),
@@ -1170,7 +1196,7 @@ fn gather_candidates(
         // measure-zero tangential contact whose fusion under union is decided
         // by voxel rounding -- precisely the "properly attaches the tips for
         // all cases" failure the owner named.
-        let policy = config.contact_policy();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
         let seat = contact::seat_depth_mm(abs_cos_raw, radius.get(), &policy, false);
         let (seated_point, seated_cos, seated_length) =
             contact::seat_endpoint(projected.point, projected.normal, p0, seat);
@@ -1381,7 +1407,7 @@ fn attest_model_rung_seats(
         MODEL_RUNG_ATTESTATION_SAMPLES_PER_SUBSEGMENT,
     )
     .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
-    let policy = config.contact_policy();
+    let policy = config.contact_policy(contact::ClearanceStage::Final);
     let outcomes = designed_embed::attest_seats_batch(surface, seats, extent, limits, &policy)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
     let mut attested_by_row = vec![false; seats.len()];
@@ -1488,11 +1514,20 @@ fn evaluate_candidates(
         &inset1,
         &census_cos_class,
     ));
+    // PLACEMENT (ruling R-1495, 2026-08-22). This grades a per-`(need, site)`
+    // candidate TOURNAMENT: a row it drops loses a tournament entry, and no
+    // model is refused here — `Unplaceable` is an accepted termination
+    // (`runner.rs`). So the demand is the pruning `STANDOFF_MM`, and
+    // prune-harder-than-accept is the intended two-tier asymmetry, not a
+    // disagreement with the final pass.
+    let placement_gap_mm = config
+        .contact_policy(contact::ClearanceStage::Placement)
+        .demanded_gap_mm;
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
         surface
-            .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
+            .segment_clearance(&p0, &p1, &r0, &r1, placement_gap_mm, &inset0, &inset1)
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
             .0
     };
@@ -1971,7 +2006,7 @@ fn exact_clearance_rows(
             // and `rewire::validate_changed_geometry` cannot drift again (#36).
             // PR-7 seats the CCO model anchor's `Rootward` end, and this site
             // picked that up for free when `seating_of` learned the family.
-            let policy = config.contact_policy();
+            let policy = config.contact_policy(contact::ClearanceStage::Final);
             let r_max = member
                 .terminal_radius_mm()
                 .get()
@@ -2014,8 +2049,17 @@ fn exact_clearance_rows(
         &inset1,
         &census_cos_class,
     ));
+    // FINAL. This is the verdict that condemns an arm — over contact-declaring
+    // members and non-contact members alike — so it grades against the only
+    // refusing number in the engine, `FINAL_CLEARANCE_GAP_MM` (Craig's ruling,
+    // 2026-08-22). The placement family screens at the larger `STANDOFF_MM`;
+    // the refusing demand is deliberately the SMALLER of the two, or a search
+    // would admit exactly what this pass then refuses.
+    let final_gap_mm = config
+        .contact_policy(contact::ClearanceStage::Final)
+        .demanded_gap_mm;
     let mut clearance = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
+        .segment_clearance(&p0, &p1, &r0, &r1, final_gap_mm, &inset0, &inset1)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
         .0;
     for index in axis_illegal_rows(
@@ -2299,6 +2343,200 @@ mod tests {
         .unwrap()
     }
 
+    /// The two-tier ruling, read through the REGISTRY rather than restated.
+    ///
+    /// A wiring test, not a values test: the values themselves are pinned in
+    /// `plinth-core` by `the_two_tier_demanded_gaps_are_a_pruning_0_6_and_a_
+    /// refusing_0_3`. What this asserts is that the brace stage actually READS
+    /// each of them, at the stage that owns it — the failure mode the two-tier
+    /// split invites is a hand-typed 0.3 somewhere, which would go stale the
+    /// day a coupon measurement supersedes the owner decision.
+    #[test]
+    fn each_stage_reads_its_own_demanded_gap_from_the_registry() {
+        let constants = m0_constants().unwrap();
+        let registered_placement = constants.placeholders().standoff_mm().diagnostic().get();
+        let registered_final = *constants.evidence().final_clearance_gap_mm().value();
+        let config = BraceConfig::current(0.05).unwrap();
+
+        assert_eq!(
+            config
+                .contact_policy(contact::ClearanceStage::Placement)
+                .demanded_gap_mm,
+            registered_placement,
+            "the PLACEMENT demand is STANDOFF_MM, read from the registry"
+        );
+        assert_eq!(
+            config
+                .contact_policy(contact::ClearanceStage::Final)
+                .demanded_gap_mm,
+            registered_final,
+            "the FINAL demand is FINAL_CLEARANCE_GAP_MM, read from the registry"
+        );
+        assert!(
+            registered_final < registered_placement,
+            "the REFUSING demand must be strictly below the PRUNING one \
+             ({registered_final} vs {registered_placement}), or the placement \
+             search would admit exactly what the final pass then refuses"
+        );
+        // The PR-2 mask's own standoff term is a DIFFERENT quantity from the
+        // demand and must not have followed it down.
+        assert_eq!(
+            config
+                .contact_policy(contact::ClearanceStage::Final)
+                .standoff_mm,
+            registered_placement,
+            "the mask's standoff term is the mask's input, not the demand"
+        );
+    }
+
+    /// TWO DEMANDS, ONE PREDICATE — on real geometry, through the real kernel.
+    ///
+    /// Three arms parallel to a flat table, each `r + gap` above it, so the TRUE
+    /// surface-to-surface gap is exactly `gap`:
+    ///
+    /// | true gap | at PLACEMENT 0.600 | at FINAL 0.300 |
+    /// |---|---|---|
+    /// | 0.45 mm | pruned  | LEGAL |
+    /// | 0.20 mm | pruned  | refused |
+    /// | 0.80 mm | legal   | legal |
+    ///
+    /// The middle row is what keeps the two-tier split from being a blanket
+    /// loosening: the final demand is smaller, not absent, and a gap below it is
+    /// refused exactly as before. The bottom row keeps the test from passing by
+    /// refusing everything.
+    ///
+    /// Both columns are the SAME kernel entry point with the same insets on the
+    /// same rows; only the demanded number differs. That is the "one predicate"
+    /// half of the ruling, asserted rather than asserted-about.
+    #[test]
+    fn a_0_45mm_true_gap_is_pruned_at_placement_legal_at_final_and_a_0_20mm_gap_is_still_refused() {
+        let surface = flat_table();
+        let config = BraceConfig::current(0.05).unwrap();
+        let placement = config
+            .contact_policy(contact::ClearanceStage::Placement)
+            .demanded_gap_mm;
+        let demanded_final = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .demanded_gap_mm;
+
+        const RADIUS: f64 = 0.5;
+        let gaps = [0.45, 0.20, 0.80];
+        let p0 = gaps
+            .iter()
+            .map(|gap| [-2.0, 0.0, RADIUS + gap])
+            .collect::<Vec<_>>();
+        let p1 = gaps
+            .iter()
+            .map(|gap| [2.0, 0.0, RADIUS + gap])
+            .collect::<Vec<_>>();
+        let radii = vec![RADIUS; gaps.len()];
+        let zero = vec![0.0; gaps.len()];
+
+        let graded = |demand: f64| {
+            surface
+                .segment_clearance(&p0, &p1, &radii, &radii, demand, &zero, &zero)
+                .unwrap()
+                .0
+        };
+        let pruning = graded(placement);
+        let refusing = graded(demanded_final);
+
+        // The kernel reads a TRUE gap: distance minus the arm radius minus the
+        // demand. Stated as an equality so a change in what the kernel measures
+        // fails here rather than silently re-interpreting both demands.
+        for (row, gap) in gaps.iter().enumerate() {
+            assert!(
+                (pruning[row] - (gap - placement)).abs() < 1e-9,
+                "row {row}: placement clearance must be (true gap - demand)"
+            );
+            assert!(
+                (refusing[row] - (gap - demanded_final)).abs() < 1e-9,
+                "row {row}: final clearance must be (true gap - demand)"
+            );
+        }
+
+        assert!(
+            pruning[0] < 0.0 && refusing[0] >= 0.0,
+            "a 0.45 mm true gap is pruned by the search margin and LEGAL under \
+             the refusing demand — that is what the two-tier split buys"
+        );
+        assert!(
+            pruning[1] < 0.0 && refusing[1] < 0.0,
+            "a 0.20 mm true gap is still refused: the final demand is smaller, \
+             not absent"
+        );
+        assert!(
+            pruning[2] >= 0.0 && refusing[2] >= 0.0,
+            "a 0.80 mm true gap clears both demands, so this test is not \
+             passing by refusing everything"
+        );
+    }
+
+    /// The caller's penetration cap REFUSES rather than quietly skipping the
+    /// axis-transit screen — on a fixture that CONSTRUCTS the admitted row.
+    ///
+    /// This replaces the runner-level `max_rows = 1` form, which depended on
+    /// the required corpus happening to leave a row in `axis_illegal_rows`'
+    /// admission window and went vacuous the moment the FINAL demand moved
+    /// (`runner.rs`, `the_callers_brace_penetration_authority_is_the_one_the_
+    /// brace_stage_spends`). Here the row is built to order: the window admits
+    /// a clearance in `[0, 0.1)`, and a member parked
+    /// `r + FINAL_CLEARANCE_GAP_MM + 0.05` above a flat table reads exactly
+    /// 0.05 by construction, derived from the registered demand rather than
+    /// from a number typed in.
+    #[test]
+    fn a_capped_penetration_batch_refuses_rather_than_skipping_the_transit_screen() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let demanded = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .demanded_gap_mm;
+        const RADIUS: f64 = 0.5;
+        // Clearance = true gap - demand = 0.05, inside the admission window.
+        let height = RADIUS + demanded + 0.05;
+        let mut forest = Forest::new();
+        forest.add_member(member(
+            [-2.0, 0.0, height],
+            [2.0, 0.0, height],
+            MemberKind::Strut,
+            0,
+        ));
+        let surface = flat_table();
+
+        let generous =
+            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap();
+        assert_eq!(generous.len(), 1);
+        assert!(
+            (generous[0].1 - 0.05).abs() < 1e-9,
+            "the fixture must land inside the admission window, or the cap has \
+             nothing to refuse; read {}",
+            generous[0].1
+        );
+
+        let capped = exact_clearance_rows(
+            &forest,
+            &surface,
+            &config,
+            PenetrationBatchLimits {
+                max_rows: 0,
+                ..test_penetration_limits()
+            },
+        );
+        assert!(
+            matches!(
+                capped,
+                Err(BraceError::Penetration(
+                    geom_kernel::PenetrationBatchError::ResourceLimitExceeded {
+                        resource: "rows",
+                        required: 1,
+                        limit: 0,
+                    }
+                ))
+            ),
+            "a batch the caller's authority cannot pay for must REFUSE; \
+             skipping it would silently retire the transit screen"
+        );
+    }
+
     fn remote_box() -> NativeSurface {
         let vertices = vec![
             [100.0, 100.0, 100.0],
@@ -2534,7 +2772,7 @@ mod tests {
     #[test]
     fn contact_mask_divides_every_term_by_the_incidence() {
         let config = BraceConfig::current(0.05).unwrap();
-        let policy = config.contact_policy();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
         let seat = 0.3;
         let mask = contact::mask_extent_mm(seat, 0.5, 0.5, &policy).unwrap();
 
@@ -3234,21 +3472,40 @@ mod tests {
             .expect("the strut is a live non-stub row");
         assert_eq!(key, strut);
         // MARGIN is the run's own process resolution.
-        let margin = config.contact_policy().process_resolution_mm;
+        let margin = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .process_resolution_mm;
+        // TWO-TIER (Craig's ruling, 2026-08-22). The PR-2 mask still places the
+        // first tested station `h + r_max + STANDOFF_MM + MARGIN` above the
+        // plane -- the mask's standoff term is the mask's own input and did not
+        // move -- but the FINAL pass now DEMANDS only `FINAL_CLEARANCE_GAP_MM`.
+        // So the planar round trip reads
+        // `MARGIN + (STANDOFF_MM - FINAL_CLEARANCE_GAP_MM)` rather than MARGIN,
+        // and it is written as those two registered numbers rather than as the
+        // 0.35 they currently make.
+        let final_gap = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .demanded_gap_mm;
+        let slack = config.standoff_mm - final_gap;
+        let expected = margin + slack;
         assert!(
-            (clearance - margin).abs() < 1.0e-9,
-            "unseated strut must read exactly MARGIN = {margin}, got {clearance}"
+            (clearance - expected).abs() < 1.0e-9,
+            "unseated strut must read MARGIN + (STANDOFF_MM - FINAL_CLEARANCE_GAP_MM) \
+             = {margin} + {slack} = {expected}, got {clearance}"
         );
-        // Discrimination: the rejected alternative (h included) reads
-        // MARGIN + default_contact_depth_mm = 0.35, an order of magnitude away.
-        assert!(clearance < margin + config.contact_depth_mm / 2.0);
+        // Discrimination, unchanged in substance: the rejected alternative
+        // (`h` included in the mask) pushes the first station a further
+        // `h/|cos|` out and reads `expected + contact_depth_mm`. Half that
+        // depth still separates the two by an order of magnitude more than the
+        // 1e-9 the equality above allows.
+        assert!(clearance < expected + config.contact_depth_mm / 2.0);
 
         // The complementary half. A PR-7-seated CCO model anchor — the same
         // geometry with its endpoint pushed inward by the PR-1 depth, which is
         // what `apply_model_anchor` now mints — reads exactly MARGIN too,
         // BECAUSE the mask carries the `h` term for it. Take the `h` term away
         // and this row under-masks by `h/|cos|` and reads 0.05 - 0.3 = -0.25.
-        let policy = config.contact_policy();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
         let mut seated_forest = Forest::new();
         let seat = contact::seat_depth_mm(1.0, 0.65, &policy, false);
         let anchor = seated_forest.add_member(contact_member(
@@ -3267,8 +3524,9 @@ mod tests {
             .find(|(key, _)| *key == anchor)
             .expect("the seated anchor is a live non-stub row");
         assert!(
-            (seated_clearance - margin).abs() < 1.0e-9,
-            "a PR-7-seated anchor must read exactly MARGIN = {margin}, got {seated_clearance}"
+            (seated_clearance - expected).abs() < 1.0e-9,
+            "a PR-7-seated anchor must read the same MARGIN + (STANDOFF_MM - \
+             FINAL_CLEARANCE_GAP_MM) = {expected}, got {seated_clearance}"
         );
     }
 

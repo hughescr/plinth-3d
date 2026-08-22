@@ -703,6 +703,11 @@ pub(crate) fn build_initial_contacts(
         floor_depth_mm: contact_depth_mm,
         process_resolution_mm: attestation_margin_mm,
         standoff_mm: policy.standoff_mm().diagnostic().get(),
+        // This policy ATTESTS seats; it never grades a clearance distance, so
+        // no `segment_clearance*` call reads this field on this path. It
+        // carries the placement value because the contacts it attests are
+        // screened next by the placement-family search.
+        demanded_gap_mm: policy.standoff_mm().diagnostic().get(),
         min_free_span_mm: policy.min_illegal_len_mm().diagnostic().get(),
         ball_factor_stub: policy.ball_factor_stub().diagnostic().get(),
         tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(policy),

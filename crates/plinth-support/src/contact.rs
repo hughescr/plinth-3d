@@ -216,8 +216,37 @@ pub(crate) struct ContactPolicy {
     /// decisions, and sizing every production contact to sit one ULP outside
     /// it would destroy the instrument while leaving no real margin.
     pub(crate) process_resolution_mm: f64,
-    /// `standoff_mm` (0.6 mm) — the kernel's clearance threshold addend.
+    /// `standoff_mm` (0.6 mm) — the PR-2 MASK's standoff term.
+    ///
+    /// This is the mask formula's own input (`mask_extent_mm`), not the
+    /// clearance demand. The demand is [`Self::demanded_gap_mm`], and after the
+    /// two-tier ruling of 2026-08-22 they are the same number only at the
+    /// placement stage.
     pub(crate) standoff_mm: f64,
+    /// The TRUE surface-to-surface gap this STAGE demands, in mm — the number
+    /// the kernel adds to `r_max` before comparing against the measured
+    /// distance.
+    ///
+    /// TWO DEMANDS, ONE PREDICATE (Craig's ruling, 2026-08-22). Both stages
+    /// call the same shared clearance functions; only this field differs.
+    ///
+    /// * PLACEMENT — `STANDOFF_MM` = 0.600 mm. Read by `cco::clearance_survival`,
+    ///   `rewire::validate_changed_geometry` and `brace::evaluate_candidates`.
+    ///   A SEARCH MARGIN: it prunes a tournament entry and refuses nothing
+    ///   final.
+    /// * FINAL — `FINAL_CLEARANCE_GAP_MM` = 0.300 mm. Read by
+    ///   `brace::exact_clearance_rows`, over contact-declaring members AND
+    ///   non-contact members alike. The ONLY refusing number in the engine.
+    ///
+    /// The refusing demand is deliberately BELOW the pruning one: were it
+    /// above, a search would admit exactly what the final pass then refuses.
+    ///
+    /// UNITS. A true gap, arm SOLID SURFACE to model surface — never a
+    /// centreline distance, never a radius. The kernel subtracts `r_max`
+    /// itself, so a number carried in from a centreline-era predicate lands one
+    /// arm radius wrong; that is the trap `STANDOFF_MM`'s own ledger note
+    /// records having fallen into.
+    pub(crate) demanded_gap_mm: f64,
     /// `min_illegal_len_mm` (0.05 mm) — the engine's own resolution for
     /// "is this free span long enough to return a verdict at all".
     pub(crate) min_free_span_mm: f64,
@@ -231,6 +260,20 @@ pub(crate) struct ContactPolicy {
     /// this is delegation and not a restatement, that move needed no edit
     /// here beyond the numbers in this sentence.
     pub(crate) tip_load: FrozenTipLoadPolicy,
+}
+
+/// Which of the two demanded gaps a policy is built for.
+///
+/// Named rather than passed as a bare number so a call site cannot silently
+/// grade a placement search at the refusing demand, or a final verdict at the
+/// pruning one. The values themselves come from the registry
+/// (`STANDOFF_MM` / `FINAL_CLEARANCE_GAP_MM`); this enum only says which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClearanceStage {
+    /// The search margin. Prunes a candidate; refuses nothing final.
+    Placement,
+    /// The refusing demand. This is the verdict that condemns an arm.
+    Final,
 }
 
 impl ContactPolicy {
@@ -541,6 +584,7 @@ mod tests {
             floor_depth_mm: 0.3,
             process_resolution_mm: 0.05,
             standoff_mm: 0.6,
+            demanded_gap_mm: 0.6,
             min_free_span_mm: 0.05,
             ball_factor_stub: BALL_FACTOR,
             tip_load: FrozenTipLoadPolicy::for_contact_tests(),

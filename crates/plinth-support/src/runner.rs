@@ -8110,41 +8110,70 @@ mod tests {
         ));
     }
 
+    /// **THE OLD FORM OF THIS TEST WENT VACUOUS WITH THE TWO-TIER RULING, AND
+    /// THAT IS MEASURED.**
+    ///
+    /// It capped brace penetration ROWS at one and asserted the stage refused,
+    /// because the required corpus used to reach the brace interval batch with
+    /// more than one admitted row. It no longer reaches it with ANY row.
+    /// `brace::axis_illegal_rows` admits a row only when its clearance sits in
+    /// `[0, 0.1)` or its midpoint is inside the model, and that window is
+    /// expressed in CLEARANCE, so it moves when the demand does: at
+    /// `STANDOFF_MM` it meant "true gap in [0.600, 0.700)", and at
+    /// `FINAL_CLEARANCE_GAP_MM` it means "true gap in [0.300, 0.400)". This
+    /// corpus has occupants of the first band and none of the second. Capping
+    /// rows at one now SUCCEEDS, capping them at zero is refused as an invalid
+    /// caller authority, and capping samples at one also succeeds — the batch
+    /// is simply never called.
+    ///
+    /// A test that can go quiet rather than red is worse than no test, so the
+    /// two things it used to conflate are now separated and neither can go
+    /// vacuous:
+    ///
+    /// * the CAP itself is pinned in `brace.rs` by
+    ///   `a_capped_penetration_batch_refuses_rather_than_skipping_the_transit_screen`,
+    ///   on a fixture that CONSTRUCTS an admitted row instead of hoping for
+    ///   one; and
+    /// * the runner BOUNDARY — that the caller's own authority is what the
+    ///   brace stage spends — is this test, which reads the value back out at
+    ///   the far side of a successful stage.
     #[test]
-    fn brace_penetration_cap_minus_one_fails_closed_at_runner_boundary() {
+    fn the_callers_brace_penetration_authority_is_the_one_the_brace_stage_spends() {
         let hollowed = hollowed_fixture(load_required_runner_corpus());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
-        let mut limited_authority = authority(&delicacy, &layers);
-        // The required corpus reaches the brace interval batch with more
-        // than this one admitted row.  All other resources remain identical
-        // to the successful finite fixture resource.
-        limited_authority.brace_penetration_limits.max_rows = 1;
-        let prepared = prepare_support_run(
+        let mut authored = authority(&delicacy, &layers);
+        // Distinctive, generous, and unmistakably the CALLER's: no default and
+        // no derived bound could produce these by coincidence.
+        let expected = PenetrationBatchLimits {
+            max_rows: 7_777_777,
+            max_total_work: 7_777_778,
+            max_total_hits: 7_777_779,
+            max_total_samples: 7_777_780,
+            max_total_intervals: 7_777_781,
+            max_scratch_bytes: 7_777_782,
+        };
+        authored.brace_penetration_limits = expected;
+        let braced = prepare_support_run(
             hollowed,
             SupportRequest {
                 lift_mm: PositiveFinite::new(5.0).unwrap(),
             },
-            limited_authority,
+            authored,
         )
-        .expect("one-row brace cap remains a valid caller authority");
-        let result = prepared
-            .route_initial_cco()
-            .expect("required corpus routes")
-            .rewire()
-            .expect("required corpus rewires")
-            .brace();
-        let result = stage_error(result);
-        assert!(matches!(
-            result,
-            Err(SupportBraceError::Brace(BraceError::Penetration(
-                geom_kernel::PenetrationBatchError::ResourceLimitExceeded {
-                    resource: "rows",
-                    required: _,
-                    limit: 1,
-                }
-            )))
-        ));
+        .expect("a generous brace authority is a valid caller authority")
+        .route_initial_cco()
+        .expect("required corpus routes")
+        .rewire()
+        .expect("required corpus rewires")
+        .brace()
+        .expect("required corpus braces under a generous authority");
+        assert_eq!(
+            braced.brace_penetration_limits(),
+            expected,
+            "the brace stage must spend the CALLER's penetration authority, \
+             not a default reconstructed inside the runner"
+        );
     }
 
     #[test]

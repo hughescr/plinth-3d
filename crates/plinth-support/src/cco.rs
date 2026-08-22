@@ -471,15 +471,14 @@ fn slim_rewire_ancestors(
             .clone();
         let existing_carried_mm2 = member.carried_mm2().get();
         let removed_mm2 = removed_carried_mm2.get();
-        let carried = Finite::new((existing_carried_mm2 - removed_mm2).max(0.0)).map_err(
-            |error| {
+        let carried =
+            Finite::new((existing_carried_mm2 - removed_mm2).max(0.0)).map_err(|error| {
                 CcoError::InvalidGeometry(format!(
                     "slim_rewire_ancestors: reducing carried area at member {key:?} \
                      (existing {existing_carried_mm2} mm2 minus removed {removed_mm2} mm2) \
                      produced a non-finite value: {error}"
                 ))
-            },
-        )?;
+            })?;
         forest.set_carried_mm2(key, carried)?;
         let murray = forest
             .children_of(key)
@@ -1976,8 +1975,10 @@ impl CcoController {
             for candidate in &feasible {
                 if let Some((seat_index, final_radius)) = candidate.anchor {
                     let seats_len = seats.len();
-                    let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
-                        || {
+                    let seat = seats
+                        .get_mut(seat_index)
+                        .and_then(Option::take)
+                        .ok_or_else(|| {
                             CcoError::InvalidGeometry(format!(
                                 "evaluate_rewire_candidates: candidate generation \
                                  {} points at seat index {seat_index} of {seats_len}, but \
@@ -1985,8 +1986,7 @@ impl CcoController {
                                  earlier candidate in this batch",
                                 candidate.generation_index
                             ))
-                        },
-                    )?;
+                        })?;
                     generation_indices.push(candidate.generation_index);
                     foot_requests.push(AnchorFootRequest::new(seat, final_radius));
                 }
@@ -2049,9 +2049,9 @@ impl CcoController {
                     Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface {
                         ..
                     }) => SeatAttestationRefusalKind::Buried,
-                    Some(
-                        crate::designed_embed::ContactAttestationRefusal::UnusableGeometry { .. },
-                    ) => SeatAttestationRefusalKind::Unusable,
+                    Some(crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
+                        ..
+                    }) => SeatAttestationRefusalKind::Unusable,
                     Some(crate::designed_embed::ContactAttestationRefusal::NotAttached {
                         ..
                     }) => SeatAttestationRefusalKind::NotAttached,
@@ -2096,12 +2096,8 @@ impl CcoController {
             });
         }
         let contact_policy = seat_contact_policy(anchor_route.process_resolution_mm)?;
-        let survives = clearance_survival(
-            anchor_route.geometry.surface(),
-            &config,
-            &contact_policy,
-            &feasible,
-        )?;
+        let survives =
+            clearance_survival(anchor_route.geometry.surface(), &contact_policy, &feasible)?;
         let mut candidates = Vec::new();
         for (candidate, verdict) in feasible.into_iter().zip(survives) {
             let generation_index = candidate.generation_index;
@@ -3262,16 +3258,17 @@ fn grow_terminal_inner(
         for candidate in &evaluated {
             if let Some((seat_index, final_radius)) = candidate.anchor {
                 let seats_len = seats.len();
-                let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
-                    || {
+                let seat = seats
+                    .get_mut(seat_index)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
                         CcoError::InvalidGeometry(format!(
                             "grow_terminal_inner: candidate generation {} points at seat \
                              index {seat_index} of {seats_len}, but that slot is out of \
                              range or was already taken by an earlier candidate",
                             candidate.generation_index
                         ))
-                    },
-                )?;
+                    })?;
                 generation_indices.push(candidate.generation_index);
                 foot_requests.push(AnchorFootRequest::new(seat, final_radius));
             }
@@ -3334,9 +3331,9 @@ fn grow_terminal_inner(
             // and its rewire sibling came out in the same commit, as their own
             // doc comments predicted they would.
             let refusal_reason = match refusal {
-                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. }) => {
-                    SeatAttestationRefusalKind::Buried
-                }
+                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface {
+                    ..
+                }) => SeatAttestationRefusalKind::Buried,
                 Some(crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
                     ..
                 }) => SeatAttestationRefusalKind::Unusable,
@@ -3378,7 +3375,7 @@ fn grow_terminal_inner(
         });
     }
 
-    let survival = clearance_survival(surface, &config, &contact_policy, &evaluated)?;
+    let survival = clearance_survival(surface, &contact_policy, &evaluated)?;
     // PR-3 (design review F1). A model anchor refused for grazing or degenerate
     // incidence leaves through the SAME channel a breached foot ball uses, so
     // it is visible in the terminal's refusal evidence instead of being folded
@@ -3539,7 +3536,6 @@ impl ClearanceVerdict {
 /// `ContactPolicy`.
 fn clearance_survival(
     surface: &NativeSurface,
-    config: &Config,
     policy: &crate::contact::ContactPolicy,
     candidates: &[EvaluatedCandidate],
 ) -> Result<Vec<ClearanceVerdict>, CcoError> {
@@ -3620,8 +3616,11 @@ fn clearance_survival(
         &inset1,
         &[]
     ));
+    // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
+    // read through the SAME shared predicate the final pass uses; only the
+    // number differs (Craig's two-tier ruling, 2026-08-22).
     let (clearances, _) = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
+        .segment_clearance(&p0, &p1, &r0, &r1, policy.demanded_gap_mm, &inset0, &inset1)
         .map_err(|error| CcoError::Native(error.to_string()))?;
     Ok(ranges
         .into_iter()
@@ -3632,10 +3631,9 @@ fn clearance_survival(
             if range.clone().any(|row| degenerate[row]) {
                 return ClearanceVerdict::DegenerateIncidence;
             }
-            if range
-                .clone()
-                .any(|row| screened[row] && !emergence_ok(claimed_mask_mm[row], &p0[row], &p1[row], policy))
-            {
+            if range.clone().any(|row| {
+                screened[row] && !emergence_ok(claimed_mask_mm[row], &p0[row], &p1[row], policy)
+            }) {
                 return ClearanceVerdict::GrazingIncidence;
             }
             if clearances[range].iter().all(|clearance| *clearance >= 0.0) {
@@ -3806,7 +3804,6 @@ impl RewireCandidateBatch {
         let contact_policy = seat_contact_policy(self.process_resolution_mm)?;
         if clearance_survival(
             geometry.surface(),
-            &config,
             &contact_policy,
             std::slice::from_ref(&replayed),
         )? != [ClearanceVerdict::Survives]
@@ -4091,14 +4088,13 @@ fn attest_model_anchor_seats(
             seated_points_mm.len()
         )));
     }
-    let extent = crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm).map_err(
-        |error| {
+    let extent =
+        crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm).map_err(|error| {
             CcoError::InvalidGeometry(format!(
                 "attest_model_anchor_seats: process resolution {process_resolution_mm} mm \
                  is not a positive-finite attestation extent: {error}"
             ))
-        },
-    )?;
+        })?;
     if anchors.is_empty() {
         return Ok(ModelAnchorSeatAttestation {
             refusals: Vec::new(),
@@ -4141,8 +4137,8 @@ fn attest_model_anchor_seats(
         })
         .collect::<Vec<_>>();
     let majority_step_mm = extent.get() / 10.0;
-    let majority_step = crate::designed_embed::PositiveFiniteMm::new(majority_step_mm)
-        .map_err(|error| {
+    let majority_step =
+        crate::designed_embed::PositiveFiniteMm::new(majority_step_mm).map_err(|error| {
             CcoError::InvalidGeometry(format!(
                 "attest_model_anchor_seats: majority-vote sampling step {majority_step_mm} mm \
                  (one tenth of extent {} mm) is not positive-finite: {error}",
@@ -4170,14 +4166,15 @@ fn attest_model_anchor_seats(
     // this model's own. `brace.rs` already routes the identical error to
     // `BraceError::NativeQuery`; this site was the outlier. #31 owns giving
     // these failures a topology name; this is the honest channel until then.
-    let outcomes = crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
-        .map_err(|error| {
-            CcoError::Native(format!(
-                "attest_model_anchor_seats: seat-attestation batch over {seat_count} \
+    let outcomes =
+        crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
+            .map_err(|error| {
+                CcoError::Native(format!(
+                    "attest_model_anchor_seats: seat-attestation batch over {seat_count} \
                  seat(s) at extent {} mm failed: {error}",
-                extent.get()
-            ))
-        })?;
+                    extent.get()
+                ))
+            })?;
     let mut refusals = vec![None; seats.len()];
     for outcome in &outcomes {
         if outcome.member >= seats.len() {
@@ -4294,6 +4291,10 @@ fn seat_contact_policy(
         floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
         process_resolution_mm,
         standoff_mm: p.standoff_mm().diagnostic().get(),
+        // PLACEMENT. `clearance_survival` grades a candidate tournament: the
+        // demand PRUNES a search and refuses nothing final, so it reads
+        // `STANDOFF_MM` and not the refusing `FINAL_CLEARANCE_GAP_MM`.
+        demanded_gap_mm: p.standoff_mm().diagnostic().get(),
         min_free_span_mm: p.min_illegal_len_mm().diagnostic().get(),
         ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
         tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(p),
@@ -7255,7 +7256,10 @@ mod tests {
         }));
         let rows = clearance_rows(&forest, &snapshot);
         assert_eq!(rows.len(), 1, "exactly one changed member");
-        assert!(rows[0].contact.is_some(), "the row declares its model contact");
+        assert!(
+            rows[0].contact.is_some(),
+            "the row declares its model contact"
+        );
         (
             EvaluatedCandidate {
                 forest: forest.clone(),
@@ -7295,7 +7299,6 @@ mod tests {
     #[test]
     fn the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes() {
         let surface = planar_slab();
-        let config = Config::current().unwrap();
         let policy = seat_contact_policy(0.05).unwrap();
         let r_max = 0.45_f64;
 
@@ -7328,7 +7331,7 @@ mod tests {
         let (seated, _, _) =
             crate::contact::seat_endpoint(raw_seat, [0.0, 0.0, 1.0], p0, seat_depth);
         let (candidate, _) = model_anchor_candidate(p0, seated);
-        let verdict = clearance_survival(&surface, &config, &policy, &[candidate]).unwrap();
+        let verdict = clearance_survival(&surface, &policy, &[candidate]).unwrap();
         assert_eq!(
             verdict,
             vec![ClearanceVerdict::Survives],
@@ -7378,7 +7381,6 @@ mod tests {
     #[test]
     fn a_grazing_model_anchor_is_refused_not_admitted_with_infinity() {
         let surface = planar_slab();
-        let config = Config::current().unwrap();
         let policy = seat_contact_policy(0.05).unwrap();
         let r_max = 0.45_f64;
 
@@ -7424,7 +7426,7 @@ mod tests {
         // PR-3 refuses it BY NAME instead.
         let (candidate, _) = model_anchor_candidate(p0, seated);
         assert_eq!(
-            clearance_survival(&surface, &config, &policy, &[candidate]).unwrap(),
+            clearance_survival(&surface, &policy, &[candidate]).unwrap(),
             vec![ClearanceVerdict::GrazingIncidence]
         );
     }
@@ -7434,12 +7436,11 @@ mod tests {
     #[test]
     fn a_degenerate_incidence_model_anchor_is_refused_by_name() {
         let surface = planar_slab();
-        let config = Config::current().unwrap();
         let policy = seat_contact_policy(0.05).unwrap();
         // Exactly tangential: the arm runs along the face, so |cos| = 0.
         let (candidate, _) = model_anchor_candidate([4.0, 0.0, -0.3], [0.0, 0.0, -0.3]);
         assert_eq!(
-            clearance_survival(&surface, &config, &policy, &[candidate]).unwrap(),
+            clearance_survival(&surface, &policy, &[candidate]).unwrap(),
             vec![ClearanceVerdict::DegenerateIncidence]
         );
     }

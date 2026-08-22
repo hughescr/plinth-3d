@@ -915,8 +915,11 @@ fn validate_changed_geometry(
     }
     let mut i0 = vec![0.0; p0.len()];
     let mut i1 = vec![0.0; p0.len()];
+    // Hoisted out of the contact branch below because the DEMANDED GAP is
+    // read for every row, contact-declaring or not: a changed set with no
+    // contacts still grades at this stage's registered demand.
+    let policy = contact_policy(config)?;
     if !contacts.is_empty() {
-        let policy = contact_policy(config)?;
         let points = contacts
             .iter()
             .map(|(row, end, _, _)| match end {
@@ -970,9 +973,12 @@ fn validate_changed_geometry(
         &i1,
         &[]
     ));
+    // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
+    // read through the SAME shared predicate the final pass uses; only the
+    // number differs (Craig's two-tier ruling, 2026-08-22).
     let (clearances, _) = geometry
         .surface()
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &i0, &i1)
+        .segment_clearance(&p0, &p1, &r0, &r1, policy.demanded_gap_mm, &i0, &i1)
         .map_err(|e| RewireError::Native(e.to_string()))?;
     Ok(clearances.into_iter().all(|value| value >= 0.0))
 }
@@ -986,6 +992,10 @@ fn contact_policy(config: &Config) -> Result<crate::contact::ContactPolicy, Rewi
         floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
         process_resolution_mm: config.process_resolution_mm,
         standoff_mm: p.standoff_mm().diagnostic().get(),
+        // PLACEMENT. `validate_changed_geometry` screens a changed set inside a
+        // search: the demand PRUNES and refuses nothing final, so it reads
+        // `STANDOFF_MM` and not the refusing `FINAL_CLEARANCE_GAP_MM`.
+        demanded_gap_mm: p.standoff_mm().diagnostic().get(),
         min_free_span_mm: p.min_illegal_len_mm().diagnostic().get(),
         ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
         tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(p),
