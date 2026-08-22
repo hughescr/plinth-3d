@@ -2962,6 +2962,268 @@ mod tests {
         ));
     }
 
+    /// The flat table PLUS one small foreign panel, welded into ONE surface, so
+    /// a grazing arm has something to be graded against that is not the surface
+    /// it is seated in.
+    fn table_with_foreign_panel(lo: [f64; 3], hi: [f64; 3]) -> NativeSurface {
+        const H: f64 = 40.0;
+        let box_faces = [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mut vertices = vec![
+            [-H, -H, -10.0],
+            [H, -H, -10.0],
+            [H, H, -10.0],
+            [-H, H, -10.0],
+            [-H, -H, 0.0],
+            [H, -H, 0.0],
+            [H, H, 0.0],
+            [-H, H, 0.0],
+        ];
+        let mut faces = box_faces.to_vec();
+        let base = vertices.len() as u32;
+        for corner in [
+            [lo[0], lo[1], lo[2]],
+            [hi[0], lo[1], lo[2]],
+            [hi[0], hi[1], lo[2]],
+            [lo[0], hi[1], lo[2]],
+            [lo[0], lo[1], hi[2]],
+            [hi[0], lo[1], hi[2]],
+            [hi[0], hi[1], hi[2]],
+            [lo[0], hi[1], hi[2]],
+        ] {
+            vertices.push(corner);
+        }
+        for face in box_faces {
+            faces.push([base + face[0], base + face[1], base + face[2]]);
+        }
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap()
+    }
+
+    /// **PARKED STATE, PINNED — the FINAL pass does not yet grade a true gap**
+    /// (challenge finding B2, 2026-08-22).
+    ///
+    /// `FINAL_CLEARANCE_GAP_MM`'s own provenance carries an HONESTY
+    /// PRECONDITION: "this number only means what it says because the clearance
+    /// test it feeds grades a TRUE gap." At this commit it does NOT.
+    /// `honest-exemption-2026-08-22.md` §8 lands in seven steps; steps 1-2 have
+    /// landed and steps 3-5 — the `FaceTopology` threading, the frozen seat
+    /// zones, and `inset0 = inset1 = 0` at the grading sites — have not. So
+    /// `exact_clearance_rows` still computes the retired radius-proportional
+    /// PR-2 mask and still hands it to the kernel as insets, and the tested
+    /// STATION SET still moves with the radius.
+    ///
+    /// This test measures that through the PRODUCTION function rather than
+    /// asserting it in prose, on the grazing fixture the audit describes: one
+    /// axis at `|cos| = 0.2`, one foreign panel hugging the stretch the THIN
+    /// arm tests and the FAT arm's own mask excuses. The thinner, cleaner arm
+    /// is refused and the fatter, closer one is legal.
+    ///
+    /// **It is expected to FAIL when §8 steps 3-5 land, and that failure is the
+    /// point.** The honest-exemption rule makes monotonicity a THEOREM (§3): the
+    /// tested face set is frozen and the tested station set is the whole axis,
+    /// so `clearance = C - r_max - gap` is monotone decreasing in `r_max` and a
+    /// thinner arm can never grade worse. When this test goes red, replace it
+    /// with the monotonicity assertion (`thin >= fat`) rather than deleting it —
+    /// the fixture is the same either way, and only the expected sign changes.
+    #[test]
+    fn the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
+        let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
+
+        const COS: f64 = 0.2;
+        const THIN_MM: f64 = 0.20;
+        const FAT_MM: f64 = 0.90;
+        let dir = [(1.0_f64 - COS * COS).sqrt(), 0.0, COS];
+        let p0 = [0.0, 0.0, -0.3];
+        let point_at = |u: f64| std::array::from_fn(|axis| p0[axis] + dir[axis] * u);
+
+        // NON-VACUITY: the two masks must be well separated, or the fixture is
+        // not exercising the radius-proportional skip at all.
+        let mask = |r: f64| contact::placed_mask_inset_mm(seating, COS, r, r, &policy).unwrap();
+        let (mask_thin, mask_fat) = (mask(THIN_MM), mask(FAT_MM));
+        assert!(
+            mask_fat > mask_thin + 3.0,
+            "the fixture needs the two masks well separated: {mask_thin} vs {mask_fat}"
+        );
+
+        let a: [f64; 3] = point_at(mask_thin + 0.02);
+        let b: [f64; 3] = point_at(mask_thin + 1.0);
+        let surface =
+            table_with_foreign_panel([a[0], 0.05, a[2] - 0.05], [b[0], 0.25, b[2] + 0.05]);
+        let p1: [f64; 3] = point_at(mask_fat + 5.0);
+
+        let graded = |radius_mm: f64, config: &BraceConfig| {
+            let mut forest = Forest::new();
+            forest.add_member(Member::new(MemberSpec {
+                p0_mm: finite3(p0).unwrap(),
+                p1_mm: finite3(p1).unwrap(),
+                r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+                r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+                kind: MemberKind::Strut,
+                owner: Owner::Generated {
+                    family: "parked-state".into(),
+                    ordinal: 0,
+                },
+                model_contact_end: Some(ContactEnd::Terminalward),
+                carried_mm2: finite(0.0).unwrap(),
+            }));
+            let rows =
+                exact_clearance_rows(&forest, &surface, config, test_penetration_limits()).unwrap();
+            assert_eq!(rows.len(), 1, "one member, one graded row");
+            rows[0].1
+        };
+        let thin = graded(THIN_MM, &config);
+        let fat = graded(FAT_MM, &config);
+
+        // What the SAME fixture read before the ruling split the demand: at the
+        // single pre-ruling 0.600, BOTH rows refused. MEASURED, not derived —
+        // this is the "from" half of the movement the ledger records, and it is
+        // what makes the inversion a step 2 effect rather than a pre-existing
+        // one.
+        let pre_ruling = BraceConfig {
+            final_clearance_gap_mm: config.standoff_mm,
+            ..config.clone()
+        };
+        let (thin_at_600, fat_at_600) = (graded(THIN_MM, &pre_ruling), graded(FAT_MM, &pre_ruling));
+        assert!(
+            thin_at_600 < 0.0 && fat_at_600 < 0.0,
+            "at the pre-ruling single demand of {} mm BOTH arms must refuse; \
+             kernel said thin = {thin_at_600}, fat = {fat_at_600}",
+            config.standoff_mm
+        );
+
+        assert!(
+            thin < 0.0 && fat >= 0.0,
+            "PARKED STATE: at this commit the thin arm (r = {THIN_MM} mm) must be \
+             REFUSED and the fat arm (r = {FAT_MM} mm) LEGAL on the same axis \
+             against the same surface — the inversion challenge finding B2 \
+             measured. Kernel said thin = {thin}, fat = {fat}. If this assertion \
+             failed because §8 steps 3-5 landed, the rule now makes monotonicity \
+             a theorem: replace this with `thin >= fat` and say so."
+        );
+        println!(
+            "PARKED-STATE-INVERSION at FINAL {}: thin(r={THIN_MM})={thin}  \
+             fat(r={FAT_MM})={fat}  |  at the pre-ruling {}: thin={thin_at_600}  \
+             fat={fat_at_600}",
+            config.final_clearance_gap_mm, config.standoff_mm
+        );
+    }
+
+    /// **`evaluate_candidates` spends the PLACEMENT demand — ruling R-1495, as
+    /// a test that goes RED on a sabotaged read** (challenge finding B3,
+    /// 2026-08-22).
+    ///
+    /// Before this test, `brace.rs:1495` was one of two ruled tier reads with
+    /// no test that could tell: the challenger switched
+    /// `ClearanceStage::Placement` to `Final` at this site and the whole scoped
+    /// estate stayed GREEN. The ruling is only real if a violation is loud.
+    ///
+    /// The fixture is the two-tier case §8 step 6 names, built so the answer
+    /// lives strictly BETWEEN the two registered demands and cannot be reached
+    /// by either one by accident:
+    ///
+    /// * a horizontal rod of radius 0.45 mm at `z = +0.90 mm` over a table
+    ///   whose top face is `z = 0`, so the kernel's TRUE gap is
+    ///   `0.90 - 0.45 = 0.45 mm` — asserted from the kernel at demand 0, not
+    ///   restated arithmetic;
+    /// * `0.300 < 0.45 < 0.600` is asserted from the REGISTRY, so the fixture
+    ///   is provably a two-tier discriminator rather than a hand-picked number;
+    /// * a control rod 2.0 mm up is viable at BOTH tiers, so a uniformly
+    ///   refusing fixture cannot pass this test by accident.
+    ///
+    /// The pin: production must call the middle rod NOT viable. A read that
+    /// switched to `FINAL_CLEARANCE_GAP_MM` would call it viable, and this
+    /// assertion is what says so.
+    #[test]
+    fn evaluate_candidates_prunes_at_the_placement_demand_not_the_final_one() {
+        let surface = flat_table();
+        let config = BraceConfig::current(0.05).unwrap();
+        let constants = m0_constants().unwrap();
+        let placement_mm = constants.placeholders().standoff_mm().diagnostic().get();
+        let final_mm = *constants.evidence().final_clearance_gap_mm().value();
+
+        let radius_mm = 0.45_f64;
+        let rod_at = |height_mm: f64| PlacementCandidate {
+            need_index: 0,
+            site_index: 0,
+            rank: 0,
+            kind: BraceAdditionKind::CrossLink,
+            rods: vec![Rod {
+                p0: [-2.0, 0.0, height_mm],
+                p1: [2.0, 0.0, height_mm],
+                radius: positive(radius_mm),
+                inset0: 0.0,
+                inset1: 0.0,
+                #[cfg(feature = "census")]
+                contact: None,
+            }],
+            printable: true,
+        };
+
+        // NON-VACUITY, from the kernel: at a demand of zero the number IS the
+        // true gap, and it sits strictly between the two registered demands.
+        let (true_gap, _) = surface
+            .segment_clearance(
+                &[[-2.0, 0.0, 0.9]],
+                &[[2.0, 0.0, 0.9]],
+                &[radius_mm],
+                &[radius_mm],
+                0.0,
+                &[0.0],
+                &[0.0],
+            )
+            .unwrap();
+        assert!(
+            (true_gap[0] - 0.45).abs() < 1e-9,
+            "the fixture's TRUE gap must be 0.45 mm; the kernel said {}",
+            true_gap[0]
+        );
+        assert!(
+            final_mm < true_gap[0] && true_gap[0] < placement_mm,
+            "the fixture must discriminate the two tiers: FINAL {final_mm} < \
+             true gap {} < PLACEMENT {placement_mm}",
+            true_gap[0]
+        );
+
+        let viable = evaluate_candidates(
+            &surface,
+            &[rod_at(0.9), rod_at(2.0)],
+            &config,
+            test_penetration_limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            viable,
+            vec![false, true],
+            "R-1495: this tournament prunes at PLACEMENT ({placement_mm} mm), so \
+             a 0.45 mm true gap is dropped here and a 1.55 mm one is kept. If \
+             this site were switched to read FINAL ({final_mm} mm) the first \
+             candidate would survive, which is exactly the sabotage this \
+             assertion exists to catch."
+        );
+    }
+
     #[test]
     fn stable_unplaceable_fixed_point_is_not_reported_as_converged() {
         let mut forest = Forest::new();

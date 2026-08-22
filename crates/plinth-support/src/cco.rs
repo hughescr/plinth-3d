@@ -7445,6 +7445,126 @@ mod tests {
         );
     }
 
+    /// One candidate holding a single arm that declares NO model contact, so
+    /// the insets are zero and the kernel grades its whole axis. This is the
+    /// clean instrument for the DEMAND: nothing about a mask can move the
+    /// answer.
+    fn plain_candidate(p0: [f64; 3], p1: [f64; 3], radius_mm: f64) -> EvaluatedCandidate {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let snapshot = Forest::new();
+        let mut forest = snapshot.clone();
+        forest.add_member(Member::new(MemberSpec {
+            p0_mm: p0.map(finite),
+            p1_mm: p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+            r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Contact(7),
+            model_contact_end: None,
+            carried_mm2: finite(2.0),
+        }));
+        let rows = clearance_rows(&forest, &snapshot);
+        assert_eq!(rows.len(), 1, "exactly one changed member");
+        assert!(
+            rows[0].contact.is_none(),
+            "this row declares no model contact, so no mask is in play"
+        );
+        EvaluatedCandidate {
+            forest: forest.clone(),
+            family: CandidateFamily::ModelAnchor,
+            generation_index: 0,
+            price_ml: 1.0,
+            rows,
+            anchor: None,
+        }
+    }
+
+    /// **`clearance_survival` spends the PLACEMENT demand — as a test that goes
+    /// RED on a sabotaged read** (challenge finding B3, 2026-08-22).
+    ///
+    /// Before this test, `cco.rs:3624` was one of two ruled tier reads with no
+    /// test that could tell: the challenger rewrote `seat_contact_policy`'s
+    /// `demanded_gap_mm` to `FINAL_CLEARANCE_GAP_MM` and the whole scoped
+    /// estate — 590 lib tests plus five integration binaries — stayed GREEN.
+    ///
+    /// The fixture is the two-tier case §8 step 6 names, on the arm that
+    /// declares NO contact so no mask can be blamed for the answer:
+    ///
+    /// * radius 0.45 mm, horizontal at `z = +0.90 mm` over a slab whose top
+    ///   face is `z = 0`, so the TRUE gap is `0.90 - 0.45 = 0.45 mm` — read
+    ///   back from the kernel at demand 0, not restated arithmetic;
+    /// * `0.300 < 0.45 < 0.600` asserted from the REGISTRY, so the fixture is
+    ///   provably a two-tier discriminator;
+    /// * a control arm 2.0 mm up survives, so a uniformly refusing fixture
+    ///   cannot pass this test by accident.
+    ///
+    /// The pin: production must return `Distance` for the middle arm. A site
+    /// reading `FINAL_CLEARANCE_GAP_MM` would return `Survives`.
+    #[test]
+    fn clearance_survival_prunes_at_the_placement_demand_not_the_final_one() {
+        let surface = planar_slab();
+        let policy = seat_contact_policy(0.05).unwrap();
+        let constants = m0_constants().unwrap();
+        let placement_mm = constants.placeholders().standoff_mm().diagnostic().get();
+        let final_mm = *constants.evidence().final_clearance_gap_mm().value();
+        let radius_mm = 0.45_f64;
+
+        // NON-VACUITY, from the kernel: at a demand of zero the number IS the
+        // true gap, and it sits strictly between the two registered demands.
+        let (true_gap, _) = surface
+            .segment_clearance(
+                &[[-2.0, 0.0, 0.9]],
+                &[[2.0, 0.0, 0.9]],
+                &[radius_mm],
+                &[radius_mm],
+                0.0,
+                &[0.0],
+                &[0.0],
+            )
+            .unwrap();
+        assert!(
+            (true_gap[0] - 0.45).abs() < 1e-9,
+            "the fixture's TRUE gap must be 0.45 mm; the kernel said {}",
+            true_gap[0]
+        );
+        assert!(
+            final_mm < true_gap[0] && true_gap[0] < placement_mm,
+            "the fixture must discriminate the two tiers: FINAL {final_mm} < \
+             true gap {} < PLACEMENT {placement_mm}",
+            true_gap[0]
+        );
+
+        let verdicts = clearance_survival(
+            &surface,
+            &policy,
+            &[
+                plain_candidate([-2.0, 0.0, 0.9], [2.0, 0.0, 0.9], radius_mm),
+                plain_candidate([-2.0, 0.0, 2.0], [2.0, 0.0, 2.0], radius_mm),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            verdicts,
+            vec![ClearanceVerdict::Distance, ClearanceVerdict::Survives],
+            "this tournament prunes at PLACEMENT ({placement_mm} mm), so a \
+             0.45 mm true gap is dropped here and a 1.55 mm one is kept. If \
+             this site were switched to read FINAL ({final_mm} mm) the first \
+             candidate would SURVIVE, which is exactly the sabotage this \
+             assertion exists to catch."
+        );
+
+        // The read itself, stated separately and AFTER the behaviour, so the
+        // behavioural half is what fails first under a sabotaged read and this
+        // one still catches a demand that arrives by some other route.
+        assert!(
+            (policy.demanded_gap_mm - placement_mm).abs() < f64::EPSILON,
+            "this stage's demand must BE `STANDOFF_MM` ({placement_mm} mm); the \
+             policy carries {}",
+            policy.demanded_gap_mm
+        );
+    }
+
     fn no_winner_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
         let (forest, request, surface) = growth_fixture();
         let request = TerminalCcoRequest::bind(
