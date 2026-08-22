@@ -296,3 +296,22 @@ Added by this implementation:
   fixed-defect movements, both are owner-visible, and both are in #39's and #29's lanes
   rather than #51's. **The judge rules on how they are re-recorded; this lane does not
   re-freeze them.**
+
+Added 2026-08-21 by the consolidation judge, on this lane's own commit `4c74f74`:
+
+* **E-E (accounting seam).** `4c74f74` correctly stopped a refused model-seated arm from
+  killing the run, and exposed the seam under it. `brace.rs:523` quarantines a condemned
+  member's subtree **inside the Brace stage, after the CCO transcript has been sealed**, so
+  a cascaded contact stub's terminal ledger reads `Quarantined` while its sealed transcript
+  row still reads `Routed`. `finalized_unrouted_terminals` (`runner.rs:5579`) admits three
+  (transcript, ledger) pairs and refuses every other combination at `runner.rs:5617`;
+  `(Routed, Quarantined)` is not one of them, and the Giant Bat is the live instance —
+  `Structure: TerminalEvidenceMismatch { terminal: 298 }` on the drilled shell,
+  `{ terminal: 187 }` on the substituted solid. **The recorded direction was (b), refuse the
+  doomed arm at candidacy — and for the class the Bat is in that direction is MEASURED
+  unavailable**, because the Brace stage assigns the radius its own verdict is computed
+  from. The defect chain, the refutation, the corrected Bat evidence and the menu of
+  remaining directions are in
+  [`candidacy-exact-mask-2026-08-21.md`](candidacy-exact-mask-2026-08-21.md); the judge
+  chooses. **A stage that mutates the terminal ledger after the transcript is sealed is an
+  architectural seam, not only a Bat bug, and is worth the owner's eye on its own.**
