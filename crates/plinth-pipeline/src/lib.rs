@@ -2226,7 +2226,73 @@ mod tests {
                 // nothing here touches the coverage radius, the patch-area
                 // floor, the zero-tolerance verdict, or any registered
                 // constant.
-                "Sphere.prepped.stl" => false,
+                //
+                // Re-recorded a SEVENTH time, 2026-08-23, by #36's honest
+                // contact exemption — frozen seat zones at every creation site
+                // (`0a72bc8`) and the full axis graded against surface-minus-Z
+                // at all four grading sites (`edcadd6`) — false -> true, with
+                // this attribution rather than an edited expectation.
+                //
+                // **MEASURED at BOTH ends, this row's own `outcome` closure,
+                // same process, same settings.** The parked state was re-run in
+                // a linked worktree at `56a8782`, which is the same negative
+                // control the corpus re-baseline used, rather than read off the
+                // comment above:
+                //
+                //   at 56a8782: measured -> Err("... during Lowering:
+                //               Lowering(RootRunTooShort { member: MemberKey
+                //               { slot: 40, generation: 0 } })")
+                //               zeros    -> the same string with slot 38.
+                //               Two refusals, DIFFERENT text: divergent, and
+                //               the SIXTH re-record's numbers reproduce exactly.
+                //   at this tip: measured -> the same string with slot 32.
+                //               zeros    -> byte-identical, slot 32.
+                //               One refusal, identical text under both: neutral.
+                //
+                // **The delicacy channel is NOT erased, and that is why this is
+                // a re-pin and not a defect report.** MEASURED, static:
+                // `git diff 56a8782..HEAD` over `plinth-support` changes no line
+                // containing `delicacy` anywhere, and `lib.rs` (contact
+                // selection and its exact-Z tie-break), `perception.rs`, and
+                // `lower.rs` — the stage that raises `RootRunTooShort` — are
+                // byte-identical. The Sphere also stays under the 0.5 anchor cap
+                // (the guard above), so `AnchorSeatRefusalReason::TooDelicate`
+                // never fires, and the anchor seat ranking sorts on length then
+                // sample index, never on delicacy. MEASURED, dynamic: the other
+                // two fixtures in this very loop still diverge at the tip, and a
+                // THIRD field on the Sphere — `0.5 - measured`, which reverses
+                // the tie order and stays under the cap — SEALS at the tip
+                // (digest 9257918106102347092) exactly as it sealed at 56a8782
+                // (4192059247452978990). The Sphere's run is still strongly
+                // field-sensitive; what converged is these two fields.
+                //
+                // **The mechanism.** `RootRunTooShort` is task #29's defect:
+                // `lower::root_boss_top` refuses a plate-rooted member whose
+                // `p0` stands less than `root_no_bend` above the plate, and
+                // `checked_support_count` walks
+                // `live_members_in_creation_order_iter`, so the member it names
+                // is the FIRST such member in creation order. The honest
+                // exemption legalizes arms the retired radius-proportional
+                // skip-length refused — MEASURED corpus-wide by the re-baseline
+                // in EMISSION-CANARY-LEDGER.md, where record counts ROSE on all
+                // five emitting models — so members that were quarantined, and
+                // therefore excluded from the live view, now survive into it.
+                // The first offender moved EARLIER in creation order, to slot
+                // 32, below both of the parked state's 38 and 40, and both
+                // fields stop there. INFERRED, not measured: that slot 32 is a
+                // member the retired rule refused and this rule keeps. What the
+                // instrument reads is refusal TEXT, so what is pinned here is
+                // that the two fields now stop identically — the same
+                // convention this row's FIFTH re-record used when the wall
+                // target pushed the Sphere's stop earlier than the stage the
+                // tie-break lives in.
+                //
+                // The Sphere has not sealed here since FU-56 and does not seal
+                // now; this records WHICH refusal, not a new one. No pinned
+                // digest anywhere is re-frozen by this line, and nothing here
+                // touches the coverage radius, the patch-area minimum, the
+                // zero-tolerance verdict, or any registered constant.
+                "Sphere.prepped.stl" => true,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
