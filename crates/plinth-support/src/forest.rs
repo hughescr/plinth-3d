@@ -1093,6 +1093,24 @@ impl Forest {
         Ok(order)
     }
 
+    /// The terminal ledger inverted: which terminal each registered contact
+    /// member belongs to, built once for a whole batch.
+    ///
+    /// `terminal_of` is the only map that binds a member to a terminal, so the
+    /// inverse is taken from it rather than hand-rolled from key comparisons —
+    /// member generations move (a Giant Bat arm is `slot 377, generation 2`),
+    /// and a hand-rolled comparison against a stale key is a defect waiting.
+    /// The inverse is injective by construction: [`Forest::register_terminal`]
+    /// refuses a member whose owner is not `Owner::Contact(terminal)`, so two
+    /// terminals can never name one member.
+    pub(crate) fn terminals_by_member(&self) -> BTreeMap<MemberKey, u32> {
+        self.state
+            .terminal_of
+            .iter()
+            .map(|(terminal, key)| (*key, *terminal))
+            .collect()
+    }
+
     /// Post-order walk of `key`'s live subtree, pushing each member after its
     /// own children so every entry is childless by the time it is quarantined.
     ///

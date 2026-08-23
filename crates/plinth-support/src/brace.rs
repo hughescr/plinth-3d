@@ -16,10 +16,11 @@ use thiserror::Error;
 
 use crate::{
     anchor::{FOOT_BREACH_CONE_RAYS, FOOT_BREACH_HALF_DEG},
+    cco::FinalizedDispositionKind,
     contact::{self, ContactPolicy},
     designed_embed,
     forest::{
-        ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec,
+        ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec, Owner,
         RootwardEndRadius, TerminalEndRadius,
     },
     legacy_compat::{LegacyCompatibility, LegacyCompatibilityError},
@@ -282,6 +283,37 @@ pub(crate) enum BraceError {
     /// rung, so it fails the pass rather than dropping a candidate.
     #[error("brace seat-zone freeze failed: {0}")]
     SeatZone(String),
+    /// **Stage A — the pass is abandoned rather than minting the illegal pair.**
+    ///
+    /// The final pass measured a sealed-`Routed` terminal's OWN chosen arm
+    /// inside the model. Quarantining it would flip that terminal's live state
+    /// to `Quarantined` under a sealed record that still says `Routed` — a pair
+    /// the accounting rightly refuses two stages later, where it reads as a
+    /// broken engine rather than as the physics it is. Nothing is quarantined
+    /// and the refusal carries the whole class.
+    ///
+    /// It is an `Err` rather than a named termination on purpose: the forest
+    /// this pass holds still contains the illegal member, so no caller may be
+    /// able to reach it by ignoring a field.
+    #[error(
+        "the bracing pass is abandoned: it measured a sealed-routed terminal's own chosen arm \
+         inside the model, and quarantining it would mint the terminal pair the accounting \
+         forbids — {0}"
+    )]
+    SealedRoutedTerminalCondemned(Box<SealedCondemnationClass>),
+    /// **Stage A — the pass that learns nothing (design §3's T6).**
+    ///
+    /// The sweep would disturb sealed terminals, but no sealed-`Routed`
+    /// terminal's OWN chosen arm is among the condemned members: every one of
+    /// them is a cascade victim of somebody else's arm, or the disturbed
+    /// terminals were sealed as something other than `Routed`. There is no
+    /// choice to steer, so re-planning would reproduce this pass exactly.
+    /// It refuses here, by name, with the physics.
+    #[error(
+        "the bracing pass has nothing to steer with: its condemned members disturb sealed \
+         terminals, but no sealed-routed terminal's own chosen arm is among them — {0}"
+    )]
+    SealedSweepLearnedNothing(Box<SealedCondemnationClass>),
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +520,14 @@ pub(crate) fn brace_pass_current_parity(
 
 /// Frozen three-pass bracing/resize controller. It returns a new forest and a
 /// named non-convergence outcome; it never asserts or silently falls through.
+///
+/// `sealed` is the routing seal's own record — every terminal it named, with
+/// the disposition it named. **Stage A** of the seal-semantics design uses it
+/// to decide whether the third-pass sweep may run at all: a sweep that would
+/// flip a sealed terminal's live state abandons the pass instead of writing on
+/// top of a record it cannot change. Pass an empty slice to get today's
+/// behaviour exactly, which is what every unit fixture without a sealed record
+/// does.
 pub(crate) fn brace_fixed_point_current_parity(
     forest: &Forest,
     surface: &NativeSurface,
@@ -495,6 +535,7 @@ pub(crate) fn brace_fixed_point_current_parity(
     plate_z_mm: Finite,
     penetration_limits: PenetrationBatchLimits,
     process_resolution_mm: f64,
+    sealed: &[SealedTerminalDisposition],
 ) -> Result<BraceFixedPointPlan, BraceError> {
     const FROZEN_PASS_CAP: usize = 3;
     let mut working = forest.clone();
@@ -594,6 +635,26 @@ pub(crate) fn brace_fixed_point_current_parity(
             // subtrees once (a refused stub that is itself the child of a
             // refused arm is condemned once, not twice, and does not become an
             // `InactiveKey` error on the second visit).
+            //
+            // **Stage A stands here.** Before the sweep runs, the condemnation
+            // set is planned READ-ONLY by the planner half of this very
+            // mutation and intersected with the sealed record. An empty
+            // intersection applies the sweep exactly as it always did — the
+            // refutation's own carve-out, and the behaviour of every model
+            // whose brace refusals disturb no contact accounting. A non-empty
+            // one abandons the pass instead of minting a terminal pair the
+            // accounting forbids.
+            if let Some(class) =
+                classify_sealed_condemnation(&working, sealed, &negative, &final_pass_refusals)?
+            {
+                class.disclose();
+                let class = Box::new(class);
+                return Err(if class.has_steerable_sealed_route() {
+                    BraceError::SealedRoutedTerminalCondemned(class)
+                } else {
+                    BraceError::SealedSweepLearnedNothing(class)
+                });
+            }
             working.quarantine_subtrees(&negative.contact_refusals)?;
             return Ok(BraceFixedPointPlan {
                 forest: working,
@@ -2146,6 +2207,223 @@ impl FinalPassRefusalAccounting {
             self.refused_arms, self.pipeline_violations,
         ));
     }
+}
+
+/// One terminal the ROUTING SEAL named, with the disposition it named.
+///
+/// Stage A is handed every sealed disposition rather than the `Routed` ones
+/// alone. The tripwire it stands in front of —
+/// `runner::finalized_unrouted_terminals` — refuses every pair outside the
+/// three it admits plus a ledger cardinality mismatch, so classifying on the
+/// whole record is the right shape and costs nothing (design §4 Stage A(a)).
+/// It is NOT claimed to retire an error that fires today: `children_of`
+/// filters to live members, so a cascade cannot reach an inactive one, and a
+/// directly named inactive key still refuses inside the planner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SealedTerminalDisposition {
+    pub(crate) terminal_id: u32,
+    pub(crate) kind: FinalizedDispositionKind,
+}
+
+/// One sealed terminal the third-pass sweep would have disturbed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DisturbedSealedTerminal {
+    pub(crate) terminal_id: u32,
+    pub(crate) sealed_kind: FinalizedDispositionKind,
+    /// The terminal's registered contact member, taken from the one map that
+    /// binds a member to a terminal.
+    pub(crate) terminal_member: MemberKey,
+    /// Measured-illegal members on this terminal's OWN route that the terminal
+    /// itself owns — the arms ITS tournament chose. A no-good is only ever
+    /// recorded for one of these (design §1.3).
+    pub(crate) own_chosen_arms: Vec<MemberKey>,
+    /// Measured-illegal members on its route that it does NOT own: somebody
+    /// else's arm, with this terminal's stub hanging off it. **A cascade
+    /// victim steers nothing.** Punishing it would cost a legal arm per pass
+    /// for another member's failure, and retire it in the end with no arm of
+    /// its own ever measured illegal.
+    pub(crate) cascade_carriers: Vec<MemberKey>,
+}
+
+impl DisturbedSealedTerminal {
+    const fn own_arm_condemned(&self) -> bool {
+        !self.own_chosen_arms.is_empty()
+    }
+}
+
+/// **The WHOLE mismatch class one abandoned pass names.**
+///
+/// The measurement lane found `finalized_unrouted_terminals` returns on the
+/// FIRST bad row, so a run learned about one terminal at a time. Stage A does
+/// not repeat that: every sealed terminal the sweep would have disturbed is
+/// carried here, each with its own arms and its cascade carriers, together
+/// with every member the final pass measured illegal and by how much.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SealedCondemnationClass {
+    /// Every member the final pass measured illegal, with its true gap in
+    /// millimetres and the radii the resize assigned.
+    pub(crate) measured_refusals: Vec<RefusalGapRow>,
+    /// Every disturbed sealed terminal, ascending by terminal id.
+    pub(crate) disturbed: Vec<DisturbedSealedTerminal>,
+}
+
+impl SealedCondemnationClass {
+    /// Does the class contain a sealed-`Routed` terminal whose OWN chosen arm
+    /// was measured illegal? That is the steerable case; anything else is a
+    /// pass that has learned nothing it can steer with.
+    fn has_steerable_sealed_route(&self) -> bool {
+        self.disturbed.iter().any(|terminal| {
+            terminal.sealed_kind == FinalizedDispositionKind::Routed && terminal.own_arm_condemned()
+        })
+    }
+
+    fn disclose(&self) {
+        crate::coverage_repair::emit_run_line(&format!("brace: {self}"));
+    }
+}
+
+impl std::fmt::Display for SealedCondemnationClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = |member: &MemberKey| format!("slot{}g{}", member.slot(), member.generation());
+        let members = |keys: &[MemberKey]| {
+            if keys.is_empty() {
+                "none".to_owned()
+            } else {
+                keys.iter().map(key).collect::<Vec<_>>().join(",")
+            }
+        };
+        write!(
+            formatter,
+            "sealed terminals disturbed={} measured refusals=[{}] class=[{}]",
+            self.disturbed.len(),
+            self.measured_refusals
+                .iter()
+                .map(|row| format!(
+                    "{}={:.6}mm@r{:.6}/{:.6}mm",
+                    key(&row.member),
+                    row.gap_mm,
+                    row.terminal_radius_mm,
+                    row.rootward_radius_mm
+                ))
+                .collect::<Vec<_>>()
+                .join(" "),
+            self.disturbed
+                .iter()
+                .map(|terminal| format!(
+                    "terminal {} sealed={:?} stub={} own_arms={} cascade_carriers={}",
+                    terminal.terminal_id,
+                    terminal.sealed_kind,
+                    key(&terminal.terminal_member),
+                    members(&terminal.own_chosen_arms),
+                    members(&terminal.cascade_carriers),
+                ))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+}
+
+/// **Stage A.** Plan the condemnation set read-only, intersect it with the
+/// sealed record, and say whether the sweep may run.
+///
+/// `Ok(None)` means the intersection is empty: no terminal the sealed record
+/// names is disturbed, so the sweep applies exactly as it does today. This is
+/// the refutation's own carve-out — brace rungs and model-anchor arms whose
+/// condemnation disturbs no contact accounting. **Their behaviour does not
+/// move.**
+///
+/// `Ok(Some(class))` means the sweep would have flipped a sealed terminal's
+/// live state under a record that cannot be rewritten. Quarantining then
+/// mints the `Routed`/`Quarantined` pair the accounting forbids, and the run
+/// dies two stages later with `TerminalEvidenceMismatch` — an error that reads
+/// as a broken engine rather than as the physics it is. The caller abandons
+/// instead, and the class says which terminals, which arms, and how many
+/// millimetres inside the model.
+///
+/// **Attribution, and why it is not a key comparison.** A member belongs to a
+/// terminal's own route when it carries that terminal's provenance:
+/// `Forest::register_terminal` refuses a stub whose owner is not
+/// `Owner::Contact(terminal)`, and `cco` mints every member of a terminal's
+/// route with that same `connector_owner`. A bifurcation's UPPER half inherits
+/// the HOST's owner instead, which is precisely the cascade-victim case — a
+/// stub re-parented onto somebody else's arm.
+fn classify_sealed_condemnation(
+    forest: &Forest,
+    sealed: &[SealedTerminalDisposition],
+    negatives: &ExactClearanceNegatives,
+    accounting: &FinalPassRefusalAccounting,
+) -> Result<Option<SealedCondemnationClass>, BraceError> {
+    if sealed.is_empty() || negatives.contact_refusals.is_empty() {
+        return Ok(None);
+    }
+    // (b) The query is an exact PREFIX of the mutation, not a second walk:
+    // `quarantine_subtrees` is this call plus a `quarantine` per planned key.
+    let order = forest.plan_quarantine_subtrees(&negatives.contact_refusals)?;
+    let condemned = order.iter().copied().collect::<BTreeSet<_>>();
+    let refused = negatives
+        .contact_refusals
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    // (c) Invert the one existing map, once, for the whole batch.
+    let terminals_by_member = forest.terminals_by_member();
+    let sealed_by_id = sealed
+        .iter()
+        .map(|row| (row.terminal_id, row.kind))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut disturbed = Vec::new();
+    for member_key in &order {
+        let Some(terminal_id) = terminals_by_member.get(member_key).copied() else {
+            continue;
+        };
+        let Some(sealed_kind) = sealed_by_id.get(&terminal_id).copied() else {
+            continue;
+        };
+        // Walk this terminal's own route rootward through the condemned set.
+        // The sweep condemns whole subtrees, so every member between the stub
+        // and the refusal key that took it down is in the set; the walk stops
+        // at the first member that is not.
+        let mut own_chosen_arms = Vec::new();
+        let mut cascade_carriers = Vec::new();
+        let mut cursor = Some(*member_key);
+        while let Some(key) = cursor {
+            if !condemned.contains(&key) {
+                break;
+            }
+            if refused.contains(&key) {
+                let owned = forest
+                    .member(key)
+                    .is_some_and(|member| member.owner() == &Owner::Contact(terminal_id));
+                if owned {
+                    own_chosen_arms.push(key);
+                } else {
+                    cascade_carriers.push(key);
+                }
+            }
+            cursor = forest.parent_of(key);
+        }
+        disturbed.push(DisturbedSealedTerminal {
+            terminal_id,
+            sealed_kind,
+            terminal_member: *member_key,
+            own_chosen_arms,
+            cascade_carriers,
+        });
+    }
+    if disturbed.is_empty() {
+        return Ok(None);
+    }
+    disturbed.sort_by_key(|terminal| terminal.terminal_id);
+    Ok(Some(SealedCondemnationClass {
+        measured_refusals: accounting
+            .rows
+            .iter()
+            .filter(|row| row.refusable)
+            .copied()
+            .collect(),
+        disturbed,
+    }))
 }
 
 fn exact_clearance_negatives(
@@ -4579,6 +4857,7 @@ mod tests {
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
+            &[],
         )
         .unwrap();
         assert_eq!(plan.termination, BraceFixedPointTermination::Unplaceable);
@@ -4783,6 +5062,7 @@ mod tests {
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
+            &[],
         )
         .expect(
             "OD-4: a refused genuine-contact member routes to quarantine, never a hard failure",
@@ -4813,6 +5093,353 @@ mod tests {
             plan.forest.terminal_quarantine(7).is_some(),
             "the terminal's own lookup must resolve, or the `quarantined` noncoverage \
              component would report this contact as merely unrouted"
+        );
+    }
+
+    /// The Stage A fixture: one registered, consumed terminal whose stub hangs
+    /// off a model-seated arm buried in the box, built at a chosen `x`/`y` so
+    /// several can share one forest.
+    ///
+    /// `arm_owner` is the whole point of the helper. Production mints every
+    /// member of a terminal's own route with that terminal's provenance
+    /// (`cco::apply_model_anchor` copies `request.connector_owner`, which
+    /// `Forest::register_terminal` has already pinned to
+    /// `Owner::Contact(terminal)`), while a bifurcation's upper half inherits
+    /// the HOST's owner instead. Passing `Owner::Contact(terminal)` therefore
+    /// builds "the terminal's own chosen arm"; passing anything else builds
+    /// "somebody else's arm, with this stub hanging off it".
+    fn seated_terminal_fixture(
+        forest: &mut Forest,
+        terminal: u32,
+        xy: [f64; 2],
+        arm_owner: Owner,
+    ) -> (MemberKey, MemberKey) {
+        let stub_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([xy[0], xy[1], 114.0]).unwrap(),
+            p1_mm: finite3([xy[0], xy[1], 112.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(terminal),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.register_terminal(terminal, stub_key).unwrap();
+        forest.consume_terminal(terminal, stub_key).unwrap();
+        let arm_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([xy[0], xy[1], 112.0]).unwrap(),
+            p1_mm: finite3([xy[0], xy[1], 105.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Strut,
+            owner: arm_owner,
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_parent(stub_key, Some(arm_key)).unwrap();
+        (stub_key, arm_key)
+    }
+
+    fn sealed_routed(terminal: u32) -> SealedTerminalDisposition {
+        SealedTerminalDisposition {
+            terminal_id: terminal,
+            kind: FinalizedDispositionKind::Routed,
+        }
+    }
+
+    /// **Stage A, the headline.** A sealed-`Routed` terminal whose OWN chosen
+    /// arm is measured inside the model abandons the pass. Nothing is
+    /// quarantined, the illegal terminal pair is never minted, and the refusal
+    /// names the terminal, the arm, the millimetres and the radius.
+    ///
+    /// This is the Giant Bat's class. Before Stage A it swept, flipped the
+    /// terminal's live state to `Quarantined` under a record still saying
+    /// `Routed`, and died two stages later with `TerminalEvidenceMismatch` —
+    /// an error that reads as a broken engine rather than as the physics.
+    #[test]
+    fn a_sealed_routed_terminals_own_arm_abandons_the_pass_instead_of_quarantining() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        let (stub_key, arm_key) =
+            seated_terminal_fixture(&mut forest, 7, [105.0, 105.0], Owner::Contact(7));
+        let before = forest.digest();
+
+        // NON-VACUITY — with an EMPTY sealed set this exact forest sweeps, so
+        // the difference below is Stage A and not the fixture.
+        let swept = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[],
+        )
+        .expect("with no sealed record the sweep applies exactly as it always did");
+        assert_eq!(
+            swept.termination,
+            BraceFixedPointTermination::ContactRefused
+        );
+        assert!(swept.forest.member(stub_key).is_none());
+
+        let capture = crate::coverage_repair::capture::RunLogCapture::install();
+        let refusal = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7)],
+        )
+        .expect_err("a sealed-routed terminal's own condemned arm abandons the pass");
+        let lines = capture.lines();
+
+        let BraceError::SealedRoutedTerminalCondemned(class) = refusal else {
+            panic!("the refusal must be the steerable one, not: {refusal}");
+        };
+        assert_eq!(
+            class.disturbed.len(),
+            1,
+            "one sealed terminal is disturbed by this sweep"
+        );
+        let disturbed = &class.disturbed[0];
+        assert_eq!(disturbed.terminal_id, 7);
+        assert_eq!(disturbed.sealed_kind, FinalizedDispositionKind::Routed);
+        assert_eq!(disturbed.terminal_member, stub_key);
+        assert_eq!(
+            disturbed.own_chosen_arms,
+            vec![arm_key],
+            "the arm the terminal's own tournament chose is what was measured illegal"
+        );
+        assert!(
+            disturbed.cascade_carriers.is_empty(),
+            "nothing else took this terminal down"
+        );
+
+        // The physics travels with the refusal, in millimetres.
+        let row = class
+            .measured_refusals
+            .iter()
+            .find(|row| row.member == arm_key)
+            .expect("the refused arm's measured gap must travel with the class");
+        assert!(
+            row.gap_mm < 0.0 && row.gap_mm.is_finite(),
+            "the refusal names how far inside the model the arm is"
+        );
+        assert_eq!((row.terminal_radius_mm, row.rootward_radius_mm), (0.5, 0.5));
+
+        // NOTHING WAS TOUCHED. The input forest is borrowed, so this also
+        // pins that the classifier's read-only query stayed read-only.
+        assert_eq!(
+            forest.digest(),
+            before,
+            "an abandoned pass must leave the forest exactly as it found it"
+        );
+        assert!(
+            forest.member(arm_key).is_some() && forest.member(stub_key).is_some(),
+            "neither member may be condemned by an abandoned pass"
+        );
+        assert!(
+            forest.quarantine_record(arm_key).is_none(),
+            "no quarantine record may be written by an abandoned pass"
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("terminal 7") && line.contains("own_arms=")),
+            "the class must be streamed while the run is happening: {lines:?}"
+        );
+    }
+
+    /// **The cascade-victim rule, and it is a correction rather than a nicety.**
+    ///
+    /// A terminal can be disturbed purely by cascade: its stub re-parented onto
+    /// somebody else's arm, and that arm condemned. Its own arm was never
+    /// measured illegal, so it has nothing to steer with and must NOT be given
+    /// a no-good. Without this rule the scheme punishes the innocent — a
+    /// victim would lose one legal arm per pass for another member's failure
+    /// and retire in the end with the ledger arithmetically perfect.
+    ///
+    /// The pass therefore refuses as "nothing learned" rather than as the
+    /// steerable class, and the victim is reported as a victim.
+    #[test]
+    fn a_terminal_taken_down_by_someone_elses_arm_is_reported_as_a_cascade_victim() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        let (stub_key, arm_key) = seated_terminal_fixture(
+            &mut forest,
+            7,
+            [105.0, 105.0],
+            Owner::Generated {
+                family: "brace-test".into(),
+                ordinal: 1,
+            },
+        );
+
+        let refusal = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7)],
+        )
+        .expect_err("a disturbed sealed terminal still abandons the pass");
+
+        let BraceError::SealedSweepLearnedNothing(class) = refusal else {
+            panic!(
+                "no sealed-routed terminal's OWN arm was condemned here, so nothing is steerable"
+            );
+        };
+        assert_eq!(class.disturbed.len(), 1);
+        let disturbed = &class.disturbed[0];
+        assert_eq!(disturbed.terminal_id, 7);
+        assert_eq!(disturbed.terminal_member, stub_key);
+        assert!(
+            disturbed.own_chosen_arms.is_empty(),
+            "the victim's OWN arm was never measured illegal, so it gets no no-good"
+        );
+        assert_eq!(
+            disturbed.cascade_carriers,
+            vec![arm_key],
+            "the arm that took it down is named as a carrier, not as its own choice"
+        );
+    }
+
+    /// **The refutation's carve-out, unchanged.** A refused member that
+    /// disturbs no terminal the sealed record names sweeps exactly as it always
+    /// did, even with a sealed record present. This is the property every model
+    /// whose brace refusals touch no contact accounting depends on, and it is
+    /// what makes Stage A's blast radius a claim a corpus run can prove.
+    #[test]
+    fn a_refusal_that_disturbs_no_sealed_terminal_sweeps_exactly_as_it_always_did() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+
+        // A sealed terminal that the sweep never reaches: its stub is clear of
+        // the box and hangs off nothing.
+        let untouched_stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([102.0, 102.0, 118.0]).unwrap(),
+            p1_mm: finite3([102.0, 102.0, 116.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.register_terminal(7, untouched_stub).unwrap();
+        forest.consume_terminal(7, untouched_stub).unwrap();
+
+        // A childless model-seated arm buried in the box: refused, carrying no
+        // terminal of its own.
+        let lone_arm = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([105.0, 105.0, 112.0]).unwrap(),
+            p1_mm: finite3([105.0, 105.0, 105.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "brace-test".into(),
+                ordinal: 2,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+
+        let plan = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7)],
+        )
+        .expect("an empty intersection applies the sweep, sealed record or not");
+        assert_eq!(plan.termination, BraceFixedPointTermination::ContactRefused);
+        assert_eq!(plan.contact_refusals, vec![lone_arm]);
+        assert!(
+            plan.forest.member(lone_arm).is_none(),
+            "the refused arm is condemned exactly as it always was"
+        );
+        assert!(
+            plan.forest.member(untouched_stub).is_some(),
+            "the sealed terminal the sweep never reached must survive it"
+        );
+    }
+
+    /// **The measurement-lane gap, closed.** `finalized_unrouted_terminals`
+    /// returns on the FIRST bad row, so a run learned about one terminal at a
+    /// time and the class could never be counted. Stage A's classification must
+    /// report the WHOLE class.
+    ///
+    /// Sabotage-shaped: a classifier that stops at the first disturbed terminal
+    /// — the shape the tripwire it replaces already has — goes red here.
+    #[test]
+    fn the_refusal_names_the_whole_mismatch_class_not_only_its_first_member() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        let (_, first_arm) =
+            seated_terminal_fixture(&mut forest, 7, [105.0, 105.0], Owner::Contact(7));
+        let (_, second_arm) =
+            seated_terminal_fixture(&mut forest, 9, [103.0, 103.0], Owner::Contact(9));
+
+        // NON-VACUITY — both arms really are refused by the exact pass.
+        let config = BraceConfig::current(0.05).unwrap();
+        let negatives =
+            exact_clearance_negatives(&forest, &surface, &config, test_penetration_limits())
+                .unwrap();
+        assert_eq!(
+            negatives.contact_refusals,
+            vec![first_arm, second_arm],
+            "both seated arms must be refusals, or the class cannot have two members"
+        );
+
+        let refusal = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7), sealed_routed(9)],
+        )
+        .expect_err("two sealed-routed terminals lose their own arms in one sweep");
+
+        let BraceError::SealedRoutedTerminalCondemned(class) = refusal else {
+            panic!("both terminals lost their OWN arms, so this is the steerable class");
+        };
+        assert_eq!(
+            class
+                .disturbed
+                .iter()
+                .map(|terminal| terminal.terminal_id)
+                .collect::<Vec<_>>(),
+            vec![7, 9],
+            "every disturbed terminal must be named, not only the first"
+        );
+        assert_eq!(class.disturbed[0].own_chosen_arms, vec![first_arm]);
+        assert_eq!(class.disturbed[1].own_chosen_arms, vec![second_arm]);
+        assert_eq!(
+            class.measured_refusals.len(),
+            2,
+            "every measured refusal travels with the class, with its own millimetres"
+        );
+
+        // The rendered refusal names both, so an operator reading one line
+        // learns the size of the class rather than one member of it.
+        let rendered = class.to_string();
+        assert!(
+            rendered.contains("terminal 7") && rendered.contains("terminal 9"),
+            "the rendered class must name every terminal: {rendered}"
         );
     }
 
@@ -4870,6 +5497,7 @@ mod tests {
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
+            &[],
         )
         .expect("the refused contact routes to quarantine");
         let lines = capture.lines();
@@ -4954,6 +5582,7 @@ mod tests {
             finite(0.0).unwrap(),
             test_penetration_limits(),
             0.05,
+            &[],
         )
         .expect("a member clear of the model braces cleanly");
         assert_eq!(

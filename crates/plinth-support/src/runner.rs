@@ -67,7 +67,7 @@ use crate::{
     assess_coverage_with_mode,
     brace::{
         brace_fixed_point_current_parity, BraceAdditionKind, BraceError, BraceFixedPointPlan,
-        BraceFixedPointTermination,
+        BraceFixedPointTermination, SealedTerminalDisposition,
     },
     cco::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
@@ -4724,7 +4724,23 @@ fn brace_state(
         let loads = state.routed.plan.finalized_loads()?;
         context.validate_brace_preflight(&state, &geometry, loads)?;
 
-        let plan = brace_fixed_point_current_parity(
+        // **Stage A.** The sealed record, handed to the brace stage so a sweep
+        // that would flip a sealed terminal's live state abandons the pass
+        // instead of writing on top of a record it cannot change. Every sealed
+        // disposition travels, not the `Routed` ones only (design §4 Stage
+        // A(a)); the transcript is already held here, so this is a projection
+        // rather than a new authority.
+        let sealed = state
+            .routed
+            .transcript
+            .rows()
+            .iter()
+            .map(|row| SealedTerminalDisposition {
+                terminal_id: row.terminal_id(),
+                kind: row.kind(),
+            })
+            .collect::<Vec<_>>();
+        let plan = match brace_fixed_point_current_parity(
             state.routed.initial.forest(),
             geometry.surface(),
             // #36 step 3. The face adjacency the seat-zone freeze walks, taken
@@ -4738,7 +4754,22 @@ fn brace_state(
             // and the clearance margin are both one layer, and a layer is a
             // property of this run's plan rather than of the registry.
             crate::contact::ContactPolicy::process_resolution_of(context.layers()),
-        )?;
+            &sealed,
+        ) {
+            Ok(plan) => plan,
+            // Stage A's two outcomes are lifted out of the generic
+            // `BraceError` wrapper and named at the stage boundary, so an
+            // operator reads WHICH refusal happened without unwrapping a
+            // transparent error, and so the retry loop Stage B adds can match
+            // one arm rather than parse a string.
+            Err(BraceError::SealedRoutedTerminalCondemned(class)) => {
+                return Err(SupportBraceError::SealedRoutedTerminalCondemned(class));
+            }
+            Err(BraceError::SealedSweepLearnedNothing(class)) => {
+                return Err(SupportBraceError::SealedSweepLearnedNothing(class));
+            }
+            Err(error) => return Err(error.into()),
+        };
         plan.forest.validate().map_err(BraceError::from)?;
         let report = transient_report(&plan.forest, context.frame.plate_z_mm())?;
         let post_brace_forest_digest = plan.forest.digest();
@@ -6240,6 +6271,18 @@ pub(crate) enum SupportBraceError {
     BracePlanDigestMismatch,
     #[error("sealed brace plan's transient report or report digest is stale")]
     TransientReportDigestMismatch,
+    /// **Stage A.** The bracing pass measured a sealed-`Routed` terminal's own
+    /// chosen arm inside the model and abandoned rather than minting the
+    /// terminal pair the accounting forbids. The whole disturbed class travels
+    /// with it — every affected terminal, its own arms, its cascade carriers,
+    /// and every measured refusal in millimetres.
+    #[error("{0}")]
+    SealedRoutedTerminalCondemned(Box<crate::brace::SealedCondemnationClass>),
+    /// **Stage A.** The bracing pass would have disturbed sealed terminals, but
+    /// no sealed-`Routed` terminal's own chosen arm was condemned, so the pass
+    /// has learned nothing it could steer with.
+    #[error("{0}")]
+    SealedSweepLearnedNothing(Box<crate::brace::SealedCondemnationClass>),
 }
 
 #[derive(Debug, Error)]
@@ -7832,6 +7875,7 @@ mod tests {
             plate,
             brace_penetration_limits(),
             0.05,
+            &[],
         )
         .expect("empty forest is a valid production brace input");
         assert_eq!(converged.termination, BraceFixedPointTermination::Converged);
@@ -7845,6 +7889,7 @@ mod tests {
             plate,
             brace_penetration_limits(),
             0.05,
+            &[],
         )
         .expect("isolated long trunk remains a valid production brace input");
         assert_eq!(
@@ -7862,6 +7907,7 @@ mod tests {
             plate,
             brace_penetration_limits(),
             0.05,
+            &[],
         )
         .expect("paired long trunks remain a valid production brace input");
         assert_eq!(
