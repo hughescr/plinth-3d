@@ -54,9 +54,22 @@ const RETIRED_FLAT_INSET: [(&str, &str); 2] = [
     ("rewire.rs", "config.contact_depth_mm"),
 ];
 
-/// The convergence, by source text: every file that builds a `segment_clearance`
-/// inset pair for a contact-declaring member must go through the ONE shared
-/// mask.
+/// The convergence, by source text: every file that builds a PR-2 mask for a
+/// contact-declaring member must go through the ONE shared statement of it.
+///
+/// **WHAT THE MASK NOW FEEDS (#36 step 5, 2026-08-22).** All three rows STAY,
+/// and the reason they stay changed. The mask is no longer handed to
+/// `segment_clearance` as an inset anywhere: the clearance distance path tests
+/// the FULL axis and exempts a frozen face SET instead. The mask survives at
+/// the two readers section 5 of the honest-exemption design keeps —
+/// `contact::emerges` (PR-3 admissibility, which the honest rule makes MORE
+/// necessary, not less: a zone that swallows the whole neighbourhood would
+/// otherwise pass by erasure) and `brace::axis_illegal_rows` (the axis-transit
+/// window, where a length measured from the seat is the right shape because the
+/// seat embed IS a length along the axis). Each guarded file still calls the
+/// shared helper for one of those, so the guard is unchanged in force and this
+/// note is what keeps it from being read as a claim about insets it no longer
+/// makes.
 ///
 /// This is the positive half of the guard, and it exists because the negative
 /// half alone is not enough. Banning a name stops that name coming back; it
@@ -205,9 +218,10 @@ fn every_clearance_site_goes_through_the_one_shared_mask() {
         assert!(
             reached,
             "{file} no longer calls `{needle}` in PRODUCTION code. Every site \
-             that builds a `segment_clearance` inset pair for a \
-             contact-declaring member must use the ONE shared PR-2 mask \
-             (`contact::placed_mask_inset_mm`). Three sites diverging from it is \
+             that builds a PR-2 mask for a contact-declaring member must use \
+             the ONE shared statement of it (`contact::placed_mask_inset_mm`) — \
+             today for PR-3 emergence and the axis-transit window rather than \
+             for a clearance inset (#36 step 5). Three sites diverging from it is \
              defect #36; the rootward half of that divergence is #51, which made \
              the model-anchor clearance test unsatisfiable by exactly the arm's \
              own radius. An occurrence inside `#[cfg(test)] mod tests` does NOT \

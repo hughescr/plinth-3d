@@ -192,7 +192,9 @@ the mesh.
 | `3fe332b` | **§8 step 1.** `ForestState::seat_zones`, `set_seat_zone` / `seat_zone`, the resize-survival and digest-inertness tests. |
 | `005d56b` | **§8 step 2.** `ContactPolicy::demanded_gap_mm` and the named `ClearanceStage`; all four production `segment_clearance` sites read their stage's registered demand. §9.3. |
 | `8b6cb14` | **Challenge finding E**, note text only: the retired `seg_clear_one` name in the `STANDOFF_MM` provenance, its ledger twin, §3.5 and twelve live source comments. |
-| this pass | **Challenge findings B1–B4 and N1** — the Bat movement recorded and controlled, the parked state pinned by a test, the two unpinned tier reads pinned, and `retired_formula_guard` strengthened so a production fork cannot hide behind a test-module occurrence. §10. |
+| `0a72bc8` | **§8 steps 3–4.** `AnchorGeometryAuthority` retains its `FaceTopology`; all four creation sites freeze `Z`. §11.1–11.3. |
+| this pass | **§8 steps 5–6.** `inset0 = inset1 = 0` at all four grading sites, exempting the frozen face set; the trip-wire's successor; the sabotage estate and its red-runs. §11.4–11.7. |
+| (earlier) | **Challenge findings B1–B4 and N1** — the Bat movement recorded and controlled, the parked state pinned by a test, the two unpinned tier reads pinned, and `retired_formula_guard` strengthened so a production fork cannot hide behind a test-module occurrence. §10. |
 
 ---
 
@@ -528,3 +530,226 @@ batch-limits question answered by an owner. When they land:
    out, replaced by the commit that made the precondition true.
 3. The Giant Bat is re-run and re-recorded. It may still refuse, it may still
    walk; either is an honest answer and neither is a target.
+
+---
+
+## 11. Steps 3-6, as landed
+
+Everything in this section is MEASURED at this branch tip unless it says
+INFERRED.
+
+### 11.1 Step 3 — the `FaceTopology` threading, and what it cost
+
+`AnchorGeometryAuthority` already TOOK a topology: `new` validated it, bound its
+content digest into the fingerprint, and dropped the reference. It now retains
+it behind `topology()`. That was cheaper than threading a second, unbound
+`&FaceTopology` down three call chains, and it makes the surface and the
+adjacency provably the same pair the fingerprint attests rather than two
+arguments a caller could mismatch.
+
+| chain | how the topology arrives |
+| --- | --- |
+| `brace_state` → `brace_fixed_point_current_parity` → `brace_pass_current_parity` → `gather_candidates` | `geometry.topology()` |
+| `grow_terminal_with_finalized_anchor` → `grow_terminal_inner` → `generate_descriptors` | `context.route.geometry().topology()` |
+| `evaluate_rewire_candidates` → `generate_descriptors` | `anchor_route.geometry.topology()` |
+| `rewire::validate_changed_geometry` | already held the authority |
+
+The runner builds no second topology. The adjacency identity the flood fill
+rests on is RECORDED rather than assumed, as the challenger required:
+`validate_perception_input` builds it with `WeldPolicy::ExactBits`, and
+`NativeSurface::from_indexed` indexes faces in the same triangle order, so
+`surface.project`'s face IDs and `topology.neighbors` address the same faces.
+Every test fixture in this change builds its topology with the same policy, so
+no fixture can pass on a welding production would not do.
+
+### 11.2 Step 4 — the creation-site inventory, AS LANDED
+
+§9.4 named four sites. The tree confirms four production mints, plus one site
+examined and excluded:
+
+| # | site | kind / end | how it freezes |
+| --- | --- | --- | --- |
+| 1 | `initial.rs` stub mint | `Stub` / `Terminalward` | `freeze_stub_seat_zones`, after grow-to-attest so the band radius is the EMITTED tip. One batched `project` plus one batched band call for the whole run. |
+| 2 | `brace.rs` model rungs | `Other(model_rung)` / `Rootward` | The seat projection already ran and DISCARDED its face ID; capturing it costs no native call. One batched freeze per pass, riding the seat-attestation batch boundary. The zone travels on `PlacementCandidate`, so `evaluate_candidates` and `append_candidate` read the same face set. |
+| 3 | `cco::apply_model_anchor` | `Strut` / `Rootward` | Frozen once per seat in `generate_descriptors`, from the seat's already-snapped face; carried on the descriptor as a finished `Arc<[u32]>` and installed by an `Arc` clone. |
+| 4 | `cco::apply_bifurcation` | inherited `Rootward` | `Forest::take_seat_zone` MOVES the host's zone to the upper half. Never recomputed. |
+
+**Why site 3 carries the ZONE and not the face ID**, which §8 step 4 had not
+worked out: the commit path re-runs `apply_and_size` against the LIVE forest and
+throws the candidate forest away
+(`forest.digest() == winner.forest.digest()`, `grow_terminal_inner`). A zone
+derived at application time from the forest being written into could differ
+between the candidacy run and the replay. One carried on the descriptor cannot.
+
+**Site 4 MOVES rather than copies.** When the host's `Rootward` declaration is
+cleared, a copy left behind would exempt faces for a member that no longer has a
+seat. `Forest::take_seat_zone` exists for that, and the pin asserts `Arc::ptr_eq`
+— comparing CONTENTS would pass for a recompute that happened to land on the
+same faces; comparing ALLOCATIONS cannot.
+
+**Examined and EXCLUDED:**
+`designed_embed::SeatAttestationRow::provisional_member` mints a member with
+`model_contact_end: Some(..)`, but it lives only inside the attestation batch,
+never enters a forest, and never reaches a clearance grading site. Every other
+`model_contact_end: Some(..)` in the tree is test code.
+
+### 11.3 §9.5 — the batch limits, RESOLVED (Craig may veto)
+
+`seat_zone::production_limits`, a MESH-DERIVED bound:
+`max_faces_per_row = topology.n_faces()`, `max_rows = rows`,
+`max_total_faces = rows * n_faces` (saturating).
+
+The orchestrator's ruling was to MIRROR `PenetrationBatchLimits` /
+`ContactConstructionLimits::production()`, deriving values the way theirs were
+derived, and to STOP rather than invent a new number. Reading their provenance
+settles it: every one is registered as an *"Inherited unmeasured cap … Codex-era
+`73e7c13` … records the inherited number without ratifying it"*. Their
+derivation is INHERITANCE, and this batch family has nothing to inherit — there
+is no near-face number anywhere in the tree. Mirroring literally would mean
+typing three fresh numbers and registering them as unmeasured, which is exactly
+the invention the ruling forbids. So the ruling's own escape clause applies and
+§9.5's option (a) is what landed.
+
+It invents nothing. A band cannot contain more faces than the mesh has, so the
+bound is the exact worst case: a TRUE STATEMENT of the ceiling rather than a
+lever, which cannot refuse a legitimate band and cannot decide an outcome. It
+admits `rows × n_faces × 4` bytes — 949 MB worst case at the Weeping Treant's
+553 contacts and 429,120 faces, against §6's measured realistic zone of tens of
+faces (≈ 0.45 MB) and the 100 GB machine ceiling. The kernel's
+refuse-rather-than-truncate semantics are inherited untouched.
+
+**RAISED FOR CRAIG.** If he wants a real numeric authority beside
+`brace_penetration_limits`, it is a one-line change at one call site.
+
+### 11.4 Step 5 — the four grading sites
+
+| site | stage | what changed |
+| --- | --- | --- |
+| `brace::exact_clearance_rows` | FINAL | zero insets + frozen `Z`; the PR-2 mask survives as `mask_inset0/1` and goes ONLY to `axis_illegal_rows` |
+| `brace::evaluate_candidates` | PLACEMENT (R-1495) | zero insets + the candidate's frozen `Z`; `Rod::inset0/1` stay the mask, for `candidate_revalidation`'s transit screen |
+| `cco::clearance_survival` | PLACEMENT | zero insets + each row's frozen `Z`; the mask survives as `mask_inset0/1` for PR-3 `emergence_ok` |
+| `rewire::validate_changed_geometry` | PLACEMENT | zero insets + `after.seat_zone(key)`; the mask survives for PR-3 |
+
+Every site looks the zone up ONLY for a row that declares a contact. A member
+with no seat forgives nothing, and a contact-declaring row with no frozen zone
+gets an EMPTY exclusion — graded over its own designed embed and refused. That
+is the strict direction, chosen deliberately: a missed creation site surfaces as
+a refusal, never as a silent pass.
+
+The census `record_segment_batch` calls now record ZEROS, because those are the
+insets the batch actually receives. Recording the mask would describe a call the
+site no longer makes.
+
+`retired_formula_guard`'s three `CONVERGED` rows all STAY, and §10.4's
+instruction to "delete them deliberately and say why" is answered by the
+opposite finding: all three files still call `placed_mask_inset_mm` in
+production, for §5's two surviving readers. The guard's own prose was corrected
+so it no longer claims to be about insets.
+
+### 11.5 The trip-wire successor, MEASURED
+
+`the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired` is
+replaced by
+`a_thinner_arm_never_grades_worse_than_a_fatter_one_through_the_production_final_pass`
+— same fixture, same axis, same surface, one frozen `Z`, two radii.
+
+| | thin `r = 0.20 mm` | fat `r = 0.90 mm` |
+| --- | --- | --- |
+| FINAL = 0.300, at this tip | **−0.45 → REFUSED** | **−1.15 → REFUSED** |
+| FINAL = 0.600 (pre-ruling) | −0.75 → refused | −1.45 → refused |
+| the retired rule, for contrast | −0.45 → refused | **+0.05 → LEGAL** |
+
+`thin >= fat` at both demands, which is the theorem. **The old inversion pair is
+now BOTH-REFUSED.** The thin arm's number did not move at all — the retired rule
+already graded it honestly, because its mask was small. The fat arm moved from
+`+0.05` to `−1.15`: that is the blind spot closing, and it is the whole change
+in one number. The frozen zone is 2 faces (the table's own top), so the foreign
+panel is graded and the seat is not.
+
+### 11.6 The sabotage estate, with every red-run PERFORMED
+
+Six named sabotages, each applied to production text, run, and reverted.
+
+| sabotage | applied to | RED |
+| --- | --- | --- |
+| **A** `an_exact_pass_that_kept_the_retired_mask_as_an_inset` | `exact_clearance_rows` hands `mask_inset0/1` to `segment_clearance_excluding` | 4 tests: monotonicity, blind spot, seated legality, seating-independence |
+| **B** `a_final_pass_that_exempts_nothing` | `exact_clearance_rows` passes an empty exclusion per row | 3 tests: blind spot, seated legality, seating-independence |
+| **G** `an_exact_pass_that_zeroed_its_transit_masks` | `exact_clearance_rows` hands zeros to `axis_illegal_rows` | 1 test: `the_exact_pass_hands_the_transit_screen_its_masks_and_not_the_zeroed_insets` |
+| **C** `a_bifurcation_that_dropped_the_hosts_zone` | `apply_bifurcation` skips the inherit | 1 test: `a_bifurcated_upper_half_inherits_the_hosts_frozen_zone_rather_than_recomputing_it` |
+| **F** `a_placement_screen_that_exempts_nothing` | `cco::clearance_survival` passes an empty exclusion | 5 tests, including `the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes` |
+| **D** `a_mint_that_skipped_the_stub_freeze` | the `freeze_stub_seat_zones` call deleted | 2 tests: both stub pins |
+
+Two results are recorded because they are NEGATIVE, and hiding them would be the
+defect this estate exists to prevent:
+
+* **Sabotage B leaves monotonicity GREEN**, and that is correct rather than a
+  hole. The theorem does not require `Z` to be non-empty: with no exemption at
+  all both arms are graded over their own embeds and `thin >= fat` still holds.
+  Monotonicity's sabotage is A, and A turns it red.
+* **Sabotage G left the ENTIRE brace suite green when first run.** Finding D had
+  no production-path pin at all — `the_transit_screen_keeps_the_seat_mask_…`
+  calls `axis_illegal_rows` directly, so a fork at `exact_clearance_rows` was
+  invisible to it. That is the same shape of hole challenge finding B3 named for
+  the two unpinned tier reads. It is now closed by
+  `the_exact_pass_hands_the_transit_screen_its_masks_and_not_the_zeroed_insets`,
+  which drives the production function and asserts (with a stated non-vacuity
+  check) that the row really did land in the screen's `[0, 0.1)` admission
+  window — MEASURED at `clearance = 0.020`.
+
+A seventh sabotage, `a_band_frozen_from_the_law_radius` (`seed.law_r0` for
+`seed.r0`), is **SILENT on the available fixture** and says so in the test: the
+overhang table grows no tip, so `law_r0 == r0` for all 91 stubs and the two
+bands are the same number. The test prints the growth population, so the day a
+fixture grows one the sabotage becomes loud automatically.
+
+### 11.7 Moved pins, and one cost the judge must price
+
+Two lib pins moved, both expected, both re-derived through their producer:
+
+* `brace::tests::an_unseated_contact_is_not_over_masked_by_the_seat_depth`
+  asserted `clearance = MARGIN + (STANDOFF_MM − FINAL_CLEARANCE_GAP_MM) = 0.35`
+  and now reads `−0.8`. That number was an ARTIFACT of the retired rule: it
+  measured where the mask placed the exact pass's first tested station, and the
+  exact pass no longer has such a station. Replaced by
+  `the_exact_pass_no_longer_reads_the_seat_depth_that_the_mask_still_carries`,
+  which keeps MAJOR-6's actual rule (the mask carries the depth term for a
+  seated end and not an unseated one — asserted at `placed_mask_inset_mm`, where
+  the mask still lives) and adds the stronger new statement: the same geometry
+  and the same frozen zone, graded once as an unseated family and once as a
+  seated one, now read the SAME clearance (`9.2` both ways; masks `1.3` vs
+  `1.6`). `seating_of`'s two directions remain pinned by
+  `seating_follows_the_design_family`, so nothing was lost.
+* `cco::tests::the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes`
+  read `[Distance]` instead of `[Survives]`. Its helper built the candidate's
+  rows by hand and never froze a zone, so the seated arm was graded over its own
+  embed — the honest rule working exactly as designed. The helper now freezes
+  where production does, BEFORE `clearance_rows` reads the forest, and #51's
+  before/after pair is intact. The trailing direct-kernel assertion is relabelled
+  as the RETIRED path's historical control rather than a live claim.
+
+**THE COST, MEASURED — one test, 5.5x.** Per-test wall clock, `gate` profile,
+this machine, tip against the lane base at `562d829`:
+
+| test | base | tip | verdict at both ends |
+| --- | --- | --- | --- |
+| `closure_repairs_censored_dust_because_that_repair_closes_a_real_hole` | 133.7 s | **738.6 s** | FAILED (inherited `#39`) |
+| `public_runner_closes_overhang_table_only_after_appending_repair_contacts` | 2.10 s | 1.46 s | FAILED (inherited `#39`) |
+| `public_runner_measures_sealed_coverage_…` | 0.90 s | 0.85 s | ok |
+| `public_runner_seals_toed_slab_…` | 0.94 s | 0.87 s | ok |
+
+The whole movement is one already-red coverage-repair test, and it is the SAME
+SHAPE as §10.1's Giant Bat finding: the honest exemption legalizes arms the
+retired skip-length refused, so the repair loop — the subsystem `#39` owns and
+whose controller tests are 4-of-8 known red — explores far more before giving
+up. INFERRED, not measured: nothing here says the walk terminates sooner or
+later than it did; only that it is longer. This is `#39`'s lane, not this one's,
+and it is recorded so the judge prices it rather than discovers it.
+
+### 11.8 What this pass did NOT do
+
+The corpus re-baseline is the judge's (§8 step 7). No model was run, no canary
+row was written, and `EMISSION-CANARY-LEDGER.md` is untouched by this pass. The
+inherited `#39` reds are byte-identical in name and count between the lane base
+and this tip: `a4_transactional_controller` 4-of-8 and
+`support_runner_integration` 2-of-4, VERIFIED by running both binaries at
+`562d829` in a linked worktree.

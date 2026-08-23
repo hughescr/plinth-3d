@@ -1146,7 +1146,10 @@ impl RewireReplay {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+// No longer `Copy`: #36's frozen seat zone is an `Arc`, and sharing one is the
+// point — the tournament, the mint and the replay must all name the SAME face
+// set rather than three copies that could drift.
+#[derive(Clone, Debug)]
 struct ClearanceRow {
     p0: [f64; 3],
     p1: [f64; 3],
@@ -1165,6 +1168,18 @@ struct ClearanceRow {
     /// per-item kernel call is introduced; the projection count per tournament
     /// goes from zero to one.
     contact: Option<ClearanceContact>,
+    /// **#36 step 5 — the frozen seat zone `Z` for this row's contact.**
+    ///
+    /// Read out of the CANDIDATE forest by [`clearance_rows`], which runs after
+    /// `apply_and_size` has minted or inherited the zone, so the tournament
+    /// grades against the same face set the committed replay will install.
+    ///
+    /// `None` for a row with no contact — it forgives nothing — and also for a
+    /// contact-declaring row whose zone is somehow missing, which grades it
+    /// against its own designed embed and refuses it. That is the STRICT
+    /// direction: a missed creation site surfaces as a refusal, never a silent
+    /// pass.
+    seat_zone: Option<std::sync::Arc<[u32]>>,
 }
 
 /// The contact facts a [`ClearanceRow`] needs to carry from candidate
@@ -3573,6 +3588,11 @@ fn clearance_survival(
     let mut r0 = Vec::new();
     let mut r1 = Vec::new();
     let mut contacts: Vec<(usize, ClearanceContact)> = Vec::new();
+    // **#36 step 5 — one frozen exclusion set per row, in row order.** A row
+    // with no contact, or a contact-declaring row with no frozen zone, exempts
+    // NOTHING and is graded against the whole surface.
+    let mut excluded: Vec<&[u32]> = Vec::new();
+    const EMPTY: &[u32] = &[];
     let mut ranges = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let start = p0.len();
@@ -3580,6 +3600,7 @@ fn clearance_survival(
             if let Some(contact) = row.contact {
                 contacts.push((p0.len(), contact));
             }
+            excluded.push(row.seat_zone.as_ref().map_or(EMPTY, |zone| zone.as_ref()));
             p0.push(row.p0);
             p1.push(row.p1);
             r0.push(row.r0);
@@ -3587,8 +3608,17 @@ fn clearance_survival(
         }
         ranges.push(start..p0.len());
     }
-    let mut inset0 = vec![0.0; p0.len()];
-    let mut inset1 = vec![0.0; p0.len()];
+    // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY.**
+    //
+    // These two vectors no longer reach the kernel's distance path. They are
+    // kept because `emergence_ok` needs the claimed mask, and PR-3 is not
+    // optional under the honest rule but MORE necessary (design §5, reader 1):
+    // at grazing incidence the whole nearby surface falls inside the band and
+    // is connected, so `Z` swallows everything, nothing is left to grade, and
+    // the kernel returns `INFINITY` — a pass by erasure. PR-3 is the gate that
+    // refuses that member, and the mask is its yardstick.
+    let mut mask_inset0 = vec![0.0; p0.len()];
+    let mut mask_inset1 = vec![0.0; p0.len()];
     // PR-3 bookkeeping, row-aligned: the total mask a row's contact ends claim,
     // and whether any of them had no finite mask at all.
     let mut claimed_mask_mm = vec![0.0_f64; p0.len()];
@@ -3624,8 +3654,8 @@ fn clearance_survival(
                 Some(mask) => {
                     claimed_mask_mm[*row] += mask;
                     match contact.end {
-                        ContactEnd::Terminalward => inset0[*row] = mask,
-                        ContactEnd::Rootward => inset1[*row] = mask,
+                        ContactEnd::Terminalward => mask_inset0[*row] = mask,
+                        ContactEnd::Rootward => mask_inset1[*row] = mask,
                     }
                 }
                 // A degenerate incidence masks NOTHING here, so the row is
@@ -3637,19 +3667,33 @@ fn clearance_survival(
             }
         }
     }
+    let zero = vec![0.0; p0.len()];
     crate::census_record!(crate::census::record_segment_batch(
         "cco_candidate_clearance",
         &p0,
         &p1,
-        &inset0,
-        &inset1,
+        // The insets the batch ACTUALLY receives, which are now zero.
+        &zero,
+        &zero,
         &[]
     ));
     // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
     // read through the SAME shared predicate the final pass uses; only the
     // number differs (Craig's two-tier ruling, 2026-08-22).
+    // #36 step 5 — the FULL axis against surface-minus-Z, at this stage's
+    // registered demand, through the SAME shared kernel predicate the final
+    // pass uses; only the number differs.
     let (clearances, _) = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, policy.demanded_gap_mm, &inset0, &inset1)
+        .segment_clearance_excluding(
+            &p0,
+            &p1,
+            &r0,
+            &r1,
+            policy.demanded_gap_mm,
+            &zero,
+            &zero,
+            &excluded,
+        )
         .map_err(|error| CcoError::Native(error.to_string()))?;
     Ok(ranges
         .into_iter()
@@ -4871,9 +4915,13 @@ fn clearance_rows(forest: &Forest, snapshot: &Forest) -> Vec<ClearanceRow> {
         .into_iter()
         .filter_map(|key| {
             let member = forest.member(key)?;
-            (snapshot.member(key) != Some(member)).then_some(member)
+            (snapshot.member(key) != Some(member)).then_some((key, member))
         })
-        .map(|member| ClearanceRow {
+        .map(|(key, member)| ClearanceRow {
+            seat_zone: member
+                .model_contact_end()
+                .and_then(|_| forest.seat_zone(key))
+                .map(std::sync::Arc::clone),
             p0: member.p0_mm().map(Finite::get),
             p1: member.p1_mm().map(Finite::get),
             r0: member.terminal_radius_mm().get().get(),
@@ -7341,6 +7389,28 @@ mod tests {
     /// nearest surface point to anything above the origin is that face. The
     /// outward normal there is `+z`, so a seat at the origin seats along `-z`.
     fn planar_slab() -> NativeSurface {
+        let (vertices, faces) = planar_slab_parts();
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect("planar slab")
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh `planar_slab` builds
+    /// its surface from, welded by the production policy.
+    fn planar_slab_topology() -> FaceTopology {
+        let (vertices, faces) = planar_slab_parts();
+        let mesh = plinth_mesh::Mesh::new(vertices, faces).expect("planar slab mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("planar slab topology")
+    }
+
+    fn planar_slab_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const H: f64 = 20.0;
         let vertices = vec![
             [-H, -H, -10.0],
@@ -7366,15 +7436,7 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
-        NativeSurface::from_indexed(
-            &vertices,
-            &faces,
-            geom_kernel::NativeSurfaceConfig {
-                grid_pitch_mm: 0.5,
-                max_grid_bytes: 16 * 1024 * 1024,
-            },
-        )
-        .expect("planar slab")
+        (vertices, faces)
     }
 
     /// One candidate holding exactly one model-anchor strut, built directly so
@@ -7394,6 +7456,41 @@ mod tests {
             model_contact_end: Some(ContactEnd::Rootward),
             carried_mm2: finite(2.0),
         }));
+        // **#36 — the helper freezes the seat zone exactly where production
+        // does: BEFORE `clearance_rows` reads it.** `apply_model_anchor`
+        // installs the descriptor's zone on the strut it mints, and `evaluate`
+        // then builds the rows from that forest. A helper that skipped the
+        // freeze would hand every test below an arm graded over its own
+        // designed embed — which is a real refusal, but not the one those tests
+        // are about.
+        let key = *forest
+            .live_tree_members()
+            .first()
+            .expect("the anchor is the one live member");
+        let surface = planar_slab();
+        let (_, _, face_ids, _) = surface.project(&[p1]);
+        if let Ok(seat_face_id) = u32::try_from(face_ids[0]) {
+            let standoff_mm = m0_constants()
+                .unwrap()
+                .placeholders()
+                .standoff_mm()
+                .diagnostic()
+                .get();
+            let zone = crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &planar_slab_topology(),
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm: p0,
+                    p1_mm: p1,
+                    seat_face_id,
+                    // The ROOTWARD end is the contact, so `r_seat` is `r1`.
+                    band_radius_mm: 0.35 + standoff_mm,
+                }],
+            )
+            .expect("the seat zone freezes")
+            .remove(0);
+            forest.set_seat_zone(key, zone);
+        }
         let rows = clearance_rows(&forest, &snapshot);
         assert_eq!(rows.len(), 1, "exactly one changed member");
         assert!(
@@ -7478,8 +7575,14 @@ mod tests {
             "the seated arm must route under the converged mask"
         );
 
-        // ... and PR-2's guarantee is EXACT, not slack: on a locally planar
-        // seat the kernel returns MARGIN.
+        // ... and the RETIRED path's own guarantee, kept as the historical
+        // control for #51 rather than as a live claim. This is a direct kernel
+        // call with the PR-2 mask as an inset — the shape production used
+        // before #36 step 5 — and on a locally planar seat it returned exactly
+        // MARGIN. Production no longer makes this call: the exact pass and this
+        // stage both test the full axis against `surface \ Z` now. It stays
+        // because it is the "after" half of #51's before/after pair and
+        // deleting it would erase the measurement that closed that task.
         let mask = crate::contact::placed_mask_inset_mm(
             crate::contact::ContactSeating::Seated,
             1.0,
@@ -8474,6 +8577,107 @@ mod tests {
         replay_family(&forest, &binding, &anchors, CandidateFamily::ModelAnchor)
             .validated_model_anchor
             .expect("a replayed model anchor carries its validated capability")
+    }
+
+    /// **#36 CREATION SITE 4 — a bifurcated upper half INHERITS the host's
+    /// frozen zone; it never recomputes one** (§8 step 6, §9.4).
+    ///
+    /// `apply_bifurcation` splits a host at `junction`. The upper half keeps the
+    /// host's `p1`, which IS the host's seat, so it is the same contact — and
+    /// the zone belongs to the contact, not to the member. Recomputing it from
+    /// the upper half's own interpolated radius would be the un-freezing the
+    /// monotonicity theorem forbids (§3): a wider band swallows more surface, so
+    /// a fatter half would be graded against strictly less of it.
+    ///
+    /// The assertion is `Arc::ptr_eq`, deliberately. Comparing CONTENTS would
+    /// pass for a recompute that happened to land on the same faces; comparing
+    /// ALLOCATIONS cannot. That is the whole difference between inheriting and
+    /// re-deriving, and it is the sabotage
+    /// `a_bifurcation_that_re_froze_the_upper_half_from_its_own_radius` this
+    /// test exists to catch.
+    ///
+    /// The second half is hygiene with teeth: the lower half no longer declares
+    /// a contact, so it must forgive NOTHING. A copy left behind would exempt
+    /// faces for a member with no seat — the move is `take_seat_zone`, not a
+    /// clone, for exactly that reason.
+    #[test]
+    fn a_bifurcated_upper_half_inherits_the_hosts_frozen_zone_rather_than_recomputing_it() {
+        let (mut forest, request, _) = growth_fixture();
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(1.0), finite(0.0), finite(20.0)],
+            p1_mm: [finite(1.0), finite(0.0), finite(0.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.65)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "bifurcation-inherit".to_owned(),
+                ordinal: 0,
+            },
+            // The host's ROOTWARD end is its seat, and the upper half keeps it.
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0),
+        }));
+        let frozen: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![3_u32, 11, 42]);
+        forest.set_seat_zone(host, std::sync::Arc::clone(&frozen));
+
+        let before = forest
+            .live_tree_members()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let config = Config::current().unwrap();
+        // Through the production entry point, so the SIZING pass runs too: the
+        // upper half's radii are rewritten after the split, and the frozen zone
+        // must not follow them.
+        assert!(
+            apply_and_size(
+                &mut forest,
+                &request,
+                &Descriptor::Bifurcate { host },
+                &config
+            )
+            .unwrap(),
+            "NON-VACUITY: the fixture must actually bifurcate, or nothing below \
+             is being measured"
+        );
+
+        // The upper half is the new member that kept the host's `p1`.
+        let host_p1 = [finite(1.0), finite(0.0), finite(0.0)];
+        let upper = forest
+            .live_tree_members()
+            .into_iter()
+            .find(|key| {
+                !before.contains(key)
+                    && forest
+                        .member(*key)
+                        .is_some_and(|member| member.p1_mm() == host_p1)
+            })
+            .expect("the split mints an upper half that keeps the host's p1");
+        assert_eq!(
+            forest.member(upper).unwrap().model_contact_end(),
+            Some(ContactEnd::Rootward),
+            "NON-VACUITY: the upper half must be the one that inherited the \
+             contact declaration"
+        );
+
+        let inherited = forest
+            .seat_zone(upper)
+            .expect("the upper half must carry the contact's frozen zone");
+        assert!(
+            std::sync::Arc::ptr_eq(inherited, &frozen),
+            "the upper half must inherit the very same allocation — an `Arc` \
+             move, not a recompute. Contents that merely MATCH would also pass a \
+             re-derivation that happened to land on the same faces; identity \
+             cannot. Sabotage: \
+             `a_bifurcation_that_re_froze_the_upper_half_from_its_own_radius`."
+        );
+        assert!(
+            forest.seat_zone(host).is_none(),
+            "and the lower half, which no longer declares a contact, must \
+             forgive NOTHING — the zone MOVES with the declaration. A copy left \
+             behind would exempt faces for a member with no seat."
+        );
     }
 
     /// **PR-7 acceptance — the seat witness now refuses at CANDIDACY.**

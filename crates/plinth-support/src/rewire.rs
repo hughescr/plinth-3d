@@ -876,6 +876,9 @@ fn validate_changed_geometry(
         crate::contact::ContactSeating,
         f64,
     )> = Vec::new();
+    // **#36 step 5 — one frozen exclusion set per row, in row order.**
+    let mut excluded: Vec<&[u32]> = Vec::new();
+    const EMPTY: &[u32] = &[];
     for key in after.live_tree_members() {
         let member = after.member(key).ok_or(ForestError::InactiveKey(key))?;
         if before.member(key) == Some(member) {
@@ -905,6 +908,15 @@ fn validate_changed_geometry(
                 },
             ));
         }
+        // A member with no contact forgives nothing; a contact-declaring
+        // member with no frozen zone is graded against its own designed embed
+        // and refused, which is the strict direction.
+        excluded.push(
+            member
+                .model_contact_end()
+                .and_then(|_| after.seat_zone(key))
+                .map_or(EMPTY, |zone| zone.as_ref()),
+        );
         p0.push(member.p0_mm().map(Finite::get));
         p1.push(member.p1_mm().map(Finite::get));
         r0.push(member.terminal_radius_mm().get().get());
@@ -913,8 +925,13 @@ fn validate_changed_geometry(
     if p0.is_empty() {
         return Ok(true);
     }
-    let mut i0 = vec![0.0; p0.len()];
-    let mut i1 = vec![0.0; p0.len()];
+    // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY** (design §5,
+    // reader 1). It no longer reaches the kernel's distance path; `emergence_ok`
+    // still needs the claimed mask, and under the honest rule PR-3 is more
+    // necessary rather than less, because a zone that swallows the whole
+    // neighbourhood would otherwise pass by erasure.
+    let mut mask_i0 = vec![0.0; p0.len()];
+    let mut mask_i1 = vec![0.0; p0.len()];
     // Hoisted out of the contact branch below because the DEMANDED GAP is
     // read for every row, contact-declaring or not: a changed set with no
     // contacts still grades at this stage's registered demand.
@@ -953,8 +970,8 @@ fn validate_changed_geometry(
             };
             claimed[*row] += mask;
             match end {
-                crate::forest::ContactEnd::Terminalward => i0[*row] = mask,
-                crate::forest::ContactEnd::Rootward => i1[*row] = mask,
+                crate::forest::ContactEnd::Terminalward => mask_i0[*row] = mask,
+                crate::forest::ContactEnd::Rootward => mask_i1[*row] = mask,
             }
             // PR-3, at the same site as the mask that makes it necessary. A
             // mask that consumes the segment makes `seg_clear_one_excluding` return
@@ -965,20 +982,32 @@ fn validate_changed_geometry(
             }
         }
     }
+    let zero = vec![0.0; p0.len()];
     crate::census_record!(crate::census::record_segment_batch(
         "rewire_clearance",
         &p0,
         &p1,
-        &i0,
-        &i1,
+        // The insets the batch ACTUALLY receives, which are now zero.
+        &zero,
+        &zero,
         &[]
     ));
     // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
     // read through the SAME shared predicate the final pass uses; only the
     // number differs (Craig's two-tier ruling, 2026-08-22).
+    // #36 step 5 — the FULL axis against surface-minus-Z.
     let (clearances, _) = geometry
         .surface()
-        .segment_clearance(&p0, &p1, &r0, &r1, policy.demanded_gap_mm, &i0, &i1)
+        .segment_clearance_excluding(
+            &p0,
+            &p1,
+            &r0,
+            &r1,
+            policy.demanded_gap_mm,
+            &zero,
+            &zero,
+            &excluded,
+        )
         .map_err(|e| RewireError::Native(e.to_string()))?;
     Ok(clearances.into_iter().all(|value| value >= 0.0))
 }

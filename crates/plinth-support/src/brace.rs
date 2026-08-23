@@ -1572,6 +1572,15 @@ fn evaluate_candidates(
     let mut inset0 = Vec::new();
     let mut inset1 = Vec::new();
     let mut ranges = Vec::with_capacity(candidates.len());
+    // **#36 step 5 — one frozen exclusion set per ROD, in row order.**
+    //
+    // A model rung's zone was frozen in `gather_candidates` from that rung's own
+    // creation radius and seat face; a cross-link declares no contact and
+    // forgives nothing. The row set the tournament grades and the row set the
+    // mint installs are therefore the same face sets, by construction rather
+    // than by re-derivation.
+    let mut excluded: Vec<&[u32]> = Vec::new();
+    const EMPTY: &[u32] = &[];
     #[cfg(feature = "census")]
     let mut census_cos_class = Vec::new();
     for candidate in candidates {
@@ -1583,6 +1592,12 @@ fn evaluate_candidates(
             r1.push(rod.radius.get());
             inset0.push(rod.inset0);
             inset1.push(rod.inset1);
+            excluded.push(
+                candidate
+                    .seat_zone
+                    .as_ref()
+                    .map_or(EMPTY, |zone| zone.as_ref()),
+            );
             // Read the incidence DIRECTLY off the rod. It used to be
             // reconstructed by inverting `embed_inset_mm`; that inverse does
             // not exist for the PR-2 mask, and since this census is the OD-8
@@ -1617,11 +1632,25 @@ fn evaluate_candidates(
     let placement_gap_mm = config
         .contact_policy(contact::ClearanceStage::Placement)
         .demanded_gap_mm;
+    // #36 step 5 — the FULL axis against surface-minus-Z. `rod.inset0/inset1`
+    // stay populated with the PR-2 mask because `candidate_revalidation` hands
+    // them to `axis_illegal_rows`, which is the one screen where a length
+    // measured from the seat is still the right shape (design §5, finding D).
+    let zero = vec![0.0; p0.len()];
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
         surface
-            .segment_clearance(&p0, &p1, &r0, &r1, placement_gap_mm, &inset0, &inset1)
+            .segment_clearance_excluding(
+                &p0,
+                &p1,
+                &r0,
+                &r1,
+                placement_gap_mm,
+                &zero,
+                &zero,
+                &excluded,
+            )
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
             .0
     };
@@ -2050,8 +2079,20 @@ fn exact_clearance_rows(
         .iter()
         .map(|(_, member)| member.rootward_radius_mm().get().get())
         .collect::<Vec<_>>();
-    let mut inset0 = vec![0.0; rows.len()];
-    let mut inset1 = vec![0.0; rows.len()];
+    // **#36 step 5 — these are the AXIS-TRANSIT masks, not clearance insets.**
+    //
+    // The PR-2 mask stays computed and stays handed to `axis_illegal_rows`
+    // (design §5, reader 2): that screen asks "is the arm passing THROUGH
+    // material away from its seat", and there a length measured from the seat
+    // is the right shape, because the seat embed IS a length along the axis.
+    // Zeroing it there would condemn every seated contact for its own designed
+    // embed — challenge finding D, and the prior challenge proved the seated-arm
+    // case must stay legal.
+    //
+    // It no longer reaches the clearance DISTANCE path. That path now tests the
+    // full axis and exempts a frozen face SET instead (`excluded` below).
+    let mut mask_inset0 = vec![0.0; rows.len()];
+    let mut mask_inset1 = vec![0.0; rows.len()];
     #[cfg(feature = "census")]
     let mut census_cos_class = vec![0u8; rows.len()];
     let embedded = rows
@@ -2130,17 +2171,42 @@ fn exact_clearance_rows(
                 census_cos_class[index] = if abs_cos_raw < 0.5 { 1 } else { 2 };
             });
             match end {
-                ContactEnd::Terminalward => inset0[index] = inset,
-                ContactEnd::Rootward => inset1[index] = inset,
+                ContactEnd::Terminalward => mask_inset0[index] = inset,
+                ContactEnd::Rootward => mask_inset1[index] = inset,
             }
         }
     }
+    // **#36 step 5 — EXEMPT A TARGET, NEVER A LENGTH.**
+    //
+    // The distance test now runs over the FULL axis (`inset0 = inset1 = 0`)
+    // against the whole surface EXCEPT each row's own frozen seat zone. The
+    // zone is looked up only for a row that DECLARES a contact: a member with
+    // no seat forgives nothing, and reading a stale entry for one would exempt
+    // faces it has no right to.
+    //
+    // A contact-declaring row with no frozen zone gets an empty exclusion and is
+    // graded against everything, including its own designed embed. That is the
+    // STRICT direction and it is deliberate — a missed creation site shows up as
+    // a refusal, never as a silent pass.
+    let zero = vec![0.0; rows.len()];
+    let empty: &[u32] = &[];
+    let excluded = rows
+        .iter()
+        .map(|(key, member)| {
+            member
+                .model_contact_end()
+                .and_then(|_| forest.seat_zone(*key))
+                .map_or(empty, |zone| zone.as_ref())
+        })
+        .collect::<Vec<_>>();
     crate::census_record!(crate::census::record_segment_batch(
         "brace_exact_member_clearance",
         &p0,
         &p1,
-        &inset0,
-        &inset1,
+        // The insets the batch ACTUALLY receives, which are now zero. Recording
+        // the mask here instead would describe a call this site no longer makes.
+        &zero,
+        &zero,
         &census_cos_class,
     ));
     // FINAL. This is the verdict that condemns an arm — over contact-declaring
@@ -2153,7 +2219,7 @@ fn exact_clearance_rows(
         .contact_policy(contact::ClearanceStage::Final)
         .demanded_gap_mm;
     let mut clearance = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, final_gap_mm, &inset0, &inset1)
+        .segment_clearance_excluding(&p0, &p1, &r0, &r1, final_gap_mm, &zero, &zero, &excluded)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
         .0;
     for index in axis_illegal_rows(
@@ -2162,8 +2228,10 @@ fn exact_clearance_rows(
         &p1,
         &r0,
         &r1,
-        &inset0,
-        &inset1,
+        // Finding D: the transit screen KEEPS the mask. Zeroing both would
+        // condemn every seated arm for its own embed.
+        &mask_inset0,
+        &mask_inset1,
         &clearance,
         config,
         penetration_limits,
@@ -3211,34 +3279,42 @@ mod tests {
         fixture_topology(vertices, faces)
     }
 
-    /// **PARKED STATE, PINNED — the FINAL pass does not yet grade a true gap**
-    /// (challenge finding B2, 2026-08-22).
+    /// **MONOTONICITY, THROUGH THE PRODUCTION FINAL PASS — the successor to the
+    /// parked-state trip-wire** (#36 §8 step 6, §10.7 item 1).
     ///
-    /// `FINAL_CLEARANCE_GAP_MM`'s own provenance carries an HONESTY
-    /// PRECONDITION: "this number only means what it says because the clearance
-    /// test it feeds grades a TRUE gap." At this commit it does NOT.
-    /// `honest-exemption-2026-08-22.md` §8 lands in seven steps; steps 1-2 have
-    /// landed and steps 3-5 — the `FaceTopology` threading, the frozen seat
-    /// zones, and `inset0 = inset1 = 0` at the grading sites — have not. So
-    /// `exact_clearance_rows` still computes the retired radius-proportional
-    /// PR-2 mask and still hands it to the kernel as insets, and the tested
-    /// STATION SET still moves with the radius.
+    /// It replaces `the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired`,
+    /// which MEASURED the interim inversion and was documented to go red the
+    /// moment steps 3-5 landed. Same fixture, same axis, same surface; only the
+    /// expected sign changed, exactly as its own message said it would.
     ///
-    /// This test measures that through the PRODUCTION function rather than
-    /// asserting it in prose, on the grazing fixture the audit describes: one
-    /// axis at `|cos| = 0.2`, one foreign panel hugging the stretch the THIN
-    /// arm tests and the FAT arm's own mask excuses. The thinner, cleaner arm
-    /// is refused and the fatter, closer one is legal.
+    /// **What the rule now guarantees, and why it is a theorem rather than a
+    /// measurement.** Fix an axis and a FROZEN `Z`. The graded clearance is
     ///
-    /// **It is expected to FAIL when §8 steps 3-5 land, and that failure is the
-    /// point.** The honest-exemption rule makes monotonicity a THEOREM (§3): the
-    /// tested face set is frozen and the tested station set is the whole axis,
-    /// so `clearance = C - r_max - gap` is monotone decreasing in `r_max` and a
-    /// thinner arm can never grade worse. When this test goes red, replace it
-    /// with the monotonicity assertion (`thin >= fat`) rather than deleting it —
-    /// the fixture is the same either way, and only the expected sign changes.
+    /// ```text
+    /// clearance = min over the WHOLE axis of dist(x, surface \ Z) - (r_max + gap)
+    ///           = C - r_max - gap
+    /// ```
+    ///
+    /// `C` does not mention the radius: the tested STATION set is the whole axis
+    /// either way, and the tested FACE set is `surface \ Z`, which is frozen. So
+    /// clearance is monotone decreasing in `r_max`, unconditionally, on any
+    /// geometry — and a thinner arm can never grade worse than a fatter one.
+    ///
+    /// The retired rule could not say that. Its exemption was a LENGTH
+    /// proportional to the radius, so a fatter arm was tested over a SHORTER
+    /// stretch of its own axis, and on this same fixture the two rows read
+    /// `thin = -0.45 REFUSED` against `fat = +0.05 LEGAL` — the inversion
+    /// challenge finding B2 measured.
+    ///
+    /// **ONE frozen zone, two radii.** That is the production case, not a
+    /// contrivance: a contact is minted once and `brace::apply_resize` may
+    /// fatten the member afterwards. Re-freezing from the later radius is what
+    /// the rule forbids, and `seat_zone.rs`'s
+    /// `the_zone_does_not_move_when_the_radius_does_because_it_is_never_recomputed`
+    /// is the sabotage that reproduces why: a wider band swallows more surface,
+    /// so the fat arm would be graded against strictly LESS of it.
     #[test]
-    fn the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired() {
+    fn a_thinner_arm_never_grades_worse_than_a_fatter_one_through_the_production_final_pass() {
         let config = BraceConfig::current(0.05).unwrap();
         let policy = config.contact_policy(contact::ClearanceStage::Final);
         let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
@@ -3250,36 +3326,70 @@ mod tests {
         let p0 = [0.0, 0.0, -0.3];
         let point_at = |u: f64| std::array::from_fn(|axis| p0[axis] + dir[axis] * u);
 
-        // NON-VACUITY: the two masks must be well separated, or the fixture is
-        // not exercising the radius-proportional skip at all.
+        // NON-VACUITY 1 — the RETIRED masks are still well separated at these
+        // two radii, so the fixture is still the one that produced the
+        // inversion. If they ever converge, this test stops discriminating and
+        // says so instead of passing quietly.
         let mask = |r: f64| contact::placed_mask_inset_mm(seating, COS, r, r, &policy).unwrap();
         let (mask_thin, mask_fat) = (mask(THIN_MM), mask(FAT_MM));
         assert!(
             mask_fat > mask_thin + 3.0,
-            "the fixture needs the two masks well separated: {mask_thin} vs {mask_fat}"
+            "the fixture needs the two retired masks well separated ({mask_thin} vs \
+             {mask_fat}); it is the separation that made the skip-length invert"
         );
 
+        // The foreign panel hugs the stretch the THIN arm tested and the FAT
+        // arm's own mask used to excuse — geometry unchanged from the trip-wire.
         let a: [f64; 3] = point_at(mask_thin + 0.02);
         let b: [f64; 3] = point_at(mask_thin + 1.0);
-        let surface =
-            table_with_foreign_panel([a[0], 0.05, a[2] - 0.05], [b[0], 0.25, b[2] + 0.05]);
+        let lo = [a[0], 0.05, a[2] - 0.05];
+        let hi = [b[0], 0.25, b[2] + 0.05];
+        let surface = table_with_foreign_panel(lo, hi);
+        let topology = table_with_foreign_panel_topology(lo, hi);
         let p1: [f64; 3] = point_at(mask_fat + 5.0);
+
+        // THE FREEZE, ONCE, at the THIN arm's creation radius. Both gradings
+        // below read this same face set — that is the hypothesis of the theorem
+        // and the thing production guarantees by never recomputing.
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: THIN_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        // NON-VACUITY 2 — the exemption is real. An empty zone would make this
+        // test a statement about a rule that is not running.
+        assert!(
+            !zone.is_empty(),
+            "the seated arm must forgive its own seat, or the fixture is grading \
+             a member with no exemption at all"
+        );
 
         let graded = |radius_mm: f64, config: &BraceConfig| {
             let mut forest = Forest::new();
-            forest.add_member(Member::new(MemberSpec {
+            let key = forest.add_member(Member::new(MemberSpec {
                 p0_mm: finite3(p0).unwrap(),
                 p1_mm: finite3(p1).unwrap(),
                 r0_mm: TerminalEndRadius::new(positive(radius_mm)),
                 r1_mm: RootwardEndRadius::new(positive(radius_mm)),
                 kind: MemberKind::Strut,
                 owner: Owner::Generated {
-                    family: "parked-state".into(),
+                    family: "monotonicity".into(),
                     ordinal: 0,
                 },
                 model_contact_end: Some(ContactEnd::Terminalward),
                 carried_mm2: finite(0.0).unwrap(),
             }));
+            forest.set_seat_zone(key, std::sync::Arc::clone(&zone));
             let rows =
                 exact_clearance_rows(&forest, &surface, config, test_penetration_limits()).unwrap();
             assert_eq!(rows.len(), 1, "one member, one graded row");
@@ -3288,38 +3398,432 @@ mod tests {
         let thin = graded(THIN_MM, &config);
         let fat = graded(FAT_MM, &config);
 
-        // What the SAME fixture read before the ruling split the demand: at the
-        // single pre-ruling 0.600, BOTH rows refused. MEASURED, not derived —
-        // this is the "from" half of the movement the ledger records, and it is
-        // what makes the inversion a step 2 effect rather than a pre-existing
-        // one.
+        assert!(
+            thin >= fat,
+            "MONOTONICITY IS A THEOREM (#36 §3): with the seat zone frozen and \
+             the whole axis tested, clearance is `C - r_max - gap` and a thinner \
+             arm can NEVER grade worse than a fatter one on the same axis. \
+             Kernel said thin(r = {THIN_MM}) = {thin}, fat(r = {FAT_MM}) = {fat}. \
+             If this failed, something recomputed the zone from a later radius \
+             — which is the retired skip-length's inversion rebuilt one level up."
+        );
+
+        // The two verdicts now AGREE, where the retired rule split them. Which
+        // way they agree is a fact about this fixture and is reported rather
+        // than engineered: the assertion above is the rule, this one only
+        // forbids the inversion from surviving in disguise.
+        assert_eq!(
+            thin >= 0.0,
+            fat >= 0.0,
+            "the pair that the retired mask split (thin REFUSED, fat LEGAL) must \
+             now share a verdict: thin = {thin}, fat = {fat}"
+        );
+
+        // The theorem does not mention the demand, so it must also hold at the
+        // pre-ruling single demand. A monotonicity that only held at one number
+        // would be an accident of that number.
         let pre_ruling = BraceConfig {
             final_clearance_gap_mm: config.standoff_mm,
             ..config.clone()
         };
         let (thin_at_600, fat_at_600) = (graded(THIN_MM, &pre_ruling), graded(FAT_MM, &pre_ruling));
         assert!(
-            thin_at_600 < 0.0 && fat_at_600 < 0.0,
-            "at the pre-ruling single demand of {} mm BOTH arms must refuse; \
-             kernel said thin = {thin_at_600}, fat = {fat_at_600}",
+            thin_at_600 >= fat_at_600,
+            "monotonicity is independent of the demanded gap, which enters as a \
+             constant offset; at {} mm the kernel said thin = {thin_at_600}, \
+             fat = {fat_at_600}",
             config.standoff_mm
         );
 
+        println!(
+            "HONEST-EXEMPTION-MONOTONICITY at FINAL {}: thin(r={THIN_MM})={thin}  \
+             fat(r={FAT_MM})={fat}  zone={} faces  |  at the pre-ruling {}: \
+             thin={thin_at_600}  fat={fat_at_600}",
+            config.final_clearance_gap_mm,
+            zone.len(),
+            config.standoff_mm
+        );
+    }
+
+    /// **THE BLIND SPOT, CLOSED — a foreign feature the retired mask hid is
+    /// graded now that the exemption names FACES** (#36 §8 step 6).
+    ///
+    /// This is the defect the whole change exists for, measured through the
+    /// production final pass. On the Giant Bat both refusals were FOREIGN
+    /// feature proximity — the opposite wall of a crevice, 133-151 degrees away
+    /// from the seat's own closest point — and the radius-proportional skip
+    /// excused it: at `r = 1.712694` an arm PASSED with `clearance = +0.336`
+    /// while standing 0.242160 mm INSIDE the model, because its own mask
+    /// covered the station that would have said so.
+    ///
+    /// The fixture is that geometry in miniature: a table the arm is seated in,
+    /// and a foreign panel hugging the stretch of axis the fat arm's mask used
+    /// to cover. The frozen zone is the seat's own faces and NOTHING else, so
+    /// the panel is tested and the arm is refused.
+    ///
+    /// **The named sabotage: `a_zone_that_swallowed_the_foreign_panel`.** Widen
+    /// the exemption to include the panel's faces — which is what a length
+    /// measured from the seat did in effect — and the same arm passes. The test
+    /// performs that sabotage itself rather than describing it, so the
+    /// difference between the two rules is a number in this file.
+    #[test]
+    fn the_foreign_wall_inside_the_retired_mask_is_graded_now_that_the_exemption_names_faces() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
+        let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
+
+        const COS: f64 = 0.2;
+        const FAT_MM: f64 = 0.90;
+        let dir = [(1.0_f64 - COS * COS).sqrt(), 0.0, COS];
+        let p0 = [0.0, 0.0, -0.3];
+        let point_at = |u: f64| std::array::from_fn(|axis| p0[axis] + dir[axis] * u);
+
+        let mask = |r: f64| contact::placed_mask_inset_mm(seating, COS, r, r, &policy).unwrap();
+        let (mask_thin, mask_fat) = (mask(0.20), mask(FAT_MM));
+        let a: [f64; 3] = point_at(mask_thin + 0.02);
+        let b: [f64; 3] = point_at(mask_thin + 1.0);
+        let lo = [a[0], 0.05, a[2] - 0.05];
+        let hi = [b[0], 0.25, b[2] + 0.05];
+        let (_, fixture_faces) = table_with_foreign_panel_parts(lo, hi);
+        let surface = table_with_foreign_panel(lo, hi);
+        let topology = table_with_foreign_panel_topology(lo, hi);
+        let p1: [f64; 3] = point_at(mask_fat + 5.0);
+
+        // NON-VACUITY — the panel really does lie inside the stretch the FAT
+        // arm's retired mask would have skipped. Without this the test could
+        // pass on a panel the old rule graded too.
+        let panel_u = mask_thin + 0.5;
         assert!(
-            thin < 0.0 && fat >= 0.0,
-            "PARKED STATE: at this commit the thin arm (r = {THIN_MM} mm) must be \
-             REFUSED and the fat arm (r = {FAT_MM} mm) LEGAL on the same axis \
-             against the same surface — the inversion challenge finding B2 \
-             measured. Kernel said thin = {thin}, fat = {fat}. If this assertion \
-             failed because §8 steps 3-5 landed, the rule now makes monotonicity \
-             a theorem: replace this with `thin >= fat` and say so."
+            panel_u < mask_fat,
+            "the foreign panel must sit at u = {panel_u} mm, INSIDE the fat arm's \
+             retired mask of {mask_fat} mm, or this fixture is not the blind spot"
+        );
+
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let honest = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: FAT_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        // The panel is the SECOND box in the fixture: `table_with_foreign_panel`
+        // appends its twelve faces after the table's twelve.
+        let panel_faces = (12_u32..fixture_faces.len() as u32).collect::<Vec<_>>();
+        assert!(!panel_faces.is_empty(), "the fixture must carry a panel");
+        assert!(
+            panel_faces.iter().all(|face| !honest.contains(face)),
+            "the honest zone must forgive the SEAT and nothing else; it must not \
+             contain a single foreign-panel face"
+        );
+
+        let graded = |zone: std::sync::Arc<[u32]>| {
+            let mut forest = Forest::new();
+            let key = forest.add_member(Member::new(MemberSpec {
+                p0_mm: finite3(p0).unwrap(),
+                p1_mm: finite3(p1).unwrap(),
+                r0_mm: TerminalEndRadius::new(positive(FAT_MM)),
+                r1_mm: RootwardEndRadius::new(positive(FAT_MM)),
+                kind: MemberKind::Strut,
+                owner: Owner::Generated {
+                    family: "blind-spot".into(),
+                    ordinal: 0,
+                },
+                model_contact_end: Some(ContactEnd::Terminalward),
+                carried_mm2: finite(0.0).unwrap(),
+            }));
+            forest.set_seat_zone(key, zone);
+            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap()[0]
+                .1
+        };
+
+        let honest_clearance = graded(std::sync::Arc::clone(&honest));
+
+        // THE SABOTAGE, performed: `a_zone_that_swallowed_the_foreign_panel`.
+        let mut swallowed = honest.to_vec();
+        swallowed.extend(panel_faces);
+        swallowed.sort_unstable();
+        swallowed.dedup();
+        let swallowed_clearance = graded(std::sync::Arc::from(swallowed));
+
+        assert!(
+            honest_clearance < 0.0,
+            "the arm stands close to a FOREIGN feature that is not its own seat, \
+             so the honest rule must refuse it. Kernel said {honest_clearance}. \
+             This is the verdict the retired skip-length inverted."
+        );
+        assert!(
+            swallowed_clearance > honest_clearance,
+            "the sabotage must be LOAD-BEARING: a zone that swallows the foreign \
+             panel has to change the verdict, or this test is not measuring the \
+             exemption at all. honest = {honest_clearance}, swallowed = \
+             {swallowed_clearance}"
         );
         println!(
-            "PARKED-STATE-INVERSION at FINAL {}: thin(r={THIN_MM})={thin}  \
-             fat(r={FAT_MM})={fat}  |  at the pre-ruling {}: thin={thin_at_600}  \
-             fat={fat_at_600}",
-            config.final_clearance_gap_mm, config.standoff_mm
+            "BLIND-SPOT-CLOSED: honest={honest_clearance} (zone {} faces)  \
+             swallowed={swallowed_clearance}",
+            honest.len()
         );
+    }
+
+    /// **A SEATED ARM IS STILL LEGAL — the exemption has to exempt** (#36 §8
+    /// step 6).
+    ///
+    /// The other half of the blind-spot test, and the one that stops the change
+    /// from being a blanket tightening. A member seated into the model is
+    /// legitimately inside the material it is seated in; if the honest rule
+    /// refused it, every seated arm in the engine would refuse itself and three
+    /// families would die at once.
+    ///
+    /// **The named sabotage: `a_seat_that_forgot_to_freeze_its_zone`.** Grade
+    /// the same member with no frozen zone — which is precisely what a MISSED
+    /// creation site produces — and it is refused by its own designed embed.
+    /// That is why §9.4's inventory had to be complete before step 5 landed, and
+    /// it is the failure direction a missed site takes: a refusal, loudly, never
+    /// a silent pass.
+    #[test]
+    fn a_seated_arm_stays_legal_against_its_own_designed_embed_and_refuses_without_its_zone() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let surface = flat_table();
+        let topology = flat_table_topology();
+        const RADIUS_MM: f64 = 0.4;
+        // Seated one designed contact depth into the table, whose top face is
+        // exactly `z = 0`, and standing straight up out of it.
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1 = [0.0, 0.0, 5.0];
+
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: RADIUS_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+        assert!(
+            !zone.is_empty(),
+            "a seated arm must forgive its own seat face"
+        );
+
+        let graded = |zone: Option<std::sync::Arc<[u32]>>| {
+            let mut forest = Forest::new();
+            let key = forest.add_member(Member::new(MemberSpec {
+                p0_mm: finite3(p0).unwrap(),
+                p1_mm: finite3(p1).unwrap(),
+                r0_mm: TerminalEndRadius::new(positive(RADIUS_MM)),
+                r1_mm: RootwardEndRadius::new(positive(RADIUS_MM)),
+                kind: MemberKind::Strut,
+                owner: Owner::Generated {
+                    family: "seated-legality".into(),
+                    ordinal: 0,
+                },
+                model_contact_end: Some(ContactEnd::Terminalward),
+                carried_mm2: finite(0.0).unwrap(),
+            }));
+            if let Some(zone) = zone {
+                forest.set_seat_zone(key, zone);
+            }
+            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap()[0]
+                .1
+        };
+
+        let with_zone = graded(Some(zone));
+        // THE SABOTAGE, performed: `a_seat_that_forgot_to_freeze_its_zone`.
+        let without_zone = graded(None);
+
+        assert!(
+            with_zone >= 0.0,
+            "a member seated its designed {} mm into the model must stay LEGAL — \
+             it is inside the material it is seated in on purpose. Kernel said \
+             {with_zone}.",
+            config.contact_depth_mm
+        );
+        assert!(
+            without_zone < 0.0,
+            "and the exemption must be what makes it legal: with no frozen zone \
+             the same member is graded over its own embed and refused. Kernel \
+             said {without_zone}. If this ever passes, the test has stopped \
+             measuring the exemption."
+        );
+        println!("SEATED-LEGALITY: with_zone={with_zone}  without_zone={without_zone}");
+    }
+
+    /// **FINDING D — the axis-transit screen KEEPS the PR-2 mask** (#36 §5
+    /// reader 2, §8 step 6).
+    ///
+    /// Step 5 zeroed the insets on the clearance DISTANCE path and only there.
+    /// `axis_illegal_rows` asks a different question — "is this arm passing
+    /// THROUGH material away from its seat" — and there a length measured from
+    /// the seat is the right shape, because the seat embed IS a length along the
+    /// axis. Zeroing both would condemn every seated contact for its own design,
+    /// which the prior challenge proved must stay legal.
+    ///
+    /// **The named sabotage: `a_transit_screen_with_its_seat_mask_zeroed`.** The
+    /// test calls the production screen twice on the SAME row — once with the
+    /// production masks and once with zeros — and the second condemns.
+    #[test]
+    fn the_transit_screen_keeps_the_seat_mask_or_it_condemns_the_designed_embed() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let surface = flat_table();
+        const RADIUS_MM: f64 = 0.4;
+        // Deliberately DEEP inside the slab, so the row is admitted to the
+        // interval batch by the midpoint-inside branch and the penetration
+        // interval it finds is the seat embed itself.
+        let p0 = [[0.0, 0.0, -3.0]];
+        let p1 = [[0.0, 0.0, 1.0]];
+        let radii = [RADIUS_MM];
+        // The mask must cover the embedded stretch: this row's whole embed is
+        // one contiguous interval from the contact end.
+        let mask0 = [3.0 + config.min_illegal_len_mm];
+        let zero = [0.0];
+        // The clearance the distance path now returns for this row is
+        // irrelevant to the screen's admission rule beyond putting it in the
+        // batch; state it explicitly so the fixture is not reading a number
+        // from somewhere else.
+        let clearances = [0.05];
+
+        let masked = axis_illegal_rows(
+            &surface,
+            &p0,
+            &p1,
+            &radii,
+            &radii,
+            &mask0,
+            &zero,
+            &clearances,
+            &config,
+            test_penetration_limits(),
+        )
+        .unwrap();
+        // THE SABOTAGE, performed: `a_transit_screen_with_its_seat_mask_zeroed`.
+        let unmasked = axis_illegal_rows(
+            &surface,
+            &p0,
+            &p1,
+            &radii,
+            &radii,
+            &zero,
+            &zero,
+            &clearances,
+            &config,
+            test_penetration_limits(),
+        )
+        .unwrap();
+
+        assert!(
+            unmasked.contains(&0),
+            "NON-VACUITY: with the seat mask zeroed the transit screen must \
+             condemn this row — it really is inside the model along its own \
+             embed. If it does not, the fixture is not exercising the screen."
+        );
+        assert!(
+            !masked.contains(&0),
+            "FINDING D: with the PR-2 mask supplied the SAME row must be admitted \
+             — the stretch inside the model is the arm's own designed embed, \
+             measured as a length from its seat, and condemning it would kill \
+             every seated contact in the engine. Step 5 zeroed the insets on the \
+             DISTANCE path only."
+        );
+    }
+
+    /// **FINDING D, THROUGH PRODUCTION — the pin that the direct-call test
+    /// above could not provide.**
+    ///
+    /// MEASURED while red-running the step-6 sabotages: forking
+    /// `exact_clearance_rows` to hand ZEROS to `axis_illegal_rows` left the
+    /// entire brace suite GREEN. The direct-call test calls the screen itself,
+    /// so a production fork is invisible to it — the same shape of hole
+    /// challenge finding B3 named for the two unpinned tier reads. This closes
+    /// it: the assertion runs through `exact_clearance_rows`, so the fork is
+    /// loud.
+    ///
+    /// The fixture puts a seated arm in the transit screen's own admission
+    /// window. The screen admits a row whose clearance sits in `[0, 0.1)`, so a
+    /// foreign panel is placed to land the clearance there; the arm is then
+    /// examined for penetration intervals, and the only material it passes
+    /// through is its own designed embed, which its PR-2 mask covers.
+    ///
+    /// **The named sabotage: `an_exact_pass_that_zeroed_its_transit_masks`.**
+    /// With zeros the embed interval is no longer excluded, the row is
+    /// condemned, and `exact_clearance_rows` stamps the verdict negative.
+    #[test]
+    fn the_exact_pass_hands_the_transit_screen_its_masks_and_not_the_zeroed_insets() {
+        let config = BraceConfig::current(0.05).unwrap();
+        const RADIUS_MM: f64 = 0.4;
+        let final_gap = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .demanded_gap_mm;
+        // A panel this far from the axis lands the clearance inside the
+        // screen's `[0, 0.1)` admission window — derived from the demand and
+        // the radius, not picked.
+        let panel_x = RADIUS_MM + final_gap + 0.02;
+        let lo = [panel_x, -0.5, 0.2];
+        let hi = [panel_x + 0.2, 0.5, 1.5];
+        let surface = table_with_foreign_panel(lo, hi);
+        let topology = table_with_foreign_panel_topology(lo, hi);
+
+        // Seated its designed depth into the table (top face at `z = 0`) and
+        // standing 2 mm out of it.
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1 = [0.0, 0.0, 2.0 - config.contact_depth_mm];
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: RADIUS_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(RADIUS_MM)),
+            r1_mm: RootwardEndRadius::new(positive(RADIUS_MM)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "finding-d".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, zone);
+        let clearance = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+            .unwrap()[0]
+            .1;
+
+        // NON-VACUITY — the row really is in the screen's admission window, so
+        // the screen really did run on it. Without this the test would pass on
+        // a row the screen never looked at, which is precisely how the hole
+        // this test closes stayed invisible.
+        assert!(
+            (0.0..0.1).contains(&clearance),
+            "the fixture must land the clearance in the transit screen's \
+             admission window [0, 0.1); kernel said {clearance}. Retune the \
+             panel rather than deleting the assertion."
+        );
+        println!("FINDING-D-THROUGH-PRODUCTION: clearance={clearance}");
     }
 
     /// **`evaluate_candidates` spends the PLACEMENT demand — ruling R-1495, as
@@ -3890,103 +4394,122 @@ mod tests {
         assert!(model.rods[0].p1[0] >= 4.0);
     }
 
-    /// MAJOR-6 regression: the exact-clearance mask must reflect each member's
-    /// ACTUAL seating state.
+    /// **MAJOR-6, RE-AIMED BY #36 STEP 5 — the seating distinction is real, and
+    /// the exact pass is now INDEPENDENT of it.**
     ///
-    /// An endpoint that sits ON the projected surface point has its axis
-    /// station at arc distance `u*` standing `u*|cos|` above the plane, not
-    /// `u*|cos| - h`, so the mask carries no `h` term for it. The check is
-    /// end-to-end through the real kernel: on a planar seat the correct mask
-    /// makes `segment_clearance` read exactly `MARGIN` (= process resolution,
-    /// 0.05 mm at a 0.05 mm layer). Including `h` would push the first checked
-    /// station 0.3 mm further out and the row would read 0.35 mm — 0.3 mm of
-    /// the member silently exempted from the distance test.
+    /// This test used to assert an artifact of the retired rule: that a correct
+    /// PR-2 mask placed the exact pass's first tested station so the kernel read
+    /// exactly `MARGIN`, and that including the `h` term for an unseated end
+    /// pushed it 0.3 mm further out. That number existed only because the mask
+    /// was handed to the kernel as an INSET. Step 5 stopped doing that — the
+    /// exact pass tests the FULL axis and exempts a frozen face SET — so the
+    /// station the mask used to place is no longer a thing the exact pass has.
     ///
-    /// **THE SUBJECT MOVED WITH PR-7.** This test used `MemberKind::Strut` with
-    /// a `Rootward` contact, because that WAS the unseated family: a CCO
-    /// model-anchor strut's `p1` was the raw seat point. `apply_model_anchor`
-    /// now seats it, so that pair is `Seated` and carrying the `h` term for it
-    /// is correct. The unseated case is taken from a family that genuinely is
-    /// one — a bifurcation `cco_upper` half — and the complementary half, that
-    /// the SEATED family reads MARGIN too when its endpoint really is seated,
-    /// is asserted alongside it. Between them they pin both directions of
-    /// `contact::seating_of`, which is the only place the decision is recorded.
+    /// MAJOR-6's actual rule is untouched and is asserted here at the reader it
+    /// still has: `contact::seating_of` records each family's seating state, and
+    /// `placed_mask_inset_mm` carries the depth term for a seated end and not
+    /// for an unseated one. That mask still feeds PR-3 emergence and
+    /// `axis_illegal_rows` (design §5), so getting it wrong still matters.
+    ///
+    /// What step 5 adds is the second half, and it is the stronger statement:
+    /// **the same geometry, the same frozen zone, graded once as an unseated
+    /// family and once as a seated one, now reads the SAME clearance.** Under
+    /// the retired rule those two rows differed by `h/|cos|`, because the mask
+    /// moved the tested stations. Under the honest rule the tested stations are
+    /// the whole axis for both and the tested faces are `surface \ Z` for both,
+    /// so nothing about seating can move the distance verdict.
     #[test]
-    fn an_unseated_contact_is_not_over_masked_by_the_seat_depth() {
-        let mut forest = Forest::new();
-        let strut = forest.add_member(contact_member(
-            [0.0, 0.0, 6.0],
-            [0.0, 0.0, 0.0],
-            MemberKind::Other("cco_upper".to_owned()),
-            ContactEnd::Rootward,
-            0,
-        ));
-        let surface = flat_table();
+    fn the_exact_pass_no_longer_reads_the_seat_depth_that_the_mask_still_carries() {
         let config = BraceConfig::current(0.05).unwrap();
-        let rows =
-            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap();
-        let (key, clearance) = rows
-            .iter()
-            .copied()
-            .find(|(key, _)| *key == strut)
-            .expect("the strut is a live non-stub row");
-        assert_eq!(key, strut);
-        // MARGIN is the run's own process resolution.
-        let margin = config
-            .contact_policy(contact::ClearanceStage::Final)
-            .process_resolution_mm;
-        // TWO-TIER (Craig's ruling, 2026-08-22). The PR-2 mask still places the
-        // first tested station `h + r_max + STANDOFF_MM + MARGIN` above the
-        // plane -- the mask's standoff term is the mask's own input and did not
-        // move -- but the FINAL pass now DEMANDS only `FINAL_CLEARANCE_GAP_MM`.
-        // So the planar round trip reads
-        // `MARGIN + (STANDOFF_MM - FINAL_CLEARANCE_GAP_MM)` rather than MARGIN,
-        // and it is written as those two registered numbers rather than as the
-        // 0.35 they currently make.
-        let final_gap = config
-            .contact_policy(contact::ClearanceStage::Final)
-            .demanded_gap_mm;
-        let slack = config.standoff_mm - final_gap;
-        let expected = margin + slack;
-        assert!(
-            (clearance - expected).abs() < 1.0e-9,
-            "unseated strut must read MARGIN + (STANDOFF_MM - FINAL_CLEARANCE_GAP_MM) \
-             = {margin} + {slack} = {expected}, got {clearance}"
-        );
-        // Discrimination, unchanged in substance: the rejected alternative
-        // (`h` included in the mask) pushes the first station a further
-        // `h/|cos|` out and reads `expected + contact_depth_mm`. Half that
-        // depth still separates the two by an order of magnitude more than the
-        // 1e-9 the equality above allows.
-        assert!(clearance < expected + config.contact_depth_mm / 2.0);
-
-        // The complementary half. A PR-7-seated CCO model anchor — the same
-        // geometry with its endpoint pushed inward by the PR-1 depth, which is
-        // what `apply_model_anchor` now mints — reads exactly MARGIN too,
-        // BECAUSE the mask carries the `h` term for it. Take the `h` term away
-        // and this row under-masks by `h/|cos|` and reads 0.05 - 0.3 = -0.25.
         let policy = config.contact_policy(contact::ClearanceStage::Final);
-        let mut seated_forest = Forest::new();
-        let seat = contact::seat_depth_mm(1.0, 0.65, &policy, false);
-        let anchor = seated_forest.add_member(contact_member(
-            [0.0, 0.0, 6.0],
-            [0.0, 0.0, -seat],
-            MemberKind::Strut,
-            ContactEnd::Rootward,
-            0,
-        ));
-        let seated_rows =
-            exact_clearance_rows(&seated_forest, &surface, &config, test_penetration_limits())
-                .unwrap();
-        let (_, seated_clearance) = seated_rows
-            .iter()
-            .copied()
-            .find(|(key, _)| *key == anchor)
-            .expect("the seated anchor is a live non-stub row");
+
+        // HALF ONE — the mask distinction survives, at the reader it still has.
+        let unseated = contact::placed_mask_inset_mm(
+            contact::seating_of(
+                &MemberKind::Other("cco_upper".to_owned()),
+                ContactEnd::Rootward,
+            ),
+            1.0,
+            0.65,
+            0.65,
+            &policy,
+        )
+        .unwrap();
+        let seated = contact::placed_mask_inset_mm(
+            contact::seating_of(&MemberKind::Strut, ContactEnd::Rootward),
+            1.0,
+            0.65,
+            0.65,
+            &policy,
+        )
+        .unwrap();
         assert!(
-            (seated_clearance - expected).abs() < 1.0e-9,
-            "a PR-7-seated anchor must read the same MARGIN + (STANDOFF_MM - \
-             FINAL_CLEARANCE_GAP_MM) = {expected}, got {seated_clearance}"
+            (seated - unseated - config.contact_depth_mm).abs() < 1.0e-9,
+            "MAJOR-6: at |cos| = 1 a SEATED end's mask must carry exactly one \
+             seat depth ({}) more than an unseated one's — the mask reflects the \
+             member's actual seating state. unseated = {unseated}, seated = \
+             {seated}",
+            config.contact_depth_mm
+        );
+
+        // HALF TWO — and the exact pass no longer reads that difference.
+        //
+        // One geometry, one frozen zone, two families. `cco_upper` is genuinely
+        // unseated (a bifurcation upper half); `Strut` + `Rootward` is the
+        // PR-7-seated CCO model anchor. `seating_of` separates them, so under
+        // the retired rule the two rows' masks — and therefore their tested
+        // station sets, and therefore their clearances — differed.
+        let surface = flat_table();
+        let topology = flat_table_topology();
+        let p0 = [0.0, 0.0, 6.0];
+        let p1 = [0.0, 0.0, 0.0];
+        let (_, _, face_ids, _) = surface.project(&[p1]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: 0.5 + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        let graded = |kind: MemberKind| {
+            let mut forest = Forest::new();
+            let key = forest.add_member(contact_member(p0, p1, kind, ContactEnd::Rootward, 0));
+            forest.set_seat_zone(key, std::sync::Arc::clone(&zone));
+            let rows = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+                .unwrap();
+            rows.iter()
+                .copied()
+                .find(|(row_key, _)| *row_key == key)
+                .expect("the member is a live non-stub row")
+                .1
+        };
+        let unseated_clearance = graded(MemberKind::Other("cco_upper".to_owned()));
+        let seated_clearance = graded(MemberKind::Strut);
+
+        assert_eq!(
+            unseated_clearance, seated_clearance,
+            "#36 step 5: the exact pass tests the WHOLE axis against \
+             `surface \\ Z` for both rows, so the seating state — which used to \
+             move the mask, and with it the first tested station — cannot move \
+             the distance verdict any more. unseated = {unseated_clearance}, \
+             seated = {seated_clearance}"
+        );
+        assert!(
+            seated_clearance >= 0.0,
+            "NON-VACUITY: with its own seat forgiven the arm must be LEGAL, or \
+             this test is comparing two refusals and would pass on a rule that \
+             refused everything. Kernel said {seated_clearance}"
+        );
+        println!(
+            "SEATING-INDEPENDENT-EXACT-PASS: unseated={unseated_clearance}  \
+             seated={seated_clearance}  mask_unseated={unseated}  mask_seated={seated}"
         );
     }
 
