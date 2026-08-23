@@ -1488,6 +1488,110 @@ fn run_stage_chain<'a>(
     ChainOutcome::Lowered(Box::new(lowered))
 }
 
+/// **Stage B — what the legalization retry spent, and the one rule that stops
+/// it.**
+///
+/// Every field is printed on every path and read by no branch, per the no-cap
+/// doctrine: the mechanism is uncapped, so the only honest control on it is
+/// that an operator can see exactly what it did.
+#[derive(Clone, Debug, Default)]
+struct LegalizationTally {
+    /// Passes through the attempt-0 chain, including the first and including
+    /// the one that lowered.
+    passes: usize,
+    /// Rounds opened. A voided round is counted here as well as in
+    /// `voided_rounds`: it was opened, it was paid for, and it earned nothing.
+    confirmation_rounds: usize,
+    voided_rounds: usize,
+    /// Arms a round has measured, across all rounds.
+    round_arms_measured: usize,
+}
+
+impl LegalizationTally {
+    fn render(&self, steering: &crate::legalization::LegalizationSteering) -> String {
+        let per_terminal = steering
+            .counts_by_terminal()
+            .into_iter()
+            .map(|(terminal, count)| format!("t{terminal}={count}"))
+            .collect::<Vec<_>>();
+        format!(
+            "passes={} no_goods={} per_terminal=[{}] confirmation_rounds={} voided_rounds={} \
+             round_arms_measured={}",
+            self.passes,
+            steering.len(),
+            if per_terminal.is_empty() {
+                "none".to_owned()
+            } else {
+                per_terminal.join(",")
+            },
+            self.confirmation_rounds,
+            self.voided_rounds,
+            self.round_arms_measured,
+        )
+    }
+
+    /// Fold one abandoned pass into the steering, or refuse by name.
+    ///
+    /// **The abandon rule, and it is the weak and correct one** (§1.3
+    /// obligation 2): *every abandoned pass added at least one no-good that was
+    /// not already in the set.* It is what makes the loop terminate — the
+    /// context universe is finite because the set never feeds a context digest,
+    /// and the set grows strictly, so the passes are bounded by the number of
+    /// distinct `(terminal, prefix, arm)` triples the run can produce.
+    ///
+    /// A pass that would abandon while learning nothing new **must refuse by
+    /// name rather than loop.** That is design §4 Stage B revert proof 3, and
+    /// it is a real refusal rather than a cap: it fires on a pass that made no
+    /// progress, never on a pass that made some.
+    fn apply(
+        &mut self,
+        steering: &mut crate::legalization::LegalizationSteering,
+        abandon: crate::legalization::LegalizationAbandon,
+    ) -> Result<(), SupportRunError> {
+        match abandon {
+            crate::legalization::LegalizationAbandon::Condemned {
+                learned,
+                own_arm_terminals,
+                cascade_victims,
+            } => {
+                let mut grew = false;
+                for no_good in learned {
+                    grew |= steering.learn(no_good);
+                }
+                if !grew {
+                    return Err(SupportRunError::Failed {
+                        phase: SupportRunPhase::Brace,
+                        detail: format!(
+                            "legalization pass {} abandoned without learning a new no-good \
+                             (own-arm terminals {own_arm_terminals:?}, cascade victims \
+                             {cascade_victims:?}); the abandon rule forbids another pass \
+                             because this one made no progress",
+                            self.passes
+                        ),
+                    });
+                }
+                Ok(())
+            }
+            crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id } => {
+                // The confirmation round lands in the next commit. Until it
+                // does, a spent steering is an HONEST NAMED REFUSAL and not a
+                // retirement: §1.3 forbids retiring a terminal on a count of
+                // no-goods, and refusing loudly is the only other truthful
+                // thing this loop can do about it today.
+                Err(SupportRunError::Failed {
+                    phase: SupportRunPhase::Routing,
+                    detail: format!(
+                        "terminal {terminal_id} has a steering no-good for every arm it can \
+                         still take after {} legalization passes; a confirmation round must \
+                         re-measure them before anything may be retired",
+                        self.passes
+                    ),
+                })
+            }
+        }
+    }
+}
+
 /// Everything one route accumulated across the whole search, so §E.1's
 /// per-route outcome is a read of counters rather than an inference.
 #[derive(Clone, Debug, Default)]
@@ -1657,7 +1761,7 @@ pub fn run_support<'a>(
     let radius_mm = coverage_request.radius_mm().get();
     let censor_area_mm2 = coverage_request.patch_area_floor_mm2().get();
 
-    let (context, plan) =
+    let (mut context, plan) =
         prepare_support_context(hollowed, request, authority).map_err(|error| {
             note_stage_failure("Preparation", &error);
             SupportRunError::Failed {
@@ -1673,26 +1777,85 @@ pub fn run_support<'a>(
     // before the repair loop's own entry line can exist, and on a big model
     // that is four to five minutes of nothing. Every line below is print-only.
     let stage_clock = crate::coverage_repair::StageClock::start("support");
-    let attempt_zero = match run_stage_chain(context, plan.clone(), Some(&stage_clock), None) {
-        ChainOutcome::Lowered(lowered) => lowered,
-        // Unreachable while this call passes `None`: `ChainOutcome::Abandoned`
-        // is produced only for a caller that supplied a steering set. The arm
-        // exists so that the legalization loop, which lands next and DOES
-        // supply one, replaces this call rather than quietly widening it.
-        ChainOutcome::Abandoned(abandon) => {
-            return Err(SupportRunError::Failed {
-                phase: SupportRunPhase::Brace,
-                detail: format!(
-                    "an unsteered attempt-0 pass abandoned: {}",
-                    abandon.abandon.render()
-                ),
-            });
+
+    // ------------------------------------------- Stage B: the legalization retry
+    //
+    // Design §4 Stage B piece 4. ONE loop, wrapping the ATTEMPT-0 chain call and
+    // not the trial call — the trial path keeps today's
+    // `restore_prepared_digests` / `into_trial_rollback` behaviour exactly.
+    //
+    // **The loop holds the no-good set**, which is precisely where the
+    // finiteness hazard is: if the set reached any digest in the context tuple,
+    // every context would be fresh on every pass, every no-good would miss
+    // forever, and each abandoned pass would satisfy the abandon rule with a
+    // genuinely new triple while making no progress. It is a local, borrowed
+    // out and never stored — and `a_growing_no_good_set_moves_no_context_digest`
+    // is the standing proof.
+    //
+    // **There is no cap here and there is none below.** Craig's authorization
+    // item 4 is that the confirmation round is uncapped in engine semantics and
+    // loudly reported. The only ceiling anywhere is the test/eval harness's
+    // wall clock, which lives outside the engine and records "stopped at T with
+    // state X" rather than passing off a truncated search as an answer. Every
+    // pass streams its entry line before it starts, so a run killed inside pass
+    // 40 still leaves a log that says which pass, which terminal, and how many
+    // no-goods.
+    let mut steering = crate::legalization::LegalizationSteering::default();
+    let mut legalization = LegalizationTally::default();
+    // §A.5, finding S4, applied to this loop for the same reason the trial loop
+    // applies it: `prepared_run_for_plan` stamps five digest fields on the
+    // context, so a pass abandoned mid-chain hands back a context stamped by
+    // that pass. The next pass re-stamps them, but anything read BETWEEN passes
+    // would be reading a plan that does not exist.
+    let prepared_digests = context.prepared_digests();
+    let attempt_zero = loop {
+        legalization.passes += 1;
+        let pass_started = std::time::Instant::now();
+        crate::coverage_repair::emit_run_line(&format!(
+            "legalize: pass {} entering no_goods={} round={}",
+            legalization.passes,
+            steering.len(),
+            steering.round().map_or_else(
+                || "none".to_owned(),
+                |round| format!("t{}@rank{}", round.terminal_id, round.arm_rank),
+            ),
+        ));
+        match run_stage_chain(context, plan.clone(), Some(&stage_clock), Some(&steering)) {
+            ChainOutcome::Lowered(lowered) => {
+                crate::coverage_repair::emit_run_line(&format!(
+                    "legalize: pass {} LOWERED in {} ms — {}",
+                    legalization.passes,
+                    elapsed_ms(pass_started),
+                    legalization.render(&steering),
+                ));
+                break lowered;
+            }
+            // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
+            // failure is the model's, not this controller's. It is not a
+            // rollback, it is not a coverage refusal, and it is not eligible to
+            // be one. An abandoned pass is not one of these — it is the arm
+            // below.
+            ChainOutcome::Refused(refusal) => {
+                return Err(refusal.stop.into_attempt_zero_failure());
+            }
+            ChainOutcome::Abandoned(abandoned) => {
+                let ChainAbandon {
+                    context: returned,
+                    abandon,
+                } = *abandoned;
+                context = returned;
+                context.restore_prepared_digests(prepared_digests);
+                crate::coverage_repair::emit_run_line(&format!(
+                    "legalize: pass {} ABANDONED in {} ms — {}",
+                    legalization.passes,
+                    elapsed_ms(pass_started),
+                    abandon.render(),
+                ));
+                legalization.apply(&mut steering, abandon)?;
+            }
         }
-        // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
-        // failure is the model's, not this controller's. It is not a rollback,
-        // it is not a coverage refusal, and it is not eligible to be one.
-        ChainOutcome::Refused(refusal) => return Err(refusal.stop.into_attempt_zero_failure()),
     };
+    crate::coverage_repair::emit_run_line(&format!("legalize: {}", legalization.render(&steering)));
     stage_clock.entering("CoverageMeasurement");
     let mut measured = match measure_for_controller(&attempt_zero, coverage_request) {
         Ok(measured) => measured,
@@ -11061,6 +11224,136 @@ mod tests {
     /// Both projections are read off the ONE value `run_stage_chain` produces,
     /// so a future edit that lets the two arms disagree about the detail cannot
     /// pass.
+    /// **The abandon rule — design §4 Stage B revert proof 3.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The legalization loop is UNCAPPED, on Craig's authorization item 4, and
+    /// it should be: a cap would answer "how long may this search run" with a
+    /// number nobody measured. What makes an uncapped loop terminate instead is
+    /// a real invariant — *every abandoned pass added at least one no-good that
+    /// was not already in the set* — plus the finiteness obligation that keeps
+    /// the set out of every context digest.
+    ///
+    /// So the loop must refuse, by name, on a pass that abandoned while
+    /// learning nothing. Without this rule the same candidate is chosen and
+    /// condemned forever and the run never ends, never emits and never says
+    /// why. With it, a stuck loop stops on its second pass with the terminals
+    /// named.
+    ///
+    /// **Sabotage-shaped:** drop the `grew` check and this test goes red on the
+    /// `Ok`. It fires on a pass that made no progress and never on one that
+    /// made some, which is why it is a refusal and not a cap.
+    #[test]
+    fn an_abandoned_pass_that_learns_nothing_new_refuses_instead_of_looping() {
+        let no_good = crate::legalization::NoGood::new(
+            113,
+            crate::legalization::PrefixKey::of(&crate::cco::TerminalRouteEvidence {
+                physical_contact_id: 113,
+                terminal_id: 113,
+                original_key: crate::forest::MemberKey::transit_test_fixture(401, 0),
+                plan_digest: 1,
+                loads_digest: 2,
+                geometry_digest: 3,
+                forest_digest_before: 4,
+                controller_digest_before: 5,
+            }),
+            crate::legalization::ArmIdentity::live(
+                crate::cco::CandidateFamily::PlateDescent,
+                7,
+                1.25,
+                3,
+            ),
+        );
+        let condemned = || crate::legalization::LegalizationAbandon::Condemned {
+            learned: vec![no_good],
+            own_arm_terminals: vec![113],
+            cascade_victims: Vec::new(),
+        };
+
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(&mut steering, condemned())
+            .expect("the first pass learns a no-good the set did not have, so it may retry");
+        assert_eq!(steering.len(), 1);
+
+        // The identical refusal a second time. The world did not move, so
+        // another pass would choose and condemn the identical arm forever.
+        tally.passes = 2;
+        let refusal = tally
+            .apply(&mut steering, condemned())
+            .expect_err("a pass that abandoned while learning nothing must refuse by name");
+        let SupportRunError::Failed { phase, detail } = refusal else {
+            panic!("the abandon rule must refuse as a named stage failure, got {refusal:?}");
+        };
+        assert_eq!(phase, SupportRunPhase::Brace);
+        assert!(
+            detail.contains("without learning a new no-good") && detail.contains("113"),
+            "the refusal must name the rule and the terminals it was about: {detail}"
+        );
+        assert_eq!(steering.len(), 1, "a refused pass adds nothing");
+    }
+
+    /// A pass whose whole disturbed class is cascade victims learns nothing it
+    /// can steer with, so it refuses by the same rule rather than retrying
+    /// against an unchanged set. Victims steer nothing — §1.3 — and "nothing"
+    /// has to include "nothing that licenses another pass".
+    #[test]
+    fn a_pass_that_disturbed_only_cascade_victims_refuses_rather_than_retrying() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        let refusal = tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: Vec::new(),
+                    own_arm_terminals: Vec::new(),
+                    cascade_victims: vec![7, 9],
+                },
+            )
+            .expect_err("victims steer nothing, so this pass learned nothing");
+        assert!(
+            format!("{refusal:?}").contains("cascade victims [7, 9]"),
+            "the refusal must name the victims: {refusal:?}"
+        );
+        assert_eq!(steering.len(), 0);
+    }
+
+    /// **A spent steering is never a retirement.** Until the confirmation round
+    /// lands, the loop's only truthful answer is a named refusal — §1.3 forbids
+    /// retiring a terminal on a count of no-goods, and a terminal retired here
+    /// would be a real contact removed from the accepted set with its carried
+    /// area repartitioned onto its neighbours, under a clean seal.
+    #[test]
+    fn a_spent_steering_refuses_by_name_and_retires_nothing() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 4,
+            ..LegalizationTally::default()
+        };
+        let refusal = tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
+            )
+            .expect_err("a spent steering stops the run; it does not retire the terminal");
+        let SupportRunError::Failed { phase, detail } = refusal else {
+            panic!("expected a named stage failure, got {refusal:?}");
+        };
+        assert_eq!(phase, SupportRunPhase::Routing);
+        assert!(
+            detail.contains("terminal 113") && detail.contains("confirmation round"),
+            "the refusal must name the terminal and what would earn a retirement: {detail}"
+        );
+    }
+
     #[test]
     fn a_stage_refusal_keeps_its_detail_at_attempt_zero_and_on_a_trial() {
         let stop = || RefusedStage {
