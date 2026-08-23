@@ -135,8 +135,26 @@ are a different question from "how far is this arm from the surface":
    from its seat" — and there a length measured from the seat is the right shape,
    because the seat embed *is* a length along the axis. Zeroing the insets here
    would condemn every seated contact for its own designed embed. That window is
-   #52's lane (stub axis re-entry); this change must not move it, and the 52
-   stub-re-entry condemnations on `zombie-3-a` stay untouched by design.
+   #52's lane (stub axis re-entry), and the MASKS it receives do not move.
+
+   **CORRECTED 2026-08-22 (challenge finding F2).** This paragraph used to say
+   "this change must not move it, and the 52 stub-re-entry condemnations on
+   `zombie-3-a` stay untouched by design". That was true of the masks and FALSE
+   as written of the screen, and nothing measured it. The screen ADMITS on the
+   clearance the distance path produces — `[0, 0.1)`, or `≥ 0.1` with the
+   midpoint inside — and step 5 is exactly a change to that number, on every
+   contact-declaring row. So the admission input moves by construction; the
+   count of re-entry condemnations is an OUTCOME the judge's re-baseline must
+   read against the 52 of record, not a claim this note may make in advance.
+   What is now MEASURED is the property that matters: the screen still catches a
+   buried arm.
+   `brace::a_seated_arm_that_keeps_running_inside_the_model_is_still_condemned_by_the_transit_screen`
+   drives production `exact_clearance_rows` on a seated arm that runs 2.7 mm
+   INTO the slab past its designed embed — the honest rule makes its distance
+   clearance read wide open (witness asserted `≥ 0.1`, so it is the
+   midpoint-inside branch that admits it, the branch the finding-D pin cannot
+   reach) — and the verdict is the screen's own `−min_illegal_len_mm`. Sabotage
+   `an_exact_pass_that_skipped_the_transit_screen` turns it red.
 
 **MEASURED, from the audit itself:** non-contact members already grade
 full-length against the whole surface and need no change. The Bat's Shoots
@@ -621,6 +639,25 @@ refuse-rather-than-truncate semantics are inherited untouched.
 **RAISED FOR CRAIG.** If he wants a real numeric authority beside
 `brace_penetration_limits`, it is a one-line change at one call site.
 
+**STATED PLAINLY, after challenge finding F3 (2026-08-22).** Two things this
+subsection implied rather than said:
+
+1. This is a RATIFICATION item, not a resolved one. The orchestrator's ruling
+   said mirror-or-STOP-AND-REPORT; the escape clause was read as licensing
+   option (a) and option (a) landed instead of the lane stopping. The provenance
+   argument above is why, and nothing was invented — but the call is still one
+   Craig may veto, and it is listed with the other open items in §11.9.
+2. The bound is INERT in production. `max_rows = rows`,
+   `max_faces_per_row = n_faces`, `max_total_faces = rows × n_faces`
+   (saturating) — a batch cannot exceed a limit computed from the batch itself.
+   So `faces_near_segments_batch`'s fail-closed refuse-rather-than-truncate
+   behaviour can never fire on this path in production, and the 949 MB worst
+   case is bounded by nothing except the realistic zone size (§6: tens of
+   faces). The refusal semantics are still exercised — `seat_zone`'s own tests
+   pass tightened limits deliberately — but as a contract, not as a live
+   production guard. If Craig wants a real ceiling that can bite, that is
+   option (b) and it needs a number.
+
 ### 11.4 Step 5 — the four grading sites
 
 | site | stage | what changed |
@@ -753,3 +790,106 @@ inherited `#39` reds are byte-identical in name and count between the lane base
 and this tip: `a4_transactional_controller` 4-of-8 and
 `support_runner_integration` 2-of-4, VERIFIED by running both binaries at
 `562d829` in a linked worktree.
+
+### 11.9 Open items, and the one that needs Craig
+
+The round-5 challenge returned ACCEPT with four non-blocking findings. Three are
+folded in above and in the test estate; one is a decision this lane may not take
+for itself.
+
+#### F1 — RAISED FOR CRAIG. A seated arm has almost no PLACEMENT headroom to grow into
+
+The band is frozen at the arm's CREATION radius, and every face outside the band
+is by construction farther than that radius plus `STANDOFF_MM` from the axis. So
+on a real, finely tessellated seat the arm's OWN surface is what grades it, with
+no foreign geometry anywhere in the mesh, and the graded clearance is
+
+```text
+clearance ≈ (r_create + STANDOFF_MM) − (r_max + demanded_gap)
+```
+
+Every millimetre the arm grows after its freeze is a millimetre off that number,
+one for one. `cco::generate_descriptors` freezes the model anchor's band at
+`min_shoot_radius_mm` and its own comment records that
+`size_tapered_without_tree_fanin` may raise the radius afterwards;
+`cco::clearance_survival` then grades at PLACEMENT with the SIZED radius. That is
+`#51`'s shape — "unsatisfiable by exactly the arm's own radius" — one level up.
+
+**MEASURED**, by `brace::a_seated_arm_that_grows_after_its_freeze_spends_its_headroom_one_for_one`,
+through production `exact_clearance_rows` (FINAL) and production
+`evaluate_candidates` (PLACEMENT), on a 0.25 mm-triangle slab of 2,182 faces
+with a 116-face zone and a 0.95 mm band, frozen at the registry's
+`min_shoot_r_mm` = 0.35 mm:
+
+| `r_max` mm | 0.35 | 0.40 | 0.50 | 0.65 | 0.80 | 1.00 |
+| --- | --- | --- | --- | --- | --- | --- |
+| FINAL (0.300 demanded) | +0.35 | +0.30 | +0.20 | +0.05 | **−0.10** | −0.30 |
+| PLACEMENT (0.600 demanded) | LEGAL | LEGAL | **REFUSED** | REFUSED | REFUSED | REFUSED |
+
+**PLACEMENT refuses above `r_max` = 0.400 mm — 0.05 mm of headroom. FINAL
+refuses above `r_max` = 0.700 mm.** Both crossings are probed a thousandth
+either side, so they are kernel verdicts rather than arithmetic, and the
+0.300 mm between them is exactly the two-tier gap of §4.
+
+**Why no existing pin caught it.** The production pin
+`a_seated_arm_stays_legal_against_its_own_designed_embed_and_refuses_without_its_zone`
+uses `flat_table`, whose top face is TWO triangles 40 mm across. The zone is
+therefore the whole tabletop and the nearest non-exempt face is the 10 mm-away
+underside, so the same arm reads **+8.75 mm at PLACEMENT even at
+`r_max` = 3.0 mm** (MEASURED by the challenger). That pin proves the exemption
+EXEMPTS and nothing more; it is now annotated to say so and to name its
+successor. The new fixture `fine_seat_slab_parts` exists because of this: a
+seat whose zone is a disc of the band's own size, which is the geometry a real
+mini presents.
+
+**What is NOT claimed.** Nothing here says a production arm is in fact refused.
+`zombie-3-a` gained records rather than losing a family, and its placement
+refusal rate HALVED on this lane (0.402 → 0.200 per trial). This is a
+sensitivity, measured and pinned, not an observed regression.
+
+**The three dispositions, for Craig:**
+
+1. **Freeze at `max(r_create, final r_max)`** — re-freeze the band after sizing.
+   Correct in shape, but it means a second freeze pass and a zone that is no
+   longer a creation-time constant.
+2. **Widen the seat's exemption by the growth** — keep one freeze, add the
+   growth to the band radius. Cheaper, but the band stops being "the arm's own
+   footprint" and becomes a number with slack in it.
+3. **Accept the cost** — 0.05 mm is the headroom, and the sizing pass must not
+   exceed it. Free, but it is a silent coupling between two passes that do not
+   know about each other today.
+
+Whichever lands, this pin's numbers move and this subsection must say which way.
+The moved pin `cco::the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes`
+sits directly on this edge — its fixture uses `r1` = 0.35 = `min_shoot_radius_mm`.
+
+#### F2 — CLOSED by measurement
+
+§5's claim that this change "must not move" the axis-transit screen was true of
+the MASKS and false as written of the ADMISSION rule. The paragraph is corrected
+in place, and the property that matters is now MEASURED by
+`brace::a_seated_arm_that_keeps_running_inside_the_model_is_still_condemned_by_the_transit_screen`,
+which drives a seated arm 2.7 mm into the slab past its designed embed, asserts
+the distance path reads it wide open (so the midpoint-inside branch is what
+admits it — the branch finding D's pin cannot reach) and pins the verdict at the
+screen's own `−min_illegal_len_mm`. The re-entry condemnation COUNT on
+`zombie-3-a` remains an outcome for the judge's re-baseline to read against the
+52 of record, not a claim this note makes in advance.
+
+#### F3 — RATIFICATION, stated plainly
+
+§11.3 now says outright that this was an escape-clause reading rather than a
+resolved question, and that the bound is INERT in production
+(`max_rows = rows`, `max_faces_per_row = n_faces`, saturating product), so the
+kernel's refuse-rather-than-truncate can never fire on this path. Craig may veto;
+a ceiling that can actually bite needs a number, and this lane declines to invent
+one.
+
+#### F4 — CLOSED
+
+`the_exact_pass_hands_the_transit_screen_its_masks_and_not_the_zeroed_insets`
+asserted its fixture check before its claim, so the sabotage red-run read "the
+fixture must land the clearance in [0, 0.1)" — true, but it names the fixture
+when the defect is the production fork. The condemnation now fails first and
+names itself; the admission-window check stays as the non-vacuity guard it was
+always meant to be.

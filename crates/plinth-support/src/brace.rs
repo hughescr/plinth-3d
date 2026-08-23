@@ -2531,6 +2531,108 @@ mod tests {
         fixture_topology(vertices, faces)
     }
 
+    /// **A slab whose top face is FINELY TESSELLATED** — `pitch_mm` triangles
+    /// over an 8 mm square, with the four walls and the underside left coarse.
+    ///
+    /// `flat_table` cannot price a seat exemption. Its top face is TWO triangles
+    /// 40 mm across, so a seat zone is the WHOLE tabletop and the nearest
+    /// non-exempt face is the 10 mm-away underside: any seated arm reads metres
+    /// of headroom there (MEASURED by the round-5 challenger: `+8.75 mm` at
+    /// `r_max = 3.0 mm`). That is what hid challenge finding F1. On this slab the
+    /// zone is a disc of the band's own size and the nearest non-exempt face
+    /// sits one tessellation step outside it, which is the geometry a real mini
+    /// presents.
+    ///
+    /// Watertight by construction: each wall is a fan from the bottom corner
+    /// adjacent to its first top vertex, over the SAME top-edge vertices the
+    /// grid emitted, closed by one triangle to the other bottom corner. The four
+    /// edge traversals are each the previous one rotated 90° about `z`, so all
+    /// four walls inherit the top face's outward winding.
+    fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        const HALF_MM: f64 = 4.0;
+        const DEPTH_MM: f64 = 10.0;
+        let span_mm = 2.0 * HALF_MM;
+        let steps = (span_mm / pitch_mm).round() as usize;
+        assert!(steps >= 4, "the top face must actually be tessellated");
+        let mut vertices = Vec::with_capacity((steps + 1) * (steps + 1) + 4);
+        for i in 0..=steps {
+            for j in 0..=steps {
+                vertices.push([
+                    -HALF_MM + span_mm * (i as f64) / (steps as f64),
+                    -HALF_MM + span_mm * (j as f64) / (steps as f64),
+                    0.0,
+                ]);
+            }
+        }
+        let top = |i: usize, j: usize| (i * (steps + 1) + j) as u32;
+        let mut faces = Vec::with_capacity(2 * steps * steps + 4 * (steps + 1) + 2);
+        for i in 0..steps {
+            for j in 0..steps {
+                faces.push([top(i, j), top(i + 1, j), top(i + 1, j + 1)]);
+                faces.push([top(i, j), top(i + 1, j + 1), top(i, j + 1)]);
+            }
+        }
+        let base = vertices.len() as u32;
+        for corner in [
+            [-HALF_MM, -HALF_MM],
+            [HALF_MM, -HALF_MM],
+            [HALF_MM, HALF_MM],
+            [-HALF_MM, HALF_MM],
+        ] {
+            vertices.push([corner[0], corner[1], -DEPTH_MM]);
+        }
+        faces.push([base, base + 2, base + 1]);
+        faces.push([base, base + 3, base + 2]);
+        let walls = [
+            (
+                (0..=steps).map(|k| top(k, 0)).collect::<Vec<_>>(),
+                base,
+                base + 1,
+            ),
+            (
+                (0..=steps).map(|k| top(steps, k)).collect::<Vec<_>>(),
+                base + 1,
+                base + 2,
+            ),
+            (
+                (0..=steps)
+                    .map(|k| top(steps - k, steps))
+                    .collect::<Vec<_>>(),
+                base + 2,
+                base + 3,
+            ),
+            (
+                (0..=steps).map(|k| top(0, steps - k)).collect::<Vec<_>>(),
+                base + 3,
+                base,
+            ),
+        ];
+        for (edge, first_corner, last_corner) in walls {
+            for k in 0..steps {
+                faces.push([first_corner, edge[k + 1], edge[k]]);
+            }
+            faces.push([first_corner, last_corner, edge[steps]]);
+        }
+        (vertices, faces)
+    }
+
+    /// The surface and the face adjacency for ONE `fine_seat_slab_parts` mesh,
+    /// welded the way `validate_perception_input` welds production's.
+    fn fine_seat_slab(pitch_mm: f64) -> (NativeSurface, FaceTopology) {
+        let (vertices, faces) = fine_seat_slab_parts(pitch_mm);
+        let surface = NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let topology = fixture_topology(vertices, faces);
+        (surface, topology)
+    }
+
     /// The two-tier ruling, read through the REGISTRY rather than restated.
     ///
     /// A wiring test, not a values test: the values themselves are pinned in
@@ -3588,6 +3690,15 @@ mod tests {
     /// That is why §9.4's inventory had to be complete before step 5 landed, and
     /// it is the failure direction a missed site takes: a refusal, loudly, never
     /// a silent pass.
+    ///
+    /// **WHAT THIS PIN CANNOT SEE — challenge finding F1, 2026-08-22.** Its
+    /// fixture is `flat_table`, whose top face is two triangles 40 mm across, so
+    /// the frozen zone is the WHOLE tabletop and the nearest non-exempt face is
+    /// the 10 mm-away underside. The seated arm therefore reads metres of
+    /// headroom here (`+8.75 mm` even at `r_max = 3.0 mm`) and this test proves
+    /// only that the exemption EXEMPTS. What it costs is measured on a real
+    /// seat by
+    /// `a_seated_arm_that_grows_after_its_freeze_spends_its_headroom_one_for_one`.
     #[test]
     fn a_seated_arm_stays_legal_against_its_own_designed_embed_and_refuses_without_its_zone() {
         let config = BraceConfig::current(0.05).unwrap();
@@ -3659,6 +3770,380 @@ mod tests {
              measuring the exemption."
         );
         println!("SEATED-LEGALITY: with_zone={with_zone}  without_zone={without_zone}");
+    }
+
+    /// **WHAT THE EXEMPTION COSTS A SEATED ARM THAT GROWS — challenge finding
+    /// F1, 2026-08-22, MEASURED. RAISED FOR CRAIG (design §11.9).**
+    ///
+    /// The band is frozen at the arm's CREATION radius, and every face outside
+    /// it is by construction farther than `r_create + STANDOFF` from the axis.
+    /// So the seat's own surface — with no foreign geometry anywhere — supplies
+    /// the graded clearance, and it is
+    ///
+    /// ```text
+    /// clearance ≈ (r_create + STANDOFF) − (r_max + demand)
+    /// ```
+    ///
+    /// which is `r_create − r_max` at PLACEMENT and `r_create − r_max + 0.30` at
+    /// FINAL. A seated arm that is later SIZED UP therefore spends that headroom
+    /// one millimetre per millimetre, and at PLACEMENT there is almost none:
+    /// `cco::generate_descriptors` freezes the model anchor's band at
+    /// `min_shoot_radius_mm` and says in its own comment that
+    /// `size_tapered_without_tree_fanin` may raise the radius afterwards, while
+    /// `cco::clearance_survival` grades at PLACEMENT with the SIZED radius.
+    ///
+    /// This test does not judge that; it MEASURES it, so the knife edge is
+    /// recorded and loud rather than discovered later. It is #51's shape
+    /// ("unsatisfiable by exactly the arm's own radius") one level up, and the
+    /// disposition — freeze at `max(r_create, final r_max)`, widen the seat's
+    /// exemption by the growth, or accept the cost — is Craig's ruling to make.
+    /// If that ruling lands, this pin's numbers move and the design note says
+    /// which way.
+    ///
+    /// The seat radius is READ FROM THE REGISTRY (`min_shoot_r_mm`), not typed,
+    /// so the fixture tracks the production freeze rather than a chosen number.
+    ///
+    /// **WHAT THIS RUN MEASURES** — 0.25 mm triangles, 2,182 faces, zone 116
+    /// faces, band 0.95 mm, no foreign geometry anywhere. Frozen at the
+    /// registry's `min_shoot_r_mm` = 0.35 mm; the FINAL column is
+    /// `exact_clearance_rows`, the PLACEMENT column is `evaluate_candidates`:
+    ///
+    /// ```text
+    /// r_max mm | 0.35  0.40  0.50  0.65  0.80  1.00
+    /// FINAL mm |+0.35 +0.30 +0.20 +0.05 -0.10 -0.30
+    /// PLACEMENT| LEGAL LEGAL  REF   REF   REF   REF
+    /// ```
+    ///
+    /// **PLACEMENT refuses above `r_max` = 0.400 mm. FINAL refuses above
+    /// `r_max` = 0.700 mm.** Both crossings are probed a thousandth either
+    /// side, so they are kernel verdicts and not arithmetic. This reproduces
+    /// the round-5 challenger's hand sweep row for row.
+    #[test]
+    fn a_seated_arm_that_grows_after_its_freeze_spends_its_headroom_one_for_one() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let constants = m0_constants().unwrap();
+        let seat_radius_mm = constants.placeholders().min_shoot_r_mm().diagnostic().get();
+        const PITCH_MM: f64 = 0.25;
+        let (surface, topology) = fine_seat_slab(PITCH_MM);
+
+        // Seated one designed contact depth into the slab and standing out of
+        // it, exactly as the seated-legality pin does — only the seat is a real
+        // tessellated surface instead of one 40 mm triangle pair.
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1 = [0.0, 0.0, 3.0];
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                // The CREATION radius, frozen once. It never follows the growth
+                // measured below.
+                band_radius_mm: seat_radius_mm + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+        // FIXTURE NON-VACUITY — the zone must be a DISC, not the whole top face,
+        // or this test degenerates into the one above.
+        assert!(
+            zone.len() * 4 < topology.n_faces(),
+            "the fine slab must give the seat a zone that is a small fraction of \
+             the mesh, or the fixture cannot price the headroom: zone {} faces \
+             of {} total",
+            zone.len(),
+            topology.n_faces()
+        );
+
+        // BOTH TIERS, BATCHED — a whole radius ladder per call, never one
+        // production call per rung. `exact_clearance_rows` grades a forest and
+        // `evaluate_candidates` grades a candidate slice, so the ladder is one
+        // batch each way; the rows come back keyed, so nothing here depends on
+        // the order the forest happens to walk its members in.
+        let final_clearances = |radii: &[f64]| -> Vec<f64> {
+            let mut forest = Forest::new();
+            let keys = radii
+                .iter()
+                .enumerate()
+                .map(|(ordinal, &radius_mm)| {
+                    let key = forest.add_member(Member::new(MemberSpec {
+                        p0_mm: finite3(p0).unwrap(),
+                        p1_mm: finite3(p1).unwrap(),
+                        r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+                        r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+                        kind: MemberKind::Strut,
+                        owner: Owner::Generated {
+                            family: "f1-headroom".into(),
+                            ordinal: u32::try_from(ordinal).unwrap(),
+                        },
+                        model_contact_end: Some(ContactEnd::Terminalward),
+                        carried_mm2: finite(0.0).unwrap(),
+                    }));
+                    forest.set_seat_zone(key, zone.clone());
+                    key
+                })
+                .collect::<Vec<_>>();
+            let graded =
+                exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+                    .unwrap()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>();
+            keys.iter().map(|key| graded[key]).collect()
+        };
+        let placement_viable = |radii: &[f64]| -> Vec<bool> {
+            let candidates = radii
+                .iter()
+                .enumerate()
+                .map(|(index, &radius_mm)| PlacementCandidate {
+                    need_index: 0,
+                    site_index: index,
+                    rank: index,
+                    kind: BraceAdditionKind::ModelRung,
+                    rods: vec![Rod {
+                        p0,
+                        p1,
+                        radius: positive(radius_mm),
+                        // The PR-2 mask, set generously enough to cover the
+                        // whole designed embed, so the TRANSIT screen is not
+                        // what decides here and the demand is.
+                        inset0: config.contact_depth_mm + config.min_illegal_len_mm,
+                        inset1: 0.0,
+                        #[cfg(feature = "census")]
+                        contact: None,
+                    }],
+                    printable: true,
+                    seat_zone: Some(zone.clone()),
+                })
+                .collect::<Vec<_>>();
+            evaluate_candidates(&surface, &candidates, &config, test_penetration_limits()).unwrap()
+        };
+
+        // THE LADDER — the same post-freeze growths the round-5 challenger swept
+        // by hand, so this pin and that measurement can be read against each
+        // other. Growths, not absolute radii, because the freeze radius is read
+        // from the registry rather than typed.
+        const GROWTH_MM: [f64; 6] = [0.00, 0.05, 0.15, 0.30, 0.45, 0.65];
+        let ladder = GROWTH_MM
+            .iter()
+            .map(|growth| seat_radius_mm + growth)
+            .collect::<Vec<_>>();
+        let ladder_final = final_clearances(&ladder);
+        let ladder_placement = placement_viable(&ladder);
+
+        // THE LAW, measured through the production FINAL pass across the whole
+        // ladder: growth is spent one for one. The differences cancel the
+        // tessellation slack, so this holds to the kernel's own precision rather
+        // than to a tolerance chosen to make it pass.
+        let headroom_final_mm = ladder_final[0];
+        assert!(
+            GROWTH_MM
+                .iter()
+                .zip(&ladder_final)
+                .all(|(growth, graded)| ((headroom_final_mm - graded) - growth).abs() < 1.0e-9),
+            "a seated arm's clearance must fall exactly as fast as its radius \
+             rises, because the tested face set is FROZEN: growths {GROWTH_MM:?} \
+             graded {ladder_final:?}"
+        );
+        assert!(
+            headroom_final_mm > 0.0,
+            "the arm must be legal at its creation radius, or the fixture is \
+             measuring something else: {headroom_final_mm}"
+        );
+
+        // THE TWO CROSSINGS, PINNED BY MEASUREMENT rather than by arithmetic.
+        // The FINAL tier runs out of headroom at `r_seat + headroom`; the
+        // PLACEMENT tier runs out exactly one tier-gap earlier, because the two
+        // tiers grade the same frozen face set against demands that differ by
+        // that much. Probing a thousandth either side of each crossing is what
+        // turns "the law says so" into "the kernel said so".
+        let tier_delta_mm = config
+            .contact_policy(contact::ClearanceStage::Placement)
+            .demanded_gap_mm
+            - config
+                .contact_policy(contact::ClearanceStage::Final)
+                .demanded_gap_mm;
+        assert!(
+            tier_delta_mm > 0.0,
+            "the two-tier ruling must leave PLACEMENT the stricter demand — it \
+             asks for the wider gap so a candidate is pruned before it can be \
+             condemned. If this is negative the tiers swapped and this whole \
+             measurement is about a different design: {tier_delta_mm}"
+        );
+        const EPS_MM: f64 = 1.0e-3;
+        let placement_crossing_mm = seat_radius_mm + headroom_final_mm - tier_delta_mm;
+        let final_crossing_mm = seat_radius_mm + headroom_final_mm;
+        let probes = vec![
+            placement_crossing_mm - EPS_MM,
+            placement_crossing_mm + EPS_MM,
+            final_crossing_mm - EPS_MM,
+            final_crossing_mm + EPS_MM,
+        ];
+        let probe_final = final_clearances(&probes);
+        let probe_placement = placement_viable(&probes);
+        assert!(
+            probe_placement[0] && !probe_placement[1],
+            "the PLACEMENT screen must flip from LEGAL to REFUSED across \
+             r_max = {placement_crossing_mm} mm — this IS challenge finding F1, \
+             and if the flip moves, either the freeze radius, the demand or the \
+             band moved and the design note's §11.9 is stale. Kernel said \
+             {probe_placement:?} at {probes:?}"
+        );
+        assert!(
+            probe_final[2] > 0.0 && probe_final[3] < 0.0,
+            "the FINAL pass must flip from LEGAL to REFUSED across \
+             r_max = {final_crossing_mm} mm. Kernel said {probe_final:?}"
+        );
+        // AND THE TWO TIERS DISAGREE ABOUT THE SAME ARM, which is the whole of
+        // F1: there is a band of post-freeze growth — one tier-gap wide — where
+        // the arm the FINAL pass would keep is one the PLACEMENT screen (the one
+        // `cco::clearance_survival` and `evaluate_candidates` spend) never lets
+        // be built.
+        assert!(
+            probe_final[1] > 0.0,
+            "…while the SAME arm is still legal at FINAL: {}. The two tiers must \
+             disagree across this band or the fixture is not on the knife edge.",
+            probe_final[1]
+        );
+        // NON-VACUITY OF THE LADDER — it must straddle both crossings, or the
+        // printed table is not the challenger's table.
+        assert!(
+            ladder_placement[0]
+                && !ladder_placement[GROWTH_MM.len() - 1]
+                && ladder_final[GROWTH_MM.len() - 1] < 0.0,
+            "the ladder must span LEGAL to REFUSED on BOTH tiers: \
+             final {ladder_final:?} placement {ladder_placement:?}"
+        );
+        println!(
+            "F1-HEADROOM: zone={} faces of {}, seat r={seat_radius_mm} mm, \
+             band={} mm, tier gap={tier_delta_mm} mm\n\
+             F1-HEADROOM: growth_mm={GROWTH_MM:?}\n\
+             F1-HEADROOM:  final_mm={ladder_final:?}\n\
+             F1-HEADROOM: placement_legal={ladder_placement:?}\n\
+             F1-HEADROOM: PLACEMENT refuses above r_max={placement_crossing_mm} mm, \
+             FINAL refuses above r_max={final_crossing_mm} mm",
+            zone.len(),
+            topology.n_faces(),
+            seat_radius_mm + config.standoff_mm,
+        );
+    }
+
+    /// **THE TRANSIT SCREEN'S ADMISSION WINDOW STILL CATCHES A BURIED ARM —
+    /// challenge finding F2, 2026-08-22, MEASURED rather than inferred.**
+    ///
+    /// Design §5 said this change "must not move" the axis-transit screen. That
+    /// is true of the MASKS the screen receives, which step 5 left alone. It was
+    /// not true as written of the screen's ADMISSION rule: a row is screened
+    /// when its clearance is in `[0, 0.1)` or when it is `≥ 0.1` with its
+    /// midpoint inside — and that clearance is now the zero-inset,
+    /// zone-excluded number, which moved on every contact-declaring row. The
+    /// challenger's finding was that nothing measured the consequence.
+    ///
+    /// This measures it on the branch `the_exact_pass_hands_the_transit_screen_…`
+    /// cannot reach: the midpoint-inside branch, which is the one that catches
+    /// an arm buried in material far from every face — the `#52` family. Under
+    /// the honest rule such a row's clearance goes UP, not down, because the
+    /// seat zone forgives exactly the faces the arm is nearest to; if the
+    /// admission rule had been weakened, this is where an arm would escape.
+    ///
+    /// The fixture: a seated arm that runs DOWN into the slab instead of
+    /// standing out of it. Its seat zone is exempt, every remaining face is
+    /// 7 mm away, and the distance path therefore reads it WIDE OPEN (asserted
+    /// as a witness). Only the screen can refuse it, and the verdict proves the
+    /// screen is what did — a distance refusal cannot produce the transit
+    /// stamp's exact `−min_illegal_len_mm`.
+    ///
+    /// **The named sabotage: `an_exact_pass_that_skipped_the_transit_screen`.**
+    /// Delete the `axis_illegal_rows` loop in `exact_clearance_rows` and this
+    /// buried arm is stamped legal at the full witness clearance.
+    #[test]
+    fn a_seated_arm_that_keeps_running_inside_the_model_is_still_condemned_by_the_transit_screen() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let surface = flat_table();
+        let topology = flat_table_topology();
+        const RADIUS_MM: f64 = 0.4;
+        // Seated at the top face and continuing straight DOWN through the slab —
+        // 2.7 mm of material past the designed embed the mask covers.
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1 = [0.0, 0.0, -3.0];
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let zone = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: RADIUS_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(RADIUS_MM)),
+            r1_mm: RootwardEndRadius::new(positive(RADIUS_MM)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "f2-buried".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, zone.clone());
+
+        // THE WITNESS, from the same kernel call the production distance path
+        // makes: with its seat zone exempt this arm is nowhere near a face it is
+        // graded against, so the distance path cannot be what refuses it, and
+        // the row reaches the screen through the midpoint-inside branch rather
+        // than the `[0, 0.1)` window.
+        let final_gap_mm = config
+            .contact_policy(contact::ClearanceStage::Final)
+            .demanded_gap_mm;
+        let zero = [0.0];
+        let witness = surface
+            .segment_clearance_excluding(
+                &[p0],
+                &[p1],
+                &[RADIUS_MM],
+                &[RADIUS_MM],
+                final_gap_mm,
+                &zero,
+                &zero,
+                &[zone.as_ref()],
+            )
+            .unwrap()
+            .0[0];
+        assert!(
+            witness >= 0.1,
+            "NON-VACUITY: the buried arm must read WIDE OPEN on the distance \
+             path, or this test is not measuring the screen at all. Kernel said \
+             {witness}."
+        );
+
+        let verdict = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+            .unwrap()[0]
+            .1;
+        assert!(
+            (verdict + config.min_illegal_len_mm).abs() < 1.0e-12,
+            "the transit screen must condemn an arm that keeps running inside \
+             the model past its designed embed, and the stamp must be the \
+             screen's own `-min_illegal_len_mm`. Kernel said {verdict} against \
+             a distance-path witness of {witness}; a value equal to the witness \
+             means the screen was skipped, and any other negative means \
+             something else refused it."
+        );
+        println!(
+            "F2-ADMISSION: witness={witness}  verdict={verdict}  zone={} faces",
+            zone.len()
+        );
     }
 
     /// **FINDING D — the axis-transit screen KEEPS the PR-2 mask** (#36 §5
@@ -3813,15 +4298,32 @@ mod tests {
             .unwrap()[0]
             .1;
 
+        // THE CLAIM FIRST, THE FIXTURE CHECK SECOND — challenge finding F4,
+        // 2026-08-22. Asserting the admission window first made the SABOTAGE
+        // read "the fixture must land the clearance in [0, 0.1); kernel said
+        // −0.05": true, but it names the fixture when the defect is the
+        // production fork. The condemnation is now what fails first, and it
+        // says so.
+        assert!(
+            clearance >= 0.0,
+            "FINDING D: the production final pass CONDEMNED a seated arm for its \
+             OWN designed embed — kernel said {clearance}. That is what the \
+             sabotage `an_exact_pass_that_zeroed_its_transit_masks` does: with \
+             zeros in place of the PR-2 masks the transit screen reads the \
+             embed as a penetration and `exact_clearance_rows` stamps the row \
+             negative. (A distance refusal would land some other number; this \
+             fixture's distance path is checked immediately below.)"
+        );
         // NON-VACUITY — the row really is in the screen's admission window, so
         // the screen really did run on it. Without this the test would pass on
         // a row the screen never looked at, which is precisely how the hole
         // this test closes stayed invisible.
         assert!(
-            (0.0..0.1).contains(&clearance),
-            "the fixture must land the clearance in the transit screen's \
-             admission window [0, 0.1); kernel said {clearance}. Retune the \
-             panel rather than deleting the assertion."
+            clearance < 0.1,
+            "NON-VACUITY: the fixture must land the clearance in the transit \
+             screen's admission window [0, 0.1); kernel said {clearance}, which \
+             is above it, so the screen may never have looked at this row. \
+             Retune the panel rather than deleting the assertion."
         );
         println!("FINDING-D-THROUGH-PRODUCTION: clearance={clearance}");
     }
