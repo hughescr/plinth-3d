@@ -13975,6 +13975,7 @@ mod tests {
                 config: AnchorSearchConfig::current().unwrap(),
                 process_resolution_mm: 0.05,
             },
+            None,
         );
         assert!(matches!(result, Err(CcoError::FinalizedContactMismatch)));
         assert_eq!(forest.digest(), before);

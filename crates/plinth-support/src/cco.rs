@@ -594,7 +594,7 @@ fn validate_terminal_stub(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CandidateFamily {
     PlateDescent,
     ModelAnchor,
@@ -1000,6 +1000,23 @@ pub(crate) enum CcoError {
     RewireGeometryAuthorityMismatch,
     #[error("rewire replay no longer satisfies its evaluated clearance proof")]
     RewireClearanceReplayFailed,
+    /// **Stage B.** Every arm this terminal could still take at its current
+    /// context carries a steering no-good.
+    ///
+    /// This is NOT a retirement and it must never become one. §1.3: a no-good
+    /// steers and never retires, because each one was measured in a world that
+    /// has since been replaced. Returning `winner: None` here would hand the
+    /// cadence a terminal with no winner, which
+    /// `grow_terminal_with_finalized_anchor` retires `UnroutedNoWinner` on the
+    /// spot — a real contact dropped, silently, under a clean seal, on a pile
+    /// of arithmetic. So the pass stops instead, and the controller loop opens
+    /// a confirmation round for this terminal: every remaining arm re-measured
+    /// under the frozen set, one per pass, in the tournament's own order.
+    #[error(
+        "terminal {terminal_id} has a steering no-good for every arm it can still take; the \
+         pass stops so a confirmation round can re-measure them"
+    )]
+    SteeringSpent { terminal_id: u32 },
     #[error("terminal {0} is not current quarantined skipped evidence")]
     InvalidSkippedTerminal(u32),
     #[error("terminal {0} already advanced the CCO terminal cadence")]
@@ -1815,6 +1832,7 @@ impl CcoController {
             0,
             Some(hosts),
             process_resolution_mm,
+            None,
         )?;
         let route = TerminalRouteEvidence {
             physical_contact_id: request.physical_contact_id,
@@ -1857,8 +1875,15 @@ impl CcoController {
         forest: &mut Forest,
         request: &TerminalCcoRequest,
         route: FinalizedAnchorTerminalRoute<'_, '_>,
+        // **Stage B.** Borrowed, never owned, and never stored: see
+        // [`PassSteering`] for why the borrow IS the finiteness obligation.
+        // `None` is every pass of every model that has never abandoned.
+        steering: Option<&crate::legalization::LegalizationSteering>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
+        // One projection per terminal per pass — not one per candidate.
+        let terminal_view = steering.map(|steering| steering.for_terminal(request.terminal_id));
+        let terminal_steering = terminal_view.as_ref();
         let controller_digest_before = self.digest();
         let forest_digest_before = forest.digest();
         let context = FinalizedAnchorValidationContext::bind(forest, request, route)?;
@@ -1898,6 +1923,19 @@ impl CcoController {
             anchor_ray_batches,
             Some(hosts),
             context.route.process_resolution_mm,
+            // **Stage B — the read side of the key.** Not "the same five
+            // digests" assembled by hand: the SAME CALL that seals this
+            // terminal's route evidence twenty lines below, run early. The key
+            // a no-good is matched against and the key a no-good is minted
+            // from are then the same expression, so they cannot drift apart.
+            terminal_steering.map(|terminal| PassSteering {
+                prefix: crate::legalization::PrefixKey::of(&context.route_evidence(
+                    request,
+                    forest_digest_before,
+                    controller_digest_before,
+                )),
+                terminal,
+            }),
         )?;
         // F3 -- chain this terminal's seat-attestation transcript before any
         // disposition is recorded, so a terminal that hard-fails later still
@@ -1939,6 +1977,36 @@ impl CcoController {
         );
         outcome.disposition = Some(disposition);
         Ok(outcome)
+    }
+
+    /// **Stage B — where a no-good is minted from, and why it is here.**
+    ///
+    /// The one place a no-good's two halves both exist as the ROUTING CADENCE'S
+    /// OWN RECORD: the prefix digests this terminal's tournament read, and the
+    /// four fields it sealed about the arm it chose.
+    ///
+    /// It is a read of sealed authority, not a new one. This value is already
+    /// folded into `CcoController::digest`, which the transcript carries as
+    /// `final_controller_digest` and folds into its own digest — so exposing it
+    /// read-only adds no field, moves no fingerprint and lets nobody
+    /// manufacture a claim. The alternative considered and rejected was putting
+    /// the winner on `FinalizedCcoTranscriptRow`, which the row deliberately
+    /// omits ("no mutable candidate and forest details") and which would have
+    /// moved every model's sealed transcript digest a SECOND time, unledgered
+    /// and unauthorized.
+    ///
+    /// `None` for a terminal that is quarantined, retired, or not in this
+    /// cadence at all: only a terminal the record sealed as `Routed` has an arm
+    /// its own tournament chose, and only such a terminal may earn a no-good.
+    pub(crate) fn sealed_routed_arm(
+        &self,
+        terminal_id: u32,
+    ) -> Option<(&TerminalRouteEvidence, &CcoCandidateEvidence)> {
+        match &self.terminals.get(&terminal_id)?.disposition {
+            TerminalDisposition::Routed { route, winner } => Some((route, winner)),
+            TerminalDisposition::SkippedQuarantined { .. }
+            | TerminalDisposition::UnroutedNoWinner { .. } => None,
+        }
     }
 
     /// Advance the same Python terminal cadence after a terminal has been
@@ -3317,6 +3385,104 @@ impl HostCache {
     }
 }
 
+/// **Stage B.** One pass's steering instruction for ONE terminal, plus the
+/// live prefix key the no-goods are matched against.
+///
+/// It is `Copy` and borrowed, and it is deliberately assembled by the CALLER
+/// from values the caller already holds: the five digests here are the very
+/// same ones `route_evidence` seals for this terminal a few lines later, so the
+/// read side of the key and the write side cannot drift apart.
+///
+/// **The finiteness obligation lives on this type's shape.** It is a borrowed
+/// parameter and nothing more. It is not a field of `CcoController`, so
+/// `CcoController::digest` cannot see it, so `controller_digest_before` cannot
+/// move when the set grows — which is what keeps the context universe finite
+/// and the termination argument non-circular (design §4 Stage B, and
+/// `a_growing_no_good_set_moves_no_context_digest`).
+#[derive(Clone, Copy, Debug)]
+struct PassSteering<'a> {
+    prefix: crate::legalization::PrefixKey,
+    terminal: &'a crate::legalization::TerminalSteering<'a>,
+}
+
+/// What the steering did to this terminal's slate.
+enum SteeringOutcome {
+    /// Ordinary steering: this many arms were passed over, and at least one
+    /// remains for the tournament to weigh.
+    Suppressed { ruled_out: usize },
+    /// A confirmation round: take the arm at this rank of the tournament's own
+    /// order, suppressing nothing. A rank past the end of the slate is how a
+    /// round ends in exhaustion, and it is handled by the caller's `nth`
+    /// returning `None`.
+    Forced { rank: usize },
+}
+
+/// Apply one pass's steering to a sorted survivor slate.
+///
+/// Batched by construction: one walk over the slate to build the identities,
+/// one probe over the whole slate at once, one retain. No native call, and no
+/// per-candidate call into anything.
+///
+/// **Every comparison is streamed, both halves.** Without it a no-good that
+/// misses on every pass is indistinguishable from a model that genuinely
+/// cannot be legalized: the second pass would learn nothing new, the abandon
+/// rule would fire, and the run would refuse by name for what looks like the
+/// right reason. The log line is what separates a live mechanism from a no-op.
+fn apply_steering(
+    steering: &PassSteering<'_>,
+    survivors: &mut Vec<&EvaluatedCandidate>,
+) -> Result<SteeringOutcome, CcoError> {
+    let slate = survivors
+        .iter()
+        .map(|candidate| {
+            crate::legalization::ArmIdentity::live(
+                candidate.family,
+                candidate.generation_index,
+                candidate.price_ml,
+                candidate.rows.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (verdict, probes) = steering.terminal.verdict(steering.prefix, &slate);
+    for probe in &probes {
+        crate::coverage_repair::emit_run_line(&format!(
+            "legalize: steer t{} {}",
+            steering.terminal.terminal_id(),
+            probe.render(),
+        ));
+    }
+
+    match verdict {
+        crate::legalization::SteeringVerdict::Forced { rank } => {
+            crate::coverage_repair::emit_run_line(&format!(
+                "legalize: round t{} takes arm rank {rank} of {} in tournament order",
+                steering.terminal.terminal_id(),
+                survivors.len(),
+            ));
+            Ok(SteeringOutcome::Forced { rank })
+        }
+        crate::legalization::SteeringVerdict::Spent { ruled_out } => {
+            crate::coverage_repair::emit_run_line(&format!(
+                "legalize: steering spent t{} — all {ruled_out} arms carry a no-good; opening a \
+                 confirmation round instead of retiring",
+                steering.terminal.terminal_id(),
+            ));
+            Err(CcoError::SteeringSpent {
+                terminal_id: steering.terminal.terminal_id(),
+            })
+        }
+        crate::legalization::SteeringVerdict::Suppressed { ruled_out, keep } => {
+            let mut index = 0_usize;
+            survivors.retain(|_| {
+                let keep = keep[index];
+                index += 1;
+                keep
+            });
+            Ok(SteeringOutcome::Suppressed { ruled_out })
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn grow_terminal_inner(
     forest: &mut Forest,
@@ -3329,6 +3495,7 @@ fn grow_terminal_inner(
     anchor_ray_batches: usize,
     cached_hosts: Option<Vec<MemberKey>>,
     process_resolution_mm: f64,
+    steering: Option<PassSteering<'_>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
     request.validate(forest)?;
     let config = Config::current()?;
@@ -3529,13 +3696,34 @@ fn grow_terminal_inner(
         .filter_map(|(candidate, verdict)| verdict.survives().then_some(candidate))
         .collect();
     survivors.sort_by(|left, right| compare_candidates(left, right));
-    let Some(winner) = survivors.into_iter().next() else {
+
+    // ---------------------------------------------- Stage B: the two channels
+    //
+    // `survivors` is now in the tournament's own order, which is what makes a
+    // confirmation round replayable: "arm rank k" means the same arm on every
+    // pass with the same prefix.
+    //
+    // A pass with nothing to steer reads nothing below — `is_idle` is the
+    // whole cost this mechanism imposes on a model that never abandons.
+    let arms_ruled_out = steering
+        .filter(|steering| !steering.terminal.is_idle())
+        .map(|steering| apply_steering(&steering, &mut survivors))
+        .transpose()?;
+    let (candidates_ruled_out, forced_rank) = match arms_ruled_out {
+        Some(SteeringOutcome::Suppressed { ruled_out }) => (ruled_out, None),
+        Some(SteeringOutcome::Forced { rank }) => (0, Some(rank)),
+        None => (0, None),
+    };
+
+    // A round takes the arm at its rank; an ordinary pass takes the tournament
+    // winner, which is rank 0 of the same order.
+    let Some(winner) = survivors.into_iter().nth(forced_rank.unwrap_or(0)) else {
         return Ok(TerminalCcoOutcome {
             winner: None,
             disposition: None,
             candidates_generated,
             candidates_feasible,
-            candidates_ruled_out: 0,
+            candidates_ruled_out,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
@@ -3578,7 +3766,7 @@ fn grow_terminal_inner(
         disposition: None,
         candidates_generated,
         candidates_feasible,
-        candidates_ruled_out: 0,
+        candidates_ruled_out,
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
@@ -5547,6 +5735,24 @@ mod tests {
         delicacy: &[f64],
         frame: BuildFrame,
     ) -> CompletedInitialRoutes {
+        route_initial_build_steered(build, plan, loads, geometry, delicacy, frame, None)
+            .expect("an unsteered cadence never reports its steering spent")
+    }
+
+    /// The same cadence, driven with a Stage B steering set.
+    ///
+    /// `Err(terminal)` is [`CcoError::SteeringSpent`] — every arm that terminal
+    /// could still take carries a no-good, so the pass stops for a confirmation
+    /// round instead of retiring a real contact on a count of refusals.
+    fn route_initial_build_steered(
+        build: &mut InitialContactBuild,
+        plan: &SpecializedContactPlan,
+        loads: &FinalizedContactLoads,
+        geometry: &AnchorGeometryAuthority<'_>,
+        delicacy: &[f64],
+        frame: BuildFrame,
+        steering: Option<&crate::legalization::LegalizationSteering>,
+    ) -> Result<CompletedInitialRoutes, u32> {
         let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
         let authority = VerifiedRoutingAuthority::compute(plan, loads, &pool, geometry).unwrap();
         let mut controller = CcoController::default();
@@ -5582,17 +5788,21 @@ mod tests {
                         config: AnchorSearchConfig::current().unwrap(),
                         process_resolution_mm: 0.05,
                     },
+                    steering,
                 )
-                .unwrap();
+                .map_err(|error| match error {
+                    CcoError::SteeringSpent { terminal_id } => terminal_id,
+                    other => panic!("steered cadence refused unexpectedly: {other}"),
+                })?;
             outcomes.push((*terminal, outcome));
         }
-        (
+        Ok((
             controller,
             expected,
             routed_request,
             skipped_ledger,
             outcomes,
-        )
+        ))
     }
 
     /// FU-32 phase J1 — the hoisted routing authority is load-bearing, arm by
@@ -5796,6 +6006,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             );
             let error = result
                 .err()
@@ -5826,6 +6037,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             )
             .expect("an honest hoisted authority routes exactly as it did before J1");
     }
@@ -5949,6 +6161,244 @@ mod tests {
         }
     }
 
+    /// **The finiteness obligation, discharged as a test rather than as a
+    /// paragraph — design §4 Stage B, revert proof 5.**
+    ///
+    /// §1.3's termination argument needs the context universe to be finite.
+    /// That needs the no-good set, and everything derived from it, to be no
+    /// input to any digest in the context tuple — above all
+    /// `controller_digest_before`, because the loop that holds the set is
+    /// exactly where a leak would happen.
+    ///
+    /// If it leaked, every context would be fresh on every pass, so every
+    /// no-good would miss forever, so the same candidate would be chosen and
+    /// condemned every pass — and each of those passes would satisfy the
+    /// abandon rule with a genuinely new triple while making no progress. A
+    /// loop that never ends and never trips the one rule meant to catch that.
+    ///
+    /// So: grow the set by an arbitrary amount with rows that match nothing,
+    /// and assert every digest in the context tuple is byte-identical. Cheap,
+    /// mechanical, and without it the termination argument is circular.
+    #[test]
+    fn a_growing_no_good_set_moves_no_context_digest() {
+        let route_digests = |steering: Option<&crate::legalization::LegalizationSteering>| {
+            let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+                real_mixed_initial_transcript_fixture();
+            let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let (mut controller, _, _, _, _) = route_initial_build_steered(
+                &mut build,
+                &plan,
+                &loads,
+                &geometry,
+                &delicacy,
+                transcript_frame(),
+                steering,
+            )
+            .expect("no-goods that match nothing suppress nothing");
+            let transcript = controller
+                .finalize_transcript(&build, &plan, &loads, &geometry)
+                .unwrap();
+            let rows = transcript
+                .rows()
+                .iter()
+                .map(|row| {
+                    (
+                        row.terminal_id(),
+                        row.route().map(|route| {
+                            (
+                                route.plan_digest,
+                                route.loads_digest,
+                                route.geometry_digest,
+                                route.forest_digest_before,
+                                route.controller_digest_before,
+                            )
+                        }),
+                        row.candidates_ruled_out(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                transcript.final_controller_digest(),
+                transcript.final_forest_digest(),
+                transcript.ordered_disposition_digest(),
+                transcript.digest(),
+                rows,
+            )
+        };
+
+        let quiet = route_digests(None);
+
+        // 4 096 no-goods, none of which can match: the terminal ids are past
+        // the fixture's namespace and the prefixes are invented. "Arbitrary
+        // amount" means the set is big enough that any accidental fold would
+        // be visible, not that the rows are plausible.
+        let mut loud = crate::legalization::LegalizationSteering::default();
+        for index in 0..4096_u64 {
+            loud.learn(crate::legalization::NoGood::new(
+                1_000_000 + u32::try_from(index % 97).unwrap(),
+                crate::legalization::PrefixKey::of(&TerminalRouteEvidence {
+                    physical_contact_id: index,
+                    terminal_id: 0,
+                    original_key: crate::forest::MemberKey::transit_test_fixture(0, 0),
+                    plan_digest: index.wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                    loads_digest: index ^ 0xdead_beef,
+                    geometry_digest: index.rotate_left(17),
+                    forest_digest_before: index.wrapping_add(3),
+                    controller_digest_before: index.wrapping_sub(11),
+                }),
+                crate::legalization::ArmIdentity::live(
+                    CandidateFamily::Bifurcation,
+                    usize::try_from(index).unwrap(),
+                    f64::from_bits(index | 0x4000_0000_0000_0000),
+                    usize::try_from(index % 13).unwrap(),
+                ),
+            ));
+        }
+        assert_eq!(loud.len(), 4096, "the set really did grow");
+
+        let steered = route_digests(Some(&loud));
+        assert_eq!(
+            quiet, steered,
+            "the no-good set reached a digest in the context tuple; the termination \
+             argument in design §1.3 is circular until this is byte-identical"
+        );
+    }
+
+    /// **Steering is live on the real routing path — design §4 Stage B revert
+    /// proof 1's first half, and the honesty check the whole stage rests on.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// A no-good that MISSES on every pass is indistinguishable, from the
+    /// outside, from a model that genuinely cannot be legalized: the second
+    /// pass would learn nothing new, the abandon rule would fire, and the run
+    /// would refuse by name for what looks like exactly the right reason. So
+    /// the mechanism has to be shown changing a real tournament's mind on real
+    /// geometry, not only on a synthetic slate.
+    ///
+    /// Three passes: route, learn the arm each terminal actually chose, route
+    /// again, and assert the winners MOVED and the second counter says so. The
+    /// exhaustion arm — every arm suppressed — is proved in microseconds
+    /// instead of in seventy routing passes by
+    /// `legalization::tests::a_slate_with_a_no_good_on_every_arm_is_spent_and_never_empty`;
+    /// this test's job is the wiring, not the arithmetic.
+    ///
+    /// MEASURED at the full length once, for the record: this fixture's
+    /// terminal 0 has 69 arms, and driving it to exhaustion took 70 passes and
+    /// 101 s before reporting `SteeringSpent` and retiring nothing.
+    #[test]
+    fn steering_moves_a_real_tournaments_choice_and_retires_nobody() {
+        let route_once = |steering: Option<&crate::legalization::LegalizationSteering>| {
+            let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+                real_mixed_initial_transcript_fixture();
+            let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let (mut controller, _, _, _, _) = route_initial_build_steered(
+                &mut build,
+                &plan,
+                &loads,
+                &geometry,
+                &delicacy,
+                transcript_frame(),
+                steering,
+            )
+            .expect("this fixture's terminals have far more arms than these passes suppress");
+            let transcript = controller
+                .finalize_transcript(&build, &plan, &loads, &geometry)
+                .unwrap();
+            let arms = transcript
+                .rows()
+                .iter()
+                .filter_map(|row| {
+                    controller
+                        .sealed_routed_arm(row.terminal_id())
+                        .map(|(route, winner)| {
+                            (
+                                row.terminal_id(),
+                                crate::legalization::PrefixKey::of(route),
+                                crate::legalization::ArmIdentity::of(winner),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            let ruled_out = transcript
+                .rows()
+                .iter()
+                .map(FinalizedCcoTranscriptRow::candidates_ruled_out)
+                .sum::<usize>();
+            let retired = transcript
+                .rows()
+                .iter()
+                .filter(|row| row.kind() == FinalizedDispositionKind::UnroutedNoWinner)
+                .count();
+            (arms, ruled_out, retired)
+        };
+
+        let (first_arms, first_ruled_out, first_retired) = route_once(None);
+        assert!(!first_arms.is_empty(), "the fixture routes real terminals");
+        assert_eq!(
+            first_ruled_out, 0,
+            "an unsteered pass rules nothing out; the second counter is physics, not noise"
+        );
+
+        // **One no-good, on the LAST routed terminal — the production shape.**
+        //
+        // The prefix key is tight on purpose, and that has a consequence worth
+        // stating rather than discovering: steering an EARLY terminal moves the
+        // forest, so every later terminal's `forest_digest_before` and
+        // `controller_digest_before` move too, and every one of their no-goods
+        // misses. MEASURED on this fixture: seed all 139 routed terminals and
+        // exactly 1 arm is ruled out.
+        //
+        // That is not a defect, it is §1.3's key doing its job — a refusal
+        // measured in one world says nothing about a different one. And it is
+        // the case the models are in: the S-1 measurement found the mismatch
+        // class is ONE terminal per run and it is late in the cadence
+        // (Deinonychus t=113 of 202, Rotting Warhorse t=177 of 317), so every
+        // terminal before it routes identically and its own prefix is stable
+        // pass to pass.
+        let (last_terminal, last_prefix, last_arm) = *first_arms
+            .last()
+            .expect("the fixture routes real terminals");
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        assert!(steering.learn(crate::legalization::NoGood::new(
+            last_terminal,
+            last_prefix,
+            last_arm
+        )));
+
+        let (second_arms, second_ruled_out, second_retired) = route_once(Some(&steering));
+        assert_eq!(
+            second_ruled_out, 1,
+            "the last routed terminal's own arm must be passed over and counted in \
+             `candidates_ruled_out` — a miss here means the key does not match and the whole \
+             mechanism is a silent no-op that would refuse looking exactly like an honest \
+             refusal"
+        );
+        assert_eq!(
+            second_arms.len(),
+            first_arms.len(),
+            "suppressing an arm must not cost a terminal its route while it has others"
+        );
+        assert_eq!(
+            second_retired, first_retired,
+            "steering retired a terminal; §1.3 forbids a retirement earned by a no-good"
+        );
+        let second_last = *second_arms.last().unwrap();
+        assert_eq!(
+            second_last.0, last_terminal,
+            "the steered terminal still routes; it did not vanish from the record"
+        );
+        assert_ne!(
+            second_last.2, last_arm,
+            "the second pass chose the identical arm: the no-good did not steer anything"
+        );
+        assert_eq!(
+            first_arms[..first_arms.len() - 1],
+            second_arms[..second_arms.len() - 1],
+            "one terminal's no-good disturbed another terminal's route"
+        );
+    }
+
     #[test]
     fn finalized_transcript_requires_real_initial_authority_and_seals_replay() {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
@@ -6029,6 +6479,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             ),
             Err(CcoError::TranscriptSealed)
         ));

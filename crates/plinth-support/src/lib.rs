@@ -95,6 +95,21 @@ pub(crate) mod initial;
 )]
 mod joints;
 pub mod legacy_compat;
+/// **Stage B's vocabulary** — the steering no-good and the confirmation round.
+/// Deliberately its own module: the one hard obligation on the mechanism is
+/// that the no-good set is never a field of anything a `digest()` walks, and a
+/// set that lives in a module of its own, reached only as a borrowed
+/// parameter, is easier to keep that way than one folded into the controller.
+#[allow(
+    dead_code,
+    reason = "the vocabulary and its tests land one commit ahead of the attempt-0 loop that \
+              mints, holds and drives it — the ordering is deliberate, because the \
+              digest-isolation proof this module carries is what makes the loop's termination \
+              argument non-circular and it must be green BEFORE the loop exists; \
+              docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4 Stage B \
+              pieces 3-5 name every reader"
+)]
+pub(crate) mod legalization;
 #[allow(
     dead_code,
     reason = "crate-private current-parity lowering is consumed by the pending support runner"

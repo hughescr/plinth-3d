@@ -1373,6 +1373,8 @@ fn run_stage_chain<'a>(
     context: SupportRunContext<'a>,
     plan: SpecializedContactPlan,
     announce: Option<&crate::coverage_repair::StageClock>,
+    // **Stage B.** `None` on the trial path, by design (§4 Stage B piece 4).
+    steering: Option<&crate::legalization::LegalizationSteering>,
 ) -> ChainOutcome<'a> {
     macro_rules! stage {
         ($expr:expr, $stage:literal, $phase:expr) => {{
@@ -1400,7 +1402,7 @@ fn run_stage_chain<'a>(
         SupportRunPhase::Preparation
     );
     let routed = stage!(
-        prepared.route_initial_cco(),
+        prepared.route_initial_cco(steering),
         "Routing",
         SupportRunPhase::Routing
     );
@@ -1596,7 +1598,7 @@ pub fn run_support<'a>(
     // before the repair loop's own entry line can exist, and on a big model
     // that is four to five minutes of nothing. Every line below is print-only.
     let stage_clock = crate::coverage_repair::StageClock::start("support");
-    let attempt_zero = match run_stage_chain(context, plan.clone(), Some(&stage_clock)) {
+    let attempt_zero = match run_stage_chain(context, plan.clone(), Some(&stage_clock), None) {
         ChainOutcome::Lowered(lowered) => lowered,
         // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
         // failure is the model's, not this controller's. It is not a rollback,
@@ -1874,7 +1876,7 @@ pub fn run_support<'a>(
         // `None`: a trial's six stage lines times hundreds of trials would bury
         // the progress line rather than reveal anything. The loop's own paced
         // line is the trial-scale instrument.
-        match run_stage_chain(context, child, None) {
+        match run_stage_chain(context, child, None, None) {
             ChainOutcome::Refused(refusal) => {
                 let ChainRefusal {
                     context: returned,
@@ -3798,12 +3800,18 @@ impl<'a> PreparedSupportRun<'a> {
     )]
     pub(crate) fn route_initial_cco(
         self,
+        // **Stage B.** The pass's steering, borrowed. `None` is every pass of
+        // every model that has never abandoned, and it is also every trial of
+        // the repair loop: the retry wraps the ATTEMPT-0 chain call only
+        // (design §4 Stage B piece 4), so the trial path keeps today's
+        // `restore_prepared_digests` / `into_trial_rollback` behaviour exactly.
+        steering: Option<&crate::legalization::LegalizationSteering>,
     ) -> Result<RoutedSupportRun<'a>, (SupportRunContext<'a>, SupportRoutingError)> {
         let limits = match RouteCcoWorkLimits::registered() {
             Ok(limits) => limits,
             Err(error) => return Err((self.context, error)),
         };
-        self.route_initial_cco_with_limits(limits)
+        self.route_initial_cco_with_limits(limits, steering)
     }
 
     /// The routing transaction, with its execution caps supplied rather than
@@ -3823,6 +3831,7 @@ impl<'a> PreparedSupportRun<'a> {
     fn route_initial_cco_with_limits(
         self,
         limits: RouteCcoWorkLimits,
+        steering: Option<&crate::legalization::LegalizationSteering>,
     ) -> Result<RoutedSupportRun<'a>, (SupportRunContext<'a>, SupportRoutingError)> {
         let PreparedSupportRun {
             mut context,
@@ -3832,7 +3841,8 @@ impl<'a> PreparedSupportRun<'a> {
         // Stage C: lend the run-invariant anchor pool to the stage, and take
         // it back on both exits. See `SupportRunContext::take_anchor_pool`.
         let mut anchor_pool = context.take_anchor_pool();
-        let routed = route_initial_cco_state(&context, &mut anchor_pool, plan, initial, limits);
+        let routed =
+            route_initial_cco_state(&context, &mut anchor_pool, plan, initial, limits, steering);
         context.restore_anchor_pool(anchor_pool);
         match routed {
             Ok(state) => Ok(RoutedSupportRun { context, state }),
@@ -3863,6 +3873,7 @@ fn route_initial_cco_state(
     plan: SpecializedContactPlan,
     mut initial: InitialContactBuild,
     limits: RouteCcoWorkLimits,
+    steering: Option<&crate::legalization::LegalizationSteering>,
 ) -> Result<RoutedPlanState, SupportRoutingError> {
     {
         // Bind these three retained fields directly so the independent
@@ -3952,6 +3963,7 @@ fn route_initial_cco_state(
                         context.layers(),
                     ),
                 },
+                steering,
             )?;
         }
         // FU-32 J5 — the receipt, held against the charge above before the
@@ -6053,7 +6065,9 @@ pub(crate) enum SupportRoutingError {
     GeometryDigestMismatch,
     #[error("sealed CCO routing found stale initial-forest authority")]
     InitialAuthorityMismatch,
-    #[error("sealed CCO routing terminal {terminal} is absent or mismatched across the physical namespace")]
+    #[error(
+        "sealed CCO routing terminal {terminal} is absent or mismatched across the physical namespace"
+    )]
     TerminalNamespaceMismatch { terminal: u32 },
     #[error("sealed CCO routing physical/terminal namespaces have unequal cardinality")]
     TerminalNamespaceCardinalityMismatch,
@@ -7516,7 +7530,7 @@ mod tests {
     fn with_braced_table<T>(use_braced: impl FnOnce(BracedSupportRun<'_>) -> T) -> T {
         with_prepared_table(|prepared| {
             let braced = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes")
                 .rewire()
                 .expect("required corpus rewires")
@@ -7546,7 +7560,7 @@ mod tests {
         )
         .expect("required fixture preparation");
         let structured = prepared
-            .route_initial_cco()
+            .route_initial_cco(None)
             .expect("required corpus routes")
             .rewire()
             .expect("required corpus rewires")
@@ -7776,7 +7790,7 @@ mod tests {
             let loads_digest = prepared.digests().loads();
             let geometry_digest = prepared.digests().geometry();
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes through sealed CCO transaction");
             let transcript = routed.transcript();
             transcript
@@ -7813,7 +7827,7 @@ mod tests {
             // `route_initial_cco` takes `self`; retaining this one resulting handle is the only
             // available route transition and proves the plan/initial pair moved intact.
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("prepared state is consumed by exactly one CCO route");
 
             assert_eq!(routed.digests().prepared(), expected_prepared);
@@ -7841,7 +7855,7 @@ mod tests {
     fn rewires_required_corpus_with_sealed_route_evidence_and_named_termination() {
         with_prepared_table(|prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes before rewire");
             let plan_digest = routed.plan().digest();
             let loads_digest = routed.transcript().finalized_load_digest();
@@ -7879,7 +7893,7 @@ mod tests {
         with_prepared_table(|prepared| {
             let expected_limits = prepared.context.brace_penetration_limits();
             let rewired = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes before rewire")
                 .rewire()
                 .expect("required corpus rewires before brace");
@@ -7984,7 +7998,7 @@ mod tests {
     fn stale_rewire_report_digest_fails_closed_before_brace_mutation() {
         with_prepared_table(|prepared| {
             let mut rewired = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes")
                 .rewire()
                 .expect("required corpus rewires");
@@ -8004,7 +8018,7 @@ mod tests {
     fn stale_brace_transient_report_digest_fails_closed_on_revalidation() {
         with_prepared_table(|prepared| {
             let mut braced = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes")
                 .rewire()
                 .expect("required corpus rewires")
@@ -8136,9 +8150,11 @@ mod tests {
     #[test]
     fn fu32_j5_routing_refuses_an_over_demand_seat_search_on_the_required_corpus() {
         with_prepared_table(|prepared| {
-            let refused = stage_error(
-                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX)),
-            );
+            let refused =
+                stage_error(prepared.route_initial_cco_with_limits(
+                    RouteCcoWorkLimits::for_test(1, usize::MAX),
+                    None,
+                ));
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat evaluations",
@@ -8158,9 +8174,11 @@ mod tests {
     #[test]
     fn fu32_j5_routing_refuses_an_over_demand_refusal_evidence_budget_on_the_required_corpus() {
         with_prepared_table(|prepared| {
-            let refused = stage_error(
-                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(usize::MAX, 1)),
-            );
+            let refused =
+                stage_error(prepared.route_initial_cco_with_limits(
+                    RouteCcoWorkLimits::for_test(usize::MAX, 1),
+                    None,
+                ));
             match refused {
                 Err(SupportRoutingError::Limit {
                     resource: "seat refusal rows",
@@ -8184,19 +8202,21 @@ mod tests {
     fn fu32_j5_the_routing_meter_counts_the_real_pool_walk_and_stays_under_its_charge() {
         // The charge this instance is priced at, recovered from the refusing
         // arm above rather than recomputed from a formula this test owns.
-        let charged = with_prepared_table(|prepared| {
-            match stage_error(
-                prepared.route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX)),
-            ) {
-                Err(SupportRoutingError::Limit { required, .. }) => required,
-                Err(other) => panic!("expected a limit refusal, got {other:?}"),
-                Ok(_) => panic!("an over-demand seat search must refuse"),
-            }
-        });
+        let charged =
+            with_prepared_table(|prepared| {
+                match stage_error(prepared.route_initial_cco_with_limits(
+                    RouteCcoWorkLimits::for_test(1, usize::MAX),
+                    None,
+                )) {
+                    Err(SupportRoutingError::Limit { required, .. }) => required,
+                    Err(other) => panic!("expected a limit refusal, got {other:?}"),
+                    Ok(_) => panic!("an over-demand seat search must refuse"),
+                }
+            });
 
         with_prepared_table(|prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             let meter = routed.state.controller.route_work_meter();
             assert!(
@@ -8311,7 +8331,7 @@ mod tests {
             authored,
         )
         .expect("a generous brace authority is a valid caller authority")
-        .route_initial_cco()
+        .route_initial_cco(None)
         .expect("required corpus routes")
         .rewire()
         .expect("required corpus rewires")
@@ -8329,7 +8349,7 @@ mod tests {
     fn stale_routed_digest_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes before stale authority check");
             routed.context.digests.plan = routed.context.digests.plan.wrapping_add(1);
             assert!(matches!(
@@ -8343,7 +8363,7 @@ mod tests {
     fn stale_initial_forest_digest_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             routed.state.initial.test_corrupt_initial_forest_digest();
             assert!(matches!(
@@ -8364,7 +8384,7 @@ mod tests {
     fn stale_contact_attestation_digest_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             // Non-vacuity: the forest digests are untouched by this seam, so
             // the rejection below can only have come from the attestation
@@ -8394,7 +8414,7 @@ mod tests {
     fn stale_post_quarantine_digest_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             routed
                 .state
@@ -8415,7 +8435,7 @@ mod tests {
     fn missing_initial_registration_evidence_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             routed
                 .state
@@ -8436,7 +8456,7 @@ mod tests {
     fn transcript_initial_forest_binding_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             routed.state.transcript.test_rebind_initial_forest_digest();
             assert!(matches!(
@@ -8454,7 +8474,7 @@ mod tests {
     fn transcript_post_quarantine_binding_fails_closed_before_rewire_mutation() {
         with_prepared_table(|prepared| {
             let mut routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("required corpus routes");
             routed
                 .state
@@ -8484,7 +8504,7 @@ mod tests {
         with_prepared_table(|prepared| {
             let plan = prepared.plan.clone();
             let (context, error) = prepared
-                .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX))
+                .route_initial_cco_with_limits(RouteCcoWorkLimits::for_test(1, usize::MAX), None)
                 .err()
                 .expect("an over-demand seat search must refuse");
             assert!(
@@ -8495,7 +8515,7 @@ mod tests {
             // the very same plan at the registered limits.
             let prepared_again = stage_error(prepared_run_for_plan(context, plan))
                 .expect("the recovered context prepares the next trial");
-            stage_error(prepared_again.route_initial_cco())
+            stage_error(prepared_again.route_initial_cco(None))
                 .expect("the recovered context routes at the registered limits");
         });
     }
@@ -8515,7 +8535,7 @@ mod tests {
         with_prepared_table(|prepared| {
             let accepted_plan = prepared.plan.clone();
             let accepted_digests = prepared.context.prepared_digests();
-            let context = prepared.route_initial_cco().map_or_else(
+            let context = prepared.route_initial_cco(None).map_or_else(
                 |(context, _error)| context,
                 |routed| {
                     routed.rewire().map_or_else(
@@ -8573,7 +8593,7 @@ mod tests {
             );
 
             // Reject the trial the way the controller will, and restore.
-            let mut context = trial.route_initial_cco().map_or_else(
+            let mut context = trial.route_initial_cco(None).map_or_else(
                 |(context, _error)| context,
                 |routed| routed.into_context_for_test(),
             );
@@ -8597,7 +8617,7 @@ mod tests {
         with_prepared_table(|mut prepared| {
             prepared.initial.test_corrupt_initial_forest_digest();
             assert!(matches!(
-                stage_error(prepared.route_initial_cco()),
+                stage_error(prepared.route_initial_cco(None)),
                 Err(SupportRoutingError::InitialAuthorityMismatch)
             ));
         });
@@ -8641,7 +8661,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("a buried half no longer takes the routing stage out");
             let ownerless = routed.ownerless_faces();
             assert!(
@@ -8718,7 +8738,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let lowered = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("a buried half no longer takes the routing stage out")
                 .rewire()
                 .expect("fixture rewires")
@@ -8952,7 +8972,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("no-winner fixture seals through CCO");
 
             let expected: Vec<(u64, UnroutedContactReason)> = routed
@@ -9109,7 +9129,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("no-winner fixture seals through CCO");
             assert!(
                 !routed.unrouted_regular_removals().is_empty(),
@@ -9185,7 +9205,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("no-winner fixture seals through CCO");
             let accepted_digest = routed.accepted_plan().digest();
             let routed_digest = routed.plan().digest();
@@ -9217,7 +9237,7 @@ mod tests {
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("no-winner fixture seals through CCO");
             let row = routed
                 .transcript()
@@ -10361,7 +10381,7 @@ mod tests {
             assert_eq!(thread_evidence.0, requested);
             assert!((1..=requested).contains(&thread_evidence.1));
             let routed = prepared
-                .route_initial_cco()
+                .route_initial_cco(None)
                 .expect("thread sweep routes the required corpus");
             let rewired = routed
                 .rewire()
