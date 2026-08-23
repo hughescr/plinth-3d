@@ -387,3 +387,45 @@ The accounting is disclosure only. It is deliberately **not** folded into
 digest already covers, and this lane is authorized to move exactly one fingerprint.
 
 **Unexplained: nothing.**
+
+### `Deinonychus` — the seam now REFUSES HONESTLY, and the residue has its first number
+
+MEASURED 2026-08-23 at `3311374` (`feature/a4-controller`), binary
+`target/gate/plinth` sha256 `c7d15bd3b7d112722e237ac252279d0bcbe8e7c870300ac4ec9c787836270913`,
+built 13:30 — after both fix commits (`80671e4` 13:01, `3311374` 13:30) — from a clean tree.
+Input `Deinonychus.stl` sha256 `d1ac66b1…e72e72b9`. Run under a 25-minute HARNESS wall-clock
+timeout, which **did not fire**: the run finished in 22 s.
+
+| | before Stage A (2026-08-23 morning) | at `3311374` |
+| --- | --- | --- |
+| stage it dies at | **Structure** | **Brace** |
+| error | `TerminalEvidenceMismatch { terminal: 113 }` | `SealedRoutedTerminalCondemned` |
+| terminal named | 113 | **113 — the same one** |
+| its arm | not reported | `slot 401, generation 0` |
+| true gap | **not measurable** | **−0.050000 mm** against the 0.300 mm final demand |
+| radii the resize assigned | not reported | 0.372136 / 0.372136 mm |
+| cascade victims | not reported | **none** |
+| emitted | 0 | 0 |
+
+Verbatim, streamed while the run was happening:
+
+```
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 gaps: slot401g0=-0.050000mm@r0.372136/0.372136mm
+brace: sealed terminals disturbed=1 measured refusals=[slot401g0=-0.050000mm@r0.372136/0.372136mm] class=[terminal 113 sealed=Routed stub=slot113g0 own_arms=slot401g0 cascade_carriers=none]
+```
+
+**What this is and is not.** It is NOT the Deinonychus emitting — Stage A does not retry, and
+the design says so (§4 Stage A, "what it does not buy"). It is the model reaching a **named
+physical refusal instead of an accounting-integrity error that reads as a broken engine**, with
+the terminal, the arm, the millimetres and the radii on the line. Stage B is what gives that
+terminal a second arm to try.
+
+**MEASURED / DERIVED, kept apart.** MEASURED: the clearance row reads −0.050000 mm. DERIVED,
+by `clearance = true_gap − 0.300` (the final-stage demanded gap): the arm's true gap to the
+model is **0.250 mm**. That is the sub-0.300 mm residue the seal decision originally waited on,
+now a number rather than a sign — one arm, on one model. The corpus-wide count and distribution
+are **not measured** here; that is Stage A's corpus run.
+
+The mismatch class is **exactly one terminal with zero cascade victims**, which reproduces the
+S-1 pre-measurement of 2026-08-22 (Deinonychus t=113 of 202, 3/3 runs) on production code
+rather than on diagnostic instrumentation.
