@@ -2085,17 +2085,21 @@ struct ExactClearanceNegatives {
     /// These are refused candidates and route to quarantine (OD-4).
     contact_refusals: Vec<MemberKey>,
     /// **Refusal accounting (Craig's rider on the seal-semantics lane,
-    /// 2026-08-23).** The TRUE gap every negative row measured, in
-    /// MILLIMETRES, keyed by member — both classes above.
+    /// 2026-08-23).** Every negative row with the PROVENANCE of its number,
+    /// keyed by member — both classes above.
     ///
     /// `exact_clearance_rows` already computes a real per-arm clearance in mm
     /// and, until this field existed, only the SIGN of it survived: a run
     /// could say "one arm was refused" and never say whether that arm was
-    /// 0.04 mm inside the model or 4 mm inside it. Those are different
-    /// physical situations and the sub-0.3 mm residue is the one Craig's seal
-    /// decision waited on. The magnitudes are carried here, disclosed by
-    /// [`FinalPassRefusalAccounting`], and read by no branch.
-    negative_gaps_mm: BTreeMap<MemberKey, f64>,
+    /// 0.04 mm short of the demanded gap or 4 mm inside the model. Those are
+    /// different physical situations and the sub-0.3 mm residue is the one
+    /// Craig's seal decision waited on.
+    ///
+    /// The rows carry the axis-transit flag as well as the distance, because
+    /// the two refusals are not the same fact and a magnitude read off a
+    /// transit sentinel is not a measurement — see [`RefusalGapRow`]. Read by
+    /// no branch.
+    negative_rows: BTreeMap<MemberKey, ExactClearanceRow>,
 }
 
 impl ExactClearanceNegatives {
@@ -2107,13 +2111,39 @@ impl ExactClearanceNegatives {
 /// One negative exact-clearance row, as the FINAL pass measured it.
 ///
 /// Disclosure only. Nothing branches on any field here; the verdict is taken
-/// from the sign, exactly as it was before this record existed.
+/// from the sign of `gap_mm`, exactly as it was before this record existed.
+///
+/// **The two refusals are different physical facts and this record keeps them
+/// apart.** `exact_clearance_rows` produces one signed number per member, and
+/// it is written by TWO paths:
+///
+/// 1. the DISTANCE path — `clr = best_axis_to_surface_distance − (r_max +
+///    FINAL_CLEARANCE_GAP_MM)`, so a negative value is a real shortfall in
+///    millimetres against the 0.300 mm demand;
+/// 2. the AXIS-TRANSIT path — a row the distance test found LEGAL
+///    (`clearance >= 0.0`) whose axis nonetheless passes THROUGH material away
+///    from its seat is stamped `min(clearance, −min_illegal_len_mm)`, i.e.
+///    exactly `−0.050 mm`, so that a single sign carries the verdict.
+///
+/// A reader who takes a transit row's `−0.050` for a gap reads a sentinel as a
+/// measurement. So `axis_transit_illegal` says which path wrote the row, and
+/// `distance_clearance_mm` carries the distance path's own value BEFORE the
+/// stamp — for a transit row that number is ≥ 0, which is the honest statement
+/// that this arm did not fail on distance at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RefusalGapRow {
     pub(crate) member: MemberKey,
-    /// MEASURED. Negative means the member is inside the model by this many
-    /// millimetres, against `FINAL_CLEARANCE_GAP_MM`'s demanded gap.
+    /// The verdict number the engine acts on. Negative condemns.
     pub(crate) gap_mm: f64,
+    /// MEASURED, and the distance path's own value before any transit stamp:
+    /// `distance − (r_max + FINAL_CLEARANCE_GAP_MM)` in millimetres. Negative
+    /// means the member is that far short of the 0.300 mm demanded gap; a
+    /// value ≥ 0 on a refused row means the refusal was NOT about distance.
+    pub(crate) distance_clearance_mm: f64,
+    /// `true` when the axis-transit screen wrote this row's verdict — the
+    /// member's axis passes through material away from its seat. `gap_mm` is
+    /// then the `−min_illegal_len_mm` sentinel and carries no distance.
+    pub(crate) axis_transit_illegal: bool,
     /// The radii the resize assigned to this member, in millimetres — the
     /// deciding input the refutation proved cannot be predicted at candidacy.
     pub(crate) terminal_radius_mm: f64,
@@ -2122,6 +2152,34 @@ pub(crate) struct RefusalGapRow {
     /// ordinary candidate rejection (OD-4); `false` when it is an unrefusable
     /// pipeline violation.
     pub(crate) refusable: bool,
+}
+
+impl RefusalGapRow {
+    /// One row, rendered so the two refusal kinds cannot be confused.
+    ///
+    /// A distance refusal prints the shortfall it measured. An axis-transit
+    /// refusal prints `axis-transit` and the distance clearance it PASSED,
+    /// because printing its `−0.050` verdict as a gap would be presenting a
+    /// sentinel as a measurement. A `!` marks an unrefusable violation.
+    fn render(&self) -> String {
+        let key = format!(
+            "slot{}g{}{}",
+            self.member.slot(),
+            self.member.generation(),
+            if self.refusable { "" } else { "!" },
+        );
+        if self.axis_transit_illegal {
+            format!(
+                "{key}=axis-transit(distance_clearance={:+.6}mm)@r{:.6}/{:.6}mm",
+                self.distance_clearance_mm, self.terminal_radius_mm, self.rootward_radius_mm,
+            )
+        } else {
+            format!(
+                "{key}=distance{:+.6}mm@r{:.6}/{:.6}mm",
+                self.gap_mm, self.terminal_radius_mm, self.rootward_radius_mm,
+            )
+        }
+    }
 }
 
 /// **The refusal-accounting rider.** What the final bracing pass measured, in
@@ -2148,22 +2206,26 @@ impl FinalPassRefusalAccounting {
             .copied()
             .collect::<BTreeSet<_>>();
         let rows = negatives
-            .negative_gaps_mm
-            .iter()
-            .map(|(key, gap_mm)| {
+            .negative_rows
+            .values()
+            .map(|row| {
                 let (terminal_radius_mm, rootward_radius_mm) =
-                    forest.member(*key).map_or((f64::NAN, f64::NAN), |member| {
-                        (
-                            member.terminal_radius_mm().get().get(),
-                            member.rootward_radius_mm().get().get(),
-                        )
-                    });
+                    forest
+                        .member(row.member)
+                        .map_or((f64::NAN, f64::NAN), |member| {
+                            (
+                                member.terminal_radius_mm().get().get(),
+                                member.rootward_radius_mm().get().get(),
+                            )
+                        });
                 RefusalGapRow {
-                    member: *key,
-                    gap_mm: *gap_mm,
+                    member: row.member,
+                    gap_mm: row.verdict_mm,
+                    distance_clearance_mm: row.distance_clearance_mm,
+                    axis_transit_illegal: row.axis_transit_illegal,
                     terminal_radius_mm,
                     rootward_radius_mm,
-                    refusable: refused.contains(key),
+                    refusable: refused.contains(&row.member),
                 }
             })
             .collect::<Vec<_>>();
@@ -2185,26 +2247,24 @@ impl FinalPassRefusalAccounting {
         if self.rows.is_empty() {
             return;
         }
+        let transit = self
+            .rows
+            .iter()
+            .filter(|row| row.axis_transit_illegal)
+            .count();
         let rows = self
             .rows
             .iter()
-            .map(|row| {
-                format!(
-                    "slot{}g{}{}={:.6}mm@r{:.6}/{:.6}mm",
-                    row.member.slot(),
-                    row.member.generation(),
-                    if row.refusable { "" } else { "!" },
-                    row.gap_mm,
-                    row.terminal_radius_mm,
-                    row.rootward_radius_mm,
-                )
-            })
+            .map(RefusalGapRow::render)
             .collect::<Vec<_>>()
             .join(" ");
         crate::coverage_repair::emit_run_line(&format!(
             "brace: final-pass refusals pass={iteration} refused_arms={} \
-             pipeline_violations={} gaps: {rows}",
-            self.refused_arms, self.pipeline_violations,
+             pipeline_violations={} distance={} axis_transit={} rows: {rows}",
+            self.refused_arms,
+            self.pipeline_violations,
+            self.rows.len() - transit,
+            transit,
         ));
     }
 }
@@ -2298,13 +2358,7 @@ impl std::fmt::Display for SealedCondemnationClass {
             self.disturbed.len(),
             self.measured_refusals
                 .iter()
-                .map(|row| format!(
-                    "{}={:.6}mm@r{:.6}/{:.6}mm",
-                    key(&row.member),
-                    row.gap_mm,
-                    row.terminal_radius_mm,
-                    row.rootward_radius_mm
-                ))
+                .map(RefusalGapRow::render)
                 .collect::<Vec<_>>()
                 .join(" "),
             self.disturbed
@@ -2433,16 +2487,16 @@ fn exact_clearance_negatives(
     penetration_limits: PenetrationBatchLimits,
 ) -> Result<ExactClearanceNegatives, BraceError> {
     let mut negatives = ExactClearanceNegatives::default();
-    for (key, clearance) in exact_clearance_rows(forest, surface, config, penetration_limits)? {
-        if clearance >= 0.0 {
+    for row in exact_clearance_rows_detailed(forest, surface, config, penetration_limits)? {
+        if row.verdict_mm >= 0.0 {
             continue;
         }
-        negatives.negative_gaps_mm.insert(key, clearance);
+        negatives.negative_rows.insert(row.member, row);
         let declares_contact = forest
-            .member(key)
+            .member(row.member)
             .is_some_and(|member| member.model_contact_end().is_some());
         if declares_contact {
-            negatives.contact_refusals.push(key);
+            negatives.contact_refusals.push(row.member);
         } else {
             negatives.pipeline_violations += 1;
         }
@@ -2469,12 +2523,12 @@ fn exact_clearance_violated_members(
     )
 }
 
-fn exact_clearance_rows(
+fn exact_clearance_rows_detailed(
     forest: &Forest,
     surface: &NativeSurface,
     config: &BraceConfig,
     penetration_limits: PenetrationBatchLimits,
-) -> Result<Vec<(MemberKey, f64)>, BraceError> {
+) -> Result<Vec<ExactClearanceRow>, BraceError> {
     let rows = forest
         .live_members()
         .into_iter()
@@ -2640,6 +2694,11 @@ fn exact_clearance_rows(
         .segment_clearance_excluding(&p0, &p1, &r0, &r1, final_gap_mm, &zero, &zero, &excluded)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
         .0;
+    // The DISTANCE path's own answer, kept before the transit screen can stamp
+    // over it. Nothing branches on this copy; it exists so a disclosure cannot
+    // present the transit sentinel as a measured shortfall (`RefusalGapRow`).
+    let distance_clearance = clearance.clone();
+    let mut transit_illegal = BTreeSet::new();
     for index in axis_illegal_rows(
         surface,
         &p0,
@@ -2657,12 +2716,50 @@ fn exact_clearance_rows(
         // Exact-clearance consumers need a single sign verdict. Preserve any
         // harder distance violation and encode belt-only transit as negative.
         clearance[index] = clearance[index].min(-config.min_illegal_len_mm);
+        transit_illegal.insert(rows[index].0);
     }
     Ok(rows
         .into_iter()
+        .zip(distance_clearance)
         .zip(clearance)
-        .map(|((key, _), value)| (key, value))
+        .map(
+            |(((member, _), distance_clearance_mm), verdict_mm)| ExactClearanceRow {
+                member,
+                verdict_mm,
+                distance_clearance_mm,
+                axis_transit_illegal: transit_illegal.contains(&member),
+            },
+        )
         .collect())
+}
+
+/// One member's FINAL-pass clearance verdict, with the provenance of the number.
+///
+/// The engine acts on `verdict_mm` alone and always has. The other two fields
+/// exist so a DISCLOSURE cannot present the axis-transit sentinel as a measured
+/// distance — see [`RefusalGapRow`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExactClearanceRow {
+    member: MemberKey,
+    verdict_mm: f64,
+    distance_clearance_mm: f64,
+    axis_transit_illegal: bool,
+}
+
+/// The verdict column only — byte-identical to what this function returned
+/// before the provenance split, for every caller that only needs the sign.
+fn exact_clearance_rows(
+    forest: &Forest,
+    surface: &NativeSurface,
+    config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
+) -> Result<Vec<(MemberKey, f64)>, BraceError> {
+    Ok(
+        exact_clearance_rows_detailed(forest, surface, config, penetration_limits)?
+            .into_iter()
+            .map(|row| (row.member, row.verdict_mm))
+            .collect(),
+    )
 }
 
 fn slender_rungs(
@@ -5517,6 +5614,16 @@ mod tests {
             .find(|row| row.member == arm_key)
             .expect("the refused arm must carry a row of its own");
         assert!(row.refusable, "a contact-declaring refusal is refusable");
+        assert!(
+            !row.axis_transit_illegal,
+            "this fixture's arm is buried in the box, so the DISTANCE path must write its \
+             verdict — if the transit screen wrote it, the number below is a sentinel and the \
+             test would be pinning the wrong thing"
+        );
+        assert_eq!(
+            row.distance_clearance_mm, row.gap_mm,
+            "on a distance refusal the two numbers are the same number"
+        );
 
         // The independent measurement. `plan.forest` has already condemned the
         // arm, so the gap is re-read from the forest the controller graded:
@@ -5553,8 +5660,96 @@ mod tests {
             "the streamed line must carry the counts: {disclosure}"
         );
         assert!(
-            disclosure.contains(&format!("{measured:.6}mm")),
+            disclosure.contains("distance=1") && disclosure.contains("axis_transit=0"),
+            "the streamed line must say WHICH screen refused, or a reader cannot tell a \
+             measured shortfall from a transit sentinel: {disclosure}"
+        );
+        assert!(
+            disclosure.contains(&format!("distance{measured:+.6}mm")),
             "the streamed line must carry the measured magnitude in millimetres: {disclosure}"
+        );
+    }
+
+    /// **The correction that matters most in this rider, and it is
+    /// sabotage-shaped.**
+    ///
+    /// `exact_clearance_rows` writes one signed number per member from TWO
+    /// paths. The DISTANCE path writes a real shortfall against the 0.300 mm
+    /// demand. The AXIS-TRANSIT screen takes a row the distance test found
+    /// LEGAL — `axis_illegal_rows` filters to `clearance >= 0.0` — and stamps
+    /// `min(clearance, -min_illegal_len_mm)`, i.e. exactly `-0.050 mm`, so one
+    /// sign can carry the verdict.
+    ///
+    /// A disclosure that printed that `-0.050` as "the gap" would report a
+    /// SENTINEL as a MEASUREMENT, and 0.050 mm is close enough to a plausible
+    /// sub-0.3 mm residue that nobody would question it. That is exactly the
+    /// mistake this lane made in its first ledger entry, on the Deinonychus,
+    /// and this test is the guard against making it again.
+    ///
+    /// **The row here is constructed, and that is deliberate.** The transit
+    /// path only fires for a member whose own seat faces are excluded from the
+    /// distance query, so reproducing it geometrically needs a seated arm on a
+    /// non-convex surface — the Deinonychus's terminal 113 is the real
+    /// witness, recorded in `EMISSION-CANARY-LEDGER.md`. What was defective
+    /// was the DISCLOSURE, and the disclosure is what this pins.
+    #[test]
+    fn an_axis_transit_refusal_is_disclosed_as_a_sentinel_and_never_as_a_measured_gap() {
+        let member = MemberKey::transit_test_fixture(401, 0);
+        let transit = RefusalGapRow {
+            member,
+            // The verdict is the sentinel, `-min_illegal_len_mm`.
+            gap_mm: -0.05,
+            // The distance test PASSED this row by 0.32 mm. Reporting the
+            // verdict as a gap would invert the physics.
+            distance_clearance_mm: 0.32,
+            axis_transit_illegal: true,
+            terminal_radius_mm: 0.372_135_701_026_434_6,
+            rootward_radius_mm: 0.372_135_701_026_434_6,
+            refusable: true,
+        };
+        let distance = RefusalGapRow {
+            member: MemberKey::transit_test_fixture(377, 2),
+            gap_mm: -0.040_503,
+            distance_clearance_mm: -0.040_503,
+            axis_transit_illegal: false,
+            terminal_radius_mm: 1.409_608,
+            rootward_radius_mm: 1.409_608,
+            refusable: true,
+        };
+
+        let rendered = transit.render();
+        assert!(
+            rendered.contains("axis-transit(distance_clearance=+0.320000mm)"),
+            "a transit row must name its screen and carry the distance it PASSED: {rendered}"
+        );
+        assert!(
+            !rendered.contains("-0.050000"),
+            "the sentinel must never be printed as a magnitude: {rendered}"
+        );
+
+        let rendered_distance = distance.render();
+        assert!(
+            rendered_distance.contains("distance-0.040503mm"),
+            "a distance row prints the shortfall it measured: {rendered_distance}"
+        );
+
+        // And the counts separate the two kinds, so a reader can size each
+        // class without parsing the rows.
+        let accounting = FinalPassRefusalAccounting {
+            refused_arms: 2,
+            pipeline_violations: 0,
+            rows: vec![transit, distance],
+        };
+        let capture = crate::coverage_repair::capture::RunLogCapture::install();
+        accounting.disclose(3);
+        let line = capture
+            .lines()
+            .into_iter()
+            .find(|line| line.starts_with("brace: final-pass refusals"))
+            .expect("the accounting streams");
+        assert!(
+            line.contains("distance=1") && line.contains("axis_transit=1"),
+            "the streamed counts must split the two refusal kinds: {line}"
         );
     }
 

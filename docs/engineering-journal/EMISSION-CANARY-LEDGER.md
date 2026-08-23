@@ -429,3 +429,59 @@ are **not measured** here; that is Stage A's corpus run.
 The mismatch class is **exactly one terminal with zero cascade victims**, which reproduces the
 S-1 pre-measurement of 2026-08-22 (Deinonychus t=113 of 202, 3/3 runs) on production code
 rather than on diagnostic instrumentation.
+
+### CORRECTION to the `Deinonychus` row above — I read a SENTINEL as a MEASUREMENT
+
+Per rule 1 of this ledger, a wrong row gets a following row that says so. The
+`Deinonychus` row above is wrong in its headline number **and in its mechanism**, and this
+row supersedes it. What is right in it: the stage moved from Structure to Brace, the error
+moved from `TerminalEvidenceMismatch` to `SealedRoutedTerminalCondemned`, terminal 113 and
+arm `slot 401 generation 0` are correctly named, and the class is one terminal with zero
+cascade victims.
+
+**What was wrong.** That row read the arm's clearance as `−0.050000 mm` and DERIVED a true
+gap of 0.250 mm, calling it "the sub-0.300 mm residue the seal decision waited on". The
+arithmetic `clearance = true_gap − 0.300` is right, and I checked it against
+`geom_kernel::seg_clear_one_excluding` — `clr = best_distance − (r_max + demanded_gap)`. What
+I did not check was **which of two paths wrote that number**, and it was the wrong one.
+
+`brace::exact_clearance_rows` writes one signed number per member from two screens:
+
+1. the **distance** screen, whose negative value IS a shortfall in millimetres; and
+2. the **axis-transit** screen, which takes a row the distance test found **legal**
+   (`axis_illegal_rows` filters to `clearance >= 0.0`) and stamps
+   `min(clearance, −min_illegal_len_mm)` — **exactly `−0.050 mm`** — so a single sign can
+   carry the verdict.
+
+`−0.050000` is `−min_illegal_len_mm` to the digit. It was a sentinel. A sentinel that happens
+to look like a plausible sub-0.300 mm residue is the worst possible shape for this mistake,
+and it is the shape I fell into.
+
+**The corrected measurement**, from a binary rebuilt at the fix and run the same way:
+
+```
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 distance=0 axis_transit=1 rows: slot401g0=axis-transit(distance_clearance=+0.280044mm)@r0.372136/0.372136mm
+```
+
+| | wrongly recorded above | **corrected** |
+| --- | --- | --- |
+| which screen refused the arm | distance | **axis transit** |
+| distance clearance | −0.050 mm (a sentinel) | **+0.280044 mm — it PASSED** |
+| DERIVED true surface gap | 0.250 mm | **0.580044 mm** (`+0.280044 + 0.300`) |
+| what the refusal is about | a clearance shortfall | **the arm's AXIS passing through material away from its seat** |
+
+So terminal 113's arm is **not** a near-miss on clearance. It clears the demanded gap by
+0.280 mm and is condemned because its axis transits the model — which is task **#52**'s class
+(*stub axis re-enters the model on edge-on faces*), not a clearance-margin residue at all.
+
+**The residue count stands at ZERO measured so far.** The one model examined at this tip
+produced no distance refusal, so this lane has still not observed a single sub-0.300 mm
+clearance residue. That is a smaller claim than the row above made and it is the true one.
+
+**The production fix that makes this impossible to repeat.** `RefusalGapRow` now carries
+`axis_transit_illegal` and `distance_clearance_mm` — the distance screen's own value **before**
+any transit stamp — and the streamed line counts `distance=` and `axis_transit=` separately and
+renders a transit row as `axis-transit(distance_clearance=+…)` rather than as a gap. A
+sabotage-shaped unit test asserts the sentinel is never printed as a magnitude.
+
+**Unexplained: nothing. Superseded: the `Deinonychus` row immediately above.**

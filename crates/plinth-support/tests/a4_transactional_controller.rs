@@ -116,9 +116,20 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
 /// bit-identical by construction rather than by luck. If a future change makes
 /// the controller touch a sealing model's plan, this is where it shows up —
 /// the digest is the same
-/// `4_190_462_360_230_124_963` the batch controller produces, taken through the
+/// `12_136_443_226_163_403_608` the batch controller produces, taken through the
 /// same producer path, and the counts are the same 64 routed identities and 170
 /// final live members.
+///
+/// **Re-frozen 2026-08-23 by the seal-semantics lane, and the claim under test
+/// did not change.** `4_190_462_360_230_124_963 -> 12_136_443_226_163_403_608`
+/// is Craig's authorization item 5: the sealed CCO transcript gains a second
+/// counter for ruled-out arms, folded unconditionally, so the fingerprint moves
+/// once for every model in the corpus on purpose. The counter reads zero on
+/// every path today. **The COUNTS are the load-bearing half of this assertion
+/// and they did not move** — still 64 routed identities and 170 final live
+/// members, still zero trials and zero commits. A controller that had touched a
+/// sealing model's plan would move those, and it did not. See
+/// `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
 #[test]
 fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
     let authority = run(
@@ -157,7 +168,7 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
+        (64_usize, 170_usize, 12_136_443_226_163_403_608_u64),
         "the toed slab's sealed digest is the batch controller's, unmoved: a model that never \
          transacts cannot have its plan changed by a controller that only changes plans through \
          transactions"
