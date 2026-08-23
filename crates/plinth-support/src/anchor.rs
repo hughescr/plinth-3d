@@ -2401,6 +2401,24 @@ mod tests {
     /// it holds are not the inputs asked for, and what it stores is
     /// load-bearing — corrupt one row and the validation both production
     /// sites run refuses.
+    ///
+    /// # What this witness is, and what it is not
+    ///
+    /// The design record asks for "corrupt a stored value and the ARTIFACT
+    /// must change". This asserts something different and stronger: a
+    /// corrupted memo does not emit different bytes, it REFUSES
+    /// (`StaleSurfaceAnchorPool`), because the content re-hash both stages
+    /// already ran is what reads it. An artifact-level witness would need the
+    /// refusal removed first, so it is not available on this code and is not
+    /// claimed.
+    ///
+    /// Claim (2), the MISS, has no model witness either. Production reaches
+    /// it only when one model runs a second sealed support run against
+    /// different geometry — the drilled-shell-then-substituted-solid path.
+    /// None of the three models measured for this change does that
+    /// (zombie-3-a and Round 25 are solid by the hollow stage's own decision;
+    /// the Deinonychus refuses before any substitution). This test is the
+    /// only cover that branch has.
     #[test]
     fn memoized_surface_anchor_pool_serves_the_same_rows_and_is_checked_not_trusted() {
         let (mesh, topology, surface) = box_parts(10.0);
