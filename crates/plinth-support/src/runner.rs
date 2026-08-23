@@ -1553,12 +1553,65 @@ impl LegalizationTally {
                 learned,
                 own_arm_terminals,
                 cascade_victims,
+                measured,
             } => {
+                let round_terminal = steering.round().map(|round| round.terminal_id);
                 let mut grew = false;
-                for no_good in learned {
+                let mut round_advanced = false;
+                let mut voided = false;
+                for (no_good, physics) in learned.into_iter().zip(measured) {
+                    if round_terminal == Some(no_good.terminal_id()) {
+                        // **The round's own arm, measured.** §1.3: refusals
+                        // measured during the round are recorded AGAINST THE
+                        // ROUND and not added to the steering set. The set is
+                        // frozen for the round's duration, which is what makes
+                        // the round replayable and what stops the round from
+                        // feeding itself.
+                        let Some(round) = steering.round_mut() else {
+                            unreachable!("round_terminal was just read from the same round");
+                        };
+                        round
+                            .measured
+                            .push(physics.at_rank(round.arm_rank, no_good.arm()));
+                        round.arm_rank += 1;
+                        self.round_arms_measured += 1;
+                        round_advanced = true;
+                        crate::coverage_repair::emit_run_line(&format!(
+                            "legalize: round t{} measured {} — advancing to rank {}",
+                            round.terminal_id,
+                            round
+                                .measured
+                                .last()
+                                .map_or_else(String::new, crate::legalization::RoundArm::render),
+                            round.arm_rank,
+                        ));
+                        continue;
+                    }
+                    // Somebody ELSE'S arm was condemned. If a round is open,
+                    // the world moved for a reason other than that terminal's
+                    // own choice, so the round is VOID: §1.3. It is paid for,
+                    // it earned nothing, and it is re-entered later against the
+                    // new set.
+                    voided |= round_terminal.is_some();
                     grew |= steering.learn(no_good);
                 }
-                if !grew {
+                if voided {
+                    let round = steering
+                        .round()
+                        .map(|round| (round.terminal_id, round.arm_rank, round.measured.len()));
+                    self.voided_rounds += 1;
+                    steering.set_round(None);
+                    crate::coverage_repair::emit_run_line(&format!(
+                        "legalize: round VOID {round:?} — another terminal's own arm was \
+                         condemned during it; it retires nothing and is re-entered later",
+                    ));
+                }
+                // **The abandon rule, and a round advancing IS progress.** A
+                // round pass measures an arm nobody had measured in this world,
+                // and its rank strictly increases, so the loop is no less
+                // bounded than a steering pass that grows the set. What is
+                // forbidden is a pass that did neither.
+                if !grew && !round_advanced && !voided {
                     return Err(SupportRunError::Failed {
                         phase: SupportRunPhase::Brace,
                         detail: format!(
@@ -1573,20 +1626,53 @@ impl LegalizationTally {
                 Ok(())
             }
             crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id } => {
-                // The confirmation round lands in the next commit. Until it
-                // does, a spent steering is an HONEST NAMED REFUSAL and not a
-                // retirement: §1.3 forbids retiring a terminal on a count of
-                // no-goods, and refusing loudly is the only other truthful
-                // thing this loop can do about it today.
-                Err(SupportRunError::Failed {
-                    phase: SupportRunPhase::Routing,
-                    detail: format!(
-                        "terminal {terminal_id} has a steering no-good for every arm it can \
-                         still take after {} legalization passes; a confirmation round must \
-                         re-measure them before anything may be retired",
-                        self.passes
-                    ),
-                })
+                // **The only thing allowed to earn a retirement opens here.**
+                // §1.3: a terminal with a no-good for every arm it can still
+                // generate does NOT retire. It enters a round — the steering
+                // set held fixed, its remaining arms driven one per pass in the
+                // tournament's own order, and the retirement earned only when
+                // the last one has been measured in the world it is deciding
+                // about.
+                if let Some(open) = steering.round() {
+                    if open.terminal_id == terminal_id {
+                        // The round is open for this very terminal and it still
+                        // reports itself spent. A round forces a rank and
+                        // suppresses nothing, so the tournament cannot have
+                        // reached the spent branch — this is a defect, not a
+                        // physics outcome, and it refuses rather than looping.
+                        return Err(SupportRunError::Failed {
+                            phase: SupportRunPhase::Routing,
+                            detail: format!(
+                                "terminal {terminal_id} reported its steering spent while its \
+                                 own confirmation round was open at rank {}; a round \
+                                 suppresses nothing, so this is a defect in the steering \
+                                 channel and not a property of the model",
+                                open.arm_rank
+                            ),
+                        });
+                    }
+                    // A second terminal is spent while another's round runs.
+                    // One round at a time (§1.3 freezes the set for its
+                    // duration), so the open one is void and this one opens.
+                    self.voided_rounds += 1;
+                    crate::coverage_repair::emit_run_line(&format!(
+                        "legalize: round VOID t{} at rank {} — terminal {terminal_id} is also \
+                         spent and one round holds the set at a time",
+                        open.terminal_id, open.arm_rank,
+                    ));
+                }
+                self.confirmation_rounds += 1;
+                steering.set_round(Some(crate::legalization::ConfirmationRound {
+                    terminal_id,
+                    arm_rank: 0,
+                    measured: Vec::new(),
+                }));
+                crate::coverage_repair::emit_run_line(&format!(
+                    "legalize: round OPEN t{terminal_id} at rank 0 — re-measuring every arm \
+                     under the frozen set, one per pass, in the tournament's own order; \
+                     UNCAPPED",
+                ));
+                Ok(())
             }
         }
     }
@@ -5096,6 +5182,7 @@ fn mint_no_goods(
     let mut learned = Vec::new();
     let mut own_arm_terminals = Vec::new();
     let mut cascade_victims = Vec::new();
+    let mut measured = Vec::new();
     for terminal in &class.disturbed {
         if terminal.own_chosen_arms.is_empty() {
             cascade_victims.push(terminal.terminal_id);
@@ -5115,11 +5202,43 @@ fn mint_no_goods(
             crate::legalization::PrefixKey::of(route),
             crate::legalization::ArmIdentity::of(winner),
         ));
+        // The MEASURED physics behind this refusal, taken from the class's own
+        // rows rather than recomputed: the worst (most negative) gap among this
+        // terminal's condemned own arms, with the radii the resize assigned to
+        // that member. A steering pass discards it; a confirmation round keeps
+        // it, because a retirement must show measured millimetres and not a
+        // count (§1.3 verifier addition 1).
+        //
+        // Absent only if the class named an arm with no refusal row, which
+        // `classify_sealed_condemnation` builds them together so cannot happen
+        // — the zeroed row would be a visible lie rather than a silent one.
+        let worst = class
+            .measured_refusals
+            .iter()
+            .filter(|row| terminal.own_chosen_arms.contains(&row.member))
+            .min_by(|left, right| left.gap_mm.total_cmp(&right.gap_mm));
+        measured.push(worst.map_or(
+            crate::legalization::ArmRefusalPhysics {
+                gap_mm: f64::NAN,
+                distance_clearance_mm: f64::NAN,
+                axis_transit_illegal: false,
+                terminal_radius_mm: f64::NAN,
+                rootward_radius_mm: f64::NAN,
+            },
+            |row| crate::legalization::ArmRefusalPhysics {
+                gap_mm: row.gap_mm,
+                distance_clearance_mm: row.distance_clearance_mm,
+                axis_transit_illegal: row.axis_transit_illegal,
+                terminal_radius_mm: row.terminal_radius_mm,
+                rootward_radius_mm: row.rootward_radius_mm,
+            },
+        ));
     }
     crate::legalization::LegalizationAbandon::Condemned {
         learned,
         own_arm_terminals,
         cascade_victims,
+        measured,
     }
 }
 
@@ -5798,6 +5917,26 @@ fn disclose_no_winner_evidence(
         }) => OwnContactNoWinnerEvidence {
             every_feasible_arm_refused_by_clearance: true,
             stage: Some(OwnContactNoWinnerStage::AllFeasibleCandidatesRefusedByClearance),
+            candidates_generated: Some(*candidates_generated),
+            candidates_feasible: Some(*candidates_feasible),
+            anchor_seat_refusals_recorded: anchor_seat_refusals.len(),
+            anchor_foot_refusals_recorded: Some(anchor_refusals.len()),
+        },
+        Some(crate::cco::NoWinnerEvidence::ConfirmationRoundExhausted {
+            candidates_generated,
+            candidates_feasible,
+            anchor_seat_refusals,
+            anchor_refusals,
+            ..
+        }) => OwnContactNoWinnerEvidence {
+            // **FALSE, and the distinction is load-bearing.** This flag means
+            // task #51's shape — every feasible arm refused by the CANDIDACY
+            // clearance standoff. A round's arms passed that standoff; what
+            // refused them is the post-resize brace pass, two stages later, on
+            // radii candidacy could not predict. Setting it here would let a
+            // Stage B retirement be counted as evidence for the mask defect.
+            every_feasible_arm_refused_by_clearance: false,
+            stage: Some(OwnContactNoWinnerStage::ConfirmationRoundExhausted),
             candidates_generated: Some(*candidates_generated),
             candidates_feasible: Some(*candidates_feasible),
             anchor_seat_refusals_recorded: anchor_seat_refusals.len(),
@@ -11341,16 +11480,7 @@ mod tests {
     fn an_abandoned_pass_that_learns_nothing_new_refuses_instead_of_looping() {
         let no_good = crate::legalization::NoGood::new(
             113,
-            crate::legalization::PrefixKey::of(&crate::cco::TerminalRouteEvidence {
-                physical_contact_id: 113,
-                terminal_id: 113,
-                original_key: crate::forest::MemberKey::transit_test_fixture(401, 0),
-                plan_digest: 1,
-                loads_digest: 2,
-                geometry_digest: 3,
-                forest_digest_before: 4,
-                controller_digest_before: 5,
-            }),
+            prefix_fixture(4),
             crate::legalization::ArmIdentity::live(
                 crate::cco::CandidateFamily::PlateDescent,
                 7,
@@ -11362,6 +11492,13 @@ mod tests {
             learned: vec![no_good],
             own_arm_terminals: vec![113],
             cascade_victims: Vec::new(),
+            measured: vec![crate::legalization::ArmRefusalPhysics {
+                gap_mm: -0.05,
+                distance_clearance_mm: 0.280_044,
+                axis_transit_illegal: true,
+                terminal_radius_mm: 0.372_136,
+                rootward_radius_mm: 0.372_136,
+            }],
         };
 
         let mut steering = crate::legalization::LegalizationSteering::default();
@@ -11409,6 +11546,7 @@ mod tests {
                     learned: Vec::new(),
                     own_arm_terminals: Vec::new(),
                     cascade_victims: vec![7, 9],
+                    measured: Vec::new(),
                 },
             )
             .expect_err("victims steer nothing, so this pass learned nothing");
@@ -11419,32 +11557,202 @@ mod tests {
         assert_eq!(steering.len(), 0);
     }
 
-    /// **A spent steering is never a retirement.** Until the confirmation round
-    /// lands, the loop's only truthful answer is a named refusal — §1.3 forbids
-    /// retiring a terminal on a count of no-goods, and a terminal retired here
-    /// would be a real contact removed from the accepted set with its carried
-    /// area repartitioned onto its neighbours, under a clean seal.
+    /// **A spent steering opens a round; it never retires anything — design
+    /// §1.3 and §4 Stage B piece 5.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The previous revision of the design let `k` recorded no-goods retire a
+    /// terminal, on the argument that `k` measured negative margins are better
+    /// evidence than an arithmetic count. They are better evidence of the wrong
+    /// proposition: each margin was measured in the world that existed when its
+    /// pass ran, and every abandoned pass replaces that world, so `k` true
+    /// measurements can be harvested from `k` different worlds and still say
+    /// nothing about whether an arm is legal in THIS one. That is the finding
+    /// that made the second review return FLAWED.
+    ///
+    /// So the only thing a spent steering may do is open a round, and the round
+    /// is what earns a retirement by re-measuring.
+    ///
+    /// **Sabotage-shaped:** make the spent branch retire, or count no-goods,
+    /// and this goes red on the open round.
     #[test]
-    fn a_spent_steering_refuses_by_name_and_retires_nothing() {
+    fn a_spent_steering_opens_a_round_at_rank_zero_and_retires_nothing() {
         let mut steering = crate::legalization::LegalizationSteering::default();
         let mut tally = LegalizationTally {
             passes: 4,
             ..LegalizationTally::default()
         };
-        let refusal = tally
+        tally
             .apply(
                 &mut steering,
                 crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
             )
-            .expect_err("a spent steering stops the run; it does not retire the terminal");
-        let SupportRunError::Failed { phase, detail } = refusal else {
-            panic!("expected a named stage failure, got {refusal:?}");
-        };
-        assert_eq!(phase, SupportRunPhase::Routing);
-        assert!(
-            detail.contains("terminal 113") && detail.contains("confirmation round"),
-            "the refusal must name the terminal and what would earn a retirement: {detail}"
+            .expect("a spent steering opens a round rather than stopping the run");
+        let round = steering
+            .round()
+            .expect("the round is the only thing allowed to earn a retirement");
+        assert_eq!(round.terminal_id, 113);
+        assert_eq!(
+            round.arm_rank, 0,
+            "a round starts at the tournament's first arm"
         );
+        assert!(
+            round.measured.is_empty(),
+            "an opening round has measured nothing; a retirement must be earned by rows this \
+             round actually took"
+        );
+        assert_eq!(tally.confirmation_rounds, 1);
+        assert_eq!(tally.voided_rounds, 0);
+    }
+
+    /// **A round's own refusals are recorded AGAINST THE ROUND, never added to
+    /// the steering set — design §1.3.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The set is held fixed for the round's duration, and that is what makes
+    /// the round replayable: "arm rank k" means the same arm on every pass with
+    /// the same prefix. If a round's own refusals fed the set, the slate would
+    /// shrink underneath the round it is being counted through, the ranks would
+    /// stop naming the same arms, and the round would be measuring a moving
+    /// target while claiming to be one round.
+    ///
+    /// The rank advancing is also what makes a round pass count as PROGRESS
+    /// under the abandon rule: it measured an arm nobody had measured in this
+    /// world, even though it grew no set.
+    #[test]
+    fn a_rounds_own_refusal_advances_the_rank_and_leaves_the_steering_set_alone() {
+        let arm = crate::legalization::ArmIdentity::live(
+            crate::cco::CandidateFamily::ModelAnchor,
+            98,
+            2.5,
+            1,
+        );
+        let no_good = crate::legalization::NoGood::new(113, prefix_fixture(4), arm);
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        steering.set_round(Some(crate::legalization::ConfirmationRound {
+            terminal_id: 113,
+            arm_rank: 0,
+            measured: Vec::new(),
+        }));
+        let mut tally = LegalizationTally::default();
+
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: vec![no_good],
+                    own_arm_terminals: vec![113],
+                    cascade_victims: Vec::new(),
+                    measured: vec![crate::legalization::ArmRefusalPhysics {
+                        gap_mm: -0.05,
+                        distance_clearance_mm: 0.280_044,
+                        axis_transit_illegal: true,
+                        terminal_radius_mm: 0.372_136,
+                        rootward_radius_mm: 0.372_136,
+                    }],
+                },
+            )
+            .expect("a round measuring its own arm is progress, so the pass may go on");
+
+        assert_eq!(
+            steering.len(),
+            0,
+            "a round's refusal must NOT enter the steering set; the set is frozen for the \
+             round's duration and that is what makes the ranks name the same arms"
+        );
+        let round = steering.round().expect("the round is still open");
+        assert_eq!(round.arm_rank, 1, "the round advanced to its next arm");
+        assert_eq!(round.measured.len(), 1);
+        assert_eq!(round.measured[0].rank, 0);
+        assert_eq!(round.measured[0].arm, arm);
+        assert!(round.measured[0].axis_transit_illegal);
+        assert!((round.measured[0].distance_clearance_mm - 0.280_044).abs() < 1e-9);
+        assert_eq!(tally.round_arms_measured, 1);
+        assert_eq!(tally.voided_rounds, 0);
+    }
+
+    /// **Another terminal's arm condemned during a round VOIDS it — design
+    /// §1.3.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The round's claim is *"nothing this terminal could have chosen was
+    /// legal, in one world"*. If some other terminal's own arm is condemned
+    /// while the round runs, the world moved for a reason that was not this
+    /// terminal's choice, so the arms measured so far were measured in worlds
+    /// the remaining ones will not be measured in. Counting them as one round
+    /// would be exactly the harvest-from-k-worlds error the round exists to
+    /// prevent — with a round's name on it.
+    ///
+    /// A void round retires nothing, is reported as void, and is re-entered
+    /// later against the new set.
+    #[test]
+    fn another_terminals_refusal_during_a_round_voids_it_and_retires_nothing() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        steering.set_round(Some(crate::legalization::ConfirmationRound {
+            terminal_id: 113,
+            arm_rank: 2,
+            measured: Vec::new(),
+        }));
+        let mut tally = LegalizationTally::default();
+
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: vec![crate::legalization::NoGood::new(
+                        177,
+                        prefix_fixture(9),
+                        crate::legalization::ArmIdentity::live(
+                            crate::cco::CandidateFamily::PlateDescent,
+                            3,
+                            1.0,
+                            2,
+                        ),
+                    )],
+                    own_arm_terminals: vec![177],
+                    cascade_victims: Vec::new(),
+                    measured: vec![crate::legalization::ArmRefusalPhysics {
+                        gap_mm: -0.2,
+                        distance_clearance_mm: -0.2,
+                        axis_transit_illegal: false,
+                        terminal_radius_mm: 0.4,
+                        rootward_radius_mm: 0.4,
+                    }],
+                },
+            )
+            .expect("the void is not a failure; the pass abandons on the new no-good as usual");
+
+        assert!(
+            steering.round().is_none(),
+            "the round is void: the world moved for a reason other than terminal 113's own \
+             choice"
+        );
+        assert_eq!(tally.voided_rounds, 1);
+        assert_eq!(
+            steering.len(),
+            1,
+            "the OTHER terminal's refusal is an ordinary steering no-good and does enter the set"
+        );
+        assert_eq!(
+            tally.round_arms_measured, 0,
+            "a voided round measured nothing that counts; it is paid for and earns nothing"
+        );
+    }
+
+    fn prefix_fixture(forest_digest_before: u64) -> crate::legalization::PrefixKey {
+        crate::legalization::PrefixKey::of(&crate::cco::TerminalRouteEvidence {
+            physical_contact_id: 0,
+            terminal_id: 0,
+            original_key: crate::forest::MemberKey::transit_test_fixture(0, 0),
+            plan_digest: 1,
+            loads_digest: 2,
+            geometry_digest: 3,
+            forest_digest_before,
+            controller_digest_before: 5,
+        })
     }
 
     #[test]

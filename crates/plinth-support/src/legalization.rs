@@ -153,6 +153,18 @@ impl ArmIdentity {
         }
     }
 
+    /// Fold this identity into a digest, by exact bits.
+    pub(crate) fn digest(&self, word: &mut impl FnMut(u64)) {
+        word(match self.family {
+            CandidateFamily::PlateDescent => 0,
+            CandidateFamily::ModelAnchor => 1,
+            CandidateFamily::Bifurcation => 2,
+        });
+        word(self.generation_index as u64);
+        word(self.price_ml_bits);
+        word(self.clearance_rows as u64);
+    }
+
     fn render(&self) -> String {
         format!(
             "{:?}/gen{}/price{:016x}/rows{}",
@@ -171,6 +183,10 @@ pub(crate) struct NoGood {
 }
 
 impl NoGood {
+    pub(crate) const fn arm(&self) -> ArmIdentity {
+        self.arm
+    }
+
     pub(crate) const fn new(terminal_id: u32, prefix: PrefixKey, arm: ArmIdentity) -> Self {
         Self {
             terminal_id,
@@ -204,13 +220,93 @@ impl NoGood {
 /// a ceiling; the round ends when an arm survives bracing or when the
 /// tournament reports it has no arm at that rank. There is deliberately no
 /// maximum here and none anywhere below it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConfirmationRound {
     /// The terminal the round is measuring.
     pub(crate) terminal_id: u32,
     /// Which arm of the tournament's own order this pass must take, counting
     /// from zero.
     pub(crate) arm_rank: usize,
+    /// **What the round has actually MEASURED**, one row per arm it has driven,
+    /// in rank order. This is the round's whole justification: §1.3 requires
+    /// that what a reader can check is not *"here are k negative numbers"* but
+    /// *"here is a round in which nothing this terminal could have chosen was
+    /// legal"*, so the rows carry the rank they were measured at as well as
+    /// the millimetres.
+    ///
+    /// These rows are recorded AGAINST THE ROUND and never added to the
+    /// steering set — §1.3: *"Refusals measured during the round are recorded
+    /// against the round, not added to the steering set."* The set is frozen
+    /// for the round's duration, which is what makes the round replayable.
+    pub(crate) measured: Vec<RoundArm>,
+}
+
+/// The measured physics of one refused arm, as the brace pass reported it.
+///
+/// Separate from [`RoundArm`] because a steering pass produces these and
+/// discards them, while a round pairs one with the rank it was measured at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ArmRefusalPhysics {
+    pub(crate) gap_mm: f64,
+    pub(crate) distance_clearance_mm: f64,
+    pub(crate) axis_transit_illegal: bool,
+    pub(crate) terminal_radius_mm: f64,
+    pub(crate) rootward_radius_mm: f64,
+}
+
+impl ArmRefusalPhysics {
+    /// Pair this measurement with the arm and the rank the round drove it at.
+    pub(crate) const fn at_rank(self, rank: usize, arm: ArmIdentity) -> RoundArm {
+        RoundArm {
+            rank,
+            arm,
+            gap_mm: self.gap_mm,
+            distance_clearance_mm: self.distance_clearance_mm,
+            axis_transit_illegal: self.axis_transit_illegal,
+            terminal_radius_mm: self.terminal_radius_mm,
+            rootward_radius_mm: self.rootward_radius_mm,
+        }
+    }
+}
+
+/// One arm a confirmation round measured, with the physics that refused it.
+///
+/// The margins are MEASURED, in millimetres, and the radii are the ones
+/// `resize_forest_current_parity` actually assigned — the deciding input the
+/// refutation proved cannot be predicted at candidacy. `gap_mm` is the verdict
+/// number the engine acted on; when `axis_transit_illegal` is set it is a
+/// sentinel and carries no distance, and `distance_clearance_mm` is the honest
+/// distance-path value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoundArm {
+    /// Which rank of the tournament's own order this was.
+    pub(crate) rank: usize,
+    pub(crate) arm: ArmIdentity,
+    pub(crate) gap_mm: f64,
+    pub(crate) distance_clearance_mm: f64,
+    pub(crate) axis_transit_illegal: bool,
+    pub(crate) terminal_radius_mm: f64,
+    pub(crate) rootward_radius_mm: f64,
+}
+
+impl RoundArm {
+    pub(crate) fn render(&self) -> String {
+        let kind = if self.axis_transit_illegal {
+            "axis-transit"
+        } else {
+            "distance"
+        };
+        format!(
+            "rank{}={}({}) gap={:.6}mm distance_clearance={:.6}mm r={:.6}/{:.6}mm",
+            self.rank,
+            self.arm.render(),
+            kind,
+            self.gap_mm,
+            self.distance_clearance_mm,
+            self.terminal_radius_mm,
+            self.rootward_radius_mm,
+        )
+    }
 }
 
 /// **Why a pass stopped, and what the next one should do differently.**
@@ -235,6 +331,13 @@ pub(crate) enum LegalizationAbandon {
         learned: Vec<NoGood>,
         own_arm_terminals: Vec<u32>,
         cascade_victims: Vec<u32>,
+        /// The MEASURED physics behind each learned no-good, in the same order:
+        /// the millimetres the brace pass actually measured and the radii the
+        /// resize actually assigned. A steering pass throws these away — a
+        /// no-good claims nothing about magnitude. A CONFIRMATION ROUND keeps
+        /// them, because a retirement has to show measured physics and not
+        /// arithmetic (§1.3 verifier addition 1).
+        measured: Vec<ArmRefusalPhysics>,
     },
     /// The routing pass found a terminal with a steering no-good on every arm
     /// it can still take. Nothing is retired; a confirmation round opens.
@@ -248,6 +351,7 @@ impl LegalizationAbandon {
                 learned,
                 own_arm_terminals,
                 cascade_victims,
+                ..
             } => {
                 let ids = |ids: &[u32]| {
                     if ids.is_empty() {
@@ -307,8 +411,14 @@ impl LegalizationSteering {
         dead_code,
         reason = "the vocabulary lands one commit ahead of the confirmation round that drives                   it; docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4                   Stage B piece 5 names the reader"
     )]
-    pub(crate) const fn round(&self) -> Option<ConfirmationRound> {
-        self.round
+    pub(crate) const fn round(&self) -> Option<&ConfirmationRound> {
+        self.round.as_ref()
+    }
+
+    /// The round, mutably, so the loop can advance its rank and append what it
+    /// measured. The loop is the only thing that drives a round.
+    pub(crate) const fn round_mut(&mut self) -> Option<&mut ConfirmationRound> {
+        self.round.as_mut()
     }
 
     pub(crate) fn set_round(&mut self, round: Option<ConfirmationRound>) {
@@ -346,8 +456,14 @@ impl LegalizationSteering {
                 .collect(),
             forced_rank: self
                 .round
+                .as_ref()
                 .filter(|round| round.terminal_id == terminal_id)
                 .map(|round| round.arm_rank),
+            round_measured: self
+                .round
+                .as_ref()
+                .filter(|round| round.terminal_id == terminal_id)
+                .map_or(&[][..], |round| round.measured.as_slice()),
         }
     }
 }
@@ -362,6 +478,10 @@ pub(crate) struct TerminalSteering<'a> {
     terminal_id: u32,
     no_goods: Vec<&'a NoGood>,
     forced_rank: Option<usize>,
+    /// Everything the open round has measured so far. The tournament seals this
+    /// into `NoWinnerEvidence` at the moment it retires the terminal, so the
+    /// retirement carries the round that earned it rather than a count.
+    round_measured: &'a [RoundArm],
 }
 
 /// One candidate's steering verdict, with both compared halves retained so a
@@ -460,6 +580,11 @@ impl TerminalSteering<'_> {
 
     pub(crate) fn is_idle(&self) -> bool {
         self.no_goods.is_empty() && self.forced_rank.is_none()
+    }
+
+    /// The rows the open round has measured, for the seal.
+    pub(crate) const fn round_measured(&self) -> &[RoundArm] {
+        self.round_measured
     }
 
     /// Probe the whole slate at once. One pass over the candidates times one
@@ -579,6 +704,7 @@ mod tests {
         steering.set_round(Some(ConfirmationRound {
             terminal_id: 7,
             arm_rank: 2,
+            measured: Vec::new(),
         }));
         let terminal = steering.for_terminal(7);
         let slate = [ArmIdentity::of(&winner(3))];
@@ -701,6 +827,7 @@ mod tests {
         steering.set_round(Some(ConfirmationRound {
             terminal_id: 7,
             arm_rank: 9,
+            measured: Vec::new(),
         }));
         let (verdict, probes) = steering.for_terminal(7).verdict(live, &slate);
         assert_eq!(verdict, SteeringVerdict::Forced { rank: 9 });

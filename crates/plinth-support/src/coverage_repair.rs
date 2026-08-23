@@ -467,6 +467,16 @@ pub enum OwnContactNoWinnerStage {
     /// Arms were proposed, some were feasible, and the clearance standoff
     /// refused every feasible one. This is task #51's shape.
     AllFeasibleCandidatesRefusedByClearance,
+    /// **A confirmation round drove every remaining arm, one per pass, under a
+    /// frozen steering set, and the exact post-brace check measured every one
+    /// of them illegal.** Distinct from the reason above because the refusal
+    /// happened at a DIFFERENT check in a DIFFERENT stage: that one is the
+    /// candidacy-time clearance standoff, this one is the post-resize brace
+    /// pass, and conflating them would let a Stage B retirement be read as
+    /// task #51's mask defect. The measured millimetres live in the sealed
+    /// `NoWinnerEvidence`, per design §1.3 — this field is disclosure of a
+    /// record that already exists.
+    ConfirmationRoundExhausted,
 }
 
 /// **EVIDENCE ONLY. Why the router built no arm at this trial's own seat.**

@@ -623,9 +623,13 @@ pub(crate) struct TerminalCcoOutcome {
     /// them" argument, and an overload would need a footnote nobody will have.
     pub(crate) candidates_feasible: usize,
     /// **The second counter.** How many arms were ruled out before the
-    /// tournament weighed them. Zero on every path today, because nothing
-    /// rules an arm out yet; the steering channel that fills it is Stage B's.
+    /// tournament weighed them.
     pub(crate) candidates_ruled_out: usize,
+    /// **Set only when a confirmation round has driven this terminal past its
+    /// last arm.** The round's measured rows, carried here so
+    /// `no_winner_evidence` can seal the round that earned the retirement
+    /// rather than a count of refusals.
+    pub(crate) confirmation_round: Option<Vec<crate::legalization::RoundArm>>,
     pub(crate) anchor_ray_batches: usize,
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
@@ -678,6 +682,34 @@ pub(crate) enum NoWinnerEvidence {
         anchor_seat_refusals: Vec<AnchorSeatRefusal>,
         anchor_refusals: Vec<AnchorFootRefusal>,
     },
+    /// **The retirement a confirmation round earned — design §1.3 verifier
+    /// addition 1, and the only kind of retirement Stage B can produce.**
+    ///
+    /// Every remaining arm of this terminal was driven, one per pass, in the
+    /// tournament's own order, under a steering set held frozen for the round's
+    /// duration; every one of them was measured illegal by the exact
+    /// post-brace check; and the last of them was measured in the pass before
+    /// this one. `round_arms` carries, per arm, the MEASURED clearance margin
+    /// in millimetres and the radii the resize actually assigned.
+    ///
+    /// **What this lets a reader check is not "here are k negative numbers".**
+    /// Arithmetic over a stale universe adds up perfectly, and so does a pile
+    /// of true measurements harvested from k different worlds. The ranks are
+    /// contiguous from zero and they are the tournament's own order, so what
+    /// the seal shows is a ROUND: nothing this terminal could have chosen was
+    /// legal, in one world, measured.
+    ///
+    /// Margins from earlier STEERING passes are deliberately not here. §1.3
+    /// requires them to be labelled as steering history rather than as part of
+    /// the round, and the honest place for that is the run log, which prints
+    /// every one of them as it happens.
+    ConfirmationRoundExhausted {
+        candidates_generated: usize,
+        candidates_feasible: usize,
+        round_arms: Vec<crate::legalization::RoundArm>,
+        anchor_seat_refusals: Vec<AnchorSeatRefusal>,
+        anchor_refusals: Vec<AnchorFootRefusal>,
+    },
 }
 
 impl NoWinnerEvidence {
@@ -695,6 +727,10 @@ impl NoWinnerEvidence {
                 ..
             }
             | Self::AllFeasibleCandidatesRefusedByClearance {
+                anchor_seat_refusals,
+                ..
+            }
+            | Self::ConfirmationRoundExhausted {
                 anchor_seat_refusals,
                 ..
             } => anchor_seat_refusals,
@@ -2578,6 +2614,20 @@ impl CcoController {
                             digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                             digest_anchor_refusals(&mut word, anchor_refusals);
                         }
+                        NoWinnerEvidence::ConfirmationRoundExhausted {
+                            candidates_generated,
+                            candidates_feasible,
+                            round_arms,
+                            anchor_seat_refusals,
+                            anchor_refusals,
+                        } => {
+                            word(3);
+                            word(*candidates_generated as u64);
+                            word(*candidates_feasible as u64);
+                            digest_round_arms(&mut word, round_arms);
+                            digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+                            digest_anchor_refusals(&mut word, anchor_refusals);
+                        }
                     }
                 }
             }
@@ -2704,6 +2754,20 @@ fn digest_terminal_record(word: &mut impl FnMut(u64), record: &TerminalCadenceRe
                     word(2);
                     word(*candidates_generated as u64);
                     word(*candidates_feasible as u64);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
+                NoWinnerEvidence::ConfirmationRoundExhausted {
+                    candidates_generated,
+                    candidates_feasible,
+                    round_arms,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(3);
+                    word(*candidates_generated as u64);
+                    word(*candidates_feasible as u64);
+                    digest_round_arms(word, round_arms);
                     digest_anchor_seat_refusals(word, anchor_seat_refusals);
                     digest_anchor_refusals(word, anchor_refusals);
                 }
@@ -2961,6 +3025,27 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
                 digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                 digest_anchor_refusals(&mut word, anchor_refusals);
             }
+            // **A NEW discriminant, so no existing row moves.** Every model
+            // that retires nothing through a round keeps its transcript
+            // fingerprint byte for byte: the three variants above fold exactly
+            // as they did, and this one is reachable only by a terminal a round
+            // actually retired. Craig's authorization item 5 bought ONE
+            // corpus-wide re-freeze, at Stage A, and this deliberately does not
+            // spend a second.
+            Some(NoWinnerEvidence::ConfirmationRoundExhausted {
+                candidates_generated,
+                candidates_feasible,
+                round_arms,
+                anchor_seat_refusals,
+                anchor_refusals,
+            }) => {
+                word(4);
+                word(*candidates_generated as u64);
+                word(*candidates_feasible as u64);
+                digest_round_arms(&mut word, round_arms);
+                digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+                digest_anchor_refusals(&mut word, anchor_refusals);
+            }
         }
     }
     hash
@@ -3176,8 +3261,36 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
     }
 }
 
+/// Fold a confirmation round's measured rows. Every field, by exact bits: the
+/// round is the evidence a retirement rests on, so a row that changed and a
+/// digest that did not would be exactly the hole this stage exists to close.
+fn digest_round_arms(word: &mut impl FnMut(u64), arms: &[crate::legalization::RoundArm]) {
+    word(arms.len() as u64);
+    for arm in arms {
+        word(arm.rank as u64);
+        arm.arm.digest(word);
+        word(arm.gap_mm.to_bits());
+        word(arm.distance_clearance_mm.to_bits());
+        word(u64::from(arm.axis_transit_illegal));
+        word(arm.terminal_radius_mm.to_bits());
+        word(arm.rootward_radius_mm.to_bits());
+    }
+}
+
 fn no_winner_evidence(outcome: &TerminalCcoOutcome) -> NoWinnerEvidence {
     debug_assert!(outcome.winner.is_none());
+    // Checked FIRST, because a round's verdict is about arms that DID exist and
+    // DID pass feasibility, and folding it into one of the three counting
+    // reasons would lose exactly the fact that makes the retirement earned.
+    if let Some(round_arms) = outcome.confirmation_round.clone() {
+        return NoWinnerEvidence::ConfirmationRoundExhausted {
+            candidates_generated: outcome.candidates_generated,
+            candidates_feasible: outcome.candidates_feasible,
+            round_arms,
+            anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
+            anchor_refusals: outcome.anchor_refusals.clone(),
+        };
+    }
     if outcome.candidates_generated == 0 {
         NoWinnerEvidence::NoCandidatesGenerated {
             anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
@@ -3660,6 +3773,7 @@ fn grow_terminal_inner(
             candidates_generated,
             candidates_feasible,
             candidates_ruled_out: 0,
+            confirmation_round: None,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 0,
@@ -3714,6 +3828,18 @@ fn grow_terminal_inner(
         Some(SteeringOutcome::Forced { rank }) => (0, Some(rank)),
         None => (0, None),
     };
+    // **The retirement a round earned.** A forced rank past the last arm means
+    // the round has driven every one of them and every one was measured
+    // illegal. This is the ONE path on which Stage B retires a terminal, and it
+    // seals the round that earned it — the measured millimetres and the radii
+    // the resize assigned, arm by arm, in the tournament's own order.
+    let confirmation_round = forced_rank
+        .filter(|rank| *rank >= survivors.len())
+        .map(|_| {
+            steering.map_or_else(Vec::new, |steering| {
+                steering.terminal.round_measured().to_vec()
+            })
+        });
 
     // A round takes the arm at its rank; an ordinary pass takes the tournament
     // winner, which is rank 0 of the same order.
@@ -3724,6 +3850,7 @@ fn grow_terminal_inner(
             candidates_generated,
             candidates_feasible,
             candidates_ruled_out,
+            confirmation_round,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
@@ -3767,6 +3894,8 @@ fn grow_terminal_inner(
         candidates_generated,
         candidates_feasible,
         candidates_ruled_out,
+        // A pass that seated a winner retired nobody, so it seals no round.
+        confirmation_round: None,
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
@@ -6158,6 +6287,21 @@ mod tests {
                 "2:{candidates_generated}:{candidates_feasible}:{}",
                 refusals(anchor_refusals)
             ),
+            NoWinnerEvidence::ConfirmationRoundExhausted {
+                candidates_generated,
+                candidates_feasible,
+                round_arms,
+                anchor_refusals,
+                ..
+            } => format!(
+                "3:{candidates_generated}:{candidates_feasible}:{}:{}",
+                refusals(anchor_refusals),
+                round_arms
+                    .iter()
+                    .map(crate::legalization::RoundArm::render)
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            ),
         }
     }
 
@@ -6577,6 +6721,7 @@ mod tests {
             first_hit_t: Some(t),
         };
         let outcome = TerminalCcoOutcome {
+            confirmation_round: None,
             winner: None,
             disposition: None,
             candidates_generated: 0,
