@@ -7937,8 +7937,26 @@ mod tests {
             termination: BraceFixedPointTermination::Converged,
             contact_refusals: Vec::new(),
             contact_attestation_digest: 0,
+            final_pass_refusals: crate::brace::FinalPassRefusalAccounting::default(),
         };
         let digest = brace_fixed_point_plan_digest(&base);
+
+        // The refusal accounting is DISCLOSURE, and deliberately outside this
+        // digest: every row it carries is a pure function of the forest and the
+        // surface the digest already covers, and this lane is authorized to
+        // move exactly one sealed fingerprint — the CCO transcript's. Pinned
+        // here so the exclusion reads as a decision rather than an oversight.
+        let mut disclosed = base.clone();
+        disclosed.final_pass_refusals = crate::brace::FinalPassRefusalAccounting {
+            refused_arms: 3,
+            pipeline_violations: 1,
+            rows: Vec::new(),
+        };
+        assert_eq!(
+            brace_fixed_point_plan_digest(&disclosed),
+            digest,
+            "refusal accounting must not move the sealed brace-plan digest"
+        );
         for termination in [
             BraceFixedPointTermination::Converged,
             BraceFixedPointTermination::IterationLimit,

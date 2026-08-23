@@ -214,6 +214,18 @@ pub(crate) struct BraceFixedPointPlan {
     /// at all, so deleting the screen would move nothing an existing gate can
     /// see.
     pub(crate) contact_attestation_digest: u64,
+    /// **Refusal accounting** — the counts and the true gaps in millimetres
+    /// the FINAL pass measured (Craig's rider, 2026-08-23).
+    ///
+    /// Deliberately NOT folded into `brace_fixed_point_plan_digest`, and the
+    /// reason is not convenience. Every row here is a pure function of the
+    /// forest and the surface that digest already covers — the refused keys
+    /// are digested one field up, and the gaps are what
+    /// `exact_clearance_rows` reads off that same geometry. Folding them would
+    /// move every sealed brace-plan digest in the corpus to disclose a number
+    /// no verdict reads, and this lane is authorized to move exactly one
+    /// fingerprint, the CCO transcript's.
+    pub(crate) final_pass_refusals: FinalPassRefusalAccounting,
 }
 
 /// The empty head of a seat-attestation chain.
@@ -520,6 +532,8 @@ pub(crate) fn brace_fixed_point_current_parity(
             penetration_limits,
         )?;
         if !added && !changed && negative.is_clean() {
+            let final_pass_refusals = FinalPassRefusalAccounting::read(&working, &negative);
+            final_pass_refusals.disclose(iteration);
             return Ok(BraceFixedPointPlan {
                 forest: working,
                 additions,
@@ -531,9 +545,15 @@ pub(crate) fn brace_fixed_point_current_parity(
                 },
                 contact_refusals: Vec::new(),
                 contact_attestation_digest,
+                final_pass_refusals,
             });
         }
         if iteration == FROZEN_PASS_CAP {
+            // Refusal accounting is read and streamed BEFORE the truth table
+            // runs, so an unrefusable violation — which returns `Err` below and
+            // never reaches a plan — still discloses its measured magnitude.
+            let final_pass_refusals = FinalPassRefusalAccounting::read(&working, &negative);
+            final_pass_refusals.disclose(iteration);
             let termination = pass_three_termination(
                 saw_unplaceable,
                 added,
@@ -582,6 +602,7 @@ pub(crate) fn brace_fixed_point_current_parity(
                 termination,
                 contact_refusals: negative.contact_refusals,
                 contact_attestation_digest,
+                final_pass_refusals,
             });
         }
     }
@@ -2002,11 +2023,128 @@ struct ExactClearanceNegatives {
     /// Members reading negative clearance that DO declare a model contact.
     /// These are refused candidates and route to quarantine (OD-4).
     contact_refusals: Vec<MemberKey>,
+    /// **Refusal accounting (Craig's rider on the seal-semantics lane,
+    /// 2026-08-23).** The TRUE gap every negative row measured, in
+    /// MILLIMETRES, keyed by member — both classes above.
+    ///
+    /// `exact_clearance_rows` already computes a real per-arm clearance in mm
+    /// and, until this field existed, only the SIGN of it survived: a run
+    /// could say "one arm was refused" and never say whether that arm was
+    /// 0.04 mm inside the model or 4 mm inside it. Those are different
+    /// physical situations and the sub-0.3 mm residue is the one Craig's seal
+    /// decision waited on. The magnitudes are carried here, disclosed by
+    /// [`FinalPassRefusalAccounting`], and read by no branch.
+    negative_gaps_mm: BTreeMap<MemberKey, f64>,
 }
 
 impl ExactClearanceNegatives {
     const fn is_clean(&self) -> bool {
         self.pipeline_violations == 0 && self.contact_refusals.is_empty()
+    }
+}
+
+/// One negative exact-clearance row, as the FINAL pass measured it.
+///
+/// Disclosure only. Nothing branches on any field here; the verdict is taken
+/// from the sign, exactly as it was before this record existed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RefusalGapRow {
+    pub(crate) member: MemberKey,
+    /// MEASURED. Negative means the member is inside the model by this many
+    /// millimetres, against `FINAL_CLEARANCE_GAP_MM`'s demanded gap.
+    pub(crate) gap_mm: f64,
+    /// The radii the resize assigned to this member, in millimetres — the
+    /// deciding input the refutation proved cannot be predicted at candidacy.
+    pub(crate) terminal_radius_mm: f64,
+    pub(crate) rootward_radius_mm: f64,
+    /// `true` when the member DECLARES a model contact, so its refusal is an
+    /// ordinary candidate rejection (OD-4); `false` when it is an unrefusable
+    /// pipeline violation.
+    pub(crate) refusable: bool,
+}
+
+/// **The refusal-accounting rider.** What the final bracing pass measured, in
+/// counts AND in millimetres, so a run can be read for the size of its
+/// clearance failures rather than only for their existence.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct FinalPassRefusalAccounting {
+    /// How many negative rows DECLARE a model contact — the refused arms.
+    pub(crate) refused_arms: usize,
+    /// How many negative rows declare none — unrefusable violations.
+    pub(crate) pipeline_violations: usize,
+    /// Every negative row, ascending by member key.
+    pub(crate) rows: Vec<RefusalGapRow>,
+}
+
+impl FinalPassRefusalAccounting {
+    /// Read the accounting off one pass's negatives. Batched: the gaps were
+    /// measured by the single `exact_clearance_rows` call this pass already
+    /// made, and nothing here re-enters the kernel.
+    fn read(forest: &Forest, negatives: &ExactClearanceNegatives) -> Self {
+        let refused = negatives
+            .contact_refusals
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let rows = negatives
+            .negative_gaps_mm
+            .iter()
+            .map(|(key, gap_mm)| {
+                let (terminal_radius_mm, rootward_radius_mm) =
+                    forest.member(*key).map_or((f64::NAN, f64::NAN), |member| {
+                        (
+                            member.terminal_radius_mm().get().get(),
+                            member.rootward_radius_mm().get().get(),
+                        )
+                    });
+                RefusalGapRow {
+                    member: *key,
+                    gap_mm: *gap_mm,
+                    terminal_radius_mm,
+                    rootward_radius_mm,
+                    refusable: refused.contains(key),
+                }
+            })
+            .collect::<Vec<_>>();
+        Self {
+            refused_arms: negatives.contact_refusals.len(),
+            pipeline_violations: negatives.pipeline_violations,
+            rows,
+        }
+    }
+
+    /// Stream the accounting while the run is happening.
+    ///
+    /// Emitted only when the final pass measured at least one negative row.
+    /// A pass with nothing negative has no refusal to hide, and the brace
+    /// fixed point runs once per repair trial as well as at attempt 0 — 92
+    /// trials MEASURED on `zombie-3-a` — so a line per clean pass would bury
+    /// the lines that carry a verdict.
+    fn disclose(&self, iteration: usize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "slot{}g{}{}={:.6}mm@r{:.6}/{:.6}mm",
+                    row.member.slot(),
+                    row.member.generation(),
+                    if row.refusable { "" } else { "!" },
+                    row.gap_mm,
+                    row.terminal_radius_mm,
+                    row.rootward_radius_mm,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        crate::coverage_repair::emit_run_line(&format!(
+            "brace: final-pass refusals pass={iteration} refused_arms={} \
+             pipeline_violations={} gaps: {rows}",
+            self.refused_arms, self.pipeline_violations,
+        ));
     }
 }
 
@@ -2021,6 +2159,7 @@ fn exact_clearance_negatives(
         if clearance >= 0.0 {
             continue;
         }
+        negatives.negative_gaps_mm.insert(key, clearance);
         let declares_contact = forest
             .member(key)
             .is_some_and(|member| member.model_contact_end().is_some());
@@ -4674,6 +4813,160 @@ mod tests {
             plan.forest.terminal_quarantine(7).is_some(),
             "the terminal's own lookup must resolve, or the `quarantined` noncoverage \
              component would report this contact as merely unrouted"
+        );
+    }
+
+    /// **The refusal-accounting rider (Craig, 2026-08-23).**
+    ///
+    /// `exact_clearance_rows` computes a real per-arm clearance in millimetres
+    /// and, before this landed, only the SIGN of it survived a run. A run could
+    /// say "one arm was refused" and never say whether that arm was 0.04 mm
+    /// inside the model or 4 mm inside it — and the sub-0.3 mm residue is the
+    /// one the seal decision waited on.
+    ///
+    /// This is sabotage-shaped on purpose. An implementation that reported a
+    /// count and a placeholder magnitude, or that reported the sign as `-1`,
+    /// passes a test that only asks "is it negative". So the assertion is
+    /// EQUALITY with the number `exact_clearance_rows` measured for this exact
+    /// member, taken independently in this test.
+    #[test]
+    fn the_final_pass_discloses_its_refusal_count_and_the_true_gaps_in_millimetres() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+
+        let stub_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([105.0, 105.0, 114.0]).unwrap(),
+            p1_mm: finite3([105.0, 105.0, 112.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.register_terminal(7, stub_key).unwrap();
+        forest.consume_terminal(7, stub_key).unwrap();
+        let arm_key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3([105.0, 105.0, 112.0]).unwrap(),
+            p1_mm: finite3([105.0, 105.0, 105.0]).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "brace-test".into(),
+                ordinal: 1,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_parent(stub_key, Some(arm_key)).unwrap();
+
+        let capture = crate::coverage_repair::capture::RunLogCapture::install();
+        let plan = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+        )
+        .expect("the refused contact routes to quarantine");
+        let lines = capture.lines();
+
+        assert_eq!(
+            plan.final_pass_refusals.refused_arms, 1,
+            "one contact-declaring member was measured inside the model"
+        );
+        assert_eq!(
+            plan.final_pass_refusals.pipeline_violations, 0,
+            "nothing here is an unrefusable violation"
+        );
+        let row = plan
+            .final_pass_refusals
+            .rows
+            .iter()
+            .find(|row| row.member == arm_key)
+            .expect("the refused arm must carry a row of its own");
+        assert!(row.refusable, "a contact-declaring refusal is refusable");
+
+        // The independent measurement. `plan.forest` has already condemned the
+        // arm, so the gap is re-read from the forest the controller graded:
+        // the input forest, resized exactly as the final pass resized it.
+        let config = BraceConfig::current(0.05).unwrap();
+        let measured = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+            .unwrap()
+            .into_iter()
+            .find(|(key, _)| *key == arm_key)
+            .expect("the arm is graded by the exact pass")
+            .1;
+        assert_eq!(
+            row.gap_mm, measured,
+            "the disclosed gap must BE the measured clearance, not a sign or a placeholder"
+        );
+        assert!(
+            row.gap_mm < 0.0 && row.gap_mm.is_finite(),
+            "a refusal's true gap is a finite negative number of millimetres"
+        );
+        assert_eq!(
+            (row.terminal_radius_mm, row.rootward_radius_mm),
+            (0.5, 0.5),
+            "the radii the resize assigned travel with the gap"
+        );
+
+        // LOUD, and streamed while the run is happening rather than only
+        // returned to a caller that may never print it.
+        let disclosure = lines
+            .iter()
+            .find(|line| line.starts_with("brace: final-pass refusals"))
+            .expect("the final pass must stream its refusal accounting");
+        assert!(
+            disclosure.contains("refused_arms=1") && disclosure.contains("pipeline_violations=0"),
+            "the streamed line must carry the counts: {disclosure}"
+        );
+        assert!(
+            disclosure.contains(&format!("{measured:.6}mm")),
+            "the streamed line must carry the measured magnitude in millimetres: {disclosure}"
+        );
+    }
+
+    /// A pass with nothing negative streams nothing, and its accounting is
+    /// empty rather than absent. The brace fixed point runs once per repair
+    /// trial as well as at attempt 0 — 92 trials MEASURED on `zombie-3-a` — so
+    /// a line per clean pass would bury the lines that carry a verdict.
+    #[test]
+    fn a_clean_final_pass_discloses_no_refusals_and_streams_no_line() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        forest.add_member(member(
+            [105.0, 105.0, 130.0],
+            [105.0, 105.0, 120.0],
+            MemberKind::Trunk,
+            0,
+        ));
+
+        let capture = crate::coverage_repair::capture::RunLogCapture::install();
+        let plan = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+        )
+        .expect("a member clear of the model braces cleanly");
+        assert_eq!(
+            plan.final_pass_refusals,
+            FinalPassRefusalAccounting::default(),
+            "a clean pass has nothing to account for"
+        );
+        assert!(
+            !capture
+                .lines()
+                .iter()
+                .any(|line| line.starts_with("brace: final-pass refusals")),
+            "a clean pass must not stream a refusal line"
         );
     }
 
