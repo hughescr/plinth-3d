@@ -6408,6 +6408,130 @@ mod tests {
         );
     }
 
+    /// **No retirement without a completed round — design §1.3 verifier
+    /// obligation 3, sealed rather than printed.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// After Stage B, `UnroutedNoWinner` can mean two different things: *"this
+    /// pass's tournament produced no winner"*, which it always meant, and *"no
+    /// arm of this terminal survived the exact post-brace check"*, which is
+    /// new. Same row, same `UnroutedContactReason::NoWinner`, same SPEC §6
+    /// removal, same load repartition — and every existing check would agree
+    /// with a defective one, because every existing check tests CONSISTENCY,
+    /// not whether the retirement was EARNED.
+    ///
+    /// That is a new print-safety hole: fewer supports, silently, under a clean
+    /// seal. It is closed by making the retirement carry the round — per arm,
+    /// the MEASURED clearance margin in millimetres and the radii the resize
+    /// assigned, at ranks contiguous from zero in the tournament's own order.
+    /// What a reader can then check is not "here are k negative numbers" but
+    /// "here is a round in which nothing this terminal could have chosen was
+    /// legal".
+    ///
+    /// **Sabotage-shaped:** seal the retirement as one of the three counting
+    /// reasons, or seal it with an empty round, and this goes red.
+    #[test]
+    fn a_round_that_ran_out_of_arms_seals_the_round_that_earned_the_retirement() {
+        // Route once unsteered to learn a real terminal and its real arm.
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, _, _, _, _) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+        );
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+        let (terminal_id, arm) = transcript
+            .rows()
+            .iter()
+            .find_map(|row| {
+                controller
+                    .sealed_routed_arm(row.terminal_id())
+                    .map(|(_, winner)| {
+                        (
+                            row.terminal_id(),
+                            crate::legalization::ArmIdentity::of(winner),
+                        )
+                    })
+            })
+            .expect("the fixture routes real terminals");
+
+        // A round already driven past every arm this terminal has, carrying the
+        // row it measured getting there. `usize::MAX` is not a cap and not a
+        // constant — it is "a rank no slate reaches", which is what exhaustion
+        // means when the round itself is uncapped.
+        let measured = vec![crate::legalization::ArmRefusalPhysics {
+            gap_mm: -0.05,
+            distance_clearance_mm: 0.280_044,
+            axis_transit_illegal: true,
+            terminal_radius_mm: 0.372_136,
+            rootward_radius_mm: 0.372_136,
+        }
+        .at_rank(0, arm)];
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        steering.set_round(Some(crate::legalization::ConfirmationRound {
+            terminal_id,
+            arm_rank: usize::MAX,
+            measured: measured.clone(),
+        }));
+
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, _, _, _, _) = route_initial_build_steered(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+            Some(&steering),
+        )
+        .expect("a round forces a rank; it never reports its steering spent");
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+
+        let row = transcript
+            .rows()
+            .iter()
+            .find(|row| row.terminal_id() == terminal_id)
+            .expect("the terminal is still in the cadence");
+        assert_eq!(
+            row.kind(),
+            FinalizedDispositionKind::UnroutedNoWinner,
+            "a round driven past its last arm retires the terminal"
+        );
+        let Some(NoWinnerEvidence::ConfirmationRoundExhausted {
+            round_arms,
+            candidates_feasible,
+            ..
+        }) = row.no_winner_reason()
+        else {
+            panic!(
+                "a retirement earned by a round must NOT be sealed as one of the three counting \
+                 reasons: {:?}",
+                row.no_winner_reason()
+            );
+        };
+        assert_eq!(
+            round_arms, &measured,
+            "the seal must carry the round's own measured millimetres and radii, arm by arm"
+        );
+        assert!(
+            *candidates_feasible > 0,
+            "the round's verdict is about arms that DID exist and DID pass feasibility — that \
+             is the whole difference between it and NoFeasibleCandidate"
+        );
+    }
+
     /// **Steering is live on the real routing path — design §4 Stage B revert
     /// proof 1's first half, and the honesty check the whole stage rests on.**
     ///
