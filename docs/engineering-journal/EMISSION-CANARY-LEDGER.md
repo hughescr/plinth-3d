@@ -524,3 +524,72 @@ a distance shortfall or an axis-transit sentinel with its millimetres. The two n
 corpus run must bring back are how many models hit an accounting-disturbing brace refusal, and
 how many terminals are disturbed in one sweep split by own-arm versus cascade — the second is
 what says whether the reachable T6 is a corner or a common outcome.
+
+---
+
+## 2026-08-23 — Stage C (the run-invariant anchor pool): zero bytes, on three models
+
+| recorded | commit | branch | md5 of `Round 25.chitubox` | support records | bytes |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-23 | `ab81ff4` | `feature/a4-controller` (seal-semantics Stage C tip) | `ee76f98a0e90ae59d0ef2762097ea7bb` | 41 | 364,416 |
+
+**The value of record does not move.** `cmp` returns clean against the `466c4c4` artifact —
+byte-identical, not merely the same md5. Stage C hoists `SurfaceAnchorPool::from_geometry`
+onto the run context so the Routing and Rewire stages stop rebuilding rows that are a
+function of two inputs neither of which moves during a run. It changes no verdict, so the
+canary is expected to be identical and now is measured identical.
+
+### The two models that exercise what the canary cannot
+
+Round 25 runs one attempt and never enters the coverage-repair trial loop, so it cannot show
+the reuse path at all. Two models were run at both ends — `plinth` built at `eb29ead` and at
+`ab81ff4`, from clean trees, same inputs, same `saturn4-ultra` profile.
+
+| model | pre `eb29ead` | post `ab81ff4` | verdict |
+| --- | --- | --- | --- |
+| `zombie-3-a.chitubox` | 3,750,864 bytes, 215 records | 3,750,864 bytes, 215 records | **byte-identical**, md5 `c13ca5288e64203b134b1ea4887669f6` |
+| `zombie-3-a.coverage.repair.json` | — | — | four wall-clock fields differ, every decision and count identical |
+| Deinonychus | refuses at Brace, terminal 113 | refuses at Brace, terminal 113 | both `brace:` lines byte-identical |
+
+The four fields that differ in the repair sidecar are `wall_time_total_ms`,
+`wall_time_per_trial_min_ms`, `wall_time_per_trial_median_ms` and
+`wall_time_per_trial_max_ms`. They record how long the run took, so they cannot be identical
+between two runs and their movement is not evidence of anything. The repair trajectory
+itself is identical on both sides: `trials=35 commits=3 remaining=485
+diversity_demotions=2185 of_which_tried=34 no_improvement=32`.
+
+### What the hoist is worth, and why the design memo over-priced it
+
+MEASURED on `zombie-3-a` with a throwaway instrument (built, run, reverted — no production
+diagnostic was added), 69,552 pool rows:
+
+| quantity | value |
+| --- | --- |
+| pool builds before Stage C | **72** (36 attempts x 2 sites) |
+| pool builds after Stage C | **1** |
+| cost of one REPEAT build | **3.55 ms** median, n=66, min 3.535 ms, max 3.840 ms |
+| of which: the content digest | 3.37 ms (95 %) |
+| of which: the row gather | 0.16 ms (4 %) |
+| total recovered | **254 ms of a 262 s run — 0.10 %** |
+
+On the Deinonychus (115,349 rows, one attempt) the single avoided build is 5.87 ms of a
+7.3 s support run: 0.08 %.
+
+**Design memo §2.4 item 1 prices this work as "a 494,617-row build per trial, paid twice",
+and that is not what repeats.** The expensive part of a build is
+`NativeSurface::exterior_face_mask` — MEASURED 354 ms on `zombie-3-a`, 322 ms on the
+Deinonychus — and it sits behind a `OnceLock` in `geom_kernel` (`queries.rs:3093`). It is
+paid once per surface, by whichever caller asks for it first, and it was never being repaid
+per build. What actually repeated was the row gather and the pool digest. The digest is not
+even removed by the hoist: both production sites still run `validate_against`, which hashes
+the same rows again — 3.37 ms on `zombie-3-a`, 5.58 ms on the Deinonychus, at every stage.
+
+So the honest sentence has two halves and they travel together: **71 of 72 builds are gone,
+and a build is 3.6 ms of which 95 % is a hash.**
+
+**What this means for the staging argument, which is a disclosure and not a decision.**
+§4 lands C before B because "Stage C is the only lever on Stage B's named cost risk". The
+lever is real and it is 0.1 % of a run. Whoever sizes Stage B's extra confirmation passes
+must price them against an unchanged pass cost, not against a pass Stage C made cheap.
+
+**Unexplained: nothing. Superseded: nothing.**
