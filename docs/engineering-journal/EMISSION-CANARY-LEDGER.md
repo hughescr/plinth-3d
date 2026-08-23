@@ -150,3 +150,166 @@ the Bat refuse again.
 
 **Unexplained: nothing.** Every row above has its cause, and the one that moved has a
 control experiment rather than an argument.
+
+---
+
+## 2026-08-23 — honest-exemption + two-tier re-baseline, §8 steps 3–7
+
+New values of record for `feature/a4-controller` at `64edde4`, after §8 steps 3–6 of
+`designs/honest-exemption-2026-08-22.md` landed the frozen seat zone and full-axis grading
+(`0a72bc8`, `edcadd6`) and `64edde4` priced the round-5 challenge findings. Craig authorized
+movement in BOTH directions for this lane. Every row is re-derived through its own producer.
+
+MEASURED 2026-08-23 by the merge judge, `gate` profile, `saturn4-ultra`, `--no-cache`, one
+machine, baseline and tip back to back, **one process at a time** so the wall times compare.
+Models taken from `minis-to-process/`, sha256-verified.
+
+### Binary provenance, both axes
+
+| | commit | sha256 | seat-zone wiring in the LINKED binary |
+| --- | --- | --- | --- |
+| baseline | `56a8782` | `7d508ed689c49bbdaf7f424c05f04e249ab2471aee356129c2b12810904b6569` | **absent** — zero `seat_zone` symbols, no `faces_near_segments_batch` |
+| tip | `64edde4` | `eef90622faa0e4282a88f218d7b1e48bf6210d94c9b946242e20eb89a3bf5015` | **present** — `freeze_seat_zones`, `SeatZoneRequest`, `faces_near_segments_batch` |
+
+Both builds started at `2026-08-23T11:02:38Z`, after `64edde4` was authored
+(`2026-08-23T10:58:54Z`). The baseline's *absence* of the wiring is the negative control: it is
+§10's parked state, not a differently-configured tip.
+
+**The baseline reproduces this ledger exactly**, so the comparison is against a verified
+baseline rather than an assumed one — `Round 25` `fe9c716deb0805a3f0074b3e3dfe4bad` / 36 / 354,984;
+`zombie-3-a` `518b346faec0d71b7cdaf05ebeacb89f` / 210 / 3,719,400; `Deinonychus`
+`f2a471165be303ab360530e30fb781a5` / 1138 / 10,379,904; and `zombie-3-a`'s repair line
+`trials=92 commits=3 remaining=433 diversity_demotions=2185 of_which_tried=91 [no_improvement=89]`
+field for field.
+
+### The new values of record
+
+| model | baseline `56a8782` | tip `64edde4` | movement |
+| --- | --- | --- | --- |
+| `Round 25` | `fe9c716deb0805a3f0074b3e3dfe4bad`, 36 rec, 354,984 B, 1.10 s | `ee76f98a0e90ae59d0ef2762097ea7bb`, **41 rec**, 364,416 B, 1.21 s | MOVED, +5 records |
+| `zombie-3-a` | `518b346faec0d71b7cdaf05ebeacb89f`, 210 rec, 3,719,400 B, 672.6 s | `c13ca5288e64203b134b1ea4887669f6`, **215 rec**, 3,750,864 B, **278.1 s** | MOVED, +5 records, 2.4× faster |
+| `Tavey` | `7d724c7d9bba175fa41032f36e9f4908`, 664 rec, 8,260,224 B, 283.8 s | `01886cbd4a37bff1792b1d17600ada0a`, **697 rec**, 8,254,536 B, 286.8 s | MOVED, +33 records |
+| `Crawler Zombie` | `eebefa541af2ccbc5fcfa786abbc1d48`, 373 rec, 3,743,232 B, 671.6 s | `ca11d626f4d85091f562120eb65eb441`, **376 rec**, 3,758,424 B, 504.6 s | MOVED, +3 records |
+| `Skulker Zombie` | *no artifact* — still walking coverage repair when the operator stopped it at 1200 s | `c05d13cec10658e071e8ab7f6472260e`, **226 rec**, 7,448,640 B, **67.7 s** | **MOVED — now emits** |
+| `Deinonychus` | `f2a471165be303ab360530e30fb781a5`, 1138 rec, 10,379,904 B, 30.1 s | *no artifact* — **exit 5** | **MOVED — REGRESSION** |
+| `Rotting Warhorse` | *no artifact* — solid reserve carried it into coverage repair; stopped at 1200 s | *no artifact* — **exit 5**, 89.0 s | **MOVED — REGRESSION** |
+| `Warhorse` | *no artifact* — stopped at 1200 s | *no artifact* — stopped at 1200 s | unchanged disposition |
+| `Giant Bat` | *no artifact* — stopped at 1200 s | *no artifact* — stopped at 1200 s | unchanged disposition |
+
+**Nothing stayed byte-identical, and that is the change working.** The frozen-zone rule changes
+the graded quantity on every contact-declaring member, so every model with seated arms moves.
+Under rule 3 the load-bearing question is whether the TIP set moved: it did, and record counts
+rose on all five emitting models, which is arms becoming legal — the authorized direction.
+
+### `Skulker Zombie` — the clearest win
+
+The baseline enters coverage repair at `remaining=1424` and after 36 trials and one commit still
+stands at `remaining=1388`; the operator stopped it at 1200 s with no artifact. The tip's initial
+plan needs **no repair at all** — `trials=0 commits=0 remaining=0` — and the model emits in
+**67.7 s**. Arms the retired skip-length refused are legal, so coverage closes on the first pass.
+
+### `Deinonychus` and `Rotting Warhorse` — two models lost to the Routing/Brace seal seam
+
+`Deinonychus`, tip, verbatim:
+
+```
+model Deinonychus failed its sealed support run: sealed support run failed during Structure:
+TerminalEvidenceMismatch { terminal: 113 } [faces=117198 max_grid_bytes=67108864
+knn_max_work=240021504]
+```
+
+`Rotting Warhorse`, tip, **both attempts**: the drilled hollow shell (275,884 faces) fails
+`TerminalEvidenceMismatch { terminal: 177 }`, the substituted oriented solid (260,906 faces)
+fails `{ terminal: 156 }`. At the baseline the shell also failed at Structure, but the solid
+reserve carried the model through; at the tip the reserve fails too, so there is nothing left.
+
+**Neither is a clearance refusal.** `TerminalEvidenceMismatch` is Structure's cross-check between
+the CCO transcript sealed during Routing and the forest's terminal ledger read after Brace
+(`runner.rs`, `finalized_unrouted_terminals`). It fires on the arm where the transcript says
+`Routed` — which admits only `Consumed` — and the ledger reads `Quarantined`.
+
+**Mechanism, traced in source.** The brace fixed point refuses contact-declaring members on the
+FINAL clearance pass and calls `quarantine_subtrees(&negative.contact_refusals)` (`brace.rs`).
+`Forest::quarantine` retires the key, and `terminal_ledger` is *derived* from live topology
+rather than stored, so that terminal retroactively re-reads as `Quarantined`. Nothing between the
+seal and the Structure read re-seals or reconciles. The honest exemption does not create this
+seam — it changes WHICH arms the final pass refuses, and so which terminals fall into it.
+
+**This is the seam `designs/seal-semantics-2026-08-22.md` already root-causes and designs a fix
+for (its Option 2), and that fix is UNBUILT.** The Giant Bat reached the same error class from
+the same seam earlier (`{ terminal: 298 }` / `{ terminal: 187 }`, recorded above). What is new is
+that two models which previously produced or progressed no longer do.
+
+**Ownership: none.** `TerminalEvidenceMismatch` has no follow-up row and no task number anywhere
+in the tree. `#47` owns the Bat's `ClearanceViolation` on the coverage-repair path and `#39` owns
+the 0-commit walk; neither owns a failure AT Structure. The seam needs its own row.
+
+### `Warhorse` — the two-tier ruling's first win survives the honest mask
+
+No previous row exists for this model, so this one is new.
+
+| | baseline `56a8782` | tip `64edde4` |
+| --- | --- | --- |
+| sealed support runs attempted | **1** | **1** |
+| hollow shell clears Brace on the first attempt | **yes** | **yes** |
+| oriented-solid substitution | never invoked | never invoked |
+| support pass to `CoverageMeasurement` | 20,691 ms | **19,278 ms** |
+| coverage repair entered at | `remaining=6356` | `remaining=6271` |
+| state when the operator stopped it at 1200 s | `trials=51 commits=2 remaining=6235` | `trials=56 commits=0 remaining=6215` |
+
+The shell cleared Brace on its first attempt at both ends and the oriented-solid reserve was
+never reached, so the honest mask did not take back the two-tier ruling's first win. What neither
+end does is finish: both walk the coverage-repair loop and both were stopped by the operator, not
+by the engine. That walk is `#39`'s lane. The tip's support pass is 6.8 % faster and it enters
+repair with less remaining work, but it committed nothing in 56 trials where the baseline
+committed twice in 51. Recorded as measured; this lane does not explain it and does not tune it.
+
+### `Giant Bat` — still the uncapped walk, entered from a better position
+
+| | baseline `56a8782` | tip `64edde4` |
+| --- | --- | --- |
+| disposition | passes `Structure`, `Lowering`, `CoverageMeasurement` | **same** — no refusal |
+| coverage repair entered at | `remaining=6221` | **`remaining=6075`** |
+| state when the operator stopped it at 1200 s | `trials=57 commits=0 remaining=6164` | `trials=48 commits=0 remaining=6027` `[stage_refusal=1]` |
+| candidates consumed per trial | exactly 1 | exactly 1 |
+| commits | **0** | **0** |
+| MEASURED rate | 19.89 s per trial | 23.89 s per trial |
+| INFERRED time to exhaust the ranking | ≈ 34.4 h | ≈ 40.3 h |
+
+The `remaining=6221` entry count reproduces §10.1 exactly. **The honest exemption did not make
+the Bat refuse and did not make it emit.** It enters the same walk with 146 fewer units of
+uncovered work and consumes the ranking 20 % more slowly per trial, still committing nothing.
+Both runs were **stopped by the operator at 1200 s** — ruling R10 removed the failed-trial cap
+and nothing shorter bounds the walk, so a run that is allowed to finish is a day and a half of
+machine time. The demand must NOT be tuned to make the Bat refuse again.
+
+`[stage_refusal=1]` in the tip's histogram is one rolled-back repair trial whose stage refused.
+It is the only channel by which a final-pass clearance violation count reaches disk, and it is
+lost when the run is stopped before it seals — see the residue note below.
+
+### The honest residue is NOT MEASURABLE from this tree
+
+The parked seal-semantics decision waits on the count of final-pass refusals whose TRUE gap is
+under 0.300 mm. **That number cannot be read out of any build of this tree**, and this is
+recorded here because it is a gap in the evidence, not a result.
+
+`brace::exact_clearance_rows` computes a real per-member mm clearance.
+`exact_clearance_negatives` tests only its sign and **discards the value**. The negatives split
+into `pipeline_violations` (no model contact — becomes `BraceError::ClearanceViolation(N)`) and
+`contact_refusals` (declares a contact — quarantined, then hashed into a plan digest and
+dropped). Passes 1 and 2 of the fixed point drop their negatives entirely. The census feature
+records the batch's INSETS, which are now zeros, and never the resulting clearance.
+
+Two consequences worth stating plainly:
+
+1. **The residue is a property of the SEARCH, not of the artifact.** Convergence requires zero
+   negatives, and every negative row is either fatal or quarantined and removed, so a shipped
+   forest is ≥ 0 everywhere by construction. "How many arms were refused on the way" is the
+   question, and nothing counts it.
+2. **Every final-pass refusal at a demand of 0.300 mm has a true gap below 0.300 mm** by
+   arithmetic — `clearance = true_gap − 0.300`. So the residue COUNT is exactly the refusal
+   count, and only the magnitudes would need more than a counter.
+
+**Unexplained: nothing.** Every row above has its cause; the two regressions have a mechanism
+traced in source rather than an argument, and the one number this lane could not produce is
+recorded as unmeasurable with the reason.
