@@ -6,6 +6,8 @@
 //! ordering prevents an undersized provisional radius from certifying geometry
 //! that the actually emitted support would breach.
 
+use std::borrow::Cow;
+
 use geom_kernel::{
     indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest, MOLLER_PARAMETER_SLACK,
 };
@@ -299,10 +301,64 @@ impl<'a> AnchorGeometryAuthority<'a> {
 )]
 pub(crate) struct SurfaceAnchorPool<'a> {
     surface: &'a NativeSurface,
+    geometry: Cow<'a, GeometryFingerprint>,
+    digest: u64,
+    rows: Cow<'a, [SurfaceAnchorSample]>,
+    delicacy_by_face: Cow<'a, [f64]>,
+}
+
+/// The pool's own contents, kept alive independently of the pool.
+///
+/// # Why this exists (task #36 Stage C, design §2.4 item 1)
+///
+/// [`SurfaceAnchorPool::from_geometry`] reads only `geometry` and
+/// `delicacy_by_face`, and BOTH are fixed for a whole support run: the
+/// geometry is the retained mesh/topology/`NativeSurface` trio the run
+/// context is built around once per model, and the delicacy sidecar is a
+/// perception-config field. The pool was nevertheless rebuilt at two
+/// production sites — the Routing stage and the Rewire stage — on every
+/// attempt the coverage-closure controller makes.
+///
+/// This type is the run-invariant half of the pool, held on the context so
+/// the later builds can borrow it instead of walking the exterior face mask,
+/// re-pushing one row per exterior face and re-hashing the result. It owns
+/// its data outright and borrows nothing, which is what lets the context hold
+/// it beside the `NativeSurface` the pool points at without becoming
+/// self-referential.
+///
+/// **It decides nothing.** The rows a reused pool serves are the rows a fresh
+/// build would have produced from the same two inputs, and both production
+/// sites still run `validate_against` — a full content re-hash compared with
+/// the pool's own sealed digest — before any query reads a row.
+pub(crate) struct SurfaceAnchorPoolMemo {
     geometry: GeometryFingerprint,
     digest: u64,
     rows: Vec<SurfaceAnchorSample>,
     delicacy_by_face: Vec<f64>,
+}
+
+impl SurfaceAnchorPoolMemo {
+    /// The exact inputs test: does this memo hold the pool the caller is
+    /// about to build?
+    ///
+    /// Exact comparison rather than a digest of the inputs. A digest would be
+    /// the weaker claim, and neither walk is the cost this hoist removes: the
+    /// fingerprint is four small fields and the sidecar is one `f64` per
+    /// face, against a row per exterior face plus a five-word-per-row hash.
+    fn serves(&self, geometry: &AnchorGeometryAuthority<'_>, delicacy_by_face: &[f64]) -> bool {
+        self.geometry == geometry.fingerprint && self.delicacy_by_face == delicacy_by_face
+    }
+
+    /// FU-32 J1's mutation-hook precedent (see
+    /// [`GeometryFingerprint::corrupt_mesh_sha256_for_test`]): move a stored
+    /// row away from the contents its sealed digest attests, so the
+    /// validation that reads the memo can be proved load-bearing.
+    #[cfg(test)]
+    pub(crate) fn corrupt_first_row_for_test(&mut self) {
+        if let Some(row) = self.rows.first_mut() {
+            row.point_mm[0] += 1.0;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,10 +444,57 @@ impl<'a> SurfaceAnchorPool<'a> {
         let digest = surface_anchor_pool_digest(&geometry.fingerprint, delicacy_by_face, &rows);
         Ok(Self {
             surface: geometry.surface(),
-            geometry: owned_geometry,
+            geometry: Cow::Owned(owned_geometry),
             digest,
-            rows,
-            delicacy_by_face: owned_delicacy,
+            rows: Cow::Owned(rows),
+            delicacy_by_face: Cow::Owned(owned_delicacy),
+        })
+    }
+
+    /// **Task #36 Stage C — the same pool, built once per run instead of once
+    /// per stage per attempt.**
+    ///
+    /// `slot` holds the run-invariant contents (§2.4 item 1). On the first
+    /// call for a given `geometry`/`delicacy_by_face` pair it is filled by
+    /// [`Self::from_geometry`] — same function, same arguments, same error on
+    /// the same input, so a first-build refusal is the refusal this stage has
+    /// always raised. Every later call borrows what is already there.
+    ///
+    /// The slot is checked, not trusted: a memo whose fingerprint or sidecar
+    /// is not the pair being asked for is REPLACED by a fresh build rather
+    /// than served. The content itself is then checked again downstream —
+    /// both production callers hand the pool to a `validate_against` that
+    /// re-hashes every row and compares against the pool's own sealed digest.
+    pub(crate) fn memoized(
+        slot: &'a mut Option<SurfaceAnchorPoolMemo>,
+        geometry: &'a AnchorGeometryAuthority<'a>,
+        delicacy_by_face: &[f64],
+    ) -> Result<Self, AnchorSearchError> {
+        let served = slot
+            .as_ref()
+            .is_some_and(|memo| memo.serves(geometry, delicacy_by_face));
+        if !served {
+            let built = Self::from_geometry(geometry, delicacy_by_face)?;
+            *slot = Some(SurfaceAnchorPoolMemo {
+                geometry: built.geometry.into_owned(),
+                digest: built.digest,
+                rows: built.rows.into_owned(),
+                delicacy_by_face: built.delicacy_by_face.into_owned(),
+            });
+        }
+        let memo = match slot.as_ref() {
+            Some(memo) => memo,
+            // Unreachable: the branch above either filled the slot or
+            // returned. Written as a refusal rather than an `expect` so no
+            // production path can panic on a future edit.
+            None => return Err(AnchorSearchError::StaleSurfaceAnchorPool),
+        };
+        Ok(Self {
+            surface: geometry.surface(),
+            geometry: Cow::Borrowed(&memo.geometry),
+            digest: memo.digest,
+            rows: Cow::Borrowed(memo.rows.as_slice()),
+            delicacy_by_face: Cow::Borrowed(memo.delicacy_by_face.as_slice()),
         })
     }
 
@@ -440,7 +543,7 @@ impl<'a> SurfaceAnchorPool<'a> {
         geometry: &AnchorGeometryAuthority<'_>,
         hoisted_content_digest: u64,
     ) -> Result<(), AnchorSearchError> {
-        if !std::ptr::eq(self.surface, geometry.surface()) || self.geometry != geometry.fingerprint
+        if !std::ptr::eq(self.surface, geometry.surface()) || *self.geometry != geometry.fingerprint
         {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
@@ -2290,6 +2393,77 @@ mod tests {
         .unwrap()
         .into_seats()
         .remove(0)
+    }
+
+    /// Task #36 Stage C. Three claims about the run-invariant memo, in one
+    /// place because they are one mechanism: it serves the pool a fresh build
+    /// would have produced, it is REPLACED rather than served when the inputs
+    /// it holds are not the inputs asked for, and what it stores is
+    /// load-bearing — corrupt one row and the validation both production
+    /// sites run refuses.
+    #[test]
+    fn memoized_surface_anchor_pool_serves_the_same_rows_and_is_checked_not_trusted() {
+        let (mesh, topology, surface) = box_parts(10.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let delicacy = (0..surface.nfaces())
+            .map(|index| index as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let fresh = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let fresh_rows = fresh.rows().to_vec();
+        let fresh_digest = fresh.digest();
+
+        // (1) First call builds, second call serves — same rows, same sealed
+        // digest, and the pool still validates against the same geometry.
+        let mut slot = None;
+        let built = SurfaceAnchorPool::memoized(&mut slot, &geometry, &delicacy).unwrap();
+        assert_eq!(built.digest(), fresh_digest);
+        assert_eq!(built.rows(), fresh_rows.as_slice());
+        built.validate_against(&geometry).unwrap();
+        drop(built);
+        assert!(slot.is_some(), "the first call must fill the slot");
+        let served = SurfaceAnchorPool::memoized(&mut slot, &geometry, &delicacy).unwrap();
+        assert_eq!(served.digest(), fresh_digest);
+        assert_eq!(served.rows(), fresh_rows.as_slice());
+        served.validate_against(&geometry).unwrap();
+        drop(served);
+
+        // (2) A memo built for a different sidecar is a MISS: the second
+        // call's own delicacy reaches the rows, and the slot is replaced.
+        let mut changed_delicacy = delicacy.clone();
+        changed_delicacy[0] = 99.0;
+        let rebuilt = SurfaceAnchorPool::memoized(&mut slot, &geometry, &changed_delicacy).unwrap();
+        let expected_changed = SurfaceAnchorPool::from_geometry(&geometry, &changed_delicacy)
+            .unwrap()
+            .digest();
+        assert_eq!(
+            rebuilt.digest(),
+            expected_changed,
+            "a stale sidecar must be rebuilt, never served"
+        );
+        assert_ne!(rebuilt.digest(), fresh_digest);
+        drop(rebuilt);
+
+        // (3) Sabotage. Move one stored row away from the digest that
+        // attests it; the pool served from that memo carries the moved row,
+        // and `validate_against` — which BOTH production sites run before any
+        // query reads a row — refuses.
+        let mut sabotaged = None;
+        let honest = SurfaceAnchorPool::memoized(&mut sabotaged, &geometry, &delicacy)
+            .unwrap()
+            .rows()
+            .to_vec();
+        sabotaged.as_mut().unwrap().corrupt_first_row_for_test();
+        let corrupted = SurfaceAnchorPool::memoized(&mut sabotaged, &geometry, &delicacy).unwrap();
+        assert_ne!(
+            corrupted.rows(),
+            honest.as_slice(),
+            "the sabotage hook must actually move a served row"
+        );
+        assert_eq!(
+            corrupted.validate_against(&geometry),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool),
+            "a memo whose contents moved must refuse, not be served to a query"
+        );
     }
 
     #[test]

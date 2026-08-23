@@ -63,7 +63,10 @@ fn record_measurement_call(update: impl FnOnce(&mut MeasurementCallCounts)) {
 }
 
 use crate::{
-    anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
+    anchor::{
+        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool,
+        SurfaceAnchorPoolMemo,
+    },
     assess_coverage_with_mode,
     brace::{
         brace_fixed_point_current_parity, BraceAdditionKind, BraceError, BraceFixedPointPlan,
@@ -3585,9 +3588,44 @@ pub(crate) struct SupportRunContext<'a> {
     brace_penetration_limits: PenetrationBatchLimits,
     raft_limits: RaftLimits,
     digests: PreparedSupportDigests,
+    /// **Task #36 Stage C (design §2.4 item 1) — the run-invariant anchor pool.**
+    ///
+    /// `SurfaceAnchorPool::from_geometry` reads the retained geometry trio
+    /// above and the perception config's delicacy sidecar, and neither moves
+    /// for the whole run. It was nevertheless rebuilt twice per attempt —
+    /// once in the Routing stage, once in Rewire — and the coverage-closure
+    /// controller makes many attempts against this one context.
+    ///
+    /// The slot starts empty and is filled by whichever stage asks first, so
+    /// a first-build refusal is still raised by the stage that has always
+    /// raised it. It holds owned rows and borrows nothing, which is why a
+    /// context that owns the `NativeSurface` those rows describe can hold it
+    /// without becoming self-referential.
+    anchor_pool: Option<SurfaceAnchorPoolMemo>,
 }
 
 impl<'a> SupportRunContext<'a> {
+    /// Lend the anchor-pool slot out for one stage.
+    ///
+    /// A stage holds `&SupportRunContext` for its whole body — `geometry`,
+    /// `pool` and `authority` all borrow it — so it cannot also hold
+    /// `&mut self.anchor_pool`. Moving the slot OUT before the shared borrow
+    /// begins is what makes the two coexist, with no interior mutability
+    /// anywhere in the retained authority (the property
+    /// `validate_against_hoisted` and the FU-32 J1 digest threading both rest
+    /// on). The caller returns it with [`Self::restore_anchor_pool`] on every
+    /// exit, refusal included.
+    fn take_anchor_pool(&mut self) -> Option<SurfaceAnchorPoolMemo> {
+        self.anchor_pool.take()
+    }
+
+    /// The other half of [`Self::take_anchor_pool`]. Losing the memo would
+    /// cost a rebuild and nothing else, so this is a performance obligation
+    /// rather than a correctness one — but every exit honours it.
+    fn restore_anchor_pool(&mut self, memo: Option<SurfaceAnchorPoolMemo>) {
+        self.anchor_pool = memo;
+    }
+
     pub(crate) const fn mesh(&self) -> &Mesh {
         &self.mesh
     }
@@ -3787,11 +3825,16 @@ impl<'a> PreparedSupportRun<'a> {
         limits: RouteCcoWorkLimits,
     ) -> Result<RoutedSupportRun<'a>, (SupportRunContext<'a>, SupportRoutingError)> {
         let PreparedSupportRun {
-            context,
+            mut context,
             plan,
             initial,
         } = self;
-        match route_initial_cco_state(&context, plan, initial, limits) {
+        // Stage C: lend the run-invariant anchor pool to the stage, and take
+        // it back on both exits. See `SupportRunContext::take_anchor_pool`.
+        let mut anchor_pool = context.take_anchor_pool();
+        let routed = route_initial_cco_state(&context, &mut anchor_pool, plan, initial, limits);
+        context.restore_anchor_pool(anchor_pool);
+        match routed {
             Ok(state) => Ok(RoutedSupportRun { context, state }),
             Err(error) => Err((context, error)),
         }
@@ -3816,6 +3859,7 @@ impl<'a> PreparedSupportRun<'a> {
 /// half-grown forest is never handed back to anyone.
 fn route_initial_cco_state(
     context: &SupportRunContext<'_>,
+    anchor_pool: &mut Option<SurfaceAnchorPoolMemo>,
     plan: SpecializedContactPlan,
     mut initial: InitialContactBuild,
     limits: RouteCcoWorkLimits,
@@ -3841,7 +3885,12 @@ fn route_initial_cco_state(
             .ok_or(SupportRoutingError::MissingAnchorDelicacy)?;
         let anchor_config = AnchorSearchConfig::current()?;
         CcoController::validate_initial_route_config()?;
-        let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
+        // Task #36 Stage C: built here on the first attempt, borrowed on
+        // every later one. The rows are a function of `geometry` and
+        // `delicacy` alone, both fixed for the run, and
+        // `VerifiedRoutingAuthority::compute` below still re-hashes every row
+        // against this pool's sealed digest before the first terminal.
+        let pool = SurfaceAnchorPool::memoized(anchor_pool, &geometry, delicacy)?;
 
         // FU-32 phase J1.  `plan`, `loads`, `pool` and `geometry` are immutable
         // for the whole cadence below, in types with no interior mutability, so
@@ -4536,8 +4585,12 @@ impl<'a> RoutedSupportRun<'a> {
     pub(crate) fn rewire(
         self,
     ) -> Result<RewiredSupportRun<'a>, (SupportRunContext<'a>, SupportRewireError)> {
-        let RoutedSupportRun { context, state } = self;
-        match rewire_state(&context, state) {
+        let RoutedSupportRun { mut context, state } = self;
+        // Stage C, the second of the two sites: same lend-and-return.
+        let mut anchor_pool = context.take_anchor_pool();
+        let rewired = rewire_state(&context, &mut anchor_pool, state);
+        context.restore_anchor_pool(anchor_pool);
+        match rewired {
             Ok(state) => Ok(RewiredSupportRun { context, state }),
             Err(error) => Err((context, error)),
         }
@@ -4549,6 +4602,7 @@ impl<'a> RoutedSupportRun<'a> {
 /// hand-written unwind per `?`.
 fn rewire_state(
     context: &SupportRunContext<'_>,
+    anchor_pool: &mut Option<SurfaceAnchorPoolMemo>,
     mut state: RoutedPlanState,
 ) -> Result<RewiredPlanState, SupportRewireError> {
     {
@@ -4565,7 +4619,12 @@ fn rewire_state(
         // The pool is the sole gather pass for rewire. `optimize` receives
         // its immutable contiguous rows and performs its own batched native
         // candidate/foot checks; there is no per-member runner query.
-        let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
+        //
+        // Task #36 Stage C: the gather itself is the Routing stage's gather,
+        // over the same fixed geometry and sidecar. `validate_against` below
+        // is untouched and still re-hashes every row against the pool's own
+        // sealed digest, so a memo whose contents moved refuses here.
+        let pool = SurfaceAnchorPool::memoized(anchor_pool, &geometry, delicacy)?;
         pool.validate_against(&geometry)?;
         let report = optimize_rewire(
             state.initial.forest_mut(),
@@ -6444,6 +6503,10 @@ pub(crate) fn prepare_support_context<'a>(
             brace_penetration_limits: authority.brace_penetration_limits,
             raft_limits: authority.raft_limits,
             digests,
+            // Stage C: empty until the Routing stage of the first attempt
+            // asks for it, so the first build's refusals stay where they
+            // have always been raised.
+            anchor_pool: None,
         },
         plan,
     ))
