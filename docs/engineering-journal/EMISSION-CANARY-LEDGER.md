@@ -485,3 +485,42 @@ renders a transit row as `axis-transit(distance_clearance=+…)` rather than as 
 sabotage-shaped unit test asserts the sentinel is never printed as a magnitude.
 
 **Unexplained: nothing. Superseded: the `Deinonychus` row immediately above.**
+
+### The canary, re-measured — and this lane moved it by ZERO bytes
+
+| recorded | commit | branch | md5 of `Round 25.chitubox` | support records | bytes |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-23 | `466c4c4` | `feature/a4-controller` (seal-semantics Stage A tip) | `ee76f98a0e90ae59d0ef2762097ea7bb` | 41 | 364,416 |
+| 2026-08-23 | `5347901` | `feature/a4-controller` (this lane's BASE) | `ee76f98a0e90ae59d0ef2762097ea7bb` | 41 | 364,416 |
+
+**The new value of record is `ee76f98a0e90ae59d0ef2762097ea7bb`, 41 support records, 364,416
+bytes**, superseding `fe9c716deb0805a3f0074b3e3dfe4bad` / 36 / 354,984 from `eb64c83`.
+
+**The movement is attributed, and it is NOT this lane's.** Both rows above were produced by
+building `plinth` at the named commit and running the same `Round 25.stl` through the same
+`saturn4-ultra` profile. The two artifacts are **byte-identical** — `cmp` returns clean, not
+merely the same md5. So the whole `36 → 41` record / `354,984 → 364,416` byte movement
+happened between `eb64c83` and `5347901`, in commits this lane did not write, and the
+seal-semantics work adds **zero bytes** on top of its own base.
+
+That is the strongest form of the design's blast-radius claim available on this model: not
+"no digest is expected to move" asserted, but the emitted artifact measured at both ends of
+the lane and found identical. Round 25 never trips Stage A — its run emits no
+`brace: sealed terminals` and no `brace: final-pass refusals` line at all — so bit-identity is
+what Stage A's carve-out predicts for it, and it is now measured rather than predicted.
+
+**What this row does NOT establish.** One model is not the corpus. Bit-identity across all 45
+models, and the S-2 class count Stage B waits on, are **not measured** — see the open item
+below.
+
+### Still open after this lane — the Stage A corpus run
+
+Craig's authorization item 2 is "prove bit-identity on the corpus, and count the class across
+all 45 models **before building anything else**", and the design repeats that the blast-radius
+claim "must be **proved** by a corpus run, not asserted". **That run has not happened.** What
+exists now is the instrument it needs: every disturbed sealed terminal is named in one refusal,
+split into own-chosen arms and cascade carriers, and every final-pass refusal is classified as
+a distance shortfall or an axis-transit sentinel with its millimetres. The two numbers the
+corpus run must bring back are how many models hit an accounting-disturbing brace refusal, and
+how many terminals are disturbed in one sweep split by own-arm versus cascade — the second is
+what says whether the reachable T6 is a corner or a common outcome.
