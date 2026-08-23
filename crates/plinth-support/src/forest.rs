@@ -1044,6 +1044,37 @@ impl Forest {
         &mut self,
         keys: &[MemberKey],
     ) -> Result<Vec<MemberKey>, ForestError> {
+        let order = self.plan_quarantine_subtrees(keys)?;
+        for key in &order {
+            self.quarantine(*key)?;
+        }
+        Ok(order)
+    }
+
+    /// The **planner half** of [`Forest::quarantine_subtrees`]: exactly what
+    /// that sweep would condemn, in exactly the order it would condemn it, with
+    /// nothing mutated.
+    ///
+    /// **Why this is a split rather than a second walk.** A caller that needs
+    /// to know the condemnation set BEFORE deciding whether the sweep may run
+    /// at all — the seal-semantics classifier in `brace` (design
+    /// `seal-semantics-2026-08-22.md` §4 Stage A(b)) — must read the same
+    /// answer the mutation would produce. Exposing
+    /// [`Forest::collect_subtree_leaf_first`] alone would reproduce the walk
+    /// but neither `require_active` pass nor the union-dedup contract, and the
+    /// query and the mutation would then drift. Here they cannot: the mutation
+    /// is this function plus a `quarantine` per planned key, so the query is a
+    /// literal prefix of the mutation rather than a copy of it.
+    ///
+    /// **It keeps the all-or-nothing refusal.** A key naming an inactive member
+    /// is a [`ForestError`] here, at the same point and for the same reason it
+    /// is one in the sweep: asking to condemn something already condemned is an
+    /// engine defect, not a physical verdict, and the classifier must not
+    /// swallow it.
+    pub fn plan_quarantine_subtrees(
+        &self,
+        keys: &[MemberKey],
+    ) -> Result<Vec<MemberKey>, ForestError> {
         let mut order = Vec::new();
         let mut seen = BTreeSet::new();
         for key in keys {
@@ -1058,9 +1089,6 @@ impl Forest {
         // about.
         for key in &order {
             self.require_active(*key)?;
-        }
-        for key in &order {
-            self.quarantine(*key)?;
         }
         Ok(order)
     }
@@ -1631,6 +1659,74 @@ mod tests {
             model_contact_end: None,
             carried_mm2: finite(1.0),
         })
+    }
+
+    /// **The exact-prefix proof for the seal-semantics classifier.**
+    ///
+    /// `plan_quarantine_subtrees` exists so the brace stage can read what a
+    /// sweep WOULD condemn before deciding whether the sweep may run. That is
+    /// only sound while the plan is the same answer the mutation produces, in
+    /// the same order — including the union dedup across overlapping keys.
+    /// Re-implement the walk one layer up and the two drift; this test stands
+    /// on the shortcut.
+    #[test]
+    fn the_planner_returns_precisely_the_order_the_sweep_removes() {
+        let build = || {
+            let mut forest = Forest::new();
+            let root = forest.add_member(member(MemberKind::Strut));
+            let mid = forest.add_member(member(MemberKind::Shoot));
+            let leaf_a = forest.add_member(member(MemberKind::Stub));
+            let leaf_b = forest.add_member(member(MemberKind::Stub));
+            forest.set_parent(mid, Some(root)).unwrap();
+            forest.set_parent(leaf_a, Some(mid)).unwrap();
+            forest.set_parent(leaf_b, Some(root)).unwrap();
+            (forest, root, mid)
+        };
+
+        // Overlapping keys on purpose: `mid` is already inside `root`'s
+        // subtree, so a batch that names both must sweep each member once.
+        let (planning, root, mid) = build();
+        let planned = planning.plan_quarantine_subtrees(&[root, mid]).unwrap();
+        let planning_digest = planning.digest();
+
+        let (mut sweeping, root, mid) = build();
+        let removed = sweeping.quarantine_subtrees(&[root, mid]).unwrap();
+
+        assert_eq!(
+            planned, removed,
+            "the planner must return the sweep's own order, member for member"
+        );
+        assert_eq!(
+            planned.len(),
+            4,
+            "the union dedup must condemn each member exactly once"
+        );
+        assert_eq!(
+            planning.digest(),
+            planning_digest,
+            "planning must not mutate the forest"
+        );
+        for key in &removed {
+            assert!(
+                sweeping.quarantine_record(*key).is_some(),
+                "every planned member must actually carry a quarantine record"
+            );
+        }
+    }
+
+    /// A directly named inactive key stays a `ForestError` in the PLANNER, at
+    /// the same point the sweep raises it. Design §4 Stage A(a): asking to
+    /// condemn something already condemned is an engine defect, not a physical
+    /// verdict, and the classifier must not be able to swallow it.
+    #[test]
+    fn planning_a_directly_named_inactive_key_still_refuses() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        forest.quarantine(key).unwrap();
+        assert!(matches!(
+            forest.plan_quarantine_subtrees(&[key]),
+            Err(ForestError::InactiveKey(_))
+        ));
     }
 
     /// The freeze has to survive the resize, or it is not a freeze.
