@@ -593,3 +593,114 @@ lever is real and it is 0.1 % of a run. Whoever sizes Stage B's extra confirmati
 must price them against an unchanged pass cost, not against a pass Stage C made cheap.
 
 **Unexplained: nothing. Superseded: nothing.**
+
+---
+
+## 2026-08-23 — Stage B (the legalization retry): zero bytes moved, and two blocked models EMIT
+
+**Design authority:** `docs/engineering-journal/designs/seal-semantics-2026-08-22.md` §1.3 and
+§4 Stage B, authorized by Craig 2026-08-23. Lane tip `ab0c3d7`; the model runs below were
+produced by a `target/gate/plinth` that `cmp` proves byte-identical to the binary rebuilt at
+that commit from a clean tree.
+
+### The canary does not move, and this time that is a claim about a NEW mechanism
+
+| recorded | commit | branch | md5 of `Round 25.chitubox` | support records | bytes |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-23 | `ab0c3d7` | `feature/a4-controller` (Stage B tip) | `ee76f98a0e90ae59d0ef2762097ea7bb` | 41 | 364,416 |
+
+**The value of record does not move.** `cmp` returns clean against the Stage C artifact —
+byte-identical, not merely the same md5.
+
+Round 25 runs **one legalization pass with an empty no-good set and no confirmation round**,
+which is the blast-radius claim §4 Stage B makes for every model with no exact-clearance
+refusals. Its run log now says so in as many words:
+
+```
+legalize: pass 1 entering no_goods=0 round=none
+legalize: pass 1 LOWERED in … ms — passes=1 no_goods=0 per_terminal=[none]
+          confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+```
+
+### `zombie-3-a` — a model that enters the repair loop, and still moves zero bytes
+
+| artifact | Stage C `6a2c2e3` | Stage B `ab0c3d7` | verdict |
+| --- | --- | --- | --- |
+| `zombie-3-a.chitubox` | 3,750,864 bytes, 215 records | 3,750,864 bytes, 215 records | **byte-identical** (`cmp` clean) |
+| `zombie-3-a.coverage.repair.json` | — | — | exactly four wall-clock fields differ |
+
+The four are `wall_time_total_ms` and the min/median/max per trial. They record how long the
+run took, so they cannot be identical between two runs and their movement is evidence of
+nothing. The repair trajectory is identical on both sides: `trials=35 commits=3
+remaining=485 diversity_demotions=2185 of_which_tried=34 no_improvement=32`. `zombie-3-a`
+also runs **one** legalization pass with an empty set.
+
+### `Deinonychus` — the seam is CLOSED, and the model emits for the first time on this lane
+
+Stage A left it refusing honestly at Brace. Stage B legalizes it. MEASURED, 67 s wall under
+a 1500 s harness ceiling that did not fire:
+
+| pass | ms | what happened |
+| --- | --- | --- |
+| 1 | 8 424 | terminal 113's own arm `ModelAnchor/gen98` condemned → no-good |
+| 2 | 8 074 | terminal 113's own arm `ModelAnchor/gen123` condemned → no-good |
+| 3 | 3 034 | **steering spent** — terminal 113 has exactly 2 arms → round OPENS |
+| 4 | 8 090 | round rank 0 of 2 measured illegal |
+| 5 | 8 282 | round rank 1 of 2 measured illegal |
+| 6 | 10 554 | round rank 2 of 2 → terminal 113 retires on the completed round; **LOWERED** |
+
+`passes=6 no_goods=2 per_terminal=[t113=2] confirmation_rounds=1 voided_rounds=0
+round_arms_measured=2`. Result **EMITTED**, 1 149 support records, 10 390 488 bytes.
+
+**The residue, arm by arm, measured inside a sealed record for the first time.** Both of
+terminal 113's arms are `ModelAnchor`, and both were refused by the **axis-transit** screen,
+not by distance:
+
+```
+rank0  gap=-0.050000mm (sentinel)  distance_clearance=+0.280044mm  r=0.372136/0.372136mm
+rank1  gap=-0.050000mm (sentinel)  distance_clearance=+0.280044mm  r=0.372136/0.372136mm
+```
+
+`+0.280 mm` of true distance clearance on both. **These arms are not too close to the model;
+their axes pass through it.** That is task #52's class, and the `-0.050000` is the
+`min_illegal_len_mm` sentinel the 2026-08-23 correction above identified — it is not a gap,
+and it is labelled as one here so nobody reads it as the sub-0.3 mm residue a second time.
+
+### `Rotting Warhorse` — the seam is CLOSED at attempt 0, same shape, same round length
+
+MEASURED under a 6 000 s harness ceiling. Terminal 177, exactly as the S-1 pre-measurement
+predicted:
+
+| pass | ms | what happened |
+| --- | --- | --- |
+| 1 | ~22 000 | terminal 177's own arm `ModelAnchor/gen113` condemned → no-good |
+| 2 | 22 318 | terminal 177's own arm condemned → no-good |
+| 3 | 5 505 | **steering spent** — 2 arms → round OPENS |
+| 4 | 22 416 | round rank 0 of 2 |
+| 5 | 22 283 | round rank 1 of 2 |
+| 6 | 29 110 | round rank 2 of 2 → terminal 177 retires; **LOWERED** |
+
+`passes=6 no_goods=2 per_terminal=[t177=2] confirmation_rounds=1 voided_rounds=0
+round_arms_measured=2`. Attempt 0 cost **~124 s** of legalization. What happens after
+attempt 0 is the coverage-repair loop's own pre-existing grind and is recorded with the run.
+
+### The cost, and the memo's named risk re-priced against measurement
+
+§4 Stage B named the risk as "up to ~100 passes at 17.8 s per retirement, where 100 is the
+largest arm count MEASURED at one terminal". **Both models that needed the mechanism have
+TWO arms at the failing terminal, not 100.** Six passes each. The 100-arm terminal was
+measured on `zombie-3-a`, which needs no passes at all.
+
+That is a measurement of two models and it is not a corpus claim. The mechanism remains
+UNCAPPED in engine semantics, per authorization item 4, and the only ceiling anywhere is the
+test/eval harness's wall clock.
+
+### The sealed-fingerprint budget: ONE move, and Stage B does not spend a second
+
+Authorization item 5 bought one corpus-wide transcript re-freeze, paid at Stage A
+(`3311374`). Stage B's `NoWinnerEvidence::ConfirmationRoundExhausted` is a **new
+discriminant**: the three existing variants fold exactly as they did, so every model that
+retires nothing through a round keeps its transcript fingerprint byte for byte. The
+toed-slab sealed-digest goldens and `coverage_gate_toed_slab.json` are green and unmoved.
+
+**No pin moved in this lane. Unexplained: nothing. Superseded: nothing.**
