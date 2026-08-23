@@ -139,13 +139,37 @@ are a different question from "how far is this arm from the surface":
 
    **CORRECTED 2026-08-22 (challenge finding F2).** This paragraph used to say
    "this change must not move it, and the 52 stub-re-entry condemnations on
-   `zombie-3-a` stay untouched by design". That was true of the masks and FALSE
-   as written of the screen, and nothing measured it. The screen ADMITS on the
-   clearance the distance path produces — `[0, 0.1)`, or `≥ 0.1` with the
-   midpoint inside — and step 5 is exactly a change to that number, on every
-   contact-declaring row. So the admission input moves by construction; the
-   count of re-entry condemnations is an OUTCOME the judge's re-baseline must
-   read against the 52 of record, not a claim this note may make in advance.
+   `zombie-3-a` stay untouched by design". Two things were wrong with that
+   sentence and both are corrected here.
+
+   *The claim.* "Must not move it" was true of the masks and FALSE as written of
+   the screen, and nothing measured it. The screen ADMITS on the clearance the
+   distance path produces — `[0, 0.1)`, or `≥ 0.1` with the midpoint inside —
+   and step 5 is exactly a change to that number, on every contact-declaring
+   row. So the admission input moves by construction, and any movement in the
+   outcome is an OUTCOME the judge's re-baseline reads, not a claim this note may
+   make in advance.
+
+   *The label.* **"52 stub-re-entry condemnations" is not what the 52 counts,
+   and the correct label is: 52 of `zombie-3-a`'s 92 repair trials had their own
+   appended contact QUARANTINED — for any reason.** MEASURED in the producer:
+   `runner.rs` sets `own_contact_quarantined` from
+   `matches!(disposition, TrialContactDisposition::Quarantined { .. })`, which
+   tests only the variant. The disposition does carry the one piece of
+   re-entry-specific evidence — `remaining_inside_axis_mm`, `Some(depth)` when
+   the initial build's condemned-stub ledger holds a row for that terminal and
+   `None` when it was quarantined for something else — but the `matches!` pattern
+   discards it before the step is written, and nothing else on
+   `RepairStepRecord` carries it. So the persisted
+   `*.coverage.repair.json` sidecars hold no per-trial re-entry evidence and a
+   TRUE stub-re-entry count is **not recoverable at any commit**, before or
+   after this change, without re-running with new instrumentation. The
+   `runner.rs` unit pin
+   `a_quarantine_with_no_measured_depth_does_not_become_task_52s_class` makes the
+   same distinction for the defect-class read: a quarantine with no measured
+   depth is not #52. A re-baselined 52 is therefore comparable as a
+   quarantine count and as nothing narrower.
+
    What is now MEASURED is the property that matters: the screen still catches a
    buried arm.
    `brace::a_seated_arm_that_keeps_running_inside_the_model_is_still_condemned_by_the_transit_screen`
@@ -677,6 +701,15 @@ The census `record_segment_batch` calls now record ZEROS, because those are the
 insets the batch actually receives. Recording the mask would describe a call the
 site no longer makes.
 
+**CORRECTED 2026-08-23 (judge's evidence-integrity finding).** That sentence was
+true of three of the four sites and FALSE of the fourth: `brace_candidate_clearance`
+still handed the census `inset0`/`inset1`, the retired PR-2 mask, while handing
+the kernel zeros. No verdict anywhere read it — the census is an instrument, and
+the corpus tables it feeds were all produced before this change — but it is
+exactly the kind of evidence this note forbids. The site now records the SAME
+`zero` vector the distance call receives, so the two cannot drift, and the two
+`Vec`s that existed only to feed the census are gone.
+
 `retired_formula_guard`'s three `CONVERGED` rows all STAY, and §10.4's
 instruction to "delete them deliberately and say why" is answered by the
 opposite finding: all three files still call `placed_mask_inset_mm` in
@@ -872,9 +905,21 @@ in place, and the property that matters is now MEASURED by
 which drives a seated arm 2.7 mm into the slab past its designed embed, asserts
 the distance path reads it wide open (so the midpoint-inside branch is what
 admits it — the branch finding D's pin cannot reach) and pins the verdict at the
-screen's own `−min_illegal_len_mm`. The re-entry condemnation COUNT on
-`zombie-3-a` remains an outcome for the judge's re-baseline to read against the
-52 of record, not a claim this note makes in advance.
+screen's own `−min_illegal_len_mm`. Any movement in `zombie-3-a`'s counters
+remains an outcome for the judge's re-baseline to read, not a claim this note
+makes in advance.
+
+**The LABEL on the 52 is corrected too, and this is the second half of F2.**
+The 52 is not a re-entry count. It is the number of `zombie-3-a`'s 92 repair
+trials whose own appended contact was quarantined, for ANY reason:
+`runner.rs` writes `own_contact_quarantined` from
+`matches!(disposition, TrialContactDisposition::Quarantined { .. })`, a
+variant test. The re-entry-specific evidence the disposition carries —
+`remaining_inside_axis_mm`, which is `None` precisely when the quarantine was
+for something other than stub re-entry — is discarded by that pattern and is
+written nowhere on the step, so no persisted `*.coverage.repair.json` sidecar
+at any commit lets a true re-entry count be recovered. Comparing 52 against a
+re-baselined 52 compares quarantine counts and nothing narrower.
 
 #### F3 — RATIFICATION, stated plainly
 
