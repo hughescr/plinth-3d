@@ -2401,6 +2401,36 @@ impl std::fmt::Display for SealedCondemnationClass {
 /// route with that same `connector_owner`. A bifurcation's UPPER half inherits
 /// the HOST's owner instead, which is precisely the cascade-victim case — a
 /// stub re-parented onto somebody else's arm.
+/// Does this member's subtree carry `terminal` and no other terminal?
+///
+/// The physical reading of *"somebody else's arm"*: an arm is somebody else's
+/// when somebody else hangs off it. One walk of the member's own subtree,
+/// checking each key against the stub→terminal map the caller already built —
+/// no second authority, and no per-member native call.
+///
+/// Called only for a member the owner test already rejected, and only on a pass
+/// that is refusing anyway, so it is off every successful path.
+fn carries_only(
+    forest: &Forest,
+    terminals_by_member: &BTreeMap<MemberKey, u32>,
+    member: MemberKey,
+    terminal: u32,
+) -> bool {
+    let mut frontier = vec![member];
+    let mut carries_this = false;
+    while let Some(key) = frontier.pop() {
+        if let Some(id) = terminals_by_member.get(&key) {
+            if *id == terminal {
+                carries_this = true;
+            } else {
+                return false;
+            }
+        }
+        frontier.extend(forest.children_of(key));
+    }
+    carries_this
+}
+
 fn classify_sealed_condemnation(
     forest: &Forest,
     sealed: &[SealedTerminalDisposition],
@@ -2449,7 +2479,44 @@ fn classify_sealed_condemnation(
                 let owned = forest
                     .member(key)
                     .is_some_and(|member| member.owner() == &Owner::Contact(terminal_id));
-                if owned {
+                // **The owner field is not sufficient, and one measured run
+                // proved it.** `cco`'s rewire mints a connector owning
+                // `Owner::Contact(root.slot())` — a MEMBER slot in the
+                // terminal-id namespace — so a member rewire minted for THIS
+                // terminal's own route wears an owner that is not
+                // `Contact(terminal)`. MEASURED on the Deinonychus: after one
+                // steering pass, terminal 113's route ended at `slot501g0`
+                // owned by `Contact(401)`, where 401 is a member slot and no
+                // sealed terminal. The owner test called it somebody else's arm
+                // and the pass refused with nothing to steer.
+                //
+                // So the second test is §1.3's own definition, applied to the
+                // thing it is actually about: *"its stub re-parented onto
+                // SOMEBODY ELSE'S arm"*. An arm is somebody else's when it
+                // also carries somebody else. A member whose subtree holds this
+                // terminal's stub and no other terminal's cannot be another
+                // terminal's arm, whatever its owner field says — it exists to
+                // carry this terminal.
+                //
+                // The victim rule is untouched where it matters. A shared spine
+                // carrying `{this, other}` is still a carrier and still steers
+                // nothing, which is the case §1.3 spends three paragraphs
+                // forbidding the punishment of — and so is every member whose
+                // owner honestly names somebody: another sealed terminal, a
+                // generated brace rung, a model anchor.
+                // **BOTH conditions, and the second one alone is not enough.**
+                // An `Owner::Generated` brace rung, or an `Owner::ModelAnchor`,
+                // that happens to carry only this terminal is NOT this
+                // terminal's chosen arm — its owner is honest provenance and
+                // says so. The reclassification below is for exactly one
+                // defect: an owner that names no terminal at all.
+                let rewire_root_owner = forest.member(key).is_some_and(|member| {
+                    matches!(member.owner(), Owner::Contact(id) if !sealed_by_id.contains_key(id))
+                });
+                let solo = !owned
+                    && rewire_root_owner
+                    && carries_only(forest, &terminals_by_member, key, terminal_id);
+                if owned || solo {
                     own_chosen_arms.push(key);
                 } else {
                     cascade_carriers.push(key);
@@ -5406,6 +5473,106 @@ mod tests {
             vec![arm_key],
             "the arm that took it down is named as a carrier, not as its own choice"
         );
+    }
+
+    /// **A rewire connector that carries only this terminal IS this terminal's
+    /// own arm, whatever its owner field says.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// `cco`'s rewire mints a connector owning `Owner::Contact(root.slot())` —
+    /// a MEMBER slot in the terminal-id namespace. So a member rewire minted
+    /// for this terminal's own route wears an owner that names no terminal at
+    /// all, and the owner test alone calls it somebody else's arm.
+    ///
+    /// **MEASURED, and it blocked a real model.** On the Deinonychus, after one
+    /// steering pass, terminal 113's route ended at `slot501g0` owned by
+    /// `Contact(401)` — 401 being a member slot and no sealed terminal. The
+    /// carrier's subtree held exactly one terminal stub: 113's own. The owner
+    /// test classified it as a cascade victim, so the pass learned nothing, and
+    /// the run refused `SealedSweepLearnedNothing` — a refusal that reads
+    /// exactly like a model whose physics cannot be satisfied, produced by a
+    /// namespace collision.
+    ///
+    /// The test is §1.3's own definition applied physically: *"its stub
+    /// re-parented onto SOMEBODY ELSE'S arm"*. An arm is somebody else's when
+    /// somebody else hangs off it.
+    #[test]
+    fn a_rewire_connector_carrying_only_this_terminal_is_its_own_arm_not_a_carrier() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        // Owner names slot 401 — a MEMBER slot, and no terminal the record
+        // seals. This is exactly what `cco.rs`'s rewire mints.
+        let (stub_key, arm_key) =
+            seated_terminal_fixture(&mut forest, 7, [105.0, 105.0], Owner::Contact(401));
+
+        let refusal = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7)],
+        )
+        .expect_err("a sealed-routed terminal's own condemned arm abandons the pass");
+
+        let BraceError::SealedRoutedTerminalCondemned(class) = refusal else {
+            panic!(
+                "the arm carries terminal 7 and nobody else, so it is terminal 7's OWN arm and \
+                 the refusal must be the steerable one, not: {refusal}"
+            );
+        };
+        let disturbed = &class.disturbed[0];
+        assert_eq!(disturbed.terminal_member, stub_key);
+        assert_eq!(
+            disturbed.own_chosen_arms,
+            vec![arm_key],
+            "a connector whose subtree holds only this terminal's stub cannot be another \
+             terminal's arm, whatever its owner field says"
+        );
+        assert!(disturbed.cascade_carriers.is_empty());
+    }
+
+    /// **The other side of the same rule, and it is the one that keeps the
+    /// victim protection intact.** A member whose owner honestly names
+    /// somebody — a generated brace rung, a model anchor, another sealed
+    /// terminal — stays a carrier even when it carries only this terminal. The
+    /// reclassification above is for exactly one defect: an owner that names no
+    /// terminal at all.
+    ///
+    /// Widen it to "any owner that is not `Contact(this)`" and every generated
+    /// rung becomes some terminal's own arm, which is the punish-the-innocent
+    /// harm §1.3 spends three paragraphs forbidding. This test stands on that
+    /// widening, and
+    /// `a_terminal_taken_down_by_someone_elses_arm_is_reported_as_a_cascade_victim`
+    /// is its sibling — that one went red the first time the rule was written
+    /// without this condition.
+    #[test]
+    fn a_generated_rung_carrying_only_this_terminal_is_still_a_carrier() {
+        let surface = remote_box();
+        let topology = remote_box_topology();
+        let mut forest = Forest::new();
+        let (_stub, arm_key) =
+            seated_terminal_fixture(&mut forest, 7, [105.0, 105.0], Owner::ModelAnchor(9));
+
+        let refusal = brace_fixed_point_current_parity(
+            &forest,
+            &surface,
+            &topology,
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+            0.05,
+            &[sealed_routed(7)],
+        )
+        .expect_err("a disturbed sealed terminal still abandons the pass");
+
+        let BraceError::SealedSweepLearnedNothing(class) = refusal else {
+            panic!("an owner that honestly names somebody is not this terminal's own arm");
+        };
+        assert_eq!(class.disturbed[0].cascade_carriers, vec![arm_key]);
+        assert!(class.disturbed[0].own_chosen_arms.is_empty());
     }
 
     /// **The refutation's carve-out, unchanged.** A refused member that

@@ -5091,7 +5091,6 @@ impl<'a> RewiredSupportRun<'a> {
 /// chain.
 fn mint_no_goods(
     controller: &CcoController,
-    forest: &Forest,
     class: &crate::brace::SealedCondemnationClass,
 ) -> crate::legalization::LegalizationAbandon {
     let mut learned = Vec::new();
@@ -5116,32 +5115,124 @@ fn mint_no_goods(
             crate::legalization::PrefixKey::of(route),
             crate::legalization::ArmIdentity::of(winner),
         ));
-        crate::coverage_repair::emit_run_line(&format!(
-            "legalize: mint t{} arms=[{}] provenance=[{}]",
-            terminal.terminal_id,
-            terminal
-                .own_chosen_arms
-                .iter()
-                .map(|key| format!("slot{}g{}", key.slot(), key.generation()))
-                .collect::<Vec<_>>()
-                .join(","),
-            terminal
-                .own_chosen_arms
-                .iter()
-                .map(|key| {
-                    forest.member(*key).map_or_else(
-                        || "absent".to_owned(),
-                        |member| format!("{:?}", member.owner()),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-        ));
     }
     crate::legalization::LegalizationAbandon::Condemned {
         learned,
         own_arm_terminals,
         cascade_victims,
+    }
+}
+
+/// **Stage B — print every condemned member's OWNER, on both brace refusals.**
+///
+/// Stage A splits a disturbed terminal's condemned members into the arms it
+/// OWNS and the carriers it does not, and the split decides everything: an own
+/// arm mints a no-good and the loop retries, a carrier steers nothing and the
+/// run stops. So the split has to be readable from a run log, because the one
+/// fact that says whether a stop is honest physics or a provenance defect is
+/// who owns the carrier.
+///
+/// **The specific hazard this discloses.** `cco`'s rewire mints members owning
+/// `Owner::Contact(root.slot())` — a MEMBER slot in the terminal-id namespace.
+/// A member that is really this terminal's own route, minted for it by rewire,
+/// therefore wears an owner that is not `Contact(terminal)` and is classified
+/// as somebody else's arm. That would turn a steerable refusal into an
+/// unsteerable one, and the run would refuse looking exactly like a model whose
+/// physics cannot be satisfied. One printed `owner()` separates the two.
+fn disclose_class_provenance(
+    forest: &Forest,
+    sealed: &[crate::brace::SealedTerminalDisposition],
+    class: &crate::brace::SealedCondemnationClass,
+) {
+    let owners = |keys: &[MemberKey]| {
+        if keys.is_empty() {
+            return "none".to_owned();
+        }
+        keys.iter()
+            .map(|key| {
+                forest.member(*key).map_or_else(
+                    || format!("slot{}g{}=absent", key.slot(), key.generation()),
+                    |member| {
+                        format!(
+                            "slot{}g{}={:?}",
+                            key.slot(),
+                            key.generation(),
+                            member.owner()
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let sealed_ids = sealed
+        .iter()
+        .map(|row| row.terminal_id)
+        .collect::<BTreeSet<_>>();
+    for terminal in &class.disturbed {
+        // The terminal's whole rootward path, with each member's owner. This
+        // answers both questions a carrier raises at once: is the rewire root
+        // its owner names ON this terminal's route, and who owns that root.
+        let mut path = Vec::new();
+        let mut cursor = Some(terminal.terminal_member);
+        while let Some(key) = cursor {
+            let Some(member) = forest.member(key) else {
+                path.push(format!("slot{}g{}=absent", key.slot(), key.generation()));
+                break;
+            };
+            let owner = member.owner();
+            let named_terminal = match owner {
+                Owner::Contact(id) => {
+                    if sealed_ids.contains(id) {
+                        "sealed-terminal"
+                    } else {
+                        // `cco`'s rewire owns by MEMBER slot, so a
+                        // `Contact(x)` whose x the sealed record does not name
+                        // is a rewire root and not a terminal at all.
+                        "not-a-sealed-terminal"
+                    }
+                }
+                Owner::ModelAnchor(_) | Owner::Generated { .. } => "n/a",
+            };
+            path.push(format!(
+                "slot{}g{}={owner:?}({named_terminal})",
+                key.slot(),
+                key.generation(),
+            ));
+            cursor = forest.parent_of(key);
+        }
+        // **The physical discriminator, and it beats owner archaeology.**
+        // "Somebody else's arm" means an arm that also carries somebody else.
+        // For each condemned carrier, walk its subtree and name every terminal
+        // whose stub hangs off it. One stub — this terminal's — and the carrier
+        // exists to carry this terminal and nothing else. More than one, and
+        // the refusal is §1.3's cascade victim exactly as written.
+        let stubs = forest.terminals_by_member();
+        for carrier in &terminal.cascade_carriers {
+            let mut carried = Vec::new();
+            let mut frontier = vec![*carrier];
+            while let Some(key) = frontier.pop() {
+                if let Some(id) = stubs.get(&key) {
+                    carried.push(*id);
+                }
+                frontier.extend(forest.children_of(key));
+            }
+            carried.sort_unstable();
+            crate::coverage_repair::emit_run_line(&format!(
+                "legalize: carrier slot{}g{} of t{} carries terminals {carried:?}",
+                carrier.slot(),
+                carrier.generation(),
+                terminal.terminal_id,
+            ));
+        }
+        crate::coverage_repair::emit_run_line(&format!(
+            "legalize: provenance t{} sealed={:?} own_arms=[{}] carriers=[{}] rootward=[{}]",
+            terminal.terminal_id,
+            terminal.sealed_kind,
+            owners(&terminal.own_chosen_arms),
+            owners(&terminal.cascade_carriers),
+            path.join(" -> "),
+        ));
     }
 }
 
@@ -5201,17 +5292,19 @@ fn brace_state(
                 // their own chosen arm condemned; the routing cadence's sealed
                 // record says WHAT each of them chose and in which world. The
                 // two are joined here, at the only point where both exist.
-                let abandon = mint_no_goods(
-                    &state.routed.controller,
-                    state.routed.initial.forest(),
-                    &class,
-                );
+                disclose_class_provenance(state.routed.initial.forest(), &sealed, &class);
+                let abandon = mint_no_goods(&state.routed.controller, &class);
                 return Err(SupportBraceError::SealedRoutedTerminalCondemned(
                     class,
                     Box::new(abandon),
                 ));
             }
             Err(BraceError::SealedSweepLearnedNothing(class)) => {
+                // The same disclosure on the refusing branch. This is the arm
+                // where knowing the owners matters MOST: the pass is about to
+                // stop for good, and whether that is honest physics or a
+                // provenance defect is exactly what an `owner()` says.
+                disclose_class_provenance(state.routed.initial.forest(), &sealed, &class);
                 return Err(SupportBraceError::SealedSweepLearnedNothing(class));
             }
             Err(error) => return Err(error.into()),
