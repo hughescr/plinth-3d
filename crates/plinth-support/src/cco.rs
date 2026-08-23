@@ -616,7 +616,16 @@ pub(crate) struct TerminalCcoOutcome {
     /// committed its exact replay or been retired as an unrouted terminal.
     pub(crate) disposition: Option<TerminalDisposition>,
     pub(crate) candidates_generated: usize,
+    /// **PHYSICS, and it keeps exactly one meaning.** How many arms passed
+    /// feasibility. Craig's authorization item 5 (2026-08-23) is that this
+    /// counter is NOT overloaded with ruled-out arms — the refutation §F.1
+    /// reads this exact field to make its "arms existed, clearance refused
+    /// them" argument, and an overload would need a footnote nobody will have.
     pub(crate) candidates_feasible: usize,
+    /// **The second counter.** How many arms were ruled out before the
+    /// tournament weighed them. Zero on every path today, because nothing
+    /// rules an arm out yet; the steering channel that fills it is Stage B's.
+    pub(crate) candidates_ruled_out: usize,
     pub(crate) anchor_ray_batches: usize,
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
@@ -759,6 +768,30 @@ pub(crate) struct FinalizedCcoTranscriptRow {
     route: Option<TerminalRouteEvidence>,
     skipped: Option<FinalizedSkippedEvidence>,
     no_winner_reason: Option<NoWinnerEvidence>,
+    /// **The second sealed counter — Craig's authorization item 5, 2026-08-23.**
+    ///
+    /// A ruled-out arm has to be counted somewhere. The cheap answer was to
+    /// fold it into `candidates_feasible`, which keeps this fingerprint still
+    /// for models that never rule anything out but leaves one number with two
+    /// meanings: *"how many arms passed feasibility"* would silently become
+    /// *"how many passed feasibility and were not ruled out in an earlier
+    /// pass"*, and the refutation §F.1 reads that exact field to make its
+    /// "arms existed, clearance refused them" argument.
+    ///
+    /// Craig ruled for the honest counter. `candidates_feasible` keeps its
+    /// meaning word for word, and ruled-out arms get their own number.
+    ///
+    /// **The price, paid once, on purpose.** This field is folded into
+    /// [`transcript_rows_digest`] UNCONDITIONALLY, so the sealed CCO
+    /// transcript fingerprint moves for EVERY model, once, at the commit that
+    /// introduces it — not only for models that rule something out. It is
+    /// ledgered in `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+    ///
+    /// It is zero on every path today. Nothing rules an arm out yet; the
+    /// steering channel that fills it is Stage B's. The counter lands with
+    /// Stage A so the one-time re-freeze is paid at the small, revert-proof
+    /// stage rather than inside the stage that changes behaviour.
+    candidates_ruled_out: usize,
 }
 
 impl FinalizedCcoTranscriptRow {
@@ -803,6 +836,20 @@ impl FinalizedCcoTranscriptRow {
     #[must_use]
     pub(crate) fn no_winner_reason(&self) -> Option<&NoWinnerEvidence> {
         self.no_winner_reason.as_ref()
+    }
+
+    /// How many of this terminal's arms were ruled out before the tournament
+    /// weighed them — the second counter, kept separate from
+    /// `candidates_feasible` so feasibility keeps one meaning.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the counter is sealed and digested at Stage A; the steering channel that gives \
+                  it a non-zero value, and the readers that report it, land with Stage B \
+                  (docs/engineering-journal/designs/seal-semantics-2026-08-22.md §4 Stage B)"
+    )]
+    pub(crate) const fn candidates_ruled_out(&self) -> usize {
+        self.candidates_ruled_out
     }
 }
 
@@ -1614,6 +1661,15 @@ impl CcoController {
 #[derive(Clone, Debug, PartialEq)]
 struct TerminalCadenceRecord {
     disposition: TerminalDisposition,
+    /// **The SECOND counter (Craig's authorization item 5, 2026-08-23).** How
+    /// many of this terminal's arms were RULED OUT before the tournament could
+    /// weigh them.
+    ///
+    /// It is zero on every path today: nothing rules an arm out yet. The
+    /// steering channel that will fill it is Stage B's, and the counter lands
+    /// here first, deliberately, so `candidates_feasible` never has to carry
+    /// two meanings — see [`FinalizedCcoTranscriptRow::candidates_ruled_out`].
+    candidates_ruled_out: usize,
 }
 
 #[derive(Default)]
@@ -1699,6 +1755,7 @@ impl CcoController {
                 plan_digest,
                 loads.digest(),
                 geometry_digest,
+                record.candidates_ruled_out,
             )?);
         }
         let ordered_disposition_digest = transcript_rows_digest(&rows);
@@ -1785,6 +1842,7 @@ impl CcoController {
             request.terminal_id,
             TerminalCadenceRecord {
                 disposition: disposition.clone(),
+                candidates_ruled_out: outcome.candidates_ruled_out,
             },
         );
         outcome.disposition = Some(disposition);
@@ -1877,6 +1935,7 @@ impl CcoController {
             request.terminal_id,
             TerminalCadenceRecord {
                 disposition: disposition.clone(),
+                candidates_ruled_out: outcome.candidates_ruled_out,
             },
         );
         outcome.disposition = Some(disposition);
@@ -1907,6 +1966,10 @@ impl CcoController {
                     forest_digest: forest.digest(),
                     controller_digest_before: self.digest(),
                 },
+                // A skipped terminal never had a route request, so it never
+                // had an arm to rule out. Zero is the truthful value here, not
+                // a placeholder.
+                candidates_ruled_out: 0,
             },
         );
         Ok(())
@@ -2645,6 +2708,7 @@ fn finalize_transcript_row(
     plan_digest: u64,
     loads_digest: u64,
     geometry_digest: u64,
+    candidates_ruled_out: usize,
 ) -> Result<FinalizedCcoTranscriptRow, CcoError> {
     let terminal = initial.terminal;
     let physical_contact_id = u64::from(terminal);
@@ -2689,6 +2753,7 @@ fn finalize_transcript_row(
                 route: Some(route.clone()),
                 skipped: None,
                 no_winner_reason: None,
+                candidates_ruled_out,
             })
         }
         TerminalDisposition::SkippedQuarantined {
@@ -2719,6 +2784,7 @@ fn finalize_transcript_row(
                     controller_digest_before: *controller_digest_before,
                 }),
                 no_winner_reason: None,
+                candidates_ruled_out,
             })
         }
         TerminalDisposition::UnroutedNoWinner { route, reason } => {
@@ -2740,6 +2806,7 @@ fn finalize_transcript_row(
                 route: Some(route.clone()),
                 skipped: None,
                 no_winner_reason: Some(reason.clone()),
+                candidates_ruled_out,
             })
         }
     }
@@ -2765,6 +2832,14 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             FinalizedDispositionKind::SkippedQuarantined => 1,
             FinalizedDispositionKind::UnroutedNoWinner => 2,
         });
+        // **The second counter, folded UNCONDITIONALLY** — Craig's
+        // authorization item 5, 2026-08-23. Not "only when non-zero": a
+        // conditional fold would keep this fingerprint still for models that
+        // rule nothing out, which is precisely the cheap-today, expensive-later
+        // shape the ruling declined. Every model's sealed transcript digest
+        // moves once, here, on purpose, and the move is ledgered in
+        // `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+        word(row.candidates_ruled_out as u64);
         match &row.route {
             Some(route) => {
                 word(1);
@@ -3409,6 +3484,7 @@ fn grow_terminal_inner(
             disposition: None,
             candidates_generated,
             candidates_feasible,
+            candidates_ruled_out: 0,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 0,
@@ -3451,6 +3527,7 @@ fn grow_terminal_inner(
             disposition: None,
             candidates_generated,
             candidates_feasible,
+            candidates_ruled_out: 0,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
@@ -3493,6 +3570,7 @@ fn grow_terminal_inner(
         disposition: None,
         candidates_generated,
         candidates_feasible,
+        candidates_ruled_out: 0,
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
@@ -5201,6 +5279,7 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
     use plinth_mesh::{
@@ -5915,6 +5994,13 @@ mod tests {
             controller.finalize_transcript(&build, &plan, &loads, &geometry),
             Err(CcoError::TranscriptSealed)
         ));
+        assert!(
+            transcript
+                .rows()
+                .iter()
+                .all(|row| row.candidates_ruled_out() == 0),
+            "nothing rules an arm out yet: the second counter is zero on every path until Stage B"
+        );
         let replay = routed_request.unwrap();
         let replay_contact = plan
             .contacts()
@@ -6036,6 +6122,7 @@ mod tests {
             disposition: None,
             candidates_generated: 0,
             candidates_feasible: 0,
+            candidates_ruled_out: 0,
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             clearance_batches: 0,
@@ -6649,6 +6736,7 @@ mod tests {
                             clearance_rows: 0,
                         },
                     },
+                    candidates_ruled_out: 0,
                 },
             );
             quarantined
@@ -6753,7 +6841,10 @@ mod tests {
                 },
             },
         };
-        TerminalCadenceRecord { disposition }
+        TerminalCadenceRecord {
+            disposition,
+            candidates_ruled_out: 0,
+        }
     }
 
     /// The J2 equivalence check, asserted after EVERY insertion: the cached
@@ -6990,6 +7081,7 @@ mod tests {
                 forest_digest: 1234,
                 controller_digest_before: 5678,
             },
+            candidates_ruled_out: 0,
         };
         let mut forward = CcoController::default();
         forward.finish_terminal(&forest, t1, record.clone());
@@ -9422,5 +9514,61 @@ mod tests {
             digests.push(digest);
         }
         assert!(digests.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    fn routed_row(candidates_ruled_out: usize) -> FinalizedCcoTranscriptRow {
+        let original_key = MemberKey::transit_test_fixture(4, 0);
+        FinalizedCcoTranscriptRow {
+            cadence_index: 0,
+            physical_contact_id: 4,
+            terminal_id: 4,
+            original_key,
+            kind: FinalizedDispositionKind::Routed,
+            route: Some(TerminalRouteEvidence {
+                physical_contact_id: 4,
+                terminal_id: 4,
+                original_key,
+                plan_digest: 1,
+                loads_digest: 2,
+                geometry_digest: 3,
+                forest_digest_before: 4,
+                controller_digest_before: 5,
+            }),
+            skipped: None,
+            no_winner_reason: None,
+            candidates_ruled_out,
+        }
+    }
+
+    /// **Craig's authorization item 5 — the second counter is really sealed.**
+    ///
+    /// Two rows that differ in nothing but the ruled-out count must not seal
+    /// to the same fingerprint. If they did, the counter would be disclosure
+    /// with no seal behind it, and a run could report any number it liked.
+    #[test]
+    fn the_ruled_out_counter_is_folded_into_the_sealed_transcript_fingerprint() {
+        assert_ne!(
+            transcript_rows_digest(&[routed_row(0)]),
+            transcript_rows_digest(&[routed_row(1)]),
+            "the ruled-out count must reach the sealed fingerprint"
+        );
+    }
+
+    /// **The fold is UNCONDITIONAL, and this is the guard on the optimization
+    /// that would undo the ruling.**
+    ///
+    /// The cheap-looking edit is `if row.candidates_ruled_out != 0 { word(..) }`
+    /// — it would keep the fingerprint still for every model that rules nothing
+    /// out, which is exactly what Craig declined, and it would make the
+    /// one-time corpus-wide re-freeze this lane paid unrepeatable. The golden
+    /// below is the digest of a single zero-count row: skip the zero fold and
+    /// it moves.
+    #[test]
+    fn a_zero_ruled_out_count_still_occupies_its_place_in_the_sealed_stream() {
+        assert_eq!(
+            transcript_rows_digest(&[routed_row(0)]),
+            11_947_743_038_542_081_092,
+            "a zero count is folded like any other: the stream position is part of the seal"
+        );
     }
 }

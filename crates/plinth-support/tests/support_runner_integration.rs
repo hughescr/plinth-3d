@@ -306,7 +306,11 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// The toed-slab half below is UNCHANGED, and unchanged is the finding: this
 /// model closes on its baseline layout, so it never enters a transaction, so no
 /// rule in §A, §B, §C, §D or §E can reach it. Every number here — 64 routed
-/// identities, 170 final live members, digest `4_190_462_360_230_124_963`,
+/// identities, 170 final live members, digest `12_136_443_226_163_403_608`
+/// (`4_190_462_360_230_124_963` before the seal-semantics lane's AUTHORIZED
+/// one-time re-freeze of 2026-08-23 — the note on
+/// `public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`
+/// records what moved and why the counts did not),
 /// `coverage_repair_rounds() == 0`, both abandoned contacts and their ladders —
 /// is bit-identical under the new door. That is §G.3's central claim measured on
 /// the model it was made about.
@@ -368,7 +372,7 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
+        (64_usize, 170_usize, 12_136_443_226_163_403_608_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
     // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
@@ -706,6 +710,21 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// 9_355_852_079_468_421_123`. The 11-tuple resource plan, all 9 frozen
 /// islands and all 9 frozen patches are UNCHANGED — re-derived at this tip,
 /// not assumed. The paragraph above stands as the record of its own date.
+///
+/// **The seal-semantics lane, 2026-08-23 — one number again, and this time it
+/// moved ON PURPOSE.** Craig's authorization item 5 keeps `candidates_feasible`
+/// meaning exactly what it means today and adds a SECOND counter for ruled-out
+/// arms (`FinalizedCcoTranscriptRow::candidates_ruled_out`). That counter is
+/// folded into the sealed CCO transcript UNCONDITIONALLY, so the fingerprint
+/// re-freezes once for every model in the corpus, deliberately, with the reason
+/// written down: `snapshot_digest 4_190_462_360_230_124_963 ->
+/// 12_136_443_226_163_403_608`. The counter is ZERO on every path today —
+/// nothing rules an arm out until Stage B's steering channel lands — so this is
+/// a stream-shape change and nothing else. MEASURED at the re-freeze: the
+/// 11-tuple resource plan, all 9 islands, all 9 patches, all 7 defects and the
+/// 64/170 counts are byte-identical; the only field that differs anywhere in
+/// the frozen JSON is `snapshot_digest`. Ledgered in
+/// `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
 #[test]
 fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let hollowed = hollowed_corpus_model(
@@ -758,7 +777,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
     // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
     // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
-    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
+    assert_eq!(snapshot.digest(), 12_136_443_226_163_403_608);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(

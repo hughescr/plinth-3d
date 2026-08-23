@@ -313,3 +313,77 @@ Two consequences worth stating plainly:
 **Unexplained: nothing.** Every row above has its cause; the two regressions have a mechanism
 traced in source rather than an argument, and the one number this lane could not produce is
 recorded as unmeasurable with the reason.
+
+---
+
+## 2026-08-23 — seal-semantics Stage A, and one AUTHORIZED sealed-fingerprint move
+
+Branch `feature/a4-controller`. Design authority
+`docs/engineering-journal/designs/seal-semantics-2026-08-22.md`; Craig authorized all seven
+§5 items on 2026-08-23.
+
+### The move, and it is deliberate
+
+Authorization item 5 keeps `candidates_feasible` meaning exactly what it means today — *"how
+many arms passed feasibility"*, the field refutation §F.1 reads to make its "arms existed,
+clearance refused them" argument — and adds a **second counter** for ruled-out arms,
+`FinalizedCcoTranscriptRow::candidates_ruled_out`. The cheaper alternative was to fold
+ruled-out arms into the existing counter, which keeps the fingerprint still for models that
+rule nothing out and leaves one sealed number with two meanings. Craig ruled for the honest
+counter and accepted the price.
+
+The counter is folded into the sealed CCO transcript **unconditionally** — not "only when
+non-zero", because a conditional fold is exactly the shape that keeps the fingerprint still
+today and makes the re-freeze unrepeatable later. So the sealed fingerprint moves **once, for
+every model**, at the commit that introduces it.
+
+| | before | after |
+| --- | --- | --- |
+| `make_toed_slab` `snapshot_digest` | `4_190_462_360_230_124_963` | **`12_136_443_226_163_403_608`** |
+| routed identities / final live members | 64 / 170 | **64 / 170 — unchanged** |
+| `coverage_repair_rounds()` | 0 | **0 — unchanged** |
+
+**MEASURED at the re-freeze, and this is the whole point of recording it.** Diffing the
+frozen `crates/plinth-verify/tests/coverage_gate_toed_slab.json` before and after: the
+11-tuple resource plan, all 9 islands, all 9 patches and all 7 defects are **byte-identical**.
+The only field that differs anywhere in that artifact is `snapshot_digest`. The counter's
+value is **zero on every path today** — nothing rules an arm out until Stage B's steering
+channel lands — so this is a change to the SHAPE of the digest stream and to nothing else.
+
+Re-frozen in two places, both with the reason written beside them:
+`crates/plinth-verify/tests/coverage_gate_toed_slab.json` and the two goldens in
+`crates/plinth-support/tests/support_runner_integration.rs`.
+
+`Round 25.chitubox` itself was **not** re-measured at this commit. The canary's own value of
+record therefore still stands at `fe9c716deb0805a3f0074b3e3dfe4bad`, 36 support records,
+354,984 bytes, and a run at this tip should be expected to move it for the same reason the
+toed-slab digest moved. Recorded as **not measured**, not as unchanged.
+
+### The honest residue is NOW MEASURABLE — the 2026-08-22 note below is superseded
+
+The section "The honest residue is NOT MEASURABLE from this tree" recorded a gap in the
+evidence: `brace::exact_clearance_rows` computes a real per-member clearance in millimetres
+and `exact_clearance_negatives` tested only its sign and discarded the value, so a run could
+say "one arm was refused" and never say by how much.
+
+**That gap is closed.** Craig's refusal-accounting rider (2026-08-23) adds
+`FinalPassRefusalAccounting`: the final bracing pass keeps the true gap of every negative row,
+in millimetres, with the two radii the resize assigned, and streams them through
+`emit_run_line` as they are measured:
+
+```
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 gaps: slot1g0=-0.800000mm@r0.500000/0.500000mm
+```
+
+Two things the earlier note said remain true and are worth keeping: the residue is a property
+of the SEARCH rather than of the artifact, and — because the demanded gap is 0.300 mm and
+`clearance = true_gap − 0.300` — every final-pass refusal already has a true gap below
+0.300 mm by arithmetic, so the COUNT was never the missing half. The MAGNITUDES were, and they
+are now recorded. What is still **not measured** is the corpus-wide distribution of them:
+that needs a corpus run at this tip, which this entry does not claim to have done.
+
+The accounting is disclosure only. It is deliberately **not** folded into
+`brace_fixed_point_plan_digest` — every row is a pure function of the forest and surface that
+digest already covers, and this lane is authorized to move exactly one fingerprint.
+
+**Unexplained: nothing.**
