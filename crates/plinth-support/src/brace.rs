@@ -1569,8 +1569,6 @@ fn evaluate_candidates(
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
     let mut r1 = Vec::new();
-    let mut inset0 = Vec::new();
-    let mut inset1 = Vec::new();
     let mut ranges = Vec::with_capacity(candidates.len());
     // **#36 step 5 — one frozen exclusion set per ROD, in row order.**
     //
@@ -1590,8 +1588,6 @@ fn evaluate_candidates(
             p1.push(rod.p1);
             r0.push(rod.radius.get());
             r1.push(rod.radius.get());
-            inset0.push(rod.inset0);
-            inset1.push(rod.inset1);
             excluded.push(
                 candidate
                     .seat_zone
@@ -1615,12 +1611,22 @@ fn evaluate_candidates(
         }
         ranges.push(start..p0.len());
     }
+    // #36 step 5 — the FULL axis against surface-minus-Z. `rod.inset0/inset1`
+    // stay populated with the PR-2 mask because `candidate_revalidation` hands
+    // them to `axis_illegal_rows`, which is the one screen where a length
+    // measured from the seat is still the right shape (design §5, finding D).
+    let zero = vec![0.0; p0.len()];
+    // The insets the batch ACTUALLY receives, which are now zero — the SAME
+    // vector the call below is handed, so the census cannot drift from it.
+    // `SegRow` is documented as one row handed to `segment_clearance`;
+    // recording `inset0`/`inset1` here would describe a call this site no
+    // longer makes, which is the deviation §11.4 forbids.
     crate::census_record!(crate::census::record_segment_batch(
         "brace_candidate_clearance",
         &p0,
         &p1,
-        &inset0,
-        &inset1,
+        &zero,
+        &zero,
         &census_cos_class,
     ));
     // PLACEMENT (ruling R-1495, 2026-08-22). This grades a per-`(need, site)`
@@ -1632,11 +1638,6 @@ fn evaluate_candidates(
     let placement_gap_mm = config
         .contact_policy(contact::ClearanceStage::Placement)
         .demanded_gap_mm;
-    // #36 step 5 — the FULL axis against surface-minus-Z. `rod.inset0/inset1`
-    // stay populated with the PR-2 mask because `candidate_revalidation` hands
-    // them to `axis_illegal_rows`, which is the one screen where a length
-    // measured from the seat is still the right shape (design §5, finding D).
-    let zero = vec![0.0; p0.len()];
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
