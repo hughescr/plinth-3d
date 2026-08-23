@@ -213,6 +213,67 @@ pub(crate) struct ConfirmationRound {
     pub(crate) arm_rank: usize,
 }
 
+/// **Why a pass stopped, and what the next one should do differently.**
+///
+/// An abandoned pass is not a failure. It produced no lowered run, therefore no
+/// sealed authority, therefore nothing that can reach an artifact — which is
+/// what makes "a pass that was abandoned may never reach output" true by
+/// construction rather than by a check (§1.3 obligation 2).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LegalizationAbandon {
+    /// The bracing pass measured a sealed-`Routed` terminal's OWN chosen arm
+    /// inside the model. The arms travel out as no-goods and the next pass
+    /// routes steered away from them.
+    ///
+    /// `cascade_victims` are terminals disturbed purely by re-parenting — their
+    /// own arm was never measured illegal. They are reported and they **steer
+    /// nothing**: a victim whose carrier sits later in the cadence would never
+    /// see its own prefix move, so its no-goods would hit every pass and it
+    /// would lose one legal arm per pass as punishment for another member's
+    /// failure (§1.3).
+    Condemned {
+        learned: Vec<NoGood>,
+        own_arm_terminals: Vec<u32>,
+        cascade_victims: Vec<u32>,
+    },
+    /// The routing pass found a terminal with a steering no-good on every arm
+    /// it can still take. Nothing is retired; a confirmation round opens.
+    SteeringSpent { terminal_id: u32 },
+}
+
+impl LegalizationAbandon {
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::Condemned {
+                learned,
+                own_arm_terminals,
+                cascade_victims,
+            } => {
+                let ids = |ids: &[u32]| {
+                    if ids.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+                    }
+                };
+                format!(
+                    "condemned own_arm_terminals={} cascade_victims={} learned=[{}]",
+                    ids(own_arm_terminals),
+                    ids(cascade_victims),
+                    learned
+                        .iter()
+                        .map(NoGood::render)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            }
+            Self::SteeringSpent { terminal_id } => {
+                format!("steering-spent terminal={terminal_id}")
+            }
+        }
+    }
+}
+
 /// The instruction set one legalization pass is driven with — **borrowed, never
 /// owned by anything that digests.**
 ///

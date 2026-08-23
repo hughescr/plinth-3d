@@ -1301,6 +1301,30 @@ fn measure_for_controller(
 enum ChainOutcome<'a> {
     Lowered(Box<LoweredSupportRun<'a>>),
     Refused(Box<ChainRefusal<'a>>),
+    /// **Stage B — the third arm.** The pass did not fail; it learned something
+    /// and stopped. It produced no lowered run, therefore no sealed authority,
+    /// therefore nothing that can reach an artifact — which is what makes "a
+    /// pass that was abandoned may never reach output" true by construction
+    /// rather than by a check (design §1.3 obligation 2).
+    ///
+    /// Produced ONLY by the routing and bracing stages, only when the abandon
+    /// rule is satisfied, and only when the CALLER SUPPLIED A STEERING SET. The
+    /// stage macro is untouched: the two stages that can abandon are written
+    /// out longhand beside it, so no other stage can grow this arm by accident.
+    ///
+    /// **That last condition is what keeps the trial path bit-identical, by
+    /// construction rather than by a downstream match.** The retry wraps the
+    /// ATTEMPT-0 chain call only (design §4 Stage B piece 4); the repair loop's
+    /// trial call passes `None`, so a trial's disturbing brace refusal is still
+    /// one `ChainOutcome::Refused`, one ledger row and the next candidate —
+    /// which is the C3 precedence rule.
+    Abandoned(Box<ChainAbandon<'a>>),
+}
+
+/// The context handed back, with what the abandoned pass learned.
+struct ChainAbandon<'a> {
+    context: SupportRunContext<'a>,
+    abandon: crate::legalization::LegalizationAbandon,
 }
 
 /// The context handed back, with the stage that refused the plan.
@@ -1401,13 +1425,64 @@ fn run_stage_chain<'a>(
         "Preparation",
         SupportRunPhase::Preparation
     );
-    let routed = stage!(
-        prepared.route_initial_cco(steering),
-        "Routing",
-        SupportRunPhase::Routing
-    );
+    // Routing and Brace are the two stages that can ABANDON, so they are
+    // written out beside the macro rather than through it. The macro at the top
+    // of this function is deliberately unchanged: an abandoned pass is an
+    // outcome only these two stages may produce, and a stage that grew it by
+    // accident would be a stage that silently stopped producing artifacts.
+    if let Some(clock) = announce {
+        clock.entering("Routing");
+    }
+    let routed = match prepared.route_initial_cco(steering) {
+        Ok(value) => value,
+        Err((context, error)) => {
+            note_stage_failure("Routing", &error);
+            return match error {
+                SupportRoutingError::SteeringSpent { terminal } if steering.is_some() => {
+                    ChainOutcome::Abandoned(Box::new(ChainAbandon {
+                        context,
+                        abandon: crate::legalization::LegalizationAbandon::SteeringSpent {
+                            terminal_id: terminal,
+                        },
+                    }))
+                }
+                error => ChainOutcome::Refused(Box::new(ChainRefusal {
+                    context,
+                    stop: RefusedStage {
+                        phase: SupportRunPhase::Routing,
+                        detail: format!("{error:?}"),
+                    },
+                })),
+            };
+        }
+    };
     let rewired = stage!(routed.rewire(), "Rewire", SupportRunPhase::Rewire);
-    let braced = stage!(rewired.brace(), "Brace", SupportRunPhase::Brace);
+    if let Some(clock) = announce {
+        clock.entering("Brace");
+    }
+    let braced = match rewired.brace() {
+        Ok(value) => value,
+        Err((context, error)) => {
+            note_stage_failure("Brace", &error);
+            return match error {
+                SupportBraceError::SealedRoutedTerminalCondemned(_class, abandon)
+                    if steering.is_some() =>
+                {
+                    ChainOutcome::Abandoned(Box::new(ChainAbandon {
+                        context,
+                        abandon: *abandon,
+                    }))
+                }
+                error => ChainOutcome::Refused(Box::new(ChainRefusal {
+                    context,
+                    stop: RefusedStage {
+                        phase: SupportRunPhase::Brace,
+                        detail: format!("{error:?}"),
+                    },
+                })),
+            };
+        }
+    };
     let structured = stage!(braced.structure(), "Structure", SupportRunPhase::Structure);
     let lowered = stage!(structured.lower(), "Lowering", SupportRunPhase::Lowering);
     ChainOutcome::Lowered(Box::new(lowered))
@@ -1600,6 +1675,19 @@ pub fn run_support<'a>(
     let stage_clock = crate::coverage_repair::StageClock::start("support");
     let attempt_zero = match run_stage_chain(context, plan.clone(), Some(&stage_clock), None) {
         ChainOutcome::Lowered(lowered) => lowered,
+        // Unreachable while this call passes `None`: `ChainOutcome::Abandoned`
+        // is produced only for a caller that supplied a steering set. The arm
+        // exists so that the legalization loop, which lands next and DOES
+        // supply one, replaces this call rather than quietly widening it.
+        ChainOutcome::Abandoned(abandon) => {
+            return Err(SupportRunError::Failed {
+                phase: SupportRunPhase::Brace,
+                detail: format!(
+                    "an unsteered attempt-0 pass abandoned: {}",
+                    abandon.abandon.render()
+                ),
+            });
+        }
         // §A.6 and §H.7: attempt 0 runs the model's OWN plan, so its stage
         // failure is the model's, not this controller's. It is not a rollback,
         // it is not a coverage refusal, and it is not eligible to be one.
@@ -1877,6 +1965,23 @@ pub fn run_support<'a>(
         // the progress line rather than reveal anything. The loop's own paced
         // line is the trial-scale instrument.
         match run_stage_chain(context, child, None, None) {
+            // Unreachable while the trial path passes `None`, and deliberately
+            // conservative if it ever stops: a trial that abandoned is rolled
+            // back exactly as a trial that refused, because the retry loop
+            // wraps the attempt-0 chain call and NOT this one (design §4
+            // Stage B piece 4). Nothing here learns, and nothing here retries.
+            ChainOutcome::Abandoned(abandon) => {
+                let ChainAbandon {
+                    context: returned,
+                    abandon,
+                } = *abandon;
+                context = returned;
+                context.restore_prepared_digests(digests);
+                step.outcome = crate::coverage_repair::RepairStepOutcome::AppendRefused {
+                    detail: format!("trial abandoned without a retry: {}", abandon.render()),
+                };
+                ledger.reject(&mut candidates, step, &winner, started);
+            }
             ChainOutcome::Refused(refusal) => {
                 let ChainRefusal {
                     context: returned,
@@ -3948,23 +4053,35 @@ fn route_initial_cco_state(
             let contact = authority
                 .contact(u64::from(terminal))
                 .ok_or(SupportRoutingError::MissingPhysicalContact { terminal })?;
-            controller.grow_terminal_with_finalized_anchor(
-                initial.forest_mut(),
-                &request,
-                FinalizedAnchorTerminalRoute {
-                    authority: &authority,
-                    contact,
-                    contact_id: u64::from(terminal),
-                    config: anchor_config,
-                    // PR-8/OD-9 (F3). The seat attestation claims ONE PROCESS
-                    // RESOLUTION, and a layer height is a property of this run
-                    // rather than of the registry, so it travels on the route.
-                    process_resolution_mm: crate::contact::ContactPolicy::process_resolution_of(
-                        context.layers(),
-                    ),
-                },
-                steering,
-            )?;
+            controller
+                .grow_terminal_with_finalized_anchor(
+                    initial.forest_mut(),
+                    &request,
+                    FinalizedAnchorTerminalRoute {
+                        authority: &authority,
+                        contact,
+                        contact_id: u64::from(terminal),
+                        config: anchor_config,
+                        // PR-8/OD-9 (F3). The seat attestation claims ONE PROCESS
+                        // RESOLUTION, and a layer height is a property of this run
+                        // rather than of the registry, so it travels on the route.
+                        process_resolution_mm: crate::contact::ContactPolicy::process_resolution_of(
+                            context.layers(),
+                        ),
+                    },
+                    steering,
+                )
+                .map_err(|error| match error {
+                    // **Stage B.** Lifted out of the transparent `Cco` wrapper at
+                    // the stage boundary for the same reason Stage A lifted the two
+                    // brace refusals: the retry loop matches one arm rather than
+                    // parsing a string, and an operator reads WHICH refusal
+                    // happened without unwrapping.
+                    CcoError::SteeringSpent { terminal_id } => SupportRoutingError::SteeringSpent {
+                        terminal: terminal_id,
+                    },
+                    other => SupportRoutingError::Cco(other),
+                })?;
         }
         // FU-32 J5 — the receipt, held against the charge above before the
         // transcript is sealed. `executed <= charged` on both resources, both
@@ -4782,6 +4899,89 @@ impl<'a> RewiredSupportRun<'a> {
     }
 }
 
+/// **Stage B — join the condemnation class to the routing cadence's own record.**
+///
+/// Stage A's class answers *which terminals had their own chosen arm condemned*.
+/// It cannot answer *what that arm was*, because a `MemberKey` in the
+/// post-rewire forest is not the tournament's record of its own choice. The
+/// sealed disposition is: `CcoController::sealed_routed_arm` returns the five
+/// prefix digests the terminal's tournament read and the four fields it sealed
+/// about the winner. One no-good per steerable terminal, minted from those two
+/// halves.
+///
+/// **A terminal that is not sealed `Routed` mints nothing**, and neither does a
+/// cascade victim. A victim's own arm was never measured illegal — its stub was
+/// re-parented onto somebody else's arm and that arm was condemned. Giving it a
+/// no-good would cost it a legal arm per pass for another member's failure
+/// (§1.3), so victims are reported as victims and steer nothing.
+///
+/// **The Stage A escalation this stage inherits, disclosed rather than
+/// guarded.** `cco.rs`'s rewire mints members owning `Owner::Contact(root.slot())`
+/// — a MEMBER slot in the terminal-id namespace — so a numeric collision on a
+/// walked rootward path could in principle attribute a rewire member to an
+/// innocent sealed terminal. It cannot produce a wrong ANSWER: a mis-keyed
+/// no-good may only suppress a choice, never retire a terminal, and the
+/// confirmation round re-measures every arm it suppressed. The owner of every
+/// arm that mints a no-good is therefore PRINTED, so the collision is a thing a
+/// run log can be read for rather than a thing a structural invariant refuses —
+/// and a structural invariant here would risk refusing a legitimate plate-descent
+/// chain.
+fn mint_no_goods(
+    controller: &CcoController,
+    forest: &Forest,
+    class: &crate::brace::SealedCondemnationClass,
+) -> crate::legalization::LegalizationAbandon {
+    let mut learned = Vec::new();
+    let mut own_arm_terminals = Vec::new();
+    let mut cascade_victims = Vec::new();
+    for terminal in &class.disturbed {
+        if terminal.own_chosen_arms.is_empty() {
+            cascade_victims.push(terminal.terminal_id);
+            continue;
+        }
+        let Some((route, winner)) = controller.sealed_routed_arm(terminal.terminal_id) else {
+            // Disturbed, its own arm condemned, and yet the record does not
+            // seal it as `Routed` with a winner. Stage A already refused to
+            // quarantine it; there is simply no arm to steer away from, so it
+            // is disclosed as a victim rather than silently dropped.
+            cascade_victims.push(terminal.terminal_id);
+            continue;
+        };
+        own_arm_terminals.push(terminal.terminal_id);
+        learned.push(crate::legalization::NoGood::new(
+            terminal.terminal_id,
+            crate::legalization::PrefixKey::of(route),
+            crate::legalization::ArmIdentity::of(winner),
+        ));
+        crate::coverage_repair::emit_run_line(&format!(
+            "legalize: mint t{} arms=[{}] provenance=[{}]",
+            terminal.terminal_id,
+            terminal
+                .own_chosen_arms
+                .iter()
+                .map(|key| format!("slot{}g{}", key.slot(), key.generation()))
+                .collect::<Vec<_>>()
+                .join(","),
+            terminal
+                .own_chosen_arms
+                .iter()
+                .map(|key| {
+                    forest.member(*key).map_or_else(
+                        || "absent".to_owned(),
+                        |member| format!("{:?}", member.owner()),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+    }
+    crate::legalization::LegalizationAbandon::Condemned {
+        learned,
+        own_arm_terminals,
+        cascade_victims,
+    }
+}
+
 /// SPEC-A4 §A.3 — the bracing fixed point, factored for context recovery. This
 /// is the stage task #47 turns on: the Giant Bat's
 /// `Brace(ClearanceViolation(1))` is a whole model today and becomes one
@@ -4834,7 +5034,19 @@ fn brace_state(
             // transparent error, and so the retry loop Stage B adds can match
             // one arm rather than parse a string.
             Err(BraceError::SealedRoutedTerminalCondemned(class)) => {
-                return Err(SupportBraceError::SealedRoutedTerminalCondemned(class));
+                // **Stage B — the mint.** The class says WHICH terminals had
+                // their own chosen arm condemned; the routing cadence's sealed
+                // record says WHAT each of them chose and in which world. The
+                // two are joined here, at the only point where both exist.
+                let abandon = mint_no_goods(
+                    &state.routed.controller,
+                    state.routed.initial.forest(),
+                    &class,
+                );
+                return Err(SupportBraceError::SealedRoutedTerminalCondemned(
+                    class,
+                    Box::new(abandon),
+                ));
             }
             Err(BraceError::SealedSweepLearnedNothing(class)) => {
                 return Err(SupportBraceError::SealedSweepLearnedNothing(class));
@@ -6065,6 +6277,20 @@ pub(crate) enum SupportRoutingError {
     GeometryDigestMismatch,
     #[error("sealed CCO routing found stale initial-forest authority")]
     InitialAuthorityMismatch,
+    /// **Stage B.** Every arm terminal {terminal} can still take at its current
+    /// context carries a steering no-good, so the pass stopped rather than
+    /// letting a winnerless terminal retire on a count of them. The controller
+    /// opens a confirmation round: every one of those arms re-measured under
+    /// the frozen set, one per pass, in the tournament's own order.
+    ///
+    /// It is an error rather than a named termination because the routing pass
+    /// it stopped holds a half-grown forest that no caller may reach by
+    /// ignoring a field — the same reason Stage A's two refusals are errors.
+    #[error(
+        "sealed CCO routing terminal {terminal} has a steering no-good for every arm it can \
+         still take; the pass stops so a confirmation round can re-measure them"
+    )]
+    SteeringSpent { terminal: u32 },
     #[error(
         "sealed CCO routing terminal {terminal} is absent or mismatched across the physical namespace"
     )]
@@ -6349,8 +6575,17 @@ pub(crate) enum SupportBraceError {
     /// terminal pair the accounting forbids. The whole disturbed class travels
     /// with it — every affected terminal, its own arms, its cascade carriers,
     /// and every measured refusal in millimetres.
+    ///
+    /// **Stage B adds the second payload**: the same refusal read as an
+    /// instruction for the next pass. The class is the physics; the abandon is
+    /// what the controller does about it. They are separate fields because a
+    /// caller that only reports has no business reading the steering, and a
+    /// caller that steers must not be able to invent the physics.
     #[error("{0}")]
-    SealedRoutedTerminalCondemned(Box<crate::brace::SealedCondemnationClass>),
+    SealedRoutedTerminalCondemned(
+        Box<crate::brace::SealedCondemnationClass>,
+        Box<crate::legalization::LegalizationAbandon>,
+    ),
     /// **Stage A.** The bracing pass would have disturbed sealed terminals, but
     /// no sealed-`Routed` terminal's own chosen arm was condemned, so the pass
     /// has learned nothing it could steer with.
