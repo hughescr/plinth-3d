@@ -1750,12 +1750,11 @@ impl CcoController {
             rows.push(finalize_transcript_row(
                 build.forest(),
                 evidence,
-                &record.disposition,
+                record,
                 cadence_index,
                 plan_digest,
                 loads.digest(),
                 geometry_digest,
-                record.candidates_ruled_out,
             )?);
         }
         let ordered_disposition_digest = transcript_rows_digest(&rows);
@@ -2703,13 +2702,22 @@ fn expected_initial_cadence(build: &InitialContactBuild) -> Result<Vec<u32>, Cco
 fn finalize_transcript_row(
     forest: &Forest,
     initial: &InitialTerminalEvidence,
-    disposition: &TerminalDisposition,
+    // The whole cadence record, rather than its disposition plus a loose
+    // counter. The row IS the record, sealed: handing over the two halves
+    // separately would let a caller pair one terminal's disposition with
+    // another's count, and it pushed this signature past the argument lint for
+    // no gain in clarity.
+    record: &TerminalCadenceRecord,
     cadence_index: usize,
     plan_digest: u64,
     loads_digest: u64,
     geometry_digest: u64,
-    candidates_ruled_out: usize,
 ) -> Result<FinalizedCcoTranscriptRow, CcoError> {
+    let TerminalCadenceRecord {
+        disposition,
+        candidates_ruled_out,
+    } = record;
+    let candidates_ruled_out = *candidates_ruled_out;
     let terminal = initial.terminal;
     let physical_contact_id = u64::from(terminal);
     let ledger = forest
