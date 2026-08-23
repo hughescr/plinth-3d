@@ -5692,6 +5692,15 @@ mod tests {
     /// non-convex surface — the Deinonychus's terminal 113 is the real
     /// witness, recorded in `EMISSION-CANARY-LEDGER.md`. What was defective
     /// was the DISCLOSURE, and the disclosure is what this pins.
+    ///
+    /// **The coverage gap this leaves, stated rather than left for a reader to
+    /// find.** `transit_illegal.insert(...)` in `exact_clearance_rows_detailed`
+    /// has no unit witness for its TRUE branch. An always-true defect goes red
+    /// in `the_final_pass_discloses_…`, which asserts its own fixture is a
+    /// distance refusal; an always-FALSE defect — the flag never set, every
+    /// transit sentinel printed as a gap again — is caught only by a real model
+    /// run, because no fixture on a convex box can reach that path. Closing it
+    /// needs a seated arm on a non-convex fixture, and that is worth doing.
     #[test]
     fn an_axis_transit_refusal_is_disclosed_as_a_sentinel_and_never_as_a_measured_gap() {
         let member = MemberKey::transit_test_fixture(401, 0);
