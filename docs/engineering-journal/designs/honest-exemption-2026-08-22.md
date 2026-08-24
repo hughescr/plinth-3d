@@ -878,11 +878,33 @@ clearance = (r_final + STANDOFF_MM + s) − (r_max + demanded_gap)
 ```
 
 with `s` the tessellation slack — strictly positive, because a face that straddles
-the band boundary is admitted to the band whole. At FINAL that is `+0.300 + s`;
-at PLACEMENT it is `+s` exactly. **The placement margin is tessellation slack and
-nothing else.** MEASURED at 0.25 mm triangles: `s` = 0.050 mm. It shrinks toward
-zero as a mesh is refined. It does not go negative, but it is thin, and that is
-the honest statement of what the ruling buys.
+the band boundary is admitted to the band whole, so every RETAINED face is
+strictly farther than the band from the axis. At FINAL that is `+0.300 + s`; at
+PLACEMENT it is `+s` exactly. **The placement margin is tessellation slack and
+nothing else.**
+
+**MEASURED, and the number is much smaller than the first rung suggests.** On the
+`fine_seat_slab` fixture (0.25 mm triangles, 2,182 faces), across the six-rung
+ladder `r_max` = 0.35 → 1.00 mm, by
+`brace::a_seated_arm_that_grows_is_re_sized_to_its_final_footprint_and_stays_legal`:
+
+| `r_max` mm | 0.35 | 0.40 | 0.50 | 0.65 | 0.80 | 1.00 |
+| --- | --- | --- | --- | --- | --- | --- |
+| zone faces | 116 | 128 | 154 | 200 | 232 | 304 |
+| FINAL mm | +0.350 | +0.331 | +0.318 | +0.325 | +0.314 | +0.301 |
+| PLACEMENT | LEGAL | LEGAL | LEGAL | LEGAL | LEGAL | LEGAL |
+| PLACEMENT margin mm (INFERRED) | 0.0500 | 0.0308 | 0.0180 | 0.0248 | 0.0142 | **0.0008** |
+
+`s` does not fall smoothly — it wobbles, because it is mesh aliasing rather than a
+quantity — but on this fixture it ranges from 0.050 mm down to **0.0008 mm**,
+0.8 micrometres. So the honest statement is: **after the re-size the placement
+tier stops refusing a grown arm, but the margin it keeps is whatever the
+tessellation happens to give, and that can be a fraction of a micron.** Quoting
+the 0.050 mm first rung alone would be the favourable reading. The SIGN is
+structural; the SIZE is not a guarantee of anything.
+
+For contrast, the same ladder with no re-size refuses four of the six rungs at
+PLACEMENT and two at FINAL — the table further down.
 
 The rest of this subsection is the measurement that RAISED F1, kept because it is
 the before-picture the flipped test's sabotage half still reproduces.
@@ -999,3 +1021,99 @@ fixture must land the clearance in [0, 0.1)" — true, but it names the fixture
 when the defect is the production fork. The condemnation now fails first and
 names itself; the admission-window check stays as the non-vacuity guard it was
 always meant to be.
+
+---
+
+## 11.10 The re-size, AS LANDED (Craig's ruling, 2026-08-23)
+
+`seat_zone::refreeze_resized_seat_zones` is the ONE recompute. It scans the
+forests it is handed, finds every seated member whose stored `band_radius_mm`
+no longer equals `r_contact + STANDOFF_MM`, and re-cuts exactly those in ONE
+`faces_near_segments_batch` call for the whole slice — however many forests and
+however many members that is.
+
+`SeatZoneRecord` is what makes that possible. It carries the frozen zone plus the
+two facts a re-size needs and a member cannot supply: the seat's own face ID (the
+contact's identity on the mesh, resolved once by the creation site's projection —
+re-projecting could walk the seat onto a different face and quietly redefine
+which contact it is) and the band radius the zone was cut at. The AXIS is
+deliberately not stored: the re-size reads `p0`/`p1` off the live member, which is
+the same axis every grading site reads, so a stored copy could only go stale.
+
+**Why the change test is `!=` and not a tolerance.** `band_radius_mm` is a value
+this module itself wrote from `r_contact + STANDOFF_MM`. Asking whether the same
+arithmetic on today's radius yields the same bits is a comparison, not a
+threshold, and it introduces no number. Gating on the sizing plan's own `changed`
+list instead would inherit that list's `TRANSIENT_TIE_TOLERANCE_MM` and would
+miss a sub-tolerance drift that `set_radii` nevertheless wrote.
+
+### The four call sites — every one between a sizing pass and the next grading pass
+
+| # | flow | after | before | batch |
+| --- | --- | --- | --- | --- |
+| 1 | `cco::grow_terminal_inner` | `evaluate_descriptors` + the anchor-foot retain — every candidate applied AND sized | `clearance_survival` (PLACEMENT) | ONE call across EVERY candidate forest in the tournament. Covers the model anchor (`size_tapered_without_tree_fanin`) and the bifurcation upper half (`size_bifurcation_candidate`) in the same call. `ClearanceRow` snapshots the zone, so touched candidates' rows are re-read — pure CPU, no native call. |
+| 2 | `cco::grow_terminal_inner`, commit path | `apply_and_size` on the LIVE forest | `forest.commit` | ZERO native calls. The winner's candidate forest already holds the re-cut record and the digests just proved both forests have the same live members under the same keys, so the commit COPIES rather than recomputing — bit-identical by construction, the same argument `apply_model_anchor` makes for carrying the zone on the descriptor. The zone table is invisible to `Forest::digest` (pinned by `freezing_a_seat_zone_does_not_move_the_forest_digest`), which is what lets the equality check run first. |
+| 3 | `brace::brace_fixed_point_current_parity` | `apply_resize` | `exact_clearance_negatives` (FINAL) | ONE call per controller iteration — there is one sizing pass per iteration. |
+| 4 | `brace::pending_triggers_after_trial` | the trial `apply_resize` | the trial `exact_clearance_rows` | ONE call, on the batch boundary this function already declares; the count is now reported as `seat_zone_refreeze_batches` and pinned at 1. Missing this site would grade the trial against pre-resize bands, leave the trigger unrelieved, and place a rung nobody needed. |
+| 5 | `rewire::validate_changed_geometry` | every caller's sizing (`try_slide`'s junction sizing, `reconcile_ancestors`' path walk) | the PLACEMENT screen | ONE call. `after` became `&mut` for this and nothing else. |
+
+### The two flows that CANNOT resize a seated member — proved, not instrumented
+
+Neither gets its own call site, and neither is dead code: both are covered by the
+same uniform scan wherever it runs, so the scan is what would notice if either
+stopped being true.
+
+* **Model rungs.** `brace::append_candidate` mints them with `Forest::add_brace`,
+  which puts them in `state.braces`. `Forest::live_tree_members` filters that set
+  out (`forest.rs:743-748`). `transient::postorder` walks only
+  `live_tree_members` (`transient.rs:689-714`), and `postorder` is the only thing
+  `resize_forest_current_parity` iterates. A rung is never reached.
+* **Stubs.** `postorder` additionally skips `MemberKind::Stub` when pushing to its
+  order (`transient.rs:702-707`), and while a stub is a registered terminal
+  `Forest::set_radii` refuses it outright via
+  `require_terminal_mutation_allowed`. Two independent guards.
+
+### Why the ruled behaviour is structural rather than fixture-luck
+
+Every production sizer leaves the CONTACT end at least as fat as the other end:
+
+* `legacy_compat::size_live_current_support_member` clamps
+  `rootward = required.max(terminal)` (`legacy_compat.rs:116`), and that is what
+  `cco::size_tapered_without_tree_fanin` returns through
+  `o10_uniform_radius_for_span`;
+* `transient::resize_forest_current_parity`'s non-uniform branch does the same
+  (`rootward = max(required, old_terminal)`), and its uniform branch writes both
+  ends equal;
+* `cco::uniformly_size_ancestor_path` writes both ends equal.
+
+The seated production families declare `Rootward` (CCO anchor, bifurcation upper
+half, model rung) or are never resized at all (`Terminalward` stubs). So
+`r_contact = r_max` for every seated member a re-size can touch, and the graded
+clearance after a re-size is `STANDOFF_MM − demanded_gap + s`, independent of the
+radius. Were a future family to end up thinner at the contact end than at the far
+end, the ruling would leave it a residual self-refusal — the band would be its
+true footprint at the seat, which is the ruling, but `r_max` would exceed it.
+Nothing in the tree does that today; the shape of the exposure is recorded here so
+it is a known edge rather than a surprise.
+
+### Test estate
+
+* `brace::a_seated_arm_that_grows_is_re_sized_to_its_final_footprint_and_stays_legal`
+  — the ruling, through the PRODUCTION helper (not a hand-rolled re-freeze) and
+  both production grading sites. Non-vacuity: the un-grown rung keeps exactly its
+  created patch and every grown rung claims a strictly larger one, which is what
+  replaces the retired pin's own "the ladder must span LEGAL to REFUSED" guard.
+* `brace::a_seat_zone_that_was_not_re_sized_after_the_growth_refuses_the_arm_again`
+  — the sabotage `a_sizing_pass_whose_seat_zones_were_never_re_cut`, and the
+  place F1's original measurement is KEPT rather than deleted.
+* `brace::shared_trigger_relief_uses_one_resize_and_one_clearance_batch` now also
+  pins `seat_zone_refreeze_batches == 1`.
+* `forest::a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius`
+  — narrowed, not weakened: the side table is PASSIVE, so a re-size has to be
+  asked for, and it must not move the band radius either.
+
+**RED RUN, PERFORMED.** With `refreeze_resized_seat_zones` neutered to return
+`Ok(0)`, the new pin fails twice over: first on its re-cut count (`0 of 6 rungs
+re-cut`), and with that guard lifted, on the clearances themselves — reproducing
+the pre-ruling ladder `[+0.350, +0.300, +0.200, +0.050, −0.100, −0.300]` exactly,
+which is F1's original table row for row.
