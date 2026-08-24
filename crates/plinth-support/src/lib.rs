@@ -161,7 +161,8 @@ pub use coverage_measurement::{
     CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
 };
 pub use coverage_repair::{
-    repair_step_outcome, CoverageRepairStep, CoverageRepairStepWire, NoncoverageComponent,
+    repair_step_outcome, ConfirmationRoundDisclosure, ConfirmationRoundOutcome, CoverageRepairStep,
+    CoverageRepairStepWire, LegalizationDisclosure, LegalizationDisturbance, NoncoverageComponent,
     NoncoverageVector, OwnContactNoWinnerEvidence, OwnContactNoWinnerStage, RepairGateVector,
     RepairRunReport, RepairStepOutcome, RouteDelta, StageClock,
 };

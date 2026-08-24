@@ -1476,6 +1476,127 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Stage D — BOTH evidence files disclose the rescue, from one record.**
+    ///
+    /// Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+    /// §4 Stage D. *"The no-good ledger, the pass count and the
+    /// confirmation-round record join the coverage refusal sidecar."*
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The two files answer opposite questions — "this model sealed, and here
+    /// is what it cost" and "this model was refused, and here is why" — and a
+    /// rescue is a fact about the RUN, so a reader must find it on whichever
+    /// file the run produced. Both carry the same `RepairRunReport` verbatim,
+    /// which is why one field reaches both; a later change that hoisted the
+    /// record onto only one body would pass every other test in this module
+    /// and lose the refusal half silently.
+    ///
+    /// The schema tag is asserted UNMOVED on purpose. The field is additive and
+    /// no existing field changed meaning, which is this file's own versioning
+    /// rule for `.v1` versus the refusal sidecar's `.v2`.
+    #[test]
+    fn stage_d_puts_the_legalization_record_on_both_the_sealed_ledger_and_the_refusal_sidecar() {
+        let dir = std::env::temp_dir().join(format!(
+            "plinth-coverage-evidence-legalization-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let target = dir.join("fixture.chitubox");
+        let legalization = plinth_support::LegalizationDisclosure {
+            passes: 6,
+            no_goods: 1,
+            no_goods_by_terminal: std::collections::BTreeMap::from([(113_u32, 1_usize)]),
+            confirmation_rounds: 1,
+            voided_rounds: 0,
+            round_arms_measured: 2,
+            disturbances: vec![plinth_support::LegalizationDisturbance {
+                pass: 2,
+                own_arm_terminals: vec![113],
+                cascade_victims: Vec::new(),
+                no_goods_learned: 1,
+                round_arm_measured: false,
+                voided_a_round: false,
+                steering_spent_terminal: None,
+            }],
+            rounds: vec![plinth_support::ConfirmationRoundDisclosure {
+                terminal_id: 113,
+                opened_at_pass: 3,
+                arms_measured: 2,
+                no_goods_at_open: 1,
+                outcome: plinth_support::ConfirmationRoundOutcome::TerminalUnroutedAtLowering,
+            }],
+        };
+        let report = plinth_support::RepairRunReport {
+            legalization: legalization.clone(),
+            ..plinth_support::RepairRunReport::default()
+        };
+        let model = ModelId::new("fixture");
+
+        // The SEALED half — the model reached its artifact.
+        let ledger = persist_sealed_repair_ledger(&model, &target, &report, &[], &[]);
+        assert_eq!(ledger.write_error, None, "{ledger:?}");
+        let sealed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ledger.path).expect("ledger written"))
+                .expect("valid json");
+        assert_eq!(
+            sealed["schema"], REPAIR_LEDGER_SCHEMA,
+            "an additive field changes no existing field's meaning, so the tag stays put"
+        );
+        let sealed_report: plinth_support::RepairRunReport =
+            serde_json::from_value(sealed["report"].clone()).expect("report round-trips");
+        assert_eq!(sealed_report.legalization, legalization);
+        assert_eq!(sealed["report"]["legalization"]["passes"], 6);
+        assert_eq!(
+            sealed["report"]["legalization"]["rounds"][0]["arms_measured"], 2,
+            "the round LENGTH — how many arms it drove — must be on the shipped artifact's \
+             own evidence file"
+        );
+        assert_eq!(
+            sealed["report"]["legalization"]["rounds"][0]["outcome"],
+            "terminal_unrouted_at_lowering"
+        );
+        assert_eq!(
+            sealed["report"]["legalization"]["disturbances"][0]["own_arm_terminals"][0], 113,
+            "which terminal was disturbed"
+        );
+
+        // The REFUSED half — the same record, on the other file.
+        let refusal = CoverageClosureRefusal {
+            attempts: 0,
+            reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                candidates_tried: 0,
+                best_remaining_score_mm2: 0.0,
+            },
+            islands: Vec::new(),
+            steps: Vec::new(),
+            repair: Some(report),
+        };
+        let mesh = RenderMesh {
+            verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            tris: vec![[0, 1, 2]],
+        };
+        let evidence = persist_closure_refusal(&model, &target, &mesh, None, &refusal);
+        assert!(evidence.write_error.is_none(), "{:?}", evidence.write_error);
+        let refused: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&evidence.sidecar_path).expect("sidecar written"),
+        )
+        .expect("valid json");
+        let refused_closure: CoverageClosureRefusal =
+            serde_json::from_value(refused["closure"].clone()).expect("closure round-trips");
+        assert_eq!(
+            refused_closure
+                .repair
+                .expect("the refusal carries the report")
+                .legalization,
+            legalization,
+            "a refused model's sidecar must disclose the same rescue an emitted model's \
+             ledger does"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_svg_renderer_is_byte_deterministic_and_highlights_exactly_the_islands_faces() {
         let mesh = RenderMesh {

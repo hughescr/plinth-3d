@@ -1509,9 +1509,82 @@ struct LegalizationTally {
     /// earn anything. What a retirement rests on is the round's own sealed
     /// rows, never this counter.
     round_arms_measured: usize,
+    /// **Stage D.** One row per ABANDONED pass, in pass order, and one row per
+    /// round opened, in open order. They are the same facts the lines above
+    /// stream, retained so they can reach the evidence sidecar instead of
+    /// living only in a log an operator has to have kept.
+    disturbances: Vec<crate::coverage_repair::LegalizationDisturbance>,
+    rounds: Vec<OpenRoundRecord>,
+    /// Index into `rounds` of the round that is open right now, if any. One
+    /// round at a time is §1.3's own rule — the steering set is frozen for a
+    /// round's duration — so this is an index and not a set.
+    open_round: Option<usize>,
+}
+
+/// A round's Stage D row while it is still being driven. `outcome` is unknown
+/// until the round is voided or a pass lowers, and an `Option` is the honest
+/// way to hold "not decided yet".
+#[derive(Clone, Debug)]
+struct OpenRoundRecord {
+    terminal_id: u32,
+    opened_at_pass: usize,
+    no_goods_at_open: usize,
+    arms_measured: usize,
+    outcome: Option<crate::coverage_repair::ConfirmationRoundOutcome>,
 }
 
 impl LegalizationTally {
+    /// **Stage D — the loop's own record, projected onto the wire.**
+    ///
+    /// `unrouted_no_winner` is read off the LOWERED run's sealed transcript and
+    /// is the only outside input: it decides nothing, it names where a round's
+    /// terminal stood when the run lowered. A round that was voided already
+    /// carries its outcome and this cannot overwrite it.
+    fn disclose(
+        &self,
+        steering: &crate::legalization::LegalizationSteering,
+        unrouted_no_winner: &BTreeSet<u32>,
+    ) -> crate::coverage_repair::LegalizationDisclosure {
+        use crate::coverage_repair::ConfirmationRoundOutcome;
+        crate::coverage_repair::LegalizationDisclosure {
+            passes: self.passes,
+            no_goods: steering.len(),
+            no_goods_by_terminal: steering.counts_by_terminal(),
+            confirmation_rounds: self.confirmation_rounds,
+            voided_rounds: self.voided_rounds,
+            round_arms_measured: self.round_arms_measured,
+            disturbances: self.disturbances.clone(),
+            rounds: self
+                .rounds
+                .iter()
+                .map(
+                    |round| crate::coverage_repair::ConfirmationRoundDisclosure {
+                        terminal_id: round.terminal_id,
+                        opened_at_pass: round.opened_at_pass,
+                        arms_measured: round.arms_measured,
+                        no_goods_at_open: round.no_goods_at_open,
+                        outcome: round.outcome.unwrap_or(
+                            if unrouted_no_winner.contains(&round.terminal_id) {
+                                ConfirmationRoundOutcome::TerminalUnroutedAtLowering
+                            } else {
+                                ConfirmationRoundOutcome::TerminalRoutedAtLowering
+                            },
+                        ),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    /// Mark the open round voided and close its Stage D row.
+    fn void_open_round(&mut self) {
+        self.voided_rounds += 1;
+        if let Some(index) = self.open_round.take() {
+            self.rounds[index].outcome =
+                Some(crate::coverage_repair::ConfirmationRoundOutcome::Voided);
+        }
+    }
+
     fn render(&self, steering: &crate::legalization::LegalizationSteering) -> String {
         let per_terminal = steering
             .counts_by_terminal()
@@ -1560,7 +1633,12 @@ impl LegalizationTally {
                 measured,
             } => {
                 let round_terminal = steering.round().map(|round| round.terminal_id);
-                let mut grew = false;
+                // **A COUNT and not a flag**, because Stage D's row reports how
+                // many no-goods this pass added that were not already in the
+                // set. The abandon rule reads the same value the flag carried —
+                // `learned_count > 0` is exactly the old `grew` — so the rule
+                // is unchanged and the disclosure is not a second tally.
+                let mut learned_count = 0_usize;
                 let mut round_advanced = false;
                 let mut voided = false;
                 for (no_good, physics) in learned.into_iter().zip(measured) {
@@ -1579,6 +1657,14 @@ impl LegalizationTally {
                             .push(physics.at_rank(round.arm_rank, no_good.arm()));
                         round.arm_rank += 1;
                         self.round_arms_measured += 1;
+                        // **Stage D — the round LENGTH, read off the round's own
+                        // rows.** Not a second tally: the round is the source,
+                        // and this row carries what it holds so the record
+                        // survives the round being dropped.
+                        let measured_now = round.measured.len();
+                        if let Some(index) = self.open_round {
+                            self.rounds[index].arms_measured = measured_now;
+                        }
                         round_advanced = true;
                         crate::coverage_repair::emit_run_line(&format!(
                             "legalize: round t{} measured {} — advancing to rank {}",
@@ -1597,25 +1683,40 @@ impl LegalizationTally {
                     // it earned nothing, and it is re-entered later against the
                     // new set.
                     voided |= round_terminal.is_some();
-                    grew |= steering.learn(no_good);
+                    if steering.learn(no_good) {
+                        learned_count += 1;
+                    }
                 }
                 if voided {
                     let round = steering
                         .round()
                         .map(|round| (round.terminal_id, round.arm_rank, round.measured.len()));
-                    self.voided_rounds += 1;
+                    self.void_open_round();
                     steering.set_round(None);
                     crate::coverage_repair::emit_run_line(&format!(
                         "legalize: round VOID {round:?} — another terminal's own arm was \
                          condemned during it; it retires nothing and is re-entered later",
                     ));
                 }
+                // **Stage D — which terminal was disturbed, per pass.** Written
+                // AFTER the abandon rule's inputs are known and BEFORE the rule
+                // itself, so a pass that refuses by name below leaves no row for
+                // a pass that never continued.
+                let disturbance = crate::coverage_repair::LegalizationDisturbance {
+                    pass: self.passes,
+                    own_arm_terminals: own_arm_terminals.clone(),
+                    cascade_victims: cascade_victims.clone(),
+                    no_goods_learned: learned_count,
+                    round_arm_measured: round_advanced,
+                    voided_a_round: voided,
+                    steering_spent_terminal: None,
+                };
                 // **The abandon rule, and a round advancing IS progress.** A
                 // round pass measures an arm nobody had measured in this world,
                 // and its rank strictly increases, so the loop is no less
                 // bounded than a steering pass that grows the set. What is
                 // forbidden is a pass that did neither.
-                if !grew && !round_advanced && !voided {
+                if learned_count == 0 && !round_advanced && !voided {
                     return Err(SupportRunError::Failed {
                         phase: SupportRunPhase::Brace,
                         detail: format!(
@@ -1627,6 +1728,7 @@ impl LegalizationTally {
                         ),
                     });
                 }
+                self.disturbances.push(disturbance);
                 Ok(())
             }
             crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id } => {
@@ -1637,6 +1739,7 @@ impl LegalizationTally {
                 // tournament's own order, and the retirement earned only when
                 // the last one has been measured in the world it is deciding
                 // about.
+                let mut displaced_a_round = false;
                 if let Some(open) = steering.round() {
                     if open.terminal_id == terminal_id {
                         // The round is open for this very terminal and it still
@@ -1658,14 +1761,39 @@ impl LegalizationTally {
                     // A second terminal is spent while another's round runs.
                     // One round at a time (§1.3 freezes the set for its
                     // duration), so the open one is void and this one opens.
-                    self.voided_rounds += 1;
                     crate::coverage_repair::emit_run_line(&format!(
                         "legalize: round VOID t{} at rank {} — terminal {terminal_id} is also \
                          spent and one round holds the set at a time",
                         open.terminal_id, open.arm_rank,
                     ));
+                    displaced_a_round = true;
+                }
+                if displaced_a_round {
+                    self.void_open_round();
                 }
                 self.confirmation_rounds += 1;
+                // **Stage D — the round row opens with the round.** The
+                // no-good count is read HERE and not at the end because §1.3
+                // freezes the set for the round's duration: this is the set the
+                // round measured against.
+                self.open_round = Some(self.rounds.len());
+                self.rounds.push(OpenRoundRecord {
+                    terminal_id,
+                    opened_at_pass: self.passes,
+                    no_goods_at_open: steering.len(),
+                    arms_measured: 0,
+                    outcome: None,
+                });
+                self.disturbances
+                    .push(crate::coverage_repair::LegalizationDisturbance {
+                        pass: self.passes,
+                        own_arm_terminals: Vec::new(),
+                        cascade_victims: Vec::new(),
+                        no_goods_learned: 0,
+                        round_arm_measured: false,
+                        voided_a_round: displaced_a_round,
+                        steering_spent_terminal: Some(terminal_id),
+                    });
                 steering.set_round(Some(crate::legalization::ConfirmationRound {
                     terminal_id,
                     arm_rank: 0,
@@ -1946,6 +2074,14 @@ pub fn run_support<'a>(
         }
     };
     crate::coverage_repair::emit_run_line(&format!("legalize: {}", legalization.render(&steering)));
+    // **Stage D — the record, taken once, at the one point every later path
+    // shares.** The loop is over, so the tally is final; the run has lowered,
+    // so its sealed transcript can say where a round's terminal ended. Every
+    // `RepairRunReport` this function builds below carries this same value, so
+    // an emitted artifact and a coverage refusal disclose the same rescue.
+    // Disclosure only: no branch below reads a field of it.
+    let legalization_disclosure =
+        legalization.disclose(&steering, &attempt_zero.unrouted_no_winner_terminals());
     stage_clock.entering("CoverageMeasurement");
     let mut measured = match measure_for_controller(&attempt_zero, coverage_request) {
         Ok(measured) => measured,
@@ -1954,7 +2090,10 @@ pub fn run_support<'a>(
             // before a single trial, so the report is all zeros — and printing
             // a line of zeros is the point: an operator sees that the repair
             // loop was never entered rather than seeing nothing at all.
-            let report = crate::coverage_repair::RepairRunReport::default();
+            let report = crate::coverage_repair::RepairRunReport {
+                legalization: legalization_disclosure,
+                ..Default::default()
+            };
             report.log_summary();
             return Err(SupportRunError::CoverageClosure(Box::new(
                 crate::coverage_closure::CoverageClosureRefusal {
@@ -1975,7 +2114,10 @@ pub fn run_support<'a>(
         // never enters a transaction, so no rule in §A, §B, §C, §D or §E can
         // reach it and its digest is bit-identical to the pre-controller
         // engine's by construction rather than by luck.
-        let report = crate::coverage_repair::RepairRunReport::default();
+        let report = crate::coverage_repair::RepairRunReport {
+            legalization: legalization_disclosure,
+            ..Default::default()
+        };
         report.log_summary();
         return Ok(seal_authority(
             *attempt_zero,
@@ -1999,7 +2141,7 @@ pub fn run_support<'a>(
     let mut accepted_ownerless = ownerless_at_attempt_zero;
     let mut committed = 0_usize;
 
-    let mut ledger = RepairLedger::new(radius_mm);
+    let mut ledger = RepairLedger::new(radius_mm, legalization_disclosure);
     // Rule N3's serve-set memory: the route's own uncovered area, by bits, at
     // the moment it was last given a trial. A commit moves the area, which puts
     // the route back in the serve set — that is "since its own measured
@@ -2381,9 +2523,19 @@ struct RepairLedger {
 }
 
 impl RepairLedger {
-    fn new(radius_mm: f64) -> Self {
+    /// **Stage D — the legalization record is a PASSENGER on this report.**
+    ///
+    /// It is taken once, before the first trial, and it is never written again:
+    /// nothing in the repair loop can change what the attempt-0 loop already
+    /// did. Passing it at construction is what makes that true by shape rather
+    /// than by discipline, and it is why every refusal this ledger builds
+    /// carries the same record the sealed authority would have.
+    fn new(radius_mm: f64, legalization: crate::coverage_repair::LegalizationDisclosure) -> Self {
         Self {
-            report: crate::coverage_repair::RepairRunReport::default(),
+            report: crate::coverage_repair::RepairRunReport {
+                legalization,
+                ..Default::default()
+            },
             ledgered: BTreeSet::new(),
             discs: crate::coverage_closure::DiversityDiscs::new(radius_mm),
             demoted: BTreeSet::new(),
@@ -6021,6 +6173,33 @@ impl<'a> LoweredSupportRun<'a> {
             .accepted
             .ownerless_faces
             .len()
+    }
+
+    /// **Stage D — every terminal this run's SEALED transcript retired with no
+    /// winner.**
+    ///
+    /// One pass over the finalized rows, comparing the disposition kind the
+    /// cadence already sealed; the same read [`Self::noncoverage_vector`] makes
+    /// to count them, keeping the ids instead of a total. It is a batch read of
+    /// a list the run already holds — no geometry call, no per-terminal
+    /// lookup, and nothing derived.
+    ///
+    /// **It names a place, not a cause.** `UnroutedNoWinner` has four sealed
+    /// causes and only one of them is a confirmation round; which one applies
+    /// to a given terminal is inside its own `NoWinnerEvidence`, where design
+    /// §1.3 put it. Stage D's round row uses this to say where the round's
+    /// terminal stood at lowering and claims nothing further.
+    fn unrouted_no_winner_terminals(&self) -> BTreeSet<u32> {
+        self.structured
+            .braced
+            .rewired
+            .routed
+            .transcript
+            .rows()
+            .iter()
+            .filter(|row| row.kind() == crate::cco::FinalizedDispositionKind::UnroutedNoWinner)
+            .map(crate::cco::FinalizedCcoTranscriptRow::terminal_id)
+            .collect()
     }
 
     /// **What the CCO did with the ONE contact a trial appended.**
@@ -11744,6 +11923,343 @@ mod tests {
             tally.round_arms_measured, 0,
             "a voided round measured nothing that counts; it is paid for and earns nothing"
         );
+    }
+
+    /// **Stage D — a run that never legalized discloses ZEROS, not silence.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The attempt-0 loop runs on every model, so `passes` is at least 1 on
+    /// every live run. That is the only thing separating "this model needed no
+    /// rescue" from "this file was written before Stage D existed", where
+    /// `#[serde(default)]` supplies a 0. Writing nothing for the quiet model,
+    /// or normalizing the 0 away, destroys the discriminator — and this is the
+    /// same rule `persist_sealed_repair_ledger` already follows when it writes
+    /// a ledger of zeros rather than no file.
+    #[test]
+    fn a_run_that_never_legalized_discloses_one_pass_and_no_rounds() {
+        let steering = crate::legalization::LegalizationSteering::default();
+        let tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        let disclosure = tally.disclose(&steering, &BTreeSet::new());
+        assert_eq!(disclosure.passes, 1, "the attempt-0 loop always runs once");
+        assert_eq!(disclosure.no_goods, 0);
+        assert!(disclosure.no_goods_by_terminal.is_empty());
+        assert_eq!(disclosure.confirmation_rounds, 0);
+        assert_eq!(disclosure.round_arms_measured, 0);
+        assert!(disclosure.disturbances.is_empty());
+        assert!(disclosure.rounds.is_empty());
+        assert_ne!(
+            disclosure,
+            crate::coverage_repair::LegalizationDisclosure::default(),
+            "a live run must be distinguishable from a file that predates Stage D, and \
+             `passes` is the whole of that distinction"
+        );
+    }
+
+    /// **Stage D — the round row carries the terminal, the length and where
+    /// that terminal ended, and it is built through the same `apply` the loop
+    /// drives.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// Design §4 Stage D asks the sidecar to disclose *which terminal was
+    /// disturbed, the round length, and the outcome*. The length is the number
+    /// of arms the round actually drove — read off the round's own `measured`
+    /// rows so there is one source, not a parallel counter that agrees today.
+    /// The outcome is decided by a read of the LOWERED run's sealed transcript,
+    /// which is why both readings are asserted here from the same tally.
+    #[test]
+    fn the_round_row_carries_the_terminal_the_length_and_where_it_ended() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 3,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
+            )
+            .expect("a spent steering opens a round");
+        tally.passes = 4;
+        for rank in 0..2 {
+            tally
+                .apply(
+                    &mut steering,
+                    crate::legalization::LegalizationAbandon::Condemned {
+                        learned: vec![crate::legalization::NoGood::new(
+                            113,
+                            prefix_fixture(40 + rank),
+                            crate::legalization::ArmIdentity::live(
+                                crate::cco::CandidateFamily::ModelAnchor,
+                                usize::try_from(rank).expect("rank fits"),
+                                2.5,
+                                1,
+                            ),
+                        )],
+                        own_arm_terminals: vec![113],
+                        cascade_victims: Vec::new(),
+                        measured: vec![crate::legalization::ArmRefusalPhysics {
+                            gap_mm: -0.05,
+                            distance_clearance_mm: 0.280_044,
+                            axis_transit_illegal: true,
+                            terminal_radius_mm: 0.372_136,
+                            rootward_radius_mm: 0.372_136,
+                        }],
+                    },
+                )
+                .expect("a round measuring its own arm is progress");
+            tally.passes += 1;
+        }
+
+        let retired = tally.disclose(&steering, &BTreeSet::from([113]));
+        assert_eq!(retired.rounds.len(), 1, "one round opened, one row");
+        let row = &retired.rounds[0];
+        assert_eq!(row.terminal_id, 113);
+        assert_eq!(row.opened_at_pass, 3);
+        assert_eq!(
+            row.arms_measured, 2,
+            "the round LENGTH is the arms it drove, read off the round's own rows"
+        );
+        assert_eq!(
+            row.no_goods_at_open, 0,
+            "the set the round measured against is the one frozen when it opened"
+        );
+        assert_eq!(
+            row.outcome,
+            crate::coverage_repair::ConfirmationRoundOutcome::TerminalUnroutedAtLowering
+        );
+        assert_eq!(retired.round_arms_measured, 2);
+        assert_eq!(
+            retired.no_goods, 0,
+            "a round's own refusals never enter the steering set"
+        );
+
+        let routed = tally.disclose(&steering, &BTreeSet::new());
+        assert_eq!(
+            routed.rounds[0].outcome,
+            crate::coverage_repair::ConfirmationRoundOutcome::TerminalRoutedAtLowering,
+            "the same round, with the terminal absent from the sealed unrouted list, ended \
+             the other way — the forced arm survived the brace pass"
+        );
+    }
+
+    /// **Stage D — a VOIDED round keeps its void outcome, whatever the sealed
+    /// transcript later says about its terminal.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// A void round retires nothing (§1.3). Its terminal can still end the run
+    /// `UnroutedNoWinner` for one of the three older reasons, and a disclosure
+    /// that let the transcript read overwrite the void would report a round
+    /// that ended in a retirement it is forbidden to have earned.
+    ///
+    /// **Sabotage-shaped:** drop the `outcome.unwrap_or(...)` guard so the
+    /// transcript read wins, and this goes red on a round whose terminal is in
+    /// the unrouted set.
+    #[test]
+    fn a_voided_round_keeps_its_void_outcome_even_when_its_terminal_ends_unrouted() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 2,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
+            )
+            .expect("a spent steering opens a round");
+        tally.passes = 3;
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: vec![crate::legalization::NoGood::new(
+                        177,
+                        prefix_fixture(9),
+                        crate::legalization::ArmIdentity::live(
+                            crate::cco::CandidateFamily::PlateDescent,
+                            3,
+                            1.0,
+                            2,
+                        ),
+                    )],
+                    own_arm_terminals: vec![177],
+                    cascade_victims: Vec::new(),
+                    measured: vec![crate::legalization::ArmRefusalPhysics {
+                        gap_mm: -0.2,
+                        distance_clearance_mm: -0.2,
+                        axis_transit_illegal: false,
+                        terminal_radius_mm: 0.4,
+                        rootward_radius_mm: 0.4,
+                    }],
+                },
+            )
+            .expect("the void is not a failure");
+
+        let disclosure = tally.disclose(&steering, &BTreeSet::from([113, 177]));
+        assert_eq!(disclosure.voided_rounds, 1);
+        assert_eq!(
+            disclosure.rounds[0].outcome,
+            crate::coverage_repair::ConfirmationRoundOutcome::Voided,
+            "a void round earned nothing, and the transcript may not re-label it"
+        );
+        assert_eq!(disclosure.rounds[0].arms_measured, 0);
+    }
+
+    /// **Stage D — each abandoned pass discloses WHICH terminal was disturbed,
+    /// and keeps Stage A's own-arm / cascade-victim split.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// Stage A's whole result is that the mismatch class is reported in full
+    /// and that a cascade victim steers nothing. A disclosure that folded the
+    /// two lists into one count would put back exactly the confusion Stage A
+    /// removed: a reader could not tell a one-terminal class from a cascade,
+    /// which is the difference between "this model's physics is hard" and
+    /// "one re-parenting disturbed a crowd".
+    #[test]
+    fn each_abandoned_pass_discloses_which_terminal_was_disturbed() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: vec![crate::legalization::NoGood::new(
+                        113,
+                        prefix_fixture(1),
+                        crate::legalization::ArmIdentity::live(
+                            crate::cco::CandidateFamily::ModelAnchor,
+                            0,
+                            2.5,
+                            1,
+                        ),
+                    )],
+                    own_arm_terminals: vec![113],
+                    cascade_victims: vec![7, 9],
+                    measured: vec![crate::legalization::ArmRefusalPhysics {
+                        gap_mm: -0.05,
+                        distance_clearance_mm: 0.280_044,
+                        axis_transit_illegal: true,
+                        terminal_radius_mm: 0.372_136,
+                        rootward_radius_mm: 0.372_136,
+                    }],
+                },
+            )
+            .expect("the pass learned a new no-good, so it may go on");
+
+        let disclosure = tally.disclose(&steering, &BTreeSet::new());
+        assert_eq!(disclosure.disturbances.len(), 1);
+        let row = &disclosure.disturbances[0];
+        assert_eq!(row.pass, 1);
+        assert_eq!(row.own_arm_terminals, vec![113]);
+        assert_eq!(
+            row.cascade_victims,
+            vec![7, 9],
+            "victims steer nothing, and a reader who cannot see them cannot tell a \
+             one-terminal class from a cascade"
+        );
+        assert_eq!(row.no_goods_learned, 1);
+        assert!(!row.round_arm_measured);
+        assert!(!row.voided_a_round);
+        assert_eq!(row.steering_spent_terminal, None);
+        assert_eq!(
+            disclosure.no_goods_by_terminal,
+            BTreeMap::from([(113_u32, 1_usize)]),
+            "the no-goods consulted, keyed by the terminal that carries them"
+        );
+    }
+
+    /// **Stage D — a pass that refuses by the abandon rule leaves NO row.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// A disturbance row says "this pass abandoned and the loop went on". The
+    /// pass that trips the abandon rule does not go on; it ends the run by
+    /// name. A row for it would claim a pass the loop never took, and the count
+    /// of rows would stop matching the count of abandoned passes.
+    #[test]
+    fn a_pass_that_refuses_by_the_abandon_rule_leaves_no_disturbance_row() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: Vec::new(),
+                    own_arm_terminals: Vec::new(),
+                    cascade_victims: vec![7],
+                    measured: Vec::new(),
+                },
+            )
+            .expect_err("victims steer nothing, so this pass learned nothing");
+        assert!(
+            tally
+                .disclose(&steering, &BTreeSet::new())
+                .disturbances
+                .is_empty(),
+            "the refusing pass did not abandon-and-continue, so it has no row"
+        );
+    }
+
+    /// **Stage D — the record survives a sidecar written before it existed.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// `persist_sealed_repair_ledger`'s doc comment claims the embedded report
+    /// "deserializes back into the original typed report exactly". Adding a
+    /// required field would break that claim for every `.coverage.repair.json`
+    /// already on disk. `#[serde(default)]` keeps it, and the default it
+    /// supplies — `passes: 0` — is the marker that says the file is older than
+    /// Stage D rather than a run that never legalized.
+    #[test]
+    fn a_report_written_before_stage_d_still_deserializes_and_reads_as_pre_stage_d() {
+        let legacy = serde_json::json!({
+            "trials": 0,
+            "commits": 0,
+            "rejections_by_class": {},
+            "wall_time_total_ms": 0,
+            "wall_time_per_trial_min_ms": 0,
+            "wall_time_per_trial_median_ms": 0,
+            "wall_time_per_trial_max_ms": 0,
+            "candidates_remaining": 0,
+            "diversity_demotions": 0,
+            "diversity_demotions_tried": 0
+        });
+        let report: crate::coverage_repair::RepairRunReport =
+            serde_json::from_value(legacy).expect("a pre-Stage-D report must still deserialize");
+        assert_eq!(
+            report.legalization.passes, 0,
+            "zero passes cannot come from a live run; it is the pre-Stage-D marker"
+        );
+
+        let steering = crate::legalization::LegalizationSteering::default();
+        let live = crate::coverage_repair::RepairRunReport {
+            legalization: LegalizationTally {
+                passes: 6,
+                confirmation_rounds: 1,
+                round_arms_measured: 2,
+                ..LegalizationTally::default()
+            }
+            .disclose(&steering, &BTreeSet::new()),
+            ..crate::coverage_repair::RepairRunReport::default()
+        };
+        let round_tripped: crate::coverage_repair::RepairRunReport =
+            serde_json::from_value(serde_json::to_value(&live).expect("serializes"))
+                .expect("round-trips");
+        assert_eq!(round_tripped, live);
+        assert_eq!(round_tripped.legalization.passes, 6);
     }
 
     fn prefix_fixture(forest_digest_before: u64) -> crate::legalization::PrefixKey {

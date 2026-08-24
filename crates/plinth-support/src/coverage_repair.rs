@@ -536,6 +536,132 @@ pub struct OwnContactNoWinnerEvidence {
     pub anchor_foot_refusals_recorded: Option<usize>,
 }
 
+/// **Stage D — what the attempt-0 legalization retry did, on disk.**
+///
+/// Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+/// §4 Stage D, authorized by Craig 2026-08-23. *"The no-good ledger, the pass
+/// count and the confirmation-round record join the coverage refusal sidecar …
+/// **This is disclosure, not the record**."*
+///
+/// **It is not a repair-controller counter.** It travels on
+/// [`RepairRunReport`], which is SPEC-A4 §A.8's report on the ONE-WINNER
+/// COVERAGE-REPAIR controller, because that report is the one value both
+/// evidence files already embed verbatim — the refusal sidecar through
+/// `CoverageClosureRefusal::repair` and the sealed ledger through its own
+/// `report` field. The mechanism it describes is a different one at a
+/// different time: the legalization retry runs at **attempt 0**, before the
+/// first repair trial exists, and none of its numbers is an input to any
+/// repair rule. Reading `passes` as a repair count would be a category error.
+///
+/// **`passes == 0` means the file predates Stage D.** The attempt-0 loop runs
+/// at least once on every run that reaches this report, so a live run always
+/// writes `passes >= 1`; the field is `#[serde(default)]` so an older
+/// `.coverage.repair.json` still deserializes, and it deserializes to zero.
+/// Do not "fix" that zero to one — it is the only thing telling an old file
+/// from a run that never legalized.
+///
+/// **Nothing here is truncated and nothing here is capped.** Craig's
+/// authorization item 4 is that the confirmation round is uncapped in engine
+/// semantics and loudly reported; a "first N rounds" or "first N arms" clip in
+/// the disclosure would be that cap wearing a reporting hat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegalizationDisclosure {
+    /// Passes through the attempt-0 chain, including the first and including
+    /// the one that lowered. A run that never abandoned reports `1`.
+    pub passes: usize,
+    /// How many steering no-goods the set held when the loop left it.
+    pub no_goods: usize,
+    /// **The no-goods consulted, per terminal.** The same projection the run
+    /// log prints, keyed by terminal id so a reader can see which terminal the
+    /// mechanism spent itself on rather than only how much it spent.
+    pub no_goods_by_terminal: BTreeMap<u32, usize>,
+    /// Rounds OPENED. A voided round is counted here too: it was opened, it
+    /// was paid for, and it earned nothing.
+    pub confirmation_rounds: usize,
+    pub voided_rounds: usize,
+    /// Arms a round has driven, across all rounds — **including arms measured
+    /// inside a round that was later voided.** It is a COST, not a credit: the
+    /// passes were spent whether or not the round they belonged to survived to
+    /// earn anything. What a retirement rests on is the round's own sealed
+    /// rows inside `NoWinnerEvidence::ConfirmationRoundExhausted`, never this
+    /// counter.
+    pub round_arms_measured: usize,
+    /// One row per ABANDONED pass — **which terminal was disturbed**, in pass
+    /// order. This is Stage A's classification, persisted.
+    pub disturbances: Vec<LegalizationDisturbance>,
+    /// One row per confirmation round opened, in the order they opened.
+    pub rounds: Vec<ConfirmationRoundDisclosure>,
+}
+
+/// One abandoned legalization pass, as the loop classified it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegalizationDisturbance {
+    /// Which pass this was, counting from one.
+    pub pass: usize,
+    /// Terminals whose OWN chosen arm the brace pass measured inside the
+    /// model. These are the terminals that steer.
+    pub own_arm_terminals: Vec<u32>,
+    /// Terminals disturbed purely by re-parenting — their own arm was never
+    /// measured illegal. **They steer nothing** (design §1.3); they are here
+    /// because a reader who cannot see them cannot tell a one-terminal class
+    /// from a cascade.
+    pub cascade_victims: Vec<u32>,
+    /// How many no-goods this pass added that were NOT already in the set.
+    /// The abandon rule's own number: a pass that added none and advanced no
+    /// round refused by name instead of looping, so a row reading zero here
+    /// carries `round_arm_measured` or `voided_a_round`.
+    pub no_goods_learned: usize,
+    /// Whether this pass measured an arm for an open confirmation round.
+    pub round_arm_measured: bool,
+    /// Whether this pass voided an open round.
+    pub voided_a_round: bool,
+    /// Set when the pass abandoned because a terminal reported every arm it
+    /// can still generate carries a no-good — the event that OPENS a round.
+    pub steering_spent_terminal: Option<u32>,
+}
+
+/// One confirmation round, as the loop drove it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmationRoundDisclosure {
+    /// The terminal the round measured.
+    pub terminal_id: u32,
+    /// The pass on which it opened, counting from one.
+    pub opened_at_pass: usize,
+    /// **The round length — how many arms it actually drove**, one per pass,
+    /// in the tournament's own order.
+    pub arms_measured: usize,
+    /// How many no-goods the steering set held at the moment the round opened.
+    /// The set is frozen for the round's duration, so this is the set the
+    /// round measured against.
+    pub no_goods_at_open: usize,
+    pub outcome: ConfirmationRoundOutcome,
+}
+
+/// **What became of one confirmation round, named for what was OBSERVED.**
+///
+/// Deliberately not `Retired` / `Legalized`. `UnroutedNoWinner` has four
+/// sealed causes and only one of them is a round, so "this round retired the
+/// terminal" is an inference, and a field name is the wrong place to smuggle
+/// one. The mechanism record lives where design §1.3 put it — inside the
+/// sealed `NoWinnerEvidence::ConfirmationRoundExhausted`, with the measured
+/// millimetres. This says only where the terminal stood in the transcript the
+/// lowering pass sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationRoundOutcome {
+    /// Another terminal's own arm was condemned while this round ran, or a
+    /// second terminal reported itself spent and one round holds the set at a
+    /// time. The round retires nothing and is re-entered later.
+    Voided,
+    /// The round was still open when a pass lowered, and the lowered run's
+    /// sealed transcript carries this terminal as `UnroutedNoWinner`.
+    TerminalUnroutedAtLowering,
+    /// The round was still open when a pass lowered, and the lowered run's
+    /// sealed transcript does NOT carry this terminal as `UnroutedNoWinner` —
+    /// the forced arm survived the brace pass.
+    TerminalRoutedAtLowering,
+}
+
 impl CoverageRepairStep {
     /// Project this step onto the wire — SPEC-A4 §D.2's persistence, with the
     /// opaque row identity replaced by its readable name.
@@ -701,6 +827,16 @@ pub struct RepairRunReport {
     /// that says whether ruling R13 worked**, and whether it kept its
     /// completeness promise.
     pub diversity_demotions_tried: usize,
+    /// **Stage D — what the attempt-0 legalization retry did.**
+    ///
+    /// A passenger, not a counter of this controller: see
+    /// [`LegalizationDisclosure`] for why it rides here and for what
+    /// `passes == 0` means. `#[serde(default)]` so a `.coverage.repair.json`
+    /// or refusal sidecar written before Stage D still deserializes into this
+    /// type, which is the claim `persist_sealed_repair_ledger`'s doc comment
+    /// makes about the embedded report.
+    #[serde(default)]
+    pub legalization: LegalizationDisclosure,
 }
 
 impl RepairRunReport {
