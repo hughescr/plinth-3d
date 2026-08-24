@@ -1,6 +1,6 @@
 # Seat footprint: exempt the declared entry carrier, not nearby geometry
 
-**Date:** 2026-08-23; revised 2026-08-24 after round-1 review
+**Date:** 2026-08-23; revised 2026-08-24 after round-2 review
 
 **Status:** REVISED DESIGN FOR OWNER DECISION; no production code in this lane
 
@@ -10,28 +10,35 @@ actually presses on or occupies, with no distance-connected slack; Craig's narro
 monotonicity ruling; and the designed-embed rulings in `SPEC-EMBED-POLICY.md` and
 `land-at-strike-2026-08-22.md`.
 
-> **Recommendation [adds one non-numeric semantic input; the current seat face,
-> axis, and mesh are not enough].** Authorize an immutable **entry carrier** for
-> each designed embed. The contact constructor must declare which local model
-> surface is the intended receiving surface. The physical footprint is the
-> entry-anchored component of the exact intersection of that carrier with the
-> exact emitted embed solid. For a demand `g`, the clearance patch is the
-> entry-anchored component of the carrier's exact intersection with the exact
-> refusal envelope used by that same clearance query. All model surface outside
-> that patch remains graded.
+> **Recommendation [adds one upstream surface-identity partition; the current seat
+> face, axis, and mesh are not enough].** Authorize model preparation to supply an
+> immutable exact **receiver partition** before support search. Each partition cell
+> names one complete receiving boundary region. The contact constructor may select
+> only the unique cell whose interior contains the intended entry crossing; that
+> cell is `Kentry`. It may not draw, clip, or enlarge a carrier after it sees an arm
+> radius or clearance result. Missing, overlapping, boundary-only, or semantically
+> ambiguous cells make the contact unavailable.
 >
-> This is not a normal angle, geodesic radius, distance allowance, or face flood.
-> It is surface identity that the current record does not contain. Without that
-> identity, the raised-column and channel fixtures require contradictory
-> continuations from the same geometric inputs. The previous “entry-sheet lift”
-> is withdrawn: it climbs the raised wall, cannot include the channel floor
-> without also admitting a bridge, and does not equal the physical intersection
-> on curved seats.
+> The physical footprint is the exact intersection of `Kentry` with the emitted
+> embed solid. For a demand `g`, the clearance patch is the exact intersection of
+> that same complete cell with the grader's exact refusal envelope. There is no
+> radius-dependent connected-component selection, so radius growth cannot add a
+> bridge and change carrier identity. All model surface outside that intersection
+> remains graded.
 >
-> **Authorization bracket [material].** If adding an entry-carrier semantic is not
-> acceptable, do not implement a footprint exemption from the current inputs.
-> No repaired distance, projection, normal, or adjacency rule in this memo can
-> establish both required outcomes without a new decision predicate.
+> This is not a normal angle, geodesic radius, distance allowance, face flood, or a
+> declaration made by the clearance path. It is new upstream surface identity.
+> Without it, the raised-column and channel fixtures require contradictory
+> continuations from the same geometric inputs. The previous “entry-sheet lift” is
+> withdrawn: it climbs the raised wall, cannot include the channel floor without
+> also admitting a bridge, and does not equal the physical intersection on curved
+> seats.
+>
+> **Authorization bracket [material].** If adding the upstream receiver partition
+> and refusing unpartitioned or ambiguous contacts are not acceptable, do not
+> implement a footprint exemption from the current inputs. No repaired distance,
+> projection, normal, or adjacency rule in this memo can establish both required
+> outcomes without that new semantic input.
 
 ---
 
@@ -95,8 +102,8 @@ d - r - g > 0,
 ```
 
 not zero. **INFERRED** with `f = 1.4` and final `g = 0.300 mm`, the margin rises
-from `0.06169 mm` at **radius** `0.350 mm` to `0.08924 mm` at **radius**
-`1.000 mm`. The fatter arm grades `0.02756 mm` better. At placement
+from `0.061688 mm` at **radius** `0.350 mm` to `0.089244 mm` at **radius**
+`1.000 mm`. The fatter arm grades `0.027556 mm` better. At placement
 `g = 0.600 mm`, it rises from `0.08465 mm` to `0.14356 mm`.
 
 The seat remains legal, but the narrowed monotonicity claim does not. The repair is
@@ -213,31 +220,55 @@ The footprint constructor and the clearance kernel must receive the same prepare
 `Qg` token. Rebuilding a ball shadow in one path and subtracting shaft radius in
 another is prohibited.
 
-### 3.3 `Kentry` supplies surface identity, not clearance slack
+### 3.3 `Kentry` comes from an upstream receiver partition [the contact constructor does not invent it]
 
-`Kentry` is a clipped surface carrier declared by the contact construction before
-clearance grading. It answers only: “which local boundary is the designed receiver
-for this embed?” It does not answer how far the exemption reaches.
+Model preparation must supply an exact receiver partition `R` on `S` before support
+search. `R` is new semantic input, carried with the prepared model and its geometry
+digest. Its producer is the model-preparation/import stage, using source surface
+provenance or an explicit authored receiver label. Support placement, clearance,
+and candidate ranking are consumers, not producers. Automatic inference from an
+unlabelled mesh is not authorized.
 
-The carrier contract is:
+A cell of `R` is one complete receiving boundary region. “Complete” has this
+normative meaning:
 
-1. `q` lies in its closure and identifies its entry component;
-2. it includes every two-dimensional part of `S ∩ E0` that the designed foot is
-   intended to press on or occupy, including a legitimate channel floor patch;
-3. it excludes an opposite wall, lateral collision, unanchored re-entry, and R4
-   far face even when those surfaces are close, mesh-connected, or uniquely
+1. it contains every two-dimensional continuation of that receiver needed by any
+   sanctioned embed and by both authorized demanded gaps, `0.600 mm` and
+   `0.300 mm`, including continuation across a crease onto a legitimate channel
+   floor;
+2. it excludes every different receiver or collision surface, including an
+   opposite or raised wall, lateral collision, unanchored re-entry, and the R4 far
+   face, even when that surface is close, mesh-connected, smooth, or uniquely
    projected under `n`;
-4. its boundary is exact clipped geometry, not whole face IDs;
-5. it is independent of `g` and is not grown from arm radius, a distance band,
-   geodesic distance, normal angle, or a face count; and
-6. it is frozen at creation and recreated only by the shared contact constructor
-   after a contact-geometry mutation.
+3. its exact clipped cells have disjoint interiors; shared edges and points do not
+   transfer identity; and
+4. its identity and full extent are independent of support axis, arm **radius**,
+   `E0`, `Qg`, clearance result, candidate winner, and grading tier.
 
-This is additional semantic data. It cannot be reconstructed honestly from only a
-seat face, axis, and unlabelled triangle adjacency: the raised-column and channel
-cases refute the proposed reconstructions. The implementation proof must show how
-the placement/contact constructor declares it. Merely renaming a flood fill
-`Kentry` does not satisfy the contract.
+The partition producer must either establish those invariants from authoritative
+source provenance or mark the region unavailable for model seating. It must not
+choose the favourable side of a clearance result. A missing label, overlapping
+cell interiors, a crossing `q` on only a shared boundary, or more than one eligible
+cell is semantic ambiguity and makes that contact unavailable. It does not trigger
+a geometric fallback.
+
+The contact constructor obtains `Kentry` by exact lookup only:
+
+```text
+Kentry = the unique complete cell of R whose interior contains q
+         and whose receiver direction admits the sanctioned entry through q.
+```
+
+It records that cell's immutable identity, exact clipped boundary, producer
+version, and partition digest. It does not draw or clip the cell to the current
+embed. Thus `Kentry` already contains the complete entry-side portion of
+`S ∩ Qg` at both authorized tiers. It cannot stop between `E0` and a refusal
+envelope, and it cannot broaden to admit a foreign wall.
+
+This contract intentionally prices the missing information rather than hiding it
+inside “the constructor declares it.” The raised-column and channel fixtures prove
+that seat face, axis, normal, and unlabelled triangle adjacency do not determine
+`R`. If the project cannot supply this upstream partition, this design stops.
 
 ---
 
@@ -248,33 +279,43 @@ Form the exact arrangements of `S`, `Kentry`, `E0`, and `Qg`.
 The physical footprint is
 
 ```text
-P0 = the entry-anchored connected component containing q of
-     S ∩ Kentry ∩ E0.
+P0 = S ∩ Kentry ∩ E0.
 ```
 
-Connectivity is over exact clipped intersection cells. A zero-area point or edge
-tie does not admit a neighboring two-dimensional cell. `P0` therefore records only
-surface actually occupied by the emitted semantic solid. It is not a tangent-plane
-stencil.
+Only exact two-dimensional intersection cells belong to `P0`. A zero-area point or
+edge tie does not admit a neighboring cell. Every occupied cell in the unique
+receiver belongs, not only cells reachable through the current intersection. `P0`
+therefore records surface actually occupied by the emitted semantic solid and
+cannot lose a valid lobe because the triangulation separates it. It is not a
+tangent-plane stencil.
 
 For the active demand `g`, the clearance patch is
 
 ```text
-Pg = the entry-anchored connected component containing P0 of
-     S ∩ Kentry ∩ Qg.
+Pg = S ∩ Kentry ∩ Qg.
 ```
 
 Then grade the exact outside fragments:
 
 ```text
 Tg = S \ Pg
-clearance_g = exact clearance of the prepared live member against Tg at demand g.
+clearance_g = min over x in Tg of C_live(x),
 ```
 
+where `C_live(x)` is the grader's exact signed-clearance field in **mm**: positive
+outside the live support solid, zero at contact, and negative in penetration. The
+binary decision at demanded gap `g` is derived from that same field. `Qg` is its
+sublevel envelope at `g`; it is not a separate approximation.
+
 `P0` is the physical scar. `Pg \ P0` is not called contact area. It is the part of
-the declared receiving carrier that lies inside the exact refusal envelope of the
+the complete declared receiver that lies inside the exact refusal envelope of the
 attached joint. Every surface outside `Kentry`, including an opposite crevice wall,
 remains in `Tg` even when it lies in `Qg`.
+
+Removing radius-dependent connected-component selection is deliberate. For fixed
+`Kentry`, envelope growth can add patch cells but cannot bridge to a second carrier
+or reclassify an existing cell's identity. Foreign walls remain outside `Kentry` by
+partition invariant, rather than by the connectivity of `Pg`.
 
 Placement uses `g = 0.600 mm`. Final grading uses `g = 0.300 mm`. They use the same
 `Kentry`, `E0`, component identity, and query semantics, but distinct prepared
@@ -310,49 +351,110 @@ surface after seeing clearance.
 
 ---
 
-## 6. Narrowed monotonicity [the query envelope and patch must share one family]
+## 6. Narrowed monotonicity [actual own-patch grades are ordered; positive tie-breaks use a separate common mask]
 
 Craig's narrowed guarantee is:
 
 > Against any surface outside its own footprint patch, a thinner arm never grades
 > worse.
 
-Let `Q(r, g)` be the exact refusal envelope prepared by the grader for member
-**radius** `r` and demand `g`. For equal axis, taper class, station parameterization,
-contact carrier, and demand, the geometry family must prove
+A refusal-set inclusion at one `g` is insufficient. The geometry family must expose
+its exact signed-clearance field `C_r(x)` in **mm** and prove the pointwise law for
+every model-surface point and every sanctioned pair with equal axis, taper class,
+station parameterization, `Kentry`, and demand:
 
 ```text
-r_thin <= r_fat  =>  Q(r_thin, g) subset-of Q(r_fat, g).
+r_thin <= r_fat  =>  C_thin(x) >= C_fat(x)  for every x in S.
 ```
 
-For any fixed retained surface point outside the compared footprint patches,
-shrinking that exact envelope cannot change a legal point into a refused point.
-The aggregate minimum over the common retained surface therefore cannot get worse.
-No separate foot-ball envelope may alter the tested boundary.
+Equivalently, all clearance-level envelopes are nested, not only the envelope at
+one demand:
 
-The guarantee is pinned in two ways:
+```text
+for every clearance level h:
+Q(r_thin, h) subset-of Q(r_fat, h).
+```
 
-1. **Common-patch comparison.** Two radii grade against one immutable prepared
-   carrier/patch token. The thinner exact envelope must not report a lower
-   clearance.
-2. **Own-patch planar ladder.** Each radius prepares its own exact `Qg` and `Pg`
-   using the same geometry family. A perpendicular planar seat must report the
-   same algebraic boundary margin for every radius. The former
-   `0.06169 → 0.08924 mm` fatter-grades-better span is a mandatory red witness.
+A geometry family that cannot prove this law is ineligible for radius comparison.
+No foot-ball shadow or other second envelope may alter the tested boundary.
 
-The claim does not compare different axes, different carriers, placement with
-final, or two different taper families. A surface excluded by one patch and tested
-by another has no pairwise grade; reports must not present that case as a
-monotonicity result. Candidate ranking must compare the common retained population
-or disclose the population change.
+The production safety grade at demand `g` is the exact signed deficit, capped at
+zero because positive surplus is not part of refusal severity:
+
+```text
+D(r, g) = min(0 mm, inf over x in T(r,g) of (C_r(x) - g))
+T(r,g)  = S \ (Kentry ∩ Q(r,g)).
+```
+
+`D = 0 mm` is legal and `D < 0 mm` is refused. This is a numeric grade, not only a
+binary set test. If an implementation also reports uncapped positive clearance,
+that value is diagnostic and must not be used to assert monotonic ranking across
+different own patches.
+
+The own-patch theorem now holds over the actual production populations. Because all
+radii use the same complete `Kentry`, patch nesting gives
+`P_thin subset-of P_fat`. Every point newly retained only for the thinner arm lies
+in `Kentry \ Q(r_thin,g)` and therefore has `C_thin(x) - g >= 0 mm`; it cannot lower
+`D_thin`. On every point retained by both arms, pointwise ordering gives
+`C_thin(x) - g >= C_fat(x) - g`. Taking the infimum and then `min(0 mm, ...)`
+therefore gives
+
+```text
+D(r_thin,g) >= D(r_fat,g).
+```
+
+This proof would fail if `Pg` used a radius-dependent connected component: growth
+could create a bridge and change identity. Section 4 prohibits that operation.
+It would also fail for a clipped or radius-derived carrier; section 3.3 requires
+one complete upstream partition cell.
+
+Candidate ranking may need positive clearance after both candidates are already
+legal. That is a different query. It must prepare an immutable
+`CommonRetainedMask` from the pair of radius-bound footprint tokens:
+
+```text
+Tcommon = T(r_thin,g) ∩ T(r_fat,g)
+R(r,g,Tcommon) = inf over x in Tcommon of C_r(x).
+```
+
+Pointwise ordering on this genuinely common population proves
+`R_thin >= R_fat`. The mask token is pair-bound and contains both geometry digests,
+`g`, `Kentry` identity, and its own digest. It does not pretend that one
+`PreparedEntryFootprint` can serve two radii. Each radius-bound token remains
+fingerprint-checked against its own live geometry; the comparison consumer rejects
+either stale input before preparing the common mask.
+
+The acceptance estate pins three independent failures:
+
+1. **Pointwise field ladder.** Sample exact witness cells and prove
+   `C_thin(x) >= C_fat(x)` at every point selected by the oracle, across every
+   sanctioned radius family and clearance level used by either tier.
+2. **Actual own-patch grade ladder.** Prepare each radius's own `Qg`, `Pg`, and
+   radius-bound token. `D_thin >= D_fat` must hold, including a fixture where radius
+   growth would formerly add a connected-component bridge.
+3. **Common-mask positive ladder.** Prepare two live radius-bound tokens plus the
+   pair-bound mask. Positive `R_thin >= R_fat` must hold. Reusing either token after
+   an axis or **radius** mutation must reject before comparison.
+
+The former **INFERRED** margins `0.061688 → 0.089244 mm`, a `0.027556 mm`
+fatter-grades-better span at `g = 0.300 mm`, are a mandatory red witness. With the
+matched field and patch, both own-patch safety deficits are `0 mm`; any positive
+ranking comparison uses `Tcommon` and preserves pointwise order.
+
+The theorem does not compare different axes, partition cells, placement with final,
+or different taper families. Those are different geometry problems, not disclosed
+exceptions inside a claimed radius ordering.
 
 ---
 
 ## 7. Lifecycle and production wiring [every creator, mutator, copier, and consumer is registered]
 
-Store one immutable `PreparedEntryFootprint` containing `q`, `n`, contact end,
-`Iembed`, the semantic geometry object and fingerprint, `Kentry`, `P0`, tier,
-prepared `Qg`, `Pg`, exact boundary clips, and a digest.
+Store one immutable radius-bound `PreparedEntryFootprint` containing `q`, `n`,
+contact end, `Iembed`, the semantic geometry object and fingerprint, upstream
+partition producer/version/digest, complete `Kentry`, `P0`, tier, prepared `Qg`,
+`Pg`, exact boundary clips, and a digest. A `CommonRetainedMask` is a separate
+pair-bound comparison object; it never substitutes one footprint token for another
+radius.
 
 The dirty fingerprint covers every input that can move `E0`, `Qg`, or `Kentry`:
 axis endpoints, contact-end and far-end **radii**, taper stations, contact end, seat
@@ -367,18 +469,21 @@ left 16 faces over-forgiven. Radius-only invalidation is prohibited.
 Production wiring is enumerated by construction through one registry or typestate
 transition, not by a prose search for call sites. The registry must account for:
 
-* initial contact/stub/foot creation;
+* model-preparation/import production and validation of the receiver partition;
+* initial contact/stub/foot creation and unique partition-cell lookup;
 * CCO candidate preparation, commit, and commit-copy;
 * brace radius growth, shrink, endpoint, taper, and commit paths;
 * rewire slide, retire, root-reanchor, and replacement paths;
 * candidate replay and winner copy;
-* placement and final tier preparation; and
+* placement and final tier preparation;
+* pair-bound common-mask preparation and candidate-ranking consumption; and
 * every clearance consumer.
 
 Each registered path gets a named red sabotage that disables only that path's
-prepare, invalidate, copy, or consume transition and then exercises the production
-path. CCO commit/copy, brace mutation, and rewire paths are mandatory, not examples.
-A helper-level test does not count.
+produce, validate, lookup, prepare, invalidate, copy, mask, or consume transition
+and then exercises the production path. Partition import/validation, CCO
+commit/copy, brace mutation, rewire, and common-mask ranking paths are mandatory,
+not examples. A helper-level test does not count.
 
 Every consumer recomputes the live geometry fingerprint and rejects a stale token
 before native grading. A sabotage that passes a stale but well-formed token must
@@ -442,17 +547,23 @@ model anchor.
    shortening, endpoint move, taper change, carrier change, and tier change each
    invalidate exactly when the fingerprint changes. CHAL-A and CHAL-A2 are
    mandatory.
-9. **Monotonicity.** Common-patch and own-patch planar ladders pass. Restoring the
-   ball-shadow/member-radius mismatch must fail.
-10. **Production-site sabotage.** Every registry entry in section 7 has one named
-    red. Disable all live prepare/re-cut sites and the library or integration
-    estate must not remain green.
-11. **Stale-token sabotage.** A caller passes a valid token prepared before an
+9. **Monotonicity.** Pointwise signed-field, actual own-patch deficit, and
+   pair-bound common-mask positive ladders pass. A radius-growth bridge fixture
+   cannot change receiver identity. Restoring the ball-shadow/member-radius
+   mismatch, one-token/two-radius reuse, or binary-only set nesting must fail.
+10. **Partition authority and ambiguity.** Provenance-labelled raised-column and
+    channel models produce the required complete cells. Missing labels, overlapping
+    interiors, boundary-only entry, and two eligible cells each refuse contact
+    creation before clearance. An unlabelled-mesh inference fallback must fail.
+11. **Production-site sabotage.** Every registry entry in section 7 has one named
+    red. Disable all live produce/validate/lookup/prepare/re-cut/mask sites and the
+    library or integration estate must not remain green.
+12. **Stale-token sabotage.** A caller passes a valid token prepared before an
     axis-only mutation. The consumer rejects it before grading.
-12. **Batch sabotage.** Scalar native calls are detected at the declared boundary.
-13. **Giant Bat.** The two known opposite-wall populations remain tested; the common
+13. **Batch sabotage.** Scalar native calls are detected at the declared boundary.
+14. **Giant Bat.** The two known opposite-wall populations remain tested; the common
     final `0.300 mm` rule decides them. “Bat emits” is not the criterion.
-14. **Corpus cost witness.** Use a model that places a model anchor; `zombie-3-a`
+15. **Corpus cost witness.** Use a model that places a model anchor; `zombie-3-a`
     placed none and cannot price this path.
 
 Every required sabotage must fail first on the claim it attacks, not on fixture
@@ -480,69 +591,150 @@ setup.
 
 # DECISION MEMO — for Craig
 
-## The dilemma
+## The dilemma [the current inputs cannot identify the foot's own surface]
 
 The re-sized seat zone keeps an arm legal by forgiving every mesh-connected face
-inside a distance tube. On the **MEASURED** crevice fixture, a 1.000 mm-radius arm
-admitted 20 and 15 wall faces at 1.00 and 1.25 mm from its axis. Those walls have
-**INFERRED** final clearances of `−0.300 mm` and `−0.050 mm`. They must remain
-refusable. No smaller tube fixes this because the tube must cover the arm's own
-refusal disc.
+inside a distance tube. On the **MEASURED** raised-column fixture, a
+`1.000 mm`-**radius** arm admitted `0 → 20` and `0 → 15` opposite-wall faces at
+wall-axis distances `1.00 mm` and `1.25 mm`. Those walls have **INFERRED** final
+clearances of `−0.300 mm` and `−0.050 mm` at demanded gap `g = 0.300 mm`. They must
+remain refusable. No smaller tube fixes the rule because the tube must cover the
+arm's own refusal disc.
 
-The first proposed replacement—a planar cut lifted onto an “entry sheet”—also does
-not work. It climbs the challenge's 82.87-degree raised wall. If it refuses to cross
-a crease, it omits the committed channel's physically occupied floor. On a curved
-seat, its lifted stencil is not the actual emitted-solid intersection. Its ball
-shadow also used a different envelope from the member-radius grader, which made a
-fatter arm grade better by `0.02756 mm` across the challenged final-radius span.
+The first replacement—a planar cut lifted onto an “entry sheet”—also fails. It
+climbs the **INFERRED** `82.87°` raised wall. If it refuses to cross a crease, it
+omits the committed channel's physically occupied floor. **MEASURED**, that fixture
+has 16 floor faces and 11 far-wall faces in the connected band; the footprint must
+include the occupied floor and retain all 11 far-wall faces for grading. On a
+curved seat, a lifted stencil is not the emitted-solid intersection.
 
-The missing input is not another distance. It is the identity of the surface that
-the designed foot is intended to enter.
+The old shadow also used a different envelope from the member-radius grader.
+**INFERRED**, its positive margins were `0.061688 → 0.089244 mm`, so a fatter arm
+graded `0.027556 mm` better at `g = 0.300 mm`.
 
-## The candidates side by side
+The missing input is not another distance. It is authoritative identity and full
+extent for the surface that the designed foot is intended to enter.
 
-* **Distance tube plus mesh connection:** cheap and already built; **MEASURED**
-  wrong on connected crevices.
-* **Geodesic disc or projected entry sheet:** follows unlabeled surface continuity;
-  it still walks onto the raised or opposite wall and fails curved physical-set
-  equality.
-* **Face normals or crease stops:** separates selected fixtures only by adding an
-  angle or by rejecting a legitimate channel floor and faceted curved seat.
-* **Every surface intersected by the embed solid:** exact but too broad; it forgives
-  lateral collisions, re-entry, and a far face.
-* **Physical intersection on a declared entry carrier:** exact contact geometry
-  plus explicit surface identity. It includes legitimate occupied floor, excludes
-  a foreign wall, and adds no numeric decision constant.
+## Recommendation [authorize an upstream receiver partition, or stop]
 
-## Recommendation [authorize a new semantic carrier, or stop]
+Authorize model preparation to supply an immutable exact **receiver partition**
+before support search. The partition producer must use source surface provenance or
+an explicit authored receiver label. It must define complete, non-overlapping
+receiving boundary cells. It must not infer the favourable answer from clearance,
+arm **radius**, mesh connectivity, projection, or a normal angle.
 
-Authorize the **declared-entry-carrier footprint**:
+The contact constructor performs only exact lookup. `Kentry` is the unique complete
+partition cell whose interior contains the intended entry crossing and admits the
+sanctioned entry direction. Missing labels, overlapping interiors, a boundary-only
+crossing, or more than one eligible cell make that model contact unavailable. There
+is no unlabelled-mesh fallback.
 
-1. placement/contact construction records an immutable clipped carrier for the
-   intended receiving surface;
-2. the physical footprint is the entry-anchored component of the exact
-   `model surface ∩ carrier ∩ emitted embed solid` intersection;
-3. each tier's clearance patch is the entry-anchored component of the exact
-   `model surface ∩ carrier ∩ that grader's refusal envelope` intersection;
-4. the footprint and grader consume the same exact envelope, so the previous
-   ball-versus-member monotonicity defect is impossible;
-5. the sanctioned embed interval has exact shared endpoints and far-face
-   truncation order; and
-6. every creator, mutator, copier, and consumer is registered, has a named red
-   sabotage, and rejects a stale prepared token.
+For each live arm:
 
-This is more geometry and more state than the current branch. It requires exact
-clipped polygons, one patch-aware native batch, and a carrier-producing contact
-constructor. The carrier is not clearance slack: it does not grow with
-`0.300 mm`, `0.600 mm`, or arm radius. The exact grader envelope decides how much
-of that carrier is excluded; all other surface stays tested.
+1. `Iembed` uses the shared designed terminal endpoint and entry crossing, after R4
+   far-face truncation;
+2. `E0` is the exact union of emitted primitives clipped to `Iembed`;
+3. `P0 = model surface ∩ Kentry ∩ E0` is the physical footprint;
+4. `Qg` is the exact refusal envelope derived from the grader's exact signed-
+   clearance field at demand `g`;
+5. `Pg = model surface ∩ Kentry ∩ Qg` is the clearance patch; and
+6. every exact model-surface fragment outside `Pg` remains graded.
 
-## What I ask you to authorize
+The complete partition cell, not a radius-dependent connected component, supplies
+surface identity. Radius growth can add patch cells inside that one cell, but it
+cannot add a bridge that admits an opposite wall. The cell must already contain the
+complete entry-side receiver needed at both `g = 0.600 mm` placement and
+`g = 0.300 mm` final grading. Thus it cannot stop after the physical intersection
+and restore own-seat refusal at a tier.
 
-Please authorize the additional **entry-carrier semantic** and its disclosed cost.
-It is a non-numeric surface-identity input, not a new clearance constant.
+## Monotonicity [proved over production grades and actual own-patch populations]
 
-If that semantic is too large a change, reject the footprint implementation for
-now. The present seat face, axis, and triangle connectivity do not contain enough
-information to keep both the channel floor legal and the raised or opposite wall
-refusable without an unpriced geometric predicate.
+The grader must expose an exact signed-clearance field `C_r(x)` in **mm** and prove,
+for every sanctioned same-axis, same-taper, same-carrier radius pair:
+
+```text
+r_thin <= r_fat  =>  C_thin(x) >= C_fat(x) for every surface point x.
+```
+
+This is equivalent to envelope nesting at every clearance level, not only binary
+refusal-set nesting at one demanded gap.
+
+Production uses the own-patch signed deficit
+
+```text
+D(r,g) = min(0 mm, inf over x outside Pg(r,g) of (C_r(x) - g)).
+```
+
+The common complete carrier gives nested patches. Points retained only by the
+thinner arm have non-negative deficit, and common retained points obey the
+pointwise field order. Therefore `D_thin >= D_fat` over the populations production
+actually grades. A radius-growth bridge cannot invert this result because patch
+membership does not use a connected-component operation.
+
+If ranking needs positive clearance after both candidates are legal, it must use a
+separate pair-bound `CommonRetainedMask` made from two live radius-bound footprint
+tokens. Both candidates then grade the same retained population. One token cannot
+be reused for two radii, and stale geometry in either token must reject before
+comparison.
+
+## Cost and proof obligations [new semantics, exact clipping, and production-path sabotage]
+
+This is more geometry, state, and upstream data than the rejected branch. It needs
+partition provenance, exact clipped cells, matched query envelopes, radius-bound
+prepared tokens, a pair-bound comparison mask, one patch-aware native batch, and
+fingerprints that include partition identity and geometry.
+
+Every partition producer, validator, lookup, contact creator, CCO commit/copy,
+brace mutation, rewire, replay, tier preparation, comparison-mask path, and
+clearance consumer must be registered. Each registered production path needs its
+own named red sabotage. Required gates include partition ambiguity/refusal, both
+crevice directions, exact curved intersections, R4 truncation, lateral collisions,
+pointwise numeric ordering, own-patch ordering, the radius-growth bridge,
+pair-mask ordering, stale tokens, and batch-call count.
+
+## What I ask you to authorize [one semantic addition with a refusal policy]
+
+Please authorize the upstream receiver partition and the rule that unpartitioned or
+ambiguous model contacts are unavailable. This is a non-numeric surface-identity
+input, not a new clearance constant.
+
+If that input and refusal policy are too large a change, reject the footprint
+implementation for now. The present seat face, axis, normal, and unlabelled triangle
+connectivity do not contain enough information to keep the channel floor legal and
+the raised or opposite wall refusable.
+
+## What changed [round-2 blocking findings folded in]
+
+- Replaced “the contact constructor declares `Kentry`” with a normative upstream
+  authority: model preparation supplies a provenance-backed or explicitly authored
+  exact receiver partition before support search.
+- Defined carrier identity and extent: one complete partition cell must cover the
+  entry-side receiver needed by the physical embed and both authorized demanded
+  gaps, while excluding foreign walls, lateral collisions, re-entry, and the R4 far
+  face.
+- Added a strict ambiguity rule. Missing labels, overlapping cells, a boundary-only
+  crossing, multiple eligible cells, or unavailable provenance refuse model seating;
+  no unlabelled-mesh inference fallback is allowed.
+- Removed radius-dependent connected-component selection from `P0` and `Pg`.
+  Exact intersections with one complete carrier prevent radius-growth bridges from
+  changing surface identity.
+- Defined the grader's exact numeric signed-clearance field in **mm** and required
+  pointwise ordering, equivalently envelope nesting at every clearance level rather
+  than only refusal-set nesting at one `g`.
+- Defined the production own-patch grade as a zero-capped signed deficit and proved
+  `D_thin >= D_fat` over the actual populations each radius grades.
+- Separated positive candidate ranking from each radius-bound prepared token.
+  Ranking now uses a pair-bound common retained mask built from two live tokens, so
+  it cannot violate stale-token fingerprints or compare different populations.
+- Added independent red witnesses for pointwise ordering, actual own-patch ordering,
+  radius-growth bridging, common-mask positive ordering, and one-token/two-radius
+  misuse.
+- Added partition production, validation, lookup, and pair-mask ranking to the
+  production registry and named-sabotage obligation.
+- Preserved the repaired `Iembed`, endpoint, R4 truncation, primitive clipping,
+  exact `E0`, matched-envelope, lifecycle, and batch-first requirements from the
+  prior revision.
+- Preserved all raw evidence with explicit provenance: **MEASURED** `0 → 20` and
+  `0 → 15` wall admissions; **INFERRED** `−0.300 mm` and `−0.050 mm` clearances;
+  **MEASURED** 16 channel-floor and 11 far-wall faces; and the **INFERRED**
+  `0.061688 → 0.089244 mm` margins with `0.027556 mm` reversal.
