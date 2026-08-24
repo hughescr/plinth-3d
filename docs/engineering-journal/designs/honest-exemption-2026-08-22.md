@@ -1117,3 +1117,31 @@ it is a known edge rather than a surprise.
 re-cut`), and with that guard lifted, on the clearances themselves — reproducing
 the pre-ruling ladder `[+0.350, +0.300, +0.200, +0.050, −0.100, −0.300]` exactly,
 which is F1's original table row for row.
+
+### Three facts the `!=` change test depends on, checked rather than assumed
+
+1. **`STANDOFF_MM` reaches every site as the same bits.** The `!=` only means
+   "the sizer moved this" if the `standoff_mm` a re-size adds is bit-identical to
+   the one the creation site added. All six reads are the same expression on the
+   same registered placeholder — `p.standoff_mm().diagnostic().get()` —
+   at `initial.rs:628`, `brace.rs:139` (carried through `contact_policy` at
+   `brace.rs:97`), `cco.rs:1336` and `cco.rs:4884`, and `rewire.rs:144`/`1047`.
+   No site recomputes or rescales it. If any of them ever diverges by one ULP the
+   `!=` fires for every seated member on every pass; the cheap runtime witness is
+   that the brace fixed-point site's re-cut count is 0 on a model where nothing
+   grows.
+2. **The re-size reads the CONTACT end, not whichever end is handy.** The
+   production case is TAPERED — `cco::apply_model_anchor` puts
+   `cco_terminal_radius` at the free end and `min_shoot_radius` at the seat, and
+   the sizer raises the seat end alone. Swap the two `ContactEnd` arms and the
+   band would be cut at the thin free end, bringing F1 back in exactly the flow
+   §11.9 measured. Every other test of the re-size uses uniform radii and a
+   `Terminalward` contact, so none of them could catch that.
+   `brace::a_tapered_arm_is_re_sized_from_its_contact_end_and_not_its_free_end`
+   is the one that can: MEASURED, the free end's band cuts 116 faces, the contact
+   end's cuts 270, and the re-size produces 270.
+3. **The side table is checkpointed.** `Forest::checkpoint` clones the whole
+   `state`, which contains `seat_zones`, and `rollback` restores it
+   (`forest.rs:1305-1326`). So the CCO commit path's `NonDeterministicWinner`
+   rollback restores the pre-`apply_and_size` table exactly, and a re-cut record
+   cannot survive a rolled-back candidate.

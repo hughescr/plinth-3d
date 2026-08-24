@@ -4878,6 +4878,129 @@ mod tests {
         );
     }
 
+    /// **THE RE-SIZE READS THE CONTACT END, NOT WHICHEVER END IS HANDY — the
+    /// TAPERED case, which is the production case §11.9 actually measured.**
+    ///
+    /// `cco::apply_model_anchor` mints a strut with `r0 = cco_terminal_radius`
+    /// at the free end and `r1 = min_shoot_radius` at the SEAT, declaring
+    /// `ContactEnd::Rootward`; `size_tapered_without_tree_fanin` then raises
+    /// `r1` alone. So the arm is TAPERED, its contact end is the ROOTWARD one,
+    /// and the band must follow that end.
+    ///
+    /// Every other test of the re-size uses uniform radii and a `Terminalward`
+    /// contact, so all of them would still pass with the two match arms in
+    /// `refreeze_resized_seat_zones` swapped — and a swap would cut the band at
+    /// the THIN free end and bring F1 straight back in the one flow that
+    /// measured it. This fixture is the one that cannot.
+    ///
+    /// It is stated as an equality against a DIRECT freeze at the contact end's
+    /// radius rather than as a face count, so it pins WHICH band was cut rather
+    /// than merely that some band moved.
+    #[test]
+    fn a_tapered_arm_is_re_sized_from_its_contact_end_and_not_its_free_end() {
+        let config = BraceConfig::current(0.05).unwrap();
+        const PITCH_MM: f64 = 0.25;
+        let (surface, topology) = fine_seat_slab(PITCH_MM);
+        // ROOTWARD contact: `p1` is the seat, `p0` stands off in the air —
+        // the geometry `apply_model_anchor` mints, upside down from the
+        // `Terminalward` fixtures above.
+        let p1 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, 3.0];
+        const FREE_END_MM: f64 = 0.35;
+        const CONTACT_END_MM: f64 = 0.90;
+
+        let (_, _, face_ids, _) = surface.project(&[p1]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let direct = |band_radius_mm: f64| {
+            crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &topology,
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm: p0,
+                    p1_mm: p1,
+                    seat_face_id,
+                    band_radius_mm,
+                }],
+            )
+            .expect("the seat zone freezes")
+            .remove(0)
+        };
+        let at_free_end = direct(FREE_END_MM + config.standoff_mm);
+        let at_contact_end = direct(CONTACT_END_MM + config.standoff_mm);
+        // NON-VACUITY — the two bands must be distinguishable, or this fixture
+        // cannot tell the two ends apart and the test proves nothing.
+        assert_ne!(
+            at_free_end.zone(),
+            at_contact_end.zone(),
+            "the fixture needs the free end's band and the contact end's band to \
+             cut different face sets: {} faces vs {} faces",
+            at_free_end.zone().len(),
+            at_contact_end.zone().len()
+        );
+
+        // The state the sizing pass leaves behind: minted uniform-thin at the
+        // creation radius, then the sizer raised the ROOTWARD end alone.
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(FREE_END_MM)),
+            r1_mm: RootwardEndRadius::new(positive(FREE_END_MM)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "tapered-contact-end".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, at_free_end.clone());
+        forest
+            .set_radii(
+                key,
+                TerminalEndRadius::new(positive(FREE_END_MM)),
+                RootwardEndRadius::new(positive(CONTACT_END_MM)),
+            )
+            .unwrap();
+
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            config.standoff_mm,
+            std::iter::once(&mut forest),
+        )
+        .unwrap();
+        assert_eq!(refrozen, 1, "the tapered arm's band moved and must be re-cut");
+
+        let re_cut = forest.seat_zone_record(key).unwrap();
+        assert_eq!(
+            re_cut.zone(),
+            at_contact_end.zone(),
+            "a tapered arm's exemption is its footprint AT THE SEAT, so the band \
+             must be cut at the ROOTWARD radius ({CONTACT_END_MM} mm), not the \
+             free end's ({FREE_END_MM} mm). Re-cut {} faces; contact end gives \
+             {}, free end gives {}. If this fails, the two `ContactEnd` arms in \
+             `refreeze_resized_seat_zones` are swapped, and challenge finding F1 \
+             is back in `cco::apply_model_anchor` — the one flow that measured it.",
+            re_cut.zone().len(),
+            at_contact_end.zone().len(),
+            at_free_end.zone().len()
+        );
+        assert_eq!(
+            re_cut.band_radius_mm(),
+            CONTACT_END_MM + config.standoff_mm,
+            "and the stored band must record the radius it was actually cut at, \
+             or the next pass cannot tell whether this member moved again"
+        );
+        println!(
+            "TAPERED-CONTACT-END: free end r={FREE_END_MM} mm gives {} faces, \
+             contact end r={CONTACT_END_MM} mm gives {} faces, re-cut gave {}",
+            at_free_end.zone().len(),
+            at_contact_end.zone().len(),
+            re_cut.zone().len()
+        );
+    }
+
     /// **THE TRANSIT SCREEN'S ADMISSION WINDOW STILL CATCHES A BURIED ARM —
     /// challenge finding F2, 2026-08-22, MEASURED rather than inferred.**
     ///
