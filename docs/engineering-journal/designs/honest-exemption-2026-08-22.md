@@ -1297,20 +1297,43 @@ Two cases below, and only the first is measured.
    condemns the arm (graded −1.15 mm). That test asserts the disconnection
    explicitly, because disconnection — not the band — is what does the work
    there, and a reader is entitled to know which.
-2. **A mesh-CONNECTED neighbour is a different question and IS NOT MEASURED.**
-   On a watertight mini everything is connected; the Giant Bat's refusals were
-   "the opposite wall of a crevice", reachable across the crevice floor. A wall
-   at distance `d` from the axis is admitted to the band once
-   `d < r_final + STANDOFF_MM`, while the FINAL tier only REFUSES on it at
-   `d < r_final + FINAL_CLEARANCE_GAP_MM`. The band is the wider of the two, so
-   there is a `STANDOFF_MM − FINAL_CLEARANCE_GAP_MM` = **0.300 mm annulus** in
-   which a connected foreign face is forgiven rather than refused — and the
-   ruling moves the window that reaches it up by exactly the growth.
+2. **A mesh-CONNECTED neighbour is measured, and the FINAL exemption is wider
+   than the old account said.** The tree already has the watertight `channel()`
+   fixture at `crates/plinth-support/src/seat_zone.rs:721-742`. Its test,
+   `the_zone_does_span_the_channel_when_the_band_itself_contains_the_connecting_path`
+   at `seat_zone.rs:903-947`, MEASURES `zone == band` and 11 exempt far-wall
+   faces. A mesh-connected crevice is therefore not a missing fixture or a
+   hypothetical topology.
 
-**This annulus is not new and the ruling did not create it**: the same 0.300 mm
-gap existed between the creation-radius band and the creation-radius refusing
-radius. What the ruling changes is WHERE the window sits, by the amount the arm
-grew. Whether any production geometry falls in it is unmeasured, and measuring it
-needs a mesh-connected crevice fixture, which this tree does not have. It is
-recorded so it is a known edge rather than a surprise, and it is the obvious
-follow-up if Craig wants the ruling's cost bounded rather than described.
+   The swallow probe is also MEASURED (`chal-probes3.log`, rows approximately
+   31-32, in `.git/seal-landing-2026-08-23/`). Its arm has a 1.000 mm radius,
+   `STANDOFF_MM = 0.600 mm`, and `FINAL_CLEARANCE_GAP_MM = 0.300 mm`: its
+   re-sized band radius is 1.600 mm and its FINAL refusal radius is 1.300 mm.
+   Of 64 wall faces at each wall-axis distance:
+
+   | wall-axis distance | creation-radius band | re-sized band | inside the 1.300 mm refusal radius? |
+   | --- | ---: | ---: | --- |
+   | 1.00 mm | 0 | 20 | yes |
+   | 1.25 mm | 0 | 15 | yes |
+
+   The measured 0 → 20 and 0 → 15 changes are growth, not movement, and they
+   are strictly inside the FINAL refusal radius. INFERRED from the two radius
+   inequalities, the entire FINAL refusal disc, `d < r_final + 0.300 mm`, lies
+   inside the band, `d < r_final + 0.600 mm`. Thus every face that would refuse
+   at FINAL is exempt when it is connected through the band; connectivity
+   through the band is the only remaining protection at that tier. The
+   forgiven-not-refused region is the entire refusal disc, not a 0.300 mm
+   annulus.
+
+   The corrected arithmetic has a narrower, different use. Compared with the
+   creation-radius band, the newly-lost-refusals shell is
+   `growth − 0.300 mm`; it is empty when growth is at most 0.300 mm. Bridge
+   admission is NOT bounded by that shell: a face inside both bands can be
+   exempt only under the new band because the old band lacked the connecting
+   path. The `channel()` fixture demonstrates that distinction (`seat_zone.rs:809`
+   versus `seat_zone.rs:903`).
+
+The owner has ruled the follow-up: a physics-first footprint rule, designed in
+`docs/engineering-journal/designs/seat-footprint-2026-08-23.md` on
+`feature/a4-controller`. This exposure is the problem that design exists to
+close. §11.10 records the honest state of this branch's landed rule.
