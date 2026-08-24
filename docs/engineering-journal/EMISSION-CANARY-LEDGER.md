@@ -673,7 +673,7 @@ predicted:
 
 | pass | ms | what happened |
 | --- | --- | --- |
-| 1 | ~22 000 | terminal 177's own arm `ModelAnchor/gen113` condemned → no-good |
+| 1 | 22 975 | terminal 177's own arm `ModelAnchor/gen113` condemned → no-good |
 | 2 | 22 318 | terminal 177's own arm condemned → no-good |
 | 3 | 5 505 | **steering spent** — 2 arms → round OPENS |
 | 4 | 22 416 | round rank 0 of 2 |
@@ -681,8 +681,14 @@ predicted:
 | 6 | 29 110 | round rank 2 of 2 → terminal 177 retires; **LOWERED** |
 
 `passes=6 no_goods=2 per_terminal=[t177=2] confirmation_rounds=1 voided_rounds=0
-round_arms_measured=2`. Attempt 0 cost **~124 s** of legalization. What happens after
-attempt 0 is the coverage-repair loop's own pre-existing grind and is recorded with the run.
+round_arms_measured=2`. The six passes cost **123 567 ms** of legalization, summed from the
+per-pass lines above.
+
+**THE ROTTING WARHORSE DID NOT EMIT, and the row above is about attempt 0 only.** Stage B
+closed the seam it was blocked at; the run then entered the coverage-repair loop and ground
+there at `commits=0` until the harness ceiling stopped it. That is a pre-existing condition
+of that model and not a Stage B outcome, and neither fact substitutes for the other. The
+fired-timeout line is quoted in the run's own log and in the Stage B evidence index.
 
 ### The cost, and the memo's named risk re-priced against measurement
 
@@ -704,3 +710,22 @@ retires nothing through a round keeps its transcript fingerprint byte for byte. 
 toed-slab sealed-digest goldens and `coverage_gate_toed_slab.json` are green and unmoved.
 
 **No pin moved in this lane. Unexplained: nothing. Superseded: nothing.**
+
+
+### CORRECTION to this entry's own headline — one model emitted, not two
+
+**Rule 1 of this ledger is that a correction is a new row, not an edit.** The heading and the
+commit subject of `cfc1e3d` both say *"both blocked models emit"*. That is true of the
+Deinonychus (`emitted=1`, RC=0, 1 149 records) and **NOT** true of the Rotting Warhorse,
+whose ATTEMPT 0 lowered and whose RUN did not emit.
+
+The two claims are different and the one that reached the headline was the favourable one.
+The body of the entry hedged it correctly from the start, which is precisely why it is worth
+recording: the arithmetic was sound and the framing was one step ahead of it, which is the
+failure mode this project has already named for itself.
+
+**The accurate sentence:** Stage B closed the sealed-`Routed` seam on both models —
+Deinonychus terminal 113 and Rotting Warhorse terminal 177, each in six passes with a
+two-arm confirmation round. **One of the two models then emitted.** The other was stopped by
+the harness while the coverage-repair loop was still at `commits=0`, which is a separate
+open condition of that model and is neither caused by nor fixed by this stage.
