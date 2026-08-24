@@ -1697,6 +1697,38 @@ impl LegalizationTally {
                         learned_count += 1;
                     }
                 }
+                // **The abandon rule, and a round advancing IS progress.** A
+                // round pass measures an arm nobody had measured in this world,
+                // and its rank strictly increases, so the loop is no less
+                // bounded than a steering pass that grows the set. What is
+                // forbidden is a pass that did neither.
+                //
+                // **Voiding a round is NOT the third kind of progress**, and the
+                // rule is evaluated BEFORE the void below for that reason. A
+                // void destroys work rather than making any: it hands the next
+                // pass the same steering set and no open round, which is the
+                // world this pass already started from. §1.3 lets the round be
+                // re-entered *"after the set grew"*, so a void is only ever
+                // finite when it travels with a no-good the set did not have.
+                // Reaching this with `voided` true and `learned_count` zero
+                // means a terminal's own arm was condemned while carrying the
+                // exact `(terminal, prefix, arm)` triple that should have
+                // suppressed it — a defect in the steering channel, not a
+                // property of the model, and the same class as the spent-during
+                // -its-own-round refusal below.
+                if learned_count == 0 && !round_advanced {
+                    return Err(SupportRunError::Failed {
+                        phase: SupportRunPhase::Brace,
+                        detail: format!(
+                            "legalization pass {} abandoned without learning a new no-good \
+                             (own-arm terminals {own_arm_terminals:?}, cascade victims \
+                             {cascade_victims:?}, would have voided an open round: {voided}); \
+                             the abandon rule forbids another pass because this one made no \
+                             progress",
+                            self.passes
+                        ),
+                    });
+                }
                 if voided {
                     let round = steering
                         .round()
@@ -1709,36 +1741,19 @@ impl LegalizationTally {
                     ));
                 }
                 // **Stage D — which terminal was disturbed, per pass.** Written
-                // AFTER the abandon rule's inputs are known and BEFORE the rule
-                // itself, so a pass that refuses by name below leaves no row for
-                // a pass that never continued.
-                let disturbance = crate::coverage_repair::LegalizationDisturbance {
-                    pass: self.passes,
-                    own_arm_terminals: own_arm_terminals.clone(),
-                    cascade_victims: cascade_victims.clone(),
-                    no_goods_learned: learned_count,
-                    round_arm_measured: round_advanced,
-                    voided_a_round: voided,
-                    steering_spent_terminal: None,
-                };
-                // **The abandon rule, and a round advancing IS progress.** A
-                // round pass measures an arm nobody had measured in this world,
-                // and its rank strictly increases, so the loop is no less
-                // bounded than a steering pass that grows the set. What is
-                // forbidden is a pass that did neither.
-                if learned_count == 0 && !round_advanced && !voided {
-                    return Err(SupportRunError::Failed {
-                        phase: SupportRunPhase::Brace,
-                        detail: format!(
-                            "legalization pass {} abandoned without learning a new no-good \
-                             (own-arm terminals {own_arm_terminals:?}, cascade victims \
-                             {cascade_victims:?}); the abandon rule forbids another pass \
-                             because this one made no progress",
-                            self.passes
-                        ),
+                // AFTER the abandon rule has let the pass continue, so a pass
+                // that refused by name above leaves no row for a pass that never
+                // continued.
+                self.disturbances
+                    .push(crate::coverage_repair::LegalizationDisturbance {
+                        pass: self.passes,
+                        own_arm_terminals,
+                        cascade_victims,
+                        no_goods_learned: learned_count,
+                        round_arm_measured: round_advanced,
+                        voided_a_round: voided,
+                        steering_spent_terminal: None,
                     });
-                }
-                self.disturbances.push(disturbance);
                 Ok(())
             }
             crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id } => {
@@ -11957,6 +11972,105 @@ mod tests {
             tally.round_arms_measured, 0,
             "a voided round measured nothing that counts; it is paid for and earns nothing"
         );
+    }
+
+    /// **Voiding a round is not progress: a pass that only voids REFUSES, and
+    /// the round it would have destroyed is left standing.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The abandon rule's own sentence is *"what is forbidden is a pass that did
+    /// neither"* — neither learned a no-good nor advanced a round. The first
+    /// version of the rule carried a third escape: a pass that voided a round
+    /// was accepted even when it learned nothing, which is the same hole the
+    /// spent arm carried, one arm over. It cycles the same way: void the round,
+    /// re-open it against the unchanged set, void it again.
+    ///
+    /// Reaching it needs a defect rather than hard physics — a terminal's own
+    /// arm condemned while the exact `(terminal, prefix, arm)` triple that
+    /// should have suppressed it is already in the set — which is precisely why
+    /// it must refuse by name instead of spinning: a defect that announces
+    /// itself is cheaper than one that looks like a slow model.
+    ///
+    /// **Sabotage-shaped:** put `&& !voided` back on the rule and this goes red
+    /// on the `expect_err`; move the rule back below the void block and it goes
+    /// red on `voided_rounds`, which is the half that says a refusing pass
+    /// destroys nothing on its way out.
+    #[test]
+    fn a_pass_that_only_voids_a_round_refuses_and_leaves_the_round_standing() {
+        let elsewhere = crate::legalization::NoGood::new(
+            177,
+            prefix_fixture(9),
+            crate::legalization::ArmIdentity::live(
+                crate::cco::CandidateFamily::PlateDescent,
+                3,
+                1.0,
+                2,
+            ),
+        );
+        let condemned_elsewhere = || crate::legalization::LegalizationAbandon::Condemned {
+            learned: vec![elsewhere],
+            own_arm_terminals: vec![177],
+            cascade_victims: Vec::new(),
+            measured: vec![crate::legalization::ArmRefusalPhysics {
+                gap_mm: -0.2,
+                distance_clearance_mm: -0.2,
+                axis_transit_illegal: false,
+                terminal_radius_mm: 0.4,
+                rootward_radius_mm: 0.4,
+            }],
+        };
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(&mut steering, condemned_elsewhere())
+            .expect("the first pass learns a no-good the set did not have");
+        tally.passes = 2;
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
+            )
+            .expect("a spent steering opens a round");
+
+        // The identical refusal, now with a round open. The set cannot grow on
+        // it, so the only thing this pass would do is destroy the round.
+        tally.passes = 3;
+        let refusal = tally
+            .apply(&mut steering, condemned_elsewhere())
+            .expect_err("a pass whose only effect is a void made no progress and must refuse");
+        let SupportRunError::Failed { phase, detail } = &refusal else {
+            panic!("the abandon rule refuses as a named stage failure, not {refusal:?}");
+        };
+        assert_eq!(*phase, SupportRunPhase::Brace);
+        assert!(
+            detail.contains("made no progress") && detail.contains("voided an open round: true"),
+            "the refusal must say the pass would have voided a round and still made no \
+             progress: {detail}"
+        );
+
+        assert_eq!(
+            tally.voided_rounds, 0,
+            "a refusing pass destroys nothing on its way out — the rule is read BEFORE the void"
+        );
+        let round = steering
+            .round()
+            .expect("the round is still open; the refusal did not void it");
+        assert_eq!(round.terminal_id, 113);
+        assert_eq!(round.arm_rank, 0);
+        assert!(
+            tally.rounds[0].outcome.is_none(),
+            "the round's row is still open, not stamped Voided"
+        );
+        assert_eq!(
+            tally.disturbances.len(),
+            2,
+            "pass 1 learned and pass 2 opened a round; pass 3 refused and wrote nothing"
+        );
+        assert_eq!(steering.len(), 1, "a refused pass adds nothing");
     }
 
     /// **Stage D — a run that never legalized discloses ZEROS, not silence.**
