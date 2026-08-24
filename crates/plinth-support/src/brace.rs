@@ -4330,6 +4330,196 @@ mod tests {
         );
     }
 
+    /// **THE RE-SIZE AND FOREIGN GEOMETRY — what a wider band CAN and CANNOT
+    /// reach. Craig's 2026-08-23 ruling, and the exposure it opens.**
+    ///
+    /// The ruling makes the band `r_final + STANDOFF` instead of
+    /// `r_create + STANDOFF`, and on the fine slab that took the zone from 116
+    /// faces to 304. The zone is the connected component of the band containing
+    /// the seat face, so a bigger band can only extend the flood fill's reach —
+    /// never shrink it. If a growth widened the band far enough to reach a
+    /// mesh-connected neighbouring wall, that wall would enter the zone and the
+    /// arm would stop being graded against it. That is the exact defect this
+    /// whole change retired, re-entering through the door the ruling opened.
+    ///
+    /// **WHAT THIS TEST ESTABLISHES, AND WHAT IT DOES NOT — stated first,
+    /// because the distinction is the whole value of it.**
+    ///
+    /// The zone is `flood_fill` over MESH ADJACENCY from the seat face, bounded
+    /// by the band. So a face enters it only if it is BOTH inside the band AND
+    /// reachable through faces inside the band. Two consequences, and this test
+    /// only measures the first:
+    ///
+    /// 1. **A topologically DISCONNECTED foreign feature can never be
+    ///    swallowed, at any band radius.** This fixture's panel is a second box
+    ///    sharing no vertex with the table (`table_with_foreign_panel_parts`),
+    ///    so the flood fill cannot cross to it however wide the band gets. The
+    ///    test asserts that disconnection explicitly, so it is a stated
+    ///    hypothesis rather than a silent one, and MEASURES that the grown arm
+    ///    is still condemned by the panel — which is the foreign-gap case Craig
+    ///    confirmed is intended and untouched.
+    /// 2. **A mesh-CONNECTED neighbour is a different question, and this test
+    ///    does NOT answer it.** On a watertight mini everything is connected —
+    ///    the Giant Bat's refusals were "the opposite wall of a crevice", which
+    ///    is reachable across the crevice floor. A wall at distance `d` from the
+    ///    axis enters the band once `d < r_final + STANDOFF`, and the ruling
+    ///    moves that threshold up by exactly the growth. Since the FINAL tier
+    ///    refuses on a face at `d < r_final + FINAL_GAP`, the band
+    ///    (`+ STANDOFF` = `+ 0.600`) is WIDER than the refusing radius
+    ///    (`+ 0.300`), so there is a `STANDOFF − FINAL_GAP` = 0.300 mm annulus
+    ///    in which a connected foreign face is forgiven rather than refused —
+    ///    and the ruling widens the window that reaches it by the growth.
+    ///
+    /// Point 2 is an EXPOSURE, named here and in design §11.10, not a defect
+    /// this test found: the same annulus existed under the creation-radius band,
+    /// and the ruling changes its position rather than creating it. Measuring it
+    /// needs a mesh-connected crevice fixture, which does not exist in this tree.
+    /// It is recorded so it is a known edge rather than a surprise.
+    #[test]
+    fn re_sizing_a_grown_arms_exemption_does_not_swallow_the_foreign_panel() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
+        let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
+
+        // Same geometry as the blind-spot pin above, so the two can be read
+        // against each other: only the re-size is different.
+        const COS: f64 = 0.2;
+        const THIN_MM: f64 = 0.20;
+        const FAT_MM: f64 = 0.90;
+        let dir = [(1.0_f64 - COS * COS).sqrt(), 0.0, COS];
+        let p0 = [0.0, 0.0, -0.3];
+        let point_at = |u: f64| std::array::from_fn(|axis| p0[axis] + dir[axis] * u);
+        let mask = |r: f64| contact::placed_mask_inset_mm(seating, COS, r, r, &policy).unwrap();
+        let (mask_thin, mask_fat) = (mask(THIN_MM), mask(FAT_MM));
+        let a: [f64; 3] = point_at(mask_thin + 0.02);
+        let b: [f64; 3] = point_at(mask_thin + 1.0);
+        let lo = [a[0], 0.05, a[2] - 0.05];
+        let hi = [b[0], 0.25, b[2] + 0.05];
+        let (_, fixture_faces) = table_with_foreign_panel_parts(lo, hi);
+        let surface = table_with_foreign_panel(lo, hi);
+        let topology = table_with_foreign_panel_topology(lo, hi);
+        let p1: [f64; 3] = point_at(mask_fat + 5.0);
+        // The panel is the SECOND box in the fixture: `table_with_foreign_panel`
+        // appends its twelve faces after the table's twelve.
+        let panel_faces = (12_u32..fixture_faces.len() as u32).collect::<Vec<_>>();
+        assert!(!panel_faces.is_empty(), "the fixture must carry a panel");
+
+        // Minted THIN, with the band its creation radius earned.
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
+        let created = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id,
+                band_radius_mm: THIN_MM + config.standoff_mm,
+            }],
+        )
+        .expect("the seat zone freezes")
+        .remove(0);
+
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(THIN_MM)),
+            r1_mm: RootwardEndRadius::new(positive(THIN_MM)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "re-sized-blind-spot".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, created.clone());
+
+        // THE SIZING PASS, then THE RULING: grown to FAT, then re-cut through
+        // the production helper the four sites call.
+        forest
+            .set_radii(
+                key,
+                TerminalEndRadius::new(positive(FAT_MM)),
+                RootwardEndRadius::new(positive(FAT_MM)),
+            )
+            .unwrap();
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            config.standoff_mm,
+            std::iter::once(&mut forest),
+        )
+        .unwrap();
+        assert_eq!(refrozen, 1, "the grown arm's band must be re-cut");
+
+        let re_cut = forest.seat_zone_record(key).unwrap().clone();
+        // NON-VACUITY — the band really did widen. If the re-size were a no-op
+        // this test would be asserting nothing about the ruling.
+        assert!(
+            re_cut.band_radius_mm() > created.band_radius_mm(),
+            "the band must have grown with the radius: {} mm became {} mm",
+            created.band_radius_mm(),
+            re_cut.band_radius_mm()
+        );
+
+        // **THE HYPOTHESIS, STATED not assumed.** The panel is a second box
+        // sharing no vertex with the table, so no face of it is adjacent to any
+        // face of the table. That — not the band radius — is what keeps it out
+        // of the zone here, and a reader is entitled to know which.
+        let table_faces = (0_u32..12).collect::<Vec<_>>();
+        assert!(
+            panel_faces.iter().all(|panel| topology
+                .neighbors(*panel as usize)
+                .is_none_or(|adjacent| adjacent
+                    .iter()
+                    .all(|face| !table_faces.contains(face)))),
+            "this fixture's panel must be topologically DISCONNECTED from the \
+             table, or the claim below is about the band when it is really \
+             about the flood fill's reach"
+        );
+
+        // **THE CLAIM.** The wider band still forgives the SEAT and nothing
+        // else. A panel face inside it would mean the exemption had stopped
+        // being the arm's own footprint.
+        let swallowed = panel_faces
+            .iter()
+            .filter(|face| re_cut.zone().contains(face))
+            .collect::<Vec<_>>();
+        assert!(
+            swallowed.is_empty(),
+            "a re-sized exemption must still equal the arm's OWN footprint. \
+             Craig's ruling is \"no slack\", and a zone grown to include a \
+             neighbour's wall is not a footprint. The re-cut band of {} mm \
+             swallowed {} DISCONNECTED foreign-panel face(s): {swallowed:?}. \
+             Disconnected geometry cannot be reached by the flood fill at any \
+             band radius, so a failure here would mean the zone stopped being a \
+             connected component at all.",
+            re_cut.band_radius_mm(),
+            swallowed.len()
+        );
+
+        // …and the arm is still CONDEMNED by the panel, which is the
+        // foreign-gap case Craig confirmed is intended and untouched.
+        let graded =
+            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap()[0]
+                .1;
+        assert!(
+            graded < 0.0,
+            "the grown arm stands next to a FOREIGN feature that is not its own \
+             seat, so the re-size must not rescue it. Kernel said {graded}."
+        );
+        println!(
+            "RE-SIZED-BLIND-SPOT: band {} mm -> {} mm, zone {} -> {} faces, \
+             panel faces swallowed = 0, graded = {graded}",
+            created.band_radius_mm(),
+            re_cut.band_radius_mm(),
+            created.zone().len(),
+            re_cut.zone().len()
+        );
+    }
+
     /// **A SEATED ARM IS STILL LEGAL — the exemption has to exempt** (#36 §8
     /// step 6).
     ///

@@ -1153,8 +1153,14 @@ input directory.
 
 | | binary sha256 | records | bytes | md5 | wall |
 | --- | --- | --- | --- | --- | --- |
-| 600be86 | `5f50fec3…` | 215 | 3,750,864 | `c13ca528…` | 276 s |
-| this branch | `c7e7cb4a…` | 215 | 3,750,864 | `c13ca528…` | 285 s |
+| 600be86 | `5f50fec3…` | 215 | 3,750,864 | `c13ca528…` |
+| this branch | `c7e7cb4a…` | 215 | 3,750,864 | `c13ca528…` |
+
+NO WALL-CLOCK COLUMN, deliberately. The two runs were 276 s and 285 s, but the
+tip run shared the machine with a corpus test's repair loop for its whole
+duration and the baseline did not. That +3% is a scheduling artefact and cannot
+be read as the re-size's cost; the honest cost figure is below — the re-size
+never ran on this model at all.
 
 Both trees were clean at their commit before building, and the baseline
 reproduces the ledger's own Stage D row for `5f5c2d6` exactly — which is the
@@ -1195,3 +1201,37 @@ provenance argument asked for). It does NOT exercise the F1 path on the corpus,
 because this model never reaches it. A model that DOES place a model anchor is
 the run that would; `zombie-3-a` is not it, and saying so is more useful than
 reporting "no change" and stopping.
+
+### NAMED EXPOSURE — what a WIDER band can reach, and what has not been measured
+
+The ruling makes the band `r_final + STANDOFF_MM` where it was
+`r_create + STANDOFF_MM`. On the fine slab that took the zone from 116 faces to
+304. The zone is `flood_fill` over MESH ADJACENCY from the seat face, bounded by
+the band, so a wider band can only extend the fill's reach — never shrink it.
+Two cases, and only the first is measured.
+
+1. **A topologically DISCONNECTED foreign feature can never be swallowed, at any
+   band radius.** MEASURED by
+   `brace::re_sizing_a_grown_arms_exemption_does_not_swallow_the_foreign_panel`:
+   the arm is grown 0.20 → 0.90 mm, the band re-cut 0.80 → 1.50 mm through the
+   production helper, and the panel is still absent from the zone and still
+   condemns the arm (graded −1.15 mm). That test asserts the disconnection
+   explicitly, because disconnection — not the band — is what does the work
+   there, and a reader is entitled to know which.
+2. **A mesh-CONNECTED neighbour is a different question and IS NOT MEASURED.**
+   On a watertight mini everything is connected; the Giant Bat's refusals were
+   "the opposite wall of a crevice", reachable across the crevice floor. A wall
+   at distance `d` from the axis is admitted to the band once
+   `d < r_final + STANDOFF_MM`, while the FINAL tier only REFUSES on it at
+   `d < r_final + FINAL_CLEARANCE_GAP_MM`. The band is the wider of the two, so
+   there is a `STANDOFF_MM − FINAL_CLEARANCE_GAP_MM` = **0.300 mm annulus** in
+   which a connected foreign face is forgiven rather than refused — and the
+   ruling moves the window that reaches it up by exactly the growth.
+
+**This annulus is not new and the ruling did not create it**: the same 0.300 mm
+gap existed between the creation-radius band and the creation-radius refusing
+radius. What the ruling changes is WHERE the window sits, by the amount the arm
+grew. Whether any production geometry falls in it is unmeasured, and measuring it
+needs a mesh-connected crevice fixture, which this tree does not have. It is
+recorded so it is a known edge rather than a surprise, and it is the obvious
+follow-up if Craig wants the ruling's cost bounded rather than described.
