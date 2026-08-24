@@ -1,6 +1,6 @@
 # Seat footprint: exempt the declared entry carrier, not nearby geometry
 
-**Date:** 2026-08-23; revised 2026-08-24 after round-2 review
+**Date:** 2026-08-23; revised 2026-08-24 after round-3 review
 
 **Status:** REVISED DESIGN FOR OWNER DECISION; no production code in this lane
 
@@ -318,8 +318,8 @@ or reclassify an existing cell's identity. Foreign walls remain outside `Kentry`
 partition invariant, rather than by the connectivity of `Pg`.
 
 Placement uses `g = 0.600 mm`. Final grading uses `g = 0.300 mm`. They use the same
-`Kentry`, `E0`, component identity, and query semantics, but distinct prepared
-`Qg` and `Pg` records. Final grading may not reuse the placement record.
+`Kentry`, `E0`, partition identity, and query semantics, but distinct prepared `Qg`
+and `Pg` records. Final grading may not reuse the placement record.
 
 A triangle crossing either boundary is split. Inside polygons are excluded and
 outside polygons remain measured. Whole-face exclusion adds mesh-size slack;
@@ -351,99 +351,92 @@ surface after seeing clearance.
 
 ---
 
-## 6. Narrowed monotonicity [actual own-patch grades are ordered; positive tie-breaks use a separate common mask]
+## 6. Narrowed monotonicity [distance, transit, and incidence verdicts are ordered for one radius-only family]
 
-Craig's narrowed guarantee is:
+Craig's guarantee is: against any surface outside its own footprint patch, a thinner
+arm never grades worse. A sanctioned comparison has the same axis, endpoints,
+length, entry point and normal, taper family and station parameterization, `Kentry`,
+policy, and demand; only **radius** changes. “Never grades worse” means that every
+production model-surface predicate which accepts the fatter arm also accepts the
+thinner arm. It is not proved by calling one distance number the production grade.
 
-> Against any surface outside its own footprint patch, a thinner arm never grades
-> worse.
-
-A refusal-set inclusion at one `g` is insufficient. The geometry family must expose
-its exact signed-clearance field `C_r(x)` in **mm** and prove the pointwise law for
-every model-surface point and every sanctioned pair with equal axis, taper class,
-station parameterization, `Kentry`, and demand:
+The family must first prove both exact-solid nesting, `Bthin subset-of Bfat`, and
+pointwise signed-clearance ordering in **mm**:
 
 ```text
 r_thin <= r_fat  =>  C_thin(x) >= C_fat(x)  for every x in S.
 ```
 
-Equivalently, all clearance-level envelopes are nested, not only the envelope at
-one demand:
+Equivalently, every clearance-level envelope nests. A family that cannot prove both
+laws is ineligible for radius comparison.
+
+### 6.1 Distance predicate
+
+For `T(r,g) = S \ (Kentry ∩ Q(r,g))`, define only the distance component:
 
 ```text
-for every clearance level h:
-Q(r_thin, h) subset-of Q(r_fat, h).
+Ddistance(r,g) = min(0 mm, inf over x in T(r,g) of (C_r(x) - g)).
 ```
 
-A geometry family that cannot prove this law is ineligible for radius comparison.
-No foot-ball shadow or other second envelope may alter the tested boundary.
+Patch nesting makes every point tested only for the thinner arm lie outside
+`Qthin`, where its deficit is non-negative. Common tested points obey the field
+order. Therefore `Ddistance_thin >= Ddistance_fat`. This does not claim that
+`Ddistance` includes transit or incidence refusals.
 
-The production safety grade at demand `g` is the exact signed deficit, capped at
-zero because positive surplus is not part of refusal severity:
+### 6.2 Axis-transit predicate
+
+Transit must use the same exact retained fragments `T(r,g)`. A foreign-transit
+witness is an interval of the live support solid inside model volume entered across
+a fragment of `T(r,g)`. The sanctioned own embed is ignored only where its entry
+crossing lies in `Pg`; a **radius**-derived axial seat mask may not hide model
+surface from this predicate. Let `Lforeign(r,g)` be the maximum witness length in
+**mm**, and define the current threshold margin
 
 ```text
-D(r, g) = min(0 mm, inf over x in T(r,g) of (C_r(x) - g))
-T(r,g)  = S \ (Kentry ∩ Q(r,g)).
+Dtransit(r,g) = min(0 mm, min_illegal_len_mm - Lforeign(r,g)).
 ```
 
-`D = 0 mm` is legal and `D < 0 mm` is refused. This is a numeric grade, not only a
-binary set test. If an implementation also reports uncapped positive clearance,
-that value is diagnostic and must not be used to assert monotonic ranking across
-different own patches.
+A thinner witness cannot enter through `Kentry \ Qthin`: that surface has no contact
+with `Bthin` at demand `g`. Its entry is therefore also retained for the fatter arm.
+Exact-solid nesting can only preserve or extend that occupied interval, so
+`Lforeign_thin <= Lforeign_fat` and `Dtransit_thin >= Dtransit_fat`.
 
-The own-patch theorem now holds over the actual production populations. Because all
-radii use the same complete `Kentry`, patch nesting gives
-`P_thin subset-of P_fat`. Every point newly retained only for the thinner arm lies
-in `Kentry \ Q(r_thin,g)` and therefore has `C_thin(x) - g >= 0 mm`; it cannot lower
-`D_thin`. On every point retained by both arms, pointwise ordering gives
-`C_thin(x) - g >= C_fat(x) - g`. Taking the infimum and then `min(0 mm, ...)`
-therefore gives
+This is a required replacement contract for the final and placement transit
+consumers. The current radius-dependent seat insets are not evidence for it: a
+fatter inset can hide an interval still tested for the thinner arm. No sanctioned
+comparison may use that path until it consumes `T(r,g)` as above.
+
+### 6.3 Degenerate- and grazing-incidence predicates
+
+Degeneracy depends only on the common axis and entry normal, so it is identical for
+the pair. For emergence, let `M(r)` be the total claimed mask extent in **mm** and
+`L` the common seated member length. Every sanctioned taper family must prove
+`Mthin <= Mfat` from the exact seat-depth and mask formulas. Then
 
 ```text
-D(r_thin,g) >= D(r_fat,g).
+Demerge(r) = min(0 mm, L - min_free_span_mm - M(r))
 ```
 
-This proof would fail if `Pg` used a radius-dependent connected component: growth
-could create a bridge and change identity. Section 4 prohibits that operation.
-It would also fail for a clipped or radius-derived carrier; section 3.3 requires
-one complete upstream partition cell.
+obeys `Demerge_thin >= Demerge_fat`. If mask ordering is not proved for every
+contact end in the family, that family is ineligible for radius comparison.
 
-Candidate ranking may need positive clearance after both candidates are already
-legal. That is a different query. It must prepare an immutable
-`CommonRetainedMask` from the pair of radius-bound footprint tokens:
+Production placement conjoins distance and transit. Final grading stamps transit
+into its distance verdict. CCO conjoins distance, degenerate incidence, and grazing
+emergence. The three proofs above therefore establish the narrowed guarantee for
+all registered production verdicts, rather than only for the distance field.
 
-```text
-Tcommon = T(r_thin,g) ∩ T(r_fat,g)
-R(r,g,Tcommon) = inf over x in Tcommon of C_r(x).
-```
+Positive ranking after both arms are legal is separate. It uses a pair-bound
+`CommonRetainedMask`, `Tcommon = Tthin ∩ Tfat`, and
+`R(r,Tcommon) = inf C_r(x)` over that common population. Pointwise ordering proves
+`Rthin >= Rfat`. Both radius-bound tokens and the pair token are fingerprint-checked.
 
-Pointwise ordering on this genuinely common population proves
-`R_thin >= R_fat`. The mask token is pair-bound and contains both geometry digests,
-`g`, `Kentry` identity, and its own digest. It does not pretend that one
-`PreparedEntryFootprint` can serve two radii. Each radius-bound token remains
-fingerprint-checked against its own live geometry; the comparison consumer rejects
-either stale input before preparing the common mask.
-
-The acceptance estate pins three independent failures:
-
-1. **Pointwise field ladder.** Sample exact witness cells and prove
-   `C_thin(x) >= C_fat(x)` at every point selected by the oracle, across every
-   sanctioned radius family and clearance level used by either tier.
-2. **Actual own-patch grade ladder.** Prepare each radius's own `Qg`, `Pg`, and
-   radius-bound token. `D_thin >= D_fat` must hold, including a fixture where radius
-   growth would formerly add a connected-component bridge.
-3. **Common-mask positive ladder.** Prepare two live radius-bound tokens plus the
-   pair-bound mask. Positive `R_thin >= R_fat` must hold. Reusing either token after
-   an axis or **radius** mutation must reject before comparison.
-
-The former **INFERRED** margins `0.061688 → 0.089244 mm`, a `0.027556 mm`
-fatter-grades-better span at `g = 0.300 mm`, are a mandatory red witness. With the
-matched field and patch, both own-patch safety deficits are `0 mm`; any positive
-ranking comparison uses `Tcommon` and preserves pointwise order.
-
-The theorem does not compare different axes, partition cells, placement with final,
-or different taper families. Those are different geometry problems, not disclosed
-exceptions inside a claimed radius ordering.
+The six CHAL-B radii must pass through the real final, placement
+`candidate_revalidation`, and CCO clearance consumers at both authorized demands.
+Each ladder records distance, transit, degenerate-incidence, and grazing-emergence
+components before the combined verdict. Required rows include a foreign-transit
+boundary, a grazing-emergence boundary, the old radius-growth bridge, and the
+**INFERRED** `0.027556 mm` distance reversal. Helper-only or distance-only ladders
+do not count. Different axes, carriers, or taper families are outside this theorem.
 
 ---
 
@@ -476,8 +469,10 @@ transition, not by a prose search for call sites. The registry must account for:
 * rewire slide, retire, root-reanchor, and replacement paths;
 * candidate replay and winner copy;
 * placement and final tier preparation;
+* final and placement foreign-transit preparation and consumption;
+* CCO degenerate-incidence and grazing-emergence preparation and consumption;
 * pair-bound common-mask preparation and candidate-ranking consumption; and
-* every clearance consumer.
+* every distance-clearance consumer.
 
 Each registered path gets a named red sabotage that disables only that path's
 produce, validate, lookup, prepare, invalidate, copy, mask, or consume transition
@@ -547,10 +542,12 @@ model anchor.
    shortening, endpoint move, taper change, carrier change, and tier change each
    invalidate exactly when the fingerprint changes. CHAL-A and CHAL-A2 are
    mandatory.
-9. **Monotonicity.** Pointwise signed-field, actual own-patch deficit, and
-   pair-bound common-mask positive ladders pass. A radius-growth bridge fixture
-   cannot change receiver identity. Restoring the ball-shadow/member-radius
-   mismatch, one-token/two-radius reuse, or binary-only set nesting must fail.
+9. **Monotonicity.** Six-radius same-axis, same-taper ladders pass through the real
+   final, placement, and CCO consumers. They record distance, foreign transit,
+   degenerate incidence, grazing emergence, combined verdict, and pair-bound positive
+   rank. A fatter-only transit mask that hides a foreign interval, an unproved mask
+   formula, the ball-shadow/member-radius mismatch, one-token/two-radius reuse, or a
+   helper-only distance ladder must fail.
 10. **Partition authority and ambiguity.** Provenance-labelled raised-column and
     channel models produce the required complete cells. Missing labels, overlapping
     interiors, boundary-only entry, and two eligible cells each refuse contact
@@ -647,35 +644,31 @@ complete entry-side receiver needed at both `g = 0.600 mm` placement and
 `g = 0.300 mm` final grading. Thus it cannot stop after the physical intersection
 and restore own-seat refusal at a tier.
 
-## Monotonicity [proved over production grades and actual own-patch populations]
+## Monotonicity [proved for every production model-surface refusal]
 
-The grader must expose an exact signed-clearance field `C_r(x)` in **mm** and prove,
-for every sanctioned same-axis, same-taper, same-carrier radius pair:
+For a sanctioned same-axis, same-taper, same-`Kentry`, same-demand pair, only
+**radius** changes. The family must prove exact-solid nesting and pointwise signed-
+clearance ordering in **mm**. The own-patch distance deficit then orders because
+patches nest and common retained points obey the field order.
 
-```text
-r_thin <= r_fat  =>  C_thin(x) >= C_fat(x) for every surface point x.
-```
+That distance proof is not the production theorem. Production also refuses
+foreign axis transit and CCO degenerate or grazing incidence. Transit must be
+redefined on the same exact retained fragments outside `Pg`: its numeric grade is
+the threshold margin for the longest foreign occupied interval. A **radius**-derived
+seat inset may not hide one. Exact-solid nesting then makes a thinner foreign
+interval no longer than the fatter interval. Degeneracy is identical because axis
+and normal are fixed. Grazing emergence orders only after each taper family proves
+that its exact claimed mask extent is nondecreasing with **radius**. The combined
+final, placement, and CCO verdicts are conjunctions of these ordered components.
 
-This is equivalent to envelope nesting at every clearance level, not only binary
-refusal-set nesting at one demanded gap.
+The six CHAL-B radii must pass through the real final, placement, and CCO consumers.
+Each witness records distance, transit, degenerate-incidence, grazing-emergence, and
+combined verdict. It includes a foreign-transit boundary and a grazing boundary;
+a distance-only helper witness does not count.
 
-Production uses the own-patch signed deficit
-
-```text
-D(r,g) = min(0 mm, inf over x outside Pg(r,g) of (C_r(x) - g)).
-```
-
-The common complete carrier gives nested patches. Points retained only by the
-thinner arm have non-negative deficit, and common retained points obey the
-pointwise field order. Therefore `D_thin >= D_fat` over the populations production
-actually grades. A radius-growth bridge cannot invert this result because patch
-membership does not use a connected-component operation.
-
-If ranking needs positive clearance after both candidates are legal, it must use a
-separate pair-bound `CommonRetainedMask` made from two live radius-bound footprint
-tokens. Both candidates then grade the same retained population. One token cannot
-be reused for two radii, and stale geometry in either token must reject before
-comparison.
+Positive ranking after both arms are legal remains a separate pair-bound
+`CommonRetainedMask` query over one common population. One token cannot be reused
+for two radii, and stale geometry must reject before comparison.
 
 ## Cost and proof obligations [new semantics, exact clipping, and production-path sabotage]
 
@@ -703,38 +696,29 @@ implementation for now. The present seat face, axis, normal, and unlabelled tria
 connectivity do not contain enough information to keep the channel floor legal and
 the raised or opposite wall refusable.
 
-## What changed [round-2 blocking findings folded in]
+## What changed [round-3 blocking finding folded in]
 
-- Replaced “the contact constructor declares `Kentry`” with a normative upstream
-  authority: model preparation supplies a provenance-backed or explicitly authored
-  exact receiver partition before support search.
-- Defined carrier identity and extent: one complete partition cell must cover the
-  entry-side receiver needed by the physical embed and both authorized demanded
-  gaps, while excluding foreign walls, lateral collisions, re-entry, and the R4 far
-  face.
-- Added a strict ambiguity rule. Missing labels, overlapping cells, a boundary-only
-  crossing, multiple eligible cells, or unavailable provenance refuse model seating;
-  no unlabelled-mesh inference fallback is allowed.
-- Removed radius-dependent connected-component selection from `P0` and `Pg`.
-  Exact intersections with one complete carrier prevent radius-growth bridges from
-  changing surface identity.
-- Defined the grader's exact numeric signed-clearance field in **mm** and required
-  pointwise ordering, equivalently envelope nesting at every clearance level rather
-  than only refusal-set nesting at one `g`.
-- Defined the production own-patch grade as a zero-capped signed deficit and proved
-  `D_thin >= D_fat` over the actual populations each radius grades.
-- Separated positive candidate ranking from each radius-bound prepared token.
-  Ranking now uses a pair-bound common retained mask built from two live tokens, so
-  it cannot violate stale-token fingerprints or compare different populations.
-- Added independent red witnesses for pointwise ordering, actual own-patch ordering,
-  radius-growth bridging, common-mask positive ordering, and one-token/two-radius
-  misuse.
-- Added partition production, validation, lookup, and pair-mask ranking to the
-  production registry and named-sabotage obligation.
-- Preserved the repaired `Iembed`, endpoint, R4 truncation, primitive clipping,
-  exact `E0`, matched-envelope, lifecycle, and batch-first requirements from the
-  prior revision.
-- Preserved all raw evidence with explicit provenance: **MEASURED** `0 → 20` and
-  `0 → 15` wall admissions; **INFERRED** `−0.300 mm` and `−0.050 mm` clearances;
-  **MEASURED** 16 channel-floor and 11 far-wall faces; and the **INFERRED**
-  `0.061688 → 0.089244 mm` margins with `0.027556 mm` reversal.
+- Retracted the claim that the distance deficit alone is the production safety
+  grade. It is now named only as the distance component.
+- Enumerated all production model-surface refusals: final and placement foreign
+  axis transit, plus CCO degenerate incidence and grazing emergence.
+- Replaced radius-dependent axial seat masking in the monotonicity contract with a
+  foreign-transit predicate over the same exact retained fragments outside `Pg`.
+  A fatter seat mask may no longer hide a foreign interval tested for a thinner arm.
+- Added the numeric transit threshold margin in **mm** and proved its radius ordering
+  from exact-solid nesting.
+- Proved degenerate incidence identical for a same-axis, same-normal pair. Made each
+  sanctioned taper family prove that exact claimed mask extent is nondecreasing with
+  **radius** before the grazing-emergence margin can enter a comparison.
+- Combined the ordered distance, transit, degenerate-incidence, and emergence
+  components explicitly for the real final, placement, and CCO verdicts.
+- Required six-radius ladders through those real consumers, including foreign-
+  transit and grazing boundaries. A helper-only or distance-only witness is not an
+  acceptance gate.
+- Registered transit and incidence producers and consumers for named red sabotage.
+- Preserved the upstream receiver partition, matched exact `Qg`, exact clipping,
+  pair-bound positive ranking, lifecycle, and batch-first requirements from round 2.
+- Preserved the evidence with provenance: **MEASURED** `0 → 20` and `0 → 15` wall
+  admissions; **INFERRED** `−0.300 mm` and `−0.050 mm` clearances; **MEASURED** 16
+  channel-floor and 11 far-wall faces; and the **INFERRED** `0.061688 → 0.089244 mm`
+  margins with `0.027556 mm` reversal.
