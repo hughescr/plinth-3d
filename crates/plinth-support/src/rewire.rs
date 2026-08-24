@@ -104,6 +104,8 @@ pub(crate) enum RewireError {
     ReplayMismatch,
     #[error("accepted rewire move left a stale brace endpoint")]
     StaleBrace,
+    #[error("re-sizing a seated member's contact exemption failed: {0}")]
+    SeatZone(String),
 }
 
 #[derive(Clone, Debug)]
@@ -411,7 +413,7 @@ fn try_reattach(
     // proof-bound replay. They can enlarge the connector or its ancestor
     // path, so the final geometry must be proved as written, in one batch,
     // before volume comparison and publication.
-    if !validate_changed_geometry(forest, &candidate, request.geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, request.geometry, config)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -477,7 +479,7 @@ fn try_slide(
     }
     let parent = candidate.parent_of(key);
     reconcile_ancestors(&mut candidate, parent)?;
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -690,7 +692,7 @@ fn try_prune(
     candidate.set_parent(child_key, parent)?;
     candidate.retire(key)?;
     reconcile_ancestors(&mut candidate, parent)?;
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -790,7 +792,7 @@ fn try_retire(
     if parent.is_some() {
         reconcile_ancestors(&mut candidate, parent)?;
     }
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -858,11 +860,33 @@ fn required_radius(
 
 fn validate_changed_geometry(
     before: &Forest,
-    after: &Forest,
+    after: &mut Forest,
     geometry: &AnchorGeometryAuthority<'_>,
     config: &Config,
 ) -> Result<bool, RewireError> {
     after.validate()?;
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, at rewire's post-sizing
+    // point.**
+    //
+    // Every caller of this function has just rewritten radii on the candidate —
+    // `try_slide` sizes a junction and its children, `reconcile_ancestors` walks
+    // the path above a splice — and a seated member among them is carrying a
+    // band cut at a radius it no longer has. This is the last moment before the
+    // PLACEMENT grading below reads those bands, and it is the first moment at
+    // which every radius on the candidate is final. ONE batched kernel call.
+    //
+    // `after` is `&mut` for exactly this and nothing else: the grading itself
+    // reads only. Re-cutting inside the grading loop instead would make the
+    // exemption a function of the radius being graded, which is the defect the
+    // frozen-`Z` rule retired.
+    crate::seat_zone::refreeze_resized_seat_zones(
+        geometry.surface(),
+        geometry.topology(),
+        config.standoff_mm,
+        std::iter::once(&mut *after),
+    )
+    .map_err(|error| RewireError::SeatZone(error.to_string()))?;
+    let after: &Forest = after;
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
@@ -1475,7 +1499,7 @@ mod tests {
             .unwrap();
         assert!(!validate_changed_geometry(
             &before,
-            &grown,
+            &mut grown,
             &authority,
             &Config::current(0.05).unwrap(),
         )

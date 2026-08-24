@@ -337,6 +337,11 @@ struct TriggerReliefResult {
     pending: Vec<MemberKey>,
     resize_batches: usize,
     exact_clearance_batches: usize,
+    /// How many batched seat-zone re-size calls the trial spent (Craig's ruling,
+    /// 2026-08-23). Counted for the same reason the two above are: the re-size
+    /// is batch-first by design, and a regression to one call per seated member
+    /// has to be VISIBLE rather than merely slow.
+    seat_zone_refreeze_batches: usize,
 }
 
 /// The seated contact geometry carried alongside a rod that touches the model.
@@ -387,7 +392,11 @@ struct PlacementCandidate {
     /// `append_candidate` (the mint) read the SAME face set. A zone recomputed
     /// between those two would be the retired skip-length's inversion rebuilt
     /// one level up (design §3).
-    seat_zone: Option<std::sync::Arc<[u32]>>,
+    ///
+    /// The whole RECORD travels, not the bare face list, because
+    /// `append_candidate` installs it into the forest and the forest's side
+    /// table is what a later re-size reads.
+    seat_zone: Option<crate::seat_zone::SeatZoneRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +497,7 @@ pub(crate) fn brace_pass_current_parity(
             pending = pending_triggers_after_trial(
                 &planned,
                 surface,
+                topology,
                 plate_z_mm,
                 &fresh,
                 pending,
@@ -564,6 +574,27 @@ pub(crate) fn brace_fixed_point_current_parity(
         );
         let changed = !plan.resize.changed.is_empty();
         working = apply_resize(plan.forest_with_braces, &plan.resize)?;
+        // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the brace
+        // controller's post-sizing point.**
+        //
+        // `apply_resize` has just rewritten radii across the live tree, and a
+        // seated member it fattened is carrying a band cut at a radius it no
+        // longer has. The exemption must equal the arm's true footprint with no
+        // slack, so the bands are re-cut here — after the sizing, before
+        // `exact_clearance_negatives` grades anything at FINAL, in ONE batched
+        // kernel call for the whole forest.
+        //
+        // It runs once per controller iteration because there is one sizing pass
+        // per iteration. That is not continuous tracking: each call sits at a
+        // moment when no grading is in flight, which is the whole of what the
+        // monotonicity theorem needs (design §3).
+        crate::seat_zone::refreeze_resized_seat_zones(
+            surface,
+            topology,
+            BraceConfig::current(process_resolution_mm)?.standoff_mm,
+            std::iter::once(&mut working),
+        )
+        .map_err(|error| BraceError::SeatZone(error.to_string()))?;
         let added = !plan.additions.is_empty();
         additions.extend(plan.additions);
         let negative = exact_clearance_negatives(
@@ -760,9 +791,18 @@ fn append_candidate(
         // **#36 — the mint half of creation site 2.** The zone was frozen in
         // `gather_candidates` from this rung's creation radius and its own seat
         // face; here it is bound to the key the grading sites will look it up
-        // by. Nothing recomputes it, which is the whole rule (design §3).
-        if let Some(zone) = candidate.seat_zone.as_ref() {
-            forest.set_seat_zone(key, std::sync::Arc::clone(zone));
+        // by.
+        //
+        // For a model rung the creation band is also the FINAL band, because a
+        // rung is never re-sized: `add_brace` above puts it in the forest's
+        // `braces` set, `live_tree_members` filters that set out
+        // (`forest.rs`), and `transient::postorder` walks only
+        // `live_tree_members`. The re-size pass therefore finds nothing to do
+        // for a rung — it is covered by the same uniform scan as everything
+        // else, and that scan is what would notice if this ever stopped being
+        // true.
+        if let Some(record) = candidate.seat_zone.as_ref() {
+            forest.set_seat_zone(key, record.clone());
         }
         additions.push(BraceAddition {
             key,
@@ -776,6 +816,7 @@ fn append_candidate(
 fn pending_triggers_after_trial(
     forest: &Forest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     plate_z_mm: Finite,
     report: &TransientReport,
     pending: Vec<MemberKey>,
@@ -810,13 +851,29 @@ fn pending_triggers_after_trial(
             pending,
             resize_batches: 0,
             exact_clearance_batches: 0,
+            seat_zone_refreeze_batches: 0,
         });
     }
     // Shared triggers use one complete resize and one exact-clearance batch.
     // The immutable trial is common to every trigger because the forest does
     // not change while their relief verdicts are scattered.
     let resize = resize_forest_current_parity(forest, plate_z_mm)?;
-    let trial = apply_resize(forest.clone(), &resize)?;
+    let mut trial = apply_resize(forest.clone(), &resize)?;
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, on the TRIAL forest.**
+    //
+    // Easy to miss and it changes verdicts. The trial exists to answer "is this
+    // trigger relieved once everything is sized?", and it answers by grading at
+    // FINAL. Grading the trial with bands cut at pre-resize radii would read a
+    // seated arm worse than the geometry it is about to have, leave the trigger
+    // unrelieved, and place a rung nobody needed. One batched call, on the same
+    // batch boundary this function already declares.
+    crate::seat_zone::refreeze_resized_seat_zones(
+        surface,
+        topology,
+        config.standoff_mm,
+        std::iter::once(&mut trial),
+    )
+    .map_err(|error| BraceError::SeatZone(error.to_string()))?;
     let clearance = exact_clearance_rows(&trial, surface, config, penetration_limits)?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
@@ -830,6 +887,7 @@ fn pending_triggers_after_trial(
             .collect(),
         resize_batches: 1,
         exact_clearance_batches: 1,
+        seat_zone_refreeze_batches: 1,
     })
 }
 
@@ -1674,7 +1732,7 @@ fn evaluate_candidates(
                 candidate
                     .seat_zone
                     .as_ref()
-                    .map_or(EMPTY, |zone| zone.as_ref()),
+                    .map_or(EMPTY, |record| record.zone().as_ref()),
             );
             // Read the incidence DIRECTLY off the rod. It used to be
             // reconstructed by inverting `embed_inset_mm`; that inverse does
@@ -3776,6 +3834,7 @@ mod tests {
         let result = pending_triggers_after_trial(
             &forest,
             &remote_box(),
+            &remote_box_topology(),
             plate,
             &report,
             vec![first, second],
@@ -3786,6 +3845,12 @@ mod tests {
         assert!(result.pending.is_empty());
         assert_eq!(result.resize_batches, 1);
         assert_eq!(result.exact_clearance_batches, 1);
+        assert_eq!(
+            result.seat_zone_refreeze_batches, 1,
+            "the trial re-sizes seated exemptions in ONE batched call, on the \
+             same batch boundary as the resize and the clearance pass. A count \
+             above 1 is a regression to one native call per seated member."
+        );
     }
 
     #[test]
@@ -4053,7 +4118,7 @@ mod tests {
         // NON-VACUITY 2 — the exemption is real. An empty zone would make this
         // test a statement about a rule that is not running.
         assert!(
-            !zone.is_empty(),
+            !zone.zone().is_empty(),
             "the seated arm must forgive its own seat, or the fixture is grading \
              a member with no exemption at all"
         );
@@ -4073,7 +4138,7 @@ mod tests {
                 model_contact_end: Some(ContactEnd::Terminalward),
                 carried_mm2: finite(0.0).unwrap(),
             }));
-            forest.set_seat_zone(key, std::sync::Arc::clone(&zone));
+            forest.set_seat_zone(key, zone.clone());
             let rows =
                 exact_clearance_rows(&forest, &surface, config, test_penetration_limits()).unwrap();
             assert_eq!(rows.len(), 1, "one member, one graded row");
@@ -4124,7 +4189,7 @@ mod tests {
              fat(r={FAT_MM})={fat}  zone={} faces  |  at the pre-ruling {}: \
              thin={thin_at_600}  fat={fat_at_600}",
             config.final_clearance_gap_mm,
-            zone.len(),
+            zone.zone().len(),
             config.standoff_mm
         );
     }
@@ -4203,12 +4268,12 @@ mod tests {
         let panel_faces = (12_u32..fixture_faces.len() as u32).collect::<Vec<_>>();
         assert!(!panel_faces.is_empty(), "the fixture must carry a panel");
         assert!(
-            panel_faces.iter().all(|face| !honest.contains(face)),
+            panel_faces.iter().all(|face| !honest.zone().contains(face)),
             "the honest zone must forgive the SEAT and nothing else; it must not \
              contain a single foreign-panel face"
         );
 
-        let graded = |zone: std::sync::Arc<[u32]>| {
+        let graded = |zone: crate::seat_zone::SeatZoneRecord| {
             let mut forest = Forest::new();
             let key = forest.add_member(Member::new(MemberSpec {
                 p0_mm: finite3(p0).unwrap(),
@@ -4228,14 +4293,14 @@ mod tests {
                 .1
         };
 
-        let honest_clearance = graded(std::sync::Arc::clone(&honest));
+        let honest_clearance = graded(honest.clone());
 
         // THE SABOTAGE, performed: `a_zone_that_swallowed_the_foreign_panel`.
-        let mut swallowed = honest.to_vec();
+        let mut swallowed = honest.zone().to_vec();
         swallowed.extend(panel_faces);
         swallowed.sort_unstable();
         swallowed.dedup();
-        let swallowed_clearance = graded(std::sync::Arc::from(swallowed));
+        let swallowed_clearance = graded(honest.with_zone(std::sync::Arc::from(swallowed)));
 
         assert!(
             honest_clearance < 0.0,
@@ -4253,7 +4318,7 @@ mod tests {
         println!(
             "BLIND-SPOT-CLOSED: honest={honest_clearance} (zone {} faces)  \
              swallowed={swallowed_clearance}",
-            honest.len()
+            honest.zone().len()
         );
     }
 
@@ -4307,11 +4372,11 @@ mod tests {
         .expect("the seat zone freezes")
         .remove(0);
         assert!(
-            !zone.is_empty(),
+            !zone.zone().is_empty(),
             "a seated arm must forgive its own seat face"
         );
 
-        let graded = |zone: Option<std::sync::Arc<[u32]>>| {
+        let graded = |zone: Option<crate::seat_zone::SeatZoneRecord>| {
             let mut forest = Forest::new();
             let key = forest.add_member(Member::new(MemberSpec {
                 p0_mm: finite3(p0).unwrap(),
@@ -4432,11 +4497,11 @@ mod tests {
         // FIXTURE NON-VACUITY — the zone must be a DISC, not the whole top face,
         // or this test degenerates into the one above.
         assert!(
-            zone.len() * 4 < topology.n_faces(),
+            zone.zone().len() * 4 < topology.n_faces(),
             "the fine slab must give the seat a zone that is a small fraction of \
              the mesh, or the fixture cannot price the headroom: zone {} faces \
              of {} total",
-            zone.len(),
+            zone.zone().len(),
             topology.n_faces()
         );
 
@@ -4606,7 +4671,7 @@ mod tests {
              F1-HEADROOM: placement_legal={ladder_placement:?}\n\
              F1-HEADROOM: PLACEMENT refuses above r_max={placement_crossing_mm} mm, \
              FINAL refuses above r_max={final_crossing_mm} mm",
-            zone.len(),
+            zone.zone().len(),
             topology.n_faces(),
             seat_radius_mm + config.standoff_mm,
         );
@@ -4699,7 +4764,7 @@ mod tests {
                 final_gap_mm,
                 &zero,
                 &zero,
-                &[zone.as_ref()],
+                &[zone.zone().as_ref()],
             )
             .unwrap()
             .0[0];
@@ -4724,7 +4789,7 @@ mod tests {
         );
         println!(
             "F2-ADMISSION: witness={witness}  verdict={verdict}  zone={} faces",
-            zone.len()
+            zone.zone().len()
         );
     }
 
@@ -6277,7 +6342,7 @@ mod tests {
         let graded = |kind: MemberKind| {
             let mut forest = Forest::new();
             let key = forest.add_member(contact_member(p0, p1, kind, ContactEnd::Rootward, 0));
-            forest.set_seat_zone(key, std::sync::Arc::clone(&zone));
+            forest.set_seat_zone(key, zone.clone());
             let rows = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
                 .unwrap();
             rows.iter()

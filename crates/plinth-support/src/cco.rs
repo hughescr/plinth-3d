@@ -1144,7 +1144,12 @@ enum Descriptor {
         /// Carrying the finished zone rather than the face ID is what makes
         /// that identity structural: the replay does an `Arc` clone, never a
         /// native call and never a recompute.
-        seat_zone: std::sync::Arc<[u32]>,
+        ///
+        /// It is the whole RECORD rather than the bare face list because a zone
+        /// that is later re-sized to the arm's final footprint (Craig's ruling,
+        /// 2026-08-23) needs the seat's own face ID and the band radius it was
+        /// cut at, and both were resolved here.
+        seat_zone: crate::seat_zone::SeatZoneRecord,
     },
     Bifurcate {
         host: MemberKey,
@@ -3784,6 +3789,39 @@ fn grow_terminal_inner(
         });
     }
 
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the CCO tournament's one
+    // defined post-sizing point.**
+    //
+    // Every candidate has now been applied AND sized: a model anchor's rootward
+    // radius was raised by `size_tapered_without_tree_fanin`, a bifurcation's
+    // upper half was rewritten by `size_bifurcation_candidate`, and both of
+    // those members carry a band cut at a radius they no longer have. This is
+    // challenge finding F1 (design §11.9), and the ruling is that the exemption
+    // must equal the arm's TRUE footprint with no slack. So the bands are re-cut
+    // to the final radii HERE — after all sizing, before `clearance_survival`
+    // grades anything, in ONE batched kernel call for every candidate forest in
+    // the tournament at once.
+    //
+    // It cannot move to a later point: `clearance_survival` is the placement
+    // grading site and it must read the re-cut zones. It cannot move to an
+    // earlier one: `evaluate_descriptors` runs inside a `rayon` map with no
+    // surface, and per-candidate re-cutting would be one native call each.
+    let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+        surface,
+        topology,
+        contact_policy.standoff_mm,
+        evaluated.iter_mut().map(|candidate| &mut candidate.forest),
+    )
+    .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+    if refrozen > 0 {
+        // `ClearanceRow` snapshots the zone when `clearance_rows` builds it, so
+        // a candidate whose forest just changed needs its rows re-read. Pure
+        // CPU: `clearance_rows` makes no native call.
+        for candidate in &mut evaluated {
+            candidate.rows = clearance_rows(&candidate.forest, &snapshot);
+        }
+    }
+
     let survival = clearance_survival(surface, &contact_policy, &evaluated)?;
     // PR-3 (design review F1). A model anchor refused for grazing or degenerate
     // incidence leaves through the SAME channel a breached foot ball uses, so
@@ -3873,7 +3911,30 @@ fn grow_terminal_inner(
         }
     ));
     match apply_and_size(forest, request, &descriptors[winner_index], &config) {
-        Ok(true) if forest.digest() == winner.forest.digest() => forest.commit(checkpoint)?,
+        Ok(true) if forest.digest() == winner.forest.digest() => {
+            // **The re-size, replayed onto the live forest — by COPY, not by
+            // recomputation.**
+            //
+            // `apply_and_size` has just re-installed the CREATION-radius band on
+            // the committed member, because that is what the descriptor carries.
+            // The winner's candidate forest already holds the re-cut record for
+            // the same key, and the digests just proved the two forests have the
+            // same live members under the same keys. Copying is therefore
+            // bit-identical to re-cutting, and it costs no native call — the
+            // same argument `apply_model_anchor` makes for carrying the zone on
+            // the descriptor in the first place.
+            //
+            // The zone table is invisible to `Forest::digest` (pinned by
+            // `freezing_a_seat_zone_does_not_move_the_forest_digest`), which is
+            // what lets the equality check above run BEFORE this copy without
+            // the re-size being able to break it.
+            for key in winner.forest.live_members() {
+                if let Some(record) = winner.forest.seat_zone_record(key) {
+                    forest.set_seat_zone(key, record.clone());
+                }
+            }
+            forest.commit(checkpoint)?;
+        }
         Ok(_) => {
             forest.rollback(checkpoint)?;
             return Err(CcoError::NonDeterministicWinner);
@@ -4389,13 +4450,16 @@ fn generate_descriptors(
                 p0_mm: se,
                 p1_mm: seated_point_mm,
                 seat_face_id: seat.snapped_face_id(),
-                // FROZEN at the anchor's creation radius. `min_shoot_radius_mm`
-                // is what `apply_model_anchor` mints the rootward (contact) end
-                // with; `size_tapered_without_tree_fanin` may raise it
-                // afterwards, and the band must NOT follow — a band that grew
-                // with the radius would swallow more surface for a fatter arm
-                // and rebuild the inversion this change exists to retire
-                // (design §3).
+                // The anchor's CREATION radius. `min_shoot_radius_mm` is what
+                // `apply_model_anchor` mints the rootward (contact) end with,
+                // and `size_tapered_without_tree_fanin` raises it immediately
+                // afterwards — that gap is challenge finding F1. Under Craig's
+                // 2026-08-23 ruling the band does not FOLLOW the growth, it is
+                // RE-CUT to the final radius once, after the sizing pass and
+                // before `clearance_survival`, by
+                // `seat_zone::refreeze_resized_seat_zones` in
+                // `grow_terminal_inner`. Padding it here instead was the
+                // rejected disposition: it would put slack in the band.
                 band_radius_mm: radius + policy.standoff_mm,
             });
             out.push(Descriptor::ModelAnchor {
@@ -4404,7 +4468,10 @@ fn generate_descriptors(
                 seated_point_mm,
                 // Placeholder; every one is replaced from the batch below
                 // before this function returns.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &zone_requests[seat_index],
+                ),
             });
         }
         // THE one batched band call plus parallel flood fill for this terminal.
@@ -4414,7 +4481,7 @@ fn generate_descriptors(
         // `out` ends with exactly one `ModelAnchor` per request, pushed in the
         // same order, so the tail of `out` re-pairs with `frozen` by position.
         let anchors = out.len() - frozen.len();
-        for (descriptor, zone) in out[anchors..].iter_mut().zip(frozen) {
+        for (descriptor, record) in out[anchors..].iter_mut().zip(frozen) {
             let Descriptor::ModelAnchor { seat_zone, .. } = descriptor else {
                 return Err(CcoError::InvalidGeometry(
                     "generate_descriptors: the seat-zone tail of the descriptor list is not \
@@ -4422,7 +4489,7 @@ fn generate_descriptors(
                         .to_owned(),
                 ));
             };
-            *seat_zone = zone;
+            *seat_zone = record;
         }
     }
     let hosts = cached_hosts
@@ -4860,7 +4927,7 @@ fn apply_model_anchor(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     seated_point_mm: [f64; 3],
-    seat_zone: &std::sync::Arc<[u32]>,
+    seat_zone: &crate::seat_zone::SeatZoneRecord,
     config: &Config,
 ) -> Result<bool, CcoError> {
     let stub_end = request.stub_end_mm().map(Finite::get);
@@ -4908,7 +4975,14 @@ fn apply_model_anchor(
     // candidate forest away. A zone derived from the forest being written into
     // could differ between those two runs; one carried on the descriptor
     // cannot.
-    forest.set_seat_zone(strut, std::sync::Arc::clone(seat_zone));
+    //
+    // This installs the CREATION-radius band. `apply_and_size` raises the
+    // rootward radius on the very next line of its own match arm, and the
+    // exemption is re-cut to that final radius by
+    // `seat_zone::refreeze_resized_seat_zones` in `grow_terminal_inner` —
+    // after the whole candidate batch is sized, before anything grades it.
+    // Doing it HERE instead would be one native call per candidate.
+    forest.set_seat_zone(strut, seat_zone.clone());
     forest.set_parent(request.stub, Some(strut))?;
     Ok(true)
 }
@@ -5064,11 +5138,14 @@ fn apply_bifurcation(
         // what the contact always forgave, and the lower half, which no longer
         // declares a contact, must forgive nothing.
         //
-        // An `Arc` move. No native call, and emphatically no re-freeze from
-        // `upper`'s own interpolated radius: that would be the recompute the
-        // monotonicity theorem forbids (design §3).
-        if let Some(zone) = forest.take_seat_zone(host_key) {
-            forest.set_seat_zone(upper, zone);
+        // A MOVE of the record, `Arc` and all. No native call here, and no
+        // re-cut here either: `size_bifurcation_candidate` runs next and will
+        // rewrite `upper`'s radii, so the honest moment to re-cut the band to
+        // the final footprint is after that, in `grow_terminal_inner`'s one
+        // batched re-size — not in the middle of a mutation, one candidate at a
+        // time.
+        if let Some(record) = forest.take_seat_zone(host_key) {
+            forest.set_seat_zone(upper, record);
         }
     }
     // The split partitions the declaration; it never duplicates it. `host_key`
@@ -9440,7 +9517,18 @@ mod tests {
             carried_mm2: finite(0.0),
         }));
         let frozen: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![3_u32, 11, 42]);
-        forest.set_seat_zone(host, std::sync::Arc::clone(&frozen));
+        forest.set_seat_zone(
+            host,
+            crate::seat_zone::SeatZoneRecord::new(
+                std::sync::Arc::clone(&frozen),
+                &crate::seat_zone::SeatZoneRequest {
+                    p0_mm: [1.0, 0.0, 20.0],
+                    p1_mm: [1.0, 0.0, 0.0],
+                    seat_face_id: 0,
+                    band_radius_mm: 0.65,
+                },
+            ),
+        );
 
         let before = forest
             .live_tree_members()
@@ -9561,7 +9649,15 @@ mod tests {
                 // Hand-built descriptor: this vector pins the family equations
                 // and the generation/price ledger, not the seat exemption, so
                 // it forgives nothing. An empty zone is the STRICT direction.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -10105,7 +10201,15 @@ mod tests {
                 // Hand-built descriptor: this vector pins the family equations
                 // and the generation/price ledger, not the seat exemption, so
                 // it forgives nothing. An empty zone is the STRICT direction.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];

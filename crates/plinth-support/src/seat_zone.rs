@@ -35,8 +35,20 @@
 //!     { x in surface : dist(x, axis) < r_seat + standoff_placement }
 //! ```
 //!
-//! and FREEZE `Z` at contact creation. It is stored with the contact and never
-//! recomputed from a later radius.
+//! and FREEZE `Z` at contact creation.
+//!
+//! # The 2026-08-23 ruling — the exemption equals the arm's TRUE footprint
+//!
+//! Craig ruled, verbatim: when the sizing pass thickens a seated arm past its
+//! creation radius, the frozen exemption patch must be RE-SIZED to match the
+//! arm's FINAL footprint — *"the exemption always equals the arm's true
+//! footprint, no slack."* Padding the band at creation was rejected (it puts
+//! slack in the band); accepting the cost was rejected (it silently couples two
+//! passes that do not know about each other).
+//!
+//! So `Z` is frozen at creation AND re-frozen once after each sizing pass that
+//! moves a seated member's radius, by [`refreeze_resized_seat_zones`]. Nothing
+//! else recomputes it, and nothing recomputes it at grading time.
 //!
 //! # Why the freeze is what makes monotonicity unconditional
 //!
@@ -49,11 +61,19 @@
 //! never grade worse than a fatter one on the same axis. THEOREM, not a
 //! measurement.
 //!
-//! Recompute `Z` from the final radius instead and the theorem dies: a fatter
-//! arm claims a wider band, a wider band swallows more faces, and the fatter arm
-//! is graded against strictly less surface than the thin one. That is the same
-//! shape of defect as the skip-length, one level up, and it is exactly the
-//! sabotage the frozen-Z test reproduces.
+//! **The hypothesis that theorem needs is narrower than "never recomputed,
+//! ever".** It needs `Z` not to move as a function of the radius BEING GRADED,
+//! within the grading pass that grades it. Let `Z` follow the radius at grading
+//! time and the theorem dies: a fatter arm claims a wider band, a wider band
+//! swallows more faces, and the fatter arm is graded against strictly less
+//! surface than the thin one. That is the same shape of defect as the
+//! skip-length, one level up, and it is exactly the sabotage the frozen-Z test
+//! reproduces.
+//!
+//! The re-size does not touch that hypothesis. It runs at a defined point
+//! BETWEEN a sizing pass and the next grading pass, so inside any one grading
+//! pass every zone is still a constant and `C` is still a constant of the axis.
+//! It changes WHICH constant, once, at a moment when no grading is in flight.
 //!
 //! # Batch-first
 //!
@@ -65,22 +85,84 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use geom_kernel::{NativeSurface, NearFaceBatchError, NearFaceBatchLimits};
+use plinth_core::Finite;
 use plinth_mesh::FaceTopology;
 use rayon::prelude::*;
 
+use crate::forest::{ContactEnd, Forest, MemberKey};
+
 /// One contact whose zone is being frozen.
 ///
-/// Every field is a CREATION-TIME value. `band_radius_mm` in particular is
-/// `r_seat + standoff_placement` at the radius the contact was minted with; a
-/// later resize must never rewrite it, which is the whole point.
+/// `band_radius_mm` is `r_seat + standoff_placement` at the radius the contact
+/// carries AT THE MOMENT OF THE FREEZE — the creation radius at a creation site,
+/// the FINAL radius at a re-size ([`refreeze_resized_seat_zones`]). Nothing
+/// between those two moments rewrites it, and no grading site rewrites it ever.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SeatZoneRequest {
     pub(crate) p0_mm: [f64; 3],
     pub(crate) p1_mm: [f64; 3],
     /// The global face ID the seat point projected onto at creation.
     pub(crate) seat_face_id: u32,
-    /// `r_seat + standoff_placement`, FROZEN.
+    /// `r_seat + standoff_placement`.
     pub(crate) band_radius_mm: f64,
+}
+
+/// A frozen zone, plus the two facts a later re-size needs and the member
+/// cannot supply.
+///
+/// **Why exactly these two and no more.** `seat_face_id` is the contact's own
+/// identity on the mesh — it is resolved once, by a projection at the creation
+/// site, and a re-size must reuse it rather than re-project (re-projecting could
+/// walk the seat onto a different face and silently redefine which contact this
+/// is). `band_radius_mm` is how the re-size answers "did the sizing pass move
+/// this?" without consulting any tolerance.
+///
+/// The axis is deliberately NOT stored. A re-size reads `p0`/`p1` from the live
+/// member, which is the same axis every grading site reads; a stored copy could
+/// only ever go stale.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SeatZoneRecord {
+    zone: Arc<[u32]>,
+    seat_face_id: u32,
+    band_radius_mm: f64,
+}
+
+impl SeatZoneRecord {
+    pub(crate) const fn new(zone: Arc<[u32]>, request: &SeatZoneRequest) -> Self {
+        Self {
+            zone,
+            seat_face_id: request.seat_face_id,
+            band_radius_mm: request.band_radius_mm,
+        }
+    }
+
+    /// The frozen face set, in the ascending order the kernel's exclusion set
+    /// requires.
+    pub(crate) const fn zone(&self) -> &Arc<[u32]> {
+        &self.zone
+    }
+
+    pub(crate) const fn seat_face_id(&self) -> u32 {
+        self.seat_face_id
+    }
+
+    pub(crate) const fn band_radius_mm(&self) -> f64 {
+        self.band_radius_mm
+    }
+
+    /// The SAME contact carrying a DIFFERENT face set.
+    ///
+    /// Only sabotage tests want this: they hand a grading site a zone the freeze
+    /// would never have produced — one that swallowed a foreign feature, one
+    /// that was never re-cut after a growth — and check that the verdict moves.
+    /// Production has no use for it, so it is not compiled into production.
+    #[cfg(test)]
+    pub(crate) fn with_zone(&self, zone: Arc<[u32]>) -> Self {
+        Self {
+            zone,
+            ..self.clone()
+        }
+    }
 }
 
 /// Why a batch of zones could not be frozen.
@@ -167,13 +249,100 @@ pub(crate) fn freeze_production_seat_zones(
     surface: &NativeSurface,
     topology: &FaceTopology,
     requests: &[SeatZoneRequest],
-) -> Result<Vec<Arc<[u32]>>, SeatZoneError> {
-    freeze_seat_zones(
+) -> Result<Vec<SeatZoneRecord>, SeatZoneError> {
+    let zones = freeze_seat_zones(
         surface,
         topology,
         requests,
         production_limits(topology, requests.len()),
-    )
+    )?;
+    Ok(zones
+        .into_iter()
+        .zip(requests)
+        .map(|(zone, request)| SeatZoneRecord::new(zone, request))
+        .collect())
+}
+
+/// **THE RE-SIZE — Craig's ruling of 2026-08-23, in one batched pass.**
+///
+/// *"The exemption always equals the arm's true footprint, no slack."* A sizing
+/// pass may leave a seated member fatter (or thinner) than it was when its zone
+/// was frozen. This walks the forests it is given, finds every seated member
+/// whose stored `band_radius_mm` no longer equals `r_contact + standoff_mm`, and
+/// re-freezes exactly those — in ONE `faces_near_segments_batch` call for the
+/// whole slice of forests, however many forests and members that is.
+///
+/// **Where it may be called, and where it may not.** Between a sizing pass and
+/// the next grading pass. Never inside a grading pass: a zone recomputed from
+/// the radius being graded is the radius-proportional defect the frozen-`Z` rule
+/// retired, one level up (see the module header's monotonicity argument).
+///
+/// **Why the change test is `!=` and not a tolerance.** `band_radius_mm` is a
+/// value this module itself wrote from `r_contact + standoff_mm`; asking whether
+/// the same arithmetic on today's radius yields the same bits is a comparison,
+/// not a threshold, and it introduces no number. Gating on the sizing plan's own
+/// `changed` list instead would inherit that list's tie tolerance and would miss
+/// a sub-tolerance drift that `set_radii` nevertheless wrote.
+///
+/// **What a member with no contact declaration does.** Nothing: it is skipped
+/// and its record left alone. A grading site already ignores a zone for a row
+/// that declares no contact, and a declaration that changed hands MOVED its
+/// record with it (`Forest::take_seat_zone`).
+///
+/// Returns the number of members re-frozen, so a caller can disclose it and a
+/// test can prove the pass actually ran.
+pub(crate) fn refreeze_resized_seat_zones<'forest, I>(
+    surface: &NativeSurface,
+    topology: &FaceTopology,
+    standoff_mm: f64,
+    forests: I,
+) -> Result<usize, SeatZoneError>
+where
+    I: IntoIterator<Item = &'forest mut Forest>,
+{
+    let mut forests = forests.into_iter().collect::<Vec<_>>();
+    let mut targets: Vec<(usize, MemberKey)> = Vec::new();
+    let mut requests: Vec<SeatZoneRequest> = Vec::new();
+    for (index, forest) in forests.iter().enumerate() {
+        for key in forest.live_members() {
+            let Some(record) = forest.seat_zone_record(key) else {
+                continue;
+            };
+            let Some(member) = forest.member(key) else {
+                continue;
+            };
+            let Some(end) = member.model_contact_end() else {
+                continue;
+            };
+            let contact_radius_mm = match end {
+                ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
+                ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
+            };
+            let band_radius_mm = contact_radius_mm + standoff_mm;
+            if band_radius_mm == record.band_radius_mm() {
+                continue;
+            }
+            targets.push((index, key));
+            requests.push(SeatZoneRequest {
+                p0_mm: member.p0_mm().map(Finite::get),
+                p1_mm: member.p1_mm().map(Finite::get),
+                // The contact's own identity on the mesh, carried from the
+                // creation site. Re-projecting could land on a different face
+                // and quietly redefine which contact this is.
+                seat_face_id: record.seat_face_id(),
+                band_radius_mm,
+            });
+        }
+    }
+    if requests.is_empty() {
+        return Ok(0);
+    }
+    // THE one batched native call for every re-size in this pass.
+    let records = freeze_production_seat_zones(surface, topology, &requests)?;
+    for ((index, key), record) in targets.iter().zip(records) {
+        forests[*index].set_seat_zone(*key, record);
+    }
+    Ok(targets.len())
 }
 
 /// Freeze one zone per request, in ONE batched band call plus a parallel flood

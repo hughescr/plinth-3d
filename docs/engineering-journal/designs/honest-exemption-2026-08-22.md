@@ -57,12 +57,20 @@ Z = the connected component, containing the seat's own face, of
     { x in surface : dist(x, axis) < r_seat + standoff_placement }
 ```
 
-**frozen at contact creation.** `Z` is stored with the contact and is never
-recomputed from a later radius.
+**frozen at contact creation, and RE-FROZEN once after each sizing pass that
+moves the member's radius** (Craig's ruling of 2026-08-23, §11.9). `Z` is stored
+with the contact. Nothing recomputes it from the radius being graded; the only
+thing that recomputes it is the one explicit post-sizing pass named below.
 
-`r_seat` is the member's radius at the contact end at the moment the contact was
-minted. `standoff_placement` is `STANDOFF_MM`. Both are frozen together as one
-`band_radius_mm`.
+`r_seat` is the member's radius at the contact end. `standoff_placement` is
+`STANDOFF_MM`. Both are stored together as one `band_radius_mm`.
+
+**The re-freeze rule, exactly.** After a sizing pass fixes radii, and before any
+grading site reads a zone, one batched pass recomputes `Z` for every seated
+member whose `r_contact + STANDOFF_MM` no longer equals its stored
+`band_radius_mm` — then the zone is frozen again. This is
+`seat_zone::refreeze_resized_seat_zones`, and its call sites are listed in
+§11.10. It is never continuous, and it never runs at grading time.
 
 ---
 
@@ -80,12 +88,21 @@ either way, and the tested **face** set is `surface \ Z`, which is frozen. So
 clearance is monotone decreasing in `r_max`, and **a thinner arm can never grade
 worse than a fatter one on the same axis.** Unconditional, for any geometry.
 
-The freeze is what makes it unconditional. Recompute `Z` from the final radius
-and the theorem dies: a fatter arm claims a wider band, a wider band swallows
-more faces, and the fatter arm is graded against strictly less surface than the
-thin one. That is the skip-length's inversion rebuilt one level up, and it is the
-sabotage `the_zone_does_not_move_when_the_radius_does_because_it_is_never_recomputed`
+The freeze is what makes it unconditional, and the **hypothesis it needs is
+narrower than "never recomputed, ever"**: `Z` must not move as a function of the
+radius *being graded, within the grading pass that grades it*. Let `Z` follow the
+radius at grading time and the theorem dies — a fatter arm claims a wider band, a
+wider band swallows more faces, and the fatter arm is graded against strictly
+less surface than the thin one. That is the skip-length's inversion rebuilt one
+level up, and it is the sabotage
+`the_zone_does_not_move_when_the_radius_does_because_it_is_never_recomputed`
 reproduces (`seat_zone.rs`).
+
+The 2026-08-23 re-freeze does not touch that hypothesis. It happens at a defined
+point **between** a sizing pass and the next grading pass; inside any one grading
+pass every zone is a constant, so `C` is still a constant of the axis and
+clearance is still `C − r_max − demanded_gap`, monotone decreasing in `r_max`. The
+re-freeze changes WHICH constant, once, at a moment no grading is in flight.
 
 The kernel half of the same theorem is
 `a_thinner_arm_never_grades_worse_than_a_fatter_one_on_a_frozen_face_set`
@@ -830,7 +847,47 @@ The round-5 challenge returned ACCEPT with four non-blocking findings. Three are
 folded in above and in the test estate; one is a decision this lane may not take
 for itself.
 
-#### F1 — RAISED FOR CRAIG. A seated arm has almost no PLACEMENT headroom to grow into
+#### F1 — RULED BY CRAIG, 2026-08-23. RE-SIZE THE EXEMPTION TO THE ARM'S FINAL FOOTPRINT
+
+**The ruling, verbatim:** when the sizing pass thickens a seated arm past its
+creation radius, the frozen exemption patch (seat zone) must be RE-SIZED to match
+the arm's FINAL footprint — *"the exemption always equals the arm's true
+footprint, no slack."*
+
+**Rejected, for the record:** accept-as-is (disposition 3 below) and
+pad-at-creation (disposition 2 below).
+
+**Craig explicitly confirmed the foreign-gap case is intended and untouched.** An
+arm placed with 0.6 mm of true gap to a foreign feature and then thickened to
+0.35 mm of remaining gap is still graded against that foreign feature at the
+final tier and refuses if the gap is short. The re-size forgives the arm's own
+seat and nothing else; it does not buy clearance from anybody else's geometry.
+
+**What the ruling changes.** The band radius is no longer "the radius at the
+moment of the mint" — it is "the radius at the contact end, now". One batched
+recompute runs after each sizing pass and before the next grading pass
+(§2, §11.10). Because every production sizer leaves the contact end at least as
+fat as the other end (`legacy_compat.rs:116`,
+`transient.rs`'s non-uniform branch, `cco::uniformly_size_ancestor_path`), the
+contact-end radius IS `r_max` for every seated production member, so the graded
+clearance after a re-size is
+
+```text
+clearance = (r_final + STANDOFF_MM + s) − (r_max + demanded_gap)
+          = STANDOFF_MM − demanded_gap + s
+```
+
+with `s` the tessellation slack — strictly positive, because a face that straddles
+the band boundary is admitted to the band whole. At FINAL that is `+0.300 + s`;
+at PLACEMENT it is `+s` exactly. **The placement margin is tessellation slack and
+nothing else.** MEASURED at 0.25 mm triangles: `s` = 0.050 mm. It shrinks toward
+zero as a mesh is refined. It does not go negative, but it is thin, and that is
+the honest statement of what the ruling buys.
+
+The rest of this subsection is the measurement that RAISED F1, kept because it is
+the before-picture the flipped test's sabotage half still reproduces.
+
+#### F1, as measured before the ruling
 
 The band is frozen at the arm's CREATION radius, and every face outside the band
 is by construction farther than that radius plus `STANDOFF_MM` from the axis. So
@@ -880,21 +937,25 @@ mini presents.
 refusal rate HALVED on this lane (0.402 → 0.200 per trial). This is a
 sensitivity, measured and pinned, not an observed regression.
 
-**The three dispositions, for Craig:**
+**The three dispositions that were put to Craig:**
 
 1. **Freeze at `max(r_create, final r_max)`** — re-freeze the band after sizing.
    Correct in shape, but it means a second freeze pass and a zone that is no
-   longer a creation-time constant.
+   longer a creation-time constant. **THIS IS WHAT HE RULED**, in its exact form
+   rather than its `max(...)` form: the band equals the FINAL contact-end radius,
+   whether that is larger or smaller than the creation radius. No slack means no
+   slack in either direction.
 2. **Widen the seat's exemption by the growth** — keep one freeze, add the
-   growth to the band radius. Cheaper, but the band stops being "the arm's own
+   growth to the band radius. **REJECTED** — the band stops being "the arm's own
    footprint" and becomes a number with slack in it.
 3. **Accept the cost** — 0.05 mm is the headroom, and the sizing pass must not
-   exceed it. Free, but it is a silent coupling between two passes that do not
-   know about each other today.
+   exceed it. **REJECTED.**
 
-Whichever lands, this pin's numbers move and this subsection must say which way.
-The moved pin `cco::the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes`
-sits directly on this edge — its fixture uses `r1` = 0.35 = `min_shoot_radius_mm`.
+The pin `a_seated_arm_that_grows_after_its_freeze_spends_its_headroom_one_for_one`
+was flipped by the ruling into
+`a_seated_arm_that_grows_is_re_sized_to_its_final_footprint_and_stays_legal`, and
+the numbers above survive inside its sabotage half, which skips the re-size and
+watches the 0.400 mm crossing come back.
 
 #### F2 — CLOSED by measurement
 
