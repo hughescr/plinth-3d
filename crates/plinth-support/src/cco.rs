@@ -633,6 +633,20 @@ pub(crate) struct TerminalCcoOutcome {
     pub(crate) anchor_ray_batches: usize,
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
+    /// How many seated MEMBERS this terminal's one batched re-size re-cut
+    /// (Craig's ruling of 2026-08-23; second review, C5/C6).
+    ///
+    /// `grow_terminal_inner` read this count only as control flow — "should the
+    /// rows be re-read?" — and then dropped it, so the tournament's re-size
+    /// disclosed nothing. It is the count across every candidate forest in the
+    /// tournament, not per candidate, because the call is one batch over all of
+    /// them; a zero here on a terminal that grew a model anchor or a
+    /// bifurcation says the re-size stopped firing.
+    ///
+    /// Deliberately NOT folded into the sealed CCO transcript, which this lane
+    /// is already moving for the ruling itself: a second reason to move it
+    /// would make the one authorized re-seal unauditable.
+    pub(crate) seat_zone_members_refrozen: usize,
     pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
     pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     pub(crate) anchor_refusals: Vec<AnchorFootRefusal>,
@@ -1205,6 +1219,15 @@ pub(crate) struct RewireCandidateBatch {
     refusals: Vec<RewireCandidateRefusal>,
     descriptors_generated: usize,
     clearance_batches: usize,
+    /// How many seated MEMBERS this batch's one re-size re-cut across every
+    /// feasible candidate's forest (second review, C5/C6).
+    ///
+    /// Read by `rewire.rs`'s report, which is where the ruling's most-travelled
+    /// site becomes visible: rewire re-cuts on EVERY sweep, not once per pass.
+    /// `replay_candidate`'s own re-cut is deliberately NOT summed in — it
+    /// re-does one candidate's work on a fresh forest, so adding it would
+    /// double-count the winner.
+    seat_zone_members_refrozen: usize,
     anchor_ray_batches: usize,
     anchor_foot_batches: usize,
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
@@ -2295,6 +2318,8 @@ impl CcoController {
                 refusals,
                 descriptors_generated,
                 clearance_batches: 0,
+                // The screen was never reached, so neither was the re-size.
+                seat_zone_members_refrozen: 0,
                 anchor_ray_batches,
                 anchor_foot_batches,
                 anchor_seat_refusals,
@@ -2393,6 +2418,7 @@ impl CcoController {
             refusals,
             descriptors_generated,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             anchor_ray_batches,
             anchor_foot_batches,
             anchor_seat_refusals,
@@ -3816,6 +3842,8 @@ fn grow_terminal_inner(
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 0,
+            // Nothing was graded, so the re-size never ran.
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
@@ -3926,6 +3954,7 @@ fn grow_terminal_inner(
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
@@ -3994,6 +4023,7 @@ fn grow_terminal_inner(
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
+        seat_zone_members_refrozen: refrozen,
         validated_model_anchor: validated_anchors.remove(&winner_index),
         anchor_seat_refusals,
         anchor_refusals,
@@ -4428,6 +4458,11 @@ impl RewireCandidateBatch {
     /// F3 — this batch's model-anchor seat-attestation transcript.
     pub(crate) const fn seat_attestation_digest(&self) -> u64 {
         self.contact_attestation_digest
+    }
+
+    /// How many seated members this batch's one re-size re-cut (C5/C6).
+    pub(crate) const fn seat_zone_members_refrozen(&self) -> usize {
+        self.seat_zone_members_refrozen
     }
 }
 
@@ -6992,6 +7027,7 @@ mod tests {
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             clearance_batches: 0,
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals: vec![zero],
             anchor_refusals: Vec::new(),
@@ -9311,6 +9347,7 @@ mod tests {
             refusals: Vec::new(),
             descriptors_generated: 2,
             clearance_batches: 1,
+            seat_zone_members_refrozen: 0,
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             anchor_seat_refusals: Vec::new(),

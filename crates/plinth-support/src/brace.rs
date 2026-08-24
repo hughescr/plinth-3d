@@ -227,6 +227,21 @@ pub(crate) struct BraceFixedPointPlan {
     /// no verdict reads, and this lane is authorized to move exactly one
     /// fingerprint, the CCO transcript's.
     pub(crate) final_pass_refusals: FinalPassRefusalAccounting,
+    /// How many seated MEMBERS this controller re-cut, summed over its bounded
+    /// passes (Craig's ruling of 2026-08-23; second review, C5/C6).
+    ///
+    /// The controller calls `refreeze_resized_seat_zones` once per iteration
+    /// and used to discard what it returned, so the ruling ran here and
+    /// reported nothing. Paired with `iterations` it is readable: a run whose
+    /// sizing moved a seated member's radius shows a non-zero count, and a zero
+    /// against a non-zero `iterations` says the re-size stopped firing before
+    /// any verdict had to change.
+    ///
+    /// **Not folded into `brace_fixed_point_plan_digest`**, for the same reason
+    /// `final_pass_refusals` is not: folding it would move every sealed
+    /// brace-plan digest in the corpus, and this lane is authorized to move
+    /// exactly one fingerprint, the CCO transcript's.
+    pub(crate) seat_zone_members_refrozen: usize,
 }
 
 /// The empty head of a seat-attestation chain.
@@ -341,7 +356,19 @@ struct TriggerReliefResult {
     /// 2026-08-23). Counted for the same reason the two above are: the re-size
     /// is batch-first by design, and a regression to one call per seated member
     /// has to be VISIBLE rather than merely slow.
+    ///
+    /// COUNTED at the call, not typed at the return (second review, C5/C6):
+    /// a literal here says what the code was meant to do, and a regression to
+    /// one call per member would leave it reading `1`.
     seat_zone_refreeze_batches: usize,
+    /// How many seated MEMBERS the trial actually re-cut — the number
+    /// `refreeze_resized_seat_zones` returns and this site used to discard.
+    ///
+    /// The batch count above and this are different facts and neither implies
+    /// the other: one batched call that re-cut nothing is `(1, 0)`, and it is
+    /// the shape a broken change test would produce. Only this field can tell
+    /// a live re-size from a pass that ran and did nothing.
+    seat_zone_members_refrozen: usize,
 }
 
 /// The seated contact geometry carried alongside a rod that touches the model.
@@ -555,6 +582,9 @@ pub(crate) fn brace_fixed_point_current_parity(
     // Chained rather than summed or replaced, so a pass that stopped attesting
     // moves the head even if a later pass attests the same rows.
     let mut contact_attestation_digest = contact_attestation_chain_seed();
+    // C5/C6 — what the ruling's re-size actually did here, summed over the
+    // bounded passes rather than discarded at each one.
+    let mut seat_zone_members_refrozen = 0_usize;
     for iteration in 1..=FROZEN_PASS_CAP {
         let report = transient_report(&working, plate_z_mm)?;
         let plan = brace_pass_current_parity(
@@ -588,13 +618,15 @@ pub(crate) fn brace_fixed_point_current_parity(
         // per iteration. That is not continuous tracking: each call sits at a
         // moment when no grading is in flight, which is the whole of what the
         // monotonicity theorem needs (design §3).
-        crate::seat_zone::refreeze_resized_seat_zones(
-            surface,
-            topology,
-            BraceConfig::current(process_resolution_mm)?.standoff_mm,
-            std::iter::once(&mut working),
-        )
-        .map_err(|error| BraceError::SeatZone(error.to_string()))?;
+        seat_zone_members_refrozen = seat_zone_members_refrozen.saturating_add(
+            crate::seat_zone::refreeze_resized_seat_zones(
+                surface,
+                topology,
+                BraceConfig::current(process_resolution_mm)?.standoff_mm,
+                std::iter::once(&mut working),
+            )
+            .map_err(|error| BraceError::SeatZone(error.to_string()))?,
+        );
         let added = !plan.additions.is_empty();
         additions.extend(plan.additions);
         let negative = exact_clearance_negatives(
@@ -618,6 +650,7 @@ pub(crate) fn brace_fixed_point_current_parity(
                 contact_refusals: Vec::new(),
                 contact_attestation_digest,
                 final_pass_refusals,
+                seat_zone_members_refrozen,
             });
         }
         if iteration == FROZEN_PASS_CAP {
@@ -695,6 +728,7 @@ pub(crate) fn brace_fixed_point_current_parity(
                 contact_refusals: negative.contact_refusals,
                 contact_attestation_digest,
                 final_pass_refusals,
+                seat_zone_members_refrozen,
             });
         }
     }
@@ -860,6 +894,7 @@ fn pending_triggers_after_trial(
             resize_batches: 0,
             exact_clearance_batches: 0,
             seat_zone_refreeze_batches: 0,
+            seat_zone_members_refrozen: 0,
         });
     }
     // Shared triggers use one complete resize and one exact-clearance batch.
@@ -875,12 +910,20 @@ fn pending_triggers_after_trial(
     // seated arm worse than the geometry it is about to have, leave the trigger
     // unrelieved, and place a rung nobody needed. One batched call, on the same
     // batch boundary this function already declares.
-    crate::seat_zone::refreeze_resized_seat_zones(
+    //
+    // The COUNT is kept rather than discarded (second review, C5/C6). One
+    // batched call that re-cut nothing and one that re-cut every seated member
+    // are the same `1` on the batch counter, and the trial's whole purpose is
+    // to grade at FINAL — a re-size that silently stopped firing would leave
+    // the batch count untouched.
+    let mut seat_zone_refreeze_batches = 0;
+    let seat_zone_members_refrozen = crate::seat_zone::refreeze_resized_seat_zones(
         surface,
         topology,
         config.standoff_mm,
         std::iter::once(&mut trial),
     )
+    .inspect(|_| seat_zone_refreeze_batches += 1)
     .map_err(|error| BraceError::SeatZone(error.to_string()))?;
     let clearance = exact_clearance_rows(&trial, surface, config, penetration_limits)?
         .into_iter()
@@ -895,7 +938,8 @@ fn pending_triggers_after_trial(
             .collect(),
         resize_batches: 1,
         exact_clearance_batches: 1,
-        seat_zone_refreeze_batches: 1,
+        seat_zone_refreeze_batches,
+        seat_zone_members_refrozen,
     })
 }
 
@@ -3859,6 +3903,17 @@ mod tests {
              same batch boundary as the resize and the clearance pass. A count \
              above 1 is a regression to one native call per seated member."
         );
+        // C5/C6. The batch count is now PLUMBED — incremented where the call is
+        // made — rather than typed at the return, so it can be zero. This
+        // fixture holds no seated member, so one call re-cut nobody: the pair
+        // (1, 0) is what a live batch-first re-size with nothing to do looks
+        // like, and it is exactly the state the old literal could not report.
+        assert_eq!(
+            result.seat_zone_members_refrozen, 0,
+            "no member here declares a model contact, so the batched call \
+             re-cut nothing — and the count says so rather than being inferred \
+             from the batch count, which is 1 either way"
+        );
     }
 
     #[test]
@@ -4936,9 +4991,11 @@ mod tests {
     /// and the two crossings challenge finding F1 measured come straight back.**
     ///
     /// Named sabotage: `a_sizing_pass_whose_seat_zones_were_never_re_cut`.
-    /// Delete the `refreeze_resized_seat_zones` call from any of its four
+    /// Delete the `refreeze_resized_seat_zones` call from any of its
     /// production sites — `brace_fixed_point_current_parity`,
     /// `pending_triggers_after_trial`, `cco::grow_terminal_inner`,
+    /// `cco::evaluate_rewire_candidates`,
+    /// `cco::RewireCandidateBatch::replay_candidate`,
     /// `rewire::validate_changed_geometry` — and this is the behaviour that
     /// returns.
     ///

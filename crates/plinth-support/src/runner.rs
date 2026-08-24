@@ -7834,6 +7834,17 @@ fn rewire_report_digest(report: &RewireReport) -> u64 {
     hash.u64(report.sweeps);
     hash.u64(report.move_evaluations);
     hash.u64(report.cco_candidate_batches);
+    // **`seat_zone_members_refrozen` is DELIBERATELY NOT folded here** (second
+    // review, C5/C6). It is disclosure, and it would be a defensible thing to
+    // digest — two runs reaching the same forest, one having re-cut every
+    // seated exemption and one having re-cut none, are not the same run, and a
+    // re-size writes no `Member` so the forest digest cannot separate them.
+    //
+    // Folding it would move every sealed rewire-report digest in the corpus,
+    // and this lane is authorized to move exactly one fingerprint, the CCO
+    // transcript's — the same argument `brace_fixed_point_plan_digest` makes
+    // for keeping `final_pass_refusals` out. Anyone re-sealing the corpus for
+    // another reason should fold it then.
     hash.u64(match report.termination {
         crate::rewire::RewireTermination::FullSweepNoAcceptance => 0,
         crate::rewire::RewireTermination::RollingSavingsConverged => 1,
@@ -8874,6 +8885,7 @@ mod tests {
             contact_refusals: Vec::new(),
             contact_attestation_digest: 0,
             final_pass_refusals: crate::brace::FinalPassRefusalAccounting::default(),
+            seat_zone_members_refrozen: 0,
         };
         let digest = brace_fixed_point_plan_digest(&base);
 
@@ -8892,6 +8904,19 @@ mod tests {
             brace_fixed_point_plan_digest(&disclosed),
             digest,
             "refusal accounting must not move the sealed brace-plan digest"
+        );
+        // C5/C6, the same decision for the same reason. The re-size count is
+        // disclosure the controller now carries instead of discarding; folding
+        // it would move every sealed brace-plan digest in the corpus, and this
+        // lane may move exactly one fingerprint. Pinned so the exclusion reads
+        // as a decision rather than an oversight.
+        let mut counted = base.clone();
+        counted.seat_zone_members_refrozen = 7;
+        assert_eq!(
+            brace_fixed_point_plan_digest(&counted),
+            digest,
+            "the seat-zone re-size count must not move the sealed brace-plan \
+             digest either"
         );
         for termination in [
             BraceFixedPointTermination::Converged,
