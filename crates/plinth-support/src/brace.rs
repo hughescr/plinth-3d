@@ -4970,7 +4970,10 @@ mod tests {
             std::iter::once(&mut forest),
         )
         .unwrap();
-        assert_eq!(refrozen, 1, "the tapered arm's band moved and must be re-cut");
+        assert_eq!(
+            refrozen, 1,
+            "the tapered arm's band moved and must be re-cut"
+        );
 
         let re_cut = forest.seat_zone_record(key).unwrap();
         assert_eq!(

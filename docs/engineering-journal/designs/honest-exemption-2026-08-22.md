@@ -1145,3 +1145,53 @@ which is F1's original table row for row.
    (`forest.rs:1305-1326`). So the CCO commit path's `NonDeterministicWinner`
    rollback restores the pre-`apply_and_size` table exactly, and a re-cut record
    cannot survive a rolled-back candidate.
+
+### The corpus sanity run: `zombie-3-a` is BYTE-IDENTICAL, and here is why
+
+Both runs at the `gate` profile, `saturn4-ultra`, `--no-cache`, one model in the
+input directory.
+
+| | binary sha256 | records | bytes | md5 | wall |
+| --- | --- | --- | --- | --- | --- |
+| 600be86 | `5f50fec3…` | 215 | 3,750,864 | `c13ca528…` | 276 s |
+| this branch | `c7e7cb4a…` | 215 | 3,750,864 | `c13ca528…` | 285 s |
+
+Both trees were clean at their commit before building, and the baseline
+reproduces the ledger's own Stage D row for `5f5c2d6` exactly — which is the
+binary-provenance check: the baseline binary is the commit it claims to be, and
+`600be86` is docs-only against `5f5c2d6`.
+
+`<stem>.coverage.repair.json`: 1,948 scalar fields, **4 differ**, and all four are
+`wall_time_*`. That is the ledger's own criterion for "moved nothing".
+
+**Byte-identical was written down beforehand as a FINDING TO CHASE, not a pass**,
+because §11.9's premise is that the model anchor's band is frozen at
+`min_shoot_radius` and the sizer raises it immediately after. So it was chased,
+with a temporary instrumented build (a print at the re-size, reverted after):
+
+* **1,311 CCO tournaments** ran on this model.
+* **Zero** of them re-cut a single band.
+* **Zero** `refreeze_resized_seat_zones` calls anywhere — brace controller, brace
+  trial, CCO, rewire — found anything to re-cut, across the whole run.
+* Every tournament reports every candidate carrying a seat zone (13/13, 14/14,
+  26/26, 39/39 …). Those zones are the STUBS: `initial.rs` freezes one per stub
+  and every candidate forest inherits them.
+
+**The reason, from the run's own evidence.** `zombie-3-a` never places a model
+anchor. Its `own_contact_no_winner` steps record
+`anchor_seat_refusals_recorded` = 69,211–69,552 with
+`anchor_foot_refusals_recorded` = 0: every anchor seat is refused at
+QUALIFICATION, before any candidate exists, so `generate_descriptors` mints no
+`ModelAnchor` and the tournament is Plate + Bifurcate only. A `Bifurcate` can
+only inherit a zone from a host that declares `Rootward`, which only a committed
+model anchor creates. So the only seated members on this model are stubs — and
+stubs are exactly the flow §11.10 proves cannot be re-sized.
+
+**What this does and does not establish.** It establishes that the change is
+INERT on a model with no placed model anchor, that the wiring runs on the real
+pipeline without erroring, and that the `!=` change test does NOT spuriously fire
+(1,311 chances, zero false re-cuts — which is the runtime witness the `standoff_mm`
+provenance argument asked for). It does NOT exercise the F1 path on the corpus,
+because this model never reaches it. A model that DOES place a model anchor is
+the run that would; `zombie-3-a` is not it, and saying so is more useful than
+reporting "no change" and stopping.
