@@ -2308,6 +2308,40 @@ impl CcoController {
             });
         }
         let contact_policy = seat_contact_policy(anchor_route.process_resolution_mm)?;
+        // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the REWIRE
+        // tournament's post-sizing point (second review, finding C1).**
+        //
+        // This path is `grow_terminal_inner`'s sibling and it sizes exactly the
+        // same way: `evaluate_descriptors` above ran `apply_and_size` on every
+        // descriptor, so a model anchor's rootward radius was raised by
+        // `size_tapered_without_tree_fanin` and a bifurcation's upper half was
+        // rewritten by `size_bifurcation_candidate`. Without a re-cut here the
+        // screen below would grade a SIZED arm against its CREATION-radius
+        // band — the exact defect the ruling kills — and the refusal would
+        // leave silently as `RewireCandidateRefusalReason::Clearance`, which
+        // `try_reattach` reports as `Ok(None)`.
+        //
+        // Same placement in the pipeline as the terminal-growth site: after all
+        // sizing, before `clearance_survival` grades anything, in ONE batched
+        // kernel call across every feasible candidate's forest at once.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            anchor_route.geometry.surface(),
+            anchor_route.geometry.topology(),
+            contact_policy.standoff_mm,
+            feasible.iter_mut().map(|candidate| &mut candidate.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // `ClearanceRow` snapshots the zone when `clearance_rows` builds
+            // it, so a candidate whose forest just changed needs its rows
+            // re-read. Pure CPU: `clearance_rows` makes no native call. The row
+            // SET cannot move — `clearance_rows` selects on `Member` equality
+            // and a re-cut writes no `Member` — so `clearance_rows` below still
+            // agrees with the count `replay_candidate` checks.
+            for candidate in &mut feasible {
+                candidate.rows = clearance_rows(&candidate.forest, &binding.snapshot);
+            }
+        }
         let survives =
             clearance_survival(anchor_route.geometry.surface(), &contact_policy, &feasible)?;
         let mut candidates = Vec::new();
@@ -4339,6 +4373,33 @@ impl RewireCandidateBatch {
         // evaluated with, so the run's process resolution travels on the batch
         // rather than being re-derived from a registry that does not know it.
         let contact_policy = seat_contact_policy(self.process_resolution_mm)?;
+        // **THE RE-SIZE, replayed (second review, finding C1).**
+        //
+        // `evaluate` above re-ran `apply_and_size` from the descriptor, so this
+        // forest carries the CREATION-radius band exactly as the batch's did
+        // before its own re-cut. The screen below is the same screen the batch
+        // ran, so it must read the same bands, and this site must therefore
+        // re-cut the same way. Leaving it out is worse than the batch site's
+        // silent refusal: the batch would have admitted the candidate and the
+        // replay would refuse it, and a replay refusal is
+        // `CcoError::RewireClearanceReplayFailed` — a hard divergence rather
+        // than a routing decision.
+        //
+        // ONE forest, so the batch over it is one call by construction.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            geometry.surface(),
+            geometry.topology(),
+            contact_policy.standoff_mm,
+            std::iter::once(&mut replayed.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // Same re-read the batch site does, for the same reason: the screen
+            // reads `rows`, not the forest. The evidence checks above compared
+            // `rows.len()`, which a re-cut cannot move — `clearance_rows`
+            // selects on `Member` equality and a re-cut writes no `Member`.
+            replayed.rows = clearance_rows(&replayed.forest, &binding.snapshot);
+        }
         if clearance_survival(
             geometry.surface(),
             &contact_policy,
