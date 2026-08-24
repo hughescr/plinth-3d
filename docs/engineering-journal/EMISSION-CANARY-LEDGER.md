@@ -919,6 +919,25 @@ void, re-enter against the unchanged set, void again. Voiding is not progress �
 work rather than making any. The clause is gone and the rule is now evaluated **before** the
 void, so a refusing pass destroys nothing on its way out.
 
+**Read this commit against the challenge report, because it looks like a contradiction and is
+not.** The challenger wrote that *"the Condemned-side void is correct and matches §1.3"*, and
+it is: what was blessed is the **void rule** — another terminal's own arm condemned during a
+round voids it — and that rule is untouched. What changed is the **acceptance disjunct**, a
+separate clause the challenge did not analyse, which decided whether such a pass may run
+another. Reaching the changed behaviour needs a defect rather than hard physics: a terminal's
+own arm condemned while carrying the exact `(terminal, prefix, arm)` triple that should have
+suppressed it, which `TerminalSteering::probe` makes impossible today. That is the argument
+for refusing rather than for leaving it — a defect that names itself costs one refusal, and a
+defect that spins looks like a slow model. The change can only refuse where the old code
+looped; it cannot loop where the old code refused.
+
+Moving the rule ahead of the void puts three mutations in one pass in a fixed order, so the
+MIXED pass — a round advancing **and** another terminal's arm condemned in the same pass — is
+pinned rather than left to chance by
+`a_pass_that_both_advances_a_round_and_voids_it_keeps_the_arm_it_measured`: the arm stays on
+the round's row, the round is still voided, and the pass still goes on. Its behaviour is
+pre-existing and did not move.
+
 The rule is now written once, on `apply`, and reads identically on both arms:
 
 > Progress is a no-good entering the set, a round advancing its rank, or a round OPENING
@@ -966,18 +985,21 @@ is now a pinned invariant, which is a better answer than a fix would have been.
 
 ### Gates at `c2834d7`
 
-plinth-support lib **641** (638 at Stage D — three tests added, none removed) ·
+plinth-support lib **642** (638 at Stage D — four tests added, none removed) ·
 clippy **0 warnings, COUNTED** · fmt **104 hunks, UNCHANGED, none in either touched file** ·
-workspace lib tests **1 085 passed, 0 failed, 1 ignored** across all 14 crates
+workspace lib tests **1 086 passed, 0 failed, 1 ignored** across all 14 crates
 (`cargo test --profile gate --workspace --lib`) — **no new red anywhere.** The known reds
 named in the brief live in integration binaries, are untouched by these commits, and were not
 re-run: nothing in this response can reach them, since both changes are refusals on paths the
 `voided_rounds = 0` measurement shows no corpus model takes.
 
-**No sealed pin moves**, and that is checkable rather than asserted: neither commit adds a
-digest input, touches a constants or registry file, or changes any emitted field. The one
-authorized fingerprint move (item 5, `candidates_ruled_out`) is still the lane's only one, at
-Stage A.
+**No sealed pin moves, MEASURED rather than inferred.** The pins the challenge tracked — the
+four that moved to `12136443226163403608` under producer commit `3311374` — are asserted by
+`cco` tests inside the plinth-support lib, and that binary ran 641/641 green on both commits.
+The reasoning agrees with the measurement (neither commit adds a digest input, touches a
+constants or registry file, or changes an emitted field), but the pins are pinned by tests
+that RAN. The one authorized fingerprint move (item 5, `candidates_ruled_out`) is still the
+lane's only one, at Stage A.
 
 ### What this response did NOT touch, named rather than left silent
 

@@ -11974,6 +11974,114 @@ mod tests {
         );
     }
 
+    /// **A MIXED pass — the round advances and another terminal's arm is
+    /// condemned in the same pass — keeps the arm it measured and still voids.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The abandon rule now runs BEFORE the void block rather than after it, so
+    /// that a refusing pass destroys nothing on its way out. That reorder puts
+    /// three mutations in one pass in a fixed order — the round's own arm is
+    /// recorded inside the loop, the rule is read, then the round is voided —
+    /// and the mixed pass is the only shape where all three happen at once. If
+    /// the void ever moved ahead of the loop's bookkeeping, the arm this pass
+    /// measured would vanish from the round's row and the run would under-report
+    /// what it spent, silently, on the one pass that did the most work.
+    ///
+    /// The behaviour itself is pre-existing and unchanged: the arm is measured,
+    /// the row keeps it, the round is voided by the OTHER terminal's refusal, and
+    /// the pass goes on because it learned a no-good the set did not have.
+    ///
+    /// **Sabotage-shaped:** move the void block above the `for` loop and the
+    /// `arms_measured` reading goes to 0 while everything else stays green.
+    #[test]
+    fn a_pass_that_both_advances_a_round_and_voids_it_keeps_the_arm_it_measured() {
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        let mut tally = LegalizationTally {
+            passes: 1,
+            ..LegalizationTally::default()
+        };
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::SteeringSpent { terminal_id: 113 },
+            )
+            .expect("a spent steering opens a round");
+        tally.passes = 2;
+        tally
+            .apply(
+                &mut steering,
+                crate::legalization::LegalizationAbandon::Condemned {
+                    learned: vec![
+                        crate::legalization::NoGood::new(
+                            113,
+                            prefix_fixture(40),
+                            crate::legalization::ArmIdentity::live(
+                                crate::cco::CandidateFamily::ModelAnchor,
+                                0,
+                                2.5,
+                                1,
+                            ),
+                        ),
+                        crate::legalization::NoGood::new(
+                            177,
+                            prefix_fixture(9),
+                            crate::legalization::ArmIdentity::live(
+                                crate::cco::CandidateFamily::PlateDescent,
+                                3,
+                                1.0,
+                                2,
+                            ),
+                        ),
+                    ],
+                    own_arm_terminals: vec![113, 177],
+                    cascade_victims: Vec::new(),
+                    measured: vec![
+                        crate::legalization::ArmRefusalPhysics {
+                            gap_mm: -0.05,
+                            distance_clearance_mm: 0.280_044,
+                            axis_transit_illegal: true,
+                            terminal_radius_mm: 0.372_136,
+                            rootward_radius_mm: 0.372_136,
+                        },
+                        crate::legalization::ArmRefusalPhysics {
+                            gap_mm: -0.2,
+                            distance_clearance_mm: -0.2,
+                            axis_transit_illegal: false,
+                            terminal_radius_mm: 0.4,
+                            rootward_radius_mm: 0.4,
+                        },
+                    ],
+                },
+            )
+            .expect("the pass learned a no-good the set did not have, so it may retry");
+
+        assert!(steering.round().is_none(), "the other terminal voided it");
+        assert_eq!(tally.voided_rounds, 1);
+        assert_eq!(
+            tally.rounds[0].arms_measured, 1,
+            "the arm this pass measured is on the round's row; the void may not erase what \
+             the run already spent"
+        );
+        assert_eq!(
+            tally.rounds[0].outcome,
+            Some(crate::coverage_repair::ConfirmationRoundOutcome::Voided)
+        );
+        assert_eq!(tally.round_arms_measured, 1);
+        assert_eq!(
+            steering.len(),
+            1,
+            "the round's own refusal stays out of the frozen set; the other terminal's enters it"
+        );
+        let disturbance = tally
+            .disturbances
+            .last()
+            .expect("the pass continued, so it left a row");
+        assert!(disturbance.round_arm_measured, "it advanced a round");
+        assert!(disturbance.voided_a_round, "and it voided one");
+        assert_eq!(disturbance.no_goods_learned, 1);
+    }
+
     /// **Voiding a round is not progress: a pass that only voids REFUSES, and
     /// the round it would have destroyed is left standing.**
     ///
