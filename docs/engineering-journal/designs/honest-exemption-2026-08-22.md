@@ -1287,7 +1287,7 @@ times the re-size runs, because each re-cut reads the radius rather than
 accumulating on the last band. That converts "a wider band reaches further" from
 an open-ended worry into a quantity a future measurement can be sized against.
 
-Two cases below, and only the first is measured.
+Two cases below; both carry measured evidence.
 
 1. **A topologically DISCONNECTED foreign feature can never be swallowed, at any
    band radius.** MEASURED by
@@ -1299,9 +1299,10 @@ Two cases below, and only the first is measured.
    there, and a reader is entitled to know which.
 2. **A mesh-CONNECTED neighbour is measured, and the FINAL exemption is wider
    than the old account said.** The tree already has the watertight `channel()`
-   fixture at `crates/plinth-support/src/seat_zone.rs:721-742`. Its test,
+   fixture at `crates/plinth-support/src/seat_zone.rs`, `channel()` (near line
+   928). Its test,
    `the_zone_does_span_the_channel_when_the_band_itself_contains_the_connecting_path`
-   at `seat_zone.rs:903-947`, MEASURES `zone == band` and 11 exempt far-wall
+   (near line 1110), MEASURES `zone == band` and 11 exempt far-wall
    faces. A mesh-connected crevice is therefore not a missing fixture or a
    hypothetical topology.
 
@@ -1330,8 +1331,11 @@ Two cases below, and only the first is measured.
    `growth − 0.300 mm`; it is empty when growth is at most 0.300 mm. Bridge
    admission is NOT bounded by that shell: a face inside both bands can be
    exempt only under the new band because the old band lacked the connecting
-   path. The `channel()` fixture demonstrates that distinction (`seat_zone.rs:809`
-   versus `seat_zone.rs:903`).
+   path. The `channel()` fixture demonstrates that distinction:
+   `a_zone_stops_at_the_crevice_on_a_manifold_bridge_where_the_walls_really_are_connected`
+   (near line 1016) is the near-wall-only contrast, versus
+   `the_zone_does_span_the_channel_when_the_band_itself_contains_the_connecting_path`
+   (near line 1110).
 
 The owner has ruled the follow-up: a physics-first footprint rule, designed in
 `docs/engineering-journal/designs/seat-footprint-2026-08-23.md` on
