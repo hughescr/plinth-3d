@@ -13,10 +13,10 @@ monotonicity ruling; and the designed-embed rulings in `SPEC-EMBED-POLICY.md` an
 > **Recommendation [measure the nearest-feature/buried-portion rule before #77
 > merges; no new upstream data or exact-arrangement kernel].** Make the Rule-Z family
 > the leading candidate. For each model-surface point in the live refusal envelope,
-> exempt it only when it is inside the support solid, or when its nearest point on the
-> support solid is inside the model volume. Existing geometry can provide all three
-> inputs: the live support solid, `NativeSurface::inside`, and the grader's clearance
-> field. Evaluate retained fragments in one native batch.
+> query the nearest point on the boundary of the support solid and exempt it only when
+> every nearest boundary point is inside the model volume. Existing geometry can provide
+> all three inputs: the live support solid, `NativeSurface::inside`, and the grader's
+> clearance field. Evaluate retained fragments in one native batch.
 >
 > **Evidence bracket [INFERRED, not yet production-measured].** The closing review
 > re-derived Rule Z on both required fixtures. On the raised column it exempts the
@@ -70,8 +70,8 @@ The wall-only arithmetic is `wall_x − 1.000 − 0.300 mm`. At `1.00` and
 No smaller concentric distance band repairs that rule. A planar seat needs its own
 refusal disc excluded through **radius** `r + g`. A foreign wall inside that disc is
 also inside any Euclidean band large enough to keep the seat legal. Connectivity
-through the band is the only remaining separator, and the raised-column and committed
-`channel()` fixtures both provide a connected path.
+through the band is the only remaining separator within that family, and the raised-
+column and committed `channel()` fixtures both provide a connected path.
 
 The Giant Bat is the production acceptance shape. **MEASURED** in
 `honest-exemption-2026-08-22.md`, both investigated refusals were opposite crevice
@@ -178,13 +178,13 @@ may rebuild a convenient ball shadow or use a different radius convention.
 
 ### 3.3 The Rule-Z predicate
 
-For every point `x` of `S ∩ Qg`, let `N_B(x)` be the set of nearest points of the
-closed support solid `B`. The conservative tie rule is that every nearest point must
-be buried; a nearest-point tie that includes an in-air feature remains graded.
+For every point `x` of `S ∩ Qg`, let `N_∂B(x)` be the set of nearest points on the
+boundary `∂B` of the closed live support solid `B`. The conservative tie rule is that
+every nearest boundary point must be buried; a nearest-point tie that includes an
+in-air feature remains graded. A point inside `B` is never exempt on that fact alone.
 
 ```text
-Z_g(x) = true  iff  x is inside B
-                    or every y in N_B(x) is inside M.
+Z_g(x) = true  iff  every y in N_∂B(x) is inside M.
 
 Pg(Z) = { x in S ∩ Qg | Z_g(x) }.
 Tg(Z) = S \ Pg(Z).
@@ -195,9 +195,9 @@ contact area. Every retained exact fragment is graded by the existing signed-cle
 field. A triangle crossing the Rule-Z boundary is split; whole-face exclusion would
 add mesh-size forgiveness.
 
-The predicate asks which support feature makes `x` close: an occupied or buried
-feature may explain the receiver; a shaft standing in air may not explain a nearby
-wall. This is neither a radial band nor a surface flood.
+The predicate asks which support-boundary feature makes `x` close: a buried boundary
+feature may explain the receiver; a boundary shaft feature standing in air may not
+explain a nearby wall. This is neither a radial band nor a surface flood.
 
 No new upstream data is required. `E0` is derived from axis, endpoint **radius**,
 ball-seat factor, taper, and truncation data already needed by emission. Model-inside
@@ -215,15 +215,18 @@ Use `f = 1.4`, support **radius** `r = 1.000 mm`, final demand `g = 0.300 mm`, f
 `c = sqrt(f² − 1) r = sqrt(0.96) mm` below the seat plane.
 
 **INFERRED:** at seat-plane radial distance `rho = 1.20 mm`, the ball is the nearest
-support feature: its distance is `0.1494 mm`, versus `0.200 mm` to the shaft. The
-nearest point on the ball has `z = −0.0945 mm`, inside the slab model volume, so Rule Z
-exempts the seat point. The exempt seat set ends exactly at
+support-boundary feature: its distance is `0.1494 mm`, versus `0.200 mm` to the shaft.
+The nearest point on the ball has `z = −0.0945 mm`, inside the slab model volume, so
+Rule Z exempts the seat point. The exempt seat set ends exactly at
 `rho = sqrt(r² + 2 f r g + g²) = sqrt(1.93) = 1.389 mm`, the same boundary at which
 the point ceases to be self-refusing.
 
-**INFERRED:** at wall-axis distances `0.75`, `1.00`, and `1.25 mm`, the nearest support
-feature is the shaft standing in air. Rule Z therefore retains those wall fragments.
-Their required wall-only final margins are `−0.550`, `−0.300`, and `−0.050 mm`.
+**INFERRED:** at wall-axis distances `0.75`, `1.00`, and `1.25 mm`, the nearest
+support-boundary feature is the shaft surface standing in air. In particular, the
+raised-wall point `(0.80, z = 1.0)` is inside the shaft, but its nearest `∂B` point is
+the shaft surface at horizontal distance `1.000 mm`, standing in air. Rule Z therefore
+retains that wall, which is refusable at its required wall-only final margin
+`−0.550 mm`; the `1.00` and `1.25 mm` rows have margins `−0.300` and `−0.050 mm`.
 Thus the seat is legal while both measured binding wall populations remain refusable.
 
 ### 4.2 Committed channel
@@ -231,15 +234,18 @@ Thus the seat is legal while both measured binding wall populations remain refus
 The committed bottom case has support **radius** `r = 0.400 mm`, axis height
 `z = 0.300 mm`, and a cylinder reaching to `z = −0.100 mm` through the channel floor.
 
-**INFERRED:** each floor point in the refusal envelope has nearest support geometry
-buried below the floor. Rule Z exempts that floor, so the physically occupied channel
-floor remains legal. At far wall `x = 1.200 mm`, the nearest support point is on the
-shaft near `x = 0.650 mm` and is in air. Rule Z retains the far wall. All 11 pinned
-far-wall faces stay graded.
+**INFERRED:** the channel floor point `(0.3, 0)` is inside the cylinder, but its
+nearest `∂B` point at `z ≈ −0.055 mm` is buried, versus `z ≈ 0.745 mm` on the upper
+surface. Rule Z exempts that floor, so the physically occupied channel floor remains
+legal. At far wall `x = 1.200 mm`, the nearest support-boundary point is on the shaft
+near `x = 0.650 mm` and is in air. Rule Z retains the far wall. All 11 pinned far-wall
+faces stay graded.
 
 These are analytic re-derivations using the memo's dimensions. They are **INFERRED**,
-not **MEASURED** production results. Acceptance gates require exact-fragment output
-and live final, placement, transit, and CCO verdicts on both fixtures.
+not **MEASURED** production results. The seat-plane derivation at `rho = 1.20 mm` and
+the `1.389 mm` boundary are unaffected because those points are outside `B`.
+Acceptance gates require exact-fragment output and live final, placement, transit, and
+CCO verdicts on both fixtures.
 
 ---
 
@@ -248,7 +254,14 @@ and live final, placement, transit, and CCO verdicts on both fixtures.
 Rule Z can refuse a shaft that grazes its own receiver immediately outside `P0`.
 At a shallow-angle seat, a receiver point can be closest to an exposed shaft station
 in air even though that surface is the intended receiver. The same discriminator that
-protects the raised wall then treats part of the receiver as foreign.
+protects the raised wall then treats part of the receiver as foreign. **INFERRED:** the
+graze cost and the monotonicity risk are one mechanism: the ball reaches out with
+`f · r` while the shaft reaches with `r`, and the ball center deepens as
+`sqrt(f² − 1) · r`, so the ball-versus-shaft crossover moves outward with radius. A
+receiver point at the crossover is explained by the buried ball for the fat arm and
+by the in-air shaft for the thin one, so the thinner arm refuses where the fatter
+passes. On a flat seat the ball always wins (tie at `rho = r`), so the inversion needs
+a tilted axis; the shallow-angle sweep is the binding witness for both.
 
 This cost must be bounded or measured before implementation authority:
 
@@ -281,12 +294,17 @@ r_thin <= r_fat  =>  Bthin subset-of Bfat
                       and C_thin(x) >= C_fat(x) for every x in S.
 ```
 
-Rule Z is **not radially monotone**. Changing **radius** can change whether the nearest
-support feature is a buried ball or an exposed shaft. Therefore neither
-`Pg(Z, thin) subset-of Pg(Z, fat)` nor its reverse is assumed. The former band proof
-does not apply. The Rule-Z family is eligible only if the following production-level
-contract holds on its full authorized family, with a counterexample rejecting the
-candidate rather than being labelled slack.
+Rule Z is **not radially monotone**. **INFERRED:** the graze cost and monotonicity risk
+are one mechanism: the ball reaches out with `f · r` while the shaft reaches with `r`,
+and the ball center deepens as `sqrt(f² − 1) · r`, so the ball-versus-shaft crossover
+moves outward with radius. A receiver point at the crossover is explained by the buried
+ball for the fat arm and by the in-air shaft for the thin one, so the thinner arm
+refuses where the fatter passes. On a flat seat the ball always wins (tie at `rho = r`),
+so the inversion needs a tilted axis; the shallow-angle sweep is the binding witness
+for both. Therefore neither `Pg(Z, thin) subset-of Pg(Z, fat)` nor its reverse is
+assumed. The former band proof does not apply. The Rule-Z family is eligible only if the
+following production-level contract holds on its full authorized family, with a
+counterexample rejecting the candidate rather than being labelled slack.
 
 ### 6.1 Distance refusal
 
@@ -374,8 +392,8 @@ The cost is pointwise work on retained fragments. The path remains batch-first:
 
 1. prepare all live support solids and `Qg` requests;
 2. broad-phase all model faces against all row envelopes in one native batch;
-3. compute nearest support features and batched model-inside queries for all exact
-   boundary events needed to classify retained fragments;
+3. compute nearest support-boundary features and batched model-inside queries for all
+   exact boundary events needed to classify retained fragments;
 4. split boundary triangles and pack retained fragments in CSR-style row storage; and
 5. issue one native patch-aware clearance batch.
 
@@ -436,9 +454,9 @@ authorized and priced. It is not the recommendation for `feature/f1-refreeze` or
    signed-clearance field use identical ball, shaft, taper, cap, station, and **radius**
    semantics at `g = 0.600 mm` and `g = 0.300 mm`.
 2. **Raised-column ladder.** Run wall-axis distances `0.75`, `1.00`, `1.25`, `1.50`,
-   `1.75`, and `2.00 mm`. Measure seat legality, nearest primitive and inside result,
-   retained wall polygons, and wall-only final clearances approximately `−0.550`,
-   `−0.300`, `−0.050`, `+0.200`, `+0.450`, and `+0.700 mm`.
+   `1.75`, and `2.00 mm`. Measure seat legality, nearest support-boundary primitive and
+   inside result, retained wall polygons, and wall-only final clearances approximately
+   `−0.550`, `−0.300`, `−0.050`, `+0.200`, `+0.450`, and `+0.700 mm`.
 3. **Committed channel, both heights.** The bottom arm keeps its occupied floor legal
    and all 11 pinned far-wall faces graded. The upper arm keeps its intended receiver
    without a far-wall exemption.
@@ -454,7 +472,9 @@ authorized and priced. It is not the recommendation for `feature/f1-refreeze` or
    favourable tie-break sabotage must fail.
 8. **Geometry mutation.** Radius growth and shrink, axis translation and shortening,
    endpoint move, taper change, model digest change, and tier change invalidate the
-   prepared token. CHAL-A and CHAL-A2 remain mandatory.
+   prepared token. **MEASURED** CHAL-A axis swing leaves 24 faces under-forgiven
+   (`116 → 140`); **MEASURED** CHAL-A2 axis shorten leaves 16 faces over-forgiven
+   (`155 → 139`). Both remain mandatory.
 9. **Monotonicity.** Six-radius ladders pass through real final, placement, and CCO
    consumers and record distance, transit, degenerate incidence, grazing emergence,
    and combined verdict. No branch may cite radial patch nesting.
@@ -514,6 +534,8 @@ requires a new robust exact surface-arrangement kernel.
 * no new fixed angle, curvature, distance, face-count, or tolerance decision number;
 * no ball-derived shadow paired with member-radius grading;
 * no favourable nearest-point tie break;
+* the nearest-point query is on `∂B`, and a point inside `B` is never exempt on that
+  fact alone;
 * no whole-face approximation presented as exact;
 * no own-embed transit whitelist outside `Iembed` or based on `Pg` or `Qg`;
 * no stale prepared token, unregistered mutation path, or helper-only wiring proof;
@@ -539,16 +561,18 @@ I previously said that no rule from the current inputs could keep the channel fl
 legal and both walls refusable. That claim is retracted. The closing review supplied a
 counterexample, Rule Z, and re-derived it on both fixtures.
 
-Rule Z asks why each model-surface point is close to the support. It exempts the point
-only if the point is inside the support, or its nearest point on the support is buried
-inside the model. A buried foot can explain its receiver. A shaft standing in air
-cannot explain a nearby wall.
+Rule Z asks why each model-surface point is close to the support boundary. It exempts
+the point only if every nearest support-boundary point is buried inside the model. A
+point inside the support is not exempt on that fact alone. A buried boundary feature can
+explain its receiver. A shaft boundary feature standing in air cannot explain a nearby
+wall.
 
 **INFERRED**, on the raised-column fixture, Rule Z keeps the seat legal exactly through
 `rho = 1.389 mm` and retains the walls at `0.75`, `1.00`, and `1.25 mm`, including the
-required `−0.050 mm` margin at `1.25 mm`. **INFERRED**, on the committed channel, the
-nearest support geometry for the floor is buried, while the far wall's nearest feature
-is the shaft in air. The floor stays legal and all 11 far-wall faces stay graded.
+required `−0.050 mm` margin at `1.25 mm`. **INFERRED**, on the committed channel,
+the floor's nearest support-boundary point is buried, while the far wall's nearest
+boundary feature is the shaft in air. The floor stays legal and all 11 far-wall faces
+stay graded.
 
 ## Recommendation [measure Rule Z before #77 merges; price its own-receiver graze]
 
@@ -627,11 +651,13 @@ forgiveness.
 ## Appendix A — raised-column fixture generator [preserved evidence, not production code]
 
 This reconstructs challenge F from `f1-heavy-challenge-REJECT.md`. Start with the
-watertight `fine_seat_slab` at `0.250 mm` pitch. For a chosen wall-axis distance,
-leave the grid column on the wall line at seat height and raise every later x-column by
-`2.000 mm`. Moving vertices without adding, deleting, or rewiring faces preserves the
-slab's watertight topology. Run distances `0.75`, `1.00`, `1.25`, `1.50`, `1.75`, and
-`2.00 mm`.
+watertight `fine_seat_slab` at `0.250 mm` pitch. The probe parameters that reproduce
+the section 1 ladder are: axis at the slab centre; creation **radius** `0.350 mm`;
+final **radius** `1.000 mm`; `STANDOFF 0.600 mm`; and final demanded gap `0.300 mm`.
+For a chosen wall-axis distance, leave the grid column on the wall line at seat height
+and raise every later x-column by `2.000 mm`. Moving vertices without adding, deleting,
+or rewiring faces preserves the slab's watertight topology. Run distances `0.75`,
+`1.00`, `1.25`, `1.50`, `1.75`, and `2.00 mm`.
 
 The same complete source is preserved at
 `.git/seal-landing-2026-08-23/raised-column-fixture.rs`. It writes one OBJ per distance
