@@ -862,3 +862,136 @@ join the coverage refusal sidecar, **and the corpus counts are pinned**."* The f
 landed and measured above. **The second half is not done.** Pinning corpus counts needs
 authorization item 2's 45-model run, which has now been escalated un-done through Stages A,
 C, B and D. Stage D should not be read as complete while that clause is open.
+
+---
+
+## 2026-08-23 — Challenge response: the retry could loop forever, and now it refuses by name
+
+The challenge returned **REJECT** on one blocking finding, and the finding is worth stating
+in the form it arrived in: **the seal did not leak.** Sealed `Routed` still means final
+admission; the challenger built the smuggle in both realistic shapes — the repair-trial path
+and a round re-taking an arm that carries a no-good — and found no path. The lane failed on a
+**termination invariant it wrote down itself and enforced on one branch only.**
+
+### What was wrong
+
+`LegalizationTally::apply` (`runner.rs`) states the abandon rule in its own doc: *"A pass
+that would abandon while learning nothing new must refuse by name rather than loop"*, and its
+`Condemned` arm says *"what is forbidden is a pass that did neither"*. The `SteeringSpent`
+arm never evaluated it. A second terminal reporting its steering spent while another
+terminal's round was open **voided that round, re-opened at rank 0 with `measured` empty, and
+returned `Ok`** — a pass that learned no no-good AND advanced no round, accepted as progress.
+
+**It is an exact fixed point, not a slow path.** With `T` before `U` in the cadence and both
+carrying a no-good on every arm:
+
+| pass | state entering | what happens |
+| --- | --- | --- |
+| A | no round | `T` spent → round(`T`) opens at rank 0 |
+| B | round(`T`) | `T` forced, routes; `U` spent → void round(`T`), open round(`U`)@0 |
+| C | round(`U`) | `T` not forced → `T` spent → void round(`U`), open round(`T`)@0 |
+| D | = pass B | the same frozen set, the same round position, the same world |
+
+Routing cadence is MEASURED bit-identical across replays (precondition S-1), so B and D are
+the same pass. The set never grows and no round ever measures an arm. `plinth prepare` has no
+wall clock: such a model **hangs with no artifact and no named reason** — the exact failure
+the uncapped-round authorization (item 4) was paid for on the promise that the abandon rule
+would stop it.
+
+The design memo does not contain this branch. §1.3 admits two ways into a round — *"a context
+whose steering set is full, or re-entered after the set grew, both of which are finite
+events"* — and the void rule it states covers only *"any **other** terminal's arm is
+**refused** during the round"*. "Another terminal reports its steering **spent**" was an
+unflagged implementer addition. Its removal needs no constant and is therefore not a §4
+escalation.
+
+### What landed — two commits, one rule
+
+**`d09f6df` — the finding.** A spent report that would displace an open round **refuses by
+name**: the pass number, the held round and its rank, and both terminals. It refuses BEFORE
+it touches anything — no `VOID` log line, no counter, no round row, no disturbance row — which
+is the `Condemned` arm's own stated discipline: a pass that never continued leaves no row.
+
+**`c2834d7` — the same root, one arm over, found while fixing it.** The `Condemned` arm's
+rule read `learned_count == 0 && !round_advanced && !voided`. That third clause let a pass
+whose **only** effect was destroying a round count as progress, and it cycles the same way:
+void, re-enter against the unchanged set, void again. Voiding is not progress — it destroys
+work rather than making any. The clause is gone and the rule is now evaluated **before** the
+void, so a refusing pass destroys nothing on its way out.
+
+The rule is now written once, on `apply`, and reads identically on both arms:
+
+> Progress is a no-good entering the set, a round advancing its rank, or a round OPENING
+> where none was open. Nothing else. Voiding is not progress.
+
+`ConfirmationRoundOutcome::Voided` loses its stale second clause; a spent report can no longer
+void a round.
+
+### The evidence is unit-scale BY NECESSITY, and here is the measurement that says so
+
+MEASURED, from this ledger's own Stage B/D rows: **`voided_rounds = 0` on all three model
+runs** — Deinonychus (line: `passes=6 … confirmation_rounds=1 voided_rounds=0`), Rotting
+Warhorse shell (same), and the Stage D sidecar (`voided_rounds 0`). The mismatch class is
+MEASURED at **exactly one terminal per failing run on 3/3 runs**, so **no corpus model reaches
+a two-round situation at all.** A model run would prove nothing here and cost 25–100 minutes
+proving it. The synthetic fixture is the instrument, and both new tests are sabotage-verified:
+
+* `a_second_spent_terminal_refuses_by_name_instead_of_displacing_an_open_round` — asserts the
+  `Err`, that it names who held whom, and that the tally and the open round are **unmoved**.
+  Verified RED against the restored void-and-re-open.
+* `a_pass_that_only_voids_a_round_refuses_and_leaves_the_round_standing` — verified RED in
+  both directions: restoring `&& !voided` reds the `expect_err`; moving the rule back below
+  the void block reds `voided_rounds`.
+* `a_voided_round_keeps_its_arms_and_the_re_entered_round_starts_from_zero` — see below.
+
+### The challenger's second symptom is DEFENDED, not fixed — and is now pinned
+
+The challenger reported, as a consequence of the same root, that after a void the sealed
+`ConfirmationRoundExhausted { round_arms }` can name 0 arms while `round_arms_measured` says
+2, and asked whether §1.3 obligation 3 is violated. **It is not, and the three readings are
+each honest about a different thing.** Obligation 3 is PER ROUND, and after the fix the only
+surviving void is the design-sanctioned one (another terminal's arm refused, set grew):
+
+| reading | value after `open(t113) → 2 arms → t177 condemned voids → t113 re-enters` | what it means |
+| --- | --- | --- |
+| `rounds[0].arms_measured` | **2**, outcome `voided` | the voided round keeps the arms it drove; they were paid for |
+| `rounds[1].arms_measured` | **0**, `no_goods_at_open` **1** | the re-entered round has measured nothing YET, and it is the only thing a retirement of t113 could rest on |
+| `round_arms_measured` | **2** | the RUN's cost across all rounds, voided ones included — commit `e6ec99e`'s ruling, and no retirement may read it |
+
+`no_goods_at_open = 1` is the load-bearing one: it proves the re-entry was earned by the set
+**growing**, which is what makes it one of §1.3's finite events rather than a second way to
+spin. All three are asserted simultaneously in
+`a_voided_round_keeps_its_arms_and_the_re_entered_round_starts_from_zero`. The open question
+is now a pinned invariant, which is a better answer than a fix would have been.
+
+### Gates at `c2834d7`
+
+plinth-support lib **641** (638 at Stage D — three tests added, none removed) ·
+clippy **0 warnings, COUNTED** · fmt **104 hunks, UNCHANGED, none in either touched file** ·
+workspace lib tests **1 085 passed, 0 failed, 1 ignored** across all 14 crates
+(`cargo test --profile gate --workspace --lib`) — **no new red anywhere.** The known reds
+named in the brief live in integration binaries, are untouched by these commits, and were not
+re-run: nothing in this response can reach them, since both changes are refusals on paths the
+`voided_rounds = 0` measurement shows no corpus model takes.
+
+**No sealed pin moves**, and that is checkable rather than asserted: neither commit adds a
+digest input, touches a constants or registry file, or changes any emitted field. The one
+authorized fingerprint move (item 5, `candidates_ruled_out`) is still the lane's only one, at
+Stage A.
+
+### What this response did NOT touch, named rather than left silent
+
+* **The empty-round-at-rank-0 seal hole** the challenger flagged as latent, not blocking, with
+  no witness: if a round's slate were ever empty at rank 0, `forced_rank(0) >= survivors.len()
+  (0)` would seal `ConfirmationRoundExhausted { round_arms: [] }` — an empty round earning a
+  retirement. Unreachable while the frozen-set determinism argument holds; it lives in
+  `cco.rs` seal logic where the pins are; left alone deliberately.
+* **The uncovered branch** the challenger named: a round whose forced arm **survives** bracing
+  has no test at the `cco` tournament level. The Stage D *disclosure* of that outcome
+  (`terminal_routed_at_lowering`) is covered by
+  `the_round_row_carries_the_terminal_the_length_and_where_it_ended`; the tournament path is
+  not, and no model has produced one.
+* **Authorization item 2's 45-model corpus run**, still un-done through Stages A, C, B, D and
+  now this response. Stage D's second clause stays open.
+* The `ptr::eq` arm of `validate_against_hoisted` being vacuous on the memoized path
+  (challenger's item 5 note, harmless — the fingerprint carries the load).
