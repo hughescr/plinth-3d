@@ -757,3 +757,108 @@ Three things this does and does not license:
   emitted nor refused; it was interrupted. The open question is the coverage-repair loop's
   convergence on that model, which is a pre-existing condition Stage B neither caused nor
   addressed, and `trials=109 commits=0 remaining=6204` is the measurement of record for it.
+
+---
+
+## 2026-08-23 — Stage D (the rescue reaches the sidecar): zero bytes, three models, two binaries
+
+| recorded | commit | branch | md5 of `Round 25.chitubox` | support records | bytes |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-23 | `5f5c2d6` | `feature/a4-controller` (seal-semantics Stage D tip) | `ee76f98a0e90ae59d0ef2762097ea7bb` | 41 | 364,416 |
+
+**The value of record is unchanged.** Stage D is disclosure: `LegalizationDisclosure`
+travels on `RepairRunReport`, which feeds no digest, no fingerprint and no byte-pinned
+golden. No pin moved. Authorization item 5's one-time sealed-fingerprint spend was paid at
+Stage A and is not spent again.
+
+### The proof: two binaries, three models, `cmp` on every artifact
+
+Both binaries built at a CLEAN tree, `gate` profile, and both provenance files record
+`tree modified : 0 path(s)`.
+
+| | binary sha256 | commit |
+| --- | --- | --- |
+| Stage D | `e2fd972d0b64e1ef218d4b479794e57fbdcb4b444cb57e41cb453bc761b5747f` | `5f5c2d6` |
+| baseline | `afb8d347068f6ad0ffa91ef254a53563bed847a027a323c80b1cc683632ca7a9` | `5f12e11` (Stage B tip, built in a detached worktree) |
+
+| model | outcome | elapsed (D / base) | artifact bytes | `cmp` |
+| --- | --- | --- | --- | --- |
+| Deinonychus | emitted | 77 s / 65 s | 10,390,488 | **CLEAN** |
+| Round 25 (canary) | emitted | 2 s / 2 s | 364,416 | **CLEAN** |
+| zombie-3-a | emitted | 271 s / 256 s | 3,750,864 | **CLEAN** |
+
+Harness ceiling **1 500 s** per model, in the harness and never in the engine. **It did not
+fire on any of the six runs**, so the loud-stop path is still unwitnessed on real geometry —
+carried forward from Stage B unchanged.
+
+**The sidecar diff is the whole change, and it was stated before it was measured.** Compared
+field by field (`jq paths(scalars)`), each `.coverage.repair.json` differs from its baseline
+in exactly the new `report.legalization` object — and, on zombie-3-a alone, in the four
+wall-clock fields, which are evidence and not a verdict and differ run to run by
+construction. Deinonychus and Round 25 spend no repair trial, so their wall times are zero
+on both sides and the legalization object is their **only** difference.
+
+### What the Deinonychus now ships beside its artifact
+
+MEASURED, read out of `Deinonychus.coverage.repair.json`:
+
+```
+passes 6 · no_goods 2 · no_goods_by_terminal {113: 2}
+confirmation_rounds 1 · voided_rounds 0 · round_arms_measured 2
+rounds[0] = terminal 113, opened_at_pass 3, arms_measured 2,
+            no_goods_at_open 2, outcome terminal_unrouted_at_lowering
+disturbances = pass 1 own [113] learned 1 · pass 2 own [113] learned 1
+             · pass 3 steering_spent 113 · pass 4 own [113] round_arm_measured
+             · pass 5 own [113] round_arm_measured
+```
+
+Every one of those numbers matches the run log's own `legalize:` lines for the same run,
+which is the point: the log and the sidecar are one source, and the sidecar is the half that
+survives the terminal window closing.
+
+**The round OUTCOME is named for what was observed, not for what it implies.**
+`terminal_unrouted_at_lowering` says the lowered run's sealed transcript carries terminal 113
+as `UnroutedNoWinner`. It deliberately does not say *"this round retired it"* —
+`UnroutedNoWinner` has four sealed causes and only one of them is a round, so that sentence
+is an inference and a field name is the wrong place to keep one. The mechanism record stays
+where design §1.3 put it: inside `NoWinnerEvidence::ConfirmationRoundExhausted`, with the
+measured millimetres.
+
+### The quiet models print zeros, not silence
+
+Round 25 and zombie-3-a never legalize, and both ship
+`legalization: {passes: 1, no_goods: 0, confirmation_rounds: 0, rounds: [], …}`. `passes: 1`
+is load-bearing: the attempt-0 loop runs at least once on every live run, so **`passes: 0`
+means the file predates Stage D**, and that is the only thing telling an old sidecar from a
+model that needed no rescue. It is the same rule `persist_sealed_repair_ledger` already
+follows when it writes a ledger of zeros rather than no file at all.
+
+The ledger's schema tag stays `plinth.coverage-repair.v1`. The field is additive and no
+existing field changes meaning, which is that file's own documented versioning rule.
+
+### Gates at `5f5c2d6`
+
+lib **638** (632 at Stage B, 613 at the lane base) · clippy **0 warnings, COUNTED** ·
+fmt **104 hunks, UNCHANGED** · 1 554 tests passed workspace-wide.
+
+Reds, and every one of them matches the Stage B baseline name for name:
+`a4_production_door` 2 (`the_production_door_reports…`, `the_sealed_ledger_on_disk_names…`),
+`first_artifact` 2 (`a_coverage_refusal_removes…`, `corpus_sphere_drilled…`) — the four task
+**#76** names, all still failing on `trials:0 commits:0` and none digest-related —
+and `a4_transactional_controller` 4, the same four names as Stage B and Stage C.
+
+`support_runner_integration` ran **2 ok / 2 FAILED**, which is its known 2-of-4, and its
+fifth test `a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule`
+was **STOPPED BY ME at 22.6 minutes** while its coverage-repair loop was still grinding
+(`trials=407 commits=2 remaining=3028 elapsed=1355252ms`). That is a loud recorded outcome
+and not a pass: **this stage has no verdict on that test.** Stage B did not run this binary
+at all, so there is no earlier verdict to compare against either. The condition is the
+repair loop's convergence — tasks #24/#37 — which Stage D neither causes nor addresses.
+
+### Stage D's own unmet clause
+
+§4 Stage D reads: *"The no-good ledger, the pass count and the confirmation-round record
+join the coverage refusal sidecar, **and the corpus counts are pinned**."* The first half is
+landed and measured above. **The second half is not done.** Pinning corpus counts needs
+authorization item 2's 45-model run, which has now been escalated un-done through Stages A,
+C, B and D. Stage D should not be read as complete while that clause is open.
