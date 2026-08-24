@@ -729,3 +729,31 @@ Deinonychus terminal 113 and Rotting Warhorse terminal 177, each in six passes w
 two-arm confirmation round. **One of the two models then emitted.** The other was stopped by
 the harness while the coverage-repair loop was still at `commits=0`, which is a separate
 open condition of that model and is neither caused by nor fixed by this stage.
+
+### SECOND CORRECTION — how the Rotting Warhorse run actually ended
+
+The correction above says the run "ground there at `commits=0` until the harness ceiling
+stopped it". **The harness ceiling did not fire.** The supervising shell was terminated by
+the environment first, so `harness.sh` never wrote its own
+`HARNESS-TIMEOUT FIRED at Ns; last state: …` line and never wrote a `STOP` line at all.
+
+**The last state the run actually recorded**, read off `rw-round/run.log`:
+
+```
+coverage-repair progress: trials=109 commits=0 remaining=6204 elapsed=3438728ms
+```
+
+So: **3 438 728 ms (57.3 min) into a 6 000 s ceiling, 109 trials, ZERO commits**, and then
+the log stops. The `plinth` child did not outlive its supervisor — the log stopped growing.
+
+Three things this does and does not license:
+
+* It does **not** license "the timeout fired". Nothing was measured about where the ceiling
+  would have landed, and the harness's loud-stop path is unwitnessed on this model.
+* It does **not** change the Stage B result. Attempt 0 lowered at pass 6, and everything
+  that claim rests on — six pass lines, the round's two measured arms, the retirement — was
+  written to the log more than 55 minutes before the run was cut short.
+* It does mean the Rotting Warhorse has **no terminal disposition on this lane**. It neither
+  emitted nor refused; it was interrupted. The open question is the coverage-repair loop's
+  convergence on that model, which is a pre-existing condition Stage B neither caused nor
+  addressed, and `trials=109 commits=0 remaining=6204` is the measurement of record for it.
