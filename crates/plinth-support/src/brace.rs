@@ -827,14 +827,13 @@ fn append_candidate(
         // face; here it is bound to the key the grading sites will look it up
         // by.
         //
-        // For a model rung the creation band is also the FINAL band, because a
-        // rung is never re-sized: `add_brace` above puts it in the forest's
-        // `braces` set, `live_tree_members` filters that set out
-        // (`forest.rs`), and `transient::postorder` walks only
-        // `live_tree_members`. The re-size pass therefore finds nothing to do
-        // for a rung — it is covered by the same uniform scan as everything
-        // else, and that scan is what would notice if this ever stopped being
-        // true.
+        // For a model rung the creation band is also the FINAL band because a
+        // brace cannot enter the tree: `Forest::set_parent` refuses a brace as
+        // either child or parent (`ForestError::BraceInTree`). Every production
+        // radius mutation that could reach this stage walks tree ancestry, so no
+        // such walk can include the rung. The re-size pass therefore finds
+        // nothing to do for it — it is covered by the same uniform scan as
+        // everything else, and that scan would notice if this ever changed.
         if let Some(record) = candidate.seat_zone.as_ref() {
             forest.set_seat_zone(key, record.clone());
         }
@@ -4091,8 +4090,10 @@ mod tests {
         fixture_topology(vertices, faces)
     }
 
-    /// **MONOTONICITY, THROUGH THE PRODUCTION FINAL PASS — the successor to the
-    /// parked-state trip-wire** (#36 §8 step 6, §10.7 item 1).
+    /// The narrow same-zone theorem: for a fixed axis and ONE frozen `Z`, the
+    /// production final pass is monotone in radius. This is a local algebra pin,
+    /// not the owner-narrowed cross-member guarantee; the next test exercises
+    /// that guarantee with each radius carrying its own re-cut zone.
     ///
     /// It replaces `the_final_pass_still_grades_a_thinner_arm_worse_until_the_zones_are_wired`,
     /// which MEASURED the interim inversion and was documented to go red the
@@ -4126,7 +4127,7 @@ mod tests {
     /// is the sabotage that reproduces why: a wider band swallows more surface,
     /// so the fat arm would be graded against strictly LESS of it.
     #[test]
-    fn a_thinner_arm_never_grades_worse_than_a_fatter_one_through_the_production_final_pass() {
+    fn with_one_fixed_zone_the_production_final_pass_is_monotone_in_radius() {
         let config = BraceConfig::current(0.05).unwrap();
         let policy = config.contact_policy(contact::ClearanceStage::Final);
         let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
@@ -4254,6 +4255,103 @@ mod tests {
             config.final_clearance_gap_mm,
             zone.zone().len(),
             config.standoff_mm
+        );
+    }
+
+    /// FINDING B — the owner-narrowed monotonicity guarantee, through the
+    /// production final pass with each radius carrying its OWN re-cut zone.
+    ///
+    /// A re-cut zone may change the self-surface tessellation slack, so no
+    /// cross-radius ordering is claimed there. The guarantee is about FOREIGN
+    /// surface outside each arm's own patch. This fixture makes that boundary
+    /// explicit: the panel is a disconnected component and every re-cut zone is
+    /// asserted not to contain a panel face. Against that same foreign panel the
+    /// thinner arm must never grade worse. A companion run on the clean fine slab
+    /// checks every rung's self-margin against the structural
+    /// `STANDOFF - FINAL_GAP` minimum.
+    #[test]
+    fn against_foreign_surface_a_thinner_arm_never_grades_worse_with_each_own_re_cut_zone() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let policy = config.contact_policy(contact::ClearanceStage::Final);
+        let seating = contact::seating_of(&MemberKind::Strut, ContactEnd::Terminalward);
+        const COS: f64 = 0.2;
+        const CREATE_MM: f64 = 0.20;
+        let radii = [0.20, 0.25, 0.35, 0.50, 0.65, 0.90];
+        let direction = [(1.0_f64 - COS * COS).sqrt(), 0.0, COS];
+        let p0 = [0.0, 0.0, -0.3];
+        let point_at = |u: f64| std::array::from_fn(|axis| p0[axis] + direction[axis] * u);
+        let mask = |radius_mm: f64| {
+            contact::placed_mask_inset_mm(seating, COS, radius_mm, radius_mm, &policy).unwrap()
+        };
+        let a: [f64; 3] = point_at(mask(CREATE_MM) + 0.02);
+        let b: [f64; 3] = point_at(mask(CREATE_MM) + 1.0);
+        let lo = [a[0], 0.05, a[2] - 0.05];
+        let hi = [b[0], 0.25, b[2] + 0.05];
+        let surface = table_with_foreign_panel(lo, hi);
+        let topology = table_with_foreign_panel_topology(lo, hi);
+        let p1: [f64; 3] = point_at(mask(*radii.last().unwrap()) + 5.0);
+
+        let (mut foreign_forest, foreign_keys) = f1_ladder_forest(
+            &surface,
+            &topology,
+            p0,
+            p1,
+            CREATE_MM,
+            config.standoff_mm,
+            &radii,
+        );
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            config.standoff_mm,
+            std::iter::once(&mut foreign_forest),
+        )
+        .unwrap();
+        assert_eq!(refrozen, radii.len() - 1);
+        let panel_faces = 12_u32..24_u32;
+        for key in &foreign_keys {
+            let zone = foreign_forest.seat_zone_record(*key).unwrap();
+            assert!(
+                panel_faces.clone().all(|face| !zone.zone().contains(&face)),
+                "the foreign panel must remain outside every arm's own re-cut patch"
+            );
+        }
+        let foreign = f1_final_clearances(&surface, &foreign_forest, &foreign_keys, &config);
+        assert!(
+            foreign.windows(2).all(|pair| pair[0] >= pair[1]),
+            "against FOREIGN surface outside each arm's own re-cut patch, a thinner \
+             arm must never grade worse: radii {radii:?}, clearances {foreign:?}"
+        );
+
+        // Companion self-margin, with the same radii and each arm's own re-cut
+        // zone, on a clean tessellated seat where only self-surface can decide.
+        let (self_surface, self_topology) = fine_seat_slab(0.25);
+        let self_p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let self_p1 = [0.0, 0.0, 3.0];
+        let (mut self_forest, self_keys) = f1_ladder_forest(
+            &self_surface,
+            &self_topology,
+            self_p0,
+            self_p1,
+            CREATE_MM,
+            config.standoff_mm,
+            &radii,
+        );
+        crate::seat_zone::refreeze_resized_seat_zones(
+            &self_surface,
+            &self_topology,
+            config.standoff_mm,
+            std::iter::once(&mut self_forest),
+        )
+        .unwrap();
+        let self_margin = f1_final_clearances(&self_surface, &self_forest, &self_keys, &config);
+        let structural_minimum_mm = config.standoff_mm - config.final_clearance_gap_mm;
+        assert!(
+            self_margin
+                .iter()
+                .all(|margin| *margin >= structural_minimum_mm),
+            "every own-zone rung must keep at least STANDOFF - FINAL_GAP = \
+             {structural_minimum_mm} mm of self-margin: {self_margin:?}"
         );
     }
 
@@ -4527,9 +4625,7 @@ mod tests {
         assert!(
             panel_faces.iter().all(|panel| topology
                 .neighbors(*panel as usize)
-                .is_none_or(|adjacent| adjacent
-                    .iter()
-                    .all(|face| !table_faces.contains(face)))),
+                .is_none_or(|adjacent| adjacent.iter().all(|face| !table_faces.contains(face)))),
             "this fixture's panel must be topologically DISCONNECTED from the \
              table, or the claim below is about the band when it is really \
              about the flood fill's reach"
@@ -4557,9 +4653,9 @@ mod tests {
 
         // …and the arm is still CONDEMNED by the panel, which is the
         // foreign-gap case Craig confirmed is intended and untouched.
-        let graded =
-            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap()[0]
-                .1;
+        let graded = exact_clearance_rows(&forest, &surface, &config, test_penetration_limits())
+            .unwrap()[0]
+            .1;
         assert!(
             graded < 0.0,
             "the grown arm stands next to a FOREIGN feature that is not its own \
@@ -5248,6 +5344,152 @@ mod tests {
             at_free_end.zone().len(),
             at_contact_end.zone().len(),
             re_cut.zone().len()
+        );
+    }
+
+    /// FINDING A / CHAL-A — an endpoint swing changes the exemption shape even
+    /// when the contact radius does not move.
+    ///
+    /// The measured challenge fixture moves the free end from `[0,0,3]` to
+    /// `[2.5,0,3]` over the 0.25 mm slab. The old axis cuts 116 faces; the final
+    /// axis cuts 140. This runs the production re-cut and requires both its count
+    /// and its stored shape to follow the final axis. A radius-only change gate
+    /// returns zero and leaves the 116-face zone behind.
+    #[test]
+    fn an_axis_swing_without_a_radius_change_re_cuts_the_zone_from_116_to_140_faces() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let (surface, topology) = fine_seat_slab(0.25);
+        let radius_mm = 0.35_f64;
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1_before = [0.0, 0.0, 3.0];
+        let p1_after = [2.5, 0.0, 3.0];
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).unwrap();
+        let freeze = |p1_mm| {
+            crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &topology,
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm: p0,
+                    p1_mm,
+                    seat_face_id,
+                    band_radius_mm: radius_mm + config.standoff_mm,
+                }],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let created = freeze(p1_before);
+        let fresh = freeze(p1_after);
+        assert_eq!(created.zone().len(), 116, "challenge control");
+        assert_eq!(fresh.zone().len(), 140, "challenge control");
+
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1_before).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+            r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "axis-swing-refreeze".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, created);
+        forest
+            .set_endpoints(key, finite3(p0).unwrap(), finite3(p1_after).unwrap())
+            .unwrap();
+
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            config.standoff_mm,
+            std::iter::once(&mut forest),
+        )
+        .unwrap();
+        assert_eq!(refrozen, 1, "the axis move itself must trigger the re-cut");
+        assert_eq!(
+            forest.seat_zone_record(key).unwrap().zone(),
+            fresh.zone(),
+            "the stored zone must equal a direct freeze on the final axis"
+        );
+    }
+
+    /// FINDING A / CHAL-A2 — shortening an axis can remove faces from the
+    /// exemption even when its contact radius does not move.
+    ///
+    /// This is the geometry shape produced when bifurcation hands the seat zone
+    /// to the upper sub-segment. The challenge measured 155 faces before and 139
+    /// after, with 16 old faces over-forgiven by a radius-only gate.
+    #[test]
+    fn an_axis_shorten_without_a_radius_change_re_cuts_and_removes_over_forgiven_faces() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let (surface, topology) = fine_seat_slab(0.25);
+        let radius_mm = 0.35_f64;
+        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1_before = [3.0, 0.0, 3.0];
+        let p1_after = [0.5, 0.0, 0.4];
+        let (_, _, face_ids, _) = surface.project(&[p0]);
+        let seat_face_id = u32::try_from(face_ids[0]).unwrap();
+        let freeze = |p1_mm| {
+            crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &topology,
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm: p0,
+                    p1_mm,
+                    seat_face_id,
+                    band_radius_mm: radius_mm + config.standoff_mm,
+                }],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let created = freeze(p1_before);
+        let fresh = freeze(p1_after);
+        assert_eq!(created.zone().len(), 155, "challenge control");
+        assert_eq!(fresh.zone().len(), 139, "challenge control");
+        let removed = created
+            .zone()
+            .iter()
+            .filter(|face| !fresh.zone().contains(face))
+            .count();
+        assert_eq!(removed, 16, "challenge over-forgiveness witness");
+
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1_before).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+            r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "axis-shorten-refreeze".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0).unwrap(),
+        }));
+        forest.set_seat_zone(key, created);
+        forest
+            .set_endpoints(key, finite3(p0).unwrap(), finite3(p1_after).unwrap())
+            .unwrap();
+
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            config.standoff_mm,
+            std::iter::once(&mut forest),
+        )
+        .unwrap();
+        assert_eq!(refrozen, 1, "the axis move itself must trigger the re-cut");
+        assert_eq!(
+            forest.seat_zone_record(key).unwrap().zone(),
+            fresh.zone(),
+            "the stored zone must equal a direct freeze on the shortened axis"
         );
     }
 

@@ -1030,12 +1030,12 @@ fn freeze_stub_seat_zones(
             p1_mm: seed.p1.map(Finite::get),
             seat_face_id,
             // The contact end's radius at the moment of the mint, plus the
-            // placement standoff. A stub is never re-sized after this — it is
-            // excluded from the transient sizer's walk by kind
-            // (`transient::postorder` skips `MemberKind::Stub`), and while it is
-            // a registered terminal `Forest::set_radii` refuses it outright
-            // (`require_terminal_mutation_allowed`). So this band is also the
-            // FINAL band, and the re-size pass finds nothing to do here.
+            // placement standoff. The transient sizer skips stubs and a
+            // registered terminal cannot be mutated, but CCO consumes that
+            // registration before later rewire moves. A consumed stub can then
+            // move through `try_slide` or `try_retire`; the downstream re-size
+            // compares this stored segment-band shape with the live member and
+            // re-cuts it when either the radius or axis changed.
             band_radius_mm: seed.r0.get() + standoff_mm,
         });
     }

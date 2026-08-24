@@ -1065,18 +1065,21 @@ always meant to be.
 ## 11.10 The re-size, AS LANDED (Craig's ruling, 2026-08-23)
 
 `seat_zone::refreeze_resized_seat_zones` is the ONE recompute. It scans the
-forests it is handed, finds every seated member whose stored `band_radius_mm`
-no longer equals `r_contact + STANDOFF_MM`, and re-cuts exactly those in ONE
-`faces_near_segments_batch` call for the whole slice — however many forests and
-however many members that is.
+forests it is handed, finds every seated member whose stored segment-band shape
+no longer equals the live `p0`, `p1`, and `r_contact + STANDOFF_MM`, and re-cuts
+exactly those in ONE `faces_near_segments_batch` call for the whole slice —
+however many forests and however many members that is.
 
 `SeatZoneRecord` is what makes that possible. It carries the frozen zone plus the
-two facts a re-size needs and a member cannot supply: the seat's own face ID (the
+facts that say what geometry the zone was cut FOR: the seat's own face ID (the
 contact's identity on the mesh, resolved once by the creation site's projection —
 re-projecting could walk the seat onto a different face and quietly redefine
-which contact it is) and the band radius the zone was cut at. The AXIS is
-deliberately not stored: the re-size reads `p0`/`p1` off the live member, which is
-the same axis every grading site reads, so a stored copy could only go stale.
+which contact it is), the band radius, and the two axis endpoints. The earlier
+argument that a stored axis "could only go stale" was backwards. Staleness is the
+condition the record must detect. Comparing the stored axis with the live axis
+makes an endpoint-only move trigger the same one batched re-cut as a radius move;
+without the stored copy, CHAL-A left 24 faces under-forgiven and CHAL-A2 left 16
+faces over-forgiven.
 
 **Why the change test is `!=` and not a tolerance.** `band_radius_mm` is a value
 this module itself wrote from `r_contact + STANDOFF_MM`. Asking whether the same
@@ -1097,21 +1100,24 @@ miss a sub-tolerance drift that `set_radii` nevertheless wrote.
 | 6 | `cco::evaluate_rewire_candidates` | `evaluate_descriptors` + the anchor-foot retain, on the REWIRE tournament | `clearance_survival` (PLACEMENT) | ONE call across every feasible candidate's forest. **Added by the second review's C1**, which found this path grading a sized anchor against its creation band and refusing it silently as `RewireCandidateRefusalReason::Clearance` → `try_reattach` `Ok(None)`. Rows re-read exactly as site 1 does. The count reaches `RewireCandidateBatch::seat_zone_members_refrozen` and is folded into the rewire report. |
 | 7 | `cco::RewireCandidateBatch::replay_candidate` | `evaluate` re-running `apply_and_size` from the descriptor | the replay's own `clearance_survival` screen | ONE forest, so one call by construction. **Also C1**, and it is not optional: fixing site 6 alone would turn a silent `Ok(None)` into a hard `CcoError::RewireClearanceReplayFailed` divergence. NOT summed into the batch's count — it re-does one candidate's work on a fresh forest, so adding it would double-count the winner. |
 
-### The two flows that CANNOT resize a seated member — proved, not instrumented
+### Model rungs cannot resize; consumed stubs can move
 
-Neither gets its own call site, and neither is dead code: both are covered by the
-same uniform scan wherever it runs, so the scan is what would notice if either
-stopped being true.
+Both are covered by the uniform re-size scan wherever it runs.
 
-* **Model rungs.** `brace::append_candidate` mints them with `Forest::add_brace`,
-  which puts them in `state.braces`. `Forest::live_tree_members` filters that set
-  out (`forest.rs:743-748`). `transient::postorder` walks only
-  `live_tree_members` (`transient.rs:689-714`), and `postorder` is the only thing
-  `resize_forest_current_parity` iterates. A rung is never reached.
-* **Stubs.** `postorder` additionally skips `MemberKind::Stub` when pushing to its
-  order (`transient.rs:702-707`), and while a stub is a registered terminal
-  `Forest::set_radii` refuses it outright via
-  `require_terminal_mutation_allowed`. Two independent guards.
+* **Model rungs.** `brace::append_candidate` mints them with `Forest::add_brace`.
+  The structural proof is `Forest::set_parent`: it refuses a brace as either
+  child or parent with `ForestError::BraceInTree` (`forest.rs:922/927`). Every
+  production radius mutation that could reach this stage walks tree ancestry, so
+  a rung can never appear on one of those walks. The earlier postorder citation
+  described one current walker, not the invariant that protects every walker.
+* **Stubs can move after terminal consumption.** The transient postorder skips
+  `MemberKind::Stub`, and `Forest::set_radii` refuses a registered terminal, but
+  `cco::apply_and_size` consumes the terminal registration first. The stub is then
+  mutable: `rewire::try_slide` and `try_retire` can change its endpoints. Those
+  moves need no special call site because `rewire::validate_changed_geometry`
+  already invokes the uniform re-size between the move's sizing and grading. The
+  stored-axis comparison makes the move honest even when the contact radius is
+  unchanged.
 
 ### Why the ruled behaviour is structural rather than fixture-luck
 
@@ -1127,8 +1133,10 @@ Every production sizer leaves the CONTACT end at least as fat as the other end:
 * `cco::uniformly_size_ancestor_path` writes both ends equal.
 
 The seated production families declare `Rootward` (CCO anchor, bifurcation upper
-half, model rung) or are never resized at all (`Terminalward` stubs). So
-`r_contact = r_max` for every seated member a re-size can touch, and the graded
+half, model rung). Terminalward stubs are not resized by the transient sizer, but
+a consumed stub can have its axis moved by rewire and is re-cut from that final
+axis. Thus `r_contact = r_max` for every seated member whose radius a production
+sizer can touch, and the graded
 clearance after a re-size is `STANDOFF_MM − demanded_gap + s`, independent of the
 radius. Were a future family to end up thinner at the contact end than at the far
 end, the ruling would leave it a residual self-refusal — the band would be its
@@ -1230,14 +1238,15 @@ anchor. Its `own_contact_no_winner` steps record
 QUALIFICATION, before any candidate exists, so `generate_descriptors` mints no
 `ModelAnchor` and the tournament is Plate + Bifurcate only. A `Bifurcate` can
 only inherit a zone from a host that declares `Rootward`, which only a committed
-model anchor creates. So the only seated members on this model are stubs — and
-stubs are exactly the flow §11.10 proves cannot be re-sized.
+model anchor creates. So the only seated members on this model are stubs. The measured zero re-cuts say
+that no pass moved those stubs on this run; they do not prove that consumed stubs
+are immutable.
 
 **What this does and does not establish.** It establishes that the change is
-INERT on a model with no placed model anchor, that the wiring runs on the real
-pipeline without erroring, and that the `!=` change test does NOT spuriously fire
-(1,311 chances, zero false re-cuts — which is the runtime witness the `standoff_mm`
-provenance argument asked for). It does NOT exercise the F1 path on the corpus,
+INERT on this model because none of its seated members changed radius or axis,
+that the wiring runs on the real pipeline without erroring, and that the exact
+shape comparison does NOT spuriously fire (1,311 chances, zero false re-cuts —
+which is the runtime witness the `standoff_mm` provenance argument asked for). It does NOT exercise the F1 path on the corpus,
 because this model never reaches it. A model that DOES place a model anchor is
 the run that would; `zombie-3-a` is not it, and saying so is more useful than
 reporting "no change" and stopping.

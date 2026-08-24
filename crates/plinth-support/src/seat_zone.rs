@@ -119,24 +119,24 @@ pub(crate) struct SeatZoneRequest {
     pub(crate) band_radius_mm: f64,
 }
 
-/// A frozen zone, plus the two facts a later re-size needs and the member
-/// cannot supply.
+/// A frozen zone, plus the facts that say what geometry it was cut FOR.
 ///
-/// **Why exactly these two and no more.** `seat_face_id` is the contact's own
-/// identity on the mesh — it is resolved once, by a projection at the creation
-/// site, and a re-size must reuse it rather than re-project (re-projecting could
-/// walk the seat onto a different face and silently redefine which contact this
-/// is). `band_radius_mm` is how the re-size answers "did the sizing pass move
-/// this?" without consulting any tolerance.
-///
-/// The axis is deliberately NOT stored. A re-size reads `p0`/`p1` from the live
-/// member, which is the same axis every grading site reads; a stored copy could
-/// only ever go stale.
+/// `seat_face_id` is the contact's own identity on the mesh — it is resolved
+/// once, by a projection at the creation site, and a re-size must reuse it
+/// rather than re-project (re-projecting could walk the seat onto a different
+/// face and silently redefine which contact this is). `band_radius_mm`,
+/// `p0_mm`, and `p1_mm` are the complete segment-band shape whose connected
+/// component produced `zone`. The re-size compares them with the live member's
+/// shape without consulting a tolerance. A stored axis can go stale; that is
+/// precisely why it belongs here: the mismatch detects the stale zone and
+/// causes the one batched re-cut.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SeatZoneRecord {
     zone: Arc<[u32]>,
     seat_face_id: u32,
     band_radius_mm: f64,
+    p0_mm: [f64; 3],
+    p1_mm: [f64; 3],
 }
 
 impl SeatZoneRecord {
@@ -145,6 +145,8 @@ impl SeatZoneRecord {
             zone,
             seat_face_id: request.seat_face_id,
             band_radius_mm: request.band_radius_mm,
+            p0_mm: request.p0_mm,
+            p1_mm: request.p1_mm,
         }
     }
 
@@ -160,6 +162,14 @@ impl SeatZoneRecord {
 
     pub(crate) const fn band_radius_mm(&self) -> f64 {
         self.band_radius_mm
+    }
+
+    pub(crate) const fn p0_mm(&self) -> [f64; 3] {
+        self.p0_mm
+    }
+
+    pub(crate) const fn p1_mm(&self) -> [f64; 3] {
+        self.p1_mm
     }
 
     /// The SAME contact carrying a DIFFERENT face set.
@@ -322,10 +332,12 @@ pub(crate) fn freeze_production_seat_zones(
 ///
 /// *"The exemption always equals the arm's true footprint, no slack."* A sizing
 /// pass may leave a seated member fatter (or thinner) than it was when its zone
-/// was frozen. This walks the forests it is given, finds every seated member
-/// whose stored `band_radius_mm` no longer equals `r_contact + standoff_mm`, and
-/// re-freezes exactly those — in ONE `faces_near_segments_batch` call for the
-/// whole slice of forests, however many forests and members that is.
+/// was frozen, and a later geometry move may change its axis without changing
+/// that radius. This walks the forests it is given, finds every seated member
+/// whose stored segment-band shape no longer equals the live `p0`, `p1`, and
+/// `r_contact + standoff_mm`, and re-freezes exactly those — in ONE
+/// `faces_near_segments_batch` call for the whole slice of forests, however many
+/// forests and members that is.
 ///
 /// **Where it may be called, and where it may not.** Between a sizing pass and
 /// the next grading pass. Never inside a grading pass: a zone recomputed from
@@ -387,14 +399,19 @@ where
                 ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
             let band_radius_mm = contact_radius_mm + standoff_mm;
-            if band_radius_mm == record.band_radius_mm() {
+            let p0_mm = member.p0_mm().map(Finite::get);
+            let p1_mm = member.p1_mm().map(Finite::get);
+            if band_radius_mm == record.band_radius_mm()
+                && p0_mm == record.p0_mm()
+                && p1_mm == record.p1_mm()
+            {
                 continue;
             }
             targets.push((index, key));
             previous.push((record.zone().len(), record.band_radius_mm()));
             requests.push(SeatZoneRequest {
-                p0_mm: member.p0_mm().map(Finite::get),
-                p1_mm: member.p1_mm().map(Finite::get),
+                p0_mm,
+                p1_mm,
                 // The contact's own identity on the mesh, carried from the
                 // creation site. Re-projecting could land on a different face
                 // and quietly redefine which contact this is.

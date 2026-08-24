@@ -1813,6 +1813,121 @@ mod tests {
         });
     }
 
+    /// FINDING D — terminal consumption makes a stub mutable, and `try_slide`
+    /// can then move the endpoint its seat-zone record was cut for.
+    ///
+    /// The record starts on the old axis with the final radius already in place,
+    /// so only the axis comparison can make `validate_changed_geometry` re-cut
+    /// it. The one-face surface is near both axes and is excluded by the stub's
+    /// zone, which keeps this test about the accepted slide rather than a
+    /// clearance refusal. A radius-only gate leaves the record's stored endpoint
+    /// at the old junction and reports zero re-cuts.
+    #[test]
+    fn try_slide_re_cuts_a_consumed_stubs_zone_to_follow_its_new_endpoint() {
+        let mesh = Mesh::new(
+            vec![[-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [0.0, 0.2, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = Config::current(0.05).unwrap();
+        let old_p0 = [5.0, 0.0, 5.0];
+        let p1 = [0.0, 0.0, 0.0];
+        let left_p0 = [-1.0, 0.0, 10.0];
+        let right_p0 = [1.0, 0.0, 10.0];
+
+        // Compute the exact radius the accepted slide will write, and create the
+        // stub at that radius. This makes the move axis-only: a radius-only
+        // change gate cannot fire by accident.
+        let geometry_stub = Member::new(MemberSpec {
+            p0_mm: old_p0.map(f),
+            p1_mm: p1.map(f),
+            r0_mm: TerminalEndRadius::new(p(0.4)),
+            r1_mm: RootwardEndRadius::new(p(0.4)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(crate::forest::ContactEnd::Terminalward),
+            carried_mm2: f(1.0),
+        });
+        let geometry_children = vec![
+            member(left_p0, old_p0, MemberKind::Shoot, 1),
+            member(right_p0, old_p0, MemberKind::Shoot, 2),
+        ];
+        let search = ordered_slide_search(&geometry_stub, &geometry_children, &config)
+            .unwrap()
+            .unwrap();
+        let final_radius = search.radii.member;
+
+        let mut forest = Forest::new();
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: old_p0.map(f),
+            p1_mm: p1.map(f),
+            r0_mm: TerminalEndRadius::new(final_radius),
+            r1_mm: RootwardEndRadius::new(final_radius),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(crate::forest::ContactEnd::Terminalward),
+            carried_mm2: f(1.0),
+        }));
+        let left = forest.add_member(member(left_p0, old_p0, MemberKind::Shoot, 1));
+        let right = forest.add_member(member(right_p0, old_p0, MemberKind::Shoot, 2));
+        forest.set_parent(left, Some(stub)).unwrap();
+        forest.set_parent(right, Some(stub)).unwrap();
+        forest.register_terminal(7, stub).unwrap();
+        forest.consume_terminal(7, stub).unwrap();
+
+        let created = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: old_p0,
+                p1_mm: p1,
+                seat_face_id: 0,
+                band_radius_mm: final_radius.get() + config.standoff_mm,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(created.zone().as_ref(), &[0], "fixture control");
+        forest.set_seat_zone(stub, created);
+
+        let mut refrozen = 0_u64;
+        let saved = try_slide(
+            &mut forest,
+            stub,
+            &authority,
+            &BTreeSet::new(),
+            &config,
+            &mut refrozen,
+        )
+        .unwrap();
+        assert!(saved.is_some(), "the consumed stub must take the slide");
+        assert_eq!(
+            refrozen, 1,
+            "the endpoint-only move must trigger one re-cut"
+        );
+        let moved_p0 = forest.member(stub).unwrap().p0_mm().map(Finite::get);
+        assert_ne!(moved_p0, old_p0, "try_slide must really move the stub");
+        let record = forest.seat_zone_record(stub).unwrap();
+        assert_eq!(
+            record.p0_mm(),
+            moved_p0,
+            "the zone must follow the new endpoint"
+        );
+        assert_eq!(record.p1_mm(), p1);
+        assert_eq!(record.zone().as_ref(), &[0]);
+    }
+
     #[test]
     fn ordered_slide_walk_pins_frozen_path_and_is_thread_setting_independent() {
         const CHILD: &str = "PLINTH_REWIRE_SLIDE_WALK_CHILD";
