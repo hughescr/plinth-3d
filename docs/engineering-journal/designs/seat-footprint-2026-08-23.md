@@ -139,7 +139,8 @@ For one designed embed, define:
 
 * `S`: the exact model boundary used by placement and grading;
 * `M`: the model volume whose boundary is `S`, queried by the same inside semantics
-  already used through `NativeSurface::inside` at `brace.rs:1949`;
+  already used through `NativeSurface::inside` at `brace.rs:1949`; a nearest boundary
+  point lying exactly on the model surface `S` counts as not buried;
 * `q`: the stored intended entry crossing on the stored seat face;
 * `n`: the stored outward entry normal;
 * `A`: the live member axis and its exact tapered station data;
@@ -223,8 +224,8 @@ the point ceases to be self-refusing.
 
 **INFERRED:** at wall-axis distances `0.75`, `1.00`, and `1.25 mm`, the nearest
 support-boundary feature is the shaft surface standing in air. In particular, the
-raised-wall point `(0.80, z = 1.0)` is inside the shaft, but its nearest `∂B` point is
-the shaft surface at horizontal distance `1.000 mm`, standing in air. Rule Z therefore
+raised-wall point `(0.80, z = 0.4)` is inside the shaft, but its nearest `∂B` point is
+the shaft lateral surface at distance `0.200 mm`, standing in air; retained. Rule Z therefore
 retains that wall, which is refusable at its required wall-only final margin
 `−0.550 mm`; the `1.00` and `1.25 mm` rows have margins `−0.300` and `−0.050 mm`.
 Thus the seat is legal while both measured binding wall populations remain refusable.
