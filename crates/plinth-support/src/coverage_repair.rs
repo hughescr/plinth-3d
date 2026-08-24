@@ -649,9 +649,12 @@ pub struct ConfirmationRoundDisclosure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationRoundOutcome {
-    /// Another terminal's own arm was condemned while this round ran, or a
-    /// second terminal reported itself spent and one round holds the set at a
-    /// time. The round retires nothing and is re-entered later.
+    /// Another terminal's own arm was condemned while this round ran (design
+    /// §1.3, and it is the ONLY way a round is voided): the set grew, so the
+    /// round is re-entered later against the new set. A second terminal
+    /// reporting its own steering spent cannot void a round — that pass learns
+    /// nothing and advances nothing, so it refuses by name instead. The round
+    /// retires nothing.
     Voided,
     /// The round was still open when a pass lowered, and the lowered run's
     /// sealed transcript carries this terminal as `UnroutedNoWinner`.
