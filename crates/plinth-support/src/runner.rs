@@ -1503,7 +1503,11 @@ struct LegalizationTally {
     /// `voided_rounds`: it was opened, it was paid for, and it earned nothing.
     confirmation_rounds: usize,
     voided_rounds: usize,
-    /// Arms a round has measured, across all rounds.
+    /// Arms a round has driven, across all rounds — **including arms measured
+    /// inside a round that was later voided.** It is a cost, not a credit: the
+    /// passes were spent whether or not the round they belonged to survived to
+    /// earn anything. What a retirement rests on is the round's own sealed
+    /// rows, never this counter.
     round_arms_measured: usize,
 }
 
