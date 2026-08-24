@@ -86,7 +86,14 @@ clearance = min over the whole axis of dist(x, surface \ Z) − (r_max + demande
 `C` does not mention the radius: the tested **station** set is the whole axis
 either way, and the tested **face** set is `surface \ Z`, which is frozen. So
 clearance is monotone decreasing in `r_max`, and **a thinner arm can never grade
-worse than a fatter one on the same axis.** Unconditional, for any geometry.
+worse than a fatter one on the same axis and the same frozen `Z`.**
+Unconditional over geometry — it holds for any surface — and it is a
+WITHIN-PASS statement: `Z` is a parameter of the theorem, not a constant of the
+member, so two radii may be compared under it only when both are graded against
+the same `Z`. That is exactly one grading pass. It is NOT a statement about a
+member's clearance across the lifetime of a run, and after the 2026-08-23 ruling
+it cannot be — see §11.9's ladder, whose FINAL column is deliberately not
+monotone in radius.
 
 The freeze is what makes it unconditional, and the **hypothesis it needs is
 narrower than "never recomputed, ever"**: `Z` must not move as a function of the
@@ -103,6 +110,16 @@ point **between** a sizing pass and the next grading pass; inside any one gradin
 pass every zone is a constant, so `C` is still a constant of the axis and
 clearance is still `C − r_max − demanded_gap`, monotone decreasing in `r_max`. The
 re-freeze changes WHICH constant, once, at a moment no grading is in flight.
+
+**And it does change the constant, which is why the theorem is stated
+within-pass and must stay that way.** Grade a member, re-cut its band, grade it
+again at a larger radius, and the two numbers are `C₁ − r₁ − gap` and
+`C₂ − r₂ − gap` with `C₂ > C₁`: the comparison is not the theorem's, and it can
+come out either way. §11.9's post-ruling ladder is that in measured form — its
+FINAL column runs `+0.318` at `r = 0.50` and `+0.325` at `r = 0.65`, so a fatter
+arm grades BETTER. That is the ruling working exactly as ruled, not a defect and
+not a counterexample: each rung is one pass with its own `Z`, and the ruling's
+whole content is that `Z` follows the radius BETWEEN passes.
 
 The kernel half of the same theorem is
 `a_thinner_arm_never_grades_worse_than_a_fatter_one_on_a_frozen_face_set`
@@ -753,6 +770,15 @@ already graded it honestly, because its mask was small. The fat arm moved from
 in one number. The frozen zone is 2 faces (the table's own top), so the foreign
 panel is graded and the seat is not.
 
+**Read the two radii as the theorem's WITHIN-PASS statement, which is what this
+test measures** (§3, and the `seat_zone` module header). One frozen `Z`, two
+radii, one pass — that is the theorem's hypothesis satisfied, and the test
+supplies the single `Z` deliberately rather than incidentally. It is NOT the
+claim that a member's clearance falls as it grows over the course of a run: from
+2026-08-23 a growth is followed by a re-cut, the two gradings hold different
+`Z`s, and §11.9's ladder measures that comparison coming out the other way. Both
+statements are true and they are about different things.
+
 ### 11.6 The sabotage estate, with every red-run PERFORMED
 
 Six named sabotages, each applied to production text, run, and reverted.
@@ -903,6 +929,18 @@ tessellation happens to give, and that can be a fraction of a micron.** Quoting
 the 0.050 mm first rung alone would be the favourable reading. The SIGN is
 structural; the SIZE is not a guarantee of anything.
 
+**THIS LADDER IS NOT MONOTONE IN RADIUS, AND THAT IS THE RULING WORKING.** The
+FINAL column goes `+0.318` at `r_max = 0.50` and `+0.325` at `r_max = 0.65`: the
+fatter arm grades BETTER. Anyone holding §3's monotonicity theorem in mind
+should expect that and not be alarmed by it. The theorem is a WITHIN-PASS
+statement — one frozen `Z`, two radii, one grading pass, which is what §11.5
+measures — and each rung here is a SEPARATE pass carrying its own re-cut `Z`.
+Across rungs both terms move: `C` rises with the band as well as `r_max`, so
+`C − r_max − gap` is a difference of two increasing quantities and its sign is
+whatever the tessellation makes it. The theorem is not violated and it is not
+weakened; it simply does not speak to this comparison, and reading it as though
+it did is the misreading this paragraph exists to prevent.
+
 For contrast, the same ladder with no re-size refuses four of the six rungs at
 PLACEMENT and two at FINAL — the table further down.
 
@@ -1052,7 +1090,7 @@ miss a sub-tolerance drift that `set_radii` nevertheless wrote.
 | # | flow | after | before | batch |
 | --- | --- | --- | --- | --- |
 | 1 | `cco::grow_terminal_inner` | `evaluate_descriptors` + the anchor-foot retain — every candidate applied AND sized | `clearance_survival` (PLACEMENT) | ONE call across EVERY candidate forest in the tournament. Covers the model anchor (`size_tapered_without_tree_fanin`) and the bifurcation upper half (`size_bifurcation_candidate`) in the same call. `ClearanceRow` snapshots the zone, so touched candidates' rows are re-read — pure CPU, no native call. The count reaches `TerminalCcoOutcome::seat_zone_members_refrozen`. |
-| 2 | `cco::grow_terminal_inner`, commit path | `apply_and_size` on the LIVE forest | `forest.commit` | ZERO native calls. The winner's candidate forest already holds the re-cut record and the digests just proved both forests have the same live members under the same keys, so the commit COPIES rather than recomputing — bit-identical by construction, the same argument `apply_model_anchor` makes for carrying the zone on the descriptor. The zone table is invisible to `Forest::digest` (pinned by `freezing_a_seat_zone_does_not_move_the_forest_digest`), which is what lets the equality check run first. |
+| 2 | `cco::grow_terminal_inner`, commit path | `apply_and_size` on the LIVE forest | `forest.commit` | ZERO native calls: the winner's candidate forest already holds the re-cut record, so the commit COPIES rather than recomputing. **The digest equality proves SHARED PROVENANCE, not zone identity** (second review, C2): `Forest::digest` EXCLUDES `seat_zones` (pinned by `freezing_a_seat_zone_does_not_move_the_forest_digest`), so what it establishes is that both forests hold the same live members under the same keys — which is what makes copying by key well defined, and its blindness to the zone table is what lets it run BEFORE the copy. The copied record is the right one by CONSTRUCTION: one shared `snapshot.clone()`, a zone carried on the descriptor rather than derived from the forest, and a re-size that read the same axis, radius and stored seat face. `cco::the_committed_bifurcation_carries_the_winners_re_cut_band_not_the_inherited_one` asserts the committed record against a fresh freeze rather than trusting the digest. |
 | 3 | `brace::brace_fixed_point_current_parity` | `apply_resize` | `exact_clearance_negatives` (FINAL) | ONE call per controller iteration — there is one sizing pass per iteration. |
 | 4 | `brace::pending_triggers_after_trial` | the trial `apply_resize` | the trial `exact_clearance_rows` | ONE call, on the batch boundary this function already declares; `seat_zone_refreeze_batches` is INCREMENTED where the call is made and pinned at 1, and the members re-cut reach `seat_zone_members_refrozen`. Missing this site would grade the trial against pre-resize bands, leave the trigger unrelieved, and place a rung nobody needed. |
 | 5 | `rewire::validate_changed_geometry` | every caller's sizing (`try_slide`'s junction sizing, `reconcile_ancestors`' path walk) | the PLACEMENT screen | ONE call. `after` became `&mut` for this and nothing else. The count reaches `RewireReport::seat_zone_members_refrozen`, accumulated over every move evaluation, accepted or refused. |
@@ -1210,7 +1248,37 @@ The ruling makes the band `r_final + STANDOFF_MM` where it was
 `r_create + STANDOFF_MM`. On the fine slab that took the zone from 116 faces to
 304. The zone is `flood_fill` over MESH ADJACENCY from the seat face, bounded by
 the band, so a wider band can only extend the fill's reach — never shrink it.
-Two cases, and only the first is measured.
+
+**That last claim holds for a FIXED AXIS, and only for a fixed axis.** The band
+is a tube about the live `p0`–`p1`, so "wider band ⊇ narrower band" is a
+statement about two radii on ONE segment. Where the axis moves the containment
+simply does not apply: a re-cut on a moved axis can drop faces the old zone held
+and pick up faces on the far side, in either direction. Two production flows
+move a seated member's axis — `cco::apply_bifurcation` gives the upper half a
+new `p0` at the junction while it keeps the host's seat at `p1`, and rewire's
+`set_endpoints` moves `p1` on a spliced child. Neither is a defect (the
+2026-08-22 second review's C3 refuted it: a later pass re-cuts on the shortened
+axis, which is the ruled behaviour), but the monotone reading is unavailable
+there and this section must not lean on it.
+
+**The exposure is BOUNDED, on any axis, and here is the bound.** After a re-cut
+the zone is contained in the tube of radius `r_final + STANDOFF_MM` about the
+LIVE axis — that is what `freeze_seat_zones` computes, no argument needed. So
+the forgiveness window's outer edge moves out from the creation-radius one by at
+most
+
+```text
+(registered sizing maximum − creation radius)
+```
+
+and by nothing else: the re-cut adds no term the sizer did not already write
+into the radius. The window MOVES with the axis and WIDENS by at most that
+difference; it does not grow without limit and it does not depend on how many
+times the re-size runs, because each re-cut reads the radius rather than
+accumulating on the last band. That converts "a wider band reaches further" from
+an open-ended worry into a quantity a future measurement can be sized against.
+
+Two cases below, and only the first is measured.
 
 1. **A topologically DISCONNECTED foreign feature can never be swallowed, at any
    band radius.** MEASURED by

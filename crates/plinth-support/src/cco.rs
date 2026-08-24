@@ -3981,16 +3981,30 @@ fn grow_terminal_inner(
             // `apply_and_size` has just re-installed the CREATION-radius band on
             // the committed member, because that is what the descriptor carries.
             // The winner's candidate forest already holds the re-cut record for
-            // the same key, and the digests just proved the two forests have the
-            // same live members under the same keys. Copying is therefore
-            // bit-identical to re-cutting, and it costs no native call — the
-            // same argument `apply_model_anchor` makes for carrying the zone on
-            // the descriptor in the first place.
+            // the same key, and copying it costs no native call — the same
+            // argument `apply_model_anchor` makes for carrying the zone on the
+            // descriptor in the first place.
             //
-            // The zone table is invisible to `Forest::digest` (pinned by
-            // `freezing_a_seat_zone_does_not_move_the_forest_digest`), which is
-            // what lets the equality check above run BEFORE this copy without
-            // the re-size being able to break it.
+            // **What the digest equality above does and does not prove** (second
+            // review, C2). It proves SHARED PROVENANCE, not zone identity:
+            // `Forest::digest` covers `p0`/`p1`/`r0`/`r1`/kind/owner/
+            // contact_end/carried and EXCLUDES `seat_zones` entirely (pinned by
+            // `freezing_a_seat_zone_does_not_move_the_forest_digest`). So it
+            // establishes that both forests hold the same live members under
+            // the same keys, which is what makes copying by key well defined —
+            // and it is deliberately blind to the zone table, which is what
+            // lets it run BEFORE this copy without the re-size breaking it.
+            //
+            // What makes the copied record the RIGHT one is separate and it is
+            // construction, not the digest: both forests descend from the same
+            // `snapshot.clone()`, `apply_model_anchor` installs a zone carried
+            // on the descriptor rather than derived from the forest, and the
+            // re-size that produced the winner's record read the same axis,
+            // radius and stored seat face this live member now has. Anything
+            // that broke that chain would leave this equality green, which is
+            // why `the_committed_bifurcation_carries_the_winners_re_cut_band_
+            // not_the_inherited_one` asserts the committed record against a
+            // fresh freeze instead of trusting the digest.
             for key in winner.forest.live_members() {
                 if let Some(record) = winner.forest.seat_zone_record(key) {
                     forest.set_seat_zone(key, record.clone());

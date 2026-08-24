@@ -58,8 +58,20 @@
 //! the whole axis either way, and the tested face set is `surface \ Z`, which is
 //! frozen. So the clearance is `C - r_max - gap` with `C` a constant of the
 //! axis, and it is MONOTONE DECREASING in `r_max`. A thinner arm therefore can
-//! never grade worse than a fatter one on the same axis. THEOREM, not a
-//! measurement.
+//! never grade worse than a fatter one on the same axis AND THE SAME `Z`.
+//! THEOREM, not a measurement — unconditional over geometry, and holding for
+//! any surface.
+//!
+//! **`Z` is a parameter of that theorem, not a constant of the member, which
+//! makes it a WITHIN-PASS statement.** Two radii may be compared under it only
+//! when both were graded against the same `Z`, and that is exactly one grading
+//! pass. It says nothing about a member's clearance across the lifetime of a
+//! run: after the 2026-08-23 ruling a growth is followed by a re-cut, so two
+//! gradings of the same member hold DIFFERENT `Z`s, both `C` and `r_max` have
+//! moved, and `C - r_max - gap` can go either way. The design note's §11.9
+//! ladder measures exactly that — `+0.318` at `r = 0.50` against `+0.325` at
+//! `r = 0.65`, a fatter arm grading BETTER. That is the ruling working as
+//! ruled, not a counterexample to anything above.
 //!
 //! **The hypothesis that theorem needs is narrower than "never recomputed,
 //! ever".** It needs `Z` not to move as a function of the radius BEING GRADED,
