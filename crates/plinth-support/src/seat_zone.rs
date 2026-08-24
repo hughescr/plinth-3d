@@ -174,6 +174,37 @@ pub(crate) enum SeatZoneError {
     /// disagreement, not a geometry outcome, so it fails rather than silently
     /// yielding an empty zone.
     SeatFaceOutOfRange { row: usize, face_id: u32 },
+    /// A RE-CUT took a zone that forgave something to a zone that forgives
+    /// nothing (second review, residual C4).
+    ///
+    /// An empty zone is a legal answer at a CREATION site — see
+    /// [`freeze_seat_zones`] — because it means the request never had a seat
+    /// inside its own band, and grading the whole surface is the strict
+    /// direction. At a RE-SIZE it means something else entirely: the band no
+    /// longer contains the seat face this contact was created on, so the axis
+    /// has moved away from its own seat, and the member is claiming a model
+    /// contact it does not have.
+    ///
+    /// **It fails rather than being counted as re-frozen, and it is
+    /// unreachable.** Every member that carries a `Rootward` model contact is
+    /// either a brace rung — which `Forest::add_brace` keeps out of the tree,
+    /// which `set_parent` refuses as child or parent, and which no sizing pass
+    /// touches — or a CCO anchor strut or bifurcated upper half, which is a
+    /// ROOT by construction (`apply_model_anchor` mints it parentless, and
+    /// `apply_bifurcation` gives the upper half the host's own parent). The
+    /// rewire moves that rewrite `p1` write it only on `children_of(key)`, and
+    /// a root is never a child; `try_slide` rewrites `p0` on a junction with
+    /// two or more children and keeps `p1`. A `Terminalward` contact is seated
+    /// at `p0`, which no rewire move writes at all. So no production path can
+    /// move a seated end, and the seat face stays at distance zero from the
+    /// axis whatever the radius does. This variant is the guard on that
+    /// argument, not a case the pipeline is expected to meet.
+    ZoneEmptiedByResize {
+        seat_face_id: u32,
+        previous_faces: usize,
+        previous_band_radius_mm: f64,
+        band_radius_mm: f64,
+    },
 }
 
 impl std::fmt::Display for SeatZoneError {
@@ -183,6 +214,18 @@ impl std::fmt::Display for SeatZoneError {
             Self::SeatFaceOutOfRange { row, face_id } => write!(
                 formatter,
                 "seat-zone row {row} named face {face_id}, which the retained topology does not have"
+            ),
+            Self::ZoneEmptiedByResize {
+                seat_face_id,
+                previous_faces,
+                previous_band_radius_mm,
+                band_radius_mm,
+            } => write!(
+                formatter,
+                "re-sizing the seat zone on face {seat_face_id} from a band of \
+                 {previous_band_radius_mm} mm to one of {band_radius_mm} mm emptied a zone that \
+                 held {previous_faces} face(s): the re-cut band no longer contains the contact's \
+                 own seat face, so the axis has moved off its seat"
             ),
         }
     }
@@ -289,6 +332,15 @@ pub(crate) fn freeze_production_seat_zones(
 /// that declares no contact, and a declaration that changed hands MOVED its
 /// record with it (`Forest::take_seat_zone`).
 ///
+/// **A re-cut that empties a non-empty zone FAILS.** At a creation site an
+/// empty zone is a legal, strict answer; at a re-size it says the band no
+/// longer reaches the contact's own seat face, which means the axis moved off
+/// its seat. Counting that as "re-frozen" would report a re-size that had
+/// silently turned the exemption off. It is checked over the whole batch
+/// before anything is written, so a caller that handles
+/// [`SeatZoneError::ZoneEmptiedByResize`] still holds forests whose every zone
+/// matches the radius it was cut at.
+///
 /// Returns the number of members re-frozen, so a caller can disclose it and a
 /// test can prove the pass actually ran.
 pub(crate) fn refreeze_resized_seat_zones<'forest, I>(
@@ -302,6 +354,10 @@ where
 {
     let mut forests = forests.into_iter().collect::<Vec<_>>();
     let mut targets: Vec<(usize, MemberKey)> = Vec::new();
+    // What each target forgave BEFORE the re-cut, so an emptied zone can be
+    // told from a zone that was empty all along. Carried in row order beside
+    // `requests`.
+    let mut previous: Vec<(usize, f64)> = Vec::new();
     let mut requests: Vec<SeatZoneRequest> = Vec::new();
     for (index, forest) in forests.iter().enumerate() {
         for key in forest.live_members() {
@@ -323,6 +379,7 @@ where
                 continue;
             }
             targets.push((index, key));
+            previous.push((record.zone().len(), record.band_radius_mm()));
             requests.push(SeatZoneRequest {
                 p0_mm: member.p0_mm().map(Finite::get),
                 p1_mm: member.p1_mm().map(Finite::get),
@@ -339,6 +396,19 @@ where
     }
     // THE one batched native call for every re-size in this pass.
     let records = freeze_production_seat_zones(surface, topology, &requests)?;
+    // C4 — check the whole batch BEFORE writing any of it, so a caller that
+    // handles the error still holds forests whose zones all match the radii
+    // they were cut at.
+    for ((previous_faces, previous_band_radius_mm), record) in previous.iter().zip(&records) {
+        if *previous_faces > 0 && record.zone().is_empty() {
+            return Err(SeatZoneError::ZoneEmptiedByResize {
+                seat_face_id: record.seat_face_id(),
+                previous_faces: *previous_faces,
+                previous_band_radius_mm: *previous_band_radius_mm,
+                band_radius_mm: record.band_radius_mm(),
+            });
+        }
+    }
     for ((index, key), record) in targets.iter().zip(records) {
         forests[*index].set_seat_zone(*key, record);
     }
@@ -604,6 +674,114 @@ mod tests {
             zones[0].is_empty(),
             "an empty zone grades the whole surface, which is the safe \
              direction: it can only make a verdict stricter"
+        );
+    }
+
+    /// **C4, the residual the second review left: a re-cut may not turn an
+    /// exemption OFF and call it a re-freeze.**
+    ///
+    /// The reviewer refuted C4 as reachable — no production path can move a
+    /// seated end, so the seat face stays at distance zero from the axis and
+    /// the band always contains it. What was missing was a guard, and a test
+    /// that says what the guard is for. This drives the condition BY
+    /// CONSTRUCTION, with a move `Forest::set_endpoints` allows but no
+    /// production caller makes: it takes the axis 49 mm away from the wall its
+    /// seat face is on, so the re-cut band cannot reach that face and the fill
+    /// returns empty.
+    ///
+    /// Without the guard this returns `Ok(1)` and writes an empty zone: the arm
+    /// keeps its contact declaration, forgives nothing, and the count says one
+    /// member was faithfully re-sized.
+    #[test]
+    fn a_re_cut_that_empties_a_non_empty_zone_fails_rather_than_counting_as_re_frozen() {
+        use crate::forest::{
+            Member, MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius,
+        };
+        use plinth_core::{Finite, PositiveFinite};
+
+        let finite = |value: f64| Finite::new(value).unwrap();
+        let positive = |value: f64| PositiveFinite::new(value).unwrap();
+        // Fixture standoff. Nothing here reads the registry: this test is about
+        // the emptying, and the band arithmetic only has to be self-consistent.
+        const STANDOFF_MM: f64 = 0.5;
+        let (surface, topology) = strip_wall();
+
+        let p0_mm = [1.0, 5.0, 5.0];
+        let p1_mm = [1.0, 5.2, 5.0];
+        let mut forest = Forest::new();
+        let key = forest.add_member(Member::new(MemberSpec {
+            p0_mm: p0_mm.map(finite),
+            p1_mm: p1_mm.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(1.0)),
+            r1_mm: RootwardEndRadius::new(positive(1.0)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "c4-guard".to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(0.0),
+        }));
+        let record = freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: 10,
+                band_radius_mm: 1.0 + STANDOFF_MM,
+            }],
+        )
+        .expect("the creation freeze")
+        .remove(0);
+        assert!(
+            !record.zone().is_empty(),
+            "the fixture must start from a zone that forgives something, or \
+             there is no emptying to detect"
+        );
+        forest.set_seat_zone(key, record);
+
+        // THE CONSTRUCTION: the axis leaves its own seat face behind. No
+        // production path does this — `apply_model_anchor` mints the seated arm
+        // as a root, `apply_bifurcation` gives the upper half the host's own
+        // `p1`, and rewire rewrites `p1` only on children — which is why this
+        // is driven by hand.
+        forest
+            .set_endpoints(
+                key,
+                [50.0, 5.0, 5.0].map(finite),
+                [50.0, 5.2, 5.0].map(finite),
+            )
+            .unwrap();
+        forest
+            .set_radii(
+                key,
+                TerminalEndRadius::new(positive(1.4)),
+                RootwardEndRadius::new(positive(1.4)),
+            )
+            .unwrap();
+
+        let error = refreeze_resized_seat_zones(
+            &surface,
+            &topology,
+            STANDOFF_MM,
+            std::iter::once(&mut forest),
+        )
+        .expect_err("an emptied re-cut must fail");
+        assert_eq!(
+            error,
+            SeatZoneError::ZoneEmptiedByResize {
+                seat_face_id: 10,
+                previous_faces: 6,
+                previous_band_radius_mm: 1.5,
+                band_radius_mm: 1.9,
+            }
+        );
+        assert_eq!(
+            forest.seat_zone_record(key).map(|kept| kept.zone().len()),
+            Some(6),
+            "and the refusal leaves the forest holding the zone it already had, \
+             rather than a half-written batch"
         );
     }
 
