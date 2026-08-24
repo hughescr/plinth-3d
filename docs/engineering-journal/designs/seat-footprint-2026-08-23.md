@@ -1,586 +1,480 @@
-# Seat footprint: exempt the entry joint, not its neighbours
+# Seat footprint: exempt the declared entry carrier, not nearby geometry
 
-**Date:** 2026-08-23
+**Date:** 2026-08-23; revised 2026-08-24 after round-1 review
 
-**Status:** DESIGN FOR OWNER DECISION; no production code in this lane
+**Status:** REVISED DESIGN FOR OWNER DECISION; no production code in this lane
 
 **Branch:** `feature/a4-controller`
 **Authority:** Craig's 2026-08-23 ruling that the exemption covers what the foot
-actually presses on or occupies, with no distance-connected slack; Craig's
-same-day narrowed monotonicity ruling; and the designed-embed rulings in
-`SPEC-EMBED-POLICY.md` and `land-at-strike-2026-08-22.md`.
+actually presses on or occupies, with no distance-connected slack; Craig's narrowed
+monotonicity ruling; and the designed-embed rulings in `SPEC-EMBED-POLICY.md` and
+`land-at-strike-2026-08-22.md`.
 
-> **Recommendation [requires an exact entry-sheet patch and a contact-aware
-> clearance query; a face-ID flood fill is not sufficient].** Define the physical
-> footprint from the final emitted embed-end solid at its intended entry crossing.
-> Never obtain its identity by walking mesh adjacency. For a clearance demand
-> `g`, test the full arm against every model-surface point except the part of the
-> **same entry sheet** covered by the `g`-clearance envelope of that embed solid.
-> Freeze that patch before grading. Re-cut it after any change to the contact
-> geometry, not only a radius change. This keeps the seat legal, leaves an
-> opposite crevice wall visible, adds no decision number, and preserves the
-> narrowed monotonicity guarantee within each frozen grading pass.
+> **Recommendation [adds one non-numeric semantic input; the current seat face,
+> axis, and mesh are not enough].** Authorize an immutable **entry carrier** for
+> each designed embed. The contact constructor must declare which local model
+> surface is the intended receiving surface. The physical footprint is the
+> entry-anchored component of the exact intersection of that carrier with the
+> exact emitted embed solid. For a demand `g`, the clearance patch is the
+> entry-anchored component of the carrier's exact intersection with the exact
+> refusal envelope used by that same clearance query. All model surface outside
+> that patch remains graded.
 >
-> **The bracket is material.** The literal physical footprint alone cannot keep
-> an attached arm legal under the unchanged full-axis `+0.300 mm` or `+0.600 mm`
-> clearance formula. At the footprint boundary the true surface-to-surface gap is
-> zero. The implementation therefore needs both the physical patch and its
-> same-entry-sheet clearance shadow. Calling the larger shadow "the physical
-> footprint" would be false.
+> This is not a normal angle, geodesic radius, distance allowance, or face flood.
+> It is surface identity that the current record does not contain. Without that
+> identity, the raised-column and channel fixtures require contradictory
+> continuations from the same geometric inputs. The previous “entry-sheet lift”
+> is withdrawn: it climbs the raised wall, cannot include the channel floor
+> without also admitting a bridge, and does not equal the physical intersection
+> on curved seats.
+>
+> **Authorization bracket [material].** If adding an entry-carrier semantic is not
+> acceptable, do not implement a footprint exemption from the current inputs.
+> No repaired distance, projection, normal, or adjacency rule in this memo can
+> establish both required outcomes without a new decision predicate.
 
 ---
 
-## 1. The measured defect [the current rule is structurally unable to distinguish a seat from a connected crevice wall]
+## 1. The measured defect [the current distance-connected rule forgives a real crevice refusal]
 
-The landed candidate on `feature/f1-refreeze` defines
+The landed candidate on `feature/f1-refreeze` freezes the mesh-connected component
+containing the stored seat face of all model faces within `contact radius + 0.600 mm`
+of the live arm axis. Re-cutting after sizing repairs stale radius, but not the set
+predicate. Mesh adjacency says that triangles belong to one object. It does not say
+that one support foot owns both triangles.
 
-```text
-Z = the mesh-connected component containing the stored seat face of
-    {model faces within r_contact + STANDOFF_MM of the live arm axis}.
-```
+The heavy challenge used a watertight 0.250 mm-pitch slab. It raised the vertices
+beyond one grid column by 2.000 mm. The arm had creation **radius** `0.350 mm` and
+final **radius** `1.000 mm`. The final demanded true gap was `0.300 mm`.
 
-It freezes `Z` at contact creation and re-cuts it after sizing. The implementation
-is batch-first: one `faces_near_segments_batch` call gathers all bands, then CPU
-flood fills run in parallel.
+**MEASURED** in `.git/seal-landing-2026-08-23/chal-probes2.log`:
 
-That lifecycle solved the stale-creation-radius self-refusal, but the set predicate
-is wrong. Mesh adjacency says only that two triangles belong to one object. It
-does not say that one support foot presses on both triangles.
+| one final arm | wall-axis distance, mm | wall faces creation → final | wall-only final clearance, mm (**INFERRED**) |
+|---|---:|---:|---:|
+| connected crevice | 0.75 | 11 → 23 | −0.550 |
+| connected crevice | 1.00 | 0 → **20** | **−0.300** |
+| connected crevice | 1.25 | 0 → **15** | **−0.050** |
+| connected crevice | 1.50 | 0 → 11 | +0.200 |
+| connected crevice | 1.75 | 0 → 0 | +0.450 |
+| connected crevice | 2.00 | 0 → 0 | +0.700 |
 
-### 1.1 Finding F, reproduced as geometry rather than as a favourable summary
+The wall-only arithmetic is `wall_x − 1.000 − 0.300 mm`. At 1.00 and 1.25 mm,
+the wall must remain refusable. The re-sized zone instead admitted 20 and 15 wall
+faces and changed the aggregate result from refused to legal.
 
-The heavy challenge built `crevice_slab` from the 0.25 mm-pitch fine slab. It did
-not add or rewire faces. It raised every top-grid vertex beyond one grid column by
-2.0 mm. The result is a watertight, mesh-connected surface with:
+No smaller distance band repairs the rule. A planar seat needs its own refusal disc
+excluded through **radius** `r + g`. A foreign wall inside that disc is also inside
+any Euclidean band large enough to keep the seat legal. Connectivity through the
+band is the only remaining separator, and the challenge and committed `channel()`
+fixture both show that a real connected path can lie inside it.
 
-* a horizontal seat sheet containing the seat at `(0, 0)`;
-* a near-vertical opposite wall at `x = wall_x_mm`; and
-* a continuous mesh path from the seat to that wall across the crevice bottom.
-
-The arm is vertical, with **radius** `r_final = 1.000 mm`. Its creation radius is
-`0.350 mm`. The final hard demand is `g = 0.300 mm` true surface-to-surface. Thus a
-wall whose nearest point is less than `1.300 mm` from the axis is inside the final
-refusal envelope.
-
-**MEASURED** in
-`.git/seal-landing-2026-08-23/chal-probes2.log`:
-
-| one rule and one final arm | wall-axis distance, mm | wall faces creation → re-sized (**MEASURED**) | true wall gap, mm (**INFERRED from fixture coordinates**) | wall-only final clearance, mm (**INFERRED**) | aggregate verdict creation → re-sized (**MEASURED**) |
-|---|---:|---:|---:|---:|---:|
-| connected crevice | 0.75 | 11 → 23 / 64 | −0.25 penetration | −0.55 | −0.3000 → **+0.3008** |
-| connected crevice | 1.00 | 0 → **20 / 64** | 0.00 | **−0.30** | −0.3000 → **+0.3008** |
-| connected crevice | 1.25 | 0 → **15 / 64** | 0.25 | **−0.05** | −0.3000 → **+0.3008** |
-| connected crevice | 1.50 | 0 → 11 / 64 | 0.50 | +0.20 | −0.3000 → **+0.3008** |
-| connected crevice | 1.75 | 0 → 0 / 64 | 0.75 | +0.45 | −0.3000 → +0.3008 |
-| connected crevice | 2.00 | 0 → 0 / 64 | 1.00 | +0.70 | −0.3000 → +0.3008 |
-
-The aggregate `−0.3000 mm` before re-size is **not** a wall-only measurement. The
-later bare control in `chal-probes3.log` shows `−1.3000 mm` because it also sees
-the arm's own seat at zero centerline distance. Those controls show why some seat
-exemption is mandatory; they do not identify the binding wall.
-
-The wall-only column is arithmetic from the fixture, not another kernel run:
-`clearance = wall_x − 1.000 − 0.300 mm`. At `x = 1.00 mm` the wall has `0.00 mm`
-true surface-to-surface gap, and at `x = 1.25 mm` it has `0.25 mm`. Both are below
-the final `0.300 mm` demand and must remain refusable. The measured facts that
-make this more than hypothetical are that 20 and 15 of their wall faces entered
-the exemption and the aggregate verdict became legal.
-
-The `x = 1.75` and `2.00 mm` rows are the unfavourable population in the same
-table: no wall face entered the patch and their wall-only clearances are legal,
-yet other connected seat-sheet faces still moved the aggregate result to
-`+0.3008 mm`. The required regression must therefore assert the wall's retained
-patch and its wall-only clearance, not only the aggregate sign.
-
-### 1.2 No radius for the current band can repair the rule
-
-For an arm of radius `r` to be legal against its own locally planar seat under a
-clearance demand `g`, the unchanged centerline query must ignore the seat sheet
-through radius at least `r + g`. Otherwise an unignored surface point exists at a
-centerline distance below `r + g`, and the arm refuses itself.
-
-A foreign wall inside the same radius is also returned by the Euclidean band. If
-it is mesh-connected to the seat through band faces, the flood fill admits it.
-Thus:
-
-```text
-band large enough for self-legality  =>  contains the whole refusal disc
-mesh-connected foreign face in disc  =>  may enter Z
-```
-
-Changing `STANDOFF_MM`, using `FINAL_CLEARANCE_GAP_MM`, or choosing an intermediate
-band moves the defect. It does not remove it. The missing quantity is **surface
-identity**, not a better radius.
-
-### 1.3 The Giant Bat is the real acceptance shape
-
-**MEASURED** by the mask-honesty audit and retained in
-`honest-exemption-2026-08-22.md`:
-
-* both investigated Bat refusals were opposite crevice walls, not the intended
-  seat sheet;
-* the closest faces were across 11–24 triangles and 133–151 degrees from the
-  seat's own closest point;
-* slot 250's final true surface-to-surface gap was approximately `0.291 mm`, below
-  the final `0.300 mm` hard demand.
-
-A correct rule does not promise that every Bat arm refuses. It promises that the
-opposite wall remains in the tested surface. The one rule then applies the same
-`0.300 mm` final demand: slot 250 should refuse by approximately `0.009 mm` if no
-other face binds; any wall with more than `0.300 mm` true surface-to-surface gap
-should remain legal.
+The Giant Bat is the production acceptance shape. **MEASURED** in
+`honest-exemption-2026-08-22.md`, both investigated refusals were opposite crevice
+walls. Slot 250 had approximately `0.291 mm` true gap, below the final `0.300 mm`
+demand. A correct rule does not promise that the Bat emits. It promises that the
+opposite wall stays in the tested surface and lets the common demand decide.
 
 ---
 
-## 2. Quantities already authorized by the contact physics
+## 2. Why the previous entry-sheet rule is rejected [all three geometry defects are blocking]
 
-This design mints no geometric decision constant. It uses geometry that the
-support already intends to emit.
+### 2.1 The old shadow and grader used different envelopes [the claimed monotonicity was false]
 
-For each designed embed end, define:
+The previous memo formed a shadow from the emitted foot ball, then graded by
+subtracting only member radius `r`. For ball factor `f > 1` and demanded gap `g`,
+the retained planar boundary is
 
-* `S`: the model boundary;
+```text
+d = sqrt(r² + 2 f r g + g²).
+```
+
+The reported clearance was therefore
+
+```text
+d - r - g > 0,
+```
+
+not zero. **INFERRED** with `f = 1.4` and final `g = 0.300 mm`, the margin rises
+from `0.06169 mm` at **radius** `0.350 mm` to `0.08924 mm` at **radius**
+`1.000 mm`. The fatter arm grades `0.02756 mm` better. At placement
+`g = 0.600 mm`, it rises from `0.08465 mm` to `0.14356 mm`.
+
+The seat remains legal, but the narrowed monotonicity claim does not. The repair is
+normative: one geometry authority must produce both the refusal envelope and its
+patch. A ball-derived shadow cannot be paired with a cylinder-radius subtraction.
+
+### 2.2 A projected lift climbs one crevice and cannot own the other correctly
+
+The challenge wall is not vertical. It rises `2.000 mm` over one `0.250 mm` grid
+column. Its **INFERRED** angle is `atan(2/0.25) = 82.87 degrees`. Under the slab
+normal it is a single-valued height field with a unique crossing connected to the
+seat. The old continuation rule therefore climbs it.
+
+For final **radius** `1.000 mm`, `f = 1.4`, and `g = 0.300 mm`, the old ball shadow
+reaches `sqrt(1.93) = 1.389 mm`. It reaches both binding wall positions at
+1.000 and 1.250 mm. The wall-only clearances remain `−0.300 mm` and `−0.050 mm`,
+but the lift can exempt their nearest strips. The old claim that the wall has no
+two-dimensional entry-sheet image does not apply to this fixture.
+
+The committed `channel()` fixture exposes the opposite error. Its bottom case has
+a **radius** `0.400 mm` arm only `0.300 mm` above the floor. The member cylinder
+occupies the floor, and the factor-1.4 foot ball has **radius** `0.560 mm`.
+**MEASURED** in the committed test, the connected band contains 13 near-wall,
+16 floor, and 11 far-wall faces. A rule that forbids crossing the near-wall/floor
+crease omits a legitimate occupied floor patch. A rule that relaxes continuation
+across that crease can bridge to the far wall.
+
+These fixtures show that “unique projection,” “do not cross a crease,” and mesh
+connectivity are not surface-ownership rules. They cannot decide both required
+outcomes from the present inputs.
+
+### 2.3 A lifted planar stencil is not the physical footprint on a curved seat
+
+Let a ball have **radius** `R = f r` and center distance
+`c = sqrt(f² − 1) r` below the tangent plane. On a curved height field
+`z = delta(rho)`, actual occupation is
+
+```text
+rho² + (delta(rho) + c)² <= R².
+```
+
+The old lift admitted every lifted point with `rho <= r` without retesting the
+solid intersection. One curvature sign over-exempts points outside the ball. The
+other omits points the ball occupies and restores self-refusal. Smooth, unique
+height fields exhibit both failures, so projection continuity does not repair it.
+
+The same defect applies to a clearance patch. The rule must select an exact
+entry-identified component of `S ∩ E0` and `S ∩ Qg`, not lift `Pi ∩ E0` or
+`Pi ∩ Qg` onto `S`.
+
+---
+
+## 3. Exact geometry objects [endpoints and truncation order are normative]
+
+For one designed embed, define:
+
+* `S`: the exact model boundary used by placement and grading;
 * `q`: the stored intended entry crossing on the stored seat face;
-* `n`: the stored outward entry normal used by the seating construction;
-* `A`: the live member axis;
-* `E`: the final semantic embed-end solid, including the end ball and adjoining
-  tapered shaft portion that the emitter will union into the model;
-* `g`: the already-authorized clearance demand for the reader: `0.600 mm` at
-  placement or `0.300 mm` at final grading.
+* `n`: the stored outward entry normal;
+* `A`: the live member axis and its exact tapered station data;
+* `Iembed`: the closed, tip-anchored sanctioned embed interval;
+* `Kentry`: the immutable declared entry carrier on `S`;
+* `E0`: the exact closed semantic embed solid emitted inside `Iembed`; and
+* `Qg`: the exact closed refusal envelope used by the active grader for the
+  already-authorized demand `g`.
 
-`E` is class-specific and must come from one shared geometry authority:
+### 3.1 `Iembed` and `E0` have one shared authority
 
-* a contact stub uses its emitted `ContactSphere` plus its adjacent
-  `ContactTaper`;
-* an embedded model foot uses the emitted foot ball plus its adjacent member
-  frustum;
-* a seated model rung without a distinct retained ball uses the emitted member
-  end that actually crosses the entry surface;
-* if an end ball is certified redundant because the adjacent frusta enclose it,
-  `E` is the same union solid, not a synthetic ball that emission removed.
+`Iembed` starts at the designed terminal end recorded by the contact constructor
+and ends at the stored intended entry crossing along the contact axis. If the R4
+far-face rule truncates the seat first, the truncated terminal endpoint replaces
+the untruncated endpoint. There is no interval after the entry crossing and no
+interval after the far-face truncation.
 
-For a ball-tipped end, `contact.rs` already derives the seat depth. With ball
-factor `f` and shaft radius `r`, the minimum depth that leaves a separating cut no
-narrower than the shaft is
+Construction order is fixed:
+
+1. resolve the final live axis, contact end, endpoint radii, taper, ball/frustum
+   class, ball factor, and derived seat depth;
+2. apply the tip anchor and R4 far-face truncation to obtain `Iembed`;
+3. clip every class-specific end primitive to that sanctioned interval with the
+   emitter's exact end-cap semantics; and
+4. union those clipped primitives to form `E0`.
+
+A contact stub uses its emitted `ContactSphere` and clipped adjacent
+`ContactTaper`. An embedded model foot uses its emitted foot ball and clipped
+adjacent member frustum. A seated rung without a retained ball uses the emitted
+member end that crosses `q`. If a ball is removed because adjacent frusta enclose
+it, `E0` uses the emitted union and does not restore a synthetic ball.
+
+“Adjoining shaft” never means an implementation-selected length. The adjoining
+portion is exactly the part of the named emitted primitive whose station lies in
+`Iembed`, after truncation and before union. Placement, footprint construction,
+grading, scar measurement, and emission must consume the same immutable semantic
+geometry object and geometry fingerprint. If any path disagrees, construction
+fails before grading.
+
+### 3.2 `Qg` is defined by the grader, not approximated by a convenient dilation
+
+For the active demand `g`, define `Qg` by observable query semantics:
 
 ```text
-h = ball_seat_factor(f) * r
-ball_seat_factor(f) = f - sqrt(f^2 - 1)
-a_cut = ball_cut_radius_mm(r, h, f)
-      = sqrt(2*f*r*h - h^2)
+x is in Qg  <=>  a surface consisting only of point x would be refused
+                  by the exact live-member clearance query at demand g.
 ```
 
-At that derived depth, `a_cut = r`. For feet, the same-day load-sized ruling uses
-`f = BALL_FACTOR_FOOT = 1.4` and derives `h = 0.4202041 × r_foot`; for contact
-stub balls the registered factor is `1.5`. These factors are emitted-geometry
-inputs already in the registry. They are not new footprint allowances.
+This definition includes the grader's exact cylinder, taper, endpoint, cap, and
+station semantics. If the implementation grades a closed support solid by a
+Minkowski sum with a sphere of **radius** `g`, that exact sum is `Qg`. If the
+implementation subtracts local member radius from an axis distance, `Qg` is the
+corresponding swept local-radius envelope. The two forms may be identified only
+when proved equal.
 
-`SPEC-EMBED-POLICY.md` supplies two more constraints:
+The footprint constructor and the clearance kernel must receive the same prepared
+`Qg` token. Rebuilding a ball shadow in one path and subtracting shaft radius in
+another is prohibited.
 
-1. only the tip-anchored entry interval is sanctioned; an unanchored crossing or
-   re-entry remains a collision; and
-2. a deep seat is truncated at the far face along its own line. It never creates
-   a backside patch.
+### 3.3 `Kentry` supplies surface identity, not clearance slack
 
-Therefore `E` means the **sanctioned entry embed**. A lateral intersection with
-another wall, a re-entry, or the far face is not silently reclassified as a second
-part of the intended footprint. The known lateral spanning exposure remains open;
-this footprint rule does not cite truncation as closing it.
+`Kentry` is a clipped surface carrier declared by the contact construction before
+clearance grading. It answers only: “which local boundary is the designed receiver
+for this embed?” It does not answer how far the exemption reaches.
 
-**Contingency:** the truncation text is ahead of some implementation paths. The
-footprint implementation cannot claim one shared emitted solid until the same
-clamp authority feeds placement, grading, scar measurement, and emission. If
-those paths disagree, construction must fail rather than select the most
-forgiving solid.
+The carrier contract is:
+
+1. `q` lies in its closure and identifies its entry component;
+2. it includes every two-dimensional part of `S ∩ E0` that the designed foot is
+   intended to press on or occupy, including a legitimate channel floor patch;
+3. it excludes an opposite wall, lateral collision, unanchored re-entry, and R4
+   far face even when those surfaces are close, mesh-connected, or uniquely
+   projected under `n`;
+4. its boundary is exact clipped geometry, not whole face IDs;
+5. it is independent of `g` and is not grown from arm radius, a distance band,
+   geodesic distance, normal angle, or a face count; and
+6. it is frozen at creation and recreated only by the shared contact constructor
+   after a contact-geometry mutation.
+
+This is additional semantic data. It cannot be reconstructed honestly from only a
+seat face, axis, and unlabelled triangle adjacency: the raised-column and channel
+cases refute the proposed reconstructions. The implementation proof must show how
+the placement/contact constructor declares it. Merely renaming a flood fill
+`Kentry` does not satisfy the contract.
 
 ---
 
-## 3. The proposed rule [physical patch plus a derived same-entry-sheet clearance shadow]
+## 4. The revised footprint rule [actual intersections only]
 
-### 3.1 Physical footprint `P0`
+Form the exact arrangements of `S`, `Kentry`, `E0`, and `Qg`.
 
-Let `Π` be the tangent plane through `q` with normal `n`. Let
-
-```text
-D0 = Π ∩ E
-```
-
-be the exact planar cut occupied by the final sanctioned embed solid. This is a
-disc for a perpendicular circular cut and the exact ball/frustum union cut at
-oblique incidence. Do not replace it with a circle of `r + constant`, an
-area-equivalent circle, or a normal-angle threshold.
-
-Lift `D0` onto the model by the entry construction:
-
-1. through each point of `D0`, consider the line parallel to `n`;
-2. select the model crossing on the entry sheet that is continuously connected to
-   the stored seat crossing `q` in this projected arrangement; and
-3. stop where that entry-sheet crossing ceases to exist or ceases to be unique.
-   Do not walk around a model crease by triangle adjacency.
-
-The resulting subset of `S` is `P0`, the **physical footprint patch**.
-
-This is an exact topological selection, not a sampled normal test. Edge and vertex
-ties need the kernel's existing deterministic lowest-face-ID tie-break only to
-choose a representation; a tie must not enlarge the selected region.
-
-### 3.2 Why `P0` alone cannot keep the seat legal
-
-Consider the favourable case: a perpendicular cylindrical arm of radius `r`
-through a planar seat. `P0` is a disc of radius `r`. Immediately outside its
-boundary, retained seat points have centerline distance arbitrarily close to
-`r`. The unchanged clearance is
+The physical footprint is
 
 ```text
-inf(dist(A, S \ P0)) - r - g = r - r - g = -g.
+P0 = the entry-anchored connected component containing q of
+     S ∩ Kentry ∩ E0.
 ```
 
-The arm therefore refuses itself for every positive `g`. This is geometry, not
-mesh resolution. Enlarging the face set until it passes would hide the enlargement
-inside tessellation and would restore the same structural defect on coarse faces.
+Connectivity is over exact clipped intersection cells. A zero-area point or edge
+tie does not admit a neighboring two-dimensional cell. `P0` therefore records only
+surface actually occupied by the emitted semantic solid. It is not a tangent-plane
+stencil.
 
-### 3.3 Clearance shadow `Pg`
-
-For a reader demanding true surface-to-surface gap `g`, form the exact clearance
-envelope of the final embed solid:
+For the active demand `g`, the clearance patch is
 
 ```text
-Eg = E Minkowski-summed with a closed sphere of radius g
-Dg = Π ∩ Eg
+Pg = the entry-anchored connected component containing P0 of
+     S ∩ Kentry ∩ Qg.
 ```
 
-Apply the **same entry-sheet lift** used for `P0` to `Dg`. The result is `Pg`.
-Then grade
+Then grade the exact outside fragments:
 
 ```text
-clearance_g = min distance from the full live axis/member to (S \ Pg)
-              minus the member radius and g,
+Tg = S \ Pg
+clearance_g = exact clearance of the prepared live member against Tg at demand g.
 ```
 
-using the existing tapered-member semantics where they apply.
+`P0` is the physical scar. `Pg \ P0` is not called contact area. It is the part of
+the declared receiving carrier that lies inside the exact refusal envelope of the
+attached joint. Every surface outside `Kentry`, including an opposite crevice wall,
+remains in `Tg` even when it lies in `Qg`.
 
-The physical claim and the clearance claim remain separate:
+Placement uses `g = 0.600 mm`. Final grading uses `g = 0.300 mm`. They use the same
+`Kentry`, `E0`, component identity, and query semantics, but distinct prepared
+`Qg` and `Pg` records. Final grading may not reuse the placement record.
 
-* `P0` says what the designed end presses on or occupies;
-* `Pg \ P0` is not reported as physical contact. It is the exact part of the same
-  entry sheet that an attached joint necessarily places inside its requested
-  clearance envelope;
-* no second mesh sheet enters merely because it is close, connected, or similarly
-  oriented.
-
-This is a **contact-aware boundary condition**, not ownership of `Pg \ P0`: the
-requested gap is suspended only against that entry sheet where it would condemn
-the joint that creates the boundary condition. The same gap still applies to every
-other surface. If the clearance kernel can represent this boundary condition
-directly without materializing `Pg`, that is the same rule; it must return the same
-clipped patch and crevice verdicts.
-
-On a perpendicular planar seat, `Dg` reaches exactly `r + g`; the arm is legal at
-algebraic zero margin. There is no tessellation-derived positive headroom to quote.
-On the challenge crevice, the horizontal entry sheet is lifted from the disc, but
-the near-vertical wall has no two-dimensional entry-sheet image under the stored
-normal. Its faces stay in `S \ Pg`, even where the crease line touches the disc.
-
-**This is one rule for both tiers.** Placement uses `g = 0.600 mm`; final uses
-`g = 0.300 mm`. The patch identity and construction are identical. Only the
-reader's already-authorized demand changes. Final grading must not reuse the
-placement patch: that would grade the final population with the more forgiving
-rule.
-
-### 3.4 Exact patch boundaries are required; whole-face exclusion is not the rule
-
-A triangle may cross the boundary of `Pg`. Excluding the whole face adds mesh-size
-slack. Retaining the whole face reintroduces self-refusal. Therefore a literal
-no-slack implementation must represent:
-
-* faces fully inside `Pg`;
-* faces fully outside `Pg`; and
-* clipped boundary polygons on partially covered faces.
-
-The clearance kernel must measure against the outside fragments of boundary
-faces. `Arc<[u32]>` alone cannot represent the rule.
-
-This is the main price increase from the current design. The existing
-frozen-record, batch boundary, and immutable grading-row machinery remain useful,
-but the record becomes a frozen patch with boundary clips rather than only a
-sorted face-ID exclusion set.
+A triangle crossing either boundary is split. Inside polygons are excluded and
+outside polygons remain measured. Whole-face exclusion adds mesh-size slack;
+whole-face retention restores self-refusal. Sorted face IDs alone cannot represent
+this rule.
 
 ---
 
-## 4. Candidate rules, one table [every candidate sees the favourable slab and the unfavourable connected crevice]
+## 5. Outcomes on the two required crevices [both directions are acceptance gates]
 
-| candidate | fine 0.25 mm slab, final radius 1.000 mm | connected wall at 1.00–1.25 mm from axis | batched cost shape | decisive failure or bracket |
-|---|---|---|---|---|
-| **Current Euclidean tube + mesh flood fill** | **MEASURED:** re-size grows zone 116 → 304 faces and keeps seat legal at +0.3008 mm final | **MEASURED:** swallows 20 and 15 wall faces; changes REFUSED → LEGAL | one batched near-face query; parallel CPU fills | rejects: proximity plus adjacency is not contact identity; no band size repairs it |
-| **Surface geodesic disc from seat face** | can keep the same sheet local if its radius is expanded to the tier demand | lower wall is reached across the crevice bottom; at 1.00 mm it is inside a 1.300 mm final geodesic reach before any climb | candidate gathering can batch; shortest-path state is per row and mesh-scale | rejects as the deciding rule: actual contact has no physics-derived geodesic radius; using `r + g` repeats the refusal disc on the surface; triangulation and folds move the path |
-| **Face-normal filter** | planar slab is favourable because all seat normals agree | the challenge wall at a sharp 90-degree turn looks separable | batched candidate query plus parallel dot products | rejects: a curved legitimate seat changes normals continuously; the Bat's opposite wall also faces the arm. Any allowed angle needs a new authority and turns tessellation noise into a verdict |
-| **All model surface intersected by the final embed solid** | physical cut is selected without a distance allowance | usually keeps a separated wall, but a laterally spanning ball or shaft can intersect another wall and would then forgive an unanchored collision | batched solid/triangle broad phase plus exact intersections | rejects in this broad form: `S ∩ E` confuses the intended entry crossing with lateral overlap, re-entry, and the R4 far face |
-| **Entry-sheet physical patch `P0` only** | identifies the right physical disc | wall remains visible | same exact patch work as recommendation, smaller domain | rejects alone: unchanged positive-gap full-axis grading self-refuses by exactly `g` at the footprint boundary |
-| **Load-bearing area from PR-4 / load attestation** | proves the separating cut can carry the load | equal area can occur on the seat, an opposite wall, or several disconnected patches | scalar arithmetic after geometry measurement | rejects as identity: area sizes the required anchor; it does not say which surface the foot owns |
-| **Recommended: final embed solid's entry sheet, expanded only by the active demand** | **INFERRED from exact planar geometry:** physical disc is `P0`; `Pg` reaches the required `r + g`, so the own seat is legal with zero invented margin | **INFERRED from fixture construction:** vertical wall has no two-dimensional lift on the horizontal entry sheet; its wall-only final clearances remain `−0.300 mm` at 1.00 and `−0.050 mm` at 1.25 | one batched broad phase and one batched clipped-patch/clearance query; parallel exact clipping per row | recommends, with two brackets: exact boundary fragments are required, and ambiguous/non-height-field entry projections must fail strict rather than jump sheets |
+On the raised-column fixture, the intended carrier is the slab receiving surface.
+The raised opposite wall is not part of `Kentry`. Its nearest fragments therefore
+remain in `Tg` even if `Qg` reaches them. For final **radius** `1.000 mm` and
+`g = 0.300 mm`, the expected wall-only clearances remain **INFERRED**
+`−0.300 mm` at 1.000 mm and `−0.050 mm` at 1.250 mm. The test must measure that no
+wall polygon is excluded; aggregate sign alone is insufficient.
 
-### 4.1 Why geodesic distance is not a hidden cheaper version
+On the committed channel bottom fixture, `P0` must contain the exact near-wall and
+floor portions occupied by `E0`. The far wall is not part of `Kentry` and stays in
+`Tg`. This avoids the false choice in the old projection rule: crossing the
+near-wall/floor crease is legal because actual `S ∩ E0` and the declared carrier
+include the floor; continuing to the far wall is illegal because carrier identity,
+not adjacency, stops it.
 
-A geodesic disc answers "how far can I walk on the mesh from the seat?" The
-physical question is "which surface did this designed solid enter here?" They
-coincide on a broad plane and diverge at the first crease, which is exactly the
-challenge geometry. At `x = 1.00 mm`, the bottom edge of the wall is one millimetre
-of surface travel from the seat. Any geodesic radius large enough to give a
-1.000 mm arm its final 0.300 mm self-clearance reaches that edge and some wall
-area. A smaller radius restores self-refusal. No new geodesic number fixes that
-trade.
-
-Geodesic distance can remain a broad-phase pruning tool if its bound is derived
-from `Dg` and cannot discard a true patch point. It must not decide patch identity.
-
-### 4.2 Why normals are evidence, not a predicate
-
-The Bat's measured 133–151 degree change supports the diagnosis that its nearest
-faces were foreign. It does not authorize an angle. A round body can rotate its
-normal through the same range while remaining one entry patch; a faceted body can
-jump at a harmless edge. The challenge's 90-degree wall is deliberately easy.
-Passing it with an angle test would not establish the production rule.
-
-Normals are valid inputs to the exact entry projection because `n` is already the
-seating direction. Comparing every candidate face normal to `n` and accepting an
-angle band is not.
-
-### 4.3 Why load area remains necessary but cannot select the patch
-
-The same-day ruling makes foot radius and depth load-sized. The area attestation
-ensures the cut carries `carried_mm2`; at the derived minimum ball seat the cut
-radius equals the shaft radius. That supplies `E`'s dimensions. It does not supply
-a surface label. Inflating an exemption until its area reaches the attested area
-would be circular: the exemption would choose whichever nearby faces make the
-area convenient.
-
-Use the attestation to build the solid. Use the entry crossing to identify its
-surface patch. Do not use attested area as an exemption quota.
+These results are requirements on carrier construction, not assumptions hidden in
+the footprint query. A constructor that cannot declare both carriers from its
+contact semantics must refuse the contact. It must not choose the most forgiving
+surface after seeing clearance.
 
 ---
 
-## 5. Lifecycle and batching [the frozen-Z architecture survives, but radius-only invalidation does not]
+## 6. Narrowed monotonicity [the query envelope and patch must share one family]
 
-### 5.1 Creation freeze
-
-At contact creation, store one immutable `FrozenEntryFootprint` per designed
-embed end. Conceptually it contains:
-
-* stored seat face ID, exact entry point `q`, and entry normal `n`;
-* the semantic embed-solid class and all geometry inputs needed to reproduce the
-  emitted union;
-* the physical patch `P0`;
-* tier patches or exact patch data from which `Pg` is evaluated without changing
-  identity during grading; and
-* an exact geometry fingerprint.
-
-The footprint constructor and lowering/emission must consume the same semantic
-contact geometry object. Copying the formulas into `seat_zone.rs` would create a
-second emitter and allow a legal-but-not-emitted patch.
-
-### 5.2 Re-cut after every contact-geometry mutation
-
-The re-cut remains between mutation and grading, never inside grading. Its dirty
-predicate must cover every input that can move `E`, `Π`, or the entry lift:
-
-```text
-(p0, p1, contact-end radius, far-end radius where taper changes the cut,
- contact end, seat point, seat normal, seat face, ball/frustum class,
- ball factor, seat depth, truncation interval, active geometry authority)
-```
-
-Exact bit comparison is appropriate for values written and later re-read by the
-same authority. A tolerance would add an unpriced region in which a stale patch
-remains accepted.
-
-A radius-only dirty gate is already refuted. **MEASURED** in retained challenge
-logs:
-
-* CHAL-A moved an axis without changing radius: `refrozen=0`, stored 116 faces,
-  fresh 140 faces, 24 missing from the stored patch;
-* CHAL-A2 shortened an axis without changing radius: `refrozen=0`, stored 155
-  faces, correct 139 faces, **16 over-forgiven**.
-
-The footprint rule is more axis-sensitive than the tube, not less. Reusing the
-radius-only gate would knowingly carry both strict and forgiving stale outcomes.
-
-### 5.3 One immutable grading token
-
-After the re-cut, construct clearance rows that own or reference the frozen patch.
-The grading API should accept an immutable prepared token, not a live radius plus
-permission to discover a patch. This makes the prohibited operation—recomputing
-an exclusion from the radius being graded—unrepresentable inside the grading
-call.
-
-Candidate evaluation may prepare many rows, but all rows for one batch are
-prepared before the native clearance call. A candidate replay must either carry
-the exact prepared winner patch or recreate the same semantic geometry and prove
-its patch digest equal before grading.
-
-### 5.4 Cost shape and limits
-
-The current cheap operation is one near-segment batch plus face-ID fills. The
-recommended operation is more expensive:
-
-1. build all final semantic embed-end solids for the row batch;
-2. broad-phase all `Eg` against the model in one native batch;
-3. construct entry-sheet arrangements and clip boundary triangles in parallel;
-4. issue one batched clearance query over all prepared rows and their frozen patch
-   fragments; and
-5. retain patch digests and per-stage counts for audit.
-
-There must be no scalar native call per contact. Work arrays use CSR-style row
-offsets so rows remain deterministic and batchable.
-
-Limits may use the exact row count, mesh face count, and checked byte arithmetic.
-They may refuse for resources before producing an outcome, but may not truncate a
-patch or select a different sheet. A partial patch can move the verdict in either
-direction. No new fixed face, fragment, path-length, angle, or byte number is
-authorized by this memo.
-
-**Price disclosure:** native geometry work, memory, record size, and test scope all
-go up. The old `Arc<[u32]>` representation and flood fill are not enough. This
-lane has not run a model or a benchmark, so it does not attach a favourable time
-estimate. The first implementation proof must measure candidate faces, boundary
-fragments, peak bytes, and native batch time on the fine slab, connected crevice,
-and at least one corpus model that actually places a model anchor.
-
----
-
-## 6. Narrowed monotonicity, proved by construction [within one frozen patch; not across re-cuts]
-
-Craig narrowed the guarantee to:
+Craig's narrowed guarantee is:
 
 > Against any surface outside its own footprint patch, a thinner arm never grades
 > worse.
 
-For one prepared grading row, fix:
-
-* the axis and tapered-shape station set;
-* the active demand `g`;
-* the frozen entry patch `Pg`; and
-* therefore the tested surface `T = S \ Pg`.
-
-For the uniform-radius form, let
+Let `Q(r, g)` be the exact refusal envelope prepared by the grader for member
+**radius** `r` and demand `g`. For equal axis, taper class, station parameterization,
+contact carrier, and demand, the geometry family must prove
 
 ```text
-C = min over the full axis of dist(axis station, T).
-clearance(r) = C - r - g.
+r_thin <= r_fat  =>  Q(r_thin, g) subset-of Q(r_fat, g).
 ```
 
-`C` does not depend on the radius being compared because the patch is already
-frozen and the grading API cannot recompute it. For `r_thin <= r_fat`,
+For any fixed retained surface point outside the compared footprint patches,
+shrinking that exact envelope cannot change a legal point into a refused point.
+The aggregate minimum over the common retained surface therefore cannot get worse.
+No separate foot-ball envelope may alter the tested boundary.
 
-```text
-clearance(r_thin) - clearance(r_fat) = r_fat - r_thin >= 0.
-```
+The guarantee is pinned in two ways:
 
-Therefore a thinner arm cannot grade worse against any retained surface point.
-The same argument holds for a tapered member when every compared local radius is
-no larger at every station: the distance field and `Pg` stay fixed while the
-subtracted support envelope only shrinks.
+1. **Common-patch comparison.** Two radii grade against one immutable prepared
+   carrier/patch token. The thinner exact envelope must not report a lower
+   clearance.
+2. **Own-patch planar ladder.** Each radius prepares its own exact `Qg` and `Pg`
+   using the same geometry family. A perpendicular planar seat must report the
+   same algebraic boundary margin for every radius. The former
+   `0.06169 → 0.08924 mm` fatter-grades-better span is a mandatory red witness.
 
-This proves exactly the narrowed guarantee. It deliberately does **not** compare:
-
-* two different axes;
-* placement `P0.600` with final `P0.300`;
-* a creation patch with a post-sizing patch; or
-* two separately prepared final solids whose physical footprints differ.
-
-Across a re-cut, both the tested surface and support radius can change, so either
-clearance may be larger. The measured fine-slab ladder already shows a fatter arm
-grading better across separate re-cuts (`+0.318 mm` at radius `0.50 mm`, then
-`+0.325 mm` at radius `0.65 mm`). This memo does not relabel that as monotone.
-
-The construction requirement is stronger than a comment: `Pg` must be absent from
-the grading function's mutable inputs. A sabotage that substitutes a live
-radius-dependent patch builder inside grading must fail an API/compile-time guard
-or a test that compares two radii against one prepared token.
+The claim does not compare different axes, different carriers, placement with
+final, or two different taper families. A surface excluded by one patch and tested
+by another has no pairwise grade; reports must not present that case as a
+monotonicity result. Candidate ranking must compare the common retained population
+or disclose the population change.
 
 ---
 
-## 7. Failure policy and measurements that can refute the design
+## 7. Lifecycle and production wiring [every creator, mutator, copier, and consumer is registered]
 
-| case | one disposition | refuting measurement or required witness |
-|---|---|---|
-| physical footprint has no entry-sheet area containing `q` | exempt nothing and refuse the contact; do not jump to a neighbour | a valid emitted embed solid and stored entry crossing produce a non-empty exact `P0` |
-| projection has two exact entry-sheet continuations | fail strict as ambiguous; no angle or distance tie-break may enlarge the patch | exact arrangement shows one branch is the unique continuation of the stored seat face |
-| patch reaches the far face | far face stays tested; R4 permits no backside patch | a prepared patch contains any face belonging only to the far crossing |
-| embed solid laterally intersects an opposite wall | wall stays tested unless it is the stored entry-sheet crossing; report the existing lateral-spanning exposure separately | wall-only clearance becomes absent because `S ∩ E` was used without entry identity |
-| triangle crosses patch boundary | retain and grade its outside fragment | replacing clipped patches with whole face IDs leaves every acceptance verdict unchanged on a deliberately coarse boundary triangle |
-| axis changes with identical radius | exact fingerprint changes and re-cut count is non-zero | reproduce CHAL-A or CHAL-A2 with `refrozen=0` |
-| tier changes from placement to final | rebuild/select the same-rule patch for the new `g`; do not reuse placement patch | final row carries a `0.600 mm` patch digest or excludes any point in `P0.600 \ P0.300` |
-| geometry authority differs from emission | fail before grading | footprint-solid digest differs from the lowered embed primitive digest |
-| resource limit binds | refuse the batch as a resource outcome; never truncate | fragment count reaches a cap and a partial patch is nevertheless graded |
+Store one immutable `PreparedEntryFootprint` containing `q`, `n`, contact end,
+`Iembed`, the semantic geometry object and fingerprint, `Kentry`, `P0`, tier,
+prepared `Qg`, `Pg`, exact boundary clips, and a digest.
 
-No headline says these cases cannot happen. Each has a witness that would disprove
-the claimed construction.
+The dirty fingerprint covers every input that can move `E0`, `Qg`, or `Kentry`:
+axis endpoints, contact-end and far-end **radii**, taper stations, contact end, seat
+point, seat normal, seat face, semantic class, ball factor, seat depth, truncation
+endpoints, carrier identity, tier, and geometry-authority version. Exact bit
+comparison is required for values written and reread by the same authority.
+
+CHAL-A and CHAL-A2 are mandatory witnesses. **MEASURED**, an axis translation at
+unchanged **radius** left 24 faces missing from a stored zone, and an axis shortening
+left 16 faces over-forgiven. Radius-only invalidation is prohibited.
+
+Production wiring is enumerated by construction through one registry or typestate
+transition, not by a prose search for call sites. The registry must account for:
+
+* initial contact/stub/foot creation;
+* CCO candidate preparation, commit, and commit-copy;
+* brace radius growth, shrink, endpoint, taper, and commit paths;
+* rewire slide, retire, root-reanchor, and replacement paths;
+* candidate replay and winner copy;
+* placement and final tier preparation; and
+* every clearance consumer.
+
+Each registered path gets a named red sabotage that disables only that path's
+prepare, invalidate, copy, or consume transition and then exercises the production
+path. CCO commit/copy, brace mutation, and rewire paths are mandatory, not examples.
+A helper-level test does not count.
+
+Every consumer recomputes the live geometry fingerprint and rejects a stale token
+before native grading. A sabotage that passes a stale but well-formed token must
+fail. Copy operations must either copy an exact digest-matching immutable token or
+recreate it and prove digest equality. A new unregistered call site must fail a
+compile-time exhaustiveness check or a registry coverage test.
 
 ---
 
-## 8. Acceptance estate [the rule must pass all populations without changing predicates]
+## 8. Batch and cost shape [more geometry work than the rejected branch]
 
-The implementation is not accepted by a legal seat alone or by a refused crevice
-alone. Each fixture carries the favourable and unfavourable cases under the same
-constructor and grader.
+The path remains batch-first:
 
-1. **Fine slab, physical patch.** On 0.25 mm triangles, show `P0`'s exact area and
-   boundary clips. The physical cut must agree with the class-specific emitted
-   solid. Do not substitute `r + g` and call it contact area.
-2. **Fine slab, two demands.** The same row constructor with `g = 0.600 mm` and
-   `g = 0.300 mm` keeps the own seat legal. It reports algebraic/tessellated
-   clearance without claiming a positive structural margin.
-3. **Connected crevice ladder.** Reuse the challenger's unchanged watertight
-   fixture at wall-axis distances 0.75, 1.00, 1.25, 1.50, 1.75, and 2.00 mm. At
-   every row, assert no two-dimensional opposite-wall patch is exempt. Then assert
-   the wall-only final clearances from one rule: approximately −0.550, −0.300,
-   −0.050, +0.200, +0.450, and +0.700 mm for radius 1.000 mm and final demand
-   0.300 mm, subject only to exact fixture tessellation.
-4. **Coarse boundary triangle.** One triangle straddles `Pg`. Its inside polygon
-   is exempt and outside polygon remains measured. The whole-face forgiving and
-   whole-face strict sabotages must each move a witness.
-5. **Curved entry sheet.** A legitimate smooth/faceted seat whose normals rotate
-   through the range that would defeat a normal threshold remains one projected
-   entry patch without an angle constant.
-6. **Folded foreign sheet.** A nearby, similarly oriented sheet inside the
-   Euclidean envelope but not on the stored entry continuation remains tested.
-7. **R4 far face and lateral overlap.** A truncated deep seat has one entry patch,
-   no far patch, and keeps any lateral opposite-wall overlap refusable.
+1. build semantic geometry and carrier requests for all rows;
+2. prepare all exact `Qg` envelopes in one geometry batch;
+3. broad-phase all carrier/envelope intersections in one native batch;
+4. clip exact intersection cells in parallel per row into CSR-style storage; and
+5. issue one native patch-aware clearance batch.
+
+There is no scalar native call per contact. A counter sabotage that replaces the
+row batch with a scalar loop must detect more than one call at the declared batch
+boundary.
+
+Checked limits may use row count, face count, intersection-cell count, and bytes.
+A bound may refuse the entire batch as a resource outcome. It may not truncate a
+patch, drop boundary polygons, or switch carriers. No new fixed face, fragment,
+path-length, angle, curvature, tolerance, or byte number is authorized here.
+
+The price increase is exact Boolean/intersection work, clipped-boundary storage,
+carrier storage, larger fingerprints, production-path tests, and a patch-aware
+clearance kernel. The first implementation proof must measure candidate cells,
+boundary fragments, peak bytes, and native batch time on the fine slab, both
+crevice fixtures, the Giant Bat rows, and a corpus model that actually places a
+model anchor.
+
+---
+
+## 9. Acceptance estate [one constructor and grader must pass favourable and unfavourable populations]
+
+1. **Exact curved physical intersection.** On convex and concave smooth/faceted
+   seats, compare `P0` with exact `S ∩ Kentry ∩ E0`. A tangent-plane stencil must
+   fail both curvature signs.
+2. **Matched planar envelope.** At `g = 0.600 mm` and `g = 0.300 mm`, all CHAL-B
+   radii keep their own planar seat legal. The old radius-dependent positive
+   margins must be absent.
+3. **Raised-column ladder.** Reuse wall-axis distances 0.75, 1.00, 1.25, 1.50,
+   1.75, and 2.00 mm. No opposite-wall polygon enters `Pg`. Measure wall-only final
+   clearances approximately −0.550, −0.300, −0.050, +0.200, +0.450, and +0.700 mm.
+4. **Committed channel, both heights.** The upper arm keeps its intended near-wall
+   patch without a far-wall patch. The bottom arm includes the physically occupied
+   floor patch but keeps all 11 pinned far-wall faces tested.
+5. **Coarse boundary triangle.** Inside polygons are excluded and outside polygons
+   remain measured. Whole-face forgiving and whole-face strict sabotages each move
+   a witness.
+6. **Folded and smooth foreign sheets.** A nearby sheet, including a smooth
+   connected crevice wall, stays tested when it is not in `Kentry`. Projection,
+   normal, and adjacency substitutes must fail named witnesses.
+7. **R4 and lateral overlap.** A truncated deep seat has no far patch. A lateral
+   intersection outside `Kentry` remains refusable.
 8. **Geometry mutation.** Radius growth, radius shrink, axis translation, axis
-   shortening, contact-end move, and taper change each re-cut when and only when
-   the exact geometry fingerprint changes. CHAL-A and CHAL-A2 are mandatory.
-9. **Frozen monotonicity.** Two or more radii grade through the same immutable
-   prepared patch token; thinner never reads lower. A named sabotage that rebuilds
-   the patch from each graded radius must fail.
-10. **Batch sabotage.** Replace the row batch with a scalar native call loop; a
-    test or instrumented counter must detect more than one native call at the
-    declared batch boundary.
-11. **Giant Bat evidence.** Re-measure the two known crevice rows. Assert that the
-    nearest opposite-wall faces remain in the tested surface, then let the common
-    `0.300 mm` final rule decide them. Do not make "Bat emits" an acceptance
-    criterion.
-12. **Corpus cost witness.** Use a model that places a model anchor. The prior
-    `zombie-3-a` run placed none, so byte identity there cannot price this path.
+   shortening, endpoint move, taper change, carrier change, and tier change each
+   invalidate exactly when the fingerprint changes. CHAL-A and CHAL-A2 are
+   mandatory.
+9. **Monotonicity.** Common-patch and own-patch planar ladders pass. Restoring the
+   ball-shadow/member-radius mismatch must fail.
+10. **Production-site sabotage.** Every registry entry in section 7 has one named
+    red. Disable all live prepare/re-cut sites and the library or integration
+    estate must not remain green.
+11. **Stale-token sabotage.** A caller passes a valid token prepared before an
+    axis-only mutation. The consumer rejects it before grading.
+12. **Batch sabotage.** Scalar native calls are detected at the declared boundary.
+13. **Giant Bat.** The two known opposite-wall populations remain tested; the common
+    final `0.300 mm` rule decides them. “Bat emits” is not the criterion.
+14. **Corpus cost witness.** Use a model that places a model anchor; `zombie-3-a`
+    placed none and cannot price this path.
 
-Required red runs remove entry-sheet identity, replace clipped patches with whole
-faces, skip an axis-only re-cut, and recompute a patch inside grading. Each must
-fail first on the claim it sabotages, not on fixture setup.
+Every required sabotage must fail first on the claim it attacks, not on fixture
+setup.
 
 ---
 
-## 9. What this does not authorize
+## 10. What this does not authorize
 
 * no change to the `0.600 mm` placement margin or `0.300 mm` final hard demand;
-* no geodesic radius, normal angle, curvature allowance, face count, fragment
-  count, or geometry tolerance;
-* no claim that load-bearing area identifies the owned surface;
-* no whole-face approximation presented as "no slack";
-* no backside footprint contrary to R4;
-* no claim that R4 closes lateral spanning;
-* no grading-time patch recomputation;
-* no per-contact native kernel loop; and
+* no distance-connected, geodesic, projection-only, or face-normal substitute for
+  carrier identity;
+* no new angle, curvature, distance, face-count, or tolerance decision number;
+* no undefined “adjoining shaft” extent or geometry path that differs from emission;
+* no ball-derived shadow paired with member-radius grading;
+* no whole-face approximation presented as exact;
+* no backside patch, unanchored re-entry, or lateral collision exemption;
+* no grading-time patch reconstruction from mutable live radius;
+* no stale prepared token, unregistered mutation path, or helper-only wiring proof;
+* no scalar per-contact native loop; and
 * no re-baseline of model outcomes before the required geometry witnesses explain
-  each moved verdict.
+  every moved verdict.
 
 ---
 
@@ -588,72 +482,67 @@ fail first on the claim it sabotages, not on fixture setup.
 
 ## The dilemma
 
-The re-sized seat zone keeps an arm legal, but it does so by forgiving every
-mesh-connected face inside a distance tube. On the measured crevice fixture, a
-1.000 mm-radius arm grew its zone from 116 to 304 faces. At walls 1.00 and
-1.25 mm from its axis, the zone swallowed 20 and 15 wall faces and turned a real
-final refusal into a legal result. No smaller distance band fixes this: the band
-has to cover the arm's own refusal disc or the arm refuses its own seat.
+The re-sized seat zone keeps an arm legal by forgiving every mesh-connected face
+inside a distance tube. On the **MEASURED** crevice fixture, a 1.000 mm-radius arm
+admitted 20 and 15 wall faces at 1.00 and 1.25 mm from its axis. Those walls have
+**INFERRED** final clearances of `−0.300 mm` and `−0.050 mm`. They must remain
+refusable. No smaller tube fixes this because the tube must cover the arm's own
+refusal disc.
 
-A literal physical contact patch has the opposite problem. It identifies the
-right seat, but the existing positive-gap full-axis query refuses at the edge of
-that patch by exactly the demanded gap. We cannot honestly call a larger disc
-"what the foot touches."
+The first proposed replacement—a planar cut lifted onto an “entry sheet”—also does
+not work. It climbs the challenge's 82.87-degree raised wall. If it refuses to cross
+a crease, it omits the committed channel's physically occupied floor. On a curved
+seat, its lifted stencil is not the actual emitted-solid intersection. Its ball
+shadow also used a different envelope from the member-radius grader, which made a
+fatter arm grade better by `0.02756 mm` across the challenged final-radius span.
+
+The missing input is not another distance. It is the identity of the surface that
+the designed foot is intended to enter.
 
 ## The candidates side by side
 
-* **Distance tube plus mesh connection:** cheapest and already built; measured
+* **Distance tube plus mesh connection:** cheap and already built; **MEASURED**
   wrong on connected crevices.
-* **Geodesic disc:** stays on the surface, but walks across the crevice bottom to
-  the opposite wall. It still needs a radius that trades self-refusal against
-  over-forgiveness.
-* **Face normals:** separates the easy square fixture, but needs a new angle and
-  fails on curved seats. The Bat's opposite wall also faces the arm, so opposition
-  is not ownership.
-* **Any surface touched by the embed solid:** physically motivated, but too broad;
-  it would forgive lateral collisions, re-entry, or a far face.
-* **Load-bearing area:** tells us how large and deep the anchor must be. It does
-  not tell us which model surface belongs to that anchor.
-* **Entry-sheet embed patch:** uses the final emitted ball/frustum and the stored
-  entry crossing. It follows the sheet the foot actually entered, not mesh
-  adjacency around a crease. The physical patch records contact. A second patch,
-  derived from the same sheet and the already-authorized clearance demand, handles
-  the unavoidable self-clearance transition.
+* **Geodesic disc or projected entry sheet:** follows unlabeled surface continuity;
+  it still walks onto the raised or opposite wall and fails curved physical-set
+  equality.
+* **Face normals or crease stops:** separates selected fixtures only by adding an
+  angle or by rejecting a legitimate channel floor and faceted curved seat.
+* **Every surface intersected by the embed solid:** exact but too broad; it forgives
+  lateral collisions, re-entry, and a far face.
+* **Physical intersection on a declared entry carrier:** exact contact geometry
+  plus explicit surface identity. It includes legitimate occupied floor, excludes
+  a foreign wall, and adds no numeric decision constant.
 
-## Recommendation [more geometry work than the current branch]
+## Recommendation [authorize a new semantic carrier, or stop]
 
-Authorize the **entry-sheet embed patch** rule:
+Authorize the **declared-entry-carrier footprint**:
 
-1. build the footprint from the final semantic embed-end solid that emission uses;
-2. select only the entry sheet connected to the stored seat crossing under the
-   seating direction—never an adjacency flood fill;
-3. keep the physical patch separate from its `0.300 mm` or `0.600 mm`
-   same-entry-sheet clearance shadow;
-4. freeze the exact clipped patch before grading and re-cut after any contact
-   geometry change, including an axis-only change; and
-5. grade every other surface, including an opposite crevice wall, by the existing
-   one final or placement rule.
+1. placement/contact construction records an immutable clipped carrier for the
+   intended receiving surface;
+2. the physical footprint is the entry-anchored component of the exact
+   `model surface ∩ carrier ∩ emitted embed solid` intersection;
+3. each tier's clearance patch is the entry-anchored component of the exact
+   `model surface ∩ carrier ∩ that grader's refusal envelope` intersection;
+4. the footprint and grader consume the same exact envelope, so the previous
+   ball-versus-member monotonicity defect is impossible;
+5. the sanctioned embed interval has exact shared endpoints and far-face
+   truncation order; and
+6. every creator, mutator, copier, and consumer is registered, has a named red
+   sabotage, and rejects a stale prepared token.
 
-The reason is direct: it is the only candidate here that answers the physical
-question "which surface did this designed foot enter?" and also explains how an
-attached arm can satisfy a positive clearance demand without granting ownership
-to a nearby wall. It adds no decision number. With a frozen patch, the narrowed
-monotonicity proof is mechanical: the tested surface is fixed, so reducing the
-arm radius cannot reduce clearance.
+This is more geometry and more state than the current branch. It requires exact
+clipped polygons, one patch-aware native batch, and a carrier-producing contact
+constructor. The carrier is not clearance slack: it does not grow with
+`0.300 mm`, `0.600 mm`, or arm radius. The exact grader envelope decides how much
+of that carrier is excluded; all other surface stays tested.
 
 ## What I ask you to authorize
 
-Please authorize the rule and its disclosed price increase:
+Please authorize the additional **entry-carrier semantic** and its disclosed cost.
+It is a non-numeric surface-identity input, not a new clearance constant.
 
-* exact entry-sheet patch construction shared with emitted contact geometry;
-* clipped boundary polygons, not only face IDs;
-* a batched patch-aware clearance query;
-* tier-specific clearance shadows from the existing `0.600 mm` and `0.300 mm`
-  demands; and
-* invalidation on every contact-geometry change, not only radius changes.
-
-This does **not** ask you for a new constant or to move either clearance demand.
-If you want the exemption to be the literal physical patch with no clearance
-shadow at all, then the full-axis positive-gap clearance semantics must change in
-a different way; the planar proof shows that the current query cannot keep such a
-seat legal.
+If that semantic is too large a change, reject the footprint implementation for
+now. The present seat face, axis, and triangle connectivity do not contain enough
+information to keep both the channel floor legal and the raised or opposite wall
+refusable without an unpriced geometric predicate.
