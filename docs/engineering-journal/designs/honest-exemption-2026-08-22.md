@@ -1341,3 +1341,39 @@ The owner has ruled the follow-up: a physics-first footprint rule, designed in
 `docs/engineering-journal/designs/seat-footprint-2026-08-23.md` on
 `feature/a4-controller`. This exposure is the problem that design exists to
 close. §11.10 records the honest state of this branch's landed rule.
+
+> SUPERSEDED, 2026-08-25. The follow-up did not close the exposure. The
+> footprint-rule search was measured and then closed by the owner, and the
+> exposure named above is now ACCEPTED behavior rather than an open defect.
+> The subsection below is the ruling of record; the closing argument and its
+> measurements are in the "OWNER RULING — 2026-08-25" section of
+> `seat-footprint-2026-08-23.md`.
+
+### OWNER RULING — 2026-08-25 — the forgiveness class is ACCEPTED
+
+Craig ruled, verbatim:
+
+> "It's fine for a support arm in a narrow crevice to touch the opposite wall
+> in those circumstances — it's not ideal, but it's better than no support at
+> all."
+
+What that settles, and what it does not:
+
+- **The connected-surface forgiveness class is ACCEPTED behavior.** The
+  exposure named in §11.10 above — a mesh-CONNECTED far wall inside the
+  re-sized band is exempt, and the forgiven-not-refused region is the entire
+  FINAL refusal disc rather than a 0.300 mm annulus — is now the ruled
+  behaviour of the tool, not a defect awaiting a fix. The measurements that
+  named it stand exactly as written; the ruling changes their STATUS, not
+  their content.
+- **Per-arm disclosure STAYS.** The ruling accepts the outcome, not silence
+  about it. Every forgiven arm is still disclosed per-arm, and nothing in this
+  ruling authorizes removing, aggregating away, or quieting that disclosure.
+  A reader must still be able to see which arms touched an opposite wall.
+- **The rationale is load, not tolerance.** The ruling prices a touched
+  opposite wall against NO SUPPORT AT ALL and prefers the touch. It says
+  nothing about cases where a refusal would still leave the arm supported;
+  those are unaffected and still refuse.
+- **The footprint-rule search is CLOSED.** The receiver partition is refuted
+  and Rule Z is rejected by measurement. Do not re-open either as "the fix for
+  §11.10" — §11.10 no longer needs a fix.

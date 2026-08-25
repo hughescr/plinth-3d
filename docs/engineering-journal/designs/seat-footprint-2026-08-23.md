@@ -634,6 +634,11 @@ large dependency, not a small extension of the current candidate.
 
 ## What I ask you to choose [three real options, with #77 consequence]
 
+> ANSWERED, 2026-08-25 — the owner chose option 2. Option 1 was taken first,
+> Rule Z was measured, and the measurement rejected it. See "OWNER RULING —
+> 2026-08-25" at the end of this memo. The question below is preserved as it
+> was asked; it is no longer open.
+
 Choose one:
 
 1. hold #77 and measure Rule Z against both its crevice success and its shallow-angle
@@ -804,3 +809,81 @@ fn main() -> std::io::Result<()> {
 
 Compile and run the standalone evidence with `rustc raised-column-fixture.rs` from its
 evidence directory. The generated OBJ files are run outputs and must not be committed.
+
+---
+
+## OWNER RULING — 2026-08-25 [the search is CLOSED; this memo stands as the record of why]
+
+Craig ruled, verbatim:
+
+> "It's fine for a support arm in a narrow crevice to touch the opposite wall in those
+> circumstances — it's not ideal, but it's better than no support at all."
+
+The owner chose option 2. The connected-surface forgiveness class this memo set out to
+close is ACCEPTED behavior, per-arm disclosure stays, and task #77's branch merges. The
+footprint-rule search is CLOSED.
+
+### Rule Z was REJECTED BY MEASUREMENT, not by preference
+
+Option 1 was taken first — this memo's own recommendation. Rule Z was built on
+`feature/rule-z-experiment` and measured. It failed on its own required fixtures. The
+judge's headline numbers, all MEASURED:
+
+- **The plain wide slab self-refuses.** FALSE REFUSAL in **104 of 108** sweep cells;
+  the refusal is decided ABOVE the plane, and so is oracle-independent, in **96 of
+  108** cells, first appearing at **10° tilt**; **worst retained clearance −1.536565
+  mm**. The ring is BURIED in 720 of 720 samples. FLAT-seat false refusals 8 of 12.
+  Evidence: `.git/rule-z-2026-08-25/judge2-gate-c.log` line 117 and its roll-up at line
+  232; the same rows appear in `judge2-gates-abcde.log` lines 330 and 445. A rule that
+  refuses a flat slab it should accept is not a rule that can ship.
+- **It does not even buy the thing it was for — the deep wall is still forgiven.** At
+  `wall_x=0.75`, tier final, of **347** wall samples in Qg: **86 exempt** for the
+  production model-foot frustum, and **223 exempt** for the production stub whose south
+  pole sits at the contact. Evidence: `judge2-gates-abcde.log` lines 203 and 205, with
+  the per-tier rows at lines 161-189. The memo §4.1 counterfactual lands on the same 86
+  of 347.
+- **Deinonychus lost EVERY refusal.** The production corpus run under Rule Z emitted
+  with **0** final-pass refusal lines and 0 legalize ABANDONED passes
+  (`.git/rule-z-2026-08-25/rulez-summary.txt`), against **4** final-pass refusal rows and
+  5 ABANDONED passes on the landed band (`band-summary.txt`) — the two axis-transit
+  refusals at `slot401g0` and `slot502g0`, `distance_clearance=+0.302411 mm` at
+  `r0.372136 mm`. Rule Z did not tighten the model; it silenced it.
+
+**Root cause: on UNLABELLED meshes, burial is approximately connectivity.** Rule Z
+asks which surface a nearest point belongs to. Current inputs carry no authored
+labels, so "is this the receiver or the far wall?" can only be answered by the mesh's
+own connectivity — and on a watertight triangle soup the crevice's far wall and the
+seat's own receiver are the SAME connected surface. The rule therefore cannot separate
+the two crevices it was designed to separate, and every attempt to make it strict
+enough to catch the far wall makes it strict enough to refuse the arm's own seat. That
+is the same wall the receiver partition hit, and it is why the partition is refuted:
+both need a distinction the inputs do not contain.
+
+### The authored-labels option was NOT pursued
+
+There is a path: author surface labels on the models, so receiver and far wall are
+distinguishable by construction rather than by geometry. It was not taken. It is new
+authored content on 45 models, it does not help any existing input, and the owner ruled
+the forgiveness acceptable instead. Recorded here so a later reader knows this was a
+declined option rather than an unconsidered one.
+
+### Status of this memo
+
+The memo is NOT retracted and NOT superseded in its analysis. Its §1 defect measurement,
+its §2 retraction of the earlier impossibility claim, its §3 exact objects, and its §5
+named cost all stand as measured. What changed is the CONCLUSION: the recommendation in
+"Recommendation" and option 1 in "What I ask you to choose" were overtaken by the
+measurement they asked for. **This memo stands as the record of why current inputs
+cannot do better** — read it before proposing any new footprint rule, because the next
+proposal must first explain how it beats burial-equals-connectivity on unlabelled
+meshes.
+
+### Evidence and branch disposition
+
+- Rule Z measurement and judge logs: `.git/rule-z-2026-08-25/` (`judge2-gate-c.log`,
+  `judge2-gates-abcde.log`, `rulez-summary.txt`, `band-summary.txt`,
+  `side-review-six-findings.md`, plus the lib/guard/clippy logs).
+- Landed-band exposure, as measured on the merged branch:
+  `honest-exemption-2026-08-22.md` §11.10, "NAMED EXPOSURE" and the ruling subsection.
+- `feature/rule-z-experiment` @ `8803ff8` stays as REFERENCE and is deliberately
+  UNMERGED. Do not merge it; do not delete it.

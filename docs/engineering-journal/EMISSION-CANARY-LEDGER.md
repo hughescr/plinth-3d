@@ -1044,3 +1044,36 @@ requested provenance, not a claim of completion.
 | 2026-08-24 | `5347901..fe91555` | `Deinonychus` | ERROR exit 5 at Structure, `TerminalEvidenceMismatch { terminal: 113 }`, 24 s, no artifact | EMITTED, 69 s, md5 `e25966a4975b4e62640bcc3e96dc452f`, 1,149 records, 10,390,488 B | **MOVED — no artifact to emitted artifact** | `seal-semantics 45-model census`; terminal 113 rescued in 6 passes, 1 completed confirmation round, 2 arms measured |
 | 2026-08-24 | `5347901..fe91555` | `Rotting Warhorse` | ERROR exit 5 at Structure, 87 s, no artifact | **HARNESS CEILING**, loud 486 s run, no artifact; seam closed before coverage repair | no artifact at either end; endpoint/stage **MOVED** | `seal-semantics 45-model census`; terminal 177 legalized in 6 passes, 1 completed confirmation round, 2 arms measured; ceiling is not emission |
 | 2026-08-24 | `5347901..fe91555` | `zombie-4-a` | ERROR exit 5 at Structure, `TerminalEvidenceMismatch { terminal: 23 }`, 106 s, no artifact | **25-MINUTE HARNESS CEILING**, last state `stage: support entering Brace elapsed=1453197ms`, no artifact | no artifact at either end; endpoint/stage **MOVED** | `seal-semantics 45-model census`; terminal 23, 33 abandoned passes, 2 rounds started, 11 of 22 round arms observed before ceiling |
+
+---
+
+## 2026-08-25 — f1-refreeze merged; the forgiveness class is RULED ACCEPTED
+
+**NO corpus run was performed in this lane.** The row below records a merge and an owner
+ruling, not an emission measurement. No emission verdict is claimed, measured, or implied
+for any model at this commit; the emission columns say so rather than being left blank for
+a reader to fill in optimistically. The last measured emission evidence remains the
+2026-08-24 census above and the Rule-Z comparison in `.git/rule-z-2026-08-25/`.
+
+| recorded | commit range | model | baseline | tip | printed-artifact verdict | cause / label |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-08-25 | `94057f0..7e11319` | *(none — no corpus run)* | not run in this lane | not run in this lane | **NOT MEASURED — merge + ruling only** | `f1-refreeze merge (#77)`; `feature/f1-refreeze` @ `855a1b8` merged into `feature/a4-controller` with a merge commit; no conflicts (the two branches' doc edits were disjoint, and `runner.rs` merged as a verified union); gates after merge: plinth-support lib **653/653**, `retired_formula_guard` **13/13**, `contact_regression_gate` 4, `penetration_census_equivalence` 4, `resource_cap_policy` 12, `compile_fail` 1, plinth-core constants suites 37, clippy **0**, `cargo fmt --all -- --check` **104** (unchanged); constants tree diff vs `a8feff4` still exactly the ruled entries |
+
+**The ruling recorded by this row** (Craig, 2026-08-25, verbatim): "It's fine for a support
+arm in a narrow crevice to touch the opposite wall in those circumstances — it's not ideal,
+but it's better than no support at all."
+
+Consequences, for a reader who finds this row later:
+
+* The connected-surface forgiveness class is **ACCEPTED behavior**, not an open defect.
+  Per-arm disclosure **stays** — the ruling accepts the outcome, not silence about it.
+* The **footprint-rule search is CLOSED**. The receiver partition is refuted; Rule Z is
+  rejected by measurement (plain wide slab false-refuses **104 of 108** sweep cells, worst
+  retained clearance **−1.536565 mm**; the deep wall is still forgiven **86–223 of 347**
+  wall samples; `Deinonychus` lost **every** refusal, 4 final-pass refusal rows → 0). Root
+  cause: on unlabelled meshes burial is approximately connectivity, so the rule cannot
+  separate the far wall from the arm's own receiver.
+* Evidence: `.git/rule-z-2026-08-25/`. The experiment branch
+  `feature/rule-z-experiment` @ `8803ff8` stays as reference, deliberately **unmerged**.
+* Full argument: `docs/engineering-journal/designs/seat-footprint-2026-08-23.md`,
+  "OWNER RULING — 2026-08-25", and `honest-exemption-2026-08-22.md` §11.10.
