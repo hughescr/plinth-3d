@@ -13,6 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::designed_embed::PositiveFiniteMm;
+use crate::seat_zone::SeatZoneRecord;
 
 /// A stable reference while the member is live.  A retired slot increments
 /// its generation, so a reference cannot accidentally identify a reused slot.
@@ -389,10 +390,15 @@ struct ForestState {
     /// * `MemberKey` carries a generation beside its slot, so a recycled slot
     ///   yields a different key: a stale entry is unreachable, never wrong.
     ///
-    /// The freeze must survive a resize, and it does because a resize is
-    /// `set_radii` on the SAME keys (`brace::apply_resize`) — pinned by
+    /// The table is PASSIVE: `set_radii` does not touch it, so nothing here
+    /// tracks a radius implicitly — pinned by
     /// `a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius`.
-    seat_zones: BTreeMap<MemberKey, Arc<[u32]>>,
+    /// Re-sizing an exemption to a grown arm's final footprint is therefore an
+    /// EXPLICIT pass someone has to call
+    /// (`seat_zone::refreeze_resized_seat_zones`, Craig's ruling 2026-08-23),
+    /// which is why the entry carries the band radius it was cut at: that is how
+    /// the pass knows which members the sizer moved.
+    seat_zones: BTreeMap<MemberKey, SeatZoneRecord>,
 }
 
 /// Opaque, LIFO checkpoint token.
@@ -571,16 +577,22 @@ impl Forest {
     }
 
     /// Freeze this member's seat zone `Z` — the global faces its OWN seat
-    /// forgives, computed once at contact creation from the creation radius.
+    /// forgives, computed from the radius the contact end carries at the moment
+    /// of the freeze.
     ///
-    /// "Freeze" is the whole rule. Nothing recomputes a zone from a later
-    /// radius: the monotonicity theorem (a thinner arm can never grade worse
-    /// than a fatter one on the same axis) holds precisely because the tested
-    /// face set does not move when the radius does. A second call for the same
-    /// key REPLACES the entry, which is what a re-minted contact on a recycled
-    /// generation needs; a resize never calls this at all.
-    pub(crate) fn set_seat_zone(&mut self, key: MemberKey, zone: Arc<[u32]>) {
-        self.state.seat_zones.insert(key, zone);
+    /// **This side table is PASSIVE.** It tracks nothing. `set_radii` does not
+    /// touch it, and neither does any grading site, which is what the
+    /// monotonicity theorem rests on: within a grading pass the tested face set
+    /// cannot move when the radius does.
+    ///
+    /// Two things call this. A creation site, minting a contact; and
+    /// `seat_zone::refreeze_resized_seat_zones`, the one explicit pass that runs
+    /// AFTER a sizing pass and BEFORE the next grading pass, re-sizing a seated
+    /// arm's exemption to its final footprint (Craig's ruling, 2026-08-23). A
+    /// second call for the same key REPLACES the entry, which is what both of
+    /// those need.
+    pub(crate) fn set_seat_zone(&mut self, key: MemberKey, record: SeatZoneRecord) {
+        self.state.seat_zones.insert(key, record);
     }
 
     /// Remove and return this member's frozen zone — the MOVE half of a
@@ -597,7 +609,7 @@ impl Forest {
     /// Taking rather than copying also keeps the table honest: a member with no
     /// contact must forgive nothing, and a stale entry left behind on the lower
     /// half would exempt faces for a member that no longer has a seat.
-    pub(crate) fn take_seat_zone(&mut self, key: MemberKey) -> Option<Arc<[u32]>> {
+    pub(crate) fn take_seat_zone(&mut self, key: MemberKey) -> Option<SeatZoneRecord> {
         self.state.seat_zones.remove(&key)
     }
 
@@ -615,6 +627,17 @@ impl Forest {
                   honest-exemption-2026-08-22.md section 8 step 5 names them"
     )]
     pub(crate) fn seat_zone(&self, key: MemberKey) -> Option<&Arc<[u32]>> {
+        self.state.seat_zones.get(&key).map(SeatZoneRecord::zone)
+    }
+
+    /// The frozen zone TOGETHER with the two facts a re-size needs: the seat's
+    /// own face ID and the band radius the zone was frozen at.
+    ///
+    /// `seat_zone::refreeze_resized_seat_zones` is the reader. Grading sites use
+    /// [`Self::seat_zone`] and never see this, because a grading site has no
+    /// business knowing what radius the band was cut at.
+    #[must_use]
+    pub(crate) fn seat_zone_record(&self, key: MemberKey) -> Option<&SeatZoneRecord> {
         self.state.seat_zones.get(&key)
     }
 
@@ -1678,6 +1701,21 @@ mod tests {
             carried_mm2: finite(1.0),
         })
     }
+    /// A side-table entry with a chosen face list and band radius. The axis and
+    /// the seat face are irrelevant to what these tests measure — they are about
+    /// the TABLE's behaviour, not about geometry — so they are stated once here
+    /// rather than repeated per test.
+    fn test_seat_zone_record(faces: Vec<u32>, band_radius_mm: f64) -> SeatZoneRecord {
+        SeatZoneRecord::new(
+            Arc::from(faces),
+            &crate::seat_zone::SeatZoneRequest {
+                p0_mm: [0.0; 3],
+                p1_mm: [1.0, 0.0, 0.0],
+                seat_face_id: 0,
+                band_radius_mm,
+            },
+        )
+    }
 
     /// **The exact-prefix proof for the seal-semantics classifier.**
     ///
@@ -1747,20 +1785,27 @@ mod tests {
         ));
     }
 
-    /// The freeze has to survive the resize, or it is not a freeze.
+    /// The side table tracks NOTHING, and that is the property the whole rule
+    /// rests on.
     ///
     /// A resize is `set_radii` on the SAME `MemberKey` (`brace::apply_resize`),
-    /// so the side table is untouched by construction — and that is exactly the
-    /// property the monotonicity theorem rests on. Recompute `Z` from the final
-    /// radius instead and a fatter arm claims a wider band, a wider band
-    /// swallows more faces, and the fatter arm is graded against strictly LESS
-    /// surface than a thin one on the same axis: the retired skip-length's
-    /// inversion, rebuilt one level up.
+    /// and it leaves the table untouched. If the storage layer followed the
+    /// radius implicitly, `Z` would move underneath a grading pass — a fatter
+    /// arm would claim a wider band, a wider band would swallow more faces, and
+    /// the fatter arm would be graded against strictly LESS surface than a thin
+    /// one on the same axis: the retired skip-length's inversion, rebuilt one
+    /// level up.
+    ///
+    /// Re-sizing an exemption to a grown arm's final footprint (Craig's ruling,
+    /// 2026-08-23) is therefore something a caller has to ASK for, at a defined
+    /// point between a sizing pass and the next grading pass —
+    /// `seat_zone::refreeze_resized_seat_zones`. This test is what makes that
+    /// explicitness true rather than merely intended.
     #[test]
     fn a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius() {
         let mut forest = Forest::new();
         let key = forest.add_member(member(MemberKind::Strut));
-        forest.set_seat_zone(key, Arc::from(vec![3_u32, 11, 42]));
+        forest.set_seat_zone(key, test_seat_zone_record(vec![3_u32, 11, 42], 0.95));
 
         forest
             .set_radii(
@@ -1775,6 +1820,15 @@ mod tests {
             Some(vec![3, 11, 42]),
             "a resize must not move the frozen zone"
         );
+        assert_eq!(
+            forest
+                .seat_zone_record(key)
+                .map(SeatZoneRecord::band_radius_mm),
+            Some(0.95),
+            "and it must not move the band radius either — the band the zone was \
+             cut at is how the explicit re-size pass later recognises that this \
+             member's radius moved"
+        );
     }
 
     /// The side table is invisible to the digest, which is what makes "a model
@@ -1784,7 +1838,7 @@ mod tests {
         let mut forest = Forest::new();
         let key = forest.add_member(member(MemberKind::Strut));
         let before = forest.digest();
-        forest.set_seat_zone(key, Arc::from(vec![7_u32, 9]));
+        forest.set_seat_zone(key, test_seat_zone_record(vec![7_u32, 9], 0.95));
         assert_eq!(
             forest.digest(),
             before,

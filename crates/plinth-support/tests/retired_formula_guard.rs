@@ -97,6 +97,35 @@ fn support_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
+fn production_source(file: &str) -> String {
+    let path = support_src().join(file);
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("guarded source {file} must be readable: {error}"));
+    production_only(&source).to_owned()
+}
+
+fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start_at = source
+        .find(start)
+        .unwrap_or_else(|| panic!("production source must contain start marker `{start}`"));
+    let tail = &source[start_at..];
+    let end_at = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("production source after `{start}` must contain `{end}`"));
+    &tail[..end_at]
+}
+
+fn assert_refreeze_between(source: &str, start: &str, grade: &str, site: &str) {
+    let sequence = between(source, start, grade);
+    assert!(
+        sequence.contains("refreeze_resized_seat_zones"),
+        "{site} sizes or applies member geometry and then grades it, but no \
+         `refreeze_resized_seat_zones` call sits between those two operations. \
+         A seated member would be graded against the zone cut for its old \
+         radius or axis."
+    );
+}
+
 /// Strip `//`-style comments so prose mentioning the retired names is exempt
 /// while live code is not.
 ///
@@ -302,6 +331,138 @@ fn every_converged_file_really_has_the_test_module_the_guard_cuts_off() {
              source, say so here and adjust `production_only`."
         );
     }
+}
+
+fn assert_grow_terminal_refreezes() {
+    assert_refreeze_between(
+        &production_source("cco.rs"),
+        "let mut evaluated = evaluate_descriptors(",
+        "let survival = clearance_survival(",
+        "cco::grow_terminal_inner",
+    );
+}
+
+fn assert_rewire_tournament_refreezes() {
+    assert_refreeze_between(
+        &production_source("cco.rs"),
+        "let evaluated =\n            evaluate_descriptors(",
+        "let survives =\n            clearance_survival(anchor_route.geometry.surface()",
+        "cco::evaluate_rewire_candidates",
+    );
+}
+
+fn assert_rewire_replay_refreezes() {
+    assert_refreeze_between(
+        &production_source("cco.rs"),
+        "let Some(mut replayed) = evaluate(",
+        "if clearance_survival(",
+        "cco::RewireCandidateBatch::replay_candidate",
+    );
+}
+
+fn assert_brace_fixed_point_refreezes() {
+    assert_refreeze_between(
+        &production_source("brace.rs"),
+        "working = apply_resize(",
+        "let negative = exact_clearance_negatives(",
+        "brace::brace_fixed_point_current_parity",
+    );
+}
+
+fn assert_brace_trial_refreezes() {
+    assert_refreeze_between(
+        &production_source("brace.rs"),
+        "let mut trial = apply_resize(",
+        "let clearance = exact_clearance_rows(",
+        "brace::pending_triggers_after_trial",
+    );
+}
+
+fn assert_rewire_validation_refreezes() {
+    assert_refreeze_between(
+        &production_source("rewire.rs"),
+        "fn validate_changed_geometry(",
+        "let mut p0 = Vec::new();",
+        "rewire::validate_changed_geometry",
+    );
+}
+
+/// The four sites the heavy challenge found without a direct red pin. Each test
+/// reads production text only and goes red if its one re-cut is deleted or moved
+/// to the wrong side of grading.
+#[test]
+fn grow_terminal_inner_refreezes_between_sizing_and_placement_grading() {
+    assert_grow_terminal_refreezes();
+}
+
+#[test]
+fn brace_fixed_point_refreezes_between_apply_resize_and_final_grading() {
+    assert_brace_fixed_point_refreezes();
+}
+
+#[test]
+fn pending_trigger_trial_refreezes_between_apply_resize_and_grading() {
+    assert_brace_trial_refreezes();
+}
+
+#[test]
+fn rewire_validation_refreezes_before_it_builds_the_placement_batch() {
+    assert_rewire_validation_refreezes();
+}
+
+/// Every production apply/size -> grade sequence must re-cut seated zones in
+/// between. This enumerates the sequences BY CONSTRUCTION rather than keeping a
+/// count beside the implementation: a future seventh sequence either matches an
+/// existing structural marker and makes one marker ambiguous, or needs an added
+/// row here before the guard can pass review.
+///
+/// The CCO commit path is intentionally absent. It does not grade: it copies the
+/// already re-cut winning record after proving member provenance.
+#[test]
+fn every_production_apply_or_size_then_grade_sequence_refreezes_between() {
+    let production_call_count = ["cco.rs", "brace.rs", "rewire.rs"]
+        .iter()
+        .map(|file| {
+            production_source(file)
+                .matches("crate::seat_zone::refreeze_resized_seat_zones(")
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        production_call_count, 6,
+        "production has {production_call_count} seat-zone re-cut calls, but this \
+         construction guard enumerates exactly six apply/size -> grade sequences. \
+         A new call site must add its structural sequence assertion here; a removed \
+         call means one of the existing sequence assertions must be failing too."
+    );
+
+    assert_grow_terminal_refreezes();
+    assert_rewire_tournament_refreezes();
+    assert_rewire_replay_refreezes();
+    assert_brace_fixed_point_refreezes();
+    assert_brace_trial_refreezes();
+    assert_rewire_validation_refreezes();
+}
+
+/// The source guard itself must go red when a sequence omits the re-cut.
+#[test]
+fn the_refreeze_sequence_guard_detects_a_missing_call() {
+    let sabotage = "\
+let mut trial = apply_resize(forest.clone(), &resize)?;
+let clearance = exact_clearance_rows(&trial, surface, config, limits)?;
+";
+    let red = std::panic::catch_unwind(|| {
+        assert_refreeze_between(
+            sabotage,
+            "let mut trial = apply_resize(",
+            "let clearance = exact_clearance_rows(",
+            "sabotaged trial",
+        );
+    });
+    assert!(
+        red.is_err(),
+        "the enumeration guard must reject a missing re-cut"
+    );
 }
 
 #[test]

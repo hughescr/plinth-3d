@@ -1029,21 +1029,25 @@ fn freeze_stub_seat_zones(
             p0_mm: seed.p0.map(Finite::get),
             p1_mm: seed.p1.map(Finite::get),
             seat_face_id,
-            // FROZEN: the contact end's radius at the moment of the mint, plus
-            // the placement standoff. A later resize must never rewrite it —
-            // that freeze is what makes monotonicity a theorem (design §3).
+            // The contact end's radius at the moment of the mint, plus the
+            // placement standoff. The transient sizer skips stubs and a
+            // registered terminal cannot be mutated, but CCO consumes that
+            // registration before later rewire moves. A consumed stub can then
+            // move through `try_slide` or `try_retire`; the downstream re-size
+            // compares this stored segment-band shape with the live member and
+            // re-cuts it when either the radius or axis changed.
             band_radius_mm: seed.r0.get() + standoff_mm,
         });
     }
     // ONE band call plus a parallel flood fill per row.
-    let zones = crate::seat_zone::freeze_production_seat_zones(
+    let records = crate::seat_zone::freeze_production_seat_zones(
         geometry.surface(),
         geometry.topology(),
         &requests,
     )
     .map_err(InitialContactError::SeatZone)?;
-    for (key, zone) in rows.into_iter().zip(zones) {
-        forest.set_seat_zone(key, zone);
+    for (key, record) in rows.into_iter().zip(records) {
+        forest.set_seat_zone(key, record);
     }
     Ok(())
 }
@@ -2281,7 +2285,7 @@ mod tests {
         for ((key, zone), request) in keys.iter().zip(expected).zip(&requests) {
             assert_eq!(
                 forest.seat_zone(*key).map(|frozen| frozen.to_vec()),
-                Some(zone.to_vec()),
+                Some(zone.zone().to_vec()),
                 "stub {key:?}'s frozen zone must be the one its EMITTED tip \
                  radius produces (band {} mm). A band frozen from the load law's \
                  request would describe a tip the run is not building.",

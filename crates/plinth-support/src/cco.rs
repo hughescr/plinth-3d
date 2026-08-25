@@ -633,6 +633,20 @@ pub(crate) struct TerminalCcoOutcome {
     pub(crate) anchor_ray_batches: usize,
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
+    /// How many seated MEMBERS this terminal's one batched re-size re-cut
+    /// (Craig's ruling of 2026-08-23; second review, C5/C6).
+    ///
+    /// `grow_terminal_inner` read this count only as control flow — "should the
+    /// rows be re-read?" — and then dropped it, so the tournament's re-size
+    /// disclosed nothing. It is the count across every candidate forest in the
+    /// tournament, not per candidate, because the call is one batch over all of
+    /// them; a zero here on a terminal that grew a model anchor or a
+    /// bifurcation says the re-size stopped firing.
+    ///
+    /// Deliberately NOT folded into the sealed CCO transcript, which this lane
+    /// is already moving for the ruling itself: a second reason to move it
+    /// would make the one authorized re-seal unauditable.
+    pub(crate) seat_zone_members_refrozen: usize,
     pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
     pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     pub(crate) anchor_refusals: Vec<AnchorFootRefusal>,
@@ -1144,7 +1158,12 @@ enum Descriptor {
         /// Carrying the finished zone rather than the face ID is what makes
         /// that identity structural: the replay does an `Arc` clone, never a
         /// native call and never a recompute.
-        seat_zone: std::sync::Arc<[u32]>,
+        ///
+        /// It is the whole RECORD rather than the bare face list because a zone
+        /// that is later re-sized to the arm's final footprint (Craig's ruling,
+        /// 2026-08-23) needs the seat's own face ID and the band radius it was
+        /// cut at, and both were resolved here.
+        seat_zone: crate::seat_zone::SeatZoneRecord,
     },
     Bifurcate {
         host: MemberKey,
@@ -1200,6 +1219,15 @@ pub(crate) struct RewireCandidateBatch {
     refusals: Vec<RewireCandidateRefusal>,
     descriptors_generated: usize,
     clearance_batches: usize,
+    /// How many seated MEMBERS this batch's one re-size re-cut across every
+    /// feasible candidate's forest (second review, C5/C6).
+    ///
+    /// Read by `rewire.rs`'s report, which is where the ruling's most-travelled
+    /// site becomes visible: rewire re-cuts on EVERY sweep, not once per pass.
+    /// `replay_candidate`'s own re-cut is deliberately NOT summed in — it
+    /// re-does one candidate's work on a fresh forest, so adding it would
+    /// double-count the winner.
+    seat_zone_members_refrozen: usize,
     anchor_ray_batches: usize,
     anchor_foot_batches: usize,
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
@@ -2290,6 +2318,8 @@ impl CcoController {
                 refusals,
                 descriptors_generated,
                 clearance_batches: 0,
+                // The screen was never reached, so neither was the re-size.
+                seat_zone_members_refrozen: 0,
                 anchor_ray_batches,
                 anchor_foot_batches,
                 anchor_seat_refusals,
@@ -2303,6 +2333,40 @@ impl CcoController {
             });
         }
         let contact_policy = seat_contact_policy(anchor_route.process_resolution_mm)?;
+        // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the REWIRE
+        // tournament's post-sizing point (second review, finding C1).**
+        //
+        // This path is `grow_terminal_inner`'s sibling and it sizes exactly the
+        // same way: `evaluate_descriptors` above ran `apply_and_size` on every
+        // descriptor, so a model anchor's rootward radius was raised by
+        // `size_tapered_without_tree_fanin` and a bifurcation's upper half was
+        // rewritten by `size_bifurcation_candidate`. Without a re-cut here the
+        // screen below would grade a SIZED arm against its CREATION-radius
+        // band — the exact defect the ruling kills — and the refusal would
+        // leave silently as `RewireCandidateRefusalReason::Clearance`, which
+        // `try_reattach` reports as `Ok(None)`.
+        //
+        // Same placement in the pipeline as the terminal-growth site: after all
+        // sizing, before `clearance_survival` grades anything, in ONE batched
+        // kernel call across every feasible candidate's forest at once.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            anchor_route.geometry.surface(),
+            anchor_route.geometry.topology(),
+            contact_policy.standoff_mm,
+            feasible.iter_mut().map(|candidate| &mut candidate.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // `ClearanceRow` snapshots the zone when `clearance_rows` builds
+            // it, so a candidate whose forest just changed needs its rows
+            // re-read. Pure CPU: `clearance_rows` makes no native call. The row
+            // SET cannot move — `clearance_rows` selects on `Member` equality
+            // and a re-cut writes no `Member` — so `clearance_rows` below still
+            // agrees with the count `replay_candidate` checks.
+            for candidate in &mut feasible {
+                candidate.rows = clearance_rows(&candidate.forest, &binding.snapshot);
+            }
+        }
         let survives =
             clearance_survival(anchor_route.geometry.surface(), &contact_policy, &feasible)?;
         let mut candidates = Vec::new();
@@ -2354,6 +2418,7 @@ impl CcoController {
             refusals,
             descriptors_generated,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             anchor_ray_batches,
             anchor_foot_batches,
             anchor_seat_refusals,
@@ -3777,11 +3842,46 @@ fn grow_terminal_inner(
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 0,
+            // Nothing was graded, so the re-size never ran.
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
             contact_attestation_digest,
         });
+    }
+
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the CCO tournament's one
+    // defined post-sizing point.**
+    //
+    // Every candidate has now been applied AND sized: a model anchor's rootward
+    // radius was raised by `size_tapered_without_tree_fanin`, a bifurcation's
+    // upper half was rewritten by `size_bifurcation_candidate`, and both of
+    // those members carry a band cut at a radius they no longer have. This is
+    // challenge finding F1 (design §11.9), and the ruling is that the exemption
+    // must equal the arm's TRUE footprint with no slack. So the bands are re-cut
+    // to the final radii HERE — after all sizing, before `clearance_survival`
+    // grades anything, in ONE batched kernel call for every candidate forest in
+    // the tournament at once.
+    //
+    // It cannot move to a later point: `clearance_survival` is the placement
+    // grading site and it must read the re-cut zones. It cannot move to an
+    // earlier one: `evaluate_descriptors` runs inside a `rayon` map with no
+    // surface, and per-candidate re-cutting would be one native call each.
+    let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+        surface,
+        topology,
+        contact_policy.standoff_mm,
+        evaluated.iter_mut().map(|candidate| &mut candidate.forest),
+    )
+    .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+    if refrozen > 0 {
+        // `ClearanceRow` snapshots the zone when `clearance_rows` builds it, so
+        // a candidate whose forest just changed needs its rows re-read. Pure
+        // CPU: `clearance_rows` makes no native call.
+        for candidate in &mut evaluated {
+            candidate.rows = clearance_rows(&candidate.forest, &snapshot);
+        }
     }
 
     let survival = clearance_survival(surface, &contact_policy, &evaluated)?;
@@ -3854,6 +3954,7 @@ fn grow_terminal_inner(
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
@@ -3873,7 +3974,44 @@ fn grow_terminal_inner(
         }
     ));
     match apply_and_size(forest, request, &descriptors[winner_index], &config) {
-        Ok(true) if forest.digest() == winner.forest.digest() => forest.commit(checkpoint)?,
+        Ok(true) if forest.digest() == winner.forest.digest() => {
+            // **The re-size, replayed onto the live forest — by COPY, not by
+            // recomputation.**
+            //
+            // `apply_and_size` has just re-installed the CREATION-radius band on
+            // the committed member, because that is what the descriptor carries.
+            // The winner's candidate forest already holds the re-cut record for
+            // the same key, and copying it costs no native call — the same
+            // argument `apply_model_anchor` makes for carrying the zone on the
+            // descriptor in the first place.
+            //
+            // **What the digest equality above does and does not prove** (second
+            // review, C2). It proves SHARED PROVENANCE, not zone identity:
+            // `Forest::digest` covers `p0`/`p1`/`r0`/`r1`/kind/owner/
+            // contact_end/carried and EXCLUDES `seat_zones` entirely (pinned by
+            // `freezing_a_seat_zone_does_not_move_the_forest_digest`). So it
+            // establishes that both forests hold the same live members under
+            // the same keys, which is what makes copying by key well defined —
+            // and it is deliberately blind to the zone table, which is what
+            // lets it run BEFORE this copy without the re-size breaking it.
+            //
+            // What makes the copied record the RIGHT one is separate and it is
+            // construction, not the digest: both forests descend from the same
+            // `snapshot.clone()`, `apply_model_anchor` installs a zone carried
+            // on the descriptor rather than derived from the forest, and the
+            // re-size that produced the winner's record read the same axis,
+            // radius and stored seat face this live member now has. Anything
+            // that broke that chain would leave this equality green, which is
+            // why `the_committed_bifurcation_carries_the_winners_re_cut_band_
+            // not_the_inherited_one` asserts the committed record against a
+            // fresh freeze instead of trusting the digest.
+            for key in winner.forest.live_members() {
+                if let Some(record) = winner.forest.seat_zone_record(key) {
+                    forest.set_seat_zone(key, record.clone());
+                }
+            }
+            forest.commit(checkpoint)?;
+        }
         Ok(_) => {
             forest.rollback(checkpoint)?;
             return Err(CcoError::NonDeterministicWinner);
@@ -3899,6 +4037,7 @@ fn grow_terminal_inner(
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
+        seat_zone_members_refrozen: refrozen,
         validated_model_anchor: validated_anchors.remove(&winner_index),
         anchor_seat_refusals,
         anchor_refusals,
@@ -4278,6 +4417,33 @@ impl RewireCandidateBatch {
         // evaluated with, so the run's process resolution travels on the batch
         // rather than being re-derived from a registry that does not know it.
         let contact_policy = seat_contact_policy(self.process_resolution_mm)?;
+        // **THE RE-SIZE, replayed (second review, finding C1).**
+        //
+        // `evaluate` above re-ran `apply_and_size` from the descriptor, so this
+        // forest carries the CREATION-radius band exactly as the batch's did
+        // before its own re-cut. The screen below is the same screen the batch
+        // ran, so it must read the same bands, and this site must therefore
+        // re-cut the same way. Leaving it out is worse than the batch site's
+        // silent refusal: the batch would have admitted the candidate and the
+        // replay would refuse it, and a replay refusal is
+        // `CcoError::RewireClearanceReplayFailed` — a hard divergence rather
+        // than a routing decision.
+        //
+        // ONE forest, so the batch over it is one call by construction.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            geometry.surface(),
+            geometry.topology(),
+            contact_policy.standoff_mm,
+            std::iter::once(&mut replayed.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // Same re-read the batch site does, for the same reason: the screen
+            // reads `rows`, not the forest. The evidence checks above compared
+            // `rows.len()`, which a re-cut cannot move — `clearance_rows`
+            // selects on `Member` equality and a re-cut writes no `Member`.
+            replayed.rows = clearance_rows(&replayed.forest, &binding.snapshot);
+        }
         if clearance_survival(
             geometry.surface(),
             &contact_policy,
@@ -4306,6 +4472,11 @@ impl RewireCandidateBatch {
     /// F3 — this batch's model-anchor seat-attestation transcript.
     pub(crate) const fn seat_attestation_digest(&self) -> u64 {
         self.contact_attestation_digest
+    }
+
+    /// How many seated members this batch's one re-size re-cut (C5/C6).
+    pub(crate) const fn seat_zone_members_refrozen(&self) -> usize {
+        self.seat_zone_members_refrozen
     }
 }
 
@@ -4389,13 +4560,16 @@ fn generate_descriptors(
                 p0_mm: se,
                 p1_mm: seated_point_mm,
                 seat_face_id: seat.snapped_face_id(),
-                // FROZEN at the anchor's creation radius. `min_shoot_radius_mm`
-                // is what `apply_model_anchor` mints the rootward (contact) end
-                // with; `size_tapered_without_tree_fanin` may raise it
-                // afterwards, and the band must NOT follow — a band that grew
-                // with the radius would swallow more surface for a fatter arm
-                // and rebuild the inversion this change exists to retire
-                // (design §3).
+                // The anchor's CREATION radius. `min_shoot_radius_mm` is what
+                // `apply_model_anchor` mints the rootward (contact) end with,
+                // and `size_tapered_without_tree_fanin` raises it immediately
+                // afterwards — that gap is challenge finding F1. Under Craig's
+                // 2026-08-23 ruling the band does not FOLLOW the growth, it is
+                // RE-CUT to the final radius once, after the sizing pass and
+                // before `clearance_survival`, by
+                // `seat_zone::refreeze_resized_seat_zones` in
+                // `grow_terminal_inner`. Padding it here instead was the
+                // rejected disposition: it would put slack in the band.
                 band_radius_mm: radius + policy.standoff_mm,
             });
             out.push(Descriptor::ModelAnchor {
@@ -4404,7 +4578,10 @@ fn generate_descriptors(
                 seated_point_mm,
                 // Placeholder; every one is replaced from the batch below
                 // before this function returns.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &zone_requests[seat_index],
+                ),
             });
         }
         // THE one batched band call plus parallel flood fill for this terminal.
@@ -4414,7 +4591,7 @@ fn generate_descriptors(
         // `out` ends with exactly one `ModelAnchor` per request, pushed in the
         // same order, so the tail of `out` re-pairs with `frozen` by position.
         let anchors = out.len() - frozen.len();
-        for (descriptor, zone) in out[anchors..].iter_mut().zip(frozen) {
+        for (descriptor, record) in out[anchors..].iter_mut().zip(frozen) {
             let Descriptor::ModelAnchor { seat_zone, .. } = descriptor else {
                 return Err(CcoError::InvalidGeometry(
                     "generate_descriptors: the seat-zone tail of the descriptor list is not \
@@ -4422,7 +4599,7 @@ fn generate_descriptors(
                         .to_owned(),
                 ));
             };
-            *seat_zone = zone;
+            *seat_zone = record;
         }
     }
     let hosts = cached_hosts
@@ -4860,7 +5037,7 @@ fn apply_model_anchor(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     seated_point_mm: [f64; 3],
-    seat_zone: &std::sync::Arc<[u32]>,
+    seat_zone: &crate::seat_zone::SeatZoneRecord,
     config: &Config,
 ) -> Result<bool, CcoError> {
     let stub_end = request.stub_end_mm().map(Finite::get);
@@ -4908,7 +5085,14 @@ fn apply_model_anchor(
     // candidate forest away. A zone derived from the forest being written into
     // could differ between those two runs; one carried on the descriptor
     // cannot.
-    forest.set_seat_zone(strut, std::sync::Arc::clone(seat_zone));
+    //
+    // This installs the CREATION-radius band. `apply_and_size` raises the
+    // rootward radius on the very next line of its own match arm, and the
+    // exemption is re-cut to that final radius by
+    // `seat_zone::refreeze_resized_seat_zones` in `grow_terminal_inner` —
+    // after the whole candidate batch is sized, before anything grades it.
+    // Doing it HERE instead would be one native call per candidate.
+    forest.set_seat_zone(strut, seat_zone.clone());
     forest.set_parent(request.stub, Some(strut))?;
     Ok(true)
 }
@@ -5064,11 +5248,14 @@ fn apply_bifurcation(
         // what the contact always forgave, and the lower half, which no longer
         // declares a contact, must forgive nothing.
         //
-        // An `Arc` move. No native call, and emphatically no re-freeze from
-        // `upper`'s own interpolated radius: that would be the recompute the
-        // monotonicity theorem forbids (design §3).
-        if let Some(zone) = forest.take_seat_zone(host_key) {
-            forest.set_seat_zone(upper, zone);
+        // A MOVE of the record, `Arc` and all. No native call here, and no
+        // re-cut here either: `size_bifurcation_candidate` runs next and will
+        // rewrite `upper`'s radii, so the honest moment to re-cut the band to
+        // the final footprint is after that, in `grow_terminal_inner`'s one
+        // batched re-size — not in the middle of a mutation, one candidate at a
+        // time.
+        if let Some(record) = forest.take_seat_zone(host_key) {
+            forest.set_seat_zone(upper, record);
         }
     }
     // The split partitions the declaration; it never duplicates it. `host_key`
@@ -6854,6 +7041,7 @@ mod tests {
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             clearance_batches: 0,
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals: vec![zero],
             anchor_refusals: Vec::new(),
@@ -9173,6 +9361,7 @@ mod tests {
             refusals: Vec::new(),
             descriptors_generated: 2,
             clearance_batches: 1,
+            seat_zone_members_refrozen: 0,
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             anchor_seat_refusals: Vec::new(),
@@ -9440,7 +9629,18 @@ mod tests {
             carried_mm2: finite(0.0),
         }));
         let frozen: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![3_u32, 11, 42]);
-        forest.set_seat_zone(host, std::sync::Arc::clone(&frozen));
+        forest.set_seat_zone(
+            host,
+            crate::seat_zone::SeatZoneRecord::new(
+                std::sync::Arc::clone(&frozen),
+                &crate::seat_zone::SeatZoneRequest {
+                    p0_mm: [1.0, 0.0, 20.0],
+                    p1_mm: [1.0, 0.0, 0.0],
+                    seat_face_id: 0,
+                    band_radius_mm: 0.65,
+                },
+            ),
+        );
 
         let before = forest
             .live_tree_members()
@@ -9561,7 +9761,15 @@ mod tests {
                 // Hand-built descriptor: this vector pins the family equations
                 // and the generation/price ledger, not the seat exemption, so
                 // it forgives nothing. An empty zone is the STRICT direction.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -10105,7 +10313,15 @@ mod tests {
                 // Hand-built descriptor: this vector pins the family equations
                 // and the generation/price ledger, not the seat exemption, so
                 // it forgives nothing. An empty zone is the STRICT direction.
-                seat_zone: std::sync::Arc::from(Vec::new()),
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -10298,5 +10514,580 @@ mod tests {
             11_947_743_038_542_081_092,
             "a zero count is folded like any other: the stream position is part of the seal"
         );
+    }
+
+    // ---- #36 F1 — the two CCO re-size sites, which no test reached ---------
+    //
+    // The second review's M1: `refreeze_resized_seat_zones` appeared in
+    // `brace.rs`'s tests only, so CCO creation sites 1 and 2 and the rewire
+    // path were pinned by nothing, and the corpus reached none of them. That
+    // gap is what let finding C1 — a whole grading path with no re-size at all
+    // — survive a first review. The three tests below close it, on the SAME
+    // geometry `brace.rs`'s F1 ladder measures.
+
+    /// A slab whose top face is finely tessellated, so a seat band's face set
+    /// genuinely GROWS with the band radius.
+    ///
+    /// The numbers are `brace.rs`'s `fine_seat_slab_parts` numbers — a 0.25 mm
+    /// pitch over a ±4 mm top face with 10 mm of body under it — on purpose, so
+    /// this module's F1 evidence and the brace ladder's measure one geometry
+    /// rather than two configurations that happen to agree. `planar_slab` above
+    /// cannot do this job: its top face is two 40 mm triangles, so every band
+    /// that reaches the seat at all reaches both of them and the zone never
+    /// moves with the radius.
+    fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        const HALF_MM: f64 = 4.0;
+        const DEPTH_MM: f64 = 10.0;
+        let span_mm = 2.0 * HALF_MM;
+        let steps = (span_mm / pitch_mm).round() as usize;
+        assert!(steps >= 4, "the top face must actually be tessellated");
+        let mut vertices = Vec::with_capacity((steps + 1) * (steps + 1) + 4);
+        for i in 0..=steps {
+            for j in 0..=steps {
+                vertices.push([
+                    -HALF_MM + span_mm * (i as f64) / (steps as f64),
+                    -HALF_MM + span_mm * (j as f64) / (steps as f64),
+                    0.0,
+                ]);
+            }
+        }
+        let top = |i: usize, j: usize| (i * (steps + 1) + j) as u32;
+        let mut faces = Vec::with_capacity(2 * steps * steps + 4 * (steps + 1) + 2);
+        for i in 0..steps {
+            for j in 0..steps {
+                faces.push([top(i, j), top(i + 1, j), top(i + 1, j + 1)]);
+                faces.push([top(i, j), top(i + 1, j + 1), top(i, j + 1)]);
+            }
+        }
+        let base = vertices.len() as u32;
+        for corner in [
+            [-HALF_MM, -HALF_MM],
+            [HALF_MM, -HALF_MM],
+            [HALF_MM, HALF_MM],
+            [-HALF_MM, HALF_MM],
+        ] {
+            vertices.push([corner[0], corner[1], -DEPTH_MM]);
+        }
+        faces.push([base, base + 2, base + 1]);
+        faces.push([base, base + 3, base + 2]);
+        let walls = [
+            (
+                (0..=steps).map(|k| top(k, 0)).collect::<Vec<_>>(),
+                base,
+                base + 1,
+            ),
+            (
+                (0..=steps).map(|k| top(steps, k)).collect::<Vec<_>>(),
+                base + 1,
+                base + 2,
+            ),
+            (
+                (0..=steps)
+                    .map(|k| top(steps - k, steps))
+                    .collect::<Vec<_>>(),
+                base + 2,
+                base + 3,
+            ),
+            (
+                (0..=steps).map(|k| top(0, steps - k)).collect::<Vec<_>>(),
+                base + 3,
+                base,
+            ),
+        ];
+        for (edge, first_corner, last_corner) in walls {
+            for k in 0..steps {
+                faces.push([first_corner, edge[k + 1], edge[k]]);
+            }
+            faces.push([first_corner, last_corner, edge[steps]]);
+        }
+        (vertices, faces)
+    }
+
+    /// The mesh, surface and adjacency for ONE `fine_seat_slab_parts` slab,
+    /// welded the way production welds its perception input.
+    fn fine_seat_slab(pitch_mm: f64) -> (Mesh, NativeSurface, FaceTopology) {
+        let (vertices, faces) = fine_seat_slab_parts(pitch_mm);
+        let surface = NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect("fine seat slab surface");
+        let mesh = Mesh::new(vertices, faces).expect("fine seat slab mesh");
+        let topology =
+            build_face_topology(&mesh, WeldPolicy::ExactBits).expect("fine seat slab topology");
+        (mesh, surface, topology)
+    }
+
+    /// The pitch every F1 fixture in this module uses. `brace.rs`'s ladder uses
+    /// the same one.
+    const FINE_PITCH_MM: f64 = 0.25;
+
+    /// The registered standoff, read rather than typed.
+    fn registered_standoff_mm() -> f64 {
+        m0_constants()
+            .unwrap()
+            .placeholders()
+            .standoff_mm()
+            .diagnostic()
+            .get()
+    }
+
+    /// One anchor seat on the fine slab's top face at the origin, discovered by
+    /// the PRODUCTION discovery pass.
+    ///
+    /// `QualifiedAnchorSeat` has no constructor a test can reach — the whole
+    /// point of the type — so the seat here is a real discovered one. The rewire
+    /// discovery entry point is used because it is the one whose binding a test
+    /// can mint; the seat it returns is the same qualified seat the finalized
+    /// path returns, and `grow_terminal_inner` takes the seats as an argument.
+    fn seat_on_fine_slab(
+        forest: &Forest,
+        stub: MemberKey,
+        stub_end_mm: [Finite; 3],
+        geometry: &AnchorGeometryAuthority<'_>,
+        seat_face_id: u32,
+    ) -> Vec<QualifiedAnchorSeat> {
+        let binding = RewireAnchorBinding::new(
+            stub,
+            forest.digest(),
+            forest.digest().wrapping_add(1),
+            stub_end_mm,
+        );
+        let sidecar = vec![0.0; geometry.surface().nfaces()];
+        let discovery = discover_rewire_anchor_seats(
+            binding,
+            &[SurfaceAnchorSample {
+                source_face_id: seat_face_id,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            Some(&sidecar),
+            AnchorSearchConfig::current().unwrap(),
+            geometry,
+        )
+        .expect("the seat discovers");
+        assert!(
+            discovery.refusals().is_empty(),
+            "the fixture's seat must qualify: {:?}",
+            discovery.refusals()
+        );
+        discovery.into_seats()
+    }
+
+    /// The face the origin projects onto — how every fixture here names the
+    /// seat face, so nothing depends on triangulation order.
+    fn seat_face_at_origin(surface: &NativeSurface) -> u32 {
+        let (_, _, face_ids, _) = surface.project(&[[0.0, 0.0, 0.0]]);
+        u32::try_from(face_ids[0]).expect("the origin projects onto a face")
+    }
+
+    /// A seated arm on the fine slab plus a terminal that can only reach ground
+    /// by bifurcating it.
+    ///
+    /// The host is `apply_model_anchor`'s own shape — a `Strut` whose ROOTWARD
+    /// end is the model seat, frozen at the registered creation radius — so the
+    /// bifurcation inherits a real seated contact rather than a manufactured
+    /// one. The plate sits 40 mm below a slab the descent would have to pass
+    /// straight through, so the plate family is refused and the bifurcation is
+    /// the answer.
+    fn fine_slab_bifurcation_fixture(
+        surface: &NativeSurface,
+        topology: &FaceTopology,
+        seat_face_id: u32,
+    ) -> (Forest, MemberKey, MemberKey, TerminalCcoRequest) {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        let host_p0 = [0.0, 0.0, 6.0];
+        let host_p1 = [0.0, 0.0, 0.0];
+        let mut forest = Forest::new();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: host_p0.map(finite),
+            p1_mm: host_p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(creation_mm)),
+            r1_mm: RootwardEndRadius::new(positive(creation_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "f1-seated-host".to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(4.0),
+        }));
+        // The freeze at the CREATION radius, through the production entry
+        // point — the state `apply_model_anchor` leaves behind.
+        let record = crate::seat_zone::freeze_production_seat_zones(
+            surface,
+            topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: host_p0,
+                p1_mm: host_p1,
+                seat_face_id,
+                band_radius_mm: creation_mm + registered_standoff_mm(),
+            }],
+        )
+        .expect("the creation freeze")
+        .remove(0);
+        forest.set_seat_zone(host, record);
+
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(0.8), finite(0.0), finite(5.1)],
+            p1_mm: [finite(0.8), finite(0.0), finite(4.5)],
+            r0_mm: TerminalEndRadius::new(positive(0.2)),
+            r1_mm: RootwardEndRadius::new(positive(creation_mm)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(12.0),
+        }));
+        forest.register_terminal(7, stub).unwrap();
+        let request =
+            TerminalCcoRequest::bind(&forest, 7, BuildFrame::new(finite(-40.0), positive(5.0)))
+                .unwrap();
+        (forest, host, stub, request)
+    }
+
+    /// **CCO SITES 1+2, PINNED: the committed forest carries the WINNER's
+    /// re-cut band, not the descriptor's creation band.**
+    ///
+    /// `grow_terminal_inner` re-cuts every candidate's zone before it grades
+    /// them, then throws the candidate forests away and re-runs
+    /// `apply_and_size` on the LIVE forest to commit the winner. That re-run
+    /// installs the CREATION band again — `apply_model_anchor` from the
+    /// descriptor, `apply_bifurcation` by MOVING the live host's own record —
+    /// so the copy loop at the commit is the only thing that puts the re-cut
+    /// band back, and until this test nothing said so.
+    ///
+    /// **Why the bifurcation family and not the anchor family.** The copy loop
+    /// is family-agnostic: it walks every live member of the winner's forest.
+    /// The bifurcation route reaches it with no `FinalizedAnchorValidationContext`
+    /// — a model anchor cannot be minted here without the hoisted routing
+    /// authority a real initial build supplies, and manufacturing one would
+    /// test the fixture rather than the loop. The model-anchor family's own
+    /// re-cut is pinned on the rewire path by
+    /// `the_rewire_screen_reads_the_re_cut_band_and_a_sized_anchor_survives_it`.
+    ///
+    /// What is asserted, and why each part is needed:
+    ///
+    /// * the committed record equals a fresh freeze at the arm's FINAL radius
+    ///   on the committed axis and the stored seat face — which is exactly the
+    ///   record the winner candidate carried, since that is how
+    ///   `refreeze_resized_seat_zones` built it;
+    /// * the arm actually GREW past its creation radius, or the re-size was a
+    ///   no-op and the equality above would hold against a build that never
+    ///   re-cut anything;
+    /// * the final band's face set is a strict SUPERSET of the creation band's
+    ///   ON THE SAME AXIS, which is what makes the fine slab load-bearing — on
+    ///   a coarse mesh both bands name the same faces and only
+    ///   `band_radius_mm` would differ.
+    ///
+    /// **The named sabotage: `a_commit_that_kept_the_descriptor_band`.** Delete
+    /// the `for key in winner.forest.live_members()` copy loop from
+    /// `grow_terminal_inner`'s commit arm. RED-RUN 2026-08-24: the committed
+    /// record comes back as the inherited one — `band_radius_mm = 0.95` over
+    /// 116 faces, against the re-cut 1.2515 over 200.
+    #[test]
+    fn the_committed_bifurcation_carries_the_winners_re_cut_band_not_the_inherited_one() {
+        let (_, surface, topology) = fine_seat_slab(FINE_PITCH_MM);
+        let seat_face_id = seat_face_at_origin(&surface);
+        let (mut forest, host, _stub, request) =
+            fine_slab_bifurcation_fixture(&surface, &topology, seat_face_id);
+        let inherited = forest
+            .seat_zone_record(host)
+            .expect("the host is seated")
+            .clone();
+
+        let outcome = grow_terminal_inner(
+            &mut forest,
+            &request,
+            &surface,
+            &topology,
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+            Some(vec![host]),
+            0.05,
+            None,
+        )
+        .expect("the terminal routes");
+        let winner = outcome.winner.expect("a winner");
+        assert_eq!(
+            winner.family,
+            CandidateFamily::Bifurcation,
+            "the plate descent runs 44 mm straight through the slab, so the \
+             bifurcation is the only legal family here"
+        );
+
+        // The committed upper half: `apply_bifurcation` re-parents the lower
+        // half onto it and MOVES the seat declaration and its record with p1.
+        let arm = forest.parent_of(host).expect("the committed upper half");
+        let member = forest.member(arm).expect("a live upper half");
+        assert_eq!(member.model_contact_end(), Some(ContactEnd::Rootward));
+        assert_eq!(
+            forest.member(host).unwrap().model_contact_end(),
+            None,
+            "the split partitions the declaration; the lower half keeps none"
+        );
+        let r_final_mm = member.rootward_radius_mm().get().get();
+        let r_creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        // NON-VACUITY 1 — the sizing pass moved the radius. Without this the
+        // whole test could pass against a build whose re-size never fired.
+        assert!(
+            r_final_mm > r_creation_mm,
+            "the fixture must make `size_bifurcation_candidate` GROW the seated \
+             half past its creation radius, or there is nothing to re-cut: \
+             final {r_final_mm} mm against creation {r_creation_mm} mm"
+        );
+
+        let standoff_mm = registered_standoff_mm();
+        let record = forest
+            .seat_zone_record(arm)
+            .expect("the committed upper half keeps a frozen zone");
+        assert_eq!(
+            record.seat_face_id(),
+            inherited.seat_face_id(),
+            "the split inherits the SAME contact, so the seat face is carried \
+             rather than re-projected"
+        );
+        let p0_mm = member.p0_mm().map(Finite::get);
+        let p1_mm = member.p1_mm().map(Finite::get);
+        let expected = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: record.seat_face_id(),
+                band_radius_mm: r_final_mm + standoff_mm,
+            }],
+        )
+        .expect("the final-radius freeze")
+        .remove(0);
+        let creation = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: record.seat_face_id(),
+                band_radius_mm: r_creation_mm + standoff_mm,
+            }],
+        )
+        .expect("the creation-radius freeze")
+        .remove(0);
+        // NON-VACUITY 2 — the two bands really do name different face sets on
+        // this mesh, so the equality below is a statement about FACES and not
+        // only about the recorded band radius.
+        assert!(
+            expected.zone().len() > creation.zone().len()
+                && creation
+                    .zone()
+                    .iter()
+                    .all(|face| expected.zone().contains(face)),
+            "the fine slab must make the final band a strict superset of the \
+             creation band, or this fixture cannot tell a re-cut zone from an \
+             un-recut one: creation {} faces, final {} faces",
+            creation.zone().len(),
+            expected.zone().len()
+        );
+
+        assert_ne!(
+            *record, inherited,
+            "and the committed record must not be the INHERITED one — that is \
+             what `apply_bifurcation` moves onto the upper half at commit time, \
+             and it was cut at the creation radius on the un-split axis"
+        );
+        assert_eq!(
+            *record,
+            expected,
+            "the COMMITTED upper half must carry the winner candidate's re-cut \
+             band. `apply_and_size` moved the live host's CREATION band onto it, \
+             and only the commit's copy loop puts the re-cut one back — delete \
+             that loop and this record comes back at band_radius_mm = {} \
+             instead of {}",
+            inherited.band_radius_mm(),
+            r_final_mm + standoff_mm
+        );
+        println!(
+            "F1-CCO-COMMIT: r_creation={r_creation_mm} mm r_final={r_final_mm} mm \
+             standoff={standoff_mm} mm\n\
+             F1-CCO-COMMIT: zone_faces=[MEASURED] creation {} -> final {} of {} mesh faces",
+            creation.zone().len(),
+            expected.zone().len(),
+            topology.n_faces()
+        );
+    }
+
+    /// The fine slab, dressed as an anchor route.
+    ///
+    /// `rewire_anchor_fixture`'s box cannot do this job: its bottom face is two
+    /// 40 mm triangles, so every band that reaches the seat reaches both of
+    /// them and a re-cut moves nothing at all.
+    fn fine_slab_anchor_fixture() -> RewireAnchorFixture {
+        let (mesh, surface, topology) = fine_seat_slab(FINE_PITCH_MM);
+        let seat_face_id = seat_face_at_origin(&surface);
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: vec![SurfaceAnchorSample {
+                source_face_id: seat_face_id,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
+    /// **THE C1 EVIDENCE — the rewire screen reads the RE-CUT band, and a
+    /// sized anchor survives it.**
+    ///
+    /// The second review's blocking finding: `evaluate_rewire_candidates` ran
+    /// apply -> size -> `clearance_survival` with no re-size between, so a
+    /// model anchor whose rootward radius `size_tapered_without_tree_fanin` had
+    /// just raised was graded against its CREATION band. On a mesh fine enough
+    /// to resolve the difference that is a SELF-refusal: the faces the arm's
+    /// own final footprint covers are outside the creation band, so the arm is
+    /// graded against its own flank and refused for distance — and the refusal
+    /// leaves as `Ok(None)` at `rewire::try_reattach`, so nothing anywhere says
+    /// the arm was ever proposed.
+    ///
+    /// Both new sites are exercised: the batch site decides whether the
+    /// candidate survives at all, and `replay_candidate`'s site is what puts
+    /// the re-cut band on the forest this asserts against.
+    ///
+    /// **The named sabotage: `a_rewire_screen_that_graded_the_creation_band`.**
+    /// Delete either `refreeze_resized_seat_zones` call added to `cco.rs` for
+    /// C1. Both halves RED-RUN 2026-08-24, and the pair is why the fix could
+    /// not be half-applied:
+    ///
+    /// * batch site deleted — the anchor leaves `batch.candidates` as
+    ///   `RewireCandidateRefusal { family: ModelAnchor, reason: Clearance }`,
+    ///   which is the silent `Ok(None)` this finding is about;
+    /// * replay site deleted — the batch still admits it and
+    ///   `replay_candidate` then answers `CcoError::RewireClearanceReplayFailed`,
+    ///   a hard divergence rather than a routing decision.
+    #[test]
+    fn the_rewire_screen_reads_the_re_cut_band_and_a_sized_anchor_survives_it() {
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let anchors = fine_slab_anchor_fixture();
+        let r_creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        let standoff_mm = registered_standoff_mm();
+
+        anchors.with_route(|route| {
+            let geometry = route.geometry;
+            let batch = CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .expect("the batch evaluates");
+            let anchor = batch
+                .candidates
+                .iter()
+                .find(|candidate| candidate.evidence.family == CandidateFamily::ModelAnchor)
+                .map(|candidate| candidate.evidence.generation_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the sized model anchor must survive the screen; refusals were {:?}",
+                        batch.refusals
+                    )
+                });
+
+            let replay = batch
+                .replay_candidate(&binding, &forest, anchor, geometry)
+                .expect("the winner replays");
+            let (replayed, _, _, _) = replay.into_parts();
+
+            let arm = replayed
+                .live_tree_members()
+                .into_iter()
+                .find(|key| {
+                    replayed.member(*key).is_some_and(|member| {
+                        member.model_contact_end() == Some(ContactEnd::Rootward)
+                    })
+                })
+                .expect("the replayed forest holds the seated arm");
+            let member = replayed.member(arm).expect("a live arm");
+            let r_final_mm = member.rootward_radius_mm().get().get();
+            // NON-VACUITY — the sizing pass moved the radius, so the re-cut had
+            // something to do. Without this the assertions below would hold
+            // against a build that never re-cut anything.
+            assert!(
+                r_final_mm > r_creation_mm,
+                "the fixture must make the anchor GROW past its creation \
+                 radius: final {r_final_mm} mm against creation {r_creation_mm} mm"
+            );
+
+            let record = replayed
+                .seat_zone_record(arm)
+                .expect("the replayed arm keeps a frozen zone");
+            let p0_mm = member.p0_mm().map(Finite::get);
+            let p1_mm = member.p1_mm().map(Finite::get);
+            let freeze = |band_radius_mm| {
+                crate::seat_zone::freeze_production_seat_zones(
+                    geometry.surface(),
+                    geometry.topology(),
+                    &[crate::seat_zone::SeatZoneRequest {
+                        p0_mm,
+                        p1_mm,
+                        seat_face_id: record.seat_face_id(),
+                        band_radius_mm,
+                    }],
+                )
+                .expect("the freeze")
+                .remove(0)
+            };
+            let expected = freeze(r_final_mm + standoff_mm);
+            let creation = freeze(r_creation_mm + standoff_mm);
+            assert!(
+                expected.zone().len() > creation.zone().len()
+                    && creation
+                        .zone()
+                        .iter()
+                        .all(|face| expected.zone().contains(face)),
+                "the fine slab must make the final band a strict superset of the \
+                 creation band, or this fixture cannot tell the two apart: \
+                 creation {} faces, final {} faces",
+                creation.zone().len(),
+                expected.zone().len()
+            );
+            assert_eq!(
+                *record, expected,
+                "the replayed forest must carry the band cut at the FINAL \
+                 radius, which is the band the screen graded"
+            );
+            println!(
+                "F1-CCO-REWIRE: r_creation={r_creation_mm} mm r_final={r_final_mm} mm \
+                 standoff={standoff_mm} mm\n\
+                 F1-CCO-REWIRE: zone_faces=[MEASURED] creation {} -> final {} of {} mesh faces",
+                creation.zone().len(),
+                expected.zone().len(),
+                geometry.topology().n_faces()
+            );
+        });
     }
 }
