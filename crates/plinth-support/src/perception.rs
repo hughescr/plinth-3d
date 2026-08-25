@@ -1376,7 +1376,7 @@ impl SliceStitchSpace {
 /// Stitch, orient and normalize every layer of one kernel slice batch.
 ///
 /// FU-10 phase C: the cutover both stitch sites now go through. Design:
-/// `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3.4 ("both
+/// `docs/architecture.md` sec 3.4 ("both
 /// stitch sites consume normalized output") and phase table row C. The
 /// pipeline is exactly the three stages sec 3.4 prescribes -- stitch (the
 /// balanced directed walk inside
@@ -1557,7 +1557,7 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 
 /// FU-10 phase A -- consumer-side in-plane loop orientation.
 ///
-/// Design: `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 3.3 and
+/// Design: `docs/architecture.md` sec 3.3 and
 /// phase table row A. The frozen kernel slice stream carries no in-plane
 /// winding convention: segment endpoint order is an artifact of which triangle
 /// vertex is the odd one out (`geom_kernel::slicing`). For a face with outward
@@ -2365,7 +2365,7 @@ fn find_local_minima(
         )
         .map_err(|error| GenericPerceptionError::Slice(error.to_string()))?;
     // Task #62: the adequacy yardstick is a REACH, in mm, not a carried area.
-    // Derivation: docs/engineering-journal/derivations/low-point-reach-2026-08-19.md.
+    // Derivation: docs/evidence/derivations/low-point-reach-2026-08-19.md.
     // Both inputs are read from the M0 registry here, so no tip decision and
     // no placeholder tuning can move a low-point verdict again.
     let allowance_mm = registry_low_point_reach_allowance_mm(constants);
@@ -3494,7 +3494,7 @@ pub(crate) struct RetainedLoadTranspose {
 /// FU-8g H4 (D6, F11) — which of the three genuinely distinct bugs poisoned
 /// the carrier.  `RetainedLoadRebuildCause::Poisoned` used to collapse all
 /// nine `record_commit` refusal sites into one census label; the treant's 21
-/// poison rebuilds (`CURRENT-STATUS.md` §G6d.8) were counted but never
+/// poison rebuilds (`CONTENT-DROPPED (removed 2026-08-25, see git log)` §G6d.8) were counted but never
 /// attributed.  This is the split, one variant per group:
 ///
 /// - [`Self::Guard3Generic`] — the merged seat resolved GENERIC, so the
@@ -8104,7 +8104,7 @@ mod tests {
     /// NOT a corpus-parity check. The three reach values below are literals
     /// copied from the instrumented `b8edcb8` dumps (derivation's 57-minima
     /// table,
-    /// `docs/engineering-journal/derivations/low-point-reach-2026-08-19.md`
+    /// `docs/evidence/derivations/low-point-reach-2026-08-19.md`
     /// sec 3), not re-derived from a mesh here, so the test is tautological
     /// on those values by construction. What it actually pins: (a) the
     /// comparison direction at both ends -- `>` the allowance demands a

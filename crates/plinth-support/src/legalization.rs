@@ -1,6 +1,6 @@
 //! **Stage B — the legalization retry's vocabulary.**
 //!
-//! Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+//! Design authority: `docs/specs/seal-semantics.md`
 //! §1.3 and §4 Stage B, authorized by Craig 2026-08-23.
 //!
 //! The routing stage seals a record saying a terminal is `Routed`. The brace

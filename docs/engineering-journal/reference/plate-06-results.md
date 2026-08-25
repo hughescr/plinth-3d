@@ -585,14 +585,14 @@ are kept here so a future reader can audit what changed:
 ## 10. Appendices — the verification panel's memos
 
 Three memos from the adversarial verification of 2026-07-31, preserved
-unmodified beside this file. Each carries a two-line provenance header and
+unmodified in `docs/evidence/` (relocated there, alongside this document's own evidence siblings, in the 2026-08 docs restructure). Each carries a two-line provenance header and
 nothing else was changed.
 
 | file | what it is |
 |---|---|
-| [`plate-06-verification-physicist.md`](plate-06-verification-physicist.md) | Failure-mode physics memo — the most-parsimonious model that has to account for all 34 specimens. This is where the cap-plane-z confound was first identified. |
-| [`plate-06-verification-protocol.md`](plate-06-verification-protocol.md) | Protocol memo — build provenance, gate-by-gate validity ruling, and the literal reading of the plate-wide void that §6 overrides. |
-| [`plate-06-verification-refutation.json`](plate-06-verification-refutation.json) | The refuter's per-claim verdicts (`CONFIRMED` / `WEAKENED` / …) with reasoning. Every caveat in §5 traces to a verdict here. **The file carries its two provenance lines as `//` comments, so it is JSONC, not strict JSON — pipe it through `tail -n +3` before `jq`.** |
+| [`plate-06-verification-physicist.md`](../../evidence/plate-06-verification-physicist.md) | Failure-mode physics memo — the most-parsimonious model that has to account for all 34 specimens. This is where the cap-plane-z confound was first identified. |
+| [`plate-06-verification-protocol.md`](../../evidence/plate-06-verification-protocol.md) | Protocol memo — build provenance, gate-by-gate validity ruling, and the literal reading of the plate-wide void that §6 overrides. |
+| [`plate-06-verification-refutation.json`](../../evidence/plate-06-verification-refutation.json) | The refuter's per-claim verdicts (`CONFIRMED` / `WEAKENED` / …) with reasoning. Every caveat in §5 traces to a verdict here. **The file carries its two provenance lines as `//` comments, so it is JSONC, not strict JSON — pipe it through `tail -n +3` before `jq`.** |
 
 Companion record: [`plate-05-results.md`](plate-05-results.md) — the conical-arm
 plate whose `X* ∈ [25.00, 25.34]` this plate reproduced.

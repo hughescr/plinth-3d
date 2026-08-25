@@ -2274,7 +2274,7 @@ mod tests {
                 // is the FIRST such member in creation order. The honest
                 // exemption legalizes arms the retired radius-proportional
                 // skip-length refused — MEASURED corpus-wide by the re-baseline
-                // in EMISSION-CANARY-LEDGER.md, where record counts ROSE on all
+                // in docs/evidence/emission-canary.md, where record counts ROSE on all
                 // five emitting models — so members that were quarantined, and
                 // therefore excluded from the live view, now survive into it.
                 // The first offender moved EARLIER in creation order, to slot
@@ -2296,7 +2296,7 @@ mod tests {
                 // Re-recorded an EIGHTH time, 2026-08-23, by `a4f5f3f` —
                 // feat(support): re-size a seated arm's exemption to its final
                 // footprint (#36 F1); Craig's ruling of 2026-08-23
-                // (docs/engineering-journal/designs/honest-exemption-2026-08-22.md
+                // (CONTENT-DROPPED (removed 2026-08-25, see git log)
                 // §11.9); landed via the #77/f1 lane, merged to develop at
                 // `7e11319` / `225b6a7` — true -> false, with this attribution
                 // rather than an edited expectation.

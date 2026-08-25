@@ -565,7 +565,7 @@ of the local layer height, not products with a global scalar.
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `delicacy_curvature_weight` / `delicacy_thinness_weight` (457/458) | 0.6 / 0.4 | — | **P** | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Blend of two geometric proxies. **Owner column corrected 2026-08-10**: it read `plinth-support::perceive`, which O-5 superseded — `plinth-mesh` is the sole delicacy implementation, and `plinth-support` is a *reader* of the resulting per-face weights, not their producer. The producer landed 2026-08-10 ([`decisions/2026-08-10-delicacy-producer.md`](decisions/2026-08-10-delicacy-producer.md)); until then nothing on the production path read these two at all. |
+| `delicacy_curvature_weight` / `delicacy_thinness_weight` (457/458) | 0.6 / 0.4 | — | **P** | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Blend of two geometric proxies. **Owner column corrected 2026-08-10**: it read `plinth-support::perceive`, which O-5 superseded — `plinth-mesh` is the sole delicacy implementation, and `plinth-support` is a *reader* of the resulting per-face weights, not their producer. The producer landed 2026-08-10 (content absorbed into [`docs/architecture.md`](../architecture.md); formerly `decisions/2026-08-10-delicacy-producer.md`); until then nothing on the production path read these two at all. |
 | `thin_feature_mm` (460) | 1.5 | mm | **P** — saturation threshold | `plinth-mesh::delicacy_eval` (producer); `plinth-metrics::scar` (independent auditor) | Same 2026-08-10 owner correction. It is also the geometry-kernel grid pitch the producer's thinness ray cast is indexed at, deliberately so there is one length scale rather than two to keep aligned. |
 | `orient_scar_weight` (481) | 0.4 | — | **P** — "the starting default", additive/opt-in; 0.0 exactly reproduces the pre-scar-term search | `plinth-orient` | Scored as `sum(face_area_mm² × delicacy)` over down-facing faces, normalized `/100.0` to match the existing `sup` term's cm² scale. |
 | orientation objective weights (`hollow.orient_search`) | `0.5·support_area_cm² + 3·peak_xsec_cm² + 0.3·height_mm` (+ scar term) | — | **P — ad hoc, DO NOT PORT AS-IS** | `plinth-orient` | 13 hand-picked candidates (identity + ±10/20/30° about X and Y only; **no Z, no combined axes**), scored on a 90 %-decimated proxy while the delicacy field is built on the full mesh. Plan of record is a **dense sweep on a decimated proxy** scoring the support / scar / height triad jointly. **Registered 2026-08-10** as `ORIENT_WEIGHT_SUPPORT_AREA_CM2` / `ORIENT_WEIGHT_PEAK_XSEC_CM2` / `ORIENT_WEIGHT_HEIGHT_MM`; see the addendum below for what that registration does and does not claim. |
@@ -662,7 +662,7 @@ of the local layer height, not products with a global scalar.
 > committed `Sphere` the L1 proxy ranks the winning legacy X −20 pose **478th of
 > 643**, so without the escort the sweep committed to 16.3173 against that pose's
 > 16.3009. Recorded in full at
-> [`decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`](decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md).
+> [`docs/architecture.md`](../architecture.md) (content absorbed; formerly `decisions/2026-08-10-legacy-block-escorted-to-the-exact-tier.md`).
 > Neither funnel width moved.
 >
 > **Rest poses are a substitute and say so.** D-12 names convex-hull face-aligned
@@ -841,14 +841,14 @@ handling-heavy. The caller states the wall, and `CavityEvidence::wall_thickness_
 records what was stated **in-process**. `CavityEvidence` is not `Serialize`; it
 hangs off `HollowedModel::cavity_authority` and dies with the process — but as
 of **FU-37** (landed 2026-08-12, see
-[`CURRENT-STATUS.md#hollow-wall-field-2026-08-12`](CURRENT-STATUS.md#hollow-wall-field-2026-08-12))
+`CURRENT-STATUS.md#hollow-wall-field-2026-08-12` — deleted in the 2026-08 docs restructure, content not carried forward)
 the same requested wall also reaches the serialized `HollowReport`, as
 `HollowReport::wall: Option<Finite>`, populated on every production path
 (hollowed-and-drilled, every typed solid-decision reason, and the internal
 support-refusal substitution).
 
 **And, as of the pipeline plumbing that completed that row** (see
-[`CURRENT-STATUS.md#hollow-wall-reaches-run-output-2026-08-12`](CURRENT-STATUS.md#hollow-wall-reaches-run-output-2026-08-12)),
+`CURRENT-STATUS.md#hollow-wall-reaches-run-output-2026-08-12` — deleted in the 2026-08 docs restructure, content not carried forward),
 it reaches **the run's own output**: `ChainOutcome` and
 `ModelPreparationOutcome::Artifact` carry `wall_mm` beside FU-55's
 `realized_wall`, and the CLI prints both. Stated precisely, because the
@@ -1079,7 +1079,7 @@ It decides only *whether to attempt*; every safety bound in the witness is `Deri
 Single-specimen basis, R4-shaped standing trigger: n = 1 large specimen, and a second corpus
 model above ~4,760 faces triggers re-derivation rather than silent inheritance. Full
 derivation, the measured consequences on the one large specimen, and the OD-8 evidence:
-[`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §9.
+[`docs/architecture.md`](../architecture.md) (content absorbed; formerly `decimation-design-2026-08-06.md` §9).
 
 ### 3.10.8 Support execution-authority caps — the model-scaled pair
 
@@ -2024,7 +2024,7 @@ assignment never by position formula, contiguous row bases, Y position randomize
 
 ### 4.4 Slotting in a results note
 
-**DONE for plate 6** — [`../reference/plate-06-results.md`](../reference/plate-06-results.md),
+**DONE for plate 6** — [`reference/plate-06-results.md`](reference/plate-06-results.md),
 written 2026-07-31. It carries the bracketing interval for each `X*`, the number of
 specimens and inversions, the per-group survival table for question (b), the A6 void
 finding and its elimination list, and the printer/resin/temperature conditions, plus

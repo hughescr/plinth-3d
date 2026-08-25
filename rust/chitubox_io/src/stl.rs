@@ -1,5 +1,5 @@
 //! Binary STL reader + identity-centering, and centering for raw triangle
-//! input. Per CHITUBOX-FORMAT.md §4: 80-byte header, u32 count, 50 B/tri
+//! input. Per docs/specs/chitubox-format.md §4: 80-byte header, u32 count, 50 B/tri
 //! (12 normal + 36 verts + 2 attr); ChituBox drops normal+attr → 36 B/tri
 //! and subtracts the bbox center from every vertex (bit-exact).
 

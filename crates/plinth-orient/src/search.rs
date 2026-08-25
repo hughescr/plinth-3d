@@ -6,7 +6,7 @@
 //! once.  This module is what runs between them — the LOD ladder, the
 //! promotion, the comparator, and the record.
 //!
-//! # The funnel is the recorded one (D-12, `02-target-architecture.md:1103`, §6)
+//! # The funnel is the recorded one (D-12, `docs/architecture.md:1103`, §6)
 //!
 //! | Tier | Candidates | LOD |
 //! |---|---|---|

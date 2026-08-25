@@ -33,7 +33,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // (73 routed contacts, 261 live members, 5 island births, 4 local minima); its
 // digest moved only because the plan digest hashes slice-layer loop vertices
 // directly, and 80 of its 686 print layers were requantized by 5 picometres.
-// See `docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 8.5 and its
+// See `docs/architecture.md` sec 8.5 and its
 // 2026-08-08 addendum.
 //
 // Refreshed a third time on 2026-08-09, by owner ruling, for FU-32 phase J2 (the
@@ -58,7 +58,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // `verification_snapshot_digest_input_list_is_pinned` stayed GREEN across this
 // movement, which is the independent confirmation that the digest's input SHAPE
 // did not widen — only one input's value moved. See
-// `docs/engineering-journal/CURRENT-STATUS.md` sections `#fu32-j3-2026-08-09` and
+// `CONTENT-DROPPED (removed 2026-08-25, see git log)` sections `#fu32-j3-2026-08-09` and
 // `#fu32-j4-2026-08-09`.
 // **Re-pinned off `make_overhang_table` onto `make_toed_slab` (FU-56,
 // 2026-08-12).** `run_support` is now the coverage-closure controller: it
@@ -104,11 +104,11 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // gate values it deliberately does not use. The from->to septet for the OD-8
 // census, and the sibling `run_support` digest pin in
 // `plinth-support/tests/support_runner_integration.rs`, are recorded together
-// with this one in `docs/engineering-journal/CURRENT-STATUS.md` under the
+// with this one in `CONTENT-DROPPED (removed 2026-08-25, see git log)` under the
 // FU-38 row and its dated section.
 //
 // **Refreshed a sixth time on 2026-08-14, by owner ruling, to honour the
-// WRITTEN 0.16 mm² A3 coverage censor** (SPEC-A3-A4-COVERAGE.md §4: "A patch
+// WRITTEN 0.16 mm² A3 coverage censor** (docs/specs/coverage-repair.md §4: "A patch
 // fails if and only if either: 1. its uncovered area is greater than
 // `voxel_pitch_mm**2` … Area at or below `voxel_pitch_mm**2` is **censored A3
 // uncertainty**"). `plinth_support::coverage_patch_blocks_verdict` used to block
@@ -345,7 +345,7 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
     assert!(!report.accepted());
     // Nine patches, SEVEN blocking islands: two of the nine patches measure
     // 0.48293 mm² against this test's 1.0 mm² censor and are censored A3
-    // uncertainty (SPEC-A3-A4-COVERAGE.md §4). The measurement always stamped
+    // uncertainty (docs/specs/coverage-repair.md §4). The measurement always stamped
     // `assessment_failed = false` on them; the verdict now agrees.
     assert_eq!(report.defects().len(), 7);
     Ok(serde_json::to_string(&report).expect("serialize full coverage report"))

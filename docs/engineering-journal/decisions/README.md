@@ -1,7 +1,3 @@
-# Decision records
-
-Dated records of decisions this project actually made, filed as `YYYY-MM-DD-<slug>.md`.
-
-The filename carries the date; the file carries the reasoning as it stood on that date.
-**Never edited after landing** — a decision that changed is a new dated record, not a rewrite
-of the old one.
+Dated decision records not yet absorbed elsewhere: `2026-07-28-rust-rewrite.md` and
+`2026-08-12-owner-rulings-fu-batch.md`. Never edited after landing — a changed decision is a
+new dated record, not a rewrite of the old one.

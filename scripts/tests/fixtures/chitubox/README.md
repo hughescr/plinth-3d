@@ -1,54 +1,59 @@
 # ChituBox test corpus
 
-Test inputs for `rust/chitubox_io/tests/` and `scripts/tests/test_chitubox_emit.py`.
-Resolved by `rust/chitubox_io/tests/common/mod.rs::corpus_path()`, which checks this
-directory first and falls back to `CHITUBOX_CORPUS_DIR` for specimens too large to commit.
-This is the ChituBox format-fixture corpus, not the separate eight-model frozen baseline corpus under `corpus/models/` and `corpus/baseline/`.
+Test inputs for `rust/chitubox_io/tests/`, `crates/plinth-emit/tests/`, and
+`crates/plinth-verify/tests/`. Resolved by
+`rust/chitubox_io/tests/common/mod.rs::required_fixture_path()`, which
+resolves this directory directly for committed fixtures and falls back to
+`CHITUBOX_CORPUS_DIR` only for the one specimen too large to commit. This is
+the ChituBox format-fixture corpus, not the separate eight-model frozen
+baseline corpus under `corpus/models/` and `corpus/baseline/` — see
+[`docs/development.md`](../../../../docs/development.md) for that one.
 
 | File | Contents | Consumed by |
 | --- | --- | --- |
-| `empty.chitubox` | 420-byte empty project (no models) | `roundtrip.rs` |
-| `sphere-cylinder.chitubox` | Sphere + Cylinder, cylinder at (43.7035, 7.1448) | `synth_compare.rs`, `transforms.rs`, `support_parity.rs`, `errors.rs`, `roundtrip.rs` |
-| `sphere-moved.chitubox` | Same scene, sphere translated to (10.5, 5.25) | `transforms.rs`, `roundtrip.rs` |
-| `sphere-scaled.chitubox` | Same scene, sphere mesh baked 1.5x | `transforms.rs`, `roundtrip.rs` |
-| `cylinder-rotated.chitubox` | Same scene, cylinder mesh baked `Ry(45)·Rz(45)` | `transforms.rs`, `roundtrip.rs` |
-| `sphere-cylinder-supported.chitubox` | Same scene with 7 supports on model 0, 13 on model 1 | `roundtrip.rs`, `support_parity.rs`, `transforms.rs`, `errors.rs` |
-| `pad_bridge_donor.chitubox` | Minimal single-model project carrying one real PAD and one real BRIDGE record | `test_chitubox_emit.py` |
-| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, and type 6 raft | `test_chitubox_emit.py`, `native_winding_oracle.rs` |
-| `basic-cube-supports-raft.chitubox` | Native ChituBox-authored project (20x20x20 cube, 12 tris) carrying real PAD and BRIDGE type-6 records; 71 support records demonstrating bottom-connected raft bridging | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
-| `cylinder-supported-bottom-connected.chitubox` | Native ChituBox-authored project (Cylinder, 244 tris) carrying real PAD and BRIDGE type-6 records; 166 support records, bottom-connected | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle) |
+| `empty.chitubox` | 420-byte empty project (no models) | `roundtrip.rs`, `preview_fallback.rs` |
+| `sphere-cylinder.chitubox` | Sphere + Cylinder, cylinder at (43.7035, 7.1448) | `roundtrip.rs`, `synth_compare.rs`, `transforms.rs`, `support_parity.rs`, `errors.rs`, `acceptance_artifacts.rs` |
+| `sphere-moved.chitubox` | Same scene, sphere translated to (10.5, 5.25) | `transforms.rs` |
+| `sphere-scaled.chitubox` | Same scene, sphere mesh baked 1.5x | `transforms.rs` |
+| `cylinder-rotated.chitubox` | Same scene, cylinder mesh baked `Ry(45)·Rz(45)` | `transforms.rs` |
+| `sphere-cylinder-supported.chitubox` | Same scene with 7 supports on model 0, 13 on model 1 | `roundtrip.rs`, `support_parity.rs`, `transforms.rs`, `errors.rs`, `acceptance_artifacts.rs` |
+| `pad_bridge_donor.chitubox` | Minimal single-model project carrying one real PAD and one real BRIDGE record | `native_winding_oracle.rs` (excluded from the winding oracle itself — circular; see Provenance) |
+| `two-supports.chitubox` | UI-authored two-support project pinning type 7/1 contacts, type 9 joint spheres, type 3 columns, type 4 bosses, and type 6 raft | `native_winding_oracle.rs`, `format_gate.rs`, `preview_fallback.rs`, `no_python_guard.rs` |
+| `basic-cube-supports-raft.chitubox` | Native ChituBox-authored project (20x20x20 cube, 12 tris) carrying real PAD and BRIDGE type-6 records; 71 support records demonstrating bottom-connected raft bridging | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle), `format_gate.rs` |
+| `cylinder-supported-bottom-connected.chitubox` | Native ChituBox-authored project (Cylinder, 244 tris) carrying real PAD and BRIDGE type-6 records; 166 support records, bottom-connected | `native_winding_oracle.rs` (the PAD/BRIDGE winding oracle), `format_gate.rs` |
 | `morel.chitubox` | Morel Mudskipper, unsupported | `roundtrip.rs` |
-| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records | `roundtrip.rs`, `support_parity.rs`, `native_winding_oracle.rs` (open-soup case only) |
-| `Sphere.stl`, `Cylinder.stl` | Source meshes for the scenes above | `synth_compare.rs` |
+| `morel_mudskipper_supports.chitubox` | Morel Mudskipper, 243 support records (merged supports — the pinned OPEN-soup case) | `roundtrip.rs`, `support_parity.rs`, `native_winding_oracle.rs` (open-soup case only), `format_gate.rs` |
+| `Sphere.stl`, `Cylinder.stl` | Source meshes for the scenes above | `synth_compare.rs`, `acceptance_artifacts.rs`, `regen_corpus.rs` |
 
-Not committed (too large, ~35MB): `treant_v5_candidate.chitubox`, pinned at 1360 support
-records by `support_parity.rs`. Found via `CHITUBOX_CORPUS_DIR`; those tests SKIP without it.
+Not committed (too large, ~35MB): `treant_v5_candidate.chitubox`, pinned at
+1360 support records by `support_parity.rs`. Found via
+`CHITUBOX_CORPUS_DIR`; tests referencing it alone `SKIP:` without it —
+every other fixture in this table is a required, never-skipped input.
 
 ## Provenance
 
-`empty`, `morel`, `morel_mudskipper_supports`, `Sphere.stl` and `Cylinder.stl` are the
-original files.
+`empty`, `morel`, `morel_mudskipper_supports`, `Sphere.stl` and `Cylinder.stl`
+are the original ChituBox-authored files.
 
-The five `sphere-*`/`cylinder-*` specimens were regenerated by this library at commit
-`aa08704bfc7918be4b83a74e9d61a774ab1ae28d` after the ChituBox-authored originals were lost
-on 2026-07-24; `pad_bridge_donor` was built at the same commit by re-hosting two records
-lifted from `morel_mudskipper_supports.chitubox`. Reproduce them all with:
+The five `sphere-*`/`cylinder-*` specimens were regenerated by
+`chitubox_io`'s own writer after the ChituBox-authored originals were lost on
+2026-07-24; `pad_bridge_donor` was built the same way, by re-hosting two
+records lifted from `morel_mudskipper_supports.chitubox`. Reproduce them all
+with:
 
     cargo run --example regen_corpus -- <stl_dir> <donor.chitubox> <out_dir>
 
-`two-supports.chitubox` is the original UI-authored project supplied on
-2026-07-26 as the authoritative native-segment semantic donor; it is not
-regenerated by the command above.
-
-`basic-cube-supports-raft.chitubox` and `cylinder-supported-bottom-connected.chitubox`
-are likewise **original ChituBox-UI-authored files, not regenerated by this library**.
-They are the source specimens from which the entire PAD and BRIDGE (type 6) binary
-record contract in `scripts/support_placement/chitubox_emit.py` was reverse-engineered
-(fixed 2.2mm width/diameter, 0.2mm height, 80-triangle/2,880-byte pads, 12-triangle/
-432-byte bridges, record endpoint Z sentinel 0, trailing f32 pairs). They were held
-outside the repo (rzip-compressed) until 2026-07-30 and are committed now, alongside
-`two-supports.chitubox`, as native ground truth — precisely because the rest of that
-class (the five `sphere-*`/`cylinder-*` specimens and `pad_bridge_donor`) was lost on
-2026-07-24 and had to be regenerated by the library itself, which makes that portion of
-the corpus circular: self-generated fixtures cannot catch a bug in the writer that
-produced them. Do not mistake these two, or `two-supports.chitubox`, for library output.
+`two-supports.chitubox`, `basic-cube-supports-raft.chitubox`, and
+`cylinder-supported-bottom-connected.chitubox` are **original
+ChituBox-UI-authored files, never regenerated by this library.** They are
+the source specimens from which the PAD and BRIDGE (type 6) binary record
+contract in [`docs/specs/chitubox-format.md`](../../../../docs/specs/chitubox-format.md)
+was reverse-engineered (fixed 2.2mm diameter, 0.2mm height, 80-triangle
+pads, 12-triangle bridges). They are committed as native ground truth
+precisely because the regenerated class above (the five `sphere-*`/
+`cylinder-*` specimens and `pad_bridge_donor`) is circular for validating
+writer bugs: a bug in the writer that produced them would reproduce
+identically in the "expected" file. Never promote a regenerated fixture to
+a role only a native fixture can fill — see
+[`docs/specs/chitubox-io.md`](../../../../docs/specs/chitubox-io.md) for the
+crate contract these fixtures gate.

@@ -1,6 +1,6 @@
 //! The winding algorithm validated against native ChituBox geometry.
 //!
-//! `05-chitubox-and-corpus.md` §2 rules that the Python trimesh
+//! `docs/specs/chitubox-format.md` §2 rules that the Python trimesh
 //! `mass_properties` winding check is REPLACED by a native f64
 //! signed-tetrahedron-volume sum in `geom_kernel`, and that the chosen
 //! algorithm must be validated against the **native** ground-truth fixtures of

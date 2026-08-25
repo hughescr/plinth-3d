@@ -79,7 +79,7 @@ use crate::{
 /// mechanism: a nominated contact covers everything within the coverage
 /// radius, so a repair nominated for a dust patch routinely closes a real
 /// hole beside it. Dropping the dust patch from the worklist drops that
-/// contact and leaves the real hole open. SPEC-A3-A4-COVERAGE.md §4 says this
+/// contact and leaves the real hole open. docs/specs/coverage-repair.md §4 says this
 /// itself — censored area is "diagnostic only … **not permission for another
 /// hard gate to fail**" — so the censor is a rule about verdicts, not about
 /// effort.
@@ -99,7 +99,7 @@ use crate::{
 ///
 /// # The censor, and why it is per patch
 ///
-/// `SPEC-A3-A4-COVERAGE.md` §4 states the rule this predicate implements:
+/// `docs/specs/coverage-repair.md` §4 states the rule this predicate implements:
 ///
 /// > A patch fails if and only if either:
 /// > 1. its uncovered area is greater than `voxel_pitch_mm**2`; or
@@ -212,7 +212,7 @@ pub fn registered_coverage_request() -> Result<CoverageMeasurementRequest, Cover
 
 /// The registered A3 coverage censor: `voxel_pitch_mm²`, one voxel-pitch square.
 ///
-/// `SPEC-A3-A4-COVERAGE.md` §4: "Area at or below `voxel_pitch_mm**2` is
+/// `docs/specs/coverage-repair.md` §4: "Area at or below `voxel_pitch_mm**2` is
 /// **censored A3 uncertainty** … At the current 0.4 mm pitch the censor is
 /// 0.16 mm²." The provenance is the registered `VOXEL_PITCH_MM` placeholder
 /// (0.4 mm, "Legacy perception working scale inferred from one corpus run"),
@@ -1408,7 +1408,7 @@ mod tests {
         );
     }
 
-    /// SPEC-A3-A4-COVERAGE.md §4 is written as "GREATER THAN
+    /// docs/specs/coverage-repair.md §4 is written as "GREATER THAN
     /// `voxel_pitch_mm**2`" with "area AT OR BELOW" censored, so the boundary
     /// itself is censored. Pinned because `>` and `>=` differ here on exactly
     /// one real value and nothing else in the suite would notice.

@@ -74,7 +74,7 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// `plinth-support` cannot depend on `plinth-pipeline` (the dependency runs
 /// the other way). Every call site below fed `vec![0.0; faces]` until this
 /// row; see
-/// `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md` and
+/// `docs/architecture.md` and
 /// `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
 /// §5 for why the all-zeros feed was not a neutral default.
 fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
@@ -107,7 +107,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 ///
 /// Every unit of that delta is PR-8 `NotAttached` quarantining FOUR stubs whose
 /// model contact has no renderable interface
-/// (`docs/engineering-journal/contact-physics-2026-08-04.md`, PR-8 / OD-4).
+/// (`docs/physics.md`, PR-8 / OD-4).
 /// Measured against the run's 0.05 mm process resolution by the attestation
 /// witness (centreline false, 0 of 8 rim rays) and independently by a parity
 /// sweep along the contact normal at 0.0025 mm:
@@ -136,7 +136,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// 64/179 -> 64/170 and `make_raking_blade` 32/89 -> 27/72. Every unit of that
 /// delta is the removal of **24 phantom island births**, each traced to a named
 /// print layer by the census attribution
-/// (`docs/engineering-journal/slicer-union-design-2026-08-07.md` sec 8.5 and its
+/// (`docs/architecture.md` sec 8.5 and its
 /// 2026-08-08 addendum):
 ///
 /// - `make_raking_blade`: 20 births at layers 90..=109 — one per layer, the
@@ -172,7 +172,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// contact, membership, live member, coverage sample or island line differs).
 /// The owner ruled: "The fingerprints aren't sacred  if things change slightly
 /// that's to be expected (because the algorithm wasn't right when the
-/// fingerprints were generated!)". See `docs/engineering-journal/CURRENT-STATUS.md`
+/// fingerprints were generated!)". See `CONTENT-DROPPED (removed 2026-08-25, see git log)`
 /// sections `#fu32-j3-2026-08-09` (the attribution) and `#fu32-j4-2026-08-09`
 /// (this re-pin).
 /// **FU-56 addendum, 2026-08-12: `make_raking_blade` now REFUSES, by a typed
@@ -191,7 +191,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// nominates for either island, at this radius, from this fixture's pool.
 /// This was always true of the fixture; nothing before FU-56 ever measured
 /// it, because production `run_support` had no coverage-closure step at all
-/// (`CURRENT-STATUS.md` FU-56). **Do not respond to this by touching the
+/// (`CONTENT-DROPPED (removed 2026-08-25, see git log)` FU-56). **Do not respond to this by touching the
 /// radius, the floor, or the tolerance** — the FU-56 ruling is explicit that
 /// "not one of the 21 [minis] has been shown to be closable ... the first
 /// action is what would show it," and this fixture's answer is "not
@@ -242,12 +242,12 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// the 8-attempt closure bound is still 8. **No digest is claimed wrong:** each
 /// value on the left of an arrow above remains exactly reproducible by the
 /// harness that produced it, against the zero-field engine that was the engine
-/// at the time. See `docs/engineering-journal/CURRENT-STATUS.md`'s FU-38 row
+/// at the time. See `CONTENT-DROPPED (removed 2026-08-25, see git log)`'s FU-38 row
 /// and its dated section for the full from→to record, including the OD-8
 /// census septet and the coverage-gate golden.
 ///
 /// **Amended 2026-08-14, when the written 0.16 mm² A3 censor was honoured**
-/// (SPEC-A3-A4-COVERAGE.md §4; `plinth_support::coverage_patch_blocks_verdict`).
+/// (docs/specs/coverage-repair.md §4; `plinth_support::coverage_patch_blocks_verdict`).
 /// The two-island record above is now a record of its own date: the blade's
 /// islands are **0.0600 mm² (island 3)** and **5.1350 mm² (island 5)**, and the
 /// censor is `voxel_pitch_mm²` = 0.16 mm², so island 3 falls below one voxel
@@ -724,7 +724,7 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// 11-tuple resource plan, all 9 islands, all 9 patches, all 7 defects and the
 /// 64/170 counts are byte-identical; the only field that differs anywhere in
 /// the frozen JSON is `snapshot_digest`. Ledgered in
-/// `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+/// `docs/evidence/emission-canary.md`.
 #[test]
 fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let hollowed = hollowed_corpus_model(
@@ -1004,7 +1004,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 /// **The repair worklist is UNCENSORED, and this fixture is why** (co-owner
 /// ruling, 2026-08-14).
 ///
-/// The 0.16 mm² A3 censor (`SPEC-A3-A4-COVERAGE.md` §4, `voxel_pitch_mm²`)
+/// The 0.16 mm² A3 censor (`docs/specs/coverage-repair.md` §4, `voxel_pitch_mm²`)
 /// decides **verdicts**: sub-censor area is "censored A3 uncertainty …
 /// diagnostic only … **not permission for another hard gate to fail**". When
 /// the same censor was also applied to the coverage-closure controller's

@@ -1,5 +1,5 @@
 //! Z-rotation of a rigid assembly. The format has no rotation field —
-//! rotation is baked into the centered vertex stream (CHITUBOX-FORMAT.md
+//! rotation is baked into the centered vertex stream (docs/specs/chitubox-format.md
 //! §3.1). Rotation about local Z through the origin:
 //! `(x,y,z) -> (x cosθ - y sinθ, x sinθ + y cosθ, z)`.
 
