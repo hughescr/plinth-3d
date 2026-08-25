@@ -76,7 +76,7 @@ source behavior are the legacy comparison target; they are not safety evidence.
 
 Support-physics redesign and calibration remain post-Python work under O-6. The
 concrete next task is
-[`07-post-python-support-calibration-plate.md`](07-post-python-support-calibration-plate.md):
+[`docs/plans/support-calibration.md`](../plans/support-calibration.md) (formerly `07-post-python-support-calibration-plate.md`):
 its preregistered plate must be challenged before fabrication, and it is roadmap
 work rather than a Python-deletion blocker.
 

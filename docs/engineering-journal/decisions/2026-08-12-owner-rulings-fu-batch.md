@@ -1,7 +1,7 @@
 # Decision — ten follow-up rows ruled in one batch
 
 **Rulings given 2026-08-12 by the owner (Craig Hughes)** on ten rows of the
-follow-ups ledger ([`CURRENT-STATUS.md#follow-ups-2026-08-04`](../CURRENT-STATUS.md#follow-ups-2026-08-04)):
+follow-ups ledger (`CURRENT-STATUS.md#follow-ups-2026-08-04` — deleted in the 2026-08 docs restructure, content not carried forward):
 **FU-55, FU-57, FU-50, FU-47, FU-38, FU-46, FU-54, FU-37, FU-51, FU-36**, in the
 order the owner gave them. Each ruled row is annotated in place in the ledger and
 points back here; this record carries the reasoning as it stood on this date.
@@ -31,7 +31,7 @@ Option (a) — accepting interim under-walled emission — is **rejected**: a 0.
 wall is roughly five resin layers, and an artifact that looks preparable and cannot
 be printed is worse than a solid one that can.
 
-**The fallback is interim and is not the goal.** [FU-53](../CURRENT-STATUS.md) —
+**The fallback is interim and is not the goal.** FU-53 (`CURRENT-STATUS.md`, deleted in the 2026-08 docs restructure) —
 make the engine actually deliver the requested 2.5 mm wall — is **MANDATED and
 prioritized**. The objective is hollowing properly, not refusing gracefully; a
 graceful refusal that becomes permanent is a hollow stage that never pays for
@@ -133,7 +133,7 @@ about closure or orientation is relaxed, and no threshold moves. A check whose
 premise was wrong is retired, and a *physical* rule about resin flow — with an
 already-registered constant behind it — takes its place.
 
-**Not ruled here:** [FU-48](../CURRENT-STATUS.md), the attribution of the
+**Not ruled here:** FU-48 (`CURRENT-STATUS.md`, deleted in the 2026-08 docs restructure), the attribution of the
 decimator-manufactured pinch. Its refusal premise changes once the flag leaves this
 gate, but which stage *writes* the pinch is still an open measurement and that row
 is left standing untouched.
@@ -275,7 +275,7 @@ writes carries a 16-sliver seam. That is our own code emitting geometry we would
 refuse from anyone else's.
 
 **How it lands.** The fix gets **its own measured byte-moving pass**, under the
-**A/B process recorded in [`05-chitubox-and-corpus.md`](../05-chitubox-and-corpus.md)**
+**A/B process recorded in [`docs/specs/chitubox-format.md`](../../specs/chitubox-format.md)** (content absorbed; formerly `05-chitubox-and-corpus.md`)
 — the corpus artifacts re-measured against the recorded baseline, per-record byte
 movement measured rather than assumed. The seam repair moves the 16 south apices from
 `r × 1.2246e-16` to `0.0` in x and y; whether that reaches the wire is per-record

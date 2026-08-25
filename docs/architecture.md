@@ -3,10 +3,10 @@
 How a model becomes a printable file, and which crate owns each part of it.
 
 ```
-STL ─▶ decimate ─▶ orient ─▶ hollow ─▶ supports ─▶ lower ─▶ emit ─▶ .chitubox
-                                          │
-                        perception · specialized contacts · initial contacts
-                        routing · rewire · brace · structure
+STL ─▶ repair ─▶ decimate ─▶ orient ─▶ hollow ─▶ supports ─▶ lower ─▶ gate ─▶ emit ─▶ .chitubox
+                                                     │
+                                   perception · specialized contacts · initial contacts
+                                   routing · rewire · brace · structure
 ```
 
 Every stage hands the next one a typed value, and a stage that cannot do its job returns a
@@ -17,12 +17,29 @@ never turn into silence.
 
 ## The stages
 
+### Repair
+
+An automatic pre-pass, upstream of every gate in the chain, that fixes two measured defect
+classes on the loaded mesh: dust shards (delegated whole to the same six-criteria triage the
+hollow stage runs) and exact-duplicate faces (re-derived after the strip, so a stripped shard
+cannot leave a duplicate decision looking at adjacency that no longer exists). A third action,
+splitting pinch vertices, was removed after a 2026-08-12 ruling reclassified a point-touch as a
+legitimate contact rather than a defect (see [`physics.md`](physics.md)).
+
+The pass may only **decline**, never refuse: it returns a mesh, not a `Result`, so a model it
+cannot help — or that trips its own resource bound — comes back bit-identical with the reason
+recorded, and every gate downstream judges exactly what it judged before this stage existed. A
+mesh with neither defect passes through byte-identical, proved through a binary-STL round trip
+rather than by inspection. No gate is softened by this stage; a model whose defects survive it
+is refused exactly as it was before, and the refusal is an automation work item, not a
+threshold to move.
+
 ### Decimate
 
 Reduces the triangle count under an explicit, measured error budget, protecting the features
-that matter. It runs **first** on purpose: its output is the *only* production mesh every
-later stage may consume, so no stage is ever reasoning about a different mesh than the one
-that will print.
+that matter. It runs immediately after repair, on purpose: its output is the *only* production
+mesh every later stage may consume, so no stage is ever reasoning about a different mesh than
+the one that will print.
 
 Reduction is not guaranteed. Candidates that break mesh topology are rejected, and if no
 candidate survives, the stage hands on the original mesh. That is a legitimate outcome, not
@@ -30,15 +47,21 @@ a failure — the guarantee is about what downstream sees, not about how small i
 
 ### Orient
 
-Applies the chosen rigid rotation and rebuilds the build frame: the transformed bounding box
-is centred in XY and rests at Z = 0. The rotated mesh replaces the production mesh outright;
-no untransformed second copy survives the stage, so there is nothing for a later stage to
-pick up by mistake.
+Applies a rigid rotation and rebuilds the build frame: the transformed bounding box is
+centred in XY and rests at Z = 0. The rotated mesh replaces the production mesh outright; no
+untransformed second copy survives the stage, so there is nothing for a later stage to pick
+up by mistake.
 
 Orientation is the coupling hub of the whole problem — it decides which surfaces face down,
-and therefore where the unavoidable support scars land (see
-[`physics.md`](physics.md)). The stage currently applies a selected orientation rather than
-searching for one.
+and therefore where the unavoidable support scars land (see [`physics.md`](physics.md)). By
+default the stage runs a three-tier dense sweep over a candidate grid — coarse on a proxy
+mesh, refine the leading candidates on a finer proxy, commit the survivors (plus a
+permanently escorted legacy candidate block, so the sweep is never worse than the orientation
+it replaced) at the full mesh — and commits the winner. It can instead replay a **pinned**
+baseline: one prior rotation, applied verbatim, keyed by model name so a folder of different
+minis is never given one model's answer. Either way, orientation is never inferred: the sweep
+measures every candidate and records what it measured, including when the winner is the
+identity rotation.
 
 ### Hollow
 
@@ -78,11 +101,19 @@ in a fixed order. This pass is deliberately pure and serial: it performs no geom
 and makes no decisions. One structural member becomes several wire segments here, which is
 why the emitted record count is larger than the member count.
 
+### Gate
+
+The sole, override-free door between a sealed support authority and a written file. It judges
+the sealed verification snapshot — today, whether the model's surface is adequately covered —
+before the authority is consumed by anything downstream. A refused model leaves no artifact on
+disk at all: not a truncated one, not an empty one, and not a stale file left over from an
+earlier run of the same model.
+
 ### Emit
 
-The single boundary where f64 geometry becomes the `.chitubox` file's f32 records. It writes
-one fresh project — never a template that already contains a model — and then audits a
-**newly opened** copy of what it just wrote.
+The single boundary where f64 geometry becomes the `.chitubox` file's f32 records. Only a
+passed authority reaches it. It writes one fresh project — never a template that already
+contains a model — and then audits a **newly opened** copy of what it just wrote.
 
 The model and its supports stay separable all the way through: supports are attached as
 per-model records carrying their own semantic kinds, not welded into one mesh. That is what
@@ -102,18 +133,18 @@ equal; it is not a claim about how any particular GUI will render it.
 | crate | role |
 | --- | --- |
 | `plinth-core` | The stable, dependency-light vocabulary: data contracts, the constants registry and its provenance types, and the single acceptance authority every stage reports through. No geometry. |
-| `plinth-mesh` | The f64 mesh substrate — topology, delicacy, STL I/O, triage. Meshes are kept exactly as their source supplied them: no implicit weld, reorder, repair or f32 conversion. |
+| `plinth-mesh` | The f64 mesh substrate — topology, delicacy, STL I/O, triage, and the automatic repair pre-pass (declines rather than refuses; a clean mesh passes through byte-identical). Loading keeps meshes exactly as their source supplied them: no implicit weld, reorder or f32 conversion. |
 | `plinth-metrics` | Independent, deliberately brute-force geometry and topology audit. It depends on none of the producing crates — that is what makes it an auditor. |
 | `plinth-decimate` | The mandatory production decimation substrate: a narrow adapter over a locked QEM simplifier, with probing, protection halos and error-budget measurement around it. |
-| `plinth-orient` | Orientation: applies the rigid rotation and rebuilds the build frame. |
+| `plinth-orient` | Orientation: the three-tier dense sweep and the rigid rotation it (or a pinned baseline) commits, rebuilding the build frame. |
 | `plinth-hollow` | Shell creation, cavity field, drain and vent placement, drilling. |
 | `plinth-solid` | Batch-shaped f64 boolean-solid operations. |
 | `plinth-layers` | Per-layer polygon union with fill-rule normalization, so every downstream consumer of a slice is correct whichever fill rule it evaluates. |
 | `plinth-support` | The engine: perception, contact physics, routing, rewiring, bracing, member sizing, coverage, raft, lowering, and the run sealer. |
-| `plinth-verify` | Disk-first `.chitubox` container verification. |
+| `plinth-verify` | The gate crate: `verify_coverage`, the coverage verdict the pre-write gate consults before any bytes are written, and `verify_artifact`, disk-first `.chitubox` container verification consulted after the write — reading precisely the bytes on disk, no producer state, cache, or repair path. |
 | `plinth-emit` | The single final emission boundary: f64 support geometry to f32 wire records, one fresh project, then an audit of a freshly opened copy. |
-| `plinth-pipeline` | The folder-in, one-artifact-per-model data boundary and its stage-stop types. The signature is defined; the runner behind it is the next thing being built. |
-| `plinth-cli` | Typed parser for the `plinth` command line. Parsing stops before execution policy is assembled. |
+| `plinth-pipeline` | The folder-in, one-artifact-per-model runner: sequences repair → decimate → orient → hollow → support for every model in a directory, then owns the pre-write gate (§ Gate) that is the sole door between a sealed support authority and a written file, before handing a passed model to `plinth-emit`. |
+| `plinth-cli` | The `plinth` binary. One subcommand, `prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense\|pinned:DIR] [--wall-mm MM] [--no-cache]`: resolves the request against the registered printer profile and resource policy, runs the pipeline over every model in the directory, and reports each model's disposition. |
 | `rust/geom_kernel` | The batch-first triangle-soup geometry kernel: BVH, closest point, ray and segment batches, slicing, parity grids. Every public query takes a slice and returns a slice. |
 | `rust/chitubox_io` | Reads and writes `.chitubox` projects starting from an *empty* project. Every write is verified by structural re-parse. |
 
