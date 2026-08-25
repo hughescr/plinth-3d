@@ -24,9 +24,11 @@ will ship the file. See [`docs/physics.md`](docs/physics.md).
 | **Determinism** | The same input produces a byte-identical file, run after run, at any thread count. |
 | **Self-check** | Every artifact is judged by re-opening the bytes on disk — a fresh parse, a fresh winding computation, a structural format gate — never by trusting what the producer thought it wrote. |
 
-Every model in the test corpus reaches a verified artifact, including the flagship: a
-**429,120-triangle** production miniature that runs the whole chain to a 27 MiB project with
-2,585 support records, twice, byte for byte the same.
+Not every model in the corpus reaches an artifact yet — see
+[`docs/status.md`](docs/status.md) for the current count and what still blocks the rest. Every
+model that *does* reach one is verified byte-identical on repeat runs, including the
+flagship: a **429,120-triangle** production miniature that runs the whole chain to a 27 MiB
+project with 2,585 support records, twice, byte for byte the same.
 
 ## Quick start
 
@@ -37,34 +39,30 @@ There is no other build dependency and no interpreter in the loop.
 cargo build --workspace --offline
 ```
 
-The runnable end-to-end entry point today is an example that drives the real chain over the
-test corpus and writes artifacts to `exports/`:
+`plinth prepare` walks a folder of STLs and writes one `.chitubox` project per model that
+passes the pipeline's pre-write physics gates:
 
 ```sh
-# every fast corpus model, one artifact each
-cargo run --release --offline --example first_artifact -p plinth-pipeline -- --all
-
-# one model by name (the flagship takes minutes, not seconds)
-cargo run --release --offline --example first_artifact -p plinth-pipeline -- "Weeping Treant v1.2"
+cargo run --release --offline -p plinth-cli -- prepare \
+  --input-models-dir path/to/stls --output saturn4-ultra --out-dir prepared/
 ```
 
-Each run prints the stage results, the emitted record counts, and the verdict of the format
-gate that re-read the file, then leaves
-`exports/<model>-first-artifact.chitubox` behind. Open it in ChituBox to look at the
-supports and slice.
+Orientation defaults to a dense per-model search (`--orient dense`); pass
+`--orient pinned:DIR` to replay a rotation a previous run recorded instead of searching again.
+`--wall-mm` overrides the hollow shell's wall thickness. Each run prints a per-model report —
+stage results, emitted record counts, the size the pipeline assumed the model was — and exits
+`3` if any model was refused by a physics gate, so a calling script can tell a refusal from a
+crash. Open the resulting `.chitubox` in ChituBox to look at the supports and slice.
+
+For driving the engine directly over the test corpus instead of a folder of your own STLs
+(useful for development), there is also an example:
+
+```sh
+cargo run --release --offline --example first_artifact -p plinth-pipeline -- --all
+```
 
 The corpus STLs are inputs rather than source and are not stored in git; see
 [`docs/development.md`](docs/development.md) for how to provision them.
-
-**The command-line front end runs, but it cannot orient a model yet.** `plinth prepare`
-now walks the folder for real: it loads and measures every `.stl`, prints a per-model run
-report including the size it assumed the model was, and writes one `.chitubox` per model
-that passes the pre-write physics gates. What is missing is one flag. Orientation is never
-inferred — the engine applies a rotation a pinned baseline states, and the automatic
-orientation search is not ported — so with no way to name a baseline on the command line,
-every model stops at a named orientation refusal. The folder runner underneath it is
-complete and produces real artifacts under a pinned orientation policy; until the flag
-lands, `cargo run --example first_artifact` above is the way to get a file.
 
 ## How it fits together
 
@@ -81,34 +79,34 @@ from is in [`docs/physics.md`](docs/physics.md).
 
 ## Known limitations
 
-**1. Support quality needs work.** The supports in a generated file are structurally sound —
-each one is sized to the measured load rule and proven attached — but their quality as a
-print aid has known issues that will be addressed. Expect to inspect the file before you
-print it.
+Not every model in the corpus emits, and the current count, causes, and the work in progress
+against them are tracked in [`docs/status.md`](docs/status.md) rather than repeated here.
+Limitations that are architectural rather than a specific open task:
 
-**2. Hollowing does not yet handle models with several internal cavities.** A shell that
+**1. Hollowing does not yet handle models with several internal cavities.** A shell that
 encloses more than one separate void is currently refused by the hollow stage, and the model
 is prepared **solid** instead. It still produces a correct, printable file; it just does not
-get the resin saving. The flagship tree is one such model.
+get the resin saving. The flagship tree is one such model. The planned fix keeps the cavities
+large enough to drain reliably, refills the rest with resin, and prefers to place the drain
+holes on surfaces that will not be seen.
 
-The planned fix keeps the cavities that are large enough to drain reliably, refills the rest
-with resin, and prefers to place the drain holes on surfaces that will not be seen.
-
-**3. The calibration is printer- and resin-specific.** Every measured constant comes from
+**2. The calibration is printer- and resin-specific.** Every measured constant comes from
 plates printed on one machine in one class of resin. Another printer or another resin needs
 its own plates before the numbers mean anything. Some of the engine's values are still
 unmeasured placeholders, and they are labelled as such rather than quietly trusted —
-[`docs/physics.md`](docs/physics.md) explains how to tell which is which.
+[`docs/physics.md`](docs/physics.md) explains how to tell which is which, and
+[`docs/plans/support-calibration.md`](docs/plans/support-calibration.md) tracks the plates
+still queued.
 
-**4. Slicing is still ChituBox's job.** plinth produces the project; you open it and slice.
+**3. Slicing is still ChituBox's job.** plinth produces the project; you open it and slice.
 
 ## Where it is going
 
-Four steps, in order. Each one is useful on its own.
+`plinth prepare` — folder in, one project per model out, no GUI in the loop — is the working
+entry point today. Beyond it, in order:
 
 | | |
 | --- | --- |
-| **Prepare a folder** | `plinth prepare <folder> --output <printer>` — walk a directory of STLs and write one prepared project per model, with no GUI in the loop. |
 | **Plate packing** | Pack several models onto one build plate, laid out against that printer's real plate geometry. |
 | **Native slicing** | Slice directly to whatever the machine eats, so the automated path no longer needs ChituBox at all. `.chitubox` stays a first-class output for anyone who wants to look before printing. |
 | **Send to the printer** | Deliver the sliced job over the network. |
