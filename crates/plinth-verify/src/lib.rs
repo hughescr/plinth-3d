@@ -294,7 +294,7 @@ fn request_record(request: CoverageMeasurementRequest) -> CoverageRequestRecord 
 /// BLOCKING patches only.
 ///
 /// `censor_area_mm2` is the request's own `voxel_pitch_mm²`. Per
-/// SPEC-A3-A4-COVERAGE.md §4 it bounds EACH PATCH, so a censored patch is not
+/// docs/specs/coverage-repair.md §4 it bounds EACH PATCH, so a censored patch is not
 /// blocking and contributes nothing to its island's measure; an island whose
 /// every patch is censored raises no defect at all. See
 /// `plinth_support::coverage_patch_blocks_verdict` for the quoted spec text and
@@ -739,7 +739,7 @@ mod tests {
 
     /// **The censor, both ways, at the verdict layer.**
     ///
-    /// SPEC-A3-A4-COVERAGE.md §4: "A patch fails if and only if either: 1. its
+    /// docs/specs/coverage-repair.md §4: "A patch fails if and only if either: 1. its
     /// uncovered area is greater than `voxel_pitch_mm**2`; or 2. it touches an
     /// ambiguous topology cut. Area at or below `voxel_pitch_mm**2` is
     /// **censored A3 uncertainty**."

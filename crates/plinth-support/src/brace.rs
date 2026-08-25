@@ -6738,7 +6738,7 @@ mod tests {
     /// path only fires for a member whose own seat faces are excluded from the
     /// distance query, so reproducing it geometrically needs a seated arm on a
     /// non-convex surface — the Deinonychus's terminal 113 is the real
-    /// witness, recorded in `EMISSION-CANARY-LEDGER.md`. What was defective
+    /// witness, recorded in `docs/evidence/emission-canary.md`. What was defective
     /// was the DISCLOSURE, and the disclosure is what this pins.
     ///
     /// **The coverage gap this leaves, stated rather than left for a reader to

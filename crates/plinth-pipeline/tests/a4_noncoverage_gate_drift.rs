@@ -1,7 +1,7 @@
 //! **SPEC-A4 §C.3 — the clause-2 forgetting-proof, at the layer where it can
 //! exist.**
 //!
-//! SPEC-A3-A4-COVERAGE.md §6 clause 2 says a committed repair step is accepted
+//! docs/specs/coverage-repair.md §6 clause 2 says a committed repair step is accepted
 //! only when "every noncoverage hard-gate count is componentwise no worse".
 //! `plinth_support::NoncoverageVector` is what compares them — and it can only
 //! compare counts that exist. Of the twelve pre-write gates, **exactly one is

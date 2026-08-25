@@ -1478,7 +1478,7 @@ mod tests {
 
     /// **Stage D — BOTH evidence files disclose the rescue, from one record.**
     ///
-    /// Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+    /// Design authority: `docs/specs/seal-semantics.md`
     /// §4 Stage D. *"The no-good ledger, the pass count and the
     /// confirmation-round record join the coverage refusal sidecar."*
     ///

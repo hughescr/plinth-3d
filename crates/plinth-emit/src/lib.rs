@@ -844,7 +844,7 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
 /// So southern mid-band ring vertices can move on the wire too, not only the
 /// pole and equator rings. Per-record byte movement was measured rather than
 /// inferred from this: see the FU-36 A/B table in
-/// `docs/engineering-journal/05-chitubox-and-corpus.md`.
+/// `docs/specs/chitubox-format.md`.
 fn sphere_point(
     center: [f64; 3],
     radius: f64,
@@ -943,7 +943,7 @@ fn perpendicular_basis(normal: [f64; 3]) -> Result<([f64; 3], [f64; 3]), EmitErr
 /// Wind a whole gathered batch of soups outward in one kernel call.
 ///
 /// The f64 tetrahedron sum itself lives in `geom_kernel` (O-5: one
-/// implementation per capability; the 05-chitubox-and-corpus.md ruling that
+/// implementation per capability; the docs/specs/chitubox-format.md ruling that
 /// replaced Python's trimesh `mass_properties` winding check).  This crate
 /// keeps only the boundary mapping onto its own error enum, because a soup a
 /// signed volume cannot be stated for is exactly a record that cannot be

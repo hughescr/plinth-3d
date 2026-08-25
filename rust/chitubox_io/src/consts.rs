@@ -1,6 +1,6 @@
 //! On-disk constants and field offsets for the ChituBox Basic 1.3.0
 //! `.chitubox` container. Every value here is pinned by the corpus recon
-//! (see `docs/engineering-journal/specs/CHITUBOX-FORMAT.md`). A parse that finds a pinned
+//! (see `docs/specs/chitubox-format.md`). A parse that finds a pinned
 //! constant violated raises `FormatDrift`.
 
 // -- file / segment magics --------------------------------------------------

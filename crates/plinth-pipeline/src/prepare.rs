@@ -5,7 +5,7 @@
 //! `examples/shared/first_artifact_chain.rs`, where it was reachable only from
 //! a test and an artifact-producing example. `crates/plinth-cli` parsed the
 //! ratified command line and then printed "execution is not implemented".
-//! Design record E4/E5 (`docs/engineering-journal/export-path-design-2026-08-07.md`)
+//! Design record E4/E5 (`docs/architecture.md`)
 //! names this the missing piece; this is it. The example's shared module is now
 //! a thin corpus-fixture wrapper over the functions below, so the code the test
 //! gates and the code the CLI runs cannot drift apart (O-5: one implementation
@@ -95,7 +95,7 @@ pub const PREPARED_MESH_LOD: &str = "prepared";
 /// geometry and was handed, on every model, a measurement that could never trip
 /// it. The owner ruling of 2026-08-10 closed that by building the producer-side
 /// evaluator; see
-/// `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md`.
+/// `docs/architecture.md`.
 ///
 /// The field is bound to this mesh at [`PREPARED_MESH_LOD`], which is what
 /// makes the per-face weights and the per-face areas the support stage measures
@@ -1037,7 +1037,7 @@ fn prepare_one(
     // **The repair pre-pass.** D-22 as written refused bad geometry and left
     // the owner to fix it in Blender; the owner ruling of 2026-08-10 overturned
     // that and made repair automatic and in-pipeline
-    // (`docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md`).
+    // (`docs/architecture.md`).
     // It sits here, on the loaded input, because that is upstream of every gate
     // in the chain — and it is *only* here. No gate below is softened by a
     // single line of this change; a model whose defects survive the pre-pass is

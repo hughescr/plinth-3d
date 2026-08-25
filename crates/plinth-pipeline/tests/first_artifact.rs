@@ -345,7 +345,7 @@ fn procedural_toed_slab_passes_the_gates_and_still_emits() {
         "make_toed_slab's artifact is made of something else now"
     );
 
-    // Eleven of the twelve gates in `00-migration-guide.md` have no ported
+    // Eleven of the twelve gates in `CONTENT-DROPPED (removed 2026-08-25, see git log)` have no ported
     // implementation yet. That is carried out to the caller rather than
     // described in a comment, and pinned here so it cannot silently grow.
     assert_eq!(

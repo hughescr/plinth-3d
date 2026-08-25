@@ -191,7 +191,7 @@ pub struct RetainedLoadCensus {
 /// and stopping mode, so a future treant transcript proves `rounds_committed`
 /// and *why it stopped* without scratch instrumentation (the G6d precedent:
 /// `PLINTH_G6D_ROUNDS` counted 823 committed rounds against 826 load
-/// builds, then was deleted before the gates — see `CURRENT-STATUS.md`
+/// builds, then was deleted before the gates — see `CONTENT-DROPPED (removed 2026-08-25, see git log)`
 /// §17.1/§G6d.8).
 ///
 /// `tournaments` counts `consolidate()` invocations (each one "opened a

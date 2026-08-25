@@ -444,7 +444,7 @@ fn assert_interval_rows_bit_identical(left: &[Vec<Interval>], right: &[Vec<Inter
 /// `CcoController::digest`). The fixture geometry, the rows, the mutation
 /// transcript and every assertion below are unaffected: the movement is
 /// decision-neutral and this model's routing output is byte-identical across
-/// it. See `docs/engineering-journal/CURRENT-STATUS.md` `#fu32-j4-2026-08-09`.
+/// it. See `CONTENT-DROPPED (removed 2026-08-25, see git log)` `#fu32-j4-2026-08-09`.
 #[test]
 fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
     let surface = surface_of(&make_raking_blade().expect("raking blade fixture"));
@@ -497,7 +497,7 @@ fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
 /// `CcoController::digest`). The fixture geometry, the rows, the mutation
 /// transcript and every assertion below are unaffected: the movement is
 /// decision-neutral and this model's routing output is byte-identical across
-/// it. See `docs/engineering-journal/CURRENT-STATUS.md` `#fu32-j4-2026-08-09`.
+/// it. See `CONTENT-DROPPED (removed 2026-08-25, see git log)` `#fu32-j4-2026-08-09`.
 #[test]
 fn fu8g_h5_overhang_table_hole_row_census_equals_execution_bit_for_bit() {
     let surface = surface_of(&make_overhang_table().expect("overhang table fixture"));

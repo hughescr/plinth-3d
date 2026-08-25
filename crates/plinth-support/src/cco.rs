@@ -835,7 +835,7 @@ pub(crate) struct FinalizedCcoTranscriptRow {
     /// [`transcript_rows_digest`] UNCONDITIONALLY, so the sealed CCO
     /// transcript fingerprint moves for EVERY model, once, at the commit that
     /// introduces it — not only for models that rule something out. It is
-    /// ledgered in `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+    /// ledgered in `docs/evidence/emission-canary.md`.
     ///
     /// It is zero on every path today. Nothing rules an arm out yet; the
     /// steering channel that fills it is Stage B's. The counter lands with
@@ -3043,7 +3043,7 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
         // rule nothing out, which is precisely the cheap-today, expensive-later
         // shape the ruling declined. Every model's sealed transcript digest
         // moves once, here, on purpose, and the move is ledgered in
-        // `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+        // `docs/evidence/emission-canary.md`.
         word(row.candidates_ruled_out as u64);
         match &row.route {
             Some(route) => {

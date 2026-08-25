@@ -1081,7 +1081,7 @@ impl Forest {
     /// **Why this is a split rather than a second walk.** A caller that needs
     /// to know the condemnation set BEFORE deciding whether the sweep may run
     /// at all — the seal-semantics classifier in `brace` (design
-    /// `seal-semantics-2026-08-22.md` §4 Stage A(b)) — must read the same
+    /// `docs/specs/seal-semantics.md` §4 Stage A(b)) — must read the same
     /// answer the mutation would produce. Exposing
     /// [`Forest::collect_subtree_leaf_first`] alone would reproduce the walk
     /// but neither `require_active` pass nor the union-dedup contract, and the

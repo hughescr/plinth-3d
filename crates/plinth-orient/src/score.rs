@@ -17,7 +17,7 @@
 //!
 //! recorded in `03-physics-and-constants.md` §3.8, with every weight a
 //! registered `Placeholder`.  The association order above is **pinned** (the
-//! einsum lesson, `02-target-architecture.md:781-783`): a re-association is a
+//! einsum lesson, `docs/architecture.md:781-783`): a re-association is a
 //! different set of rounding decisions and therefore a different argmin.
 //!
 //! ## The search space is S², not SO(3)

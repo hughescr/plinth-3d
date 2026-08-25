@@ -14,7 +14,7 @@
 //! are structural and must survive every later edit:
 //!
 //! * **Delicacy is a property of the `FaceTable` at the LOD being scored**
-//!   (`02-target-architecture.md:251-253`).  Every quantity below is computed
+//!   (`docs/architecture.md:251-253`).  Every quantity below is computed
 //!   from the mesh the table was bound to and from nothing else.  The Python
 //!   defect — delicacy taken from the full mesh while areas came from a
 //!   decimated proxy, so scar magnitudes moved with the decimation ratio —

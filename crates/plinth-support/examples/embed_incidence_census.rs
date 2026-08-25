@@ -177,7 +177,7 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     // scaled `DelicacyBuildConfig` -- inlined rather than imported because
     // this crate cannot depend on `plinth-pipeline` (the dependency runs the
     // other way: `plinth-pipeline` depends on `plinth-support`). See
-    // `docs/engineering-journal/decisions/2026-08-10-delicacy-producer.md`
+    // `docs/architecture.md`
     // and `docs/engineering-journal/decisions/2026-08-12-owner-rulings-fu-batch.md`
     // §5.
     //
@@ -185,7 +185,7 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     // the FULL from->to table -- both columns re-measured at this tip by
     // building this harness twice, once with the `vec![0.0; faces]` feed
     // restored verbatim from `44b8df1` and once with the real field -- is
-    // recorded in `docs/engineering-journal/CURRENT-STATUS.md` under the FU-38
+    // recorded in `CONTENT-DROPPED (removed 2026-08-25, see git log)` under the FU-38
     // row and its dated section
     // (`#fu38-real-delicacy-repin-2026-08-12`). In summary: SIX models seal and
     // all six digests move (`Sphere` 2297157889062365577 -> 686822247060573262,

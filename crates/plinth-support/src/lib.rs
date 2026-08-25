@@ -76,7 +76,7 @@ pub mod coverage_repair;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
 // (brace/cco/rewire) are gated on the open owner decisions recorded in
-// `docs/engineering-journal/CURRENT-STATUS.md`, so the allow is scoped and temporary.
+// `CONTENT-DROPPED (removed 2026-08-25, see git log)`, so the allow is scoped and temporary.
 #[allow(
     dead_code,
     reason = "crate-private designed embed masks await the gated verifier wiring in brace/cco/rewire"
@@ -1690,7 +1690,7 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-/// **SPEC-A3-A4-COVERAGE.md §6 clause 1's objective, in the spec's own order.**
+/// **docs/specs/coverage-repair.md §6 clause 1's objective, in the spec's own order.**
 ///
 /// > the coverage objective strictly improves lexicographically in this order:
 /// > total failing area, maximum failing-patch area, failing-patch count,

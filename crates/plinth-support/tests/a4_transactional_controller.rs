@@ -129,7 +129,7 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
 /// and they did not move** — still 64 routed identities and 170 final live
 /// members, still zero trials and zero commits. A controller that had touched a
 /// sealing model's plan would move those, and it did not. See
-/// `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+/// `docs/evidence/emission-canary.md`.
 #[test]
 fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
     let authority = run(
@@ -527,7 +527,7 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         "this model commits nothing, so no row in its stream may claim a commit number"
     );
 
-    // **The 37, on the wire** — `candidacy-exact-mask-2026-08-21.md` §F.
+    // **The 37, on the wire** — `docs/plans/support-clearance.md` §F.
     //
     // §F measured that 37 of `zombie-3-a`'s 89 rejected trials ended
     // `UnroutedNoWinner` on their own appended contact — a class that ends at

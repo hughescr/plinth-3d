@@ -45,7 +45,7 @@
 //! unmoved rule.
 //!
 //! **And it moved a fourth time on 2026-08-14, back to the original reading.**
-//! Honouring the written 0.16 mm² A3 censor (SPEC-A3-A4-COVERAGE.md §4)
+//! Honouring the written 0.16 mm² A3 censor (docs/specs/coverage-repair.md §4)
 //! showed that `make_raking_blade.prepped.stl`'s whole residual was ONE
 //! 0.0600 mm² patch — well under a single 0.4 mm voxel footprint. Its
 //! 2026-08-12 "genuine coverage-closure refusal" was genuine only relative to
@@ -162,7 +162,7 @@ impl Scratch {
 /// The refusal fixture every coverage-refusal test in this file uses.
 ///
 /// **Moved off `make_raking_blade.prepped.stl` on 2026-08-14**, when the
-/// written 0.16 mm² A3 censor was honoured (SPEC-A3-A4-COVERAGE.md §4;
+/// written 0.16 mm² A3 censor was honoured (docs/specs/coverage-repair.md §4;
 /// `plinth_support::coverage_patch_blocks_verdict`). That fixture's entire
 /// residual was ONE patch of **0.0600 mm²** — 0.375 of a single 0.4 mm voxel
 /// footprint — measured off its own FU-57 sidecar. It was a "refusal" only
@@ -987,7 +987,7 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
         "the unclosable island must be named"
     );
     // **The refusal is a real hole, not censored dust.** This is the other half
-    // of the 2026-08-14 censor change (SPEC-A3-A4-COVERAGE.md §4): a model whose
+    // of the 2026-08-14 censor change (docs/specs/coverage-repair.md §4): a model whose
     // uncovered area is genuinely above `voxel_pitch_mm²` must still be refused,
     // end to end, through the production executor. 5.135 mm² is 32x the
     // registered 0.16 mm² censor, so this assert is what goes red if the censor

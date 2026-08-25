@@ -4,7 +4,7 @@
 //! Blender geometry sweep and *refuses* bad geometry, with the owner repairing
 //! upstream by hand. The owner ruling of 2026-08-10 revised that: repair is
 //! built into the Rust pipeline, fully automatic, no manual steps
-//! (`docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md`).
+//! (`docs/architecture.md`).
 //! What the ruling did **not** revise is the gate: repair earns no exemptions,
 //! lands strictly upstream of the closed-solid gate, and its output has to pass
 //! that gate unchanged.

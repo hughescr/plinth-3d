@@ -2,7 +2,7 @@
 //!
 //! This is the harness that produced the numbers behind the D-22 revision
 //! (owner ruling 2026-08-10,
-//! `docs/engineering-journal/decisions/2026-08-10-d22-revision-automatic-repair.md`),
+//! `docs/architecture.md`),
 //! landed as a permanent diagnostic rather than left as a throwaway. Its whole
 //! job is to answer one question per model, four ways:
 //!

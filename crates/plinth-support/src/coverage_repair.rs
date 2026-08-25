@@ -1,6 +1,6 @@
 //! SPEC-A4 §B and §C: what one repair step must prove before it may be kept.
 //!
-//! The spec's own words, from `SPEC-A3-A4-COVERAGE.md` §6:
+//! The spec's own words, from `docs/specs/coverage-repair.md` §6:
 //!
 //! > One winner at a time enters a full construct, rewire, brace/size, and
 //! > verify transaction. It is accepted only when:
@@ -417,7 +417,7 @@ pub struct CoverageRepairStep {
     /// feasible, never zero). Arms existed, most were feasible, and the
     /// clearance standoff refused every one, which is task #51's shape end to
     /// end. [`Self::own_contact_no_winner`] is the field that says so, and
-    /// `candidacy-exact-mask-2026-08-21.md` §F.1 records the run.
+    /// `docs/plans/support-clearance.md` §F.1 records the run.
     ///
     /// **Nothing reads it to decide anything, and a ranking rule that did was
     /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a
@@ -481,7 +481,7 @@ pub enum OwnContactNoWinnerStage {
 
 /// **EVIDENCE ONLY. Why the router built no arm at this trial's own seat.**
 ///
-/// The design record (`candidacy-exact-mask-2026-08-21.md` §F) measured that on
+/// The design record (`docs/plans/support-clearance.md` §F) measured that on
 /// `zombie-3-a` **37 of 89** rejected trials ended `UnroutedNoWinner` on their
 /// own appended contact — a class that ends at ROUTING, before any brace,
 /// resize or path-level state exists — and recorded that the run computed
@@ -538,7 +538,7 @@ pub struct OwnContactNoWinnerEvidence {
 
 /// **Stage D — what the attempt-0 legalization retry did, on disk.**
 ///
-/// Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+/// Design authority: `docs/specs/seal-semantics.md`
 /// §4 Stage D, authorized by Craig 2026-08-23. *"The no-good ledger, the pass
 /// count and the confirmation-round record join the coverage refusal sidecar …
 /// **This is disclosure, not the record**."*
@@ -1325,7 +1325,7 @@ mod tests {
 
     /// **The 37 must be readable off the FILE, field by field.**
     ///
-    /// `candidacy-exact-mask-2026-08-21.md` §F measured that 37 of `zombie-3-a`'s
+    /// `docs/plans/support-clearance.md` §F measured that 37 of `zombie-3-a`'s
     /// 89 rejected trials ended `UnroutedNoWinner` on their own appended
     /// contact, and recorded that nobody could say which of them were task #51's
     /// `every_feasible_arm_refused_by_clearance` sub-class — the run computed the
