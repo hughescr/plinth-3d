@@ -71,21 +71,6 @@ here so nobody rediscovers them as surprises:
 - **O-11** — the spec never says the repair pool is frozen for the run; it matters for #26
   (whether model-seated arms that add rows may enter mid-run).
 
-## Stage-4 work not yet started
-
-The transactional controller landed as `run_support_transactional`; production still calls
-`run_support`. Swapping the door over needs, together, as one corpus-measured change (not
-several separate ones):
-
-- the `attempts` field's re-meaning at five struct call sites,
-- the refusal-report schema bump to `plinth.coverage-refusal.v2`,
-- a deliberate digest re-freeze with the corpus measurement recorded beside it, and
-- wiring the per-model report line into `plinth-pipeline` (the operator line and sidecar copy
-  already exist; only the run-report line is missing).
-
-The trial stream (`RepairRowId` per trial) is currently in-memory only; persisting it needs a
-public wire encoding it has never had, which belongs to this same format change.
-
 ## Adjacent, not this controller's fix
 
 **Task #53 — the legacy replay asymmetry.** A second, older repair loop (`lib.rs`) reads the

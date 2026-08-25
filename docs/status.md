@@ -32,8 +32,8 @@ Of the 15 real minis that do not emit, as measured at the census tip:
 | crash | 2 | Giant Toad (swallowing) — `RootRunTooShort` at Lowering, slot 280 (task #29); `zombie-2-a` fails the final ChituBox disk audit (untracked — no task number assigned yet) |
 | unmeasured | 4 | Giant Bat, Warhorse, Tavey Badger, Tavey Base |
 
-**Zero models are refused by clearance rules.** Sub-0.300 mm true-gap residue is **0
-corpus-wide** (MEASURED, 33 rows) — see
+**Zero models are refused by clearance rules.** Sub-0.300 mm true-gap residue is **0 in all 33
+measured rows; 12 of 45 unmeasured** — see
 [`docs/evidence/emission-canary.md`](evidence/emission-canary.md) for the instrument and the
 census this reading comes from.
 

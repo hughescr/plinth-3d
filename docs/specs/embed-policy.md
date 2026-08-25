@@ -109,7 +109,13 @@ amendment, below): depth is unlimited and the interval is truncated at the
 opposite face. A designed embed end never exits the model and never creates a
 patch on a face other than the one it entered — there is no backside scar.
 Long grazing chords stay bounded by rules 1–2 (`A_shaft` grows as
-`2*r_x*T`).
+`2*r_x*T`). Depth was retired as a sanction because it is a proxy that points
+the wrong way on the real population — MEASURED `corr(depth, patch area) =
+-0.44 to -0.53` (deep near-perpendicular embeds have the smallest patches,
+shallow grazing chords the largest) — and both incumbent depth formulas
+(engine arc, census perpendicular) enforced not one area bound but a
+~25-30x scatter of effective bounds, unbounded at grazing angles (SPEC-EMBED-POLICY
+panel ruling, SCAR-AREA-CAP supersedes arc-plus-slack, `cd989fe`).
 
 ## PRINT-FLOOR amendment (owner-ratified 2026-07-24)
 

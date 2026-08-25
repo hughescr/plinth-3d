@@ -2,8 +2,10 @@
 
 Physical calibration plates are how the engine's load constants stop being guesses. Two are
 queued; neither has produced a promoted engine constant yet. The completed plates (5 and 6,
-support-arm capacity) are recorded in [`docs/evidence/`](../evidence/), not here — this page
-is only the work still ahead.
+support-arm capacity) are recorded in
+[`docs/engineering-journal/reference/`](../engineering-journal/reference/) (`plate-05-results.md`,
+`plate-06-results.md`, code-pinned and never moved), not here — this page is only the work
+still ahead.
 
 ## Why every plate is preregistered before it is printed
 

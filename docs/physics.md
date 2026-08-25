@@ -35,8 +35,11 @@ never computes a force. It sizes to the ratio.
 ### The measured boundary
 
 The boundary was measured directly, on plates of purpose-built coupons — a cap of known area
-carried on a tip of known diameter — printed and then pulled. Records: `docs/evidence/`
-(plate 5 and plate 6 calibration results and their review memos).
+carried on a tip of known diameter — printed and then pulled. Records:
+[`docs/engineering-journal/reference/plate-05-results.md`](engineering-journal/reference/plate-05-results.md)
+and [`plate-06-results.md`](engineering-journal/reference/plate-06-results.md) (the plate 5 and
+plate 6 calibration results, code-pinned and never moved); plate 6's review memos are in
+`docs/evidence/` (`plate-06-verification-protocol.md`, `plate-06-verification-physicist.md`).
 
 | | |
 | --- | --- |
@@ -331,21 +334,13 @@ model surface was not, until the seating fix below.
 
 ### Model-seated arms now actually seat
 
-Before 2026-08-21 a model-anchored arm's root end sat exactly *on* the surface — a kiss, not a
-joint — and the engine's own seat-attestation witness reported it as unattached on every
-instance measured (thousands of attested seats, all reporting no genuine engagement). A
-commit-time safety catch refused every one of them rather than ship an arm fused to the model
-by voxel rounding alone.
-
-**PR-7, landed:** the model-anchor family is seated below the surface by the same
-seat-depth and clearance-mask machinery the brace-rung family already used —
-`contact::seating_of` now classifies a `Strut` end at `ContactEnd::Rootward` as `Seated`, not
-`OnSurface`. The clearance mask converged to one shared statement
-(`contact::placed_mask_inset_mm`) read by every site that builds a segment-clearance inset —
-CCO, rewire, and brace alike — replacing three previously-divergent call sites. The
-commit-time safety catch was retired in the same change: an unseated witness is now an
-ordinary candidacy refusal (grazing or degenerate incidence, or a genuinely unattested seat),
-not a last-instant tripwire on a winner.
+A model-anchored arm's root end is seated below the surface by the same seat-depth and
+clearance-mask machinery the brace-rung family uses — `contact::seating_of` classifies a
+`Strut` end at `ContactEnd::Rootward` as `Seated`, not `OnSurface`. The clearance mask is one
+shared statement (`contact::placed_mask_inset_mm`) read by every site that builds a
+segment-clearance inset — CCO, rewire, and brace alike. An unseated witness is an ordinary
+candidacy refusal (grazing or degenerate incidence, or a genuinely unattested seat), not a
+last-instant tripwire on a winner.
 
 **What is still open, not built.** Whether the *struck model feature itself* demonstrably
 carries the transferred load onward to its own supports (as opposed to the contact simply being
@@ -365,7 +360,7 @@ h = max( default_contact_depth,
 ```
 
 - *Slicer resolution.* A fused region thinner than one layer is not resolvable by the
-  printer, so the layer height sets a floor.
+  printer, so the layer height sets a minimum.
 - *Full-cross-section engagement.* An arm meeting the surface at incidence `theta` has its
   end disc tilted; only `h ≥ r_end · sin(theta)` engages the whole end cross-section rather
   than smearing a partial bond.
@@ -436,7 +431,7 @@ of any cavity as the model lifts off the film, with an inlet above for replaceme
 a model's sub-voxel grid phase can shift a clearance reading enough to flip a hollow/no-hollow
 verdict at the margins was ruled immaterial: even where it matters, the resin-savings stake is
 too small next to the cost of chasing it. What was measured before the ruling closed the
-question: the corpus's closest approach to the bulk-gate floor was ~1.1 mm, roughly 5× the
+question: the corpus's closest approach to the bulk-gate minimum was ~1.1 mm, roughly 5× the
 largest observed grid-phase swing on this corpus — too far for phase alone to flip a verdict
 here. This does not license loosening any gate, cap, floor or threshold to raise the hollow
 rate; it only explains why chasing sub-voxel phase precision further was ruled not worth it.
@@ -515,7 +510,7 @@ lets a genuine quadratic through at 24 faces. So the caps that govern per-face w
 shape
 
 ```
-cap = max(floor, per_face × face_count)
+cap = max(minimum, per_face × face_count)
 ```
 
 with the coefficient derived from measurement by one stated rule rather than picked. `k·N` is
