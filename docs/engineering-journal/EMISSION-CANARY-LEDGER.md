@@ -1017,3 +1017,30 @@ lane's only one, at Stage A.
   now this response. Stage D's second clause stays open.
 * The `ptr::eq` arm of `validate_against_hoisted` being vacuous on the memoized path
   (challenger's item 5 note, harmless — the fingerprint carries the load).
+
+---
+
+## 2026-08-24 — seal-semantics 45-model census [33/45 measured]
+
+**This was not a completed 45-model census.** It measured 33 rows and left 12 unmeasured:
+`Giant Bat`, `Tavey Badger`, `Tavey Base`, `Warhorse`, `corpus/models/Cylinder`,
+`corpus/models/make_box`, `corpus/models/make_overhang_table`,
+`corpus/models/make_raking_blade`, `corpus/models/make_thin_fin`,
+`corpus/models/make_toed_slab`, `corpus/models/Sphere`, and
+`corpus/models/Weeping Treant v1.2`. Counts below are measured counts and lower bounds;
+no missing row is inferred clean, byte-identical, or outside the seal class. The label is
+requested provenance, not a claim of completion.
+
+| recorded | census summary | value |
+| --- | --- | --- |
+| 2026-08-24 | seal class fired | **5 / 33 measured** (at least 5 / 45) |
+| 2026-08-24 | observed class size | all observed classes size **1** |
+| 2026-08-24 | cascade carriers | **0** observed |
+| 2026-08-24 | sub-0.300 mm residue | **0** in measured corpus evidence; 45-model result unknown |
+| 2026-08-24 | printed artifacts | **21** byte-identical |
+
+| recorded | commit range | model | baseline | tip | printed-artifact verdict | cause / label |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-08-24 | `5347901..fe91555` | `Deinonychus` | ERROR exit 5 at Structure, `TerminalEvidenceMismatch { terminal: 113 }`, 24 s, no artifact | EMITTED, 69 s, md5 `e25966a4975b4e62640bcc3e96dc452f`, 1,149 records, 10,390,488 B | **MOVED — no artifact to emitted artifact** | `seal-semantics 45-model census`; terminal 113 rescued in 6 passes, 1 completed confirmation round, 2 arms measured |
+| 2026-08-24 | `5347901..fe91555` | `Rotting Warhorse` | ERROR exit 5 at Structure, 87 s, no artifact | **HARNESS CEILING**, loud 486 s run, no artifact; seam closed before coverage repair | no artifact at either end; endpoint/stage **MOVED** | `seal-semantics 45-model census`; terminal 177 legalized in 6 passes, 1 completed confirmation round, 2 arms measured; ceiling is not emission |
+| 2026-08-24 | `5347901..fe91555` | `zombie-4-a` | ERROR exit 5 at Structure, `TerminalEvidenceMismatch { terminal: 23 }`, 106 s, no artifact | **25-MINUTE HARNESS CEILING**, last state `stage: support entering Brace elapsed=1453197ms`, no artifact | no artifact at either end; endpoint/stage **MOVED** | `seal-semantics 45-model census`; terminal 23, 33 abandoned passes, 2 rounds started, 11 of 22 round arms observed before ceiling |
