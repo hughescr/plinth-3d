@@ -314,8 +314,9 @@ fn the_contact_attestation_is_still_wired_into_the_production_path() {
          This gate is structural because the requirement is behaviourally \
          invisible on today's corpus: the attestation refuses nothing, so \
          deleting it moves no geometry and every golden stays green.\n\
-         See docs/engineering-journal/contact-physics-2026-08-04.md, sections PR-8, \
-         PR-9, OD-9 and MAJOR-7.\n\
+         See docs/physics.md §\"9. Admissibility: emergence, area sufficiency, \
+         attestation, buried surface\" (OD-9); PR-8, PR-9 and MAJOR-7 are \
+         historical labels not carried by any surviving doc (git log only).\n\
          Missing:\n  {}",
         missing.join("\n  ")
     );

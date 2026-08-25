@@ -33,8 +33,6 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // (73 routed contacts, 261 live members, 5 island births, 4 local minima); its
 // digest moved only because the plan digest hashes slice-layer loop vertices
 // directly, and 80 of its 686 print layers were requantized by 5 picometres.
-// See `docs/architecture.md` sec 8.5 and its
-// 2026-08-08 addendum.
 //
 // Refreshed a third time on 2026-08-09, by owner ruling, for FU-32 phase J2 (the
 // state-pure incremental `CcoController::digest`): `snapshot_digest`
@@ -57,9 +55,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // right when the fingerprints were generated!)". The pinned input-list test
 // `verification_snapshot_digest_input_list_is_pinned` stayed GREEN across this
 // movement, which is the independent confirmation that the digest's input SHAPE
-// did not widen — only one input's value moved. See
-// `CONTENT-DROPPED (removed 2026-08-25, see git log)` sections `#fu32-j3-2026-08-09` and
-// `#fu32-j4-2026-08-09`.
+// did not widen — only one input's value moved.
 // **Re-pinned off `make_overhang_table` onto `make_toed_slab` (FU-56,
 // 2026-08-12).** `run_support` is now the coverage-closure controller: it
 // measures ROUTED coverage at the REGISTERED gate radius
@@ -104,8 +100,8 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // gate values it deliberately does not use. The from->to septet for the OD-8
 // census, and the sibling `run_support` digest pin in
 // `plinth-support/tests/support_runner_integration.rs`, are recorded together
-// with this one in `CONTENT-DROPPED (removed 2026-08-25, see git log)` under the
-// FU-38 row and its dated section.
+// with this one under the FU-38 row and its dated section (git history only;
+// the record's own document has since been retired).
 //
 // **Refreshed a sixth time on 2026-08-14, by owner ruling, to honour the
 // WRITTEN 0.16 mm² A3 coverage censor** (docs/specs/coverage-repair.md §4: "A patch

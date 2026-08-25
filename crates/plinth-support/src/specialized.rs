@@ -189,8 +189,8 @@ impl SpecializedLimits {
     /// 196,264,386,588 (97.4 % of the demand) is a *different* defect, opened as
     /// **FU-8d**. Read 5,173,199,556 as the floor of the repriced plan, never as
     /// the treant's price. See
-    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §7 and
-    /// `docs/engineering-journal/CONTENT-DROPPED (removed 2026-08-25, see git log)` (*FU-8c fixed 2026-08-06*).
+    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §7
+    /// (*FU-8c fixed 2026-08-06*).
     ///
     /// **Dated addendum 2026-08-06 — FU-8d phase F2. The block above is left
     /// standing exactly as written; every number in it was true when measured
@@ -214,8 +214,8 @@ impl SpecializedLimits {
     /// same limit at **variant 275 of 39,224**, printing
     /// `required: 35445618202, limit: 35445500736`. That residual is FU-8d
     /// part (2) — the per-variant load/owner-face path — and it is what phase
-    /// F4 is for. See `docs/engineering-journal/support-resource-caps-2026-08-05.md` §9 and
-    /// `CONTENT-DROPPED (removed 2026-08-25, see git log)` (*FU-8d phase F2 landed 2026-08-06*).
+    /// F4 is for. See `docs/engineering-journal/support-resource-caps-2026-08-05.md` §9
+    /// (*FU-8d phase F2 landed 2026-08-06*).
     ///
     /// **Dated addendum 2026-08-06 — FU-8d phases F3 and F4. Every block above
     /// is left standing exactly as written; the F2 block's closing claim is the
@@ -242,8 +242,8 @@ impl SpecializedLimits {
     /// F3 or F4.** What stops the treant now is wall-clock rather than a limit:
     /// F4's clean run at this tip is an EXCEEDS-TIMEBOX at 600 s, and its
     /// successor defect is opened as **FU-8e**. See
-    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §10 and §11, and
-    /// `CONTENT-DROPPED (removed 2026-08-25, see git log)` (*FU-8d phase F3 landed 2026-08-06*, *FU-8d phase F4
+    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §10 and §11
+    /// (*FU-8d phase F3 landed 2026-08-06*, *FU-8d phase F4
     /// measured 2026-08-06*).
     ///
     /// **Dated addendum 2026-08-07 — FU-8e phases E1–E4 landed. Every block
@@ -262,8 +262,8 @@ impl SpecializedLimits {
     /// fell back. **The cap still did not move and no cap code was touched.**
     /// What stops the treant is still wall-clock: EXCEEDS-TIMEBOX at 601 s, now
     /// 33 merge rounds of an estimated ~460, so **ruling R-f remains
-    /// unsatisfied**. See `docs/engineering-journal/support-resource-caps-2026-08-05.md` §12 and
-    /// `CONTENT-DROPPED (removed 2026-08-25, see git log)` (*FU-8e phases E1–E4 landed 2026-08-07*).
+    /// unsatisfied**. See `docs/engineering-journal/support-resource-caps-2026-08-05.md` §12
+    /// (*FU-8e phases E1–E4 landed 2026-08-07*).
     ///
     /// **Dated addendum 2026-08-07 — FU-8f phase G5. Every block above is left
     /// standing exactly as written, and for the first time since F3 the demand
@@ -294,7 +294,7 @@ impl SpecializedLimits {
     /// wall-clock: G4's two attempts are EXCEEDS-TIMEBOX at 602 s with 436 and
     /// 430 merge rounds counted, so **ruling R-f remains unsatisfied** and
     /// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is still not re-derived. See
-    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §15 and `CONTENT-DROPPED (removed 2026-08-25, see git log)`
+    /// `docs/engineering-journal/support-resource-caps-2026-08-05.md` §15
     /// (*FU-8f phase G5 landed 2026-08-07*).
     ///
     /// **Ruling note 2026-08-06 on the 12,714,828,544 quoted at the top of this
@@ -14220,8 +14220,7 @@ mod tests {
     /// `DuplicatePhysicalSeat` before consolidation could finish.
     ///
     /// **Re-pinned 2026-08-08 by owner ruling for the FU-10 phase-C
-    /// polygon-union cutover** (`docs/architecture.md`
-    /// sec 8.5 and its 2026-08-08 addendum). `toed slab` moves
+    /// polygon-union cutover.** `toed slab` moves
     /// `(72, 50_688, 9)` -> `(42, 34_304, 8)` — the FU-7 parked `72 -> 42`
     /// contact count, reproduced digit for digit from the other direction — and
     /// `raking blade` moves `(40, 35_008, 11)` -> `(33, 34_176, 8)`.

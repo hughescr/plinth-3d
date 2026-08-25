@@ -9016,7 +9016,7 @@ mod tests {
     /// never drift apart silently.
     #[test]
     fn fu32_j5_routing_charge_prices_the_measured_treant_shape_under_the_registered_caps() {
-        // CONTENT-DROPPED (removed 2026-08-25, see git log) M1, measured at bfa5b3b: cadence 553,
+        // FU-32 design M1, measured at bfa5b3b: cadence 553,
         // pool_rows 364,223 (single specimen, n = 1, per R4/FU-23).
         let charge = RouteCcoWorkCharge::compute(553, 364_223).expect("treant shape is finite");
         assert_eq!(charge.seat_evaluations(), 201_415_319);
@@ -13175,7 +13175,8 @@ mod tests {
 
     /// **The disclosure is a READ of the sealed reason, one variant at a time.**
     ///
-    /// `docs/plans/support-clearance.md` §F sized a class it could not name:
+    /// The archived design evidence (`docs/plans/support-clearance.md`
+    /// §"Evidence") sized a class it could not name:
     /// 37 of `zombie-3-a`'s 89 rejected trials ended `UnroutedNoWinner`, and
     /// which of them were the `every_feasible_arm_refused_by_clearance` sub-class
     /// was unmeasured because the run computed the flag and threw it away. This

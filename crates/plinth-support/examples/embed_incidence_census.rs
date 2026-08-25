@@ -184,10 +184,10 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     // The OD-8 census digests this harness prints move with this change, and
     // the FULL from->to table -- both columns re-measured at this tip by
     // building this harness twice, once with the `vec![0.0; faces]` feed
-    // restored verbatim from `44b8df1` and once with the real field -- is
-    // recorded in `CONTENT-DROPPED (removed 2026-08-25, see git log)` under the FU-38
-    // row and its dated section
-    // (`#fu38-real-delicacy-repin-2026-08-12`). In summary: SIX models seal and
+    // restored verbatim from `44b8df1` and once with the real field -- was
+    // recorded under the FU-38 row and its dated section
+    // (`#fu38-real-delicacy-repin-2026-08-12`; git history only, that record's
+    // own document has since been retired). In summary: SIX models seal and
     // all six digests move (`Sphere` 2297157889062365577 -> 686822247060573262,
     // `Cylinder` 6853793710942395608 -> 12410021645461158056, `make_box`
     // 8709076999423814412 -> 5356317665317762409, `make_overhang_table`

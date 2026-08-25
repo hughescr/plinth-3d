@@ -1,8 +1,9 @@
 //! FU-10 phase B -- per-layer polygon union with fill-rule normalization.
 //!
-//! Design: `docs/architecture.md` sec 3
-//! (phase table row B; the OQ-1 resolution and phase-B deviations are the
-//! sec 7 addendum). The stitched slice loops of one layer -- wound contours
+//! Design: `docs/architecture.md` §"The workspace" (`plinth-layers` row);
+//! the FU-10 phase-B phase table and the OQ-1 resolution are design history
+//! (git log only, the design doc that recorded them has been retired). The
+//! stitched slice loops of one layer -- wound contours
 //! when the phase-A orientation derivation succeeded, unoriented loops when it
 //! degraded -- are resolved by ONE boolean union per layer into the canonical
 //! normalized form: pairwise-disjoint outer boundaries, counter-clockwise
@@ -15,7 +16,8 @@
 //! # Numeric contract
 //!
 //! One explicit quantization at this boundary, exact integer arithmetic
-//! inside, one dequantization out (design sec 3.2). The quantum is
+//! inside, one dequantization out (`docs/physics.md` §"14. Determinism and
+//! numeric contracts"). The quantum is
 //! [`SLICE_UNION_QUANTUM_MM`] = 1e-8 mm: the design's OQ-1 i64 branch, taken
 //! because the pinned `i_overlay` 8.0.0 exposes an i64 integer API with i128
 //! wide arithmetic. 1e-8 mm coincides with the perception stitch key
@@ -32,7 +34,8 @@
 //! Because this normalizer is upstream of every frozen OD-8 digest, a layer
 //! whose union output equals its (area-filtered) input under canonical
 //! integer form is emitted as the ORIGINAL f64 loops verbatim -- not the
-//! requantized ones (design sec 3.5). Clean layers are therefore
+//! requantized ones (`docs/physics.md` §"14. Determinism and numeric
+//! contracts"). Clean layers are therefore
 //! byte-identical by construction, and the equality check doubles as the
 //! idempotence property running in production.
 //!

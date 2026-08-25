@@ -2296,8 +2296,8 @@ mod tests {
                 // Re-recorded an EIGHTH time, 2026-08-23, by `a4f5f3f` —
                 // feat(support): re-size a seated arm's exemption to its final
                 // footprint (#36 F1); Craig's ruling of 2026-08-23
-                // (CONTENT-DROPPED (removed 2026-08-25, see git log)
-                // §11.9); landed via the #77/f1 lane, merged to develop at
+                // (`docs/physics.md` §"The seat's own contact zone — the honest
+                // exemption"); landed via the #77/f1 lane, merged to develop at
                 // `7e11319` / `225b6a7` — true -> false, with this attribution
                 // rather than an edited expectation.
                 //

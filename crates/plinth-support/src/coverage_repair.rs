@@ -416,8 +416,9 @@ pub struct CoverageRepairStep {
     /// batch and not one ran out of feasible arms (42 to 106 proposed, 37 to 102
     /// feasible, never zero). Arms existed, most were feasible, and the
     /// clearance standoff refused every one, which is task #51's shape end to
-    /// end. [`Self::own_contact_no_winner`] is the field that says so, and
-    /// `docs/plans/support-clearance.md` §F.1 records the run.
+    /// end. [`Self::own_contact_no_winner`] is the field that says so; the run
+    /// is recorded in the archived design evidence
+    /// (`docs/plans/support-clearance.md` §"Evidence").
     ///
     /// **Nothing reads it to decide anything, and a ranking rule that did was
     /// built and MEASURED HARMFUL.** Deprioritizing every candidate inside a
@@ -481,7 +482,8 @@ pub enum OwnContactNoWinnerStage {
 
 /// **EVIDENCE ONLY. Why the router built no arm at this trial's own seat.**
 ///
-/// The design record (`docs/plans/support-clearance.md` §F) measured that on
+/// The design record (`docs/plans/support-clearance.md` §"Evidence", the
+/// archived probe logs) measured that on
 /// `zombie-3-a` **37 of 89** rejected trials ended `UnroutedNoWinner` on their
 /// own appended contact — a class that ends at ROUTING, before any brace,
 /// resize or path-level state exists — and recorded that the run computed
@@ -747,8 +749,8 @@ pub struct CoverageRepairStepWire {
     /// Verbatim from [`CoverageRepairStep::own_contact_no_winner`], which is
     /// the only place this field is explained. It splits the `UnroutedNoWinner`
     /// half of `own_contact_condemned` into the stages the routing cadence
-    /// already sealed, so the class §F sized at 37 of 89 can be read off the
-    /// file instead of guessed at.
+    /// already sealed, so the class the design record sized at 37 of 89 (`docs/plans/support-clearance.md`
+    /// §"Evidence") can be read off the file instead of guessed at.
     pub own_contact_no_winner: Option<OwnContactNoWinnerEvidence>,
     pub route_deltas: Vec<RouteDelta>,
     pub outcome: RepairStepOutcome,
@@ -1325,14 +1327,15 @@ mod tests {
 
     /// **The 37 must be readable off the FILE, field by field.**
     ///
-    /// `docs/plans/support-clearance.md` §F measured that 37 of `zombie-3-a`'s
+    /// The archived design evidence (`docs/plans/support-clearance.md`
+    /// §"Evidence") measured that 37 of `zombie-3-a`'s
     /// 89 rejected trials ended `UnroutedNoWinner` on their own appended
     /// contact, and recorded that nobody could say which of them were task #51's
     /// `every_feasible_arm_refused_by_clearance` sub-class — the run computed the
     /// flag and the sidecar dropped it. This reads the JSON a sealed run writes.
     ///
     /// **The revert this guards** is the one-line kind and it is exactly the one
-    /// §F was bitten by: leave the field off `to_wire`, or off the wire struct,
+    /// that measurement was bitten by: leave the field off `to_wire`, or off the wire struct,
     /// or let the runner stop filling it, and every digest, every gate verdict
     /// and every artifact byte stays identical while the class goes back to
     /// being unmeasurable. Each assertion below is on a distinct field, so a

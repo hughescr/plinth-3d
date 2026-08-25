@@ -75,8 +75,8 @@ mod coverage_measurement;
 pub mod coverage_repair;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
-// (brace/cco/rewire) are gated on the open owner decisions recorded in
-// `CONTENT-DROPPED (removed 2026-08-25, see git log)`, so the allow is scoped and temporary.
+// (brace/cco/rewire) are gated on open owner decisions, so the allow is scoped
+// and temporary.
 #[allow(
     dead_code,
     reason = "crate-private designed embed masks await the gated verifier wiring in brace/cco/rewire"
@@ -106,8 +106,9 @@ pub mod legacy_compat;
               mints, holds and drives it — the ordering is deliberate, because the \
               digest-isolation proof this module carries is what makes the loop's termination \
               argument non-circular and it must be green BEFORE the loop exists; \
-              docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4 Stage B \
-              pieces 3-5 name every reader"
+              docs/specs/seal-semantics.md §\"Stage B — the legalization retry (attempt 0 \
+              only)\" pieces 3-5 (\"The abandon outcome\", \"The loop\", \"The confirmation \
+              round\") name every reader"
 )]
 pub(crate) mod legalization;
 #[allow(
@@ -131,7 +132,8 @@ pub(crate) mod runner;
 #[allow(
     dead_code,
     reason = "the frozen seat zone lands one commit ahead of the clearance sites that read it; \
-              docs/engineering-journal/designs/honest-exemption-2026-08-22.md section 8 names them"
+              docs/physics.md §\"6. The seat's own contact zone — the honest exemption\" \
+              describes the mechanism they implement"
 )]
 pub(crate) mod seat_zone;
 pub mod specialized;

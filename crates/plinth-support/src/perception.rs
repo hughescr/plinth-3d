@@ -1375,10 +1375,10 @@ impl SliceStitchSpace {
 
 /// Stitch, orient and normalize every layer of one kernel slice batch.
 ///
-/// FU-10 phase C: the cutover both stitch sites now go through. Design:
-/// `docs/architecture.md` sec 3.4 ("both
-/// stitch sites consume normalized output") and phase table row C. The
-/// pipeline is exactly the three stages sec 3.4 prescribes -- stitch (the
+/// FU-10 phase C: the cutover both stitch sites now go through -- both stitch
+/// sites consume normalized output (design history: phase table row C, git
+/// log only, the design doc that recorded it has been retired). The
+/// pipeline is exactly the three stages that design prescribes -- stitch (the
 /// balanced directed walk inside
 /// [`orientation::orient_layer`]) -> orient (the phase-A `z_hat x n`
 /// derivation) -> normalize (the phase-B per-layer union) -- and it is
@@ -1557,8 +1557,8 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 
 /// FU-10 phase A -- consumer-side in-plane loop orientation.
 ///
-/// Design: `docs/architecture.md` sec 3.3 and
-/// phase table row A. The frozen kernel slice stream carries no in-plane
+/// Design history: phase table row A (git log only, the design doc that
+/// recorded it has been retired). The frozen kernel slice stream carries no in-plane
 /// winding convention: segment endpoint order is an artifact of which triangle
 /// vertex is the odd one out (`geom_kernel::slicing`). For a face with outward
 /// normal `n` cut by a horizontal plane, the in-plane direction that keeps the
@@ -3494,8 +3494,10 @@ pub(crate) struct RetainedLoadTranspose {
 /// FU-8g H4 (D6, F11) — which of the three genuinely distinct bugs poisoned
 /// the carrier.  `RetainedLoadRebuildCause::Poisoned` used to collapse all
 /// nine `record_commit` refusal sites into one census label; the treant's 21
-/// poison rebuilds (`CONTENT-DROPPED (removed 2026-08-25, see git log)` §G6d.8) were counted but never
-/// attributed.  This is the split, one variant per group:
+/// poison rebuilds (`docs/engineering-journal/support-resource-caps-2026-08-05.md`
+/// §"Retention, measured on a whole tournament, with the pre-G6 round as an
+/// internal control") were counted but never attributed.  This is the split,
+/// one variant per group:
 ///
 /// - [`Self::Guard3Generic`] — the merged seat resolved GENERIC, so the
 ///   bucket-union identity (F-G6-1) does not hold.  A silent-wrongness guard;

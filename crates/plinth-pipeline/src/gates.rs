@@ -49,8 +49,8 @@ use crate::PipelineError;
 
 /// The twelve gates a candidate must pass before emission.
 ///
-/// The list is `CONTENT-DROPPED (removed 2026-08-25, see git log)` §"ported current verifier safety gates"
-/// verbatim and in its stated order. Exactly one of them —
+/// The list is `docs/engineering-journal/04-migration-plan.md` §"The defect class this
+/// milestone exists to make impossible" verbatim and in its stated order. Exactly one of them —
 /// [`Self::UncoveredIslands`] — has a ported implementation today; the other
 /// eleven are named here rather than left implicit, so that "which gates does
 /// emission actually consult?" has one answer in the type system instead of
@@ -294,7 +294,8 @@ fn judge(
             }
         }
         // TODO(gate-port): each of these is a live gate in the frozen current
-        // verifier and is listed as binding by `CONTENT-DROPPED (removed 2026-08-25, see git log)`. None
+        // verifier and is listed as binding by `docs/engineering-journal/04-migration-plan.md`
+        // §"The defect class this milestone exists to make impossible". None
         // has a ported Rust implementation yet, so none can reach a verdict.
         // They are named here, in the refusal path, so that the gap is a
         // reported value rather than an omission — see
