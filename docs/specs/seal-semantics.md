@@ -15,8 +15,8 @@ record's history if the rationale is needed).
 Section labels below (`Stage A`, `Stage A(b)`, `Stage B` piece numbers) are
 cited by exact label from code comments (`crates/plinth-support/src/lib.rs`,
 `legalization.rs`, `coverage_repair.rs`, `forest.rs`, `cco.rs`,
-`crates/plinth-pipeline/src/coverage_evidence.rs`) under the filename
-`seal-semantics-2026-08-22.md`; keep the stage/piece labels stable across any
+`crates/plinth-pipeline/src/coverage_evidence.rs`) under this file's own path,
+`docs/specs/seal-semantics.md`; keep the stage/piece labels stable across any
 future edit of this file.
 
 ## Vocabulary

@@ -6,7 +6,7 @@
 //! once.  This module is what runs between them — the LOD ladder, the
 //! promotion, the comparator, and the record.
 //!
-//! # The funnel is the recorded one (D-12, `docs/architecture.md:1103`, §6)
+//! # The funnel is the recorded one (D-12, `docs/engineering-journal/03-physics-and-constants.md` §3.8)
 //!
 //! | Tier | Candidates | LOD |
 //! |---|---|---|
@@ -20,18 +20,19 @@
 //! measurement. Neither recorded width moved.
 //!
 //! "Exact" is the protected, decimated **production mesh** this stage is handed,
-//! not the original high-detail input (02:243-245) — orientation runs after
-//! decimation by construction, so there is no higher-detail mesh in scope at
-//! all.  Commitment happens only at the exact tier (02:852): a proxy can
-//! mis-rank, never mis-report, because the winner's published score is always
-//! recomputed on the production mesh.
+//! not the original high-detail input (`docs/engineering-journal/04-migration-plan.md`
+//! §"Rust deliverables", the Coarse/Refine/Exact tier table) — orientation runs
+//! after decimation by construction, so there is no higher-detail mesh in scope
+//! at all.  Commitment happens only at the exact tier of that same table: a
+//! proxy can mis-rank, never mis-report, because the winner's published score
+//! is always recomputed on the production mesh.
 //!
 //! # Search proxies can never become production geometry
 //!
 //! [`SearchProxy`] wraps a mesh with no conversion into `DecimatedModel`,
-//! `OrientedModel` or anything the emit path can reach.  02:244-245 records that
-//! L1/L2 "may never become alternate downstream production meshes"; here that is
-//! a property of what compiles, not a rule someone has to remember.  The proxies
+//! `OrientedModel` or anything the emit path can reach: L1/L2 proxies never
+//! become alternate downstream production meshes; here that is a property of
+//! what compiles, not a rule someone has to remember.  The proxies
 //! deliberately bypass the production decimation gates — error budget, topology
 //! gate, downstream-utility witness — because those gates protect *shipped*
 //! geometry and these meshes are never shipped.
@@ -94,7 +95,8 @@ pub const L2_LOD: &str = "orient-l2";
 ///
 /// There is deliberately no `From<SearchProxy>` for any production model type
 /// and no accessor that yields an owned `Mesh`: a search proxy cannot reach the
-/// emit path in code that compiles (02:244-245).
+/// emit path in code that compiles (`docs/engineering-journal/04-migration-plan.md`
+/// §"Rust deliverables", the Coarse/Refine/Exact tier table).
 #[derive(Clone, Debug)]
 pub struct SearchProxy {
     mesh: Mesh,

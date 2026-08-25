@@ -527,9 +527,10 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         "this model commits nothing, so no row in its stream may claim a commit number"
     );
 
-    // **The 37, on the wire** — `docs/plans/support-clearance.md` §F.
+    // **The 37, on the wire** — the archived design evidence
+    // (`docs/plans/support-clearance.md` §"Evidence").
     //
-    // §F measured that 37 of `zombie-3-a`'s 89 rejected trials ended
+    // That evidence measured that 37 of `zombie-3-a`'s 89 rejected trials ended
     // `UnroutedNoWinner` on their own appended contact — a class that ends at
     // ROUTING, before any brace or resize exists — and could not say which of
     // them were the `every_feasible_arm_refused_by_clearance` sub-class: the run
@@ -561,7 +562,7 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
 
         // The `UnroutedNoWinner` class, named from the two fields that already
         // existed: condemned, but not at quarantine. That is exactly the 37's
-        // definition in §F, so the disclosure must be on those rows and on no
+        // definition in that evidence, so the disclosure must be on those rows and on no
         // others — a projection that filled it everywhere would report a
         // routing stage for a contact that never reached routing.
         let in_class =
@@ -625,7 +626,7 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
     //
     // A frozen pair, not a lower bound, because a moved number is a moved
     // diagnosis: if this fixture stops being 37-of-45-all-clearance, the class
-    // §F sized has changed shape on the one procedural model that reproduces
+    // the design evidence sized has changed shape on the one procedural model that reproduces
     // it, and that has to be re-measured rather than re-accepted. (The blade's
     // 37 and `zombie-3-a`'s 37 are unrelated counts that happen to coincide.)
     assert_eq!(

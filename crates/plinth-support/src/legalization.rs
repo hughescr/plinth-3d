@@ -397,7 +397,9 @@ impl LegalizationSteering {
     /// for this mechanism existing.
     #[allow(
         dead_code,
-        reason = "the vocabulary lands one commit ahead of the attempt-0 loop that drives it;                   docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4                   Stage B piece 4 names the reader"
+        reason = "the vocabulary lands one commit ahead of the attempt-0 loop that drives it; \
+                  docs/specs/seal-semantics.md §\"Stage B — the legalization retry (attempt 0 \
+                  only)\" piece 4 (\"The loop\") names the reader"
     )]
     pub(crate) fn is_idle(&self) -> bool {
         self.no_goods.is_empty() && self.round.is_none()
@@ -409,7 +411,9 @@ impl LegalizationSteering {
 
     #[allow(
         dead_code,
-        reason = "the vocabulary lands one commit ahead of the confirmation round that drives                   it; docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4                   Stage B piece 5 names the reader"
+        reason = "the vocabulary lands one commit ahead of the confirmation round that drives \
+                  it; docs/specs/seal-semantics.md §\"Stage B — the legalization retry (attempt \
+                  0 only)\" piece 5 (\"The confirmation round\") names the reader"
     )]
     pub(crate) const fn round(&self) -> Option<&ConfirmationRound> {
         self.round.as_ref()

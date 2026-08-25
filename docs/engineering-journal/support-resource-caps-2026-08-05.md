@@ -32,9 +32,8 @@ Preparation: Perception(PointIndex("kNN work requires 298667520; limit is 100000
 > (`crates/plinth-support/examples/embed_incidence_census.rs:93-95`), which decides *solid*
 > and moves no triangle. **Neither stage touched the count.** Nothing else in this document
 > depends on the attribution: every measurement below was taken on the 429,120-face mesh,
-> which is what the pipeline actually hands the support stage. Evidence:
-> [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §0, and owner ruling
-> R6 in `CURRENT-STATUS.md`.
+> which is what the pipeline actually hands the support stage. Evidence: `decimation-design-2026-08-06.md`
+> §0, and owner ruling R6 in `CURRENT-STATUS.md` — both retired, git history only.
 
 Not one of the support pipeline's ~35 execution caps had a measurement of
 record. `git log -S` puts them all in Codex-era commits **73e7c13** ("Assemble
@@ -2096,7 +2095,7 @@ node-visit overhead exceeds `nfaces` on a 12/24-face mesh), four orders of
 magnitude under the cap in both cases. A fixture proves an over-demand mesh is
 still refused at the unchanged caps. Full record, with the per-model
 before/after table and the deviations: *FU-8g phase H2 landed 2026-08-09* in
-[`CURRENT-STATUS.md`](archive/STATUS-ARCHIVE-2026-08-09.md#fu8g-h2-2026-08-09). M0 registration of
+`CURRENT-STATUS.md` (retired archive, git history only). M0 registration of
 these four `ContactConstructionLimits` numbers, this document's §18 and the
 `constants.md` regeneration remain owed by FU-8g H3.]**
 
@@ -2142,7 +2141,7 @@ happened.** See §18.]**
 section's opening sentence is superseded.** Everything above is left standing
 exactly as written, as the record of its date. FU-32 phase J6 ran the Weeping
 Treant to a **seal**, twice, under the standing memory protocol
-([`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09)):
+(`#fu32-j6-2026-08-09` (retired archive, git history only)):
 `prepare_support_run` returns **`Ok`**, so routing, rewire, penetration/brace,
 the CCO anchors, attestation and lowering all executed, and `routed_contacts`
 (306), `final_live_members` (1,383) and a snapshot digest
@@ -2260,7 +2259,7 @@ run has not produced:
 and the half that survives is the important one.** *"No run has ever reached
 them"* is **no longer true**: the treant sealed twice under the standing memory
 protocol and the brace, joints/raft and lowering stages all executed
-([`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09); §22.3).
+(`#fu32-j6-2026-08-09` (retired archive, git history only); §22.3).
 *"Carry **no measured demand**"* **remains true and unchanged**: no brace or raft
 cap is metered anywhere in the census, so a run that did not refuse establishes
 only that the demand was **below** the cap, never what it was. The F7 ceiling
@@ -2319,7 +2318,7 @@ Two attempts, the standing memory protocol without deviation — release,
 armed at 90 GB, 600 s timebox, two attempts and no more. Machine quiet at both
 launches (no other `cargo`/`rustc`/census process). Full transcript and
 diagnosis: *FU-8g phase H6 measured 2026-08-09*
-([`#fu8g-h6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu8g-h6-2026-08-09)).
+(`#fu8g-h6-2026-08-09`, retired archive, git history only).
 
 Both attempts ended **EXCEEDS-TIMEBOX at 600 s** (600 s / 601 s wall, SIGKILL by
 the watchdog), peak RSS **3,693 MiB** and **3,721 MiB**.
@@ -2358,7 +2357,7 @@ the watchdog), peak RSS **3,693 MiB** and **3,721 MiB**.
 **[ADDENDUM 2026-08-09 (FU-32 phase J6) — the two bullets above are the record of
 their date and both are now overtaken.** The treant **sealed** twice under the
 standing memory protocol at FU-32 J5's tip
-([`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09)), so brace, joints,
+(`#fu32-j6-2026-08-09` (retired archive, git history only)), so brace, joints,
 raft and lowering **were** entered — the "remain unexercised" bullet is
 superseded as to **reach** and stands as to **demand** (§22.3). The 90 GB arm was
 again never approached, at a whole-process peak of **5,585.6 / 5,610.9 MiB =
@@ -2521,7 +2520,7 @@ whole-stage RSS growth is 1,359 MiB / 1,436 MiB over 162,719,910 retained rows �
 GB**, not ≈16.3 GB. **THE CAP DOES NOT MOVE, in either direction**, and design open question 4
 remains untouched: lowering a cap on a friendlier observation is the same error as raising one on
 an unfriendly observation. See §22.5 and
-[`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09).]**
+`#fu32-j6-2026-08-09` (retired archive, git history only).]**
 
 ### 21.6 What this phase does NOT bound: `rewire::optimize`
 
@@ -2552,7 +2551,7 @@ armed at 90 GB, 600 s timebox, **two attempts and no more**. Machine quiet at bo
 `cargo`, `rustc` or sibling census process; nothing above ~30 % CPU). **Both attempts COMPLETED**:
 wall **470.83 s** and **470.64 s**, exit code **0**, peak RSS **5,585.6 MiB** and **5,610.9 MiB**.
 Full transcript and diagnosis: *FU-32 phase J6 measured 2026-08-09*
-([`#fu32-j6-2026-08-09`](archive/STATUS-ARCHIVE-2026-08-09.md#fu32-j6-2026-08-09)).
+(`#fu32-j6-2026-08-09` (retired archive, git history only)).
 
 ### 22.2 What the caps did — the first run that reached every one of them
 

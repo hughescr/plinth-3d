@@ -135,9 +135,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// records an independent, later one. Post-cutover: `make_toed_slab`
 /// 64/179 -> 64/170 and `make_raking_blade` 32/89 -> 27/72. Every unit of that
 /// delta is the removal of **24 phantom island births**, each traced to a named
-/// print layer by the census attribution
-/// (`docs/architecture.md` sec 8.5 and its
-/// 2026-08-08 addendum):
+/// print layer by the census attribution:
 ///
 /// - `make_raking_blade`: 20 births at layers 90..=109 — one per layer, the
 ///   same rake tooth re-born on every layer once it is fused into the blade
@@ -172,9 +170,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// contact, membership, live member, coverage sample or island line differs).
 /// The owner ruled: "The fingerprints aren't sacred  if things change slightly
 /// that's to be expected (because the algorithm wasn't right when the
-/// fingerprints were generated!)". See `CONTENT-DROPPED (removed 2026-08-25, see git log)`
-/// sections `#fu32-j3-2026-08-09` (the attribution) and `#fu32-j4-2026-08-09`
-/// (this re-pin).
+/// fingerprints were generated!)".
 /// **FU-56 addendum, 2026-08-12: `make_raking_blade` now REFUSES, by a typed
 /// coverage-closure refusal, and that is a real finding rather than a
 /// regression.** `run_support` is now the coverage-closure controller
@@ -191,7 +187,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// nominates for either island, at this radius, from this fixture's pool.
 /// This was always true of the fixture; nothing before FU-56 ever measured
 /// it, because production `run_support` had no coverage-closure step at all
-/// (`CONTENT-DROPPED (removed 2026-08-25, see git log)` FU-56). **Do not respond to this by touching the
+/// (FU-56 ruling). **Do not respond to this by touching the
 /// radius, the floor, or the tolerance** — the FU-56 ruling is explicit that
 /// "not one of the 21 [minis] has been shown to be closable ... the first
 /// action is what would show it," and this fixture's answer is "not
@@ -242,9 +238,9 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// the 8-attempt closure bound is still 8. **No digest is claimed wrong:** each
 /// value on the left of an arrow above remains exactly reproducible by the
 /// harness that produced it, against the zero-field engine that was the engine
-/// at the time. See `CONTENT-DROPPED (removed 2026-08-25, see git log)`'s FU-38 row
-/// and its dated section for the full from→to record, including the OD-8
-/// census septet and the coverage-gate golden.
+/// at the time. The full from→to record, including the OD-8 census septet and
+/// the coverage-gate golden, was kept under the FU-38 row's dated section; that
+/// record's own document has since been retired (git history only).
 ///
 /// **Amended 2026-08-14, when the written 0.16 mm² A3 censor was honoured**
 /// (docs/specs/coverage-repair.md §4; `plinth_support::coverage_patch_blocks_verdict`).

@@ -10,8 +10,8 @@ specification differ, this specification governs.
 
 Section numbers below are cited by section from code comments
 (`crates/plinth-support`, `crates/plinth-verify`, `crates/plinth-pipeline`)
-under the filename `SPEC-A3-A4-COVERAGE.md`; keep §4 and §6's clause order
-stable across any future edit of this file.
+under this file's own path, `docs/specs/coverage-repair.md`; keep §4 and §6's
+clause order stable across any future edit of this file.
 
 ## 1. User rules and calibrated reach
 

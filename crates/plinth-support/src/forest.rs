@@ -623,8 +623,8 @@ impl Forest {
     #[allow(
         dead_code,
         reason = "the creation sites that freeze into the table land one commit ahead of the \
-                  grading sites that read it; docs/engineering-journal/designs/\
-                  honest-exemption-2026-08-22.md section 8 step 5 names them"
+                  grading sites that read it; docs/physics.md §\"6. The seat's own contact \
+                  zone — the honest exemption\" describes the mechanism they implement"
     )]
     pub(crate) fn seat_zone(&self, key: MemberKey) -> Option<&Arc<[u32]>> {
         self.state.seat_zones.get(&key).map(SeatZoneRecord::zone)

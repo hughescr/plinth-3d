@@ -896,7 +896,8 @@ impl FinalizedCcoTranscriptRow {
         dead_code,
         reason = "the counter is sealed and digested at Stage A; the steering channel that gives \
                   it a non-zero value, and the readers that report it, land with Stage B \
-                  (docs/engineering-journal/designs/seal-semantics-2026-08-22.md §4 Stage B)"
+                  (docs/specs/seal-semantics.md §\"Stage B — the legalization retry (attempt 0 \
+                  only)\")"
     )]
     pub(crate) const fn candidates_ruled_out(&self) -> usize {
         self.candidates_ruled_out

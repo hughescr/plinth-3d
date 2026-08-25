@@ -60,7 +60,7 @@ something through:
 Attribute every change in the test counts. A delta you cannot name is an unexplained change
 in behaviour, whichever direction it moved.
 
-### The expected numbers, current (MEASURED at `develop@7e11319`/`225b6a7`, the `#77` merge)
+### The expected numbers, current (MEASURED at `develop@7e11319`, the `#77` merge, and `225b6a7`, the `a4-controller` merge)
 
 - `plinth-support` lib tests: **653/653**.
 - `retired_formula_guard` (`crates/plinth-support/tests/retired_formula_guard.rs`):
