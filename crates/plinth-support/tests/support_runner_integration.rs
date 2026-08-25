@@ -4,8 +4,8 @@ use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_raking_blade, make_toed_slab, DelicacyBuildConfig,
-    DelicacySettings, Mesh,
+    evaluate_delicacy, make_overhang_table, make_toed_slab, DelicacyBuildConfig, DelicacySettings,
+    Mesh,
 };
 use plinth_orient::{
     run as run_orientation, BaselineSelection, OrientRequest, OrientationHistory,
@@ -298,8 +298,42 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 ///   all 11 resource counters identical.
 /// - **No cap, gate, bound, tolerance or registered constant was touched**, and
 ///   no new one was added.
+///
+/// **Ported at SPEC-A4 design §G.1 stage 4, when `run_support` BECAME the
+/// one-winner controller — and split in two, which is the one thing about it
+/// that changed.**
+///
+/// The toed-slab half below is UNCHANGED, and unchanged is the finding: this
+/// model closes on its baseline layout, so it never enters a transaction, so no
+/// rule in §A, §B, §C, §D or §E can reach it. Every number here — 64 routed
+/// identities, 170 final live members, digest `12_136_443_226_163_403_608`
+/// (`4_190_462_360_230_124_963` before the seal-semantics lane's AUTHORIZED
+/// one-time re-freeze of 2026-08-23 — the note on
+/// `public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`
+/// records what moved and why the counts did not),
+/// `coverage_repair_rounds() == 0`, both abandoned contacts and their ladders —
+/// is bit-identical under the new door. That is §G.3's central claim measured on
+/// the model it was made about.
+///
+/// **The `make_raking_blade` half MOVED, it was not dropped.** It now lives in
+/// `plinth-support/tests/a4_transactional_controller.rs::the_raking_blade_refuses_with_a_measured_class_per_route`,
+/// which already asserted every substantive thing this half asserted, and more:
+/// the censor BOTH ways (island 3's 0.060 mm² censored and out of the refusal,
+/// island 5's 5.135 mm² above the censor and refusing, both re-checked against
+/// the registered censor), the exact island tuple, and — the part this half
+/// could not state — WHY the route is still uncovered, as
+/// `Blocked(PoolExhausted { pool_rows: 33, occupied: 2, ledgered: 31 })`.
+/// That last assertion is the successor to this half's
+/// `nominated_repair_rows > 0` ("the evidence must say whether it was ever
+/// attempted"), and it is strictly stronger: it says how many rows the route
+/// had, how many were spent, and how many were left.
+///
+/// **Why moved rather than duplicated.** Both files now call the same
+/// `run_support`, so keeping both would run the blade's 45 full pipeline trials
+/// TWICE per gate for one set of facts. Gate cost is a real cost (task #44) and
+/// a duplicated expensive fixture is the wrong place to spend it.
 #[test]
-fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure() {
+fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
@@ -338,7 +372,7 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 4_190_462_360_230_124_963_u64),
+        (64_usize, 170_usize, 12_136_443_226_163_403_608_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
     // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
@@ -502,108 +536,6 @@ fn public_runner_seals_toed_slab_and_refuses_raking_blade_via_coverage_closure()
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");
-
-    let hollowed = hollowed_corpus_model(
-        make_raking_blade().expect("procedural raking blade"),
-        "make_raking_blade",
-    );
-    // FU-38 (2026-08-12): real delicacy, not the zero field -- see
-    // `real_delicacy`'s doc comment for what production this now matches.
-    let delicacy = real_delicacy(&hollowed);
-    let error = run_support(
-        hollowed,
-        SupportRequest {
-            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
-        },
-        support_input(&delicacy, &layers),
-    );
-    let error = match error {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "make_raking_blade has an island of 5.135 mm² the immutable repair pool cannot close \
-             at the registered radius — 32x the registered A3 censor, so no censor at the \
-             registered voxel pitch can excuse it"
-        ),
-    };
-    let plinth_support::SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got a different SupportRunError");
-    };
-    assert_eq!(refusal.attempts, 8);
-    assert_eq!(
-        refusal.reason,
-        plinth_support::CoverageClosureReason::AttemptsExhausted
-    );
-    assert_eq!(
-        refusal.history.len(),
-        9,
-        "attempts 0..=8 each measure exactly once"
-    );
-    let mut islands = refusal.islands.clone();
-    islands.sort_by_key(|island| island.island_id);
-    // **The 0.16 mm² A3 censor, both ways, on ONE real model (2026-08-14).**
-    //
-    // SPEC-A3-A4-COVERAGE.md §4: "A patch fails if and only if either: 1. its
-    // uncovered area is greater than `voxel_pitch_mm**2` … Area at or below
-    // `voxel_pitch_mm**2` is **censored A3 uncertainty**."
-    //
-    // This fixture measures two uncovered islands, and they sit on OPPOSITE
-    // sides of the censor — which is why it is the best witness in the suite:
-    //
-    //   * island 3: **0.06000000000000172 mm²**, one patch, faces [15, 20].
-    //     That is 0.375 of a single 0.4 mm voxel footprint — below the
-    //     resolution the pipeline can act on, so it is censored and is NOT in
-    //     the refusal. Until 2026-08-14 the blocking predicate failed on
-    //     `uncovered_area_mm2 > 0.0` and this island was listed here.
-    //   * island 5: **5.135000000000005 mm²**, one patch, faces
-    //     [14, 15, 20, 21] — 32x the censor. Still fatal, and the refusal
-    //     still names it.
-    //
-    // So a censor that stopped working would put island 3 back in this list,
-    // and a censor widened far enough to swallow island 5 would make
-    // `run_support` return Ok and trip the panic above. Both directions are
-    // load-bearing here.
-    assert_eq!(
-        islands
-            .iter()
-            .map(|island| (
-                island.island_id,
-                island.component_id,
-                island.representative_face_id,
-                island.worst_gap,
-            ))
-            .collect::<Vec<_>>(),
-        vec![(
-            5,
-            1,
-            14,
-            plinth_support::CoverageClosureGap::NoRoutedContact
-        )],
-        "only the island genuinely above the censor may refuse this model"
-    );
-    let censor = plinth_support::registered_coverage_censor_area_mm2()
-        .expect("registered A3 coverage censor");
-    assert!(
-        islands[0].uncovered_area_mm2 > censor,
-        "the refusing island must be above the censor: {} mm² against {censor} mm²",
-        islands[0].uncovered_area_mm2
-    );
-    assert!(
-        (islands[0].uncovered_area_mm2 - 5.135).abs() < 1e-9,
-        "island 5 measures 5.135 mm²; if it moved, the fixture moved: {} mm²",
-        islands[0].uncovered_area_mm2
-    );
-    // FU-56 (2026-08-12 fix): the refusal says PER ISLAND whether it was ever
-    // attempted. "Nominated N times and still blocking" is a router problem;
-    // "zero eligible repair rows, ever" is a pool or mesh problem, and they
-    // need different actions from the owner. This fixture's island was
-    // nominated for and never closed, which is the first of the two.
-    for island in &islands {
-        assert!(
-            island.nominated_repair_rows > 0,
-            "island {} was nominated for on every attempt, so the evidence must say so",
-            island.island_id
-        );
-    }
 }
 
 fn support_input<'a>(
@@ -653,44 +585,80 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
     )
     .expect("make_overhang_table closes coverage from its own repair pool");
 
-    let history = authority.coverage_closure_history();
+    let steps = authority.repair_steps();
+    let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
     assert!(
         authority.coverage_repair_rounds() >= 1,
         "this fixture must NOT close on its baseline layout -- that is what makes it the \
-         success-after-repair demonstration: {history:?}"
-    );
-    // The first attempt measures blocking patches and nominates rows for
-    // them; the last measures clean and nominates nothing. Anything else
-    // would mean the loop returned without the repair rounds doing the work.
-    let first = history.first().expect("at least one measured attempt");
-    let last = history.last().expect("at least one measured attempt");
-    assert_eq!(first.attempt, 0);
-    assert!(
-        first.blocking_patch_count > 0 && first.nominated_rows > 0,
-        "attempt 0 must have measured a blocking patch and nominated for it: {history:?}"
+         success-after-repair demonstration: {steps:?}"
     );
     assert_eq!(
-        (last.blocking_patch_count, last.nominated_rows),
-        (0, 0),
-        "the closing attempt measures clean and nominates nothing: {history:?}"
+        committed.len(),
+        authority.coverage_repair_rounds(),
+        "a repair round IS a committed step now; if these disagree the counter is measuring \
+         something other than the contacts the plan kept"
     );
-    for (index, attempt) in history.iter().enumerate() {
-        assert_eq!(attempt.attempt, index);
+
+    // Attempt 0 measured a blocking patch, and the record says so in its own
+    // numbers: the FIRST trial's before-state is attempt 0's measurement, and a
+    // model with no failing patch there would never have entered a transaction.
+    let first = committed.first().expect("at least one committed step");
+    assert!(
+        first.objective_before.failing_patch_count > 0,
+        "the first commit's before-state IS attempt 0's measurement, and it must show the \
+         blocking patch that put this model into repair: {steps:?}"
+    );
+    // The closing step measures clean. That is the same claim the retired
+    // `history`'s "the closing attempt measures clean and nominates nothing"
+    // made, read off the step that actually did it rather than off an
+    // aggregate that could not say which one that was.
+    let last = committed.last().expect("at least one committed step");
+    assert_eq!(
+        last.objective_after
+            .expect("a committed step was measured on both sides")
+            .failing_patch_count,
+        0,
+        "this run sealed, so its last committed step must have measured zero failing patches: \
+         {steps:?}"
+    );
+
+    // **The monotone pair, and what replaced it.** The retired version asserted
+    // that the blocking patch count was non-increasing across attempts and fell
+    // at least once — a PROXY for "a repair worked", because a batch of 266
+    // appended rows could not say which row moved it. Under one-winner
+    // transactions the property is a guarantee by construction and is asserted
+    // as one: every committed step strictly reduced UNCENSORED uncovered area
+    // (clause 3), which is coverage by definition, and no committed step
+    // worsened the censored objective. A step that covered nothing cannot be
+    // in this list at all.
+    for step in &committed {
+        let before = step.uncensored_before_mm2;
+        let after = step
+            .uncensored_after_mm2
+            .expect("a committed step was measured on both sides");
+        assert!(
+            after < before,
+            "trial {} committed without covering one sample ({before} -> {after} mm²): {steps:?}",
+            step.trial
+        );
+        assert!(
+            step.objective_after
+                .expect("a committed step was measured on both sides")
+                .failing_uncovered_area_mm2
+                <= step.objective_before.failing_uncovered_area_mm2,
+            "trial {} committed while the censored failing area grew: {steps:?}",
+            step.trial
+        );
     }
-    // An appended repair contact measurably reduced uncovered coverage: the
-    // blocking patch count is non-increasing and strictly falls at least once.
-    assert!(
-        history
-            .windows(2)
-            .all(|pair| pair[1].blocking_patch_count <= pair[0].blocking_patch_count),
-        "a repair round must never make coverage worse: {history:?}"
-    );
-    assert!(
-        history
-            .windows(2)
-            .any(|pair| pair[1].blocking_patch_count < pair[0].blocking_patch_count),
-        "at least one repair round must measurably close a blocking patch: {history:?}"
-    );
+    // The accepted state moves ONLY inside a transaction: each commit's
+    // before-state is the previous commit's after-state.
+    for pair in committed.windows(2) {
+        assert_eq!(
+            pair[0].objective_after.expect("measured"),
+            pair[1].objective_before,
+            "something moved the accepted state between commits: {steps:?}"
+        );
+    }
 
     let snapshot = authority
         .verification_snapshot()
@@ -742,6 +710,21 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
 /// 9_355_852_079_468_421_123`. The 11-tuple resource plan, all 9 frozen
 /// islands and all 9 frozen patches are UNCHANGED — re-derived at this tip,
 /// not assumed. The paragraph above stands as the record of its own date.
+///
+/// **The seal-semantics lane, 2026-08-23 — one number again, and this time it
+/// moved ON PURPOSE.** Craig's authorization item 5 keeps `candidates_feasible`
+/// meaning exactly what it means today and adds a SECOND counter for ruled-out
+/// arms (`FinalizedCcoTranscriptRow::candidates_ruled_out`). That counter is
+/// folded into the sealed CCO transcript UNCONDITIONALLY, so the fingerprint
+/// re-freezes once for every model in the corpus, deliberately, with the reason
+/// written down: `snapshot_digest 4_190_462_360_230_124_963 ->
+/// 12_136_443_226_163_403_608`. The counter is ZERO on every path today —
+/// nothing rules an arm out until Stage B's steering channel lands — so this is
+/// a stream-shape change and nothing else. MEASURED at the re-freeze: the
+/// 11-tuple resource plan, all 9 islands, all 9 patches, all 7 defects and the
+/// 64/170 counts are byte-identical; the only field that differs anywhere in
+/// the frozen JSON is `snapshot_digest`. Ledgered in
+/// `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
 #[test]
 fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     let hollowed = hollowed_corpus_model(
@@ -794,7 +777,7 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
     // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
     // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
-    assert_eq!(snapshot.digest(), 4_190_462_360_230_124_963);
+    assert_eq!(snapshot.digest(), 12_136_443_226_163_403_608);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
@@ -1057,6 +1040,155 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
 /// remaining patch below the registered censor, which the pre-write gate
 /// re-measures for itself, and the assertions below check exactly that rather
 /// than trusting the controller's own word.
+///
+/// ---
+///
+/// # FINDING 1 — this fixture is RED ON PURPOSE, and here is what it caught
+///
+/// **Under the one-winner controller this model no longer seals.** It refuses
+/// with `NoImprovingRepair { candidates_tried: 190, best_remaining_score_mm2:
+/// 0.0 }` after **190 trials and 2 commits**, leaving island 4 (component 4)
+/// at 0.2666015625 mm² and island 5 (component 5) at **0.36 mm² — the stub's
+/// hole, untouched**. The red is NOT "the expectation needs re-pinning": the
+/// expectation below is what the engine is supposed to do, and it stays until
+/// the engine does it.
+///
+/// ## Amended 2026-08-21 — task #68 contract (1) has landed, and this fixture
+/// still refuses. What moved, and what did not.
+///
+/// The append no longer replays the load partition
+/// (`perception::append_to_specialized_load_partition`): every surviving
+/// contact's carried area is bit-identical across a trial append, so no trial
+/// can hand a 546.0 mm² block to whichever contact the repartition names. That
+/// is the whole of contract (1) and it is delivered.
+///
+/// **The model does not seal, and it now measures WORSE on island 4 by a
+/// constant.** Both runs below were taken at this commit, on this fixture,
+/// with only `append_regular_repair_rows`' derivation switched — replay
+/// against incremental — so the comparison is like for like:
+///
+/// | | replay (the defect) | incremental (contract 1) |
+/// | --- | --- | --- |
+/// | trials / commits | 190 / 2 | 190 / 2 |
+/// | island 4 residual | 0.2666015625 mm² | 0.2666015625 mm² |
+/// | island 5 residual | 0.36 mm² | 0.36 mm² |
+/// | rejections | `no_improvement: 187, stage_refusal: 1` | `no_improvement: 181, stage_refusal: 7` |
+/// | island-4 area a trial measures | **≤ 0.9664306640625 mm²** | **≤ 2.2994384765625 mm²** |
+/// | `load_violations`, every state | **7** | **7** |
+/// | wall / median per trial | 368 s / 1953 ms | 367 s / 1912 ms |
+///
+/// **The shift is EXACTLY 1.3330078125 mm², in every bucket.** The trial
+/// distribution keeps its shape to the bit — the own-route re-buy offsets are
+/// unchanged (`0.9664306640625 - 0.7998046875` and
+/// `2.2994384765625 - 2.1328125` are both 0.166626 mm²) — and the whole
+/// distribution simply rises by that one constant.
+///
+/// **That constant is phantom credit, and losing it is the fix working.** The
+/// replay bought it by moving un-carriable blocks off incumbent contacts:
+/// a contact relieved of a 546.0 mm² block gets a smaller tip, clears, routes,
+/// and pays island 4. Nothing was supported by that shuffle — the block did
+/// not get lighter, it got someone else's name on it — which is the
+/// toed-slab phantom-credit pattern task #55 named. Contract (1) stops the
+/// shuffle, so the credit stops arriving, and what is left is the true state
+/// of a layout whose contacts are overloaded.
+///
+/// **What is still missing is contract (2) AT THE REPLAY SEAM, and the number
+/// that says so is `load_violations: 7`.** It is 7 in every measured state of
+/// both runs. Seven contacts carry more than the area law's single-contact
+/// maximum of 37.699 mm², and until those blocks are SPLIT where they are
+/// created rather than passed around, this fixture cannot route them however
+/// the trials are ordered. Contract (2) is delivered at the append seam
+/// (`append_to_specialized_load_partition` passes
+/// `CarriableMaximum::AreaLaw`), and is BLOCKED at the replay seam by the
+/// merge tournament's retained load delta, which indexes its arrays by
+/// eligibility row and carries one winner per row — the escalation recorded on
+/// task #68 and stated in full at `finalize_load_rows`' charge.
+///
+/// **The two commits are not in question.** Commit 1 is bit-identical across
+/// both runs (trial 1, island 10 / component 5, objective_after
+/// 1.3264306640625005). Commit 2 lands on a different equally-valued island-4
+/// seat — candidate 1077 at (7.875, 8.9375, 24.0) under the replay, candidate
+/// 1075 at (7.875, 7.3125, 24.0) under the incremental — and both leave island
+/// 4 at 0.2666015625 mm².
+///
+/// **This fixture stays RED, and for exactly one reason: neither of the two
+/// defects below has been resolved.** Item 1 (cross-route credit) is task #68's
+/// own "Defect 1", which it records as separate and needing a design framing.
+/// Item 2's identity survives with its base moved, as the table above shows.
+/// Re-pinning the `expect` to a refusal would turn this fixture green over the
+/// defect it exists to report.
+///
+/// ---
+///
+/// **The step stream says exactly why, and it is neither reachability nor
+/// objective granularity.** Measured over all 190 trials, 2026-08-20:
+///
+/// 1. **The cross-route credit is scored but never delivered.** 44 of the 190
+///    trials were credited an island-5 share in `scored_from` — commit 1
+///    (0.36 of 2.22), commit 2 (0.36 of 1.0598) and 42 rejections. **Not one
+///    route delta in the whole run names island 5**, and its worst gap reads
+///    `NoRoutedContact` from first measurement to last. The two sides disagree
+///    by construction: `coverage_closure::score_candidates_globally` scores a
+///    seat against **every** uncovered sample within the 6.0 mm radius and
+///    deliberately does **not** filter by `(island_id, component_id)`, while
+///    the coverage measurement matches a sample only against routed contacts
+///    of **its own** `(island_id, component_id)` route
+///    (`fill_route_points_nearest`; the rule is written down at
+///    `runner.rs`'s `OwnerlessIslandDisclosure`). A contact seated on island
+///    4 can therefore be *paid* for island 5's hole and can never *close* it.
+///
+/// 2. **Every trial from the accepted state is arithmetic, not search.** From
+///    the post-commit-2 state, for **182 of 182** measured trials:
+///
+///    ```text
+///    island4_after = 0.9664306640625 - (own-route island-4 share, if the trial's contact routed)
+///    ```
+///
+///    **RE-PINNED 2026-08-21, task #68 contract (1).** The identity holds
+///    unchanged in shape; only its base moved, by exactly 1.3330078125 mm²:
+///
+///    ```text
+///    island4_after = 2.2994384765625 - (own-route island-4 share, if the trial's contact routed)
+///    ```
+///
+///    …over 179 of the 190 trials (100 at 2.2994384765625, 30 at 2.1328125,
+///    27 at 2.199462890625, 5 at 2.26611328125, 2 at 2.2327880859375, 1 at
+///    2.1661376953125, and 14 still at 0.9664306640625). The paragraph below
+///    reads against the 0.9664306640625 base it was written for; the sentence
+///    it makes — that this is arithmetic and not search — is what survived the
+///    re-pin, and the amendment above says why the base moved.
+///
+///    That is: appending ANY repair row first destroys exactly the
+///    0.6998291015625 mm² that commit 2 had bought — whether the row routes,
+///    is quarantined, or is refused a winner, and wherever it sits, including
+///    a seat 30 mm away — and a row that routes then re-buys exactly its own
+///    -route share and nothing else. The best own-route share on the ranking
+///    IS 0.6998291015625, so the best attainable result is break-even (trials
+///    2, 4, 5 and 6 measure bit-identical objectives) and clause 1, which is
+///    strict, can never be satisfied again. The search was decided at trial 8:
+///    the loop spent 366 s over 190 trials at a measured 1.917 s median, so
+///    roughly 351 s of it went on proving an identity.
+///
+/// 3. **No accept clause other than clause 1 ever fired.** The rejection
+///    histogram is `{no_improvement: 187, stage_refusal: 1}` — clause 2
+///    (non-regression) and clause 3 (uncensored area) rejected **nothing**, so
+///    this is not an accept-clause calibration problem.
+///
+///    **RE-PINNED 2026-08-21:** `{no_improvement: 181, stage_refusal: 7}`.
+///    Six trials moved from "measured and not better" to "the stage refused
+///    them", which is the incremental append declining to place a row rather
+///    than placing it and measuring nothing. Clauses 2 and 3 still reject
+///    **nothing**, so the sentence this item makes is unchanged.
+///
+/// **Island 5's own pool cannot rescue it either.** It reports
+/// `Blocked(PoolExhausted { pool_rows: 4, occupied: 3, ledgered: 1 })`: the
+/// stub's bottom face is 0.6 mm × 0.6 mm, narrower than the candidate seat
+/// pitch (0.8125 mm on this mesh), so the pool is exactly the face's four
+/// corner seats and nothing interior. Both corners that ever became eligible
+/// were tried and both failed before any measurement — trial 3 at
+/// (10.3, 7.2, 19.0) took `unrouted_no_winner` 3 -> 4, and trial 28 at
+/// (10.3, 7.8, 19.0) killed the whole chain with
+/// `Lowering(RootRunTooShort { .. })`.
 #[test]
 fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     let hollowed = identity_hollowed(shelf_with_dust_beside_a_row_less_hole());
@@ -1069,31 +1201,101 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
         },
         support_input(&delicacy, &layers),
     )
+    // **FINDING 1's red starts here** — see the block above the test. Today
+    // this `expect` is what fails, and the message states the finding rather
+    // than the retired suspicion it replaced: the run reaches the two commits
+    // it is supposed to reach and then cannot place a third, because the
+    // island-5 share it keeps being credited for is scored across routes and
+    // measured within one. Blaming the censored worklist here would be a claim
+    // the step stream refutes — the worklist is uncensored on this path and the
+    // model still refuses.
     .expect(
-        "the stub's 0.36 mm² hole closes from a contact nominated for the censored dust patch \
-         beside it; censoring the repair worklist is what refuses this model",
+        "FINDING 1: the stub's 0.36 mm² hole must CLOSE from a contact nominated for the \
+         censored dust patch beside it. Measured 2026-08-20 and again 2026-08-21 with task #68 \
+         contract (1) landed: the run commits twice, never moves island 5 by a single sample, \
+         and refuses with NoImprovingRepair after 190 trials. Seven contacts still carry more \
+         than the area law allows one contact to carry; see the amendment above the test",
     );
 
-    let history = authority.coverage_closure_history();
+    let steps = authority.repair_steps();
+    let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
+    // MEASURED, not aspirational: this run earns two commits — trial 1 closes
+    // island 10's 1.86 mm² and trial 7 buys back island 4's 0.6998 mm². Pinning
+    // it at 0 would have been a second, independent falsehood in a test that is
+    // already red for one reason; a red fixture has to be red for exactly one.
     assert_eq!(
         authority.coverage_repair_rounds(),
-        3,
-        "this fixture must close in three repair rounds: {history:?}"
+        2,
+        "this fixture must close in the measured number of committed steps: {steps:?}"
     );
-    // The fixture is only evidence if the controller really did work a patch
-    // the verdict had censored, WHILE a real hole was still open. If this
-    // stops being true the mesh has drifted and the test proves nothing.
+
+    // **§E.5 case 4's mechanism, asserted on the real loop instead of through a
+    // proxy — and this is the whole reason the fixture exists.**
+    //
+    // The stub's island has ZERO eligible repair rows of its own. The only
+    // contact that can close its 0.36 mm² hole is one drawn from the DUST
+    // route beside it — the route whose own residual is 0.0999 mm², below the
+    // registered censor, which a censored worklist would have dropped. Under
+    // the retired batch loop the closest this test could get was "some attempt
+    // had a worklist wider than its verdict set". Under one-winner transactions
+    // the step stream names the row, its route, and every route its GLOBAL
+    // score was credited for, so the sentence §D.2 promised is a read rather
+    // than an inference.
+    let closer = committed
+        .iter()
+        .find(|step| {
+            step.route_deltas.iter().any(|delta| {
+                delta.failing_area_before_mm2 > 0.0 && delta.failing_area_after_mm2 == 0.0
+            })
+        })
+        .unwrap_or_else(|| panic!("some committed step must close a FAILING patch: {steps:?}"));
+    let closed = closer
+        .route_deltas
+        .iter()
+        .find(|delta| delta.failing_area_before_mm2 > 0.0 && delta.failing_area_after_mm2 == 0.0)
+        .expect("checked just above");
+    let closed_route = (closed.island_id, closed.component_id);
+    let winner_route = (closer.source_island_id, closer.source_component_id);
+    assert_ne!(
+        winner_route, closed_route,
+        "the closing contact must come from a DIFFERENT route than the hole it closed; if it \
+         came from the hole's own route this fixture is no longer testing the cross-route \
+         effect it was built for: {steps:?}"
+    );
     assert!(
-        history
+        closer
+            .scored_from
             .iter()
-            .any(|attempt| attempt.blocking_patch_count > 0
-                && attempt.repair_target_patch_count > attempt.blocking_patch_count),
-        "the worklist must exceed the verdict set while a hole is still open: {history:?}"
+            .any(
+                |share| (share.island_id, share.component_id) == closed_route
+                    && share.area_mm2 > 0.0
+            ),
+        "the winner's GLOBAL score must be credited, by name and by area, for the route whose \
+         hole it closed — that share IS the uncensored worklist's justification: {steps:?}"
     );
+    assert!(
+        (closed.failing_area_before_mm2 - 0.36).abs() < 1e-6,
+        "the hole this fixture is about measures 0.36 mm²; if it moved, the mesh moved: {} mm²",
+        closed.failing_area_before_mm2
+    );
+
+    // The closing step measures clean, which is what sealing means.
+    //
+    // **FINDING 1 keeps this assertion exactly as it stands.** It is the one
+    // that legitimately fails while the model refuses, and it is the sentence
+    // the fix has to make true: the last committed step measures
+    // `failing_patch_count: 2` today — island 4 at 0.2666015625 mm² and island
+    // 5 at 0.36 mm² — because commit 2 bought back its own route's area and was
+    // never paid the island-5 share its GLOBAL score was credited for. Relaxing
+    // this to "2" would turn the fixture green over the defect it exists to
+    // report.
+    let last = committed.last().expect("at least one committed step");
     assert_eq!(
-        history.last().expect("at least one attempt").blocking_patch_count,
+        last.objective_after
+            .expect("a committed step was measured on both sides")
+            .failing_patch_count,
         0,
-        "the closing attempt measures no blocking patch: {history:?}"
+        "the closing step must measure no blocking patch: {steps:?}"
     );
 
     // And the sealed model is judged by the gate's own rule, re-measured here

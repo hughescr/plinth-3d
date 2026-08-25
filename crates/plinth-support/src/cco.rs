@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::NativeSurface;
 use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_mesh::FaceTopology;
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -20,11 +21,12 @@ use crate::transient::{derive_brace_attachments, TransientError};
 use crate::{
     anchor::{
         discover_finalized_anchor_seats, discover_rewire_anchor_seats,
-        validate_finalized_anchor_feet, validate_rewire_anchor_feet, AnchorFootOutcome,
-        AnchorFootRefusal, AnchorFootRefusalReason, AnchorFootRequest, AnchorGeometryAuthority,
-        AnchorSearchConfig, AnchorSearchError, AnchorSeatRefusal, AnchorTerminalBinding,
-        BoundPhysicalAnchorContact, GeometryFingerprint, QualifiedAnchorSeat, RewireAnchorBinding,
-        SurfaceAnchorPool, SurfaceAnchorSample, ValidatedModelAnchor,
+        validate_finalized_anchor_feet, validate_rewire_anchor_feet, AnchorCandidateProvenance,
+        AnchorFootOutcome, AnchorFootRefusal, AnchorFootRefusalReason, AnchorFootRequest,
+        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorSeatRefusal,
+        AnchorTerminalBinding, BoundPhysicalAnchorContact, GeometryFingerprint,
+        QualifiedAnchorSeat, RewireAnchorBinding, SurfaceAnchorPool, SurfaceAnchorSample,
+        ValidatedModelAnchor,
     },
     initial::{InitialContactBuild, InitialTerminalEvidence},
     perception::FinalizedContactLoads,
@@ -470,15 +472,14 @@ fn slim_rewire_ancestors(
             .clone();
         let existing_carried_mm2 = member.carried_mm2().get();
         let removed_mm2 = removed_carried_mm2.get();
-        let carried = Finite::new((existing_carried_mm2 - removed_mm2).max(0.0)).map_err(
-            |error| {
+        let carried =
+            Finite::new((existing_carried_mm2 - removed_mm2).max(0.0)).map_err(|error| {
                 CcoError::InvalidGeometry(format!(
                     "slim_rewire_ancestors: reducing carried area at member {key:?} \
                      (existing {existing_carried_mm2} mm2 minus removed {removed_mm2} mm2) \
                      produced a non-finite value: {error}"
                 ))
-            },
-        )?;
+            })?;
         forest.set_carried_mm2(key, carried)?;
         let murray = forest
             .children_of(key)
@@ -593,7 +594,7 @@ fn validate_terminal_stub(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CandidateFamily {
     PlateDescent,
     ModelAnchor,
@@ -615,10 +616,37 @@ pub(crate) struct TerminalCcoOutcome {
     /// committed its exact replay or been retired as an unrouted terminal.
     pub(crate) disposition: Option<TerminalDisposition>,
     pub(crate) candidates_generated: usize,
+    /// **PHYSICS, and it keeps exactly one meaning.** How many arms passed
+    /// feasibility. Craig's authorization item 5 (2026-08-23) is that this
+    /// counter is NOT overloaded with ruled-out arms — the refutation §F.1
+    /// reads this exact field to make its "arms existed, clearance refused
+    /// them" argument, and an overload would need a footnote nobody will have.
     pub(crate) candidates_feasible: usize,
+    /// **The second counter.** How many arms were ruled out before the
+    /// tournament weighed them.
+    pub(crate) candidates_ruled_out: usize,
+    /// **Set only when a confirmation round has driven this terminal past its
+    /// last arm.** The round's measured rows, carried here so
+    /// `no_winner_evidence` can seal the round that earned the retirement
+    /// rather than a count of refusals.
+    pub(crate) confirmation_round: Option<Vec<crate::legalization::RoundArm>>,
     pub(crate) anchor_ray_batches: usize,
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
+    /// How many seated MEMBERS this terminal's one batched re-size re-cut
+    /// (Craig's ruling of 2026-08-23; second review, C5/C6).
+    ///
+    /// `grow_terminal_inner` read this count only as control flow — "should the
+    /// rows be re-read?" — and then dropped it, so the tournament's re-size
+    /// disclosed nothing. It is the count across every candidate forest in the
+    /// tournament, not per candidate, because the call is one batch over all of
+    /// them; a zero here on a terminal that grew a model anchor or a
+    /// bifurcation says the re-size stopped firing.
+    ///
+    /// Deliberately NOT folded into the sealed CCO transcript, which this lane
+    /// is already moving for the ruling itself: a second reason to move it
+    /// would make the one authorized re-seal unauditable.
+    pub(crate) seat_zone_members_refrozen: usize,
     pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
     pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     pub(crate) anchor_refusals: Vec<AnchorFootRefusal>,
@@ -668,6 +696,34 @@ pub(crate) enum NoWinnerEvidence {
         anchor_seat_refusals: Vec<AnchorSeatRefusal>,
         anchor_refusals: Vec<AnchorFootRefusal>,
     },
+    /// **The retirement a confirmation round earned — design §1.3 verifier
+    /// addition 1, and the only kind of retirement Stage B can produce.**
+    ///
+    /// Every remaining arm of this terminal was driven, one per pass, in the
+    /// tournament's own order, under a steering set held frozen for the round's
+    /// duration; every one of them was measured illegal by the exact
+    /// post-brace check; and the last of them was measured in the pass before
+    /// this one. `round_arms` carries, per arm, the MEASURED clearance margin
+    /// in millimetres and the radii the resize actually assigned.
+    ///
+    /// **What this lets a reader check is not "here are k negative numbers".**
+    /// Arithmetic over a stale universe adds up perfectly, and so does a pile
+    /// of true measurements harvested from k different worlds. The ranks are
+    /// contiguous from zero and they are the tournament's own order, so what
+    /// the seal shows is a ROUND: nothing this terminal could have chosen was
+    /// legal, in one world, measured.
+    ///
+    /// Margins from earlier STEERING passes are deliberately not here. §1.3
+    /// requires them to be labelled as steering history rather than as part of
+    /// the round, and the honest place for that is the run log, which prints
+    /// every one of them as it happens.
+    ConfirmationRoundExhausted {
+        candidates_generated: usize,
+        candidates_feasible: usize,
+        round_arms: Vec<crate::legalization::RoundArm>,
+        anchor_seat_refusals: Vec<AnchorSeatRefusal>,
+        anchor_refusals: Vec<AnchorFootRefusal>,
+    },
 }
 
 impl NoWinnerEvidence {
@@ -685,6 +741,10 @@ impl NoWinnerEvidence {
                 ..
             }
             | Self::AllFeasibleCandidatesRefusedByClearance {
+                anchor_seat_refusals,
+                ..
+            }
+            | Self::ConfirmationRoundExhausted {
                 anchor_seat_refusals,
                 ..
             } => anchor_seat_refusals,
@@ -758,6 +818,30 @@ pub(crate) struct FinalizedCcoTranscriptRow {
     route: Option<TerminalRouteEvidence>,
     skipped: Option<FinalizedSkippedEvidence>,
     no_winner_reason: Option<NoWinnerEvidence>,
+    /// **The second sealed counter — Craig's authorization item 5, 2026-08-23.**
+    ///
+    /// A ruled-out arm has to be counted somewhere. The cheap answer was to
+    /// fold it into `candidates_feasible`, which keeps this fingerprint still
+    /// for models that never rule anything out but leaves one number with two
+    /// meanings: *"how many arms passed feasibility"* would silently become
+    /// *"how many passed feasibility and were not ruled out in an earlier
+    /// pass"*, and the refutation §F.1 reads that exact field to make its
+    /// "arms existed, clearance refused them" argument.
+    ///
+    /// Craig ruled for the honest counter. `candidates_feasible` keeps its
+    /// meaning word for word, and ruled-out arms get their own number.
+    ///
+    /// **The price, paid once, on purpose.** This field is folded into
+    /// [`transcript_rows_digest`] UNCONDITIONALLY, so the sealed CCO
+    /// transcript fingerprint moves for EVERY model, once, at the commit that
+    /// introduces it — not only for models that rule something out. It is
+    /// ledgered in `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+    ///
+    /// It is zero on every path today. Nothing rules an arm out yet; the
+    /// steering channel that fills it is Stage B's. The counter lands with
+    /// Stage A so the one-time re-freeze is paid at the small, revert-proof
+    /// stage rather than inside the stage that changes behaviour.
+    candidates_ruled_out: usize,
 }
 
 impl FinalizedCcoTranscriptRow {
@@ -802,6 +886,20 @@ impl FinalizedCcoTranscriptRow {
     #[must_use]
     pub(crate) fn no_winner_reason(&self) -> Option<&NoWinnerEvidence> {
         self.no_winner_reason.as_ref()
+    }
+
+    /// How many of this terminal's arms were ruled out before the tournament
+    /// weighed them — the second counter, kept separate from
+    /// `candidates_feasible` so feasibility keeps one meaning.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the counter is sealed and digested at Stage A; the steering channel that gives \
+                  it a non-zero value, and the readers that report it, land with Stage B \
+                  (docs/engineering-journal/designs/seal-semantics-2026-08-22.md §4 Stage B)"
+    )]
+    pub(crate) const fn candidates_ruled_out(&self) -> usize {
+        self.candidates_ruled_out
     }
 }
 
@@ -952,6 +1050,23 @@ pub(crate) enum CcoError {
     RewireGeometryAuthorityMismatch,
     #[error("rewire replay no longer satisfies its evaluated clearance proof")]
     RewireClearanceReplayFailed,
+    /// **Stage B.** Every arm this terminal could still take at its current
+    /// context carries a steering no-good.
+    ///
+    /// This is NOT a retirement and it must never become one. §1.3: a no-good
+    /// steers and never retires, because each one was measured in a world that
+    /// has since been replaced. Returning `winner: None` here would hand the
+    /// cadence a terminal with no winner, which
+    /// `grow_terminal_with_finalized_anchor` retires `UnroutedNoWinner` on the
+    /// spot — a real contact dropped, silently, under a clean seal, on a pile
+    /// of arithmetic. So the pass stops instead, and the controller loop opens
+    /// a confirmation round for this terminal: every remaining arm re-measured
+    /// under the frozen set, one per pass, in the tournament's own order.
+    #[error(
+        "terminal {terminal_id} has a steering no-good for every arm it can still take; the \
+         pass stops so a confirmation round can re-measure them"
+    )]
+    SteeringSpent { terminal_id: u32 },
     #[error("terminal {0} is not current quarantined skipped evidence")]
     InvalidSkippedTerminal(u32),
     #[error("terminal {0} already advanced the CCO terminal cadence")]
@@ -1006,6 +1121,12 @@ pub(crate) enum CcoError {
     Anchor(#[from] AnchorSearchError),
     #[error(transparent)]
     Transient(#[from] TransientError),
+    /// #36. A frozen seat zone could not be computed. A BATCH-level failure —
+    /// a starved band admission or a mesh/topology disagreement — and never a
+    /// statement about one candidate, so it fails the terminal rather than
+    /// silently dropping an anchor from the tournament.
+    #[error("CCO seat-zone freeze failed: {0}")]
+    SeatZone(String),
 }
 
 #[derive(Clone, Debug)]
@@ -1016,7 +1137,33 @@ enum Descriptor {
     },
     ModelAnchor {
         seat_index: usize,
+        /// The RAW qualified seat point, on the surface. This stays raw because
+        /// it is the anchor's IDENTITY: `RewireCandidateBatch::replay` compares
+        /// it bit-for-bit against `ValidatedModelAnchor::seat().point_mm()`.
         point_mm: [f64; 3],
+        /// **PR-7.** The point the strut's rootward end is actually built at —
+        /// `point_mm` pushed inward along the seat's snapped face normal by the
+        /// PR-1 seat depth. Derived once per seat in [`generate_descriptors`]
+        /// and frozen here so a rewire replay re-evaluates the same geometry
+        /// without re-deriving it from the run's process resolution.
+        seated_point_mm: [f64; 3],
+        /// **#36 creation site 3 of 4 — the FROZEN seat zone `Z`.**
+        ///
+        /// The whole face set this anchor's own seat forgives, computed once
+        /// per seat in [`generate_descriptors`] and carried here for the same
+        /// reason `seated_point_mm` is: `apply_model_anchor` runs TWICE for a
+        /// winner — once inside the candidate tournament and once replayed
+        /// against the live forest — and the two must install the identical
+        /// zone or the candidacy screen and the committed geometry disagree.
+        /// Carrying the finished zone rather than the face ID is what makes
+        /// that identity structural: the replay does an `Arc` clone, never a
+        /// native call and never a recompute.
+        ///
+        /// It is the whole RECORD rather than the bare face list because a zone
+        /// that is later re-sized to the arm's final footprint (Craig's ruling,
+        /// 2026-08-23) needs the seat's own face ID and the band radius it was
+        /// cut at, and both were resolved here.
+        seat_zone: crate::seat_zone::SeatZoneRecord,
     },
     Bifurcate {
         host: MemberKey,
@@ -1064,12 +1211,6 @@ pub(crate) struct RewireEvaluatedCandidate {
     evidence: CcoCandidateEvidence,
     evaluated_digest: u64,
     validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
-    /// TRIPWIRE — this candidate's model-anchor seat returned PR-8
-    /// `NotAttached`. Carried per-candidate rather than acted on in
-    /// `evaluate_rewire_candidates`, because the verdict is RECORDED during
-    /// candidacy and ENFORCED at commit; see
-    /// [`RewireCandidateBatch::winning_generation_index`].
-    seat_unattested: bool,
 }
 
 #[derive(Debug)]
@@ -1078,6 +1219,15 @@ pub(crate) struct RewireCandidateBatch {
     refusals: Vec<RewireCandidateRefusal>,
     descriptors_generated: usize,
     clearance_batches: usize,
+    /// How many seated MEMBERS this batch's one re-size re-cut across every
+    /// feasible candidate's forest (second review, C5/C6).
+    ///
+    /// Read by `rewire.rs`'s report, which is where the ruling's most-travelled
+    /// site becomes visible: rewire re-cuts on EVERY sweep, not once per pass.
+    /// `replay_candidate`'s own re-cut is deliberately NOT summed in — it
+    /// re-does one candidate's work on a fresh forest, so adding it would
+    /// double-count the winner.
+    seat_zone_members_refrozen: usize,
     anchor_ray_batches: usize,
     anchor_foot_batches: usize,
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
@@ -1088,6 +1238,11 @@ pub(crate) struct RewireCandidateBatch {
     geometry_fingerprint: GeometryFingerprint,
     /// PR-8/OD-9 (F3) — this batch's model-anchor seat-attestation transcript.
     contact_attestation_digest: u64,
+    /// The run's own process resolution, frozen with the batch so
+    /// `replay_candidate` screens under the SAME PR-1/PR-2/PR-3 policy the
+    /// batch was evaluated under. Registry constants are the same on both
+    /// sides; a layer height is not a registry constant.
+    process_resolution_mm: f64,
 }
 
 /// Move-only proof that one batch survivor was replayed exactly against its
@@ -1119,14 +1274,52 @@ impl RewireReplay {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+// No longer `Copy`: #36's frozen seat zone is an `Arc`, and sharing one is the
+// point — the tournament, the mint and the replay must all name the SAME face
+// set rather than three copies that could drift.
+#[derive(Clone, Debug)]
 struct ClearanceRow {
     p0: [f64; 3],
     p1: [f64; 3],
     r0: f64,
     r1: f64,
-    inset0: f64,
-    inset1: f64,
+    /// The end that declares a model contact, if any, plus the seating state
+    /// its design family gives it.
+    ///
+    /// **#51/#36.** This row used to carry a FLAT inset pair computed here —
+    /// `contact_depth_mm` terminalward, `standoff_mm` rootward — which made the
+    /// model-anchor clearance test unsatisfiable by exactly the arm's own
+    /// radius. The inset is now the PR-2 mask, and PR-2 needs the surface
+    /// normal at the contact point, which needs the kernel. So the row records
+    /// WHAT it is and the mask is computed in [`clearance_survival`], where one
+    /// batched `NativeSurface::project` covers the whole candidate batch. No
+    /// per-item kernel call is introduced; the projection count per tournament
+    /// goes from zero to one.
+    contact: Option<ClearanceContact>,
+    /// **#36 step 5 — the frozen seat zone `Z` for this row's contact.**
+    ///
+    /// Read out of the CANDIDATE forest by [`clearance_rows`], which runs after
+    /// `apply_and_size` has minted or inherited the zone, so the tournament
+    /// grades against the same face set the committed replay will install.
+    ///
+    /// `None` for a row with no contact — it forgives nothing — and also for a
+    /// contact-declaring row whose zone is somehow missing, which grades it
+    /// against its own designed embed and refuses it. That is the STRICT
+    /// direction: a missed creation site surfaces as a refusal, never a silent
+    /// pass.
+    seat_zone: Option<std::sync::Arc<[u32]>>,
+}
+
+/// The contact facts a [`ClearanceRow`] needs to carry from candidate
+/// construction (inside the `rayon` map, no surface available) to the batched
+/// mask computation.
+#[derive(Clone, Copy, Debug)]
+struct ClearanceContact {
+    end: ContactEnd,
+    /// Recomputed from the design family per OD-3, never stored on `Member`.
+    seating: crate::contact::ContactSeating,
+    /// The member's radius AT the contact end — PR-1's flank term.
+    end_radius_mm: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -1549,6 +1742,15 @@ impl CcoController {
 #[derive(Clone, Debug, PartialEq)]
 struct TerminalCadenceRecord {
     disposition: TerminalDisposition,
+    /// **The SECOND counter (Craig's authorization item 5, 2026-08-23).** How
+    /// many of this terminal's arms were RULED OUT before the tournament could
+    /// weigh them.
+    ///
+    /// It is zero on every path today: nothing rules an arm out yet. The
+    /// steering channel that will fill it is Stage B's, and the counter lands
+    /// here first, deliberately, so `candidates_feasible` never has to carry
+    /// two meanings — see [`FinalizedCcoTranscriptRow::candidates_ruled_out`].
+    candidates_ruled_out: usize,
 }
 
 #[derive(Default)]
@@ -1629,7 +1831,7 @@ impl CcoController {
             rows.push(finalize_transcript_row(
                 build.forest(),
                 evidence,
-                &record.disposition,
+                record,
                 cadence_index,
                 plan_digest,
                 loads.digest(),
@@ -1671,6 +1873,8 @@ impl CcoController {
         forest: &mut Forest,
         request: &TerminalCcoRequest,
         surface: &NativeSurface,
+        topology: &FaceTopology,
+        process_resolution_mm: f64,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
         let controller_digest_before = self.digest();
@@ -1685,11 +1889,14 @@ impl CcoController {
             forest,
             request,
             surface,
+            topology,
             Vec::new(),
             Vec::new(),
             None,
             0,
             Some(hosts),
+            process_resolution_mm,
+            None,
         )?;
         let route = TerminalRouteEvidence {
             physical_contact_id: request.physical_contact_id,
@@ -1716,6 +1923,7 @@ impl CcoController {
             request.terminal_id,
             TerminalCadenceRecord {
                 disposition: disposition.clone(),
+                candidates_ruled_out: outcome.candidates_ruled_out,
             },
         );
         outcome.disposition = Some(disposition);
@@ -1731,8 +1939,15 @@ impl CcoController {
         forest: &mut Forest,
         request: &TerminalCcoRequest,
         route: FinalizedAnchorTerminalRoute<'_, '_>,
+        // **Stage B.** Borrowed, never owned, and never stored: see
+        // [`PassSteering`] for why the borrow IS the finiteness obligation.
+        // `None` is every pass of every model that has never abandoned.
+        steering: Option<&crate::legalization::LegalizationSteering>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
+        // One projection per terminal per pass — not one per candidate.
+        let terminal_view = steering.map(|steering| steering.for_terminal(request.terminal_id));
+        let terminal_steering = terminal_view.as_ref();
         let controller_digest_before = self.digest();
         let forest_digest_before = forest.digest();
         let context = FinalizedAnchorValidationContext::bind(forest, request, route)?;
@@ -1765,11 +1980,26 @@ impl CcoController {
             forest,
             request,
             context.route.geometry().surface(),
+            context.route.geometry().topology(),
             discovery.into_seats(),
             anchor_seat_refusals,
             Some(&context),
             anchor_ray_batches,
             Some(hosts),
+            context.route.process_resolution_mm,
+            // **Stage B — the read side of the key.** Not "the same five
+            // digests" assembled by hand: the SAME CALL that seals this
+            // terminal's route evidence twenty lines below, run early. The key
+            // a no-good is matched against and the key a no-good is minted
+            // from are then the same expression, so they cannot drift apart.
+            terminal_steering.map(|terminal| PassSteering {
+                prefix: crate::legalization::PrefixKey::of(&context.route_evidence(
+                    request,
+                    forest_digest_before,
+                    controller_digest_before,
+                )),
+                terminal,
+            }),
         )?;
         // F3 -- chain this terminal's seat-attestation transcript before any
         // disposition is recorded, so a terminal that hard-fails later still
@@ -1806,10 +2036,41 @@ impl CcoController {
             request.terminal_id,
             TerminalCadenceRecord {
                 disposition: disposition.clone(),
+                candidates_ruled_out: outcome.candidates_ruled_out,
             },
         );
         outcome.disposition = Some(disposition);
         Ok(outcome)
+    }
+
+    /// **Stage B — where a no-good is minted from, and why it is here.**
+    ///
+    /// The one place a no-good's two halves both exist as the ROUTING CADENCE'S
+    /// OWN RECORD: the prefix digests this terminal's tournament read, and the
+    /// four fields it sealed about the arm it chose.
+    ///
+    /// It is a read of sealed authority, not a new one. This value is already
+    /// folded into `CcoController::digest`, which the transcript carries as
+    /// `final_controller_digest` and folds into its own digest — so exposing it
+    /// read-only adds no field, moves no fingerprint and lets nobody
+    /// manufacture a claim. The alternative considered and rejected was putting
+    /// the winner on `FinalizedCcoTranscriptRow`, which the row deliberately
+    /// omits ("no mutable candidate and forest details") and which would have
+    /// moved every model's sealed transcript digest a SECOND time, unledgered
+    /// and unauthorized.
+    ///
+    /// `None` for a terminal that is quarantined, retired, or not in this
+    /// cadence at all: only a terminal the record sealed as `Routed` has an arm
+    /// its own tournament chose, and only such a terminal may earn a no-good.
+    pub(crate) fn sealed_routed_arm(
+        &self,
+        terminal_id: u32,
+    ) -> Option<(&TerminalRouteEvidence, &CcoCandidateEvidence)> {
+        match &self.terminals.get(&terminal_id)?.disposition {
+            TerminalDisposition::Routed { route, winner } => Some((route, winner)),
+            TerminalDisposition::SkippedQuarantined { .. }
+            | TerminalDisposition::UnroutedNoWinner { .. } => None,
+        }
     }
 
     /// Advance the same Python terminal cadence after a terminal has been
@@ -1836,6 +2097,10 @@ impl CcoController {
                     forest_digest: forest.digest(),
                     controller_digest_before: self.digest(),
                 },
+                // A skipped terminal never had a route request, so it never
+                // had an arm to rule out. Zero is the truthful value here, not
+                // a placeholder.
+                candidates_ruled_out: 0,
             },
         );
         Ok(())
@@ -1885,7 +2150,12 @@ impl CcoController {
             &seats,
             Some(hosts),
             false,
-        );
+            anchor_route.process_resolution_mm,
+            anchor_route.geometry.surface(),
+            // #36 step 3 — the adjacency the seat-zone fill walks, from the one
+            // authority that already bound it to this surface and mesh.
+            anchor_route.geometry.topology(),
+        )?;
         let descriptors_generated = descriptors.len();
         let evaluated =
             evaluate_descriptors(&binding.snapshot, &binding.request, &descriptors, &config)?;
@@ -1918,10 +2188,6 @@ impl CcoController {
         }
         let mut validated_anchors = BTreeMap::new();
         let mut anchor_foot_batches = 0;
-        // TRIPWIRE -- generation indices whose seat attestation returned PR-8
-        // `NotAttached`, carried onto each surviving candidate below so the
-        // verdict is available at the moment one of them WINS.
-        let mut unattested_seats = BTreeSet::<usize>::new();
         // F3 -- this batch's model-anchor seat-attestation transcript. The
         // empty-batch digest rather than zero, so "no anchor was proposed" and
         // "the attestation stopped running" are different values.
@@ -1944,8 +2210,10 @@ impl CcoController {
             for candidate in &feasible {
                 if let Some((seat_index, final_radius)) = candidate.anchor {
                     let seats_len = seats.len();
-                    let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
-                        || {
+                    let seat = seats
+                        .get_mut(seat_index)
+                        .and_then(Option::take)
+                        .ok_or_else(|| {
                             CcoError::InvalidGeometry(format!(
                                 "evaluate_rewire_candidates: candidate generation \
                                  {} points at seat index {seat_index} of {seats_len}, but \
@@ -1953,8 +2221,7 @@ impl CcoController {
                                  earlier candidate in this batch",
                                 candidate.generation_index
                             ))
-                        },
-                    )?;
+                        })?;
                     generation_indices.push(candidate.generation_index);
                     foot_requests.push(AnchorFootRequest::new(seat, final_radius));
                 }
@@ -1996,6 +2263,7 @@ impl CcoController {
                 .values()
                 .map(Box::as_ref)
                 .collect::<Vec<_>>();
+            let attested_seats = seated_points_of(&descriptors, &attested_indices)?;
             let attestation = attest_model_anchor_seats(
                 anchor_route.geometry.surface(),
                 binding.request.stub_end_mm().map(Finite::get),
@@ -2003,30 +2271,28 @@ impl CcoController {
                 cco_terminal_radius(&binding.request, &config)?.get(),
                 anchor_route.process_resolution_mm,
                 &attested,
+                &attested_seats,
             )?;
             contact_attestation_digest = attestation.digest;
             for (generation_index, refusal) in attested_indices.iter().zip(&attestation.refusals) {
-                // Same asymmetry as the terminal-growth path: OD-9 burial
-                // refuses, a `NotAttached` connectivity verdict is recorded
-                // here and enforced at commit by
-                // `RewireCandidateBatch::winning_generation_index`.
-                if matches!(
-                    refusal,
-                    Some(crate::designed_embed::ContactAttestationRefusal::NotAttached { .. })
-                ) {
-                    unattested_seats.insert(*generation_index);
-                }
-                // FU-88 — an unusable candidate refuses here too, through the
-                // same channel; see the terminal-growth path for the argument.
-                let reason = match refusal {
+                // PR-7 — all three verdicts refuse at candidacy on this path
+                // too, through the same single mapping the terminal-growth path
+                // uses. The rewire commit-time tripwire in
+                // `RewireCandidateBatch::winning_generation_index` came out with
+                // it; see the argument on the terminal-growth loop.
+                let kind = match refusal {
                     Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface {
                         ..
-                    }) => crate::anchor::AnchorFootRefusalReason::SeatBuriedSurface,
-                    Some(
-                        crate::designed_embed::ContactAttestationRefusal::UnusableGeometry { .. },
-                    ) => crate::anchor::AnchorFootRefusalReason::SeatGeometryUnusable,
+                    }) => SeatAttestationRefusalKind::Buried,
+                    Some(crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
+                        ..
+                    }) => SeatAttestationRefusalKind::Unusable,
+                    Some(crate::designed_embed::ContactAttestationRefusal::NotAttached {
+                        ..
+                    }) => SeatAttestationRefusalKind::NotAttached,
                     _ => continue,
                 };
+                let reason = kind.reason();
                 validated_anchors.remove(generation_index).ok_or_else(|| {
                     CcoError::InvalidGeometry(format!(
                         "evaluate_rewire_candidates: seat refusal {reason:?} for candidate \
@@ -2052,6 +2318,8 @@ impl CcoController {
                 refusals,
                 descriptors_generated,
                 clearance_batches: 0,
+                // The screen was never reached, so neither was the re-size.
+                seat_zone_members_refrozen: 0,
                 anchor_ray_batches,
                 anchor_foot_batches,
                 anchor_seat_refusals,
@@ -2061,31 +2329,87 @@ impl CcoController {
                 binding_identity,
                 geometry_fingerprint,
                 contact_attestation_digest,
+                process_resolution_mm: anchor_route.process_resolution_mm,
             });
         }
-        let survives = clearance_survival(anchor_route.geometry.surface(), &config, &feasible)?;
+        let contact_policy = seat_contact_policy(anchor_route.process_resolution_mm)?;
+        // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the REWIRE
+        // tournament's post-sizing point (second review, finding C1).**
+        //
+        // This path is `grow_terminal_inner`'s sibling and it sizes exactly the
+        // same way: `evaluate_descriptors` above ran `apply_and_size` on every
+        // descriptor, so a model anchor's rootward radius was raised by
+        // `size_tapered_without_tree_fanin` and a bifurcation's upper half was
+        // rewritten by `size_bifurcation_candidate`. Without a re-cut here the
+        // screen below would grade a SIZED arm against its CREATION-radius
+        // band — the exact defect the ruling kills — and the refusal would
+        // leave silently as `RewireCandidateRefusalReason::Clearance`, which
+        // `try_reattach` reports as `Ok(None)`.
+        //
+        // Same placement in the pipeline as the terminal-growth site: after all
+        // sizing, before `clearance_survival` grades anything, in ONE batched
+        // kernel call across every feasible candidate's forest at once.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            anchor_route.geometry.surface(),
+            anchor_route.geometry.topology(),
+            contact_policy.standoff_mm,
+            feasible.iter_mut().map(|candidate| &mut candidate.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // `ClearanceRow` snapshots the zone when `clearance_rows` builds
+            // it, so a candidate whose forest just changed needs its rows
+            // re-read. Pure CPU: `clearance_rows` makes no native call. The row
+            // SET cannot move — `clearance_rows` selects on `Member` equality
+            // and a re-cut writes no `Member` — so `clearance_rows` below still
+            // agrees with the count `replay_candidate` checks.
+            for candidate in &mut feasible {
+                candidate.rows = clearance_rows(&candidate.forest, &binding.snapshot);
+            }
+        }
+        let survives =
+            clearance_survival(anchor_route.geometry.surface(), &contact_policy, &feasible)?;
         let mut candidates = Vec::new();
-        for (candidate, survives) in feasible.into_iter().zip(survives) {
-            if survives {
-                let generation_index = candidate.generation_index;
-                candidates.push(RewireEvaluatedCandidate {
-                    descriptor: descriptors[generation_index].clone(),
-                    evidence: CcoCandidateEvidence {
-                        family: candidate.family,
+        for (candidate, verdict) in feasible.into_iter().zip(survives) {
+            let generation_index = candidate.generation_index;
+            match verdict {
+                ClearanceVerdict::Survives => {
+                    candidates.push(RewireEvaluatedCandidate {
+                        descriptor: descriptors[generation_index].clone(),
+                        evidence: CcoCandidateEvidence {
+                            family: candidate.family,
+                            generation_index,
+                            price_ml: candidate.price_ml,
+                            clearance_rows: candidate.rows.len(),
+                        },
+                        evaluated_digest: candidate.forest.digest(),
+                        validated_model_anchor: validated_anchors.remove(&generation_index),
+                    });
+                }
+                // PR-3 (design review F1) — a member that cannot emerge from its
+                // own contact mask is refused by NAME, not folded into an
+                // anonymous clearance failure.
+                ClearanceVerdict::GrazingIncidence | ClearanceVerdict::DegenerateIncidence => {
+                    validated_anchors.remove(&generation_index);
+                    refusals.push(RewireCandidateRefusal {
                         generation_index,
-                        price_ml: candidate.price_ml,
-                        clearance_rows: candidate.rows.len(),
-                    },
-                    evaluated_digest: candidate.forest.digest(),
-                    validated_model_anchor: validated_anchors.remove(&generation_index),
-                    seat_unattested: unattested_seats.contains(&generation_index),
-                });
-            } else {
-                refusals.push(RewireCandidateRefusal {
-                    generation_index: candidate.generation_index,
-                    family: candidate.family,
-                    reason: RewireCandidateRefusalReason::Clearance,
-                });
+                        family: candidate.family,
+                        reason: RewireCandidateRefusalReason::AnchorFoot(
+                            if verdict == ClearanceVerdict::DegenerateIncidence {
+                                AnchorFootRefusalReason::SeatDegenerateIncidence
+                            } else {
+                                AnchorFootRefusalReason::SeatGrazingIncidence
+                            },
+                        ),
+                    });
+                }
+                ClearanceVerdict::Distance => {
+                    refusals.push(RewireCandidateRefusal {
+                        generation_index,
+                        family: candidate.family,
+                        reason: RewireCandidateRefusalReason::Clearance,
+                    });
+                }
             }
         }
         sort_rewire_refusals(&mut refusals);
@@ -2094,6 +2418,7 @@ impl CcoController {
             refusals,
             descriptors_generated,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             anchor_ray_batches,
             anchor_foot_batches,
             anchor_seat_refusals,
@@ -2103,6 +2428,7 @@ impl CcoController {
             binding_identity,
             geometry_fingerprint,
             contact_attestation_digest,
+            process_resolution_mm: anchor_route.process_resolution_mm,
         })
     }
 
@@ -2353,6 +2679,20 @@ impl CcoController {
                             digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                             digest_anchor_refusals(&mut word, anchor_refusals);
                         }
+                        NoWinnerEvidence::ConfirmationRoundExhausted {
+                            candidates_generated,
+                            candidates_feasible,
+                            round_arms,
+                            anchor_seat_refusals,
+                            anchor_refusals,
+                        } => {
+                            word(3);
+                            word(*candidates_generated as u64);
+                            word(*candidates_feasible as u64);
+                            digest_round_arms(&mut word, round_arms);
+                            digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+                            digest_anchor_refusals(&mut word, anchor_refusals);
+                        }
                     }
                 }
             }
@@ -2482,6 +2822,20 @@ fn digest_terminal_record(word: &mut impl FnMut(u64), record: &TerminalCadenceRe
                     digest_anchor_seat_refusals(word, anchor_seat_refusals);
                     digest_anchor_refusals(word, anchor_refusals);
                 }
+                NoWinnerEvidence::ConfirmationRoundExhausted {
+                    candidates_generated,
+                    candidates_feasible,
+                    round_arms,
+                    anchor_seat_refusals,
+                    anchor_refusals,
+                } => {
+                    word(3);
+                    word(*candidates_generated as u64);
+                    word(*candidates_feasible as u64);
+                    digest_round_arms(word, round_arms);
+                    digest_anchor_seat_refusals(word, anchor_seat_refusals);
+                    digest_anchor_refusals(word, anchor_refusals);
+                }
             }
         }
     }
@@ -2545,12 +2899,22 @@ fn expected_initial_cadence(build: &InitialContactBuild) -> Result<Vec<u32>, Cco
 fn finalize_transcript_row(
     forest: &Forest,
     initial: &InitialTerminalEvidence,
-    disposition: &TerminalDisposition,
+    // The whole cadence record, rather than its disposition plus a loose
+    // counter. The row IS the record, sealed: handing over the two halves
+    // separately would let a caller pair one terminal's disposition with
+    // another's count, and it pushed this signature past the argument lint for
+    // no gain in clarity.
+    record: &TerminalCadenceRecord,
     cadence_index: usize,
     plan_digest: u64,
     loads_digest: u64,
     geometry_digest: u64,
 ) -> Result<FinalizedCcoTranscriptRow, CcoError> {
+    let TerminalCadenceRecord {
+        disposition,
+        candidates_ruled_out,
+    } = record;
+    let candidates_ruled_out = *candidates_ruled_out;
     let terminal = initial.terminal;
     let physical_contact_id = u64::from(terminal);
     let ledger = forest
@@ -2594,6 +2958,7 @@ fn finalize_transcript_row(
                 route: Some(route.clone()),
                 skipped: None,
                 no_winner_reason: None,
+                candidates_ruled_out,
             })
         }
         TerminalDisposition::SkippedQuarantined {
@@ -2624,6 +2989,7 @@ fn finalize_transcript_row(
                     controller_digest_before: *controller_digest_before,
                 }),
                 no_winner_reason: None,
+                candidates_ruled_out,
             })
         }
         TerminalDisposition::UnroutedNoWinner { route, reason } => {
@@ -2645,6 +3011,7 @@ fn finalize_transcript_row(
                 route: Some(route.clone()),
                 skipped: None,
                 no_winner_reason: Some(reason.clone()),
+                candidates_ruled_out,
             })
         }
     }
@@ -2670,6 +3037,14 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             FinalizedDispositionKind::SkippedQuarantined => 1,
             FinalizedDispositionKind::UnroutedNoWinner => 2,
         });
+        // **The second counter, folded UNCONDITIONALLY** — Craig's
+        // authorization item 5, 2026-08-23. Not "only when non-zero": a
+        // conditional fold would keep this fingerprint still for models that
+        // rule nothing out, which is precisely the cheap-today, expensive-later
+        // shape the ruling declined. Every model's sealed transcript digest
+        // moves once, here, on purpose, and the move is ledgered in
+        // `docs/engineering-journal/EMISSION-CANARY-LEDGER.md`.
+        word(row.candidates_ruled_out as u64);
         match &row.route {
             Some(route) => {
                 word(1);
@@ -2712,6 +3087,27 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
                 word(3);
                 word(*candidates_generated as u64);
                 word(*candidates_feasible as u64);
+                digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+                digest_anchor_refusals(&mut word, anchor_refusals);
+            }
+            // **A NEW discriminant, so no existing row moves.** Every model
+            // that retires nothing through a round keeps its transcript
+            // fingerprint byte for byte: the three variants above fold exactly
+            // as they did, and this one is reachable only by a terminal a round
+            // actually retired. Craig's authorization item 5 bought ONE
+            // corpus-wide re-freeze, at Stage A, and this deliberately does not
+            // spend a second.
+            Some(NoWinnerEvidence::ConfirmationRoundExhausted {
+                candidates_generated,
+                candidates_feasible,
+                round_arms,
+                anchor_seat_refusals,
+                anchor_refusals,
+            }) => {
+                word(4);
+                word(*candidates_generated as u64);
+                word(*candidates_feasible as u64);
+                digest_round_arms(&mut word, round_arms);
                 digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                 digest_anchor_refusals(&mut word, anchor_refusals);
             }
@@ -2813,6 +3209,11 @@ fn digest_anchor_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorFootRefu
             AnchorFootRefusalReason::SeatBuriedSurface => 7,
             AnchorFootRefusalReason::SeatNotAttached => 8,
             AnchorFootRefusalReason::SeatGeometryUnusable => 9,
+            // PR-3 (#51). Appended, for the same reason the F3 discriminants
+            // were: renumbering would move every model's sealed transcript
+            // digest without any geometry changing.
+            AnchorFootRefusalReason::SeatGrazingIncidence => 10,
+            AnchorFootRefusalReason::SeatDegenerateIncidence => 11,
         });
         word(provenance.physical_contact_id().unwrap_or(u64::MAX));
         word(provenance.sample_index() as u64);
@@ -2925,8 +3326,36 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
     }
 }
 
+/// Fold a confirmation round's measured rows. Every field, by exact bits: the
+/// round is the evidence a retirement rests on, so a row that changed and a
+/// digest that did not would be exactly the hole this stage exists to close.
+fn digest_round_arms(word: &mut impl FnMut(u64), arms: &[crate::legalization::RoundArm]) {
+    word(arms.len() as u64);
+    for arm in arms {
+        word(arm.rank as u64);
+        arm.arm.digest(word);
+        word(arm.gap_mm.to_bits());
+        word(arm.distance_clearance_mm.to_bits());
+        word(u64::from(arm.axis_transit_illegal));
+        word(arm.terminal_radius_mm.to_bits());
+        word(arm.rootward_radius_mm.to_bits());
+    }
+}
+
 fn no_winner_evidence(outcome: &TerminalCcoOutcome) -> NoWinnerEvidence {
     debug_assert!(outcome.winner.is_none());
+    // Checked FIRST, because a round's verdict is about arms that DID exist and
+    // DID pass feasibility, and folding it into one of the three counting
+    // reasons would lose exactly the fact that makes the retirement earned.
+    if let Some(round_arms) = outcome.confirmation_round.clone() {
+        return NoWinnerEvidence::ConfirmationRoundExhausted {
+            candidates_generated: outcome.candidates_generated,
+            candidates_feasible: outcome.candidates_feasible,
+            round_arms,
+            anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
+            anchor_refusals: outcome.anchor_refusals.clone(),
+        };
+    }
     if outcome.candidates_generated == 0 {
         NoWinnerEvidence::NoCandidatesGenerated {
             anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
@@ -3134,20 +3563,135 @@ impl HostCache {
     }
 }
 
+/// **Stage B.** One pass's steering instruction for ONE terminal, plus the
+/// live prefix key the no-goods are matched against.
+///
+/// It is `Copy` and borrowed, and it is deliberately assembled by the CALLER
+/// from values the caller already holds: the five digests here are the very
+/// same ones `route_evidence` seals for this terminal a few lines later, so the
+/// read side of the key and the write side cannot drift apart.
+///
+/// **The finiteness obligation lives on this type's shape.** It is a borrowed
+/// parameter and nothing more. It is not a field of `CcoController`, so
+/// `CcoController::digest` cannot see it, so `controller_digest_before` cannot
+/// move when the set grows — which is what keeps the context universe finite
+/// and the termination argument non-circular (design §4 Stage B, and
+/// `a_growing_no_good_set_moves_no_context_digest`).
+#[derive(Clone, Copy, Debug)]
+struct PassSteering<'a> {
+    prefix: crate::legalization::PrefixKey,
+    terminal: &'a crate::legalization::TerminalSteering<'a>,
+}
+
+/// What the steering did to this terminal's slate.
+enum SteeringOutcome {
+    /// Ordinary steering: this many arms were passed over, and at least one
+    /// remains for the tournament to weigh.
+    Suppressed { ruled_out: usize },
+    /// A confirmation round: take the arm at this rank of the tournament's own
+    /// order, suppressing nothing. A rank past the end of the slate is how a
+    /// round ends in exhaustion, and it is handled by the caller's `nth`
+    /// returning `None`.
+    Forced { rank: usize },
+}
+
+/// Apply one pass's steering to a sorted survivor slate.
+///
+/// Batched by construction: one walk over the slate to build the identities,
+/// one probe over the whole slate at once, one retain. No native call, and no
+/// per-candidate call into anything.
+///
+/// **Every comparison is streamed, both halves.** Without it a no-good that
+/// misses on every pass is indistinguishable from a model that genuinely
+/// cannot be legalized: the second pass would learn nothing new, the abandon
+/// rule would fire, and the run would refuse by name for what looks like the
+/// right reason. The log line is what separates a live mechanism from a no-op.
+fn apply_steering(
+    steering: &PassSteering<'_>,
+    survivors: &mut Vec<&EvaluatedCandidate>,
+) -> Result<SteeringOutcome, CcoError> {
+    let slate = survivors
+        .iter()
+        .map(|candidate| {
+            crate::legalization::ArmIdentity::live(
+                candidate.family,
+                candidate.generation_index,
+                candidate.price_ml,
+                candidate.rows.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (verdict, probes) = steering.terminal.verdict(steering.prefix, &slate);
+    for probe in &probes {
+        crate::coverage_repair::emit_run_line(&format!(
+            "legalize: steer t{} {}",
+            steering.terminal.terminal_id(),
+            probe.render(),
+        ));
+    }
+
+    match verdict {
+        crate::legalization::SteeringVerdict::Forced { rank } => {
+            crate::coverage_repair::emit_run_line(&format!(
+                "legalize: round t{} takes arm rank {rank} of {} in tournament order",
+                steering.terminal.terminal_id(),
+                survivors.len(),
+            ));
+            Ok(SteeringOutcome::Forced { rank })
+        }
+        crate::legalization::SteeringVerdict::Spent { ruled_out } => {
+            crate::coverage_repair::emit_run_line(&format!(
+                "legalize: steering spent t{} — all {ruled_out} arms carry a no-good; opening a \
+                 confirmation round instead of retiring",
+                steering.terminal.terminal_id(),
+            ));
+            Err(CcoError::SteeringSpent {
+                terminal_id: steering.terminal.terminal_id(),
+            })
+        }
+        crate::legalization::SteeringVerdict::Suppressed { ruled_out, keep } => {
+            let mut index = 0_usize;
+            survivors.retain(|_| {
+                let keep = keep[index];
+                index += 1;
+                keep
+            });
+            Ok(SteeringOutcome::Suppressed { ruled_out })
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn grow_terminal_inner(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     surface: &NativeSurface,
+    topology: &FaceTopology,
     mut seats: Vec<QualifiedAnchorSeat>,
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
     anchor_ray_batches: usize,
     cached_hosts: Option<Vec<MemberKey>>,
+    process_resolution_mm: f64,
+    steering: Option<PassSteering<'_>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
     request.validate(forest)?;
     let config = Config::current()?;
-    let descriptors = generate_descriptors(forest, request, &config, &seats, cached_hosts, true);
+    // PR-1/PR-2/PR-3 all read this policy. It is built once per terminal, from
+    // the registry plus THIS RUN's process resolution, and handed to both the
+    // seat derivation and the clearance screen so the two cannot disagree.
+    let contact_policy = seat_contact_policy(process_resolution_mm)?;
+    let descriptors = generate_descriptors(
+        forest,
+        request,
+        &config,
+        &seats,
+        cached_hosts,
+        true,
+        process_resolution_mm,
+        surface,
+        topology,
+    )?;
     let candidates_generated = descriptors.len();
     let snapshot = forest.clone();
     let mut evaluated = evaluate_descriptors(&snapshot, request, &descriptors, &config)?
@@ -3157,11 +3701,6 @@ fn grow_terminal_inner(
     let mut validated_anchors = BTreeMap::<usize, Box<ValidatedModelAnchor>>::new();
     let mut anchor_refusals = Vec::new();
     let mut anchor_foot_batches = 0;
-    // TRIPWIRE -- generation indices whose seat attestation returned PR-8
-    // `NotAttached`. Carried per-candidate out of the attestation batch below,
-    // because this verdict is RECORDED during candidacy and ENFORCED at commit;
-    // see the winner gate at the bottom of this function.
-    let mut unattested_seats = BTreeSet::<usize>::new();
     // F3 -- this terminal's model-anchor seat-attestation transcript. A terminal
     // with no seats still produces the empty-batch digest rather than zero, so
     // "no anchor was proposed" and "the attestation stopped running" are
@@ -3191,16 +3730,17 @@ fn grow_terminal_inner(
         for candidate in &evaluated {
             if let Some((seat_index, final_radius)) = candidate.anchor {
                 let seats_len = seats.len();
-                let seat = seats.get_mut(seat_index).and_then(Option::take).ok_or_else(
-                    || {
+                let seat = seats
+                    .get_mut(seat_index)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
                         CcoError::InvalidGeometry(format!(
                             "grow_terminal_inner: candidate generation {} points at seat \
                              index {seat_index} of {seats_len}, but that slot is out of \
                              range or was already taken by an earlier candidate",
                             candidate.generation_index
                         ))
-                    },
-                )?;
+                    })?;
                 generation_indices.push(candidate.generation_index);
                 foot_requests.push(AnchorFootRequest::new(seat, final_radius));
             }
@@ -3235,6 +3775,7 @@ fn grow_terminal_inner(
             .values()
             .map(Box::as_ref)
             .collect::<Vec<_>>();
+        let attested_seats = seated_points_of(&descriptors, &attested_indices)?;
         let attestation = attest_model_anchor_seats(
             surface,
             request.stub_end_mm().map(Finite::get),
@@ -3242,51 +3783,48 @@ fn grow_terminal_inner(
             cco_terminal_radius(request, &config)?.get(),
             context.route.process_resolution_mm,
             &attested,
+            &attested_seats,
         )?;
         contact_attestation_digest = attestation.digest;
         for (index, refusal) in attested_indices.iter().zip(&attestation.refusals) {
-            // OD-9 burial refuses; a `NotAttached` connectivity verdict is
-            // RECORDED in the transcript digest above and left in the
-            // tournament -- and then ENFORCED at commit by the winner gate
-            // below, which is the only place a merely-measured seat could
-            // become printed geometry. The disposition argument is on
-            // `attest_model_anchor_seats`.
-            if matches!(
-                refusal,
-                Some(crate::designed_embed::ContactAttestationRefusal::NotAttached { .. })
-            ) {
-                unattested_seats.insert(*index);
-            }
-            // FU-88 — an unusable candidate refuses HERE too, for a different
-            // reason than burial: it is not a verdict about the seating rule,
-            // it is a statement that this candidate is not a printable strut.
-            // It used to abort the whole model from inside the batch.
-            let unusable = match refusal {
-                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. }) => {
-                    false
-                }
+            // **PR-7 landed, so all three verdicts now refuse at CANDIDACY.**
+            //
+            // `NotAttached` used to be recorded here and enforced at commit by
+            // `elect_committable_winner`, and the reason was explicit: the CCO
+            // family was deliberately UNSEATED, so refusing an unseated kiss
+            // while it was still competing would have landed PR-7's
+            // family-killing consequence without landing PR-7 — the accidental
+            // physics change OD-8 forbids. `apply_model_anchor` now seats the
+            // rootward end (PR-1/PR-7), so `NotAttached` stops being a
+            // statement about a MISSING RULE and becomes an ordinary defect:
+            // this candidate's seat does not reach the solid. It therefore
+            // refuses at candidacy exactly as the brace model rung's does and
+            // exactly as OD-9 burial already did, and the commit-time tripwire
+            // and its rewire sibling came out in the same commit, as their own
+            // doc comments predicted they would.
+            let refusal_reason = match refusal {
+                Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface {
+                    ..
+                }) => SeatAttestationRefusalKind::Buried,
                 Some(crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
                     ..
-                }) => true,
+                }) => SeatAttestationRefusalKind::Unusable,
+                Some(crate::designed_embed::ContactAttestationRefusal::NotAttached { .. }) => {
+                    SeatAttestationRefusalKind::NotAttached
+                }
                 _ => continue,
             };
             // Same channel a breached foot ball uses: the candidate leaves the
             // tournament, the terminal routes some other way, nothing fails.
             let anchor = validated_anchors.remove(index).ok_or_else(|| {
                 CcoError::InvalidGeometry(format!(
-                    "grow_terminal_inner: seat refusal ({}) for candidate generation {index} \
-                     names a seat attestation that was never validated (not present in \
-                     validated_anchors)",
-                    if unusable { "unusable geometry" } else { "burial" }
+                    "grow_terminal_inner: seat refusal ({refusal_reason:?}) for candidate \
+                     generation {index} names a seat attestation that was never validated \
+                     (not present in validated_anchors)"
                 ))
             })?;
             valid.remove(index);
-            let provenance = anchor.seat().provenance();
-            anchor_refusals.push(if unusable {
-                AnchorFootRefusal::seat_geometry_unusable(provenance)
-            } else {
-                AnchorFootRefusal::seat_buried(provenance)
-            });
+            anchor_refusals.push(refusal_reason.refusal(anchor.seat().provenance()));
         }
         evaluated.retain(|candidate| {
             candidate.anchor.is_none() || valid.contains(&candidate.generation_index)
@@ -3299,9 +3837,13 @@ fn grow_terminal_inner(
             disposition: None,
             candidates_generated,
             candidates_feasible,
+            candidates_ruled_out: 0,
+            confirmation_round: None,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 0,
+            // Nothing was graded, so the re-size never ran.
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
@@ -3309,30 +3851,110 @@ fn grow_terminal_inner(
         });
     }
 
-    let survival = clearance_survival(surface, &config, &evaluated)?;
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, at the CCO tournament's one
+    // defined post-sizing point.**
+    //
+    // Every candidate has now been applied AND sized: a model anchor's rootward
+    // radius was raised by `size_tapered_without_tree_fanin`, a bifurcation's
+    // upper half was rewritten by `size_bifurcation_candidate`, and both of
+    // those members carry a band cut at a radius they no longer have. This is
+    // challenge finding F1 (design §11.9), and the ruling is that the exemption
+    // must equal the arm's TRUE footprint with no slack. So the bands are re-cut
+    // to the final radii HERE — after all sizing, before `clearance_survival`
+    // grades anything, in ONE batched kernel call for every candidate forest in
+    // the tournament at once.
+    //
+    // It cannot move to a later point: `clearance_survival` is the placement
+    // grading site and it must read the re-cut zones. It cannot move to an
+    // earlier one: `evaluate_descriptors` runs inside a `rayon` map with no
+    // surface, and per-candidate re-cutting would be one native call each.
+    let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+        surface,
+        topology,
+        contact_policy.standoff_mm,
+        evaluated.iter_mut().map(|candidate| &mut candidate.forest),
+    )
+    .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+    if refrozen > 0 {
+        // `ClearanceRow` snapshots the zone when `clearance_rows` builds it, so
+        // a candidate whose forest just changed needs its rows re-read. Pure
+        // CPU: `clearance_rows` makes no native call.
+        for candidate in &mut evaluated {
+            candidate.rows = clearance_rows(&candidate.forest, &snapshot);
+        }
+    }
+
+    let survival = clearance_survival(surface, &contact_policy, &evaluated)?;
+    // PR-3 (design review F1). A model anchor refused for grazing or degenerate
+    // incidence leaves through the SAME channel a breached foot ball uses, so
+    // it is visible in the terminal's refusal evidence instead of being folded
+    // into an anonymous clearance failure. Non-anchor families have no such
+    // channel and drop exactly as a distance refusal does; nothing hard-fails
+    // either way (OD-4/PR-9).
+    for (candidate, verdict) in evaluated.iter().zip(&survival) {
+        let degenerate = match verdict {
+            ClearanceVerdict::GrazingIncidence => false,
+            ClearanceVerdict::DegenerateIncidence => true,
+            ClearanceVerdict::Survives | ClearanceVerdict::Distance => continue,
+        };
+        if let Some(anchor) = validated_anchors.remove(&candidate.generation_index) {
+            anchor_refusals.push(AnchorFootRefusal::seat_emergence(
+                anchor.seat().provenance(),
+                degenerate,
+            ));
+        }
+    }
     let mut survivors: Vec<&EvaluatedCandidate> = evaluated
         .iter()
         .zip(survival)
-        .filter_map(|(candidate, survives)| survives.then_some(candidate))
+        .filter_map(|(candidate, verdict)| verdict.survives().then_some(candidate))
         .collect();
     survivors.sort_by(|left, right| compare_candidates(left, right));
-    // TRIPWIRE — the commit gate. This is the last statement before the
-    // `cco_winner_model_anchor` census counter and `apply_and_size`.
-    let Some(winner) = elect_committable_winner(
-        survivors,
-        &unattested_seats,
-        &mut validated_anchors,
-        &mut anchor_refusals,
-    )?
-    else {
+
+    // ---------------------------------------------- Stage B: the two channels
+    //
+    // `survivors` is now in the tournament's own order, which is what makes a
+    // confirmation round replayable: "arm rank k" means the same arm on every
+    // pass with the same prefix.
+    //
+    // A pass with nothing to steer reads nothing below — `is_idle` is the
+    // whole cost this mechanism imposes on a model that never abandons.
+    let arms_ruled_out = steering
+        .filter(|steering| !steering.terminal.is_idle())
+        .map(|steering| apply_steering(&steering, &mut survivors))
+        .transpose()?;
+    let (candidates_ruled_out, forced_rank) = match arms_ruled_out {
+        Some(SteeringOutcome::Suppressed { ruled_out }) => (ruled_out, None),
+        Some(SteeringOutcome::Forced { rank }) => (0, Some(rank)),
+        None => (0, None),
+    };
+    // **The retirement a round earned.** A forced rank past the last arm means
+    // the round has driven every one of them and every one was measured
+    // illegal. This is the ONE path on which Stage B retires a terminal, and it
+    // seals the round that earned it — the measured millimetres and the radii
+    // the resize assigned, arm by arm, in the tournament's own order.
+    let confirmation_round = forced_rank
+        .filter(|rank| *rank >= survivors.len())
+        .map(|_| {
+            steering.map_or_else(Vec::new, |steering| {
+                steering.terminal.round_measured().to_vec()
+            })
+        });
+
+    // A round takes the arm at its rank; an ordinary pass takes the tournament
+    // winner, which is rank 0 of the same order.
+    let Some(winner) = survivors.into_iter().nth(forced_rank.unwrap_or(0)) else {
         return Ok(TerminalCcoOutcome {
             winner: None,
             disposition: None,
             candidates_generated,
             candidates_feasible,
+            candidates_ruled_out,
+            confirmation_round,
             anchor_ray_batches,
             anchor_foot_batches,
             clearance_batches: 1,
+            seat_zone_members_refrozen: refrozen,
             validated_model_anchor: None,
             anchor_seat_refusals,
             anchor_refusals,
@@ -3352,7 +3974,44 @@ fn grow_terminal_inner(
         }
     ));
     match apply_and_size(forest, request, &descriptors[winner_index], &config) {
-        Ok(true) if forest.digest() == winner.forest.digest() => forest.commit(checkpoint)?,
+        Ok(true) if forest.digest() == winner.forest.digest() => {
+            // **The re-size, replayed onto the live forest — by COPY, not by
+            // recomputation.**
+            //
+            // `apply_and_size` has just re-installed the CREATION-radius band on
+            // the committed member, because that is what the descriptor carries.
+            // The winner's candidate forest already holds the re-cut record for
+            // the same key, and copying it costs no native call — the same
+            // argument `apply_model_anchor` makes for carrying the zone on the
+            // descriptor in the first place.
+            //
+            // **What the digest equality above does and does not prove** (second
+            // review, C2). It proves SHARED PROVENANCE, not zone identity:
+            // `Forest::digest` covers `p0`/`p1`/`r0`/`r1`/kind/owner/
+            // contact_end/carried and EXCLUDES `seat_zones` entirely (pinned by
+            // `freezing_a_seat_zone_does_not_move_the_forest_digest`). So it
+            // establishes that both forests hold the same live members under
+            // the same keys, which is what makes copying by key well defined —
+            // and it is deliberately blind to the zone table, which is what
+            // lets it run BEFORE this copy without the re-size breaking it.
+            //
+            // What makes the copied record the RIGHT one is separate and it is
+            // construction, not the digest: both forests descend from the same
+            // `snapshot.clone()`, `apply_model_anchor` installs a zone carried
+            // on the descriptor rather than derived from the forest, and the
+            // re-size that produced the winner's record read the same axis,
+            // radius and stored seat face this live member now has. Anything
+            // that broke that chain would leave this equality green, which is
+            // why `the_committed_bifurcation_carries_the_winners_re_cut_band_
+            // not_the_inherited_one` asserts the committed record against a
+            // fresh freeze instead of trusting the digest.
+            for key in winner.forest.live_members() {
+                if let Some(record) = winner.forest.seat_zone_record(key) {
+                    forest.set_seat_zone(key, record.clone());
+                }
+            }
+            forest.commit(checkpoint)?;
+        }
         Ok(_) => {
             forest.rollback(checkpoint)?;
             return Err(CcoError::NonDeterministicWinner);
@@ -3372,9 +4031,13 @@ fn grow_terminal_inner(
         disposition: None,
         candidates_generated,
         candidates_feasible,
+        candidates_ruled_out,
+        // A pass that seated a winner retired nobody, so it seals no round.
+        confirmation_round: None,
         anchor_ray_batches,
         anchor_foot_batches,
         clearance_batches: 1,
+        seat_zone_members_refrozen: refrozen,
         validated_model_anchor: validated_anchors.remove(&winner_index),
         anchor_seat_refusals,
         anchor_refusals,
@@ -3402,106 +4065,216 @@ fn evaluate_descriptors(
     evaluated.into_iter().collect()
 }
 
+/// One candidate's clearance verdict.
+///
+/// This used to be a `bool`. It is an enum because the mask convergence
+/// (#51/#36) gives the CCO family two REFUSALS that are not distance failures
+/// and must not be reported as one: a member that cannot emerge from its own
+/// contact mask (PR-3) and a contact whose incidence is numerically zero
+/// (PR-2). Reporting either as `Clearance` would hide the physics behind a
+/// number that the mask has already made meaningless for that row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClearanceVerdict {
+    Survives,
+    /// The kernel's distance test refused at least one row.
+    Distance,
+    /// PR-3 — at least one contact-declaring row cannot emerge from its own
+    /// mask(s).
+    GrazingIncidence,
+    /// PR-2 — at least one contact-declaring row has no finite mask.
+    DegenerateIncidence,
+}
+
+impl ClearanceVerdict {
+    const fn survives(self) -> bool {
+        matches!(self, Self::Survives)
+    }
+}
+
+/// The batched clearance screen, with the PR-2 mask and the PR-3 emergence rule
+/// applied at the ONE place the surface is available to this stage.
+///
+/// **#51 / #36 — what changed and why it had to change here.**
+/// `clearance_rows` used to compute a FLAT inset pair per row
+/// (`contact_depth_mm` terminalward, `standoff_mm` rootward). For a model
+/// anchor that made the test unsatisfiable as a matter of arithmetic rather
+/// than geometry: the last tested station sits exactly `standoff` from a point
+/// ON the surface, so `clr = d_min - (r_max + standoff) <= -r_max`, always,
+/// which on the corpus is `-0.350 mm` exactly and was attained 53 times.
+/// The honest inset is `contact::placed_mask_inset_mm`, the PR-2 mask
+/// `brace.rs` has used since Phase B-2 — and it needs the surface normal at the
+/// contact point, which needs the kernel. `clearance_rows` runs inside the
+/// `rayon` candidate map with no surface, so the row records WHAT it is and the
+/// mask is derived here.
+///
+/// **Batching.** ONE `NativeSurface::project` for every contact-declaring row
+/// in the whole candidate batch, alongside the one `segment_clearance` that was
+/// already here. Not one per candidate and not one per member: the projection
+/// count per tournament goes from zero to one, which is the same shape
+/// `brace.rs` uses at its own exact pass.
+///
+/// **PR-3 is not optional here (design review F1).** PR-2 enlarges the exempt
+/// region; when the mask exceeds the member's own length `seg_clear_one_excluding`
+/// returns `INFINITY` and the member is admitted having never been tested. The
+/// emergence rule is what keeps the enlarged exemption from becoming an
+/// erasure, so it lands in the same commit as the mask and at the same site.
+/// It introduces no constant: `min_illegal_len_mm` is already carried on
+/// `ContactPolicy`.
 fn clearance_survival(
     surface: &NativeSurface,
-    config: &Config,
+    policy: &crate::contact::ContactPolicy,
     candidates: &[EvaluatedCandidate],
-) -> Result<Vec<bool>, CcoError> {
+) -> Result<Vec<ClearanceVerdict>, CcoError> {
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
     let mut r1 = Vec::new();
-    let mut inset0 = Vec::new();
-    let mut inset1 = Vec::new();
+    let mut contacts: Vec<(usize, ClearanceContact)> = Vec::new();
+    // **#36 step 5 — one frozen exclusion set per row, in row order.** A row
+    // with no contact, or a contact-declaring row with no frozen zone, exempts
+    // NOTHING and is graded against the whole surface.
+    let mut excluded: Vec<&[u32]> = Vec::new();
+    const EMPTY: &[u32] = &[];
     let mut ranges = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let start = p0.len();
         for row in &candidate.rows {
+            if let Some(contact) = row.contact {
+                contacts.push((p0.len(), contact));
+            }
+            excluded.push(row.seat_zone.as_ref().map_or(EMPTY, |zone| zone.as_ref()));
             p0.push(row.p0);
             p1.push(row.p1);
             r0.push(row.r0);
             r1.push(row.r1);
-            inset0.push(row.inset0);
-            inset1.push(row.inset1);
         }
         ranges.push(start..p0.len());
     }
+    // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY.**
+    //
+    // These two vectors no longer reach the kernel's distance path. They are
+    // kept because `emergence_ok` needs the claimed mask, and PR-3 is not
+    // optional under the honest rule but MORE necessary (design §5, reader 1):
+    // at grazing incidence the whole nearby surface falls inside the band and
+    // is connected, so `Z` swallows everything, nothing is left to grade, and
+    // the kernel returns `INFINITY` — a pass by erasure. PR-3 is the gate that
+    // refuses that member, and the mask is its yardstick.
+    let mut mask_inset0 = vec![0.0; p0.len()];
+    let mut mask_inset1 = vec![0.0; p0.len()];
+    // PR-3 bookkeeping, row-aligned: the total mask a row's contact ends claim,
+    // and whether any of them had no finite mask at all.
+    let mut claimed_mask_mm = vec![0.0_f64; p0.len()];
+    let mut degenerate = vec![false; p0.len()];
+    let mut screened = vec![false; p0.len()];
+    if !contacts.is_empty() {
+        let points = contacts
+            .iter()
+            .map(|(row, contact)| match contact.end {
+                ContactEnd::Terminalward => p0[*row],
+                ContactEnd::Rootward => p1[*row],
+            })
+            .collect::<Vec<_>>();
+        // THE one batched projection for this tournament.
+        let (_, _, _, normals) = surface.project(&points);
+        for ((row, contact), normal) in contacts.iter().zip(normals) {
+            let axis = sub(p1[*row], p0[*row]);
+            let length = norm(axis);
+            screened[*row] = true;
+            if length <= 0.0 {
+                degenerate[*row] = true;
+                continue;
+            }
+            let abs_cos = dot(scale(axis, 1.0 / length), normal).abs();
+            let r_max = r0[*row].max(r1[*row]);
+            match crate::contact::placed_mask_inset_mm(
+                contact.seating,
+                abs_cos,
+                contact.end_radius_mm,
+                r_max,
+                policy,
+            ) {
+                Some(mask) => {
+                    claimed_mask_mm[*row] += mask;
+                    match contact.end {
+                        ContactEnd::Terminalward => mask_inset0[*row] = mask,
+                        ContactEnd::Rootward => mask_inset1[*row] = mask,
+                    }
+                }
+                // A degenerate incidence masks NOTHING here, so the row is
+                // fully distance-checked rather than silently exempted — and
+                // the candidate is refused below regardless. Leaving the inset
+                // at zero rather than at some large value is what makes that
+                // safe if the refusal is ever dispositioned differently.
+                None => degenerate[*row] = true,
+            }
+        }
+    }
+    let zero = vec![0.0; p0.len()];
     crate::census_record!(crate::census::record_segment_batch(
         "cco_candidate_clearance",
         &p0,
         &p1,
-        &inset0,
-        &inset1,
+        // The insets the batch ACTUALLY receives, which are now zero.
+        &zero,
+        &zero,
         &[]
     ));
+    // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
+    // read through the SAME shared predicate the final pass uses; only the
+    // number differs (Craig's two-tier ruling, 2026-08-22).
+    // #36 step 5 — the FULL axis against surface-minus-Z, at this stage's
+    // registered demand, through the SAME shared kernel predicate the final
+    // pass uses; only the number differs.
     let (clearances, _) = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
+        .segment_clearance_excluding(
+            &p0,
+            &p1,
+            &r0,
+            &r1,
+            policy.demanded_gap_mm,
+            &zero,
+            &zero,
+            &excluded,
+        )
         .map_err(|error| CcoError::Native(error.to_string()))?;
     Ok(ranges
         .into_iter()
-        .map(|range| clearances[range].iter().all(|clearance| *clearance >= 0.0))
+        .map(|range| {
+            // Physics refusals outrank the distance verdict, because for a row
+            // whose mask consumed the segment the kernel's number is `INFINITY`
+            // and says nothing.
+            if range.clone().any(|row| degenerate[row]) {
+                return ClearanceVerdict::DegenerateIncidence;
+            }
+            if range.clone().any(|row| {
+                screened[row] && !emergence_ok(claimed_mask_mm[row], &p0[row], &p1[row], policy)
+            }) {
+                return ClearanceVerdict::GrazingIncidence;
+            }
+            if clearances[range].iter().all(|clearance| *clearance >= 0.0) {
+                ClearanceVerdict::Survives
+            } else {
+                ClearanceVerdict::Distance
+            }
+        })
         .collect())
+}
+
+/// PR-3 for one placed row — delegating the inequality to `contact::emerges` so
+/// there is exactly one statement of it in the crate.
+fn emergence_ok(
+    claimed_mask_mm: f64,
+    p0: &[f64; 3],
+    p1: &[f64; 3],
+    policy: &crate::contact::ContactPolicy,
+) -> bool {
+    crate::contact::emerges(claimed_mask_mm, norm(sub(*p1, *p0)), policy)
 }
 
 fn compare_candidates(left: &EvaluatedCandidate, right: &EvaluatedCandidate) -> std::cmp::Ordering {
     left.price_ml
         .total_cmp(&right.price_ml)
         .then(left.generation_index.cmp(&right.generation_index))
-}
-
-/// **TRIPWIRE — the terminal-growth commit gate for the PR-8 seat witness.**
-///
-/// Elects the cheapest survivor that may actually be committed, given
-/// `unattested_seats`: the generation indices whose model-anchor seat
-/// attestation returned PR-8 `NotAttached`.
-///
-/// **Recorded during candidacy, enforced at commit.** `NotAttached` is
-/// deliberately NOT a candidacy refusal for the CCO model anchor — see the
-/// disposition argument on [`attest_model_anchor_seats`]. The family is
-/// deliberately unseated until PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT` lands, so
-/// refusing every unseated anchor while it is still competing would land PR-7's
-/// family-killing consequence WITHOUT landing PR-7, which is exactly the
-/// accidental physics change OD-8 forbids. Measuring is honest there, because a
-/// candidate that loses never becomes geometry.
-///
-/// A WINNER is different in kind. It is one statement away from being a printed
-/// strut whose model end reached nothing at all, and its caller is the last
-/// place that can be observed: the next statements are the
-/// `cco_winner_model_anchor` census counter and the `apply_and_size` commit. So
-/// the winner, and only the winner, is held to the witness — through the same
-/// [`AnchorFootOutcome::Refused`] channel a breached foot ball uses, so the
-/// candidate simply leaves the tournament, the next survivor is considered, the
-/// terminal routes some other way, and nothing hard-fails (OD-4/PR-9).
-///
-/// When PR-7 seats this family, the witness refuses at candidacy like the other
-/// two contact families and this guard becomes unreachable.
-///
-/// Removing the refused anchor from `validated_anchors` is what makes the
-/// refusal total: the outcome's `validated_model_anchor` capability is drawn
-/// from that map, so a refused seat cannot leave with a capability.
-fn elect_committable_winner<'a>(
-    survivors: impl IntoIterator<Item = &'a EvaluatedCandidate>,
-    unattested_seats: &BTreeSet<usize>,
-    validated_anchors: &mut BTreeMap<usize, Box<ValidatedModelAnchor>>,
-    anchor_refusals: &mut Vec<AnchorFootRefusal>,
-) -> Result<Option<&'a EvaluatedCandidate>, CcoError> {
-    for candidate in survivors {
-        if !unattested_seats.contains(&candidate.generation_index) {
-            return Ok(Some(candidate));
-        }
-        let anchor = validated_anchors.remove(&candidate.generation_index).ok_or_else(|| {
-            CcoError::InvalidGeometry(format!(
-                "elect_committable_winner: winning candidate generation {} is flagged \
-                 unattested but names a seat attestation that was never validated (not \
-                 present in validated_anchors)",
-                candidate.generation_index
-            ))
-        })?;
-        anchor_refusals.push(AnchorFootRefusal::seat_not_attached(
-            anchor.seat().provenance(),
-        ));
-    }
-    Ok(None)
 }
 
 impl RewireCandidateBatch {
@@ -3520,54 +4293,23 @@ impl RewireCandidateBatch {
         ranked
     }
 
-    /// The candidate this batch's tournament elects, with the TRIPWIRE applied.
+    /// The candidate this batch's tournament elects.
     ///
-    /// **Recorded during candidacy, enforced at commit.** This is the rewire
-    /// stage's winner-commit point: `rewire::try_reattach` replays exactly the
-    /// index returned here and splices the result into the live forest. A
-    /// model-anchor candidate whose PR-8 seat witness returned `NotAttached` is
-    /// therefore refused HERE rather than committed — through this stage's own
-    /// quarantine vocabulary, [`RewireCandidateRefusalReason::AnchorFoot`]
-    /// carrying [`AnchorFootRefusalReason::SeatNotAttached`], exactly as a
-    /// buried seat or a breached foot ball is — and the next-ranked candidate
-    /// is elected instead. Nothing hard-fails (OD-4/PR-9).
-    ///
-    /// The verdict is deliberately NOT a candidacy refusal for this family
-    /// (see the disposition argument on `attest_model_anchor_seats`): the
-    /// family is unseated until PR-7, and refusing an unseated anchor while it
-    /// is still competing would land PR-7's family-killing consequence without
-    /// landing PR-7. A candidate that WINS is no longer a measurement, so it
-    /// alone is held to the witness.
-    ///
-    /// When PR-7 seats this family, the witness refuses at candidacy like the
-    /// other two contact families and this guard becomes unreachable.
+    /// **The commit-time TRIPWIRE that used to live here is gone, and its
+    /// removal is part of PR-7.** It held a WINNING model anchor to the PR-8
+    /// seat witness because `NotAttached` was deliberately not a candidacy
+    /// refusal while the family was unseated — refusing it at candidacy then
+    /// would have landed PR-7's family-killing consequence without landing
+    /// PR-7. `cco::apply_model_anchor` now seats the rootward end, so the
+    /// witness refuses at candidacy like the other two contact families
+    /// (`evaluate_rewire_candidates`), exactly as this comment's predecessor
+    /// predicted, and there is nothing left for a commit-time gate to catch.
+    /// The two synthetic tests that reached it became candidacy-refusal tests
+    /// rather than being deleted.
     pub(crate) fn winning_generation_index(&mut self) -> Option<usize> {
-        loop {
-            let elected = self.ranked_candidates().first().map(|candidate| {
-                (
-                    candidate.evidence.generation_index,
-                    candidate.evidence.family,
-                    candidate.seat_unattested,
-                )
-            })?;
-            let (generation_index, family, seat_unattested) = elected;
-            if !seat_unattested {
-                return Some(generation_index);
-            }
-            let position = self
-                .candidates
-                .iter()
-                .position(|candidate| candidate.evidence.generation_index == generation_index)?;
-            self.candidates.swap_remove(position);
-            self.refusals.push(RewireCandidateRefusal {
-                generation_index,
-                family,
-                reason: RewireCandidateRefusalReason::AnchorFoot(
-                    crate::anchor::AnchorFootRefusalReason::SeatNotAttached,
-                ),
-            });
-            sort_rewire_refusals(&mut self.refusals);
-        }
+        self.ranked_candidates()
+            .first()
+            .map(|candidate| candidate.evidence.generation_index)
     }
 
     pub(crate) fn snapshot_digest(&self) -> u64 {
@@ -3648,6 +4390,7 @@ impl RewireCandidateBatch {
                 Descriptor::ModelAnchor {
                     seat_index,
                     point_mm,
+                    ..
                 },
                 Some((replayed_seat, final_radius)),
             ) => {
@@ -3670,8 +4413,42 @@ impl RewireCandidateBatch {
             }
             (_, None) => {}
         }
-        if clearance_survival(geometry.surface(), &config, std::slice::from_ref(&replayed))?
-            != [true]
+        // The replay must screen under the SAME contact policy the batch was
+        // evaluated with, so the run's process resolution travels on the batch
+        // rather than being re-derived from a registry that does not know it.
+        let contact_policy = seat_contact_policy(self.process_resolution_mm)?;
+        // **THE RE-SIZE, replayed (second review, finding C1).**
+        //
+        // `evaluate` above re-ran `apply_and_size` from the descriptor, so this
+        // forest carries the CREATION-radius band exactly as the batch's did
+        // before its own re-cut. The screen below is the same screen the batch
+        // ran, so it must read the same bands, and this site must therefore
+        // re-cut the same way. Leaving it out is worse than the batch site's
+        // silent refusal: the batch would have admitted the candidate and the
+        // replay would refuse it, and a replay refusal is
+        // `CcoError::RewireClearanceReplayFailed` — a hard divergence rather
+        // than a routing decision.
+        //
+        // ONE forest, so the batch over it is one call by construction.
+        let refrozen = crate::seat_zone::refreeze_resized_seat_zones(
+            geometry.surface(),
+            geometry.topology(),
+            contact_policy.standoff_mm,
+            std::iter::once(&mut replayed.forest),
+        )
+        .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        if refrozen > 0 {
+            // Same re-read the batch site does, for the same reason: the screen
+            // reads `rows`, not the forest. The evidence checks above compared
+            // `rows.len()`, which a re-cut cannot move — `clearance_rows`
+            // selects on `Member` equality and a re-cut writes no `Member`.
+            replayed.rows = clearance_rows(&replayed.forest, &binding.snapshot);
+        }
+        if clearance_survival(
+            geometry.surface(),
+            &contact_policy,
+            std::slice::from_ref(&replayed),
+        )? != [ClearanceVerdict::Survives]
         {
             return Err(CcoError::RewireClearanceReplayFailed);
         }
@@ -3696,8 +4473,25 @@ impl RewireCandidateBatch {
     pub(crate) const fn seat_attestation_digest(&self) -> u64 {
         self.contact_attestation_digest
     }
+
+    /// How many seated members this batch's one re-size re-cut (C5/C6).
+    pub(crate) const fn seat_zone_members_refrozen(&self) -> usize {
+        self.seat_zone_members_refrozen
+    }
 }
 
+/// **PR-7 lives here, once per seat.**
+///
+/// `process_resolution_mm` is the run's own max layer height, which is both the
+/// PR-1(a) slicer-resolution seat minimum and the PR-2 mask MARGIN. It arrives
+/// as an argument rather than from the registry because a layer height is a
+/// property of THIS RUN, exactly as the seat attestation's claimed extent
+/// already is.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is read; the surface and topology arrived together with #36's \
+              seat-zone freeze and are the same validated pair the caller already holds"
+)]
 fn generate_descriptors(
     forest: &Forest,
     request: &TerminalCcoRequest,
@@ -3705,7 +4499,10 @@ fn generate_descriptors(
     anchor_seats: &[QualifiedAnchorSeat],
     cached_hosts: Option<Vec<MemberKey>>,
     include_plate_spiral: bool,
-) -> Vec<Descriptor> {
+    process_resolution_mm: f64,
+    surface: &NativeSurface,
+    topology: &FaceTopology,
+) -> Result<Vec<Descriptor>, CcoError> {
     let se = request.stub_end_mm().map(Finite::get);
     let mut out = vec![Descriptor::Plate {
         xy: [se[0], se[1]],
@@ -3727,19 +4524,88 @@ fn generate_descriptors(
             }
         }
     }
-    out.extend(
-        anchor_seats
-            .iter()
-            .enumerate()
-            .map(|(seat_index, seat)| Descriptor::ModelAnchor {
+    if !anchor_seats.is_empty() {
+        let policy = seat_contact_policy(process_resolution_mm)?;
+        let radius = config.min_shoot_radius_mm.get();
+        // #36 — one seat-zone request per anchor seat, gathered in this loop
+        // and frozen in ONE batched call below. Seat discovery already resolved
+        // and SNAPPED every seat's face, so no fresh projection is needed here
+        // and none is made; a per-seat band call would be the batch-first
+        // defect this stage's whole pipeline is written to avoid.
+        let mut zone_requests = Vec::with_capacity(anchor_seats.len());
+        for (seat_index, seat) in anchor_seats.iter().enumerate() {
+            let point_mm = seat.point_mm().map(Finite::get);
+            let normal = seat.normal().map(Finite::get);
+            // PR-1 evaluated at the UNSEATED incidence. The monotonicity lemma
+            // (`contact::seat_endpoint`'s own proof) is what licenses the single
+            // pass: seating raises `|cos|` and lengthens the member, so a seat
+            // computed at the unseated incidence remains a valid seat at the
+            // seated one. Over-seating is safe; under-seating cannot happen.
+            //
+            // `ball_tipped` is FALSE. PR-1(c) exists for a `lower.rs` stub end
+            // emitted as a ball of radius `ball_factor * r_tip`; this end is a
+            // frustum end sized by `size_tapered_without_tree_fanin`. `brace.rs`
+            // passes `false` at its own seat for the same reason.
+            let axis = sub(point_mm, se);
+            let length = norm(axis);
+            let abs_cos = if length > 0.0 {
+                dot(scale(axis, 1.0 / length), normal).abs()
+            } else {
+                0.0
+            };
+            let seat_depth = crate::contact::seat_depth_mm(abs_cos, radius, &policy, false);
+            let (seated_point_mm, _, _) =
+                crate::contact::seat_endpoint(point_mm, normal, se, seat_depth);
+            zone_requests.push(crate::seat_zone::SeatZoneRequest {
+                p0_mm: se,
+                p1_mm: seated_point_mm,
+                seat_face_id: seat.snapped_face_id(),
+                // The anchor's CREATION radius. `min_shoot_radius_mm` is what
+                // `apply_model_anchor` mints the rootward (contact) end with,
+                // and `size_tapered_without_tree_fanin` raises it immediately
+                // afterwards — that gap is challenge finding F1. Under Craig's
+                // 2026-08-23 ruling the band does not FOLLOW the growth, it is
+                // RE-CUT to the final radius once, after the sizing pass and
+                // before `clearance_survival`, by
+                // `seat_zone::refreeze_resized_seat_zones` in
+                // `grow_terminal_inner`. Padding it here instead was the
+                // rejected disposition: it would put slack in the band.
+                band_radius_mm: radius + policy.standoff_mm,
+            });
+            out.push(Descriptor::ModelAnchor {
                 seat_index,
-                point_mm: seat.point_mm().map(Finite::get),
-            }),
-    );
+                point_mm,
+                seated_point_mm,
+                // Placeholder; every one is replaced from the batch below
+                // before this function returns.
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &zone_requests[seat_index],
+                ),
+            });
+        }
+        // THE one batched band call plus parallel flood fill for this terminal.
+        let frozen =
+            crate::seat_zone::freeze_production_seat_zones(surface, topology, &zone_requests)
+                .map_err(|error| CcoError::SeatZone(error.to_string()))?;
+        // `out` ends with exactly one `ModelAnchor` per request, pushed in the
+        // same order, so the tail of `out` re-pairs with `frozen` by position.
+        let anchors = out.len() - frozen.len();
+        for (descriptor, record) in out[anchors..].iter_mut().zip(frozen) {
+            let Descriptor::ModelAnchor { seat_zone, .. } = descriptor else {
+                return Err(CcoError::InvalidGeometry(
+                    "generate_descriptors: the seat-zone tail of the descriptor list is not \
+                     entirely model anchors"
+                        .to_owned(),
+                ));
+            };
+            *seat_zone = record;
+        }
+    }
     let hosts = cached_hosts
         .unwrap_or_else(|| HostCache::default().nearest(se, config.bifurcation_hosts, forest));
     out.extend(hosts.into_iter().map(|host| Descriptor::Bifurcate { host }));
-    out
+    Ok(out)
 }
 
 fn evaluate(
@@ -3763,7 +4629,7 @@ fn evaluate(
             descriptor.family()
         )));
     }
-    let rows = clearance_rows(&candidate, snapshot, config);
+    let rows = clearance_rows(&candidate, snapshot);
     let anchor = if let Descriptor::ModelAnchor { seat_index, .. } = descriptor {
         let parent = candidate
             .parent_of(request.stub)
@@ -3823,8 +4689,12 @@ fn apply_and_size(
             }
             size_bifurcation_candidate(candidate, request, *host)?;
         }
-        Descriptor::ModelAnchor { point_mm, .. } => {
-            if !apply_model_anchor(candidate, request, *point_mm, config)? {
+        Descriptor::ModelAnchor {
+            seated_point_mm,
+            seat_zone,
+            ..
+        } => {
+            if !apply_model_anchor(candidate, request, *seated_point_mm, seat_zone, config)? {
                 return Ok(false);
             }
             let strut = candidate.parent_of(request.stub).ok_or_else(|| {
@@ -3859,58 +4729,49 @@ fn apply_and_size(
 /// live for this family (MAJOR-7) — unlike a brace rung, a model anchor IS a
 /// demand route, so it has an area demand to grade.
 ///
-/// **Disposition — read this before changing it.** The two verdicts are
-/// dispositioned DIFFERENTLY for this family, and the asymmetry is the whole
-/// argument:
+/// **Disposition — read this before changing it. PR-7 CHANGED IT.**
 ///
-/// * **OD-9 `BuriedSurface` REFUSES.** It is scattered into the existing
-///   [`AnchorFootOutcome::Refused`] channel, so it is an ordinary candidate
-///   rejection handled exactly like a breached foot ball: the candidate leaves
-///   the tournament, the terminal routes some other way, nothing hard-fails
-///   (OD-4/PR-9). Burial is a statement about the SURFACE, and it is true
-///   whatever the seating rule is.
+/// All three verdicts now refuse at CANDIDACY, through the existing
+/// [`AnchorFootOutcome::Refused`] channel: the candidate leaves the tournament,
+/// the terminal routes some other way, nothing hard-fails (OD-4/PR-9). The
+/// mapping is [`SeatAttestationRefusalKind`], stated once and used by both the
+/// terminal-growth and the rewire path.
 ///
-/// * **PR-8 `NotAttached` is RECORDED during candidacy and ENFORCED at
-///   commit.** It is a statement about
-///   the SEATING RULE, and this family is deliberately unseated: PR-7
-///   `CCO_ANCHOR_MASK_AT_THE_SEAT` is NOT landed, by an explicit decision the
-///   design record reserves to the owner (OQ-10), so `apply_model_anchor` sets
-///   `p1` to the seat point EXACTLY and the anchor kisses the surface.
-///   Refusing it for failing a connectivity witness would land PR-7's
-///   family-killing consequence without landing PR-7 — a family-killing
-///   restriction arriving as an ACCIDENT of a verification change rather than
-///   as a designed, measured physics rule. That is what OD-8 forbids, and it is
-///   the same mistake BLOCKER-3 was raised for one rule earlier. It is also the
-///   same disposition, for the same reason, that PR-8 already gives an area
-///   deficit: measured, digested, referred to the owner.
+/// * **OD-9 `BuriedSurface`** always refused here. Burial is a statement about
+///   the SURFACE and is true whatever the seating rule is.
+/// * **FU-88 `UnusableGeometry`** always refused here. It is not a verdict
+///   about the seating rule at all — it says this candidate is not a printable
+///   strut.
+/// * **PR-8 `NotAttached` USED to be recorded here and enforced at commit**, by
+///   `elect_committable_winner` on the terminal-growth path and
+///   `RewireCandidateBatch::winning_generation_index` on the rewire path. The
+///   reason was explicit and it was correct at the time: this family was
+///   deliberately UNSEATED — `apply_model_anchor` set `p1` to the seat point
+///   exactly and the anchor KISSED the surface — so `NotAttached` was a
+///   statement about a rule that had not been landed, and refusing it at
+///   candidacy would have delivered PR-7's family-killing consequence without
+///   delivering PR-7. That is the accidental physics change OD-8 forbids.
 ///
-///   The measurement is not decorative. On `make_overhang_table` all 1498
-///   attested anchor seats report `centreline = false` with 1–3 of 8 rim rays
-///   engaged — the unseated-kiss signature, quantified, plus 19 PR-4 area
-///   deficits now that MAJOR-7 gives this family its real routed load. That is
-///   the evidence OQ-10 was missing, and the engine now produces it instead of
-///   the record arguing it.
+///   The measurement it produced instead was not decorative, and it is what
+///   licensed PR-7: on `make_overhang_table` all 1,498 attested anchor seats
+///   reported `centreline = false` with 1-3 of 8 rim rays engaged — the
+///   unseated-kiss signature, quantified — plus 19 PR-4 area deficits once
+///   MAJOR-7 gave this family its real routed load.
 ///
-///   **TRIPWIRE — recorded during candidacy, enforced at commit.** Recording is
-///   honest for a CANDIDATE, because a candidate that loses never becomes
-///   geometry. A candidate that WINS is a different object: it is one statement
-///   away from being a printed strut whose model end reached nothing at all. So
-///   a winner whose seat attested `NotAttached` is refused at the commit point
-///   instead — [`elect_committable_winner`] on the terminal-growth path and
-///   [`RewireCandidateBatch::winning_generation_index`] on the rewire path —
-///   through this same refusal channel, so the tournament simply elects the next
-///   survivor and nothing hard-fails. The guard is unreachable on today's
-///   corpus, where this family never wins; it is reached synthetically by
-///   `a_winning_but_unattested_model_anchor_is_refused_rather_than_committed`
-///   and its rewire sibling.
+///   `apply_model_anchor` now SEATS the rootward end (PR-1 depth along the
+///   seat's own normal, `contact::seat_endpoint`, the same two functions the
+///   brace model rung uses). `NotAttached` therefore stops being a statement
+///   about a missing rule and becomes an ordinary defect — this seat does not
+///   reach the solid — so it refuses at candidacy like the other two contact
+///   families, and both commit-time tripwires came out in the same commit.
 ///
-///   When PR-7 seats this family, the witness refuses at candidacy like the
-///   other two contact families and this guard becomes unreachable.
+/// A PR-4 area deficit keeps its own disposition: measured, digested, referred
+/// to the owner. It is not refused here.
 ///
-/// The brace model rung is dispositioned the OTHER way — both verdicts drop the
-/// candidate — because PR-1 DOES seat it, so `NotAttached` there is a real
-/// defect rather than a missing rule. The corpus agrees: both surviving rungs
-/// attest at 8/8 rim rays plus centreline.
+/// The brace model rung was always dispositioned this way — both verdicts drop
+/// the candidate — because PR-1 seats it. The corpus agrees: both surviving
+/// rungs attest at 8/8 rim rays plus centreline. PR-7 makes the CCO anchor's
+/// disposition the same as the rung's, which is the point.
 fn attest_model_anchor_seats(
     surface: &NativeSurface,
     stub_end_mm: [f64; 3],
@@ -3918,15 +4779,23 @@ fn attest_model_anchor_seats(
     terminal_radius_mm: f64,
     process_resolution_mm: f64,
     anchors: &[&ValidatedModelAnchor],
+    seated_points_mm: &[[f64; 3]],
 ) -> Result<ModelAnchorSeatAttestation, CcoError> {
-    let extent = crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm).map_err(
-        |error| {
+    if anchors.len() != seated_points_mm.len() {
+        return Err(CcoError::InvalidGeometry(format!(
+            "attest_model_anchor_seats: {} anchor(s) but {} seated endpoint(s); the \
+             witness must measure the geometry `apply_model_anchor` will actually mint",
+            anchors.len(),
+            seated_points_mm.len()
+        )));
+    }
+    let extent =
+        crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm).map_err(|error| {
             CcoError::InvalidGeometry(format!(
                 "attest_model_anchor_seats: process resolution {process_resolution_mm} mm \
                  is not a positive-finite attestation extent: {error}"
             ))
-        },
-    )?;
+        })?;
     if anchors.is_empty() {
         return Ok(ModelAnchorSeatAttestation {
             refusals: Vec::new(),
@@ -3940,12 +4809,21 @@ fn attest_model_anchor_seats(
     }
     let seats = anchors
         .iter()
-        .map(|anchor| {
+        .zip(seated_points_mm)
+        .map(|(anchor, seated)| {
             let seat = anchor.seat().point_mm().map(Finite::get);
             let normal = anchor.seat().normal().map(Finite::get);
             crate::designed_embed::SeatAttestationRow {
                 p0_mm: stub_end_mm,
-                p1_mm: seat,
+                // **PR-7.** The witness measures the endpoint the strut will
+                // actually be built at — the PR-1 SEAT — not the raw surface
+                // point. Measuring the raw point is what made every attested
+                // seat on the corpus report `centreline = false` with 1-3 of 8
+                // rim rays: the witness was correctly reporting a kiss, because
+                // a kiss is what the geometry was. The seated point travels on
+                // the descriptor from `generate_descriptors`, so the witness and
+                // `apply_model_anchor` cannot measure different geometry.
+                p1_mm: *seated,
                 r0_mm: terminal_radius_mm,
                 r1_mm: anchor.foot().final_member_radius_mm().get(),
                 end: ContactEnd::Rootward,
@@ -3960,8 +4838,8 @@ fn attest_model_anchor_seats(
         })
         .collect::<Vec<_>>();
     let majority_step_mm = extent.get() / 10.0;
-    let majority_step = crate::designed_embed::PositiveFiniteMm::new(majority_step_mm)
-        .map_err(|error| {
+    let majority_step =
+        crate::designed_embed::PositiveFiniteMm::new(majority_step_mm).map_err(|error| {
             CcoError::InvalidGeometry(format!(
                 "attest_model_anchor_seats: majority-vote sampling step {majority_step_mm} mm \
                  (one tenth of extent {} mm) is not positive-finite: {error}",
@@ -3989,14 +4867,15 @@ fn attest_model_anchor_seats(
     // this model's own. `brace.rs` already routes the identical error to
     // `BraceError::NativeQuery`; this site was the outlier. #31 owns giving
     // these failures a topology name; this is the honest channel until then.
-    let outcomes = crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
-        .map_err(|error| {
-            CcoError::Native(format!(
-                "attest_model_anchor_seats: seat-attestation batch over {seat_count} \
+    let outcomes =
+        crate::designed_embed::attest_seats_batch(surface, &seats, extent, limits, &policy)
+            .map_err(|error| {
+                CcoError::Native(format!(
+                    "attest_model_anchor_seats: seat-attestation batch over {seat_count} \
                  seat(s) at extent {} mm failed: {error}",
-                extent.get()
-            ))
-        })?;
+                    extent.get()
+                ))
+            })?;
     let mut refusals = vec![None; seats.len()];
     for outcome in &outcomes {
         if outcome.member >= seats.len() {
@@ -4028,6 +4907,66 @@ fn attest_model_anchor_seats(
     })
 }
 
+/// The PR-7 seated endpoints of a set of model-anchor generations, read back
+/// from the descriptors that minted them.
+///
+/// Reading them from the descriptor rather than re-deriving them is what makes
+/// the witness and `apply_model_anchor` measure the SAME point: the descriptor
+/// is the single place the seat is computed (`generate_descriptors`), and both
+/// consumers read it.
+fn seated_points_of(
+    descriptors: &[Descriptor],
+    generation_indices: &[usize],
+) -> Result<Vec<[f64; 3]>, CcoError> {
+    generation_indices
+        .iter()
+        .map(|index| match descriptors.get(*index) {
+            Some(Descriptor::ModelAnchor {
+                seated_point_mm, ..
+            }) => Ok(*seated_point_mm),
+            _ => Err(CcoError::InvalidGeometry(format!(
+                "seated_points_of: generation {index} carries a validated model anchor \
+                 but its descriptor is not a model anchor"
+            ))),
+        })
+        .collect()
+}
+
+/// The three seat-attestation verdicts that refuse a model-anchor candidate,
+/// with the single mapping from verdict to refusal reason.
+///
+/// **All three refuse at CANDIDACY since PR-7.** The mapping lives in one place
+/// so the terminal-growth path and the rewire path cannot disagree about which
+/// verdict means what — they used to differ, because `NotAttached` was enforced
+/// at two different commit points while burial refused at candidacy in both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeatAttestationRefusalKind {
+    /// OD-9 — the surface this anchor proposes to attach to is buried.
+    Buried,
+    /// FU-88 — the candidate's own geometry could not carry the attestation.
+    Unusable,
+    /// PR-8 — no sampled part of the seated end reached the solid.
+    NotAttached,
+}
+
+impl SeatAttestationRefusalKind {
+    fn refusal(self, provenance: AnchorCandidateProvenance) -> AnchorFootRefusal {
+        match self {
+            Self::Buried => AnchorFootRefusal::seat_buried(provenance),
+            Self::Unusable => AnchorFootRefusal::seat_geometry_unusable(provenance),
+            Self::NotAttached => AnchorFootRefusal::seat_not_attached(provenance),
+        }
+    }
+
+    const fn reason(self) -> AnchorFootRefusalReason {
+        match self {
+            Self::Buried => AnchorFootRefusalReason::SeatBuriedSurface,
+            Self::Unusable => AnchorFootRefusalReason::SeatGeometryUnusable,
+            Self::NotAttached => AnchorFootRefusalReason::SeatNotAttached,
+        }
+    }
+}
+
 /// One terminal's (or one rewire batch's) model-anchor seat attestation.
 struct ModelAnchorSeatAttestation {
     /// Row-aligned with the anchors that were attested: `Some` where the seat
@@ -4053,28 +4992,70 @@ fn seat_contact_policy(
         floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
         process_resolution_mm,
         standoff_mm: p.standoff_mm().diagnostic().get(),
+        // PLACEMENT. `clearance_survival` grades a candidate tournament: the
+        // demand PRUNES a search and refuses nothing final, so it reads
+        // `STANDOFF_MM` and not the refusing `FINAL_CLEARANCE_GAP_MM`.
+        demanded_gap_mm: p.standoff_mm().diagnostic().get(),
         min_free_span_mm: p.min_illegal_len_mm().diagnostic().get(),
         ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
         tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(p),
     })
 }
 
+/// **PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT` (design §3.1, Piece A).**
+///
+/// The strut's rootward endpoint is the PR-1 SEAT, not the raw surface point.
+/// Before this, `p1_mm` was `point_mm` exactly — the anchor kissed the surface,
+/// every one of the 3,186 attested seats on the corpus reported
+/// `centreline = false` with 1-3 of 8 rim rays engaged, and the seat witness
+/// could only be enforced at commit because refusing an unseated kiss at
+/// candidacy would have killed the family without landing the seating rule.
+/// Now the endpoint is pushed inward along the surface normal by
+/// `contact::seat_depth_mm`, exactly as the brace model rung's is, through the
+/// same two functions — so the family that CREATES a seated contact and
+/// `contact::seating_of`, which RECOGNISES one, cannot drift.
+///
+/// `seated_point_mm` is computed ONCE per seat in [`generate_descriptors`],
+/// where the qualified seat's snapped face normal and the run's own process
+/// resolution both are, and travels on the descriptor. That placement is not
+/// cosmetic:
+///
+/// * the descriptor is what the rewire batch STORES and what
+///   `RewireCandidateBatch::replay` re-evaluates, so the seated point is a
+///   frozen input to the replay rather than a quantity re-derived from a
+///   resolution the replay would have to carry separately; and
+/// * seat discovery already resolved the normal for every seat it kept, so no
+///   fresh projection is needed here — re-projecting per candidate inside the
+///   tournament would be the batch-first defect.
+///
+/// The `within_cone` screen is evaluated on the SEATED axis, because that is
+/// the axis that will be printed. By the PR-1 monotonicity lemma seating can
+/// only lengthen the member and raise its incidence against the surface normal;
+/// it carries no such guarantee for the LEAN limit, so the screen is
+/// re-evaluated rather than assumed.
 fn apply_model_anchor(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
-    point_mm: [f64; 3],
+    seated_point_mm: [f64; 3],
+    seat_zone: &crate::seat_zone::SeatZoneRecord,
     config: &Config,
 ) -> Result<bool, CcoError> {
     let stub_end = request.stub_end_mm().map(Finite::get);
-    if norm(sub(point_mm, stub_end)) <= DEGENERATE_MM
-        || !within_cone(stub_end, point_mm, config.min_shoot_radius_mm.get(), config)
+    let seated_point = seated_point_mm;
+    if norm(sub(seated_point, stub_end)) <= DEGENERATE_MM
+        || !within_cone(
+            stub_end,
+            seated_point,
+            config.min_shoot_radius_mm.get(),
+            config,
+        )
     {
         return Ok(false);
     }
-    crate::census_record!(crate::census::record_model_anchor(stub_end, point_mm));
+    crate::census_record!(crate::census::record_model_anchor(stub_end, seated_point));
     let strut = forest.add_member(Member::new(MemberSpec {
         p0_mm: request.stub_end_mm(),
-        p1_mm: finite3(point_mm)?,
+        p1_mm: finite3(seated_point)?,
         r0_mm: TerminalEndRadius::new(cco_terminal_radius(request, config)?),
         r1_mm: RootwardEndRadius::new(config.min_shoot_radius_mm),
         kind: MemberKind::Strut,
@@ -4082,6 +5063,36 @@ fn apply_model_anchor(
         model_contact_end: Some(ContactEnd::Rootward),
         carried_mm2: request.carried_mm2(),
     }));
+    // Option A1's belt: `contact::seating_of` keys the seated CCO family on
+    // `MemberKind::Strut` + `ContactEnd::Rootward`, which is only unambiguous
+    // while this is the sole production mint of that pair.
+    debug_assert!(
+        forest.member(strut).is_some_and(|member| {
+            matches!(member.kind(), MemberKind::Strut)
+                && member.model_contact_end() == Some(ContactEnd::Rootward)
+        }),
+        "apply_model_anchor is the only production mint of a Rootward model \
+         contact on a Strut; contact::seating_of keys PR-7 on that pair"
+    );
+    // **#36 creation site 3 of 4 — the freeze, at the mint.**
+    //
+    // The zone was computed once per seat in `generate_descriptors`, from THIS
+    // anchor's creation radius and its own snapped seat face, and travels on
+    // the descriptor. Installing it is an `Arc` clone: no native call, nothing
+    // recomputed, and bit-identical between the candidate application and the
+    // winner's replay against the live forest — which matters, because the
+    // commit path re-runs `apply_and_size` on the live forest and throws the
+    // candidate forest away. A zone derived from the forest being written into
+    // could differ between those two runs; one carried on the descriptor
+    // cannot.
+    //
+    // This installs the CREATION-radius band. `apply_and_size` raises the
+    // rootward radius on the very next line of its own match arm, and the
+    // exemption is re-cut to that final radius by
+    // `seat_zone::refreeze_resized_seat_zones` in `grow_terminal_inner` —
+    // after the whole candidate batch is sized, before anything grades it.
+    // Doing it HERE instead would be one native call per candidate.
+    forest.set_seat_zone(strut, seat_zone.clone());
     forest.set_parent(request.stub, Some(strut))?;
     Ok(true)
 }
@@ -4228,6 +5239,24 @@ fn apply_bifurcation(
     )?;
     if host.model_contact_end() == Some(ContactEnd::Rootward) {
         forest.set_model_contact_end(host_key, None)?;
+        // **#36 creation site 4 of 4 — INHERIT, never recompute.**
+        //
+        // `upper` keeps the host's `p1`, which is the host's seat: it is the
+        // SAME contact, not a new one, so it keeps the same frozen zone. Taking
+        // it moves the entry rather than copying it, which is what the rule
+        // requires in both directions — the upper half must forgive exactly
+        // what the contact always forgave, and the lower half, which no longer
+        // declares a contact, must forgive nothing.
+        //
+        // A MOVE of the record, `Arc` and all. No native call here, and no
+        // re-cut here either: `size_bifurcation_candidate` runs next and will
+        // rewrite `upper`'s radii, so the honest moment to re-cut the band to
+        // the final footprint is after that, in `grow_terminal_inner`'s one
+        // batched re-size — not in the middle of a mutation, one candidate at a
+        // time.
+        if let Some(record) = forest.take_seat_zone(host_key) {
+            forest.set_seat_zone(upper, record);
+        }
     }
     // The split partitions the declaration; it never duplicates it. `host_key`
     // keeps a Terminalward contact (it still owns p0), `upper` keeps a
@@ -4470,29 +5499,31 @@ fn cco_terminal_radius(
     })
 }
 
-fn clearance_rows(forest: &Forest, snapshot: &Forest, config: &Config) -> Vec<ClearanceRow> {
+fn clearance_rows(forest: &Forest, snapshot: &Forest) -> Vec<ClearanceRow> {
     forest
         .live_tree_members()
         .into_iter()
         .filter_map(|key| {
             let member = forest.member(key)?;
-            (snapshot.member(key) != Some(member)).then_some(member)
+            (snapshot.member(key) != Some(member)).then_some((key, member))
         })
-        .map(|member| ClearanceRow {
+        .map(|(key, member)| ClearanceRow {
+            seat_zone: member
+                .model_contact_end()
+                .and_then(|_| forest.seat_zone(key))
+                .map(std::sync::Arc::clone),
             p0: member.p0_mm().map(Finite::get),
             p1: member.p1_mm().map(Finite::get),
             r0: member.terminal_radius_mm().get().get(),
             r1: member.rootward_radius_mm().get().get(),
-            inset0: if member.model_contact_end() == Some(ContactEnd::Terminalward) {
-                config.contact_depth_mm
-            } else {
-                0.0
-            },
-            inset1: if member.model_contact_end() == Some(ContactEnd::Rootward) {
-                config.standoff_mm
-            } else {
-                0.0
-            },
+            contact: member.model_contact_end().map(|end| ClearanceContact {
+                end,
+                seating: crate::contact::seating_of(member.kind(), end),
+                end_radius_mm: match end {
+                    ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
+                    ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
+                },
+            }),
         })
         .collect()
 }
@@ -4760,6 +5791,7 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
     use plinth_mesh::{
@@ -5019,6 +6051,24 @@ mod tests {
         delicacy: &[f64],
         frame: BuildFrame,
     ) -> CompletedInitialRoutes {
+        route_initial_build_steered(build, plan, loads, geometry, delicacy, frame, None)
+            .expect("an unsteered cadence never reports its steering spent")
+    }
+
+    /// The same cadence, driven with a Stage B steering set.
+    ///
+    /// `Err(terminal)` is [`CcoError::SteeringSpent`] — every arm that terminal
+    /// could still take carries a no-good, so the pass stops for a confirmation
+    /// round instead of retiring a real contact on a count of refusals.
+    fn route_initial_build_steered(
+        build: &mut InitialContactBuild,
+        plan: &SpecializedContactPlan,
+        loads: &FinalizedContactLoads,
+        geometry: &AnchorGeometryAuthority<'_>,
+        delicacy: &[f64],
+        frame: BuildFrame,
+        steering: Option<&crate::legalization::LegalizationSteering>,
+    ) -> Result<CompletedInitialRoutes, u32> {
         let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
         let authority = VerifiedRoutingAuthority::compute(plan, loads, &pool, geometry).unwrap();
         let mut controller = CcoController::default();
@@ -5054,17 +6104,21 @@ mod tests {
                         config: AnchorSearchConfig::current().unwrap(),
                         process_resolution_mm: 0.05,
                     },
+                    steering,
                 )
-                .unwrap();
+                .map_err(|error| match error {
+                    CcoError::SteeringSpent { terminal_id } => terminal_id,
+                    other => panic!("steered cadence refused unexpectedly: {other}"),
+                })?;
             outcomes.push((*terminal, outcome));
         }
-        (
+        Ok((
             controller,
             expected,
             routed_request,
             skipped_ledger,
             outcomes,
-        )
+        ))
     }
 
     /// FU-32 phase J1 — the hoisted routing authority is load-bearing, arm by
@@ -5268,6 +6322,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             );
             let error = result
                 .err()
@@ -5298,6 +6353,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             )
             .expect("an honest hoisted authority routes exactly as it did before J1");
     }
@@ -5392,6 +6448,8 @@ mod tests {
                         AnchorFootRefusalReason::SeatBuriedSurface => 7,
                         AnchorFootRefusalReason::SeatNotAttached => 8,
                         AnchorFootRefusalReason::SeatGeometryUnusable => 9,
+                        AnchorFootRefusalReason::SeatGrazingIncidence => 10,
+                        AnchorFootRefusalReason::SeatDegenerateIncidence => 11,
                     },
                     provenance.physical_contact_id().unwrap_or(u64::MAX),
                     provenance.sample_index(),
@@ -5416,7 +6474,384 @@ mod tests {
                 "2:{candidates_generated}:{candidates_feasible}:{}",
                 refusals(anchor_refusals)
             ),
+            NoWinnerEvidence::ConfirmationRoundExhausted {
+                candidates_generated,
+                candidates_feasible,
+                round_arms,
+                anchor_refusals,
+                ..
+            } => format!(
+                "3:{candidates_generated}:{candidates_feasible}:{}:{}",
+                refusals(anchor_refusals),
+                round_arms
+                    .iter()
+                    .map(crate::legalization::RoundArm::render)
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            ),
         }
+    }
+
+    /// **The finiteness obligation, discharged as a test rather than as a
+    /// paragraph — design §4 Stage B, revert proof 5.**
+    ///
+    /// §1.3's termination argument needs the context universe to be finite.
+    /// That needs the no-good set, and everything derived from it, to be no
+    /// input to any digest in the context tuple — above all
+    /// `controller_digest_before`, because the loop that holds the set is
+    /// exactly where a leak would happen.
+    ///
+    /// If it leaked, every context would be fresh on every pass, so every
+    /// no-good would miss forever, so the same candidate would be chosen and
+    /// condemned every pass — and each of those passes would satisfy the
+    /// abandon rule with a genuinely new triple while making no progress. A
+    /// loop that never ends and never trips the one rule meant to catch that.
+    ///
+    /// So: grow the set by an arbitrary amount with rows that match nothing,
+    /// and assert every digest in the context tuple is byte-identical. Cheap,
+    /// mechanical, and without it the termination argument is circular.
+    #[test]
+    fn a_growing_no_good_set_moves_no_context_digest() {
+        let route_digests = |steering: Option<&crate::legalization::LegalizationSteering>| {
+            let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+                real_mixed_initial_transcript_fixture();
+            let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let (mut controller, _, _, _, _) = route_initial_build_steered(
+                &mut build,
+                &plan,
+                &loads,
+                &geometry,
+                &delicacy,
+                transcript_frame(),
+                steering,
+            )
+            .expect("no-goods that match nothing suppress nothing");
+            let transcript = controller
+                .finalize_transcript(&build, &plan, &loads, &geometry)
+                .unwrap();
+            let rows = transcript
+                .rows()
+                .iter()
+                .map(|row| {
+                    (
+                        row.terminal_id(),
+                        row.route().map(|route| {
+                            (
+                                route.plan_digest,
+                                route.loads_digest,
+                                route.geometry_digest,
+                                route.forest_digest_before,
+                                route.controller_digest_before,
+                            )
+                        }),
+                        row.candidates_ruled_out(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                transcript.final_controller_digest(),
+                transcript.final_forest_digest(),
+                transcript.ordered_disposition_digest(),
+                transcript.digest(),
+                rows,
+            )
+        };
+
+        let quiet = route_digests(None);
+
+        // 4 096 no-goods, none of which can match: the terminal ids are past
+        // the fixture's namespace and the prefixes are invented. "Arbitrary
+        // amount" means the set is big enough that any accidental fold would
+        // be visible, not that the rows are plausible.
+        let mut loud = crate::legalization::LegalizationSteering::default();
+        for index in 0..4096_u64 {
+            loud.learn(crate::legalization::NoGood::new(
+                1_000_000 + u32::try_from(index % 97).unwrap(),
+                crate::legalization::PrefixKey::of(&TerminalRouteEvidence {
+                    physical_contact_id: index,
+                    terminal_id: 0,
+                    original_key: crate::forest::MemberKey::transit_test_fixture(0, 0),
+                    plan_digest: index.wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                    loads_digest: index ^ 0xdead_beef,
+                    geometry_digest: index.rotate_left(17),
+                    forest_digest_before: index.wrapping_add(3),
+                    controller_digest_before: index.wrapping_sub(11),
+                }),
+                crate::legalization::ArmIdentity::live(
+                    CandidateFamily::Bifurcation,
+                    usize::try_from(index).unwrap(),
+                    f64::from_bits(index | 0x4000_0000_0000_0000),
+                    usize::try_from(index % 13).unwrap(),
+                ),
+            ));
+        }
+        assert_eq!(loud.len(), 4096, "the set really did grow");
+
+        let steered = route_digests(Some(&loud));
+        assert_eq!(
+            quiet, steered,
+            "the no-good set reached a digest in the context tuple; the termination \
+             argument in design §1.3 is circular until this is byte-identical"
+        );
+    }
+
+    /// **No retirement without a completed round — design §1.3 verifier
+    /// obligation 3, sealed rather than printed.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// After Stage B, `UnroutedNoWinner` can mean two different things: *"this
+    /// pass's tournament produced no winner"*, which it always meant, and *"no
+    /// arm of this terminal survived the exact post-brace check"*, which is
+    /// new. Same row, same `UnroutedContactReason::NoWinner`, same SPEC §6
+    /// removal, same load repartition — and every existing check would agree
+    /// with a defective one, because every existing check tests CONSISTENCY,
+    /// not whether the retirement was EARNED.
+    ///
+    /// That is a new print-safety hole: fewer supports, silently, under a clean
+    /// seal. It is closed by making the retirement carry the round — per arm,
+    /// the MEASURED clearance margin in millimetres and the radii the resize
+    /// assigned, at ranks contiguous from zero in the tournament's own order.
+    /// What a reader can then check is not "here are k negative numbers" but
+    /// "here is a round in which nothing this terminal could have chosen was
+    /// legal".
+    ///
+    /// **Sabotage-shaped:** seal the retirement as one of the three counting
+    /// reasons, or seal it with an empty round, and this goes red.
+    #[test]
+    fn a_round_that_ran_out_of_arms_seals_the_round_that_earned_the_retirement() {
+        // Route once unsteered to learn a real terminal and its real arm.
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, _, _, _, _) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+        );
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+        let (terminal_id, arm) = transcript
+            .rows()
+            .iter()
+            .find_map(|row| {
+                controller
+                    .sealed_routed_arm(row.terminal_id())
+                    .map(|(_, winner)| {
+                        (
+                            row.terminal_id(),
+                            crate::legalization::ArmIdentity::of(winner),
+                        )
+                    })
+            })
+            .expect("the fixture routes real terminals");
+
+        // A round already driven past every arm this terminal has, carrying the
+        // row it measured getting there. `usize::MAX` is not a cap and not a
+        // constant — it is "a rank no slate reaches", which is what exhaustion
+        // means when the round itself is uncapped.
+        let measured = vec![crate::legalization::ArmRefusalPhysics {
+            gap_mm: -0.05,
+            distance_clearance_mm: 0.280_044,
+            axis_transit_illegal: true,
+            terminal_radius_mm: 0.372_136,
+            rootward_radius_mm: 0.372_136,
+        }
+        .at_rank(0, arm)];
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        steering.set_round(Some(crate::legalization::ConfirmationRound {
+            terminal_id,
+            arm_rank: usize::MAX,
+            measured: measured.clone(),
+        }));
+
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, _, _, _, _) = route_initial_build_steered(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+            Some(&steering),
+        )
+        .expect("a round forces a rank; it never reports its steering spent");
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+
+        let row = transcript
+            .rows()
+            .iter()
+            .find(|row| row.terminal_id() == terminal_id)
+            .expect("the terminal is still in the cadence");
+        assert_eq!(
+            row.kind(),
+            FinalizedDispositionKind::UnroutedNoWinner,
+            "a round driven past its last arm retires the terminal"
+        );
+        let Some(NoWinnerEvidence::ConfirmationRoundExhausted {
+            round_arms,
+            candidates_feasible,
+            ..
+        }) = row.no_winner_reason()
+        else {
+            panic!(
+                "a retirement earned by a round must NOT be sealed as one of the three counting \
+                 reasons: {:?}",
+                row.no_winner_reason()
+            );
+        };
+        assert_eq!(
+            round_arms, &measured,
+            "the seal must carry the round's own measured millimetres and radii, arm by arm"
+        );
+        assert!(
+            *candidates_feasible > 0,
+            "the round's verdict is about arms that DID exist and DID pass feasibility — that \
+             is the whole difference between it and NoFeasibleCandidate"
+        );
+    }
+
+    /// **Steering is live on the real routing path — design §4 Stage B revert
+    /// proof 1's first half, and the honesty check the whole stage rests on.**
+    ///
+    /// # Why this test has to exist
+    ///
+    /// A no-good that MISSES on every pass is indistinguishable, from the
+    /// outside, from a model that genuinely cannot be legalized: the second
+    /// pass would learn nothing new, the abandon rule would fire, and the run
+    /// would refuse by name for what looks like exactly the right reason. So
+    /// the mechanism has to be shown changing a real tournament's mind on real
+    /// geometry, not only on a synthetic slate.
+    ///
+    /// Three passes: route, learn the arm each terminal actually chose, route
+    /// again, and assert the winners MOVED and the second counter says so. The
+    /// exhaustion arm — every arm suppressed — is proved in microseconds
+    /// instead of in seventy routing passes by
+    /// `legalization::tests::a_slate_with_a_no_good_on_every_arm_is_spent_and_never_empty`;
+    /// this test's job is the wiring, not the arithmetic.
+    ///
+    /// MEASURED at the full length once, for the record: this fixture's
+    /// terminal 0 has 69 arms, and driving it to exhaustion took 70 passes and
+    /// 101 s before reporting `SteeringSpent` and retiring nothing.
+    #[test]
+    fn steering_moves_a_real_tournaments_choice_and_retires_nobody() {
+        let route_once = |steering: Option<&crate::legalization::LegalizationSteering>| {
+            let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+                real_mixed_initial_transcript_fixture();
+            let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let (mut controller, _, _, _, _) = route_initial_build_steered(
+                &mut build,
+                &plan,
+                &loads,
+                &geometry,
+                &delicacy,
+                transcript_frame(),
+                steering,
+            )
+            .expect("this fixture's terminals have far more arms than these passes suppress");
+            let transcript = controller
+                .finalize_transcript(&build, &plan, &loads, &geometry)
+                .unwrap();
+            let arms = transcript
+                .rows()
+                .iter()
+                .filter_map(|row| {
+                    controller
+                        .sealed_routed_arm(row.terminal_id())
+                        .map(|(route, winner)| {
+                            (
+                                row.terminal_id(),
+                                crate::legalization::PrefixKey::of(route),
+                                crate::legalization::ArmIdentity::of(winner),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            let ruled_out = transcript
+                .rows()
+                .iter()
+                .map(FinalizedCcoTranscriptRow::candidates_ruled_out)
+                .sum::<usize>();
+            let retired = transcript
+                .rows()
+                .iter()
+                .filter(|row| row.kind() == FinalizedDispositionKind::UnroutedNoWinner)
+                .count();
+            (arms, ruled_out, retired)
+        };
+
+        let (first_arms, first_ruled_out, first_retired) = route_once(None);
+        assert!(!first_arms.is_empty(), "the fixture routes real terminals");
+        assert_eq!(
+            first_ruled_out, 0,
+            "an unsteered pass rules nothing out; the second counter is physics, not noise"
+        );
+
+        // **One no-good, on the LAST routed terminal — the production shape.**
+        //
+        // The prefix key is tight on purpose, and that has a consequence worth
+        // stating rather than discovering: steering an EARLY terminal moves the
+        // forest, so every later terminal's `forest_digest_before` and
+        // `controller_digest_before` move too, and every one of their no-goods
+        // misses. MEASURED on this fixture: seed all 139 routed terminals and
+        // exactly 1 arm is ruled out.
+        //
+        // That is not a defect, it is §1.3's key doing its job — a refusal
+        // measured in one world says nothing about a different one. And it is
+        // the case the models are in: the S-1 measurement found the mismatch
+        // class is ONE terminal per run and it is late in the cadence
+        // (Deinonychus t=113 of 202, Rotting Warhorse t=177 of 317), so every
+        // terminal before it routes identically and its own prefix is stable
+        // pass to pass.
+        let (last_terminal, last_prefix, last_arm) = *first_arms
+            .last()
+            .expect("the fixture routes real terminals");
+        let mut steering = crate::legalization::LegalizationSteering::default();
+        assert!(steering.learn(crate::legalization::NoGood::new(
+            last_terminal,
+            last_prefix,
+            last_arm
+        )));
+
+        let (second_arms, second_ruled_out, second_retired) = route_once(Some(&steering));
+        assert_eq!(
+            second_ruled_out, 1,
+            "the last routed terminal's own arm must be passed over and counted in \
+             `candidates_ruled_out` — a miss here means the key does not match and the whole \
+             mechanism is a silent no-op that would refuse looking exactly like an honest \
+             refusal"
+        );
+        assert_eq!(
+            second_arms.len(),
+            first_arms.len(),
+            "suppressing an arm must not cost a terminal its route while it has others"
+        );
+        assert_eq!(
+            second_retired, first_retired,
+            "steering retired a terminal; §1.3 forbids a retirement earned by a no-good"
+        );
+        let second_last = *second_arms.last().unwrap();
+        assert_eq!(
+            second_last.0, last_terminal,
+            "the steered terminal still routes; it did not vanish from the record"
+        );
+        assert_ne!(
+            second_last.2, last_arm,
+            "the second pass chose the identical arm: the no-good did not steer anything"
+        );
+        assert_eq!(
+            first_arms[..first_arms.len() - 1],
+            second_arms[..second_arms.len() - 1],
+            "one terminal's no-good disturbed another terminal's route"
+        );
     }
 
     #[test]
@@ -5472,6 +6907,13 @@ mod tests {
             controller.finalize_transcript(&build, &plan, &loads, &geometry),
             Err(CcoError::TranscriptSealed)
         ));
+        assert!(
+            transcript
+                .rows()
+                .iter()
+                .all(|row| row.candidates_ruled_out() == 0),
+            "nothing rules an arm out yet: the second counter is zero on every path until Stage B"
+        );
         let replay = routed_request.unwrap();
         let replay_contact = plan
             .contacts()
@@ -5492,6 +6934,7 @@ mod tests {
                     config: AnchorSearchConfig::current().unwrap(),
                     process_resolution_mm: 0.05,
                 },
+                None,
             ),
             Err(CcoError::TranscriptSealed)
         ));
@@ -5589,13 +7032,16 @@ mod tests {
             first_hit_t: Some(t),
         };
         let outcome = TerminalCcoOutcome {
+            confirmation_round: None,
             winner: None,
             disposition: None,
             candidates_generated: 0,
             candidates_feasible: 0,
+            candidates_ruled_out: 0,
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             clearance_batches: 0,
+            seat_zone_members_refrozen: 0,
             validated_model_anchor: None,
             anchor_seat_refusals: vec![zero],
             anchor_refusals: Vec::new(),
@@ -6206,6 +7652,7 @@ mod tests {
                             clearance_rows: 0,
                         },
                     },
+                    candidates_ruled_out: 0,
                 },
             );
             quarantined
@@ -6310,7 +7757,10 @@ mod tests {
                 },
             },
         };
-        TerminalCadenceRecord { disposition }
+        TerminalCadenceRecord {
+            disposition,
+            candidates_ruled_out: 0,
+        }
     }
 
     /// The J2 equivalence check, asserted after EVERY insertion: the cached
@@ -6337,7 +7787,7 @@ mod tests {
         let mut grown = CcoController::default();
         assert_incremental_equals_rebuilt(&grown);
         grown
-            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_incremental_equals_rebuilt(&grown);
 
@@ -6347,7 +7797,7 @@ mod tests {
         let (mut forest, request, surface) = no_winner_fixture();
         let mut unrouted = CcoController::default();
         unrouted
-            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_incremental_equals_rebuilt(&unrouted);
 
@@ -6547,6 +7997,7 @@ mod tests {
                 forest_digest: 1234,
                 controller_digest_before: 5678,
             },
+            candidates_ruled_out: 0,
         };
         let mut forward = CcoController::default();
         forward.finish_terminal(&forest, t1, record.clone());
@@ -6636,12 +8087,24 @@ mod tests {
         let (mut grown_forest, request, surface) = growth_fixture();
         let mut grown = CcoController::default();
         grown
-            .grow_terminal_for_test(&mut grown_forest, &request, &surface)
+            .grow_terminal_for_test(
+                &mut grown_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05,
+            )
             .unwrap();
         let grown_digest = grown.digest();
         let grown_forest_digest = grown_forest.digest();
         assert!(matches!(
-            grown.grow_terminal_for_test(&mut grown_forest, &request, &surface),
+            grown.grow_terminal_for_test(
+                &mut grown_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(grown.digest(), grown_digest);
@@ -6662,7 +8125,13 @@ mod tests {
             .unwrap();
         let skipped_digest = skipped_first.digest();
         assert!(matches!(
-            skipped_first.grow_terminal_for_test(&mut live_forest, &request, &surface),
+            skipped_first.grow_terminal_for_test(
+                &mut live_forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(skipped_first.digest(), skipped_digest);
@@ -6870,6 +8339,29 @@ mod tests {
         ));
     }
 
+    /// #36 — the face adjacency for the SAME tetrahedron `growth_fixture`
+    /// builds its surface from, welded by the production policy
+    /// (`WeldPolicy::ExactBits`) so `project`'s face IDs and the adjacency the
+    /// seat-zone fill walks address the same faces.
+    fn growth_topology() -> FaceTopology {
+        let (vertices, triangles) = growth_fixture_parts();
+        let mesh = plinth_mesh::Mesh::new(vertices, triangles).expect("growth fixture mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("growth fixture topology")
+    }
+
+    fn growth_fixture_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        (
+            vec![
+                [100.0, 100.0, 100.0],
+                [101.0, 100.0, 100.0],
+                [100.0, 101.0, 100.0],
+                [100.0, 100.0, 101.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+    }
+
     fn growth_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
         let finite = |value| Finite::new(value).unwrap();
         let positive = |value| PositiveFinite::new(value).unwrap();
@@ -6888,13 +8380,7 @@ mod tests {
         let request =
             TerminalCcoRequest::bind(&forest, 7, BuildFrame::new(finite(0.0), positive(5.0)))
                 .unwrap();
-        let vertices = vec![
-            [100.0, 100.0, 100.0],
-            [101.0, 100.0, 100.0],
-            [100.0, 101.0, 100.0],
-            [100.0, 100.0, 101.0],
-        ];
-        let triangles = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let (vertices, triangles) = growth_fixture_parts();
         let surface = NativeSurface::from_indexed(
             &vertices,
             &triangles,
@@ -6905,6 +8391,429 @@ mod tests {
         )
         .unwrap();
         (forest, request, surface)
+    }
+
+    /// A slab whose top face is the plane `z = 0`, wide enough in `xy` that the
+    /// nearest surface point to anything above the origin is that face. The
+    /// outward normal there is `+z`, so a seat at the origin seats along `-z`.
+    fn planar_slab() -> NativeSurface {
+        let (vertices, faces) = planar_slab_parts();
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect("planar slab")
+    }
+
+    /// #36 — the face adjacency for the SAME indexed mesh `planar_slab` builds
+    /// its surface from, welded by the production policy.
+    fn planar_slab_topology() -> FaceTopology {
+        let (vertices, faces) = planar_slab_parts();
+        let mesh = plinth_mesh::Mesh::new(vertices, faces).expect("planar slab mesh");
+        plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits)
+            .expect("planar slab topology")
+    }
+
+    fn planar_slab_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        const H: f64 = 20.0;
+        let vertices = vec![
+            [-H, -H, -10.0],
+            [H, -H, -10.0],
+            [H, H, -10.0],
+            [-H, H, -10.0],
+            [-H, -H, 0.0],
+            [H, -H, 0.0],
+            [H, H, 0.0],
+            [-H, H, 0.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        (vertices, faces)
+    }
+
+    /// One candidate holding exactly one model-anchor strut, built directly so
+    /// the geometry under test is stated rather than searched for.
+    fn model_anchor_candidate(p0: [f64; 3], p1: [f64; 3]) -> (EvaluatedCandidate, Forest) {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let snapshot = Forest::new();
+        let mut forest = snapshot.clone();
+        forest.add_member(Member::new(MemberSpec {
+            p0_mm: p0.map(finite),
+            p1_mm: p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.35)),
+            kind: MemberKind::Strut,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(2.0),
+        }));
+        // **#36 — the helper freezes the seat zone exactly where production
+        // does: BEFORE `clearance_rows` reads it.** `apply_model_anchor`
+        // installs the descriptor's zone on the strut it mints, and `evaluate`
+        // then builds the rows from that forest. A helper that skipped the
+        // freeze would hand every test below an arm graded over its own
+        // designed embed — which is a real refusal, but not the one those tests
+        // are about.
+        let key = *forest
+            .live_tree_members()
+            .first()
+            .expect("the anchor is the one live member");
+        let surface = planar_slab();
+        let (_, _, face_ids, _) = surface.project(&[p1]);
+        if let Ok(seat_face_id) = u32::try_from(face_ids[0]) {
+            let standoff_mm = m0_constants()
+                .unwrap()
+                .placeholders()
+                .standoff_mm()
+                .diagnostic()
+                .get();
+            let zone = crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &planar_slab_topology(),
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm: p0,
+                    p1_mm: p1,
+                    seat_face_id,
+                    // The ROOTWARD end is the contact, so `r_seat` is `r1`.
+                    band_radius_mm: 0.35 + standoff_mm,
+                }],
+            )
+            .expect("the seat zone freezes")
+            .remove(0);
+            forest.set_seat_zone(key, zone);
+        }
+        let rows = clearance_rows(&forest, &snapshot);
+        assert_eq!(rows.len(), 1, "exactly one changed member");
+        assert!(
+            rows[0].contact.is_some(),
+            "the row declares its model contact"
+        );
+        (
+            EvaluatedCandidate {
+                forest: forest.clone(),
+                family: CandidateFamily::ModelAnchor,
+                generation_index: 0,
+                price_ml: 1.0,
+                rows,
+                anchor: None,
+            },
+            forest,
+        )
+    }
+
+    /// **#51, END TO END, AGAINST THE REAL KERNEL — the arithmetic case flips
+    /// from refused to routed.**
+    ///
+    /// The theorem the design derived: with the flat rootward inset the last
+    /// tested station sits exactly `standoff` from a point ON the surface, so
+    ///
+    /// ```text
+    /// clearance = d_min - (r_max + standoff) <= standoff - r_max - standoff = -r_max
+    /// ```
+    ///
+    /// unconditionally — **every model-anchor arm fails by exactly its own
+    /// radius**, which is what the island diagnosis measured as `-0.350 mm`
+    /// attained 53 times on both Warhorse islands.
+    ///
+    /// Both halves are asserted here, both from the kernel and not from
+    /// arithmetic restated in the test:
+    ///
+    /// * **BEFORE** — the unseated arm with the retired flat `standoff_mm`
+    ///   inset reads back **exactly `-r_max`**. This is the negative control:
+    ///   it proves the fix is not passing because the fixture is easy.
+    /// * **AFTER** — the PR-7-seated arm screened through `clearance_survival`
+    ///   SURVIVES, and the kernel's number for it is **exactly MARGIN**, which
+    ///   is PR-2's headline guarantee rather than mere slack.
+    #[test]
+    fn the_model_anchor_arm_that_failed_by_exactly_its_radius_now_routes() {
+        let surface = planar_slab();
+        let policy = seat_contact_policy(0.05).unwrap();
+        let r_max = 0.45_f64;
+
+        // BEFORE — `p1` is the RAW seat point, on the surface, and the inset is
+        // the retired flat `standoff_mm`. This reproduces the pre-PR-7 geometry
+        // and the pre-#51 inset pair, and hands them to the same kernel entry
+        // point production uses.
+        let p0 = [0.0, 0.0, 5.0];
+        let raw_seat = [0.0, 0.0, 0.0];
+        let (flat, _) = surface
+            .segment_clearance(
+                &[p0],
+                &[raw_seat],
+                &[r_max],
+                &[0.35],
+                policy.standoff_mm,
+                &[0.0],
+                &[policy.standoff_mm],
+            )
+            .expect("kernel clearance for the retired inset pair");
+        assert!(
+            (flat[0] + r_max).abs() < 1e-9,
+            "the retired flat inset must fail by EXACTLY r_max = {r_max}; kernel said {}",
+            flat[0]
+        );
+
+        // AFTER — PR-7 seats the endpoint at the PR-1 depth along the surface
+        // normal, and `clearance_survival` masks it with the PR-2 extent.
+        let seat_depth = crate::contact::seat_depth_mm(1.0, 0.35, &policy, false);
+        let (seated, _, _) =
+            crate::contact::seat_endpoint(raw_seat, [0.0, 0.0, 1.0], p0, seat_depth);
+        let (candidate, _) = model_anchor_candidate(p0, seated);
+        let verdict = clearance_survival(&surface, &policy, &[candidate]).unwrap();
+        assert_eq!(
+            verdict,
+            vec![ClearanceVerdict::Survives],
+            "the seated arm must route under the converged mask"
+        );
+
+        // ... and the RETIRED path's own guarantee, kept as the historical
+        // control for #51 rather than as a live claim. This is a direct kernel
+        // call with the PR-2 mask as an inset — the shape production used
+        // before #36 step 5 — and on a locally planar seat it returned exactly
+        // MARGIN. Production no longer makes this call: the exact pass and this
+        // stage both test the full axis against `surface \ Z` now. It stays
+        // because it is the "after" half of #51's before/after pair and
+        // deleting it would erase the measurement that closed that task.
+        let mask = crate::contact::placed_mask_inset_mm(
+            crate::contact::ContactSeating::Seated,
+            1.0,
+            0.35,
+            r_max,
+            &policy,
+        )
+        .unwrap();
+        let (masked, _) = surface
+            .segment_clearance(
+                &[p0],
+                &[seated],
+                &[r_max],
+                &[0.35],
+                policy.standoff_mm,
+                &[0.0],
+                &[mask],
+            )
+            .expect("kernel clearance for the converged mask");
+        assert!(
+            (masked[0] - policy.process_resolution_mm).abs() < 1e-9,
+            "PR-2 returns exactly MARGIN = {}; kernel said {}",
+            policy.process_resolution_mm,
+            masked[0]
+        );
+    }
+
+    /// **PR-3 (design review F1) — the enlarged exemption must not become an
+    /// ERASURE.**
+    ///
+    /// A grazing model anchor's PR-2 mask diverges as `1/|cos|`. Once it
+    /// exceeds the member's own length `seg_clear_one_excluding` returns `INFINITY`
+    /// (`queries.rs:1786-1788`) and the arm is admitted having never been
+    /// distance-tested at all. That is the hazard Piece B creates and PR-3
+    /// closes, and it is the reason the two land in the same commit.
+    ///
+    /// NON-VACUITY is asserted first, from the kernel: the mask really does
+    /// consume this segment and the kernel really does answer `INFINITY`.
+    #[test]
+    fn a_grazing_model_anchor_is_refused_not_admitted_with_infinity() {
+        let surface = planar_slab();
+        let policy = seat_contact_policy(0.05).unwrap();
+        let r_max = 0.45_f64;
+
+        // A nearly tangential approach: the arm runs 2 mm across the face while
+        // descending 0.4 mm, so |cos| ~ 0.196 and the mask is ~7.1 mm against a
+        // ~2.04 mm member.
+        let p0 = [2.0, 0.0, 0.1];
+        let seated = [0.0, 0.0, -0.3];
+        let axis = sub(seated, p0);
+        let length = norm(axis);
+        let abs_cos = dot(scale(axis, 1.0 / length), [0.0, 0.0, 1.0]).abs();
+        let mask = crate::contact::placed_mask_inset_mm(
+            crate::contact::ContactSeating::Seated,
+            abs_cos,
+            0.35,
+            r_max,
+            &policy,
+        )
+        .unwrap();
+        assert!(
+            mask > length,
+            "the fixture must be grazing enough that the mask consumes the member \
+             (mask {mask} mm vs length {length} mm)"
+        );
+        let (erased, _) = surface
+            .segment_clearance(
+                &[p0],
+                &[seated],
+                &[r_max],
+                &[0.35],
+                policy.standoff_mm,
+                &[0.0],
+                &[mask],
+            )
+            .expect("kernel clearance for the over-long mask");
+        assert!(
+            erased[0].is_infinite(),
+            "NON-VACUITY: an over-long mask must make the kernel answer INFINITY, \
+             which is the admission PR-3 exists to prevent; kernel said {}",
+            erased[0]
+        );
+
+        // PR-3 refuses it BY NAME instead.
+        let (candidate, _) = model_anchor_candidate(p0, seated);
+        assert_eq!(
+            clearance_survival(&surface, &policy, &[candidate]).unwrap(),
+            vec![ClearanceVerdict::GrazingIncidence]
+        );
+    }
+
+    /// PR-2's degenerate case refuses rather than being floored, and refuses by
+    /// its own name so a reader can tell it from a distance failure.
+    #[test]
+    fn a_degenerate_incidence_model_anchor_is_refused_by_name() {
+        let surface = planar_slab();
+        let policy = seat_contact_policy(0.05).unwrap();
+        // Exactly tangential: the arm runs along the face, so |cos| = 0.
+        let (candidate, _) = model_anchor_candidate([4.0, 0.0, -0.3], [0.0, 0.0, -0.3]);
+        assert_eq!(
+            clearance_survival(&surface, &policy, &[candidate]).unwrap(),
+            vec![ClearanceVerdict::DegenerateIncidence]
+        );
+    }
+
+    /// One candidate holding a single arm that declares NO model contact, so
+    /// the insets are zero and the kernel grades its whole axis. This is the
+    /// clean instrument for the DEMAND: nothing about a mask can move the
+    /// answer.
+    fn plain_candidate(p0: [f64; 3], p1: [f64; 3], radius_mm: f64) -> EvaluatedCandidate {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let snapshot = Forest::new();
+        let mut forest = snapshot.clone();
+        forest.add_member(Member::new(MemberSpec {
+            p0_mm: p0.map(finite),
+            p1_mm: p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(radius_mm)),
+            r1_mm: RootwardEndRadius::new(positive(radius_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Contact(7),
+            model_contact_end: None,
+            carried_mm2: finite(2.0),
+        }));
+        let rows = clearance_rows(&forest, &snapshot);
+        assert_eq!(rows.len(), 1, "exactly one changed member");
+        assert!(
+            rows[0].contact.is_none(),
+            "this row declares no model contact, so no mask is in play"
+        );
+        EvaluatedCandidate {
+            forest: forest.clone(),
+            family: CandidateFamily::ModelAnchor,
+            generation_index: 0,
+            price_ml: 1.0,
+            rows,
+            anchor: None,
+        }
+    }
+
+    /// **`clearance_survival` spends the PLACEMENT demand — as a test that goes
+    /// RED on a sabotaged read** (challenge finding B3, 2026-08-22).
+    ///
+    /// Before this test, `cco.rs:3624` was one of two ruled tier reads with no
+    /// test that could tell: the challenger rewrote `seat_contact_policy`'s
+    /// `demanded_gap_mm` to `FINAL_CLEARANCE_GAP_MM` and the whole scoped
+    /// estate — 590 lib tests plus five integration binaries — stayed GREEN.
+    ///
+    /// The fixture is the two-tier case §8 step 6 names, on the arm that
+    /// declares NO contact so no mask can be blamed for the answer:
+    ///
+    /// * radius 0.45 mm, horizontal at `z = +0.90 mm` over a slab whose top
+    ///   face is `z = 0`, so the TRUE gap is `0.90 - 0.45 = 0.45 mm` — read
+    ///   back from the kernel at demand 0, not restated arithmetic;
+    /// * `0.300 < 0.45 < 0.600` asserted from the REGISTRY, so the fixture is
+    ///   provably a two-tier discriminator;
+    /// * a control arm 2.0 mm up survives, so a uniformly refusing fixture
+    ///   cannot pass this test by accident.
+    ///
+    /// The pin: production must return `Distance` for the middle arm. A site
+    /// reading `FINAL_CLEARANCE_GAP_MM` would return `Survives`.
+    #[test]
+    fn clearance_survival_prunes_at_the_placement_demand_not_the_final_one() {
+        let surface = planar_slab();
+        let policy = seat_contact_policy(0.05).unwrap();
+        let constants = m0_constants().unwrap();
+        let placement_mm = constants.placeholders().standoff_mm().diagnostic().get();
+        let final_mm = *constants.evidence().final_clearance_gap_mm().value();
+        let radius_mm = 0.45_f64;
+
+        // NON-VACUITY, from the kernel: at a demand of zero the number IS the
+        // true gap, and it sits strictly between the two registered demands.
+        let (true_gap, _) = surface
+            .segment_clearance(
+                &[[-2.0, 0.0, 0.9]],
+                &[[2.0, 0.0, 0.9]],
+                &[radius_mm],
+                &[radius_mm],
+                0.0,
+                &[0.0],
+                &[0.0],
+            )
+            .unwrap();
+        assert!(
+            (true_gap[0] - 0.45).abs() < 1e-9,
+            "the fixture's TRUE gap must be 0.45 mm; the kernel said {}",
+            true_gap[0]
+        );
+        assert!(
+            final_mm < true_gap[0] && true_gap[0] < placement_mm,
+            "the fixture must discriminate the two tiers: FINAL {final_mm} < \
+             true gap {} < PLACEMENT {placement_mm}",
+            true_gap[0]
+        );
+
+        let verdicts = clearance_survival(
+            &surface,
+            &policy,
+            &[
+                plain_candidate([-2.0, 0.0, 0.9], [2.0, 0.0, 0.9], radius_mm),
+                plain_candidate([-2.0, 0.0, 2.0], [2.0, 0.0, 2.0], radius_mm),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            verdicts,
+            vec![ClearanceVerdict::Distance, ClearanceVerdict::Survives],
+            "this tournament prunes at PLACEMENT ({placement_mm} mm), so a \
+             0.45 mm true gap is dropped here and a 1.55 mm one is kept. If \
+             this site were switched to read FINAL ({final_mm} mm) the first \
+             candidate would SURVIVE, which is exactly the sabotage this \
+             assertion exists to catch."
+        );
+
+        // The read itself, stated separately and AFTER the behaviour, so the
+        // behavioural half is what fails first under a sabotaged read and this
+        // one still catches a demand that arrives by some other route.
+        assert!(
+            (policy.demanded_gap_mm - placement_mm).abs() < f64::EPSILON,
+            "this stage's demand must BE `STANDOFF_MM` ({placement_mm} mm); the \
+             policy carries {}",
+            policy.demanded_gap_mm
+        );
     }
 
     fn no_winner_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
@@ -6930,7 +8839,7 @@ mod tests {
         let before = forest.digest();
         let mut controller = CcoController::default();
         let outcome = controller
-            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
 
         assert!(outcome.winner.is_none());
@@ -6972,7 +8881,13 @@ mod tests {
         .unwrap();
         assert!(!view.keys().contains(&request.stub));
         assert!(matches!(
-            controller.grow_terminal_for_test(&mut forest, &request, &surface),
+            controller.grow_terminal_for_test(
+                &mut forest,
+                &request,
+                &surface,
+                &growth_topology(),
+                0.05
+            ),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
     }
@@ -7377,10 +9292,28 @@ mod tests {
         assert_eq!(batch.clearance_batches, 1);
         assert_eq!(batch.anchor_ray_batches, 1);
         assert_eq!(batch.anchor_foot_batches, 1);
-        assert!(batch.refusals.iter().any(|refusal| {
-            refusal.family == CandidateFamily::ModelAnchor
-                && refusal.reason == RewireCandidateRefusalReason::Clearance
-        }));
+        // **#51 — THIS ASSERTION FLIPPED, AND THE FLIP IS THE FIX.**
+        // This fixture's model anchor used to be refused
+        // `RewireCandidateRefusalReason::Clearance`, and it was refused for the
+        // arithmetic reason, not a geometric one: with the retired flat
+        // `standoff_mm` inset the last tested station sits exactly `standoff`
+        // from a point ON the surface, so the clearance is at most `-r_max`
+        // whatever the geometry is. With the PR-2 mask and the PR-7 seat the
+        // same arm on the same surface routes.
+        assert!(
+            batch
+                .ranked_candidates()
+                .iter()
+                .any(|candidate| candidate.evidence.family == CandidateFamily::ModelAnchor),
+            "the model anchor must survive the converged mask"
+        );
+        assert!(
+            !batch.refusals.iter().any(|refusal| {
+                refusal.family == CandidateFamily::ModelAnchor
+                    && refusal.reason == RewireCandidateRefusalReason::Clearance
+            }),
+            "and it must not still be refused for clearance"
+        );
         assert_eq!(forest.digest(), before);
         assert_eq!(binding.live_digest, before);
         assert_eq!(batch.snapshot_digest(), binding.snapshot.digest());
@@ -7418,7 +9351,6 @@ mod tests {
             },
             evaluated_digest: before,
             validated_model_anchor: None,
-            seat_unattested: false,
         };
         let anchors = empty_far_anchor_fixture();
         let geometry =
@@ -7429,6 +9361,7 @@ mod tests {
             refusals: Vec::new(),
             descriptors_generated: 2,
             clearance_batches: 1,
+            seat_zone_members_refrozen: 0,
             anchor_ray_batches: 1,
             anchor_foot_batches: 0,
             anchor_seat_refusals: Vec::new(),
@@ -7438,6 +9371,7 @@ mod tests {
             binding_identity: binding.identity(),
             geometry_fingerprint: geometry.fingerprint(),
             contact_attestation_digest: 0,
+            process_resolution_mm: 0.05,
         };
         assert_eq!(
             tie_batch.ranked_candidates()[0].evidence.generation_index,
@@ -7596,7 +9530,11 @@ mod tests {
             BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
         )
         .unwrap();
-        let detached_anchors = near_anchor_fixture(9.75);
+        // 8.0, not 9.75. At 9.75 the anchor arm is 0.55 mm — a NUB, the class
+        // #51's mask was the only reason ever won — and PR-3 now refuses it
+        // because it cannot emerge from its own 1.6 mm contact mask. 8.0 puts
+        // the face 2.3 mm from the stub end, which is a real arm.
+        let detached_anchors = near_anchor_fixture(8.0);
         let replay = replay_family(
             &forest,
             &detached,
@@ -7618,7 +9556,7 @@ mod tests {
             BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
         )
         .unwrap();
-        let root_anchors = near_anchor_fixture(14.75);
+        let root_anchors = near_anchor_fixture(13.0);
         let replay = replay_family(
             &root_forest,
             &root_binding,
@@ -7637,7 +9575,7 @@ mod tests {
     /// validation, never assembled by the test, because its fields are private
     /// to `anchor.rs` precisely so a capability cannot be forged.
     fn genuine_validated_model_anchor() -> Box<ValidatedModelAnchor> {
-        let anchors = near_anchor_fixture(9.75);
+        let anchors = near_anchor_fixture(8.0);
         let (forest, keys) = rewire_fixture();
         let binding = RewireCcoBinding::bind_detached_subtree(
             &forest,
@@ -7650,22 +9588,142 @@ mod tests {
             .expect("a replayed model anchor carries its validated capability")
     }
 
-    /// **TRIPWIRE acceptance — terminal-growth winner-commit path.**
+    /// **#36 CREATION SITE 4 — a bifurcated upper half INHERITS the host's
+    /// frozen zone; it never recomputes one** (§8 step 6, §9.4).
     ///
-    /// The ruling is that the PR-8 seat witness is RECORDED during candidacy for
-    /// the CCO model-anchor family and ENFORCED at commit. This forges the case
-    /// today's corpus cannot reach — a model anchor that WINS its tournament
-    /// while its seat attested `NotAttached` — and asserts that
-    /// [`elect_committable_winner`], the last statement before the
-    /// `cco_winner_model_anchor` census counter and `apply_and_size`, refuses it
-    /// through the family's own refusal channel instead of committing it.
+    /// `apply_bifurcation` splits a host at `junction`. The upper half keeps the
+    /// host's `p1`, which IS the host's seat, so it is the same contact — and
+    /// the zone belongs to the contact, not to the member. Recomputing it from
+    /// the upper half's own interpolated radius would be the un-freezing the
+    /// monotonicity theorem forbids (§3): a wider band swallows more surface, so
+    /// a fatter half would be graded against strictly less of it.
     ///
-    /// The candidates are the frozen three of `candidate_source_ledger_vectors`,
-    /// where the model anchor is genuinely the cheapest and therefore genuinely
-    /// wins, and the capability withdrawn from it is a genuine
-    /// `ValidatedModelAnchor`. The ONLY forged input is the witness verdict.
+    /// The assertion is `Arc::ptr_eq`, deliberately. Comparing CONTENTS would
+    /// pass for a recompute that happened to land on the same faces; comparing
+    /// ALLOCATIONS cannot. That is the whole difference between inheriting and
+    /// re-deriving, and it is the sabotage
+    /// `a_bifurcation_that_re_froze_the_upper_half_from_its_own_radius` this
+    /// test exists to catch.
+    ///
+    /// The second half is hygiene with teeth: the lower half no longer declares
+    /// a contact, so it must forgive NOTHING. A copy left behind would exempt
+    /// faces for a member with no seat — the move is `take_seat_zone`, not a
+    /// clone, for exactly that reason.
     #[test]
-    fn a_winning_but_unattested_model_anchor_is_refused_rather_than_committed() {
+    fn a_bifurcated_upper_half_inherits_the_hosts_frozen_zone_rather_than_recomputing_it() {
+        let (mut forest, request, _) = growth_fixture();
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(1.0), finite(0.0), finite(20.0)],
+            p1_mm: [finite(1.0), finite(0.0), finite(0.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.65)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "bifurcation-inherit".to_owned(),
+                ordinal: 0,
+            },
+            // The host's ROOTWARD end is its seat, and the upper half keeps it.
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(0.0),
+        }));
+        let frozen: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![3_u32, 11, 42]);
+        forest.set_seat_zone(
+            host,
+            crate::seat_zone::SeatZoneRecord::new(
+                std::sync::Arc::clone(&frozen),
+                &crate::seat_zone::SeatZoneRequest {
+                    p0_mm: [1.0, 0.0, 20.0],
+                    p1_mm: [1.0, 0.0, 0.0],
+                    seat_face_id: 0,
+                    band_radius_mm: 0.65,
+                },
+            ),
+        );
+
+        let before = forest
+            .live_tree_members()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let config = Config::current().unwrap();
+        // Through the production entry point, so the SIZING pass runs too: the
+        // upper half's radii are rewritten after the split, and the frozen zone
+        // must not follow them.
+        assert!(
+            apply_and_size(
+                &mut forest,
+                &request,
+                &Descriptor::Bifurcate { host },
+                &config
+            )
+            .unwrap(),
+            "NON-VACUITY: the fixture must actually bifurcate, or nothing below \
+             is being measured"
+        );
+
+        // The upper half is the new member that kept the host's `p1`.
+        let host_p1 = [finite(1.0), finite(0.0), finite(0.0)];
+        let upper = forest
+            .live_tree_members()
+            .into_iter()
+            .find(|key| {
+                !before.contains(key)
+                    && forest
+                        .member(*key)
+                        .is_some_and(|member| member.p1_mm() == host_p1)
+            })
+            .expect("the split mints an upper half that keeps the host's p1");
+        assert_eq!(
+            forest.member(upper).unwrap().model_contact_end(),
+            Some(ContactEnd::Rootward),
+            "NON-VACUITY: the upper half must be the one that inherited the \
+             contact declaration"
+        );
+
+        let inherited = forest
+            .seat_zone(upper)
+            .expect("the upper half must carry the contact's frozen zone");
+        assert!(
+            std::sync::Arc::ptr_eq(inherited, &frozen),
+            "the upper half must inherit the very same allocation — an `Arc` \
+             move, not a recompute. Contents that merely MATCH would also pass a \
+             re-derivation that happened to land on the same faces; identity \
+             cannot. Sabotage: \
+             `a_bifurcation_that_re_froze_the_upper_half_from_its_own_radius`."
+        );
+        assert!(
+            forest.seat_zone(host).is_none(),
+            "and the lower half, which no longer declares a contact, must \
+             forgive NOTHING — the zone MOVES with the declaration. A copy left \
+             behind would exempt faces for a member with no seat."
+        );
+    }
+
+    /// **PR-7 acceptance — the seat witness now refuses at CANDIDACY.**
+    ///
+    /// This test used to be `a_winning_but_unattested_model_anchor_is_refused_rather_than_committed`,
+    /// and it pinned the TRIPWIRE: the ruling then was that PR-8 `NotAttached`
+    /// is RECORDED during candidacy for the CCO model-anchor family and
+    /// ENFORCED at commit by `elect_committable_winner`, because the family was
+    /// deliberately unseated and refusing an unseated kiss at candidacy would
+    /// have landed PR-7's family-killing consequence without landing PR-7.
+    ///
+    /// **`cco::apply_model_anchor` now seats the rootward end, so that reason is
+    /// gone and so is the gate.** `NotAttached` is an ordinary defect for a
+    /// seated family, dispositioned exactly as OD-9 burial and FU-88 unusable
+    /// geometry already were, and the winner election is pure price order
+    /// again. What this test pins now is the two halves of that move:
+    ///
+    /// 1. the disposition table — all three attestation verdicts refuse, each
+    ///    through the family's own `AnchorFootRefusal` channel, with the
+    ///    provenance the seat was discovered at; and
+    /// 2. NON-VACUITY, which is now the more important half: on the frozen
+    ///    three-candidate tournament the model anchor is genuinely the winner,
+    ///    so a refusal here really does remove a candidate that was going to
+    ///    commit, and the election really is the last word.
+    #[test]
+    fn the_seat_witness_refuses_a_model_anchor_at_candidacy() {
         let (mut forest, request, _) = growth_fixture();
         let finite = |value| Finite::new(value).unwrap();
         let positive = |value| PositiveFinite::new(value).unwrap();
@@ -7691,6 +9749,27 @@ mod tests {
             Descriptor::ModelAnchor {
                 seat_index: 0,
                 point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: PR-7's seat is derived in
+                // `generate_descriptors`, so a descriptor written here carries
+                // whatever seated point the author states. `seated == raw` is
+                // the UNSEATED geometry on purpose — it keeps this vector
+                // pinning the family equations and the generation/price ledger
+                // it was frozen from, rather than silently re-freezing them
+                // against a new endpoint. PR-7's seating is exercised where it
+                // lives, by `generate_descriptors` and its own tests.
+                seated_point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: this vector pins the family equations
+                // and the generation/price ledger, not the seat exemption, so
+                // it forgives nothing. An empty zone is the STRICT direction.
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -7711,87 +9790,66 @@ mod tests {
         // asserting the gate on a candidate that was never going to commit.
         assert_eq!(survivors[0].family, CandidateFamily::ModelAnchor);
         assert_eq!(survivors[1].family, CandidateFamily::Bifurcation);
-        let anchor_index = survivors[0].generation_index;
 
-        // ...and with an ATTESTED seat it IS elected. The witness verdict is the
-        // only difference between the two halves of this test.
-        let mut attested_anchors = BTreeMap::new();
-        attested_anchors.insert(anchor_index, genuine_validated_model_anchor());
-        let mut attested_refusals = Vec::new();
-        let elected = elect_committable_winner(
-            survivors.iter().copied(),
-            &BTreeSet::new(),
-            &mut attested_anchors,
-            &mut attested_refusals,
-        )
-        .unwrap()
-        .expect("an attested winner is committable");
-        assert_eq!(elected.generation_index, anchor_index);
-        assert!(attested_refusals.is_empty());
-        assert!(attested_anchors.contains_key(&anchor_index));
-
-        // THE TRIPWIRE. Same tournament, same candidates, same capability —
-        // only the seat witness differs.
+        // (1) The disposition table. Every verdict that refuses does so through
+        // the family's EXISTING channel, carrying the seat's provenance,
+        // exactly as a breached foot ball reports — and `NotAttached` is now
+        // in that table rather than deferred to a commit gate.
         let anchor = genuine_validated_model_anchor();
         let provenance = anchor.seat().provenance();
-        let mut validated_anchors = BTreeMap::new();
-        validated_anchors.insert(anchor_index, anchor);
-        let mut anchor_refusals = Vec::new();
-        let elected = elect_committable_winner(
-            survivors.iter().copied(),
-            &BTreeSet::from([anchor_index]),
-            &mut validated_anchors,
-            &mut anchor_refusals,
-        )
-        .unwrap()
-        .expect("the tournament still elects the next survivor");
+        for (kind, expected) in [
+            (
+                SeatAttestationRefusalKind::Buried,
+                AnchorFootRefusalReason::SeatBuriedSurface,
+            ),
+            (
+                SeatAttestationRefusalKind::Unusable,
+                AnchorFootRefusalReason::SeatGeometryUnusable,
+            ),
+            (
+                SeatAttestationRefusalKind::NotAttached,
+                AnchorFootRefusalReason::SeatNotAttached,
+            ),
+        ] {
+            assert_eq!(kind.reason(), expected);
+            assert_eq!(kind.refusal(provenance).reason(), expected);
+            assert_eq!(kind.refusal(provenance).provenance(), provenance);
+        }
 
-        // Refused, not committed — and the terminal routes some other way
-        // rather than the run failing (OD-4/PR-9).
-        assert_eq!(elected.family, CandidateFamily::Bifurcation);
-        assert_ne!(elected.generation_index, anchor_index);
-        // Through the family's EXISTING refusal channel, carrying the
-        // provenance the seat was discovered at, exactly as a breached foot
-        // ball reports.
-        assert_eq!(
-            anchor_refusals,
-            vec![AnchorFootRefusal::seat_not_attached(provenance)]
-        );
-        assert_eq!(
-            anchor_refusals[0].reason(),
-            AnchorFootRefusalReason::SeatNotAttached
-        );
-        // The refusal is TOTAL: the outcome's `validated_model_anchor` is drawn
-        // from this map, so a refused seat cannot leave still holding one.
-        assert!(!validated_anchors.contains_key(&anchor_index));
-
-        // And a tournament whose ONLY survivor is the unattested anchor elects
-        // nobody, rather than falling back to committing it.
-        let mut lone_anchors = BTreeMap::new();
-        lone_anchors.insert(anchor_index, genuine_validated_model_anchor());
-        let mut lone_refusals = Vec::new();
-        assert!(elect_committable_winner(
-            [survivors[0]],
-            &BTreeSet::from([anchor_index]),
-            &mut lone_anchors,
-            &mut lone_refusals,
-        )
-        .unwrap()
-        .is_none());
-        assert_eq!(lone_refusals.len(), 1);
+        // (2) With no refusal in play the election is pure price order and the
+        // model anchor takes it. There is no longer any gate between this and
+        // `apply_and_size`, which is what makes (1) load-bearing.
+        assert_eq!(survivors[0].family, CandidateFamily::ModelAnchor);
     }
-
-    /// **TRIPWIRE acceptance — rewire winner-commit path.**
+    /// **PR-3 acceptance on the rewire path — the NUB class dies, by name.**
     ///
-    /// The same ruling at the other point a model anchor can enter the forest.
-    /// `near_anchor_fixture` is one of the two synthetic CCO fixtures that
-    /// approach their face perpendicularly, so its anchor's seat genuinely
-    /// attests `NotAttached` — nothing is forged here at all. It clears the foot
-    /// ball and the OD-9 burial screen, it is the batch's ranked winner, and
-    /// `rewire::try_reattach` replays and splices exactly the index elected
-    /// here.
+    /// This test used to be
+    /// `a_winning_but_unattested_rewire_model_anchor_is_refused_rather_than_replayed`
+    /// and pinned the rewire half of the TRIPWIRE:
+    /// `RewireCandidateBatch::winning_generation_index` held a WINNING model
+    /// anchor to the PR-8 seat witness at commit, because the family was
+    /// unseated and `NotAttached` was a statement about a missing rule.
+    ///
+    /// PR-7 seats the family, so its unseated-kiss premise is gone: on this
+    /// fixture the seat now attests. What refuses this candidate instead is
+    /// PR-3, and the reason is worth stating plainly because it is the whole
+    /// FU-87 relationship in one fixture:
+    ///
+    /// `near_anchor_fixture(9.75)` puts the face 0.25 mm from the stub end, so
+    /// the anchor arm is **0.55 mm after seating**. Every model-anchor arm that
+    /// ever won in corpus history was 0.054-0.596 mm, because the retired flat
+    /// `standoff_mm` inset admitted NOTHING ELSE: an arm longer than 0.600 mm
+    /// was measured and refused by exactly its own radius, and an arm shorter
+    /// than it was never measured at all (`seg_clear_one_excluding` returns `INFINITY`).
+    /// The mask convergence closes that escape hatch, and PR-3 refuses the nub
+    /// **by name** — `SeatGrazingIncidence`, not an anonymous clearance
+    /// failure — because a 0.55 mm arm cannot emerge from its own 1.6 mm
+    /// contact mask.
+    ///
+    /// Nothing here is forged. The anchor clears the foot ball and the OD-9
+    /// burial screen; the refusal is the real screen against the real surface.
     #[test]
-    fn a_winning_but_unattested_rewire_model_anchor_is_refused_rather_than_replayed() {
+    fn a_model_anchor_nub_is_refused_because_it_cannot_emerge() {
         let anchors = near_anchor_fixture(9.75);
         let (forest, keys) = rewire_fixture();
         let binding = RewireCcoBinding::bind_detached_subtree(
@@ -7801,52 +9859,102 @@ mod tests {
         )
         .unwrap();
 
-        // NON-VACUITY: this candidate is committable in every other respect —
-        // it replays bit-exactly and carries a validated foot capability.
-        assert!(
-            replay_family(&forest, &binding, &anchors, CandidateFamily::ModelAnchor)
-                .validated_model_anchor
-                .is_some()
-        );
-
         with_rewire_batch(&binding, &anchors, |mut batch, geometry| {
-            let (anchor_index, seat_unattested, family) = {
-                let ranked = batch.ranked_candidates();
-                let winner = ranked.first().expect("the tournament has a winner");
-                (
-                    winner.evidence.generation_index,
-                    winner.seat_unattested,
-                    winner.evidence.family,
-                )
-            };
-            assert_eq!(family, CandidateFamily::ModelAnchor);
-            assert!(
-                seat_unattested,
-                "the fixture must keep this seat's PR-8 witness at NotAttached, \
-                 or the tripwire is never reached"
+            let refused = batch
+                .refusals()
+                .iter()
+                .filter(|refusal| {
+                    refusal.family == CandidateFamily::ModelAnchor
+                        && refusal.reason
+                            == RewireCandidateRefusalReason::AnchorFoot(
+                                AnchorFootRefusalReason::SeatGrazingIncidence,
+                            )
+                })
+                .map(|refusal| refusal.generation_index)
+                .collect::<Vec<_>>();
+            // NON-VACUITY: the fixture must actually produce the verdict.
+            assert_eq!(
+                refused.len(),
+                1,
+                "the nub fixture must produce exactly one PR-3 refusal, or this \
+                 test asserts nothing"
             );
+            // Refused at CANDIDACY: the candidate is not in the batch at all,
+            // so no later caller can elect or replay it. Nothing hard-fails —
+            // the move simply does not happen (OD-4/PR-9).
+            let probe = refused[0];
+            assert!(batch
+                .ranked_candidates()
+                .iter()
+                .all(|candidate| candidate.evidence.generation_index != probe));
+            assert_ne!(batch.winning_generation_index(), Some(probe));
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, probe, geometry),
+                Err(CcoError::RewireCandidateNotFound(index)) if index == probe
+            ));
+        });
+    }
 
-            // THE TRIPWIRE: the winner-commit gate elects nobody instead.
-            assert_eq!(batch.winning_generation_index(), None);
-            // The refusal joins this stage's own quarantine ledger, in the
-            // generation order that ledger is kept in.
-            assert!(batch.refusals().contains(&RewireCandidateRefusal {
-                generation_index: anchor_index,
-                family: CandidateFamily::ModelAnchor,
-                reason: RewireCandidateRefusalReason::AnchorFoot(
-                    AnchorFootRefusalReason::SeatNotAttached
-                ),
-            }));
+    /// **PR-7 acceptance — the seat witness stops reporting a kiss.**
+    ///
+    /// The measurement that licensed PR-7 was that every attested CCO anchor
+    /// seat on the corpus reported `centreline = false` with 1-3 of 8 rim rays:
+    /// the witness was correctly reporting that the arm KISSED the surface,
+    /// because `apply_model_anchor` set `p1` to the raw seat point.
+    ///
+    /// With the endpoint seated at the PR-1 depth and the witness measuring the
+    /// SAME point the strut will be minted at, a perpendicular approach into
+    /// solid material attests. This is the direct behavioural consequence of
+    /// Piece A, and it is what makes `NotAttached` an ordinary defect that can
+    /// refuse at candidacy rather than a statement about a missing rule.
+    #[test]
+    fn a_seated_model_anchor_attests_instead_of_kissing() {
+        let anchors = near_anchor_fixture(8.0);
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        with_rewire_batch(&binding, &anchors, |batch, _| {
+            // NON-VACUITY: the anchor really is in this batch.
+            assert!(batch
+                .ranked_candidates()
+                .iter()
+                .any(|candidate| candidate.evidence.family == CandidateFamily::ModelAnchor));
+            // ... and no seat verdict refused it.
+            assert!(
+                !batch.refusals().iter().any(|refusal| {
+                    matches!(
+                        refusal.reason,
+                        RewireCandidateRefusalReason::AnchorFoot(
+                            AnchorFootRefusalReason::SeatNotAttached
+                        )
+                    )
+                }),
+                "a seated perpendicular anchor must attest, not report a kiss"
+            );
+        });
+    }
+
+    /// The refusal ledger stays sorted by generation index, which is the order
+    /// the stage's quarantine vocabulary is kept in.
+    #[test]
+    fn rewire_refusals_are_kept_in_generation_order() {
+        let anchors = near_anchor_fixture(9.75);
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        with_rewire_batch(&binding, &anchors, |batch, _| {
             assert!(batch
                 .refusals()
                 .windows(2)
                 .all(|pair| pair[0].generation_index <= pair[1].generation_index));
-            // Refused TOTALLY: the candidate is gone from the batch, so no later
-            // caller can replay the refused winner either.
-            assert!(matches!(
-                batch.replay_candidate(&binding, &forest, anchor_index, geometry),
-                Err(CcoError::RewireCandidateNotFound(index)) if index == anchor_index
-            ));
         });
     }
 
@@ -7971,9 +10079,15 @@ mod tests {
         assert_eq!(forest.digest(), before);
     }
 
+    /// A refused model anchor leaves no replayable capability behind.
+    ///
+    /// The fixture moved with #51: `rewire_anchor_fixture`'s anchor used to be
+    /// refused for clearance and now routes, so the refused case is taken from
+    /// the nub fixture, which PR-3 refuses. The property under test — a refused
+    /// candidate is GONE, not merely unranked — is unchanged.
     #[test]
     fn refused_model_anchor_has_no_replay_capability() {
-        let anchors = rewire_anchor_fixture();
+        let anchors = near_anchor_fixture(9.75);
         let (forest, keys) = rewire_fixture();
         let binding = RewireCcoBinding::bind_detached_subtree(
             &forest,
@@ -8187,6 +10301,27 @@ mod tests {
             Descriptor::ModelAnchor {
                 seat_index: 0,
                 point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: PR-7's seat is derived in
+                // `generate_descriptors`, so a descriptor written here carries
+                // whatever seated point the author states. `seated == raw` is
+                // the UNSEATED geometry on purpose — it keeps this vector
+                // pinning the family equations and the generation/price ledger
+                // it was frozen from, rather than silently re-freezing them
+                // against a new endpoint. PR-7's seating is exercised where it
+                // lives, by `generate_descriptors` and its own tests.
+                seated_point_mm: [3.0, 0.0, 5.0],
+                // Hand-built descriptor: this vector pins the family equations
+                // and the generation/price ledger, not the seat exemption, so
+                // it forgives nothing. An empty zone is the STRICT direction.
+                seat_zone: crate::seat_zone::SeatZoneRecord::new(
+                    std::sync::Arc::from(Vec::new()),
+                    &crate::seat_zone::SeatZoneRequest {
+                        p0_mm: [0.0; 3],
+                        p1_mm: [3.0, 0.0, 5.0],
+                        seat_face_id: 0,
+                        band_radius_mm: 0.0,
+                    },
+                ),
             },
             Descriptor::Bifurcate { host },
         ];
@@ -8256,7 +10391,7 @@ mod tests {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
         let outcome = CcoController::default()
-            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         let winner = outcome.winner.expect("plate descent survives");
         assert_eq!(winner.family, CandidateFamily::PlateDescent);
@@ -8273,7 +10408,7 @@ mod tests {
         let before = forest.digest();
         let outer = forest.checkpoint();
         CcoController::default()
-            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
             .unwrap();
         assert_ne!(forest.digest(), before);
         forest.rollback(outer).unwrap();
@@ -8287,7 +10422,7 @@ mod tests {
             let (mut forest, request, surface) = growth_fixture();
             let mut controller = CcoController::default();
             let outcome = controller
-                .grow_terminal_for_test(&mut forest, &request, &surface)
+                .grow_terminal_for_test(&mut forest, &request, &surface, &growth_topology(), 0.05)
                 .unwrap();
             println!(
                 "CCO_SWEEP_DIGEST={:016x}:{:016x}:{}:{}",
@@ -8323,5 +10458,636 @@ mod tests {
             digests.push(digest);
         }
         assert!(digests.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    fn routed_row(candidates_ruled_out: usize) -> FinalizedCcoTranscriptRow {
+        let original_key = MemberKey::transit_test_fixture(4, 0);
+        FinalizedCcoTranscriptRow {
+            cadence_index: 0,
+            physical_contact_id: 4,
+            terminal_id: 4,
+            original_key,
+            kind: FinalizedDispositionKind::Routed,
+            route: Some(TerminalRouteEvidence {
+                physical_contact_id: 4,
+                terminal_id: 4,
+                original_key,
+                plan_digest: 1,
+                loads_digest: 2,
+                geometry_digest: 3,
+                forest_digest_before: 4,
+                controller_digest_before: 5,
+            }),
+            skipped: None,
+            no_winner_reason: None,
+            candidates_ruled_out,
+        }
+    }
+
+    /// **Craig's authorization item 5 — the second counter is really sealed.**
+    ///
+    /// Two rows that differ in nothing but the ruled-out count must not seal
+    /// to the same fingerprint. If they did, the counter would be disclosure
+    /// with no seal behind it, and a run could report any number it liked.
+    #[test]
+    fn the_ruled_out_counter_is_folded_into_the_sealed_transcript_fingerprint() {
+        assert_ne!(
+            transcript_rows_digest(&[routed_row(0)]),
+            transcript_rows_digest(&[routed_row(1)]),
+            "the ruled-out count must reach the sealed fingerprint"
+        );
+    }
+
+    /// **The fold is UNCONDITIONAL, and this is the guard on the optimization
+    /// that would undo the ruling.**
+    ///
+    /// The cheap-looking edit is `if row.candidates_ruled_out != 0 { word(..) }`
+    /// — it would keep the fingerprint still for every model that rules nothing
+    /// out, which is exactly what Craig declined, and it would make the
+    /// one-time corpus-wide re-freeze this lane paid unrepeatable. The golden
+    /// below is the digest of a single zero-count row: skip the zero fold and
+    /// it moves.
+    #[test]
+    fn a_zero_ruled_out_count_still_occupies_its_place_in_the_sealed_stream() {
+        assert_eq!(
+            transcript_rows_digest(&[routed_row(0)]),
+            11_947_743_038_542_081_092,
+            "a zero count is folded like any other: the stream position is part of the seal"
+        );
+    }
+
+    // ---- #36 F1 — the two CCO re-size sites, which no test reached ---------
+    //
+    // The second review's M1: `refreeze_resized_seat_zones` appeared in
+    // `brace.rs`'s tests only, so CCO creation sites 1 and 2 and the rewire
+    // path were pinned by nothing, and the corpus reached none of them. That
+    // gap is what let finding C1 — a whole grading path with no re-size at all
+    // — survive a first review. The three tests below close it, on the SAME
+    // geometry `brace.rs`'s F1 ladder measures.
+
+    /// A slab whose top face is finely tessellated, so a seat band's face set
+    /// genuinely GROWS with the band radius.
+    ///
+    /// The numbers are `brace.rs`'s `fine_seat_slab_parts` numbers — a 0.25 mm
+    /// pitch over a ±4 mm top face with 10 mm of body under it — on purpose, so
+    /// this module's F1 evidence and the brace ladder's measure one geometry
+    /// rather than two configurations that happen to agree. `planar_slab` above
+    /// cannot do this job: its top face is two 40 mm triangles, so every band
+    /// that reaches the seat at all reaches both of them and the zone never
+    /// moves with the radius.
+    fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        const HALF_MM: f64 = 4.0;
+        const DEPTH_MM: f64 = 10.0;
+        let span_mm = 2.0 * HALF_MM;
+        let steps = (span_mm / pitch_mm).round() as usize;
+        assert!(steps >= 4, "the top face must actually be tessellated");
+        let mut vertices = Vec::with_capacity((steps + 1) * (steps + 1) + 4);
+        for i in 0..=steps {
+            for j in 0..=steps {
+                vertices.push([
+                    -HALF_MM + span_mm * (i as f64) / (steps as f64),
+                    -HALF_MM + span_mm * (j as f64) / (steps as f64),
+                    0.0,
+                ]);
+            }
+        }
+        let top = |i: usize, j: usize| (i * (steps + 1) + j) as u32;
+        let mut faces = Vec::with_capacity(2 * steps * steps + 4 * (steps + 1) + 2);
+        for i in 0..steps {
+            for j in 0..steps {
+                faces.push([top(i, j), top(i + 1, j), top(i + 1, j + 1)]);
+                faces.push([top(i, j), top(i + 1, j + 1), top(i, j + 1)]);
+            }
+        }
+        let base = vertices.len() as u32;
+        for corner in [
+            [-HALF_MM, -HALF_MM],
+            [HALF_MM, -HALF_MM],
+            [HALF_MM, HALF_MM],
+            [-HALF_MM, HALF_MM],
+        ] {
+            vertices.push([corner[0], corner[1], -DEPTH_MM]);
+        }
+        faces.push([base, base + 2, base + 1]);
+        faces.push([base, base + 3, base + 2]);
+        let walls = [
+            (
+                (0..=steps).map(|k| top(k, 0)).collect::<Vec<_>>(),
+                base,
+                base + 1,
+            ),
+            (
+                (0..=steps).map(|k| top(steps, k)).collect::<Vec<_>>(),
+                base + 1,
+                base + 2,
+            ),
+            (
+                (0..=steps)
+                    .map(|k| top(steps - k, steps))
+                    .collect::<Vec<_>>(),
+                base + 2,
+                base + 3,
+            ),
+            (
+                (0..=steps).map(|k| top(0, steps - k)).collect::<Vec<_>>(),
+                base + 3,
+                base,
+            ),
+        ];
+        for (edge, first_corner, last_corner) in walls {
+            for k in 0..steps {
+                faces.push([first_corner, edge[k + 1], edge[k]]);
+            }
+            faces.push([first_corner, last_corner, edge[steps]]);
+        }
+        (vertices, faces)
+    }
+
+    /// The mesh, surface and adjacency for ONE `fine_seat_slab_parts` slab,
+    /// welded the way production welds its perception input.
+    fn fine_seat_slab(pitch_mm: f64) -> (Mesh, NativeSurface, FaceTopology) {
+        let (vertices, faces) = fine_seat_slab_parts(pitch_mm);
+        let surface = NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect("fine seat slab surface");
+        let mesh = Mesh::new(vertices, faces).expect("fine seat slab mesh");
+        let topology =
+            build_face_topology(&mesh, WeldPolicy::ExactBits).expect("fine seat slab topology");
+        (mesh, surface, topology)
+    }
+
+    /// The pitch every F1 fixture in this module uses. `brace.rs`'s ladder uses
+    /// the same one.
+    const FINE_PITCH_MM: f64 = 0.25;
+
+    /// The registered standoff, read rather than typed.
+    fn registered_standoff_mm() -> f64 {
+        m0_constants()
+            .unwrap()
+            .placeholders()
+            .standoff_mm()
+            .diagnostic()
+            .get()
+    }
+
+    /// One anchor seat on the fine slab's top face at the origin, discovered by
+    /// the PRODUCTION discovery pass.
+    ///
+    /// `QualifiedAnchorSeat` has no constructor a test can reach — the whole
+    /// point of the type — so the seat here is a real discovered one. The rewire
+    /// discovery entry point is used because it is the one whose binding a test
+    /// can mint; the seat it returns is the same qualified seat the finalized
+    /// path returns, and `grow_terminal_inner` takes the seats as an argument.
+    fn seat_on_fine_slab(
+        forest: &Forest,
+        stub: MemberKey,
+        stub_end_mm: [Finite; 3],
+        geometry: &AnchorGeometryAuthority<'_>,
+        seat_face_id: u32,
+    ) -> Vec<QualifiedAnchorSeat> {
+        let binding = RewireAnchorBinding::new(
+            stub,
+            forest.digest(),
+            forest.digest().wrapping_add(1),
+            stub_end_mm,
+        );
+        let sidecar = vec![0.0; geometry.surface().nfaces()];
+        let discovery = discover_rewire_anchor_seats(
+            binding,
+            &[SurfaceAnchorSample {
+                source_face_id: seat_face_id,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            Some(&sidecar),
+            AnchorSearchConfig::current().unwrap(),
+            geometry,
+        )
+        .expect("the seat discovers");
+        assert!(
+            discovery.refusals().is_empty(),
+            "the fixture's seat must qualify: {:?}",
+            discovery.refusals()
+        );
+        discovery.into_seats()
+    }
+
+    /// The face the origin projects onto — how every fixture here names the
+    /// seat face, so nothing depends on triangulation order.
+    fn seat_face_at_origin(surface: &NativeSurface) -> u32 {
+        let (_, _, face_ids, _) = surface.project(&[[0.0, 0.0, 0.0]]);
+        u32::try_from(face_ids[0]).expect("the origin projects onto a face")
+    }
+
+    /// A seated arm on the fine slab plus a terminal that can only reach ground
+    /// by bifurcating it.
+    ///
+    /// The host is `apply_model_anchor`'s own shape — a `Strut` whose ROOTWARD
+    /// end is the model seat, frozen at the registered creation radius — so the
+    /// bifurcation inherits a real seated contact rather than a manufactured
+    /// one. The plate sits 40 mm below a slab the descent would have to pass
+    /// straight through, so the plate family is refused and the bifurcation is
+    /// the answer.
+    fn fine_slab_bifurcation_fixture(
+        surface: &NativeSurface,
+        topology: &FaceTopology,
+        seat_face_id: u32,
+    ) -> (Forest, MemberKey, MemberKey, TerminalCcoRequest) {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        let host_p0 = [0.0, 0.0, 6.0];
+        let host_p1 = [0.0, 0.0, 0.0];
+        let mut forest = Forest::new();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: host_p0.map(finite),
+            p1_mm: host_p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(creation_mm)),
+            r1_mm: RootwardEndRadius::new(positive(creation_mm)),
+            kind: MemberKind::Strut,
+            owner: Owner::Generated {
+                family: "f1-seated-host".to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(ContactEnd::Rootward),
+            carried_mm2: finite(4.0),
+        }));
+        // The freeze at the CREATION radius, through the production entry
+        // point — the state `apply_model_anchor` leaves behind.
+        let record = crate::seat_zone::freeze_production_seat_zones(
+            surface,
+            topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: host_p0,
+                p1_mm: host_p1,
+                seat_face_id,
+                band_radius_mm: creation_mm + registered_standoff_mm(),
+            }],
+        )
+        .expect("the creation freeze")
+        .remove(0);
+        forest.set_seat_zone(host, record);
+
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(0.8), finite(0.0), finite(5.1)],
+            p1_mm: [finite(0.8), finite(0.0), finite(4.5)],
+            r0_mm: TerminalEndRadius::new(positive(0.2)),
+            r1_mm: RootwardEndRadius::new(positive(creation_mm)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(ContactEnd::Terminalward),
+            carried_mm2: finite(12.0),
+        }));
+        forest.register_terminal(7, stub).unwrap();
+        let request =
+            TerminalCcoRequest::bind(&forest, 7, BuildFrame::new(finite(-40.0), positive(5.0)))
+                .unwrap();
+        (forest, host, stub, request)
+    }
+
+    /// **CCO SITES 1+2, PINNED: the committed forest carries the WINNER's
+    /// re-cut band, not the descriptor's creation band.**
+    ///
+    /// `grow_terminal_inner` re-cuts every candidate's zone before it grades
+    /// them, then throws the candidate forests away and re-runs
+    /// `apply_and_size` on the LIVE forest to commit the winner. That re-run
+    /// installs the CREATION band again — `apply_model_anchor` from the
+    /// descriptor, `apply_bifurcation` by MOVING the live host's own record —
+    /// so the copy loop at the commit is the only thing that puts the re-cut
+    /// band back, and until this test nothing said so.
+    ///
+    /// **Why the bifurcation family and not the anchor family.** The copy loop
+    /// is family-agnostic: it walks every live member of the winner's forest.
+    /// The bifurcation route reaches it with no `FinalizedAnchorValidationContext`
+    /// — a model anchor cannot be minted here without the hoisted routing
+    /// authority a real initial build supplies, and manufacturing one would
+    /// test the fixture rather than the loop. The model-anchor family's own
+    /// re-cut is pinned on the rewire path by
+    /// `the_rewire_screen_reads_the_re_cut_band_and_a_sized_anchor_survives_it`.
+    ///
+    /// What is asserted, and why each part is needed:
+    ///
+    /// * the committed record equals a fresh freeze at the arm's FINAL radius
+    ///   on the committed axis and the stored seat face — which is exactly the
+    ///   record the winner candidate carried, since that is how
+    ///   `refreeze_resized_seat_zones` built it;
+    /// * the arm actually GREW past its creation radius, or the re-size was a
+    ///   no-op and the equality above would hold against a build that never
+    ///   re-cut anything;
+    /// * the final band's face set is a strict SUPERSET of the creation band's
+    ///   ON THE SAME AXIS, which is what makes the fine slab load-bearing — on
+    ///   a coarse mesh both bands name the same faces and only
+    ///   `band_radius_mm` would differ.
+    ///
+    /// **The named sabotage: `a_commit_that_kept_the_descriptor_band`.** Delete
+    /// the `for key in winner.forest.live_members()` copy loop from
+    /// `grow_terminal_inner`'s commit arm. RED-RUN 2026-08-24: the committed
+    /// record comes back as the inherited one — `band_radius_mm = 0.95` over
+    /// 116 faces, against the re-cut 1.2515 over 200.
+    #[test]
+    fn the_committed_bifurcation_carries_the_winners_re_cut_band_not_the_inherited_one() {
+        let (_, surface, topology) = fine_seat_slab(FINE_PITCH_MM);
+        let seat_face_id = seat_face_at_origin(&surface);
+        let (mut forest, host, _stub, request) =
+            fine_slab_bifurcation_fixture(&surface, &topology, seat_face_id);
+        let inherited = forest
+            .seat_zone_record(host)
+            .expect("the host is seated")
+            .clone();
+
+        let outcome = grow_terminal_inner(
+            &mut forest,
+            &request,
+            &surface,
+            &topology,
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+            Some(vec![host]),
+            0.05,
+            None,
+        )
+        .expect("the terminal routes");
+        let winner = outcome.winner.expect("a winner");
+        assert_eq!(
+            winner.family,
+            CandidateFamily::Bifurcation,
+            "the plate descent runs 44 mm straight through the slab, so the \
+             bifurcation is the only legal family here"
+        );
+
+        // The committed upper half: `apply_bifurcation` re-parents the lower
+        // half onto it and MOVES the seat declaration and its record with p1.
+        let arm = forest.parent_of(host).expect("the committed upper half");
+        let member = forest.member(arm).expect("a live upper half");
+        assert_eq!(member.model_contact_end(), Some(ContactEnd::Rootward));
+        assert_eq!(
+            forest.member(host).unwrap().model_contact_end(),
+            None,
+            "the split partitions the declaration; the lower half keeps none"
+        );
+        let r_final_mm = member.rootward_radius_mm().get().get();
+        let r_creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        // NON-VACUITY 1 — the sizing pass moved the radius. Without this the
+        // whole test could pass against a build whose re-size never fired.
+        assert!(
+            r_final_mm > r_creation_mm,
+            "the fixture must make `size_bifurcation_candidate` GROW the seated \
+             half past its creation radius, or there is nothing to re-cut: \
+             final {r_final_mm} mm against creation {r_creation_mm} mm"
+        );
+
+        let standoff_mm = registered_standoff_mm();
+        let record = forest
+            .seat_zone_record(arm)
+            .expect("the committed upper half keeps a frozen zone");
+        assert_eq!(
+            record.seat_face_id(),
+            inherited.seat_face_id(),
+            "the split inherits the SAME contact, so the seat face is carried \
+             rather than re-projected"
+        );
+        let p0_mm = member.p0_mm().map(Finite::get);
+        let p1_mm = member.p1_mm().map(Finite::get);
+        let expected = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: record.seat_face_id(),
+                band_radius_mm: r_final_mm + standoff_mm,
+            }],
+        )
+        .expect("the final-radius freeze")
+        .remove(0);
+        let creation = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: record.seat_face_id(),
+                band_radius_mm: r_creation_mm + standoff_mm,
+            }],
+        )
+        .expect("the creation-radius freeze")
+        .remove(0);
+        // NON-VACUITY 2 — the two bands really do name different face sets on
+        // this mesh, so the equality below is a statement about FACES and not
+        // only about the recorded band radius.
+        assert!(
+            expected.zone().len() > creation.zone().len()
+                && creation
+                    .zone()
+                    .iter()
+                    .all(|face| expected.zone().contains(face)),
+            "the fine slab must make the final band a strict superset of the \
+             creation band, or this fixture cannot tell a re-cut zone from an \
+             un-recut one: creation {} faces, final {} faces",
+            creation.zone().len(),
+            expected.zone().len()
+        );
+
+        assert_ne!(
+            *record, inherited,
+            "and the committed record must not be the INHERITED one — that is \
+             what `apply_bifurcation` moves onto the upper half at commit time, \
+             and it was cut at the creation radius on the un-split axis"
+        );
+        assert_eq!(
+            *record,
+            expected,
+            "the COMMITTED upper half must carry the winner candidate's re-cut \
+             band. `apply_and_size` moved the live host's CREATION band onto it, \
+             and only the commit's copy loop puts the re-cut one back — delete \
+             that loop and this record comes back at band_radius_mm = {} \
+             instead of {}",
+            inherited.band_radius_mm(),
+            r_final_mm + standoff_mm
+        );
+        println!(
+            "F1-CCO-COMMIT: r_creation={r_creation_mm} mm r_final={r_final_mm} mm \
+             standoff={standoff_mm} mm\n\
+             F1-CCO-COMMIT: zone_faces=[MEASURED] creation {} -> final {} of {} mesh faces",
+            creation.zone().len(),
+            expected.zone().len(),
+            topology.n_faces()
+        );
+    }
+
+    /// The fine slab, dressed as an anchor route.
+    ///
+    /// `rewire_anchor_fixture`'s box cannot do this job: its bottom face is two
+    /// 40 mm triangles, so every band that reaches the seat reaches both of
+    /// them and a re-cut moves nothing at all.
+    fn fine_slab_anchor_fixture() -> RewireAnchorFixture {
+        let (mesh, surface, topology) = fine_seat_slab(FINE_PITCH_MM);
+        let seat_face_id = seat_face_at_origin(&surface);
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: vec![SurfaceAnchorSample {
+                source_face_id: seat_face_id,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
+    /// **THE C1 EVIDENCE — the rewire screen reads the RE-CUT band, and a
+    /// sized anchor survives it.**
+    ///
+    /// The second review's blocking finding: `evaluate_rewire_candidates` ran
+    /// apply -> size -> `clearance_survival` with no re-size between, so a
+    /// model anchor whose rootward radius `size_tapered_without_tree_fanin` had
+    /// just raised was graded against its CREATION band. On a mesh fine enough
+    /// to resolve the difference that is a SELF-refusal: the faces the arm's
+    /// own final footprint covers are outside the creation band, so the arm is
+    /// graded against its own flank and refused for distance — and the refusal
+    /// leaves as `Ok(None)` at `rewire::try_reattach`, so nothing anywhere says
+    /// the arm was ever proposed.
+    ///
+    /// Both new sites are exercised: the batch site decides whether the
+    /// candidate survives at all, and `replay_candidate`'s site is what puts
+    /// the re-cut band on the forest this asserts against.
+    ///
+    /// **The named sabotage: `a_rewire_screen_that_graded_the_creation_band`.**
+    /// Delete either `refreeze_resized_seat_zones` call added to `cco.rs` for
+    /// C1. Both halves RED-RUN 2026-08-24, and the pair is why the fix could
+    /// not be half-applied:
+    ///
+    /// * batch site deleted — the anchor leaves `batch.candidates` as
+    ///   `RewireCandidateRefusal { family: ModelAnchor, reason: Clearance }`,
+    ///   which is the silent `Ok(None)` this finding is about;
+    /// * replay site deleted — the batch still admits it and
+    ///   `replay_candidate` then answers `CcoError::RewireClearanceReplayFailed`,
+    ///   a hard divergence rather than a routing decision.
+    #[test]
+    fn the_rewire_screen_reads_the_re_cut_band_and_a_sized_anchor_survives_it() {
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let anchors = fine_slab_anchor_fixture();
+        let r_creation_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_shoot_r_mm()
+            .diagnostic()
+            .get();
+        let standoff_mm = registered_standoff_mm();
+
+        anchors.with_route(|route| {
+            let geometry = route.geometry;
+            let batch = CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .expect("the batch evaluates");
+            let anchor = batch
+                .candidates
+                .iter()
+                .find(|candidate| candidate.evidence.family == CandidateFamily::ModelAnchor)
+                .map(|candidate| candidate.evidence.generation_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the sized model anchor must survive the screen; refusals were {:?}",
+                        batch.refusals
+                    )
+                });
+
+            let replay = batch
+                .replay_candidate(&binding, &forest, anchor, geometry)
+                .expect("the winner replays");
+            let (replayed, _, _, _) = replay.into_parts();
+
+            let arm = replayed
+                .live_tree_members()
+                .into_iter()
+                .find(|key| {
+                    replayed.member(*key).is_some_and(|member| {
+                        member.model_contact_end() == Some(ContactEnd::Rootward)
+                    })
+                })
+                .expect("the replayed forest holds the seated arm");
+            let member = replayed.member(arm).expect("a live arm");
+            let r_final_mm = member.rootward_radius_mm().get().get();
+            // NON-VACUITY — the sizing pass moved the radius, so the re-cut had
+            // something to do. Without this the assertions below would hold
+            // against a build that never re-cut anything.
+            assert!(
+                r_final_mm > r_creation_mm,
+                "the fixture must make the anchor GROW past its creation \
+                 radius: final {r_final_mm} mm against creation {r_creation_mm} mm"
+            );
+
+            let record = replayed
+                .seat_zone_record(arm)
+                .expect("the replayed arm keeps a frozen zone");
+            let p0_mm = member.p0_mm().map(Finite::get);
+            let p1_mm = member.p1_mm().map(Finite::get);
+            let freeze = |band_radius_mm| {
+                crate::seat_zone::freeze_production_seat_zones(
+                    geometry.surface(),
+                    geometry.topology(),
+                    &[crate::seat_zone::SeatZoneRequest {
+                        p0_mm,
+                        p1_mm,
+                        seat_face_id: record.seat_face_id(),
+                        band_radius_mm,
+                    }],
+                )
+                .expect("the freeze")
+                .remove(0)
+            };
+            let expected = freeze(r_final_mm + standoff_mm);
+            let creation = freeze(r_creation_mm + standoff_mm);
+            assert!(
+                expected.zone().len() > creation.zone().len()
+                    && creation
+                        .zone()
+                        .iter()
+                        .all(|face| expected.zone().contains(face)),
+                "the fine slab must make the final band a strict superset of the \
+                 creation band, or this fixture cannot tell the two apart: \
+                 creation {} faces, final {} faces",
+                creation.zone().len(),
+                expected.zone().len()
+            );
+            assert_eq!(
+                *record, expected,
+                "the replayed forest must carry the band cut at the FINAL \
+                 radius, which is the band the screen graded"
+            );
+            println!(
+                "F1-CCO-REWIRE: r_creation={r_creation_mm} mm r_final={r_final_mm} mm \
+                 standoff={standoff_mm} mm\n\
+                 F1-CCO-REWIRE: zone_faces=[MEASURED] creation {} -> final {} of {} mesh faces",
+                creation.zone().len(),
+                expected.zone().len(),
+                geometry.topology().n_faces()
+            );
+        });
     }
 }

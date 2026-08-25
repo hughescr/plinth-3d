@@ -450,6 +450,13 @@ pub(crate) enum InitialContactError {
     UnattestableContactDepth { depth_mm: f64, margin_mm: f64 },
     #[error("contact attestation batch failed: {0}")]
     Attestation(DesignedMaskError),
+    /// #36. The stub family's frozen seat zones could not be computed. This is
+    /// a BATCH-level failure — a starved band admission or a mesh/topology
+    /// disagreement — and never a statement about any one contact, so it takes
+    /// the same channel every other batch integrity failure here takes rather
+    /// than quarantining a stub.
+    #[error("initial stub seat-zone freeze failed: {0}")]
+    SeatZone(crate::seat_zone::SeatZoneError),
 }
 
 struct StubSeed {
@@ -614,6 +621,11 @@ pub(crate) fn build_initial_contacts(
         .tip_radius_max_grown_scar_mm()
         .value();
     let min_shoot_r_mm = policy.min_shoot_r_mm().diagnostic().get();
+    // `STANDOFF_MM` — the PLACEMENT standoff, and the second term of the frozen
+    // seat-zone band radius `r_seat + standoff_placement` (design §2). It is
+    // the mask formula's own standoff, NOT a demanded gap; the two-tier ruling
+    // of 2026-08-22 separated those and this is the former.
+    let standoff_mm = policy.standoff_mm().diagnostic().get();
 
     let native_digest = geometry.digest();
     let mut seeds = Vec::new();
@@ -703,6 +715,11 @@ pub(crate) fn build_initial_contacts(
         floor_depth_mm: contact_depth_mm,
         process_resolution_mm: attestation_margin_mm,
         standoff_mm: policy.standoff_mm().diagnostic().get(),
+        // This policy ATTESTS seats; it never grades a clearance distance, so
+        // no `segment_clearance*` call reads this field on this path. It
+        // carries the placement value because the contacts it attests are
+        // screened next by the placement-family search.
+        demanded_gap_mm: policy.standoff_mm().diagnostic().get(),
         min_free_span_mm: policy.min_illegal_len_mm().diagnostic().get(),
         ball_factor_stub: policy.ball_factor_stub().diagnostic().get(),
         tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(policy),
@@ -817,6 +834,24 @@ pub(crate) fn build_initial_contacts(
     for seed in &seeds {
         keys.push(forest.add_member(stub_member(seed)));
     }
+    // **The honest contact exemption, creation site 1 of 4 (#36, design §8
+    // step 4 / §9.4).** A stub is a designed `contact_depth_mm` embed: it is
+    // legitimately inside the material it is seated in, so its own seat zone
+    // must be exempt or the full-axis grading of §8 step 5 refuses every stub
+    // for its own design.
+    //
+    // The stub family was NOT in §8's original inventory and had to be added:
+    // `brace::exact_clearance_rows` excludes `MemberKind::Stub` by kind, but
+    // `cco::clearance_rows` does not — it walks `live_tree_members` and keeps
+    // every CHANGED member — so an unfrozen stub self-refuses there and CCO
+    // growth loses its candidates wholesale.
+    //
+    // Frozen HERE rather than at seed time because grow-to-attest can still
+    // raise `r0` above, and the frozen band radius must be the radius the
+    // contact is MINTED with. Cost is one batched projection plus one batched
+    // band call for the whole run, riding the same stage boundary as the
+    // attestation batches; a per-stub call would be the batch-first defect.
+    freeze_stub_seat_zones(&mut forest, &seeds, &keys, geometry, standoff_mm)?;
     for (seed, key) in seeds.iter().zip(&keys) {
         forest.register_terminal(seed.terminal, *key)?;
     }
@@ -947,6 +982,74 @@ pub(crate) fn build_initial_contacts(
         scratch_bytes,
         all_terminals_registered_before_quarantine: true,
     })
+}
+
+/// **#36 — freeze the stub family's seat zones, one batch for the whole run.**
+///
+/// `Z` is the connected component, containing the seat's own face, of the faces
+/// within `r_seat + standoff_placement` of the stub's axis (design §2). For a
+/// stub the contact end is `Terminalward`, so `r_seat` is `seed.r0` — the tip
+/// radius the run will EMIT, after grow-to-attest, which is why this runs at
+/// the mint and not at seed time.
+///
+/// The seat FACE comes from one batched `project` over the seats. That is the
+/// same rule `brace::exact_clearance_rows` and `cco::clearance_survival` use to
+/// resolve a contact's surface normal, so the face this forgives is the face
+/// those sites would have measured the seat against — the identity the flood
+/// fill rests on. `validate_perception_input` builds the retained topology with
+/// `WeldPolicy::ExactBits` and `NativeSurface::from_indexed` indexes faces in
+/// the same triangle order, so `project`'s face ID and `topology.neighbors`
+/// address the SAME faces (design §10.6, verified independently by the
+/// challenger and re-recorded there).
+///
+/// A projection that lands off the mesh (`face_id < 0`, which `project` returns
+/// for an empty or degenerate surface) is left UNFROZEN rather than guessed at:
+/// no zone means "exempt nothing", which is the strict direction.
+fn freeze_stub_seat_zones(
+    forest: &mut Forest,
+    seeds: &[StubSeed],
+    keys: &[MemberKey],
+    geometry: &AnchorGeometryAuthority<'_>,
+    standoff_mm: f64,
+) -> Result<(), InitialContactError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let seats = seeds.iter().map(|seed| seed.seat_mm).collect::<Vec<_>>();
+    // ONE projection for the whole run.
+    let (_, _, face_ids, _) = geometry.surface().project(&seats);
+    let mut rows = Vec::new();
+    let mut requests = Vec::new();
+    for ((seed, key), face_id) in seeds.iter().zip(keys).zip(&face_ids) {
+        let Ok(seat_face_id) = u32::try_from(*face_id) else {
+            continue;
+        };
+        rows.push(*key);
+        requests.push(crate::seat_zone::SeatZoneRequest {
+            p0_mm: seed.p0.map(Finite::get),
+            p1_mm: seed.p1.map(Finite::get),
+            seat_face_id,
+            // The contact end's radius at the moment of the mint, plus the
+            // placement standoff. The transient sizer skips stubs and a
+            // registered terminal cannot be mutated, but CCO consumes that
+            // registration before later rewire moves. A consumed stub can then
+            // move through `try_slide` or `try_retire`; the downstream re-size
+            // compares this stored segment-band shape with the live member and
+            // re-cuts it when either the radius or axis changed.
+            band_radius_mm: seed.r0.get() + standoff_mm,
+        });
+    }
+    // ONE band call plus a parallel flood fill per row.
+    let records = crate::seat_zone::freeze_production_seat_zones(
+        geometry.surface(),
+        geometry.topology(),
+        &requests,
+    )
+    .map_err(InitialContactError::SeatZone)?;
+    for (key, record) in rows.into_iter().zip(records) {
+        forest.set_seat_zone(key, record);
+    }
+    Ok(())
 }
 
 /// The exact member one stub seed becomes.
@@ -2018,6 +2121,177 @@ mod tests {
             build.initial_forest_digest(),
             build.post_quarantine_forest_digest()
         );
+    }
+
+    /// **#36 CREATION SITE 1 — every initial stub leaves the mint with a frozen
+    /// seat zone** (§8 step 6, §9.4).
+    ///
+    /// The stub family was NOT in §8's original inventory and had to be added.
+    /// `brace::exact_clearance_rows` excludes `MemberKind::Stub` by kind, so the
+    /// final pass never grades one — but `cco::clearance_rows` does not: it
+    /// walks `live_tree_members` and keeps every CHANGED member. A stub is a
+    /// designed `default_contact_depth_mm` embed, so an unfrozen one is graded
+    /// over its own design and refuses itself, and CCO growth loses its
+    /// candidates wholesale.
+    ///
+    /// This runs the real builder over the real overhang table, so it is the
+    /// production path and not a re-implementation of it.
+    ///
+    /// **The named sabotage: `a_mint_that_skipped_the_stub_freeze`.** Delete the
+    /// `freeze_stub_seat_zones` call and every assertion below fails at once.
+    /// The band radius is pinned separately, against the EMITTED tip radius
+    /// rather than the load law's request, because grow-to-attest can raise one
+    /// and a band frozen from the law's number would describe a tip the run is
+    /// not building.
+    #[test]
+    fn every_initial_stub_leaves_the_mint_with_a_frozen_seat_zone() {
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let build = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(
+            !fixture.plan.contacts().is_empty(),
+            "NON-VACUITY: the fixture must produce contacts"
+        );
+
+        let forest = build.forest();
+        let face_count = fixture.topology.n_faces();
+        let mut frozen = 0_usize;
+        for key in forest.live_members() {
+            let member = forest.member(key).expect("a live member resolves");
+            if member.model_contact_end().is_none() {
+                continue;
+            }
+            let zone = forest.seat_zone(key).unwrap_or_else(|| {
+                panic!(
+                    "stub {key:?} declares a model contact and must carry a frozen \
+                     seat zone; without one the honest full-axis grading refuses \
+                     it for its own designed embed (§9.4)"
+                )
+            });
+            assert!(
+                !zone.is_empty(),
+                "a seated stub must forgive its own seat face; {key:?} forgives \
+                 nothing"
+            );
+            assert!(
+                zone.len() < face_count,
+                "and it must forgive its SEAT, not the mesh: {key:?} claims {} of \
+                 {face_count} faces",
+                zone.len()
+            );
+            assert!(
+                zone.windows(2).all(|pair| pair[0] < pair[1]),
+                "the kernel's exclusion set must be sorted and deduplicated"
+            );
+            frozen += 1;
+        }
+        // Every stub that SURVIVED the mint, not merely most of them. A
+        // quarantined stub leaves `live_members`, so the arithmetic states
+        // exactly which population is covered rather than leaving a shortfall
+        // to be read as noise.
+        assert!(frozen > 0, "NON-VACUITY: the fixture must freeze something");
+        assert_eq!(
+            frozen,
+            fixture.plan.contacts().len() - build.unattested().len(),
+            "every LIVE stub must be frozen; {} of {} were quarantined by PR-8 \
+             and correctly leave the forest",
+            build.unattested().len(),
+            fixture.plan.contacts().len()
+        );
+    }
+
+    /// **#36 — the stub band radius is the EMITTED tip, not the load law's
+    /// request** (§8 step 6, companion to the freeze test above).
+    ///
+    /// `r_seat` is "the member's radius at the contact end at the moment the
+    /// contact was minted". Grow-to-attest can raise `r0` above `law_r0` before
+    /// the forest is built, which is exactly why the freeze runs at the mint and
+    /// not at seed time. This pins the difference where a fixture can see it:
+    /// the zone the production path froze must equal the one a request built
+    /// from the EMITTED radius produces, for every stub.
+    ///
+    /// **The named sabotage: `a_band_frozen_from_the_law_radius`.** Swap
+    /// `seed.r0` for `seed.law_r0` in `freeze_stub_seat_zones` and this test
+    /// separates them on any contact that grew.
+    ///
+    /// **MEASURED 2026-08-22, and stated rather than hidden: that sabotage is
+    /// SILENT on this fixture.** The overhang table grows no tip, so
+    /// `law_r0 == r0` for every stub and the two bands are the same number. The
+    /// test asserts the growth population directly, so the day a fixture does
+    /// grow a tip the sabotage becomes loud automatically — and until then a
+    /// reader is told which arm is unexercised instead of inferring coverage
+    /// this test does not have.
+    #[test]
+    fn the_stub_seat_zone_band_is_the_emitted_tip_radius_plus_the_placement_standoff() {
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let build = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        let forest = build.forest();
+        let standoff_mm = m0_constants()
+            .unwrap()
+            .placeholders()
+            .standoff_mm()
+            .diagnostic()
+            .get();
+
+        let mut requests = Vec::new();
+        let mut keys = Vec::new();
+        for key in forest.live_members() {
+            let member = forest.member(key).expect("a live member resolves");
+            if member.model_contact_end() != Some(ContactEnd::Terminalward) {
+                continue;
+            }
+            let p0 = member.p0_mm().map(Finite::get);
+            let p1 = member.p1_mm().map(Finite::get);
+            // The seat is the surface point, one contact depth outboard of `p0`
+            // along the axis — the same point the mint projected.
+            let axis: [f64; 3] = std::array::from_fn(|i| p1[i] - p0[i]);
+            let length = (0..3).map(|i| axis[i] * axis[i]).sum::<f64>().sqrt();
+            let depth = m0_constants()
+                .unwrap()
+                .placeholders()
+                .default_contact_depth_mm()
+                .diagnostic()
+                .get();
+            let seat: [f64; 3] = std::array::from_fn(|i| p0[i] + axis[i] / length * depth);
+            let (_, _, face_ids, _) = fixture.surface.project(&[seat]);
+            requests.push(crate::seat_zone::SeatZoneRequest {
+                p0_mm: p0,
+                p1_mm: p1,
+                seat_face_id: u32::try_from(face_ids[0]).expect("the seat projects onto a face"),
+                band_radius_mm: member.terminal_radius_mm().get().get() + standoff_mm,
+            });
+            keys.push(key);
+        }
+        assert!(!keys.is_empty(), "NON-VACUITY: the fixture must have stubs");
+        // The discriminating population, stated. `a_band_frozen_from_the_law_radius`
+        // can only separate `law_r0` from `r0` on a stub that GREW; this
+        // fixture grows none, so the sabotage is silent here BY MEASUREMENT.
+        println!(
+            "STUB-BAND-DISCRIMINATION: {} of {} stubs grew a tip; the \
+             law-radius sabotage is silent unless this is non-zero",
+            build.grown().len(),
+            keys.len()
+        );
+
+        let expected = crate::seat_zone::freeze_production_seat_zones(
+            &fixture.surface,
+            &fixture.topology,
+            &requests,
+        )
+        .expect("the reference freeze succeeds");
+        for ((key, zone), request) in keys.iter().zip(expected).zip(&requests) {
+            assert_eq!(
+                forest.seat_zone(*key).map(|frozen| frozen.to_vec()),
+                Some(zone.zone().to_vec()),
+                "stub {key:?}'s frozen zone must be the one its EMITTED tip \
+                 radius produces (band {} mm). A band frozen from the load law's \
+                 request would describe a tip the run is not building.",
+                request.band_radius_mm
+            );
+        }
     }
 
     #[test]

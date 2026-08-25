@@ -49,7 +49,33 @@ use crate::{PreWriteGate, SupportedGeometry};
 
 /// The wire schema tag written into every sidecar. Bumped only if the shape
 /// changes in a way an old reader could misparse.
-const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v1";
+///
+/// **v1 -> v2, SPEC-A4 design §G.1 stage 4 and §G.2.** Two changes, both of
+/// them the stage-4 landing, and v2 covers the completed shape rather than an
+/// intermediate one — v2 has never left this branch.
+///
+/// 1. **One field's MEANING moved.** `attempts` is named for the registered
+///    `coverage_repair_max_attempts` bound, and under ruling R6 that bound
+///    counts **committed repair steps**, not passes of a batch loop. A v1
+///    sidecar's `attempts: 8` says "the loop ran eight times and appended a
+///    batch each time"; a v2 sidecar's `attempts: 0` says "no repair row ever
+///    earned its place". Those are different facts in the same field, which is
+///    exactly the misparse a schema tag exists to prevent — a reader that could
+///    not tell them apart would read a refusal that spent 45 trials as one that
+///    never tried.
+/// 2. **`closure.history` became `closure.steps`.** The per-attempt history was
+///    a list of aggregates (blocking count, worklist count, rows nominated); the
+///    step stream is SPEC-A4 §D's one row per transaction, naming the exact
+///    repair-pool row, the routes its global score came from, both sides of all
+///    three accept clauses, and the outcome. An old reader looking for
+///    `history` finds nothing, which is the honest answer: what it wanted to
+///    read no longer exists.
+///
+/// **`attempts` is not renamed**, at v2 or here. It stays the name of the bound
+/// it counts against, as `CoverageClosureRefusal::attempts` does in
+/// `plinth-support`; renaming it at its struct sites is a separate, larger API
+/// break and is not in this change.
+const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v2";
 
 /// Whole-mesh face bound above which a render degrades to a bounding-box
 /// silhouette plus the highlighted island faces only, rather than drawing
@@ -212,6 +238,19 @@ pub fn render_path(target: &Path, island_id: u32) -> PathBuf {
 pub fn render_file_prefix(target: &Path) -> Option<String> {
     let stem = target.file_stem()?.to_str()?;
     Some(format!("{stem}.coverage.island-"))
+}
+
+/// The SEALED-run repair ledger's path for one model:
+/// `<target-stem>.coverage.repair.json`, beside the `.chitubox` target.
+///
+/// **A twin of [`sidecar_path`], not a second writer of it.** The refusal
+/// sidecar means one thing — "this model was refused, and here is the coverage
+/// evidence" — and a reader that found one beside an emitted artifact would
+/// have to guess. This file means the other thing: "this model sealed, and here
+/// is what the repair controller did to get there."
+#[must_use]
+pub fn repair_ledger_path(target: &Path) -> PathBuf {
+    target.with_extension("coverage.repair.json")
 }
 
 fn worse_gap(left: CoverageClosureGap, right: CoverageClosureGap) -> CoverageClosureGap {
@@ -475,6 +514,128 @@ fn write_sidecar(path: &Path, inputs: SidecarWrite<'_>) -> Result<(), String> {
             path.display()
         )
     })
+}
+
+// --- Sealed-run repair ledger --------------------------------------------
+
+/// The wire schema tag of the SEALED-run repair ledger.
+///
+/// **Versioned the same way the refusal sidecar is**, and for the same reason:
+/// this file's whole content is SPEC-A4 §D's exact attribution, and §D's rows
+/// carry meanings a reader must not guess at. `.v1` is honest here — the refusal
+/// sidecar is at `.v2` because one of ITS fields changed meaning, and this file
+/// has no earlier shape to be confused with.
+const REPAIR_LEDGER_SCHEMA: &str = "plinth.coverage-repair.v1";
+
+/// The sealed-run repair ledger, as it goes on disk — **SPEC-A4 §D.2 for a
+/// model that EMITS**.
+///
+/// Before this, `prepare.rs` deleted any stale coverage sidecar on the way in
+/// and wrote nothing at all for a model that sealed, so the exact attribution
+/// §D promises existed only in memory and only until the authority was
+/// consumed. A reader asking "which contact closed which hole on this model"
+/// could be answered for a REFUSED model and not for a successful one — which
+/// is the wrong way round, because the successful one is the plan that gets
+/// printed.
+#[derive(Serialize)]
+struct RepairLedgerBody<'a> {
+    schema: &'a str,
+    model: &'a str,
+    /// **Ruling R6**: repair steps that COMMITTED, which is what the registered
+    /// `coverage_repair_max_attempts` bound bounds. Hoisted out of `report` so
+    /// the one number a reader wants first is the first one they see.
+    commits: usize,
+    /// Every transaction attempted, committed or not.
+    trials: usize,
+    /// §A.8's counters in full: the rejection histogram by class, the wall
+    /// times, rule N4's demotion pair, and the rows left on the ranking.
+    report: &'a plinth_support::RepairRunReport,
+    /// §D's stream: one row per transaction, each naming the exact repair-pool
+    /// row, its seat, every route its GLOBAL score was credited for, both sides
+    /// of all three accept clauses, the per-route deltas, and the outcome.
+    steps: &'a [plinth_support::CoverageRepairStepWire],
+    /// **Task #71** — one row per ROUTED contact of the plan that emitted, with
+    /// the model area it is charged to carry and the size of the tip that
+    /// carries it, as a radius AND as a diameter.
+    ///
+    /// The gap it closes is the task's own sentence: artifact bytes can move
+    /// while every disclosed field stays identical. `commits`, `trials`, the
+    /// §A.8 counters and the §D stream are all properties of the REPAIR SEARCH;
+    /// none of them is a function of the load partition or of tip sizing, so
+    /// two runs that partition the same model's load differently, or size the
+    /// same contact's tip differently, wrote different files and printed the
+    /// same summary. This is the field a reader diffs to attribute a byte
+    /// movement instead of arguing about it.
+    contacts: &'a [plinth_support::EmittedContactDisclosure],
+}
+
+/// What one sealed-run ledger write produced.
+///
+/// **A write failure is data, not control flow** — the same rule the refusal
+/// evidence follows. A model that emitted is not un-emitted because its
+/// evidence file could not be written; the failure is recorded and travels out
+/// on the run report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SealedRepairLedger {
+    pub path: PathBuf,
+    /// Ruling R6's number, the same one inside the file.
+    pub commits: usize,
+    pub trials: usize,
+    /// How many step rows reached the file. Equal to `trials`; carried so a
+    /// reader of the report alone can tell a truncated ledger from a short run.
+    pub steps: usize,
+    pub write_error: Option<String>,
+}
+
+/// Persist the SEALED-run repair ledger for one model — SPEC-A4 §D.2's
+/// attribution, for a model that reached its artifact.
+///
+/// **Written for every model that seals, including one that spent nothing.** A
+/// ledger reading `commits: 0, trials: 0, steps: []` says "this model covered
+/// on its baseline layout and the controller cost it nothing", which is a
+/// measurement. Writing no file at all would say only "nobody left a note",
+/// and those two must not look alike — the same reason §A.8 prints a line of
+/// zeros rather than staying quiet.
+#[must_use]
+pub fn persist_sealed_repair_ledger(
+    model: &ModelId,
+    target: &Path,
+    report: &plinth_support::RepairRunReport,
+    steps: &[plinth_support::CoverageRepairStep],
+    contacts: &[plinth_support::EmittedContactDisclosure],
+) -> SealedRepairLedger {
+    let path = repair_ledger_path(target);
+    let wire: Vec<plinth_support::CoverageRepairStepWire> = steps
+        .iter()
+        .map(plinth_support::CoverageRepairStep::to_wire)
+        .collect();
+    let body = RepairLedgerBody {
+        schema: REPAIR_LEDGER_SCHEMA,
+        model: model.as_str(),
+        commits: report.commits,
+        trials: report.trials,
+        report,
+        steps: &wire,
+        contacts,
+    };
+    let write_error = serde_json::to_vec_pretty(&body)
+        .map_err(|error| format!("sealed repair ledger could not be serialized: {error}"))
+        .and_then(|bytes| {
+            std::fs::write(&path, bytes).map_err(|error| {
+                format!(
+                    "sealed repair ledger could not be written to {}: {error}",
+                    path.display()
+                )
+            })
+        })
+        .err();
+    SealedRepairLedger {
+        path,
+        commits: report.commits,
+        trials: report.trials,
+        steps: wire.len(),
+        write_error,
+    }
 }
 
 // --- Renders -------------------------------------------------------------
@@ -1033,9 +1194,17 @@ pub fn persist_closure_refusal(
     let islands = islands_from_closure(refusal);
     let measurement_error = match &refusal.reason {
         plinth_support::CoverageClosureReason::MeasurementRefused(detail) => Some(detail.clone()),
-        plinth_support::CoverageClosureReason::AttemptsExhausted
-        | plinth_support::CoverageClosureReason::NoEligibleRepairRows
-        | plinth_support::CoverageClosureReason::RepairPlanRefused { .. } => None,
+        // EXHAUSTIVE, no wildcard arm, deliberately: this is the one place in
+        // the workspace that must decide what a NEW closure reason means for the
+        // sidecar, and a wildcard would decide it silently. Only a refused
+        // MEASUREMENT is a measurement error; every other reason is the
+        // controller reporting a verdict it reached, not an instrument that
+        // failed. SPEC-A4 §B.7's three one-winner reasons join the second group
+        // for exactly that reason.
+        plinth_support::CoverageClosureReason::RepairPlanRefused { .. }
+        | plinth_support::CoverageClosureReason::NothingToTry
+        | plinth_support::CoverageClosureReason::NoImprovingRepair { .. }
+        | plinth_support::CoverageClosureReason::CommitBudgetExhausted { .. } => None,
     };
     persist(
         model,
@@ -1168,7 +1337,10 @@ mod tests {
     fn closure_islands_merge_across_components_and_rank_worst_first() {
         let refusal = CoverageClosureRefusal {
             attempts: 8,
-            reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+            reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                candidates_tried: 8,
+                best_remaining_score_mm2: 0.0,
+            },
             islands: vec![
                 plinth_support::CoverageClosureIsland {
                     island_id: 5,
@@ -1180,6 +1352,7 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 5,
@@ -1191,6 +1364,7 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
                 plinth_support::CoverageClosureIsland {
                     island_id: 2,
@@ -1202,9 +1376,11 @@ mod tests {
                     patch_count: 1,
                     nominated_repair_rows: 0,
                     eligible_repair_rows: 0,
+                    outcome: None,
                 },
             ],
-            history: Vec::new(),
+            steps: Vec::new(),
+            repair: None,
         };
         let islands = islands_from_closure(&refusal);
         assert_eq!(
@@ -1262,7 +1438,10 @@ mod tests {
         let target = dir.join("fixture.chitubox");
         let refusal = CoverageClosureRefusal {
             attempts: 8,
-            reason: plinth_support::CoverageClosureReason::AttemptsExhausted,
+            reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                candidates_tried: 8,
+                best_remaining_score_mm2: 0.0,
+            },
             islands: vec![plinth_support::CoverageClosureIsland {
                 island_id: 4,
                 component_id: 0,
@@ -1273,8 +1452,10 @@ mod tests {
                 patch_count: 1,
                 nominated_repair_rows: 3,
                 eligible_repair_rows: 0,
+                outcome: None,
             }],
-            history: Vec::new(),
+            steps: Vec::new(),
+            repair: None,
         };
         let mesh = RenderMesh {
             verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -1291,6 +1472,127 @@ mod tests {
             serde_json::from_value(value["closure"].clone()).expect("closure round-trips");
         assert_eq!(round_tripped, refusal);
         assert!(value.get("report").is_none() || value["report"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Stage D — BOTH evidence files disclose the rescue, from one record.**
+    ///
+    /// Design authority: `docs/engineering-journal/designs/seal-semantics-2026-08-22.md`
+    /// §4 Stage D. *"The no-good ledger, the pass count and the
+    /// confirmation-round record join the coverage refusal sidecar."*
+    ///
+    /// # Why this test has to exist
+    ///
+    /// The two files answer opposite questions — "this model sealed, and here
+    /// is what it cost" and "this model was refused, and here is why" — and a
+    /// rescue is a fact about the RUN, so a reader must find it on whichever
+    /// file the run produced. Both carry the same `RepairRunReport` verbatim,
+    /// which is why one field reaches both; a later change that hoisted the
+    /// record onto only one body would pass every other test in this module
+    /// and lose the refusal half silently.
+    ///
+    /// The schema tag is asserted UNMOVED on purpose. The field is additive and
+    /// no existing field changed meaning, which is this file's own versioning
+    /// rule for `.v1` versus the refusal sidecar's `.v2`.
+    #[test]
+    fn stage_d_puts_the_legalization_record_on_both_the_sealed_ledger_and_the_refusal_sidecar() {
+        let dir = std::env::temp_dir().join(format!(
+            "plinth-coverage-evidence-legalization-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let target = dir.join("fixture.chitubox");
+        let legalization = plinth_support::LegalizationDisclosure {
+            passes: 6,
+            no_goods: 1,
+            no_goods_by_terminal: std::collections::BTreeMap::from([(113_u32, 1_usize)]),
+            confirmation_rounds: 1,
+            voided_rounds: 0,
+            round_arms_measured: 2,
+            disturbances: vec![plinth_support::LegalizationDisturbance {
+                pass: 2,
+                own_arm_terminals: vec![113],
+                cascade_victims: Vec::new(),
+                no_goods_learned: 1,
+                round_arm_measured: false,
+                voided_a_round: false,
+                steering_spent_terminal: None,
+            }],
+            rounds: vec![plinth_support::ConfirmationRoundDisclosure {
+                terminal_id: 113,
+                opened_at_pass: 3,
+                arms_measured: 2,
+                no_goods_at_open: 1,
+                outcome: plinth_support::ConfirmationRoundOutcome::TerminalUnroutedAtLowering,
+            }],
+        };
+        let report = plinth_support::RepairRunReport {
+            legalization: legalization.clone(),
+            ..plinth_support::RepairRunReport::default()
+        };
+        let model = ModelId::new("fixture");
+
+        // The SEALED half — the model reached its artifact.
+        let ledger = persist_sealed_repair_ledger(&model, &target, &report, &[], &[]);
+        assert_eq!(ledger.write_error, None, "{ledger:?}");
+        let sealed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ledger.path).expect("ledger written"))
+                .expect("valid json");
+        assert_eq!(
+            sealed["schema"], REPAIR_LEDGER_SCHEMA,
+            "an additive field changes no existing field's meaning, so the tag stays put"
+        );
+        let sealed_report: plinth_support::RepairRunReport =
+            serde_json::from_value(sealed["report"].clone()).expect("report round-trips");
+        assert_eq!(sealed_report.legalization, legalization);
+        assert_eq!(sealed["report"]["legalization"]["passes"], 6);
+        assert_eq!(
+            sealed["report"]["legalization"]["rounds"][0]["arms_measured"], 2,
+            "the round LENGTH — how many arms it drove — must be on the shipped artifact's \
+             own evidence file"
+        );
+        assert_eq!(
+            sealed["report"]["legalization"]["rounds"][0]["outcome"],
+            "terminal_unrouted_at_lowering"
+        );
+        assert_eq!(
+            sealed["report"]["legalization"]["disturbances"][0]["own_arm_terminals"][0], 113,
+            "which terminal was disturbed"
+        );
+
+        // The REFUSED half — the same record, on the other file.
+        let refusal = CoverageClosureRefusal {
+            attempts: 0,
+            reason: plinth_support::CoverageClosureReason::NoImprovingRepair {
+                candidates_tried: 0,
+                best_remaining_score_mm2: 0.0,
+            },
+            islands: Vec::new(),
+            steps: Vec::new(),
+            repair: Some(report),
+        };
+        let mesh = RenderMesh {
+            verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            tris: vec![[0, 1, 2]],
+        };
+        let evidence = persist_closure_refusal(&model, &target, &mesh, None, &refusal);
+        assert!(evidence.write_error.is_none(), "{:?}", evidence.write_error);
+        let refused: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&evidence.sidecar_path).expect("sidecar written"),
+        )
+        .expect("valid json");
+        let refused_closure: CoverageClosureRefusal =
+            serde_json::from_value(refused["closure"].clone()).expect("closure round-trips");
+        assert_eq!(
+            refused_closure
+                .repair
+                .expect("the refusal carries the report")
+                .legalization,
+            legalization,
+            "a refused model's sidecar must disclose the same rescue an emitted model's \
+             ledger does"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

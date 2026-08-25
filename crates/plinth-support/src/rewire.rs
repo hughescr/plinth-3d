@@ -58,6 +58,20 @@ pub(crate) struct RewireReport {
     pub(crate) sweeps: u64,
     pub(crate) move_evaluations: u64,
     pub(crate) cco_candidate_batches: u64,
+    /// How many seated MEMBERS this optimization re-cut, over every move
+    /// evaluation (Craig's ruling of 2026-08-23; second review, C5/C6).
+    ///
+    /// `validate_changed_geometry` runs once per candidate move and returns the
+    /// count `refreeze_resized_seat_zones` gives it. That count used to be
+    /// discarded on the spot, so the ruling's most-travelled site — rewire
+    /// re-cuts on EVERY sweep, not once per pass — reported nothing at all.
+    ///
+    /// The pair with `move_evaluations` is what makes it readable: a run whose
+    /// forest holds seated members and whose sizing moves radii should show a
+    /// non-zero count here, and a zero against a non-zero
+    /// `move_evaluations` says the re-size stopped firing without any verdict
+    /// having to change first.
+    pub(crate) seat_zone_members_refrozen: u64,
     pub(crate) termination: RewireTermination,
     /// PR-8/OD-9 (F3) — the model-anchor seat-attestation CHAIN over every CCO
     /// candidate batch this optimization evaluated.
@@ -104,6 +118,10 @@ pub(crate) enum RewireError {
     ReplayMismatch,
     #[error("accepted rewire move left a stale brace endpoint")]
     StaleBrace,
+    #[error("re-sizing a seated member's contact exemption failed: {0}")]
+    SeatZone(String),
+    #[error("a rewire disclosure count is not representable on this platform")]
+    CountNotRepresentable,
 }
 
 #[derive(Clone, Debug)]
@@ -114,12 +132,15 @@ struct Config {
     roll_window: usize,
     roll_eps: f64,
     work_budget: Option<u64>,
-    contact_depth_mm: f64,
     standoff_mm: f64,
+    /// The run's own process resolution — the PR-1(a) seat minimum and the PR-2
+    /// mask MARGIN. It is a property of THIS RUN, not a registry constant, so
+    /// it arrives as an argument.
+    process_resolution_mm: f64,
 }
 
 impl Config {
-    fn current() -> Result<Self, RewireError> {
+    fn current(process_resolution_mm: f64) -> Result<Self, RewireError> {
         let constants =
             m0_constants().map_err(|error| RewireError::Constants(error.to_string()))?;
         let p = constants.placeholders();
@@ -136,8 +157,8 @@ impl Config {
                 .diagnostic()
                 .enabled_value()
                 .map(|value| value.get()),
-            contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
             standoff_mm: p.standoff_mm().diagnostic().get(),
+            process_resolution_mm,
         };
         for (actual, expected, name) in [
             (config.twig_mm, 0.5_f64, "REWIRE_TWIG_MERGE_LEN_MM"),
@@ -177,7 +198,7 @@ pub(crate) fn optimize(
     forest: &mut Forest,
     request: RewireRequest<'_>,
 ) -> Result<RewireReport, RewireError> {
-    let config = Config::current()?;
+    let config = Config::current(request.process_resolution_mm)?;
     forest.validate()?;
     let initial_volume_ml = total_volume_ml(forest)?;
     let mut current_volume_ml = initial_volume_ml;
@@ -190,6 +211,7 @@ pub(crate) fn optimize(
         sweeps: 0,
         move_evaluations: 0,
         cco_candidate_batches: 0,
+        seat_zone_members_refrozen: 0,
         termination: RewireTermination::FullSweepNoAcceptance,
         // F3 -- a distinguished non-zero seed, so "no CCO batch ran" and "a
         // batch ran and attested nothing" are different heads.
@@ -230,6 +252,7 @@ pub(crate) fn optimize(
                     request.geometry,
                     &braced_hosts,
                     &config,
+                    &mut report.seat_zone_members_refrozen,
                 )?,
                 MoveKind::Prune => try_prune(
                     forest,
@@ -237,6 +260,7 @@ pub(crate) fn optimize(
                     request.geometry,
                     &braced_hosts,
                     &config,
+                    &mut report.seat_zone_members_refrozen,
                 )?,
                 MoveKind::Retire => try_retire(
                     forest,
@@ -244,6 +268,7 @@ pub(crate) fn optimize(
                     request.geometry,
                     &braced_hosts,
                     &config,
+                    &mut report.seat_zone_members_refrozen,
                 )?,
             };
             if let Some(saved) = outcome {
@@ -368,6 +393,16 @@ fn try_reattach(
         },
     )?;
     report.cco_candidate_batches += 1;
+    // C5/C6 -- the CCO batch's own re-size, folded into the same counter
+    // `validate_changed_geometry` feeds. Counted BEFORE the early returns
+    // below, for the same reason the attestation chain is: a batch that
+    // produced no ranked candidate still did the re-cut, and dropping the
+    // count would make a live re-size look idle on exactly the sweeps where a
+    // regression would be easiest to miss.
+    report.seat_zone_members_refrozen = report.seat_zone_members_refrozen.saturating_add(
+        u64::try_from(batch.seat_zone_members_refrozen())
+            .map_err(|_| RewireError::CountNotRepresentable)?,
+    );
     // F3 -- chain this batch's model-anchor seat-attestation transcript. It is
     // chained BEFORE the early returns below, so a batch that produced no
     // ranked candidate still cannot drop its attestation evidence.
@@ -408,7 +443,13 @@ fn try_reattach(
     // proof-bound replay. They can enlarge the connector or its ancestor
     // path, so the final geometry must be proved as written, in one batch,
     // before volume comparison and publication.
-    if !validate_changed_geometry(forest, &candidate, request.geometry, config)? {
+    if !validate_changed_geometry(
+        forest,
+        &mut candidate,
+        request.geometry,
+        config,
+        &mut report.seat_zone_members_refrozen,
+    )? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -425,6 +466,7 @@ fn try_slide(
     geometry: &AnchorGeometryAuthority<'_>,
     braced: &BTreeSet<MemberKey>,
     config: &Config,
+    refrozen: &mut u64,
 ) -> Result<Option<f64>, RewireError> {
     if braced.contains(&key) {
         return Ok(None);
@@ -474,7 +516,7 @@ fn try_slide(
     }
     let parent = candidate.parent_of(key);
     reconcile_ancestors(&mut candidate, parent)?;
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config, refrozen)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -628,6 +670,7 @@ fn try_prune(
     geometry: &AnchorGeometryAuthority<'_>,
     braced: &BTreeSet<MemberKey>,
     config: &Config,
+    refrozen: &mut u64,
 ) -> Result<Option<f64>, RewireError> {
     if braced.contains(&key) {
         return Ok(None);
@@ -687,7 +730,7 @@ fn try_prune(
     candidate.set_parent(child_key, parent)?;
     candidate.retire(key)?;
     reconcile_ancestors(&mut candidate, parent)?;
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config, refrozen)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -704,6 +747,7 @@ fn try_retire(
     geometry: &AnchorGeometryAuthority<'_>,
     braced: &BTreeSet<MemberKey>,
     config: &Config,
+    refrozen: &mut u64,
 ) -> Result<Option<f64>, RewireError> {
     if braced.contains(&key) {
         return Ok(None);
@@ -787,7 +831,7 @@ fn try_retire(
     if parent.is_some() {
         reconcile_ancestors(&mut candidate, parent)?;
     }
-    if !validate_changed_geometry(forest, &candidate, geometry, config)? {
+    if !validate_changed_geometry(forest, &mut candidate, geometry, config, refrozen)? {
         return Ok(None);
     }
     let after = total_volume_ml(&candidate)?;
@@ -853,19 +897,64 @@ fn required_radius(
     )?)
 }
 
+/// `refrozen` accumulates the number of seated members the re-size below
+/// re-cut, over every candidate this function screens (second review, C5/C6).
+///
+/// It accumulates whether or not the candidate is then ACCEPTED, because the
+/// re-cut is work this call really did on the candidate it really graded — a
+/// count that only followed accepted moves would read zero on a sweep that
+/// rejected everything and would say nothing about whether the re-size ran.
 fn validate_changed_geometry(
     before: &Forest,
-    after: &Forest,
+    after: &mut Forest,
     geometry: &AnchorGeometryAuthority<'_>,
     config: &Config,
+    refrozen: &mut u64,
 ) -> Result<bool, RewireError> {
     after.validate()?;
+    // **THE RE-SIZE — Craig's ruling of 2026-08-23, at rewire's post-sizing
+    // point.**
+    //
+    // Every caller of this function has just rewritten radii on the candidate —
+    // `try_slide` sizes a junction and its children, `reconcile_ancestors` walks
+    // the path above a splice — and a seated member among them is carrying a
+    // band cut at a radius it no longer has. This is the last moment before the
+    // PLACEMENT grading below reads those bands, and it is the first moment at
+    // which every radius on the candidate is final. ONE batched kernel call.
+    //
+    // `after` is `&mut` for exactly this and nothing else: the grading itself
+    // reads only. Re-cutting inside the grading loop instead would make the
+    // exemption a function of the radius being graded, which is the defect the
+    // frozen-`Z` rule retired.
+    *refrozen = refrozen.saturating_add(
+        u64::try_from(
+            crate::seat_zone::refreeze_resized_seat_zones(
+                geometry.surface(),
+                geometry.topology(),
+                config.standoff_mm,
+                std::iter::once(&mut *after),
+            )
+            .map_err(|error| RewireError::SeatZone(error.to_string()))?,
+        )
+        .map_err(|_| RewireError::CountNotRepresentable)?,
+    );
+    let after: &Forest = after;
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
     let mut r1 = Vec::new();
-    let mut i0 = Vec::new();
-    let mut i1 = Vec::new();
+    // #36/#51 — the contact-declaring rows, resolved into PR-2 masks below in
+    // ONE batched projection rather than each taking the flat inset pair this
+    // site used to build. See `contact::placed_mask_inset_mm`.
+    let mut contacts: Vec<(
+        usize,
+        crate::forest::ContactEnd,
+        crate::contact::ContactSeating,
+        f64,
+    )> = Vec::new();
+    // **#36 step 5 — one frozen exclusion set per row, in row order.**
+    let mut excluded: Vec<&[u32]> = Vec::new();
+    const EMPTY: &[u32] = &[];
     for key in after.live_tree_members() {
         let member = after.member(key).ok_or(ForestError::InactiveKey(key))?;
         if before.member(key) == Some(member) {
@@ -882,41 +971,140 @@ fn validate_changed_geometry(
         )? {
             return Ok(false);
         }
+        if let Some(end) = member.model_contact_end() {
+            contacts.push((
+                p0.len(),
+                end,
+                crate::contact::seating_of(member.kind(), end),
+                match end {
+                    crate::forest::ContactEnd::Terminalward => {
+                        member.terminal_radius_mm().get().get()
+                    }
+                    crate::forest::ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
+                },
+            ));
+        }
+        // A member with no contact forgives nothing; a contact-declaring
+        // member with no frozen zone is graded against its own designed embed
+        // and refused, which is the strict direction.
+        excluded.push(
+            member
+                .model_contact_end()
+                .and_then(|_| after.seat_zone(key))
+                .map_or(EMPTY, |zone| zone.as_ref()),
+        );
         p0.push(member.p0_mm().map(Finite::get));
         p1.push(member.p1_mm().map(Finite::get));
         r0.push(member.terminal_radius_mm().get().get());
         r1.push(member.rootward_radius_mm().get().get());
-        i0.push(
-            if member.model_contact_end() == Some(crate::forest::ContactEnd::Terminalward) {
-                config.contact_depth_mm
-            } else {
-                0.0
-            },
-        );
-        i1.push(
-            if member.model_contact_end() == Some(crate::forest::ContactEnd::Rootward) {
-                config.standoff_mm
-            } else {
-                0.0
-            },
-        );
     }
     if p0.is_empty() {
         return Ok(true);
     }
+    // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY** (design §5,
+    // reader 1). It no longer reaches the kernel's distance path; `emergence_ok`
+    // still needs the claimed mask, and under the honest rule PR-3 is more
+    // necessary rather than less, because a zone that swallows the whole
+    // neighbourhood would otherwise pass by erasure.
+    let mut mask_i0 = vec![0.0; p0.len()];
+    let mut mask_i1 = vec![0.0; p0.len()];
+    // Hoisted out of the contact branch below because the DEMANDED GAP is
+    // read for every row, contact-declaring or not: a changed set with no
+    // contacts still grades at this stage's registered demand.
+    let policy = contact_policy(config)?;
+    if !contacts.is_empty() {
+        let points = contacts
+            .iter()
+            .map(|(row, end, _, _)| match end {
+                crate::forest::ContactEnd::Terminalward => p0[*row],
+                crate::forest::ContactEnd::Rootward => p1[*row],
+            })
+            .collect::<Vec<_>>();
+        // ONE projection for the whole changed set, alongside the one
+        // `segment_clearance` that was already here.
+        let (_, _, _, normals) = geometry.surface().project(&points);
+        let mut claimed = vec![0.0_f64; p0.len()];
+        for ((row, end, seating, end_radius_mm), normal) in contacts.iter().zip(normals) {
+            let axis = sub(p1[*row], p0[*row]);
+            let length = norm(axis);
+            if length <= 0.0 {
+                return Ok(false);
+            }
+            let abs_cos = dot(scale(axis, 1.0 / length), normal).abs();
+            let r_max = r0[*row].max(r1[*row]);
+            // PR-2. A degenerate incidence has no finite mask; this pass
+            // VALIDATES an already-accepted move rather than screening a
+            // tournament, so it refuses the move rather than exempting the row.
+            let Some(mask) = crate::contact::placed_mask_inset_mm(
+                *seating,
+                abs_cos,
+                *end_radius_mm,
+                r_max,
+                &policy,
+            ) else {
+                return Ok(false);
+            };
+            claimed[*row] += mask;
+            match end {
+                crate::forest::ContactEnd::Terminalward => mask_i0[*row] = mask,
+                crate::forest::ContactEnd::Rootward => mask_i1[*row] = mask,
+            }
+            // PR-3, at the same site as the mask that makes it necessary. A
+            // mask that consumes the segment makes `seg_clear_one_excluding` return
+            // `INFINITY`; validating a move on that number would be validating
+            // nothing.
+            if !crate::contact::emerges(claimed[*row], length, &policy) {
+                return Ok(false);
+            }
+        }
+    }
+    let zero = vec![0.0; p0.len()];
     crate::census_record!(crate::census::record_segment_batch(
         "rewire_clearance",
         &p0,
         &p1,
-        &i0,
-        &i1,
+        // The insets the batch ACTUALLY receives, which are now zero.
+        &zero,
+        &zero,
         &[]
     ));
+    // PLACEMENT. `policy.demanded_gap_mm` is this stage's registered demand,
+    // read through the SAME shared predicate the final pass uses; only the
+    // number differs (Craig's two-tier ruling, 2026-08-22).
+    // #36 step 5 — the FULL axis against surface-minus-Z.
     let (clearances, _) = geometry
         .surface()
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &i0, &i1)
+        .segment_clearance_excluding(
+            &p0,
+            &p1,
+            &r0,
+            &r1,
+            policy.demanded_gap_mm,
+            &zero,
+            &zero,
+            &excluded,
+        )
         .map_err(|e| RewireError::Native(e.to_string()))?;
     Ok(clearances.into_iter().all(|value| value >= 0.0))
+}
+
+/// The PR-1..PR-4 policy this stage validates under — every number the
+/// registered one, plus THIS RUN's process resolution.
+fn contact_policy(config: &Config) -> Result<crate::contact::ContactPolicy, RewireError> {
+    let constants = m0_constants().map_err(|e| RewireError::Constants(e.to_string()))?;
+    let p = constants.placeholders();
+    Ok(crate::contact::ContactPolicy {
+        floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
+        process_resolution_mm: config.process_resolution_mm,
+        standoff_mm: p.standoff_mm().diagnostic().get(),
+        // PLACEMENT. `validate_changed_geometry` screens a changed set inside a
+        // search: the demand PRUNES and refuses nothing final, so it reads
+        // `STANDOFF_MM` and not the refusing `FINAL_CLEARANCE_GAP_MM`.
+        demanded_gap_mm: p.standoff_mm().diagnostic().get(),
+        min_free_span_mm: p.min_illegal_len_mm().diagnostic().get(),
+        ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
+        tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(p),
+    })
 }
 
 fn within_cone(p0: [f64; 3], p1: [f64; 3], radius: f64) -> Result<bool, RewireError> {
@@ -1146,7 +1334,7 @@ mod tests {
 
     #[test]
     fn frozen_order_prioritizes_single_stub_degenerate_and_uses_python_ties() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         let root = forest.add_member(member(
             [0.0, 0.0, 1.0],
@@ -1179,7 +1367,7 @@ mod tests {
 
     #[test]
     fn degenerate_retire_splices_children_and_dead_member_never_contributes() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         let parent = forest.add_member(member(
             [0.0, 0.0, 1.0],
@@ -1211,11 +1399,16 @@ mod tests {
         let before = forest.live_tree_members().len();
         let mut candidate = forest.clone();
         with_far_authority(|authority| {
-            assert!(
-                try_retire(&mut candidate, deg, authority, &BTreeSet::new(), &cfg,)
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(try_retire(
+                &mut candidate,
+                deg,
+                authority,
+                &BTreeSet::new(),
+                &cfg,
+                &mut 0,
+            )
+            .unwrap()
+            .is_some());
         });
         assert_eq!(candidate.live_tree_members().len(), before - 1);
         assert_eq!(candidate.parent_of(a), Some(parent));
@@ -1240,7 +1433,7 @@ mod tests {
 
     #[test]
     fn degenerate_root_retire_grounds_its_children_and_the_forest_still_lowers() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
         // The spliced case above with `deg` on the plate and no parent: its
         // rootward end is the grounded one and its children hang off the
@@ -1278,9 +1471,16 @@ mod tests {
         let mut candidate = forest.clone();
         with_far_authority(|authority| {
             assert!(
-                try_retire(&mut candidate, deg, authority, &BTreeSet::new(), &cfg)
-                    .unwrap()
-                    .is_some(),
+                try_retire(
+                    &mut candidate,
+                    deg,
+                    authority,
+                    &BTreeSet::new(),
+                    &cfg,
+                    &mut 0,
+                )
+                .unwrap()
+                .is_some(),
                 "a grounded degenerate root's children can inherit its plate end"
             );
         });
@@ -1312,7 +1512,7 @@ mod tests {
 
     #[test]
     fn constants_and_disabled_budget_pin_exact_search_contract() {
-        let cfg = Config::current().unwrap();
+        let cfg = Config::current(0.05).unwrap();
         assert_eq!(cfg.twig_mm.to_bits(), 0.5f64.to_bits());
         assert_eq!(cfg.degenerate_mm.to_bits(), 1e-4f64.to_bits());
         assert_eq!(cfg.max_slide_evals, 50);
@@ -1363,9 +1563,10 @@ mod tests {
             .unwrap();
         assert!(!validate_changed_geometry(
             &before,
-            &grown,
+            &mut grown,
             &authority,
-            &Config::current().unwrap(),
+            &Config::current(0.05).unwrap(),
+            &mut 0,
         )
         .unwrap());
         assert_eq!(
@@ -1374,10 +1575,103 @@ mod tests {
         );
     }
 
+    /// **C5/C6 — the count `validate_changed_geometry` used to discard now
+    /// reaches the report, and it counts a REFUSED candidate too.**
+    ///
+    /// The second review's disclosure finding at rewire's site: the re-size
+    /// here runs on EVERY move evaluation, which makes it the ruling's
+    /// most-travelled site, and it reported nothing at all.
+    ///
+    /// The screened candidate below is REFUSED — this fixture's seated arm is
+    /// grown from 0.1 mm to 0.5 mm against a wall it cannot clear, which is
+    /// what `post_splice_radius_growth_rechecks_clearance_before_publication`
+    /// above measures. That is the case worth pinning: a counter that only
+    /// followed accepted moves would read zero across a sweep that rejected
+    /// everything and could not distinguish it from a re-size that had stopped
+    /// running.
+    #[test]
+    fn the_re_size_count_reaches_the_report_even_when_the_candidate_is_refused() {
+        // The same near wall at `x = 1` that
+        // `post_splice_radius_growth_rechecks_clearance_before_publication`
+        // builds, so the two measure one geometry.
+        let mesh = Mesh::new(
+            vec![[1.0, -10.0, 0.0], [1.0, 10.0, 0.0], [1.0, 0.0, 10.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = Config::current(0.05).unwrap();
+
+        let p0_mm = [0.9, 0.0, 4.0];
+        let p1_mm = [1.0, 0.0, 3.0];
+        let mut before = Forest::new();
+        let key = before.add_member(Member::new(MemberSpec {
+            p0_mm: p0_mm.map(f),
+            p1_mm: p1_mm.map(f),
+            r0_mm: TerminalEndRadius::new(p(0.1)),
+            r1_mm: RootwardEndRadius::new(p(0.1)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "c5-count".into(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(crate::forest::ContactEnd::Rootward),
+            carried_mm2: f(1.0),
+        }));
+        let (_, _, face_ids, _) = surface.project(&[p1_mm]);
+        let record = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm,
+                p1_mm,
+                seat_face_id: u32::try_from(face_ids[0]).unwrap(),
+                band_radius_mm: 0.1 + config.standoff_mm,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        before.set_seat_zone(key, record);
+
+        let mut grown = before.clone();
+        grown
+            .set_radii(
+                key,
+                TerminalEndRadius::new(p(0.5)),
+                RootwardEndRadius::new(p(0.5)),
+            )
+            .unwrap();
+
+        let mut refrozen = 0_u64;
+        let admitted =
+            validate_changed_geometry(&before, &mut grown, &authority, &config, &mut refrozen)
+                .unwrap();
+        assert_eq!(
+            refrozen, 1,
+            "the grown seated member must be re-cut, and the count must say so \
+             — this is the number the site used to drop on the floor"
+        );
+        assert!(
+            !admitted,
+            "and it is counted whether or not the candidate survives: this one \
+             does not"
+        );
+    }
+
     #[test]
     fn live_prune_root_reanchor_and_optimizer_paths_are_transactional() {
         with_far_authority(|authority| {
-            let cfg = Config::current().unwrap();
+            let cfg = Config::current(0.05).unwrap();
 
             let mut prune = Forest::new();
             let short = prune.add_member(member(
@@ -1408,7 +1702,7 @@ mod tests {
                 .unwrap();
             prune.set_parent(child, Some(short)).unwrap();
             assert!(
-                try_prune(&mut prune, short, authority, &BTreeSet::new(), &cfg)
+                try_prune(&mut prune, short, authority, &BTreeSet::new(), &cfg, &mut 0,)
                     .unwrap()
                     .is_some()
             );
@@ -1436,6 +1730,7 @@ mod tests {
                 sweeps: 0,
                 move_evaluations: 0,
                 cco_candidate_batches: 0,
+                seat_zone_members_refrozen: 0,
                 termination: RewireTermination::FullSweepNoAcceptance,
                 contact_attestation_digest: 0x8f00_0000_0000_0001,
             };
@@ -1518,6 +1813,121 @@ mod tests {
         });
     }
 
+    /// FINDING D — terminal consumption makes a stub mutable, and `try_slide`
+    /// can then move the endpoint its seat-zone record was cut for.
+    ///
+    /// The record starts on the old axis with the final radius already in place,
+    /// so only the axis comparison can make `validate_changed_geometry` re-cut
+    /// it. The one-face surface is near both axes and is excluded by the stub's
+    /// zone, which keeps this test about the accepted slide rather than a
+    /// clearance refusal. A radius-only gate leaves the record's stored endpoint
+    /// at the old junction and reports zero re-cuts.
+    #[test]
+    fn try_slide_re_cuts_a_consumed_stubs_zone_to_follow_its_new_endpoint() {
+        let mesh = Mesh::new(
+            vec![[-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [0.0, 0.2, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = Config::current(0.05).unwrap();
+        let old_p0 = [5.0, 0.0, 5.0];
+        let p1 = [0.0, 0.0, 0.0];
+        let left_p0 = [-1.0, 0.0, 10.0];
+        let right_p0 = [1.0, 0.0, 10.0];
+
+        // Compute the exact radius the accepted slide will write, and create the
+        // stub at that radius. This makes the move axis-only: a radius-only
+        // change gate cannot fire by accident.
+        let geometry_stub = Member::new(MemberSpec {
+            p0_mm: old_p0.map(f),
+            p1_mm: p1.map(f),
+            r0_mm: TerminalEndRadius::new(p(0.4)),
+            r1_mm: RootwardEndRadius::new(p(0.4)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(crate::forest::ContactEnd::Terminalward),
+            carried_mm2: f(1.0),
+        });
+        let geometry_children = vec![
+            member(left_p0, old_p0, MemberKind::Shoot, 1),
+            member(right_p0, old_p0, MemberKind::Shoot, 2),
+        ];
+        let search = ordered_slide_search(&geometry_stub, &geometry_children, &config)
+            .unwrap()
+            .unwrap();
+        let final_radius = search.radii.member;
+
+        let mut forest = Forest::new();
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: old_p0.map(f),
+            p1_mm: p1.map(f),
+            r0_mm: TerminalEndRadius::new(final_radius),
+            r1_mm: RootwardEndRadius::new(final_radius),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(7),
+            model_contact_end: Some(crate::forest::ContactEnd::Terminalward),
+            carried_mm2: f(1.0),
+        }));
+        let left = forest.add_member(member(left_p0, old_p0, MemberKind::Shoot, 1));
+        let right = forest.add_member(member(right_p0, old_p0, MemberKind::Shoot, 2));
+        forest.set_parent(left, Some(stub)).unwrap();
+        forest.set_parent(right, Some(stub)).unwrap();
+        forest.register_terminal(7, stub).unwrap();
+        forest.consume_terminal(7, stub).unwrap();
+
+        let created = crate::seat_zone::freeze_production_seat_zones(
+            &surface,
+            &topology,
+            &[crate::seat_zone::SeatZoneRequest {
+                p0_mm: old_p0,
+                p1_mm: p1,
+                seat_face_id: 0,
+                band_radius_mm: final_radius.get() + config.standoff_mm,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(created.zone().as_ref(), &[0], "fixture control");
+        forest.set_seat_zone(stub, created);
+
+        let mut refrozen = 0_u64;
+        let saved = try_slide(
+            &mut forest,
+            stub,
+            &authority,
+            &BTreeSet::new(),
+            &config,
+            &mut refrozen,
+        )
+        .unwrap();
+        assert!(saved.is_some(), "the consumed stub must take the slide");
+        assert_eq!(
+            refrozen, 1,
+            "the endpoint-only move must trigger one re-cut"
+        );
+        let moved_p0 = forest.member(stub).unwrap().p0_mm().map(Finite::get);
+        assert_ne!(moved_p0, old_p0, "try_slide must really move the stub");
+        let record = forest.seat_zone_record(stub).unwrap();
+        assert_eq!(
+            record.p0_mm(),
+            moved_p0,
+            "the zone must follow the new endpoint"
+        );
+        assert_eq!(record.p1_mm(), p1);
+        assert_eq!(record.zone().as_ref(), &[0]);
+    }
+
     #[test]
     fn ordered_slide_walk_pins_frozen_path_and_is_thread_setting_independent() {
         const CHILD: &str = "PLINTH_REWIRE_SLIDE_WALK_CHILD";
@@ -1571,7 +1981,7 @@ mod tests {
             let walk = ordered_slide_search(
                 &junction_member,
                 &child_members,
-                &Config::current().unwrap(),
+                &Config::current(0.05).unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -1581,7 +1991,8 @@ mod tests {
                 junction,
                 &authority,
                 &BTreeSet::new(),
-                &Config::current().unwrap(),
+                &Config::current(0.05).unwrap(),
+                &mut 0,
             )
             .unwrap();
             println!(

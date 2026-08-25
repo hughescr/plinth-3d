@@ -2,6 +2,8 @@
 
 Status: OWNER RATIFIED (SCAR-AREA-CAP, cd989fe). PRINT-FLOOR amendment
 OWNER RATIFIED 2026-07-24 (see the PRINT-FLOOR amendment section below).
+TRUNCATION amendment OWNER RULED 2026-08-22 (see the TRUNCATION amendment
+section below); it amends the no-depth-cap paragraph only.
 Supersedes: the same-day ARC-SLACK depth-inset ruling (committed 3920a0e),
 overtaken before ratification by the owner's binding reframing: union is
 idempotent, interior overlap is physically meaningless, and the embed's
@@ -129,11 +131,22 @@ LEGAL iff ALL of:
    members apply this per end independently. The thin-feature-span check
    remains a separate, unchanged check.
 
-There is NO depth cap on the tip-anchored interval itself: a deep
-perpendicular plug into thick solid has a small crossing patch and, per
-the owner's idempotence ruling, no further physical consequence; thin
-walls are protected by rule 4 and the thin-feature-span check, and long
-grazing chords are bounded by rules 1-2 (A_shaft grows as 2*r_x*T).
+There is NO depth cap on the tip-anchored interval itself (TRUNCATION
+amended 2026-08-22): a deep perpendicular plug into thick solid has a
+small crossing patch and, per the owner's idempotence ruling, no further
+physical consequence. **Depth is unlimited and the interval is TRUNCATED
+at the opposite face. A designed embed end — seat, foot, ball included —
+never exits the model, and never creates a patch on any face other than
+the one it entered. There is no backside scar.** Long grazing chords are
+bounded by rules 1-2 (A_shaft grows as 2*r_x*T).
+
+The pre-amendment text of this paragraph made the same no-depth-cap
+permission CONDITIONAL, in these words: *"thin walls are protected by
+rule 4 and the thin-feature-span check"*. That condition is retired here,
+because the check it names is not built in this engine. It is replaced by
+the truncation clamp above, which is a construction rather than a check.
+See the TRUNCATION amendment section for the ruling, its authority, and
+the one thing the clamp does NOT bound.
 
 ## PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24)
 
@@ -180,6 +193,71 @@ band `0.08-0.10` + 50 all-crossings-`< 0.08`). NB: mi=420 is all-moot at
 full IEEE-754 precision (its worst crossing rounds up to 0.08 mm only under
 reduced precision); it sits in the moot 50, not the band — see
 phase8_relocation_input.json CORRECTION 2026-07-24.
+
+## TRUNCATION amendment (OWNER RULED 2026-08-22)
+
+Amends the no-depth-cap paragraph only. Rules 1-4, the PRINT-FLOOR
+amendment and every normative constant and formula above are untouched.
+
+AUTHORITY. The owner's ruling of 2026-08-22, quoted verbatim, is the
+whole of this amendment:
+
+> "A seat should be allowed to go as deep into the model as it likes, but
+> it should not come out the other side of the model so if the seat wants
+> to go deeper than the thickness of the model, it should get truncated
+> at the opposite face — it should not create a scar on the backside
+> because that provides no additional support so there's no need for it
+> to extend beyond the model anyway."
+
+Recorded in `docs/engineering-journal/designs/land-at-strike-2026-08-22.md`
+section 0.1 as ruling R4, with the measured effect on the Rotting
+Warhorse probe population.
+
+NORMATIVE STATEMENT (both implementations, identical):
+
+- Depth on the tip-anchored interval stays UNLIMITED. No cap, no
+  threshold, no new constant.
+- The interval is CLAMPED at the model's opposite face along the seat's
+  own line: `depth <= interval`, where the interval is the measured
+  penetration interval the implementations already produce. The clamp's
+  right operand is a measurement, so there is no tolerance term.
+- A designed embed end — seat, foot, ball included — never exits. There
+  is no backside patch and no backside scar, so rules 1-3 are graded at
+  the entry face only, exactly as they are today.
+- Punch-through along the seat's own line is therefore impossible BY
+  CONSTRUCTION, not by check.
+
+HISTORY, kept visible. Before this amendment the no-depth-cap permission
+was conditional on "rule 4 and the thin-feature-span check". The
+thin-feature-span check is not built in this engine (rule 4's own closing
+sentence, "The thin-feature-span check remains a separate, unchanged
+check", is left as written but names the same absent check and should be
+read with this paragraph). The condition is therefore replaced, not
+merely restated: the truncation clamp does the work the absent check was
+credited with, for the exit direction.
+
+WHAT THIS CLAMP DOES NOT BOUND, stated so it is never read as closed.
+The clamp is scalar and acts along ONE direction — the seat's own line.
+It does not bound the buried ball's LATERAL reach at oblique incidence,
+AT EITHER END OF THE MEMBER. At entry incidence `cosang` a ball of radius
+`R_b` driven to depth `h` reaches `h + R_b * (1 - cosang)` below the entry
+face; where that exceeds the perpendicular wall thickness the anchor is a
+plug SPANNING the wall rather than a cap in a half-space. Rules 1-3 price
+the joint at the entry plane; nothing in this spec prices the wall around
+such a plug. That is open escalation E-D
+(`land-at-strike-2026-08-22.md` section 4.7), measured at 81 instances on
+the Rotting Warhorse probe: 65 of 129 recovered landed-foot records
+(314.362 mm2) and 16 tip-seat records by the identical formula
+(52.176 mm2 of them recovered), one record clipped at both ends and
+counted once per end. This amendment does not close it and must not be
+cited as closing it.
+
+IMPLEMENTATION NOTE. A spec edit must reach BOTH implementations. The
+second implementation of the scar formulas is `plinth-metrics/src/scar.rs`,
+pinned by `closed_form_patch_uses_anchored_length_and_never_applies_an_area_cap`
+(`plinth-metrics/src/scar.rs:3426`). Until the engine and that auditor
+both apply the clamp, this text is ahead of the code, and the divergence
+is the thing to check first.
 
 ## Rationale (measured on the 853-member run1 designed-embed population)
 

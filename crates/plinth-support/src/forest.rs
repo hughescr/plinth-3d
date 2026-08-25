@@ -5,6 +5,7 @@
 //! types make reversing that convention a type error.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use geom_kernel::SurfaceTriangleSoupDigest;
 use plinth_core::{Finite, PositiveFinite};
@@ -12,6 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::designed_embed::PositiveFiniteMm;
+use crate::seat_zone::SeatZoneRecord;
 
 /// A stable reference while the member is live.  A retired slot increments
 /// its generation, so a reference cannot accidentally identify a reused slot.
@@ -371,6 +373,32 @@ struct ForestState {
     braces: BTreeSet<MemberKey>,
     quarantined: BTreeMap<MemberKey, QuarantineRecord>,
     dead: BTreeSet<MemberKey>,
+    /// The FROZEN seat zone `Z` of every contact-declaring member: the global
+    /// face IDs its own seat forgives, sorted ascending and deduplicated
+    /// (`crate::seat_zone`).
+    ///
+    /// A SIDE TABLE, deliberately, and deliberately outside [`Forest::digest`]
+    /// and off `Member` (honest-exemption design, section 6):
+    ///
+    /// * `Member` is `Serialize` and feeds the run's disclosed geometry. A
+    ///   frozen face list is an implementation detail of a VERDICT, not
+    ///   geometry, and on `Member` it would land in front of every artifact
+    ///   consumer.
+    /// * `digest()` hashes explicit fields, so a side table cannot move a digest
+    ///   by accident. That is what makes "a model with no affected arms stays
+    ///   bit-identical" provable BY INSPECTION rather than by running a corpus.
+    /// * `MemberKey` carries a generation beside its slot, so a recycled slot
+    ///   yields a different key: a stale entry is unreachable, never wrong.
+    ///
+    /// The table is PASSIVE: `set_radii` does not touch it, so nothing here
+    /// tracks a radius implicitly — pinned by
+    /// `a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius`.
+    /// Re-sizing an exemption to a grown arm's final footprint is therefore an
+    /// EXPLICIT pass someone has to call
+    /// (`seat_zone::refreeze_resized_seat_zones`, Craig's ruling 2026-08-23),
+    /// which is why the entry carries the band radius it was cut at: that is how
+    /// the pass knows which members the sizer moved.
+    seat_zones: BTreeMap<MemberKey, SeatZoneRecord>,
 }
 
 /// Opaque, LIFO checkpoint token.
@@ -546,6 +574,71 @@ impl Forest {
     #[must_use]
     pub fn member(&self, key: MemberKey) -> Option<&Member> {
         self.active_slot(key).and_then(|slot| slot.member.as_ref())
+    }
+
+    /// Freeze this member's seat zone `Z` — the global faces its OWN seat
+    /// forgives, computed from the radius the contact end carries at the moment
+    /// of the freeze.
+    ///
+    /// **This side table is PASSIVE.** It tracks nothing. `set_radii` does not
+    /// touch it, and neither does any grading site, which is what the
+    /// monotonicity theorem rests on: within a grading pass the tested face set
+    /// cannot move when the radius does.
+    ///
+    /// Two things call this. A creation site, minting a contact; and
+    /// `seat_zone::refreeze_resized_seat_zones`, the one explicit pass that runs
+    /// AFTER a sizing pass and BEFORE the next grading pass, re-sizing a seated
+    /// arm's exemption to its final footprint (Craig's ruling, 2026-08-23). A
+    /// second call for the same key REPLACES the entry, which is what both of
+    /// those need.
+    pub(crate) fn set_seat_zone(&mut self, key: MemberKey, record: SeatZoneRecord) {
+        self.state.seat_zones.insert(key, record);
+    }
+
+    /// Remove and return this member's frozen zone — the MOVE half of a
+    /// contact declaration changing hands.
+    ///
+    /// `cco::apply_bifurcation` is the one caller. Splitting a host that
+    /// declares a `Rootward` contact gives the contact to the UPPER half (it
+    /// keeps `p1`, the seat) and clears it from the lower one. The zone belongs
+    /// to the CONTACT, so it has to travel with the declaration rather than be
+    /// recomputed for the new member — recomputing it from the upper half's own
+    /// radius is exactly the un-freezing the monotonicity theorem forbids
+    /// (design §3).
+    ///
+    /// Taking rather than copying also keeps the table honest: a member with no
+    /// contact must forgive nothing, and a stale entry left behind on the lower
+    /// half would exempt faces for a member that no longer has a seat.
+    pub(crate) fn take_seat_zone(&mut self, key: MemberKey) -> Option<SeatZoneRecord> {
+        self.state.seat_zones.remove(&key)
+    }
+
+    /// This member's frozen seat zone, or `None` if it never declared a
+    /// contact.
+    ///
+    /// `None` means "exempt nothing": the row is then graded against the WHOLE
+    /// surface, which is the strict direction and the correct one for a member
+    /// with no seat of its own.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the creation sites that freeze into the table land one commit ahead of the \
+                  grading sites that read it; docs/engineering-journal/designs/\
+                  honest-exemption-2026-08-22.md section 8 step 5 names them"
+    )]
+    pub(crate) fn seat_zone(&self, key: MemberKey) -> Option<&Arc<[u32]>> {
+        self.state.seat_zones.get(&key).map(SeatZoneRecord::zone)
+    }
+
+    /// The frozen zone TOGETHER with the two facts a re-size needs: the seat's
+    /// own face ID and the band radius the zone was frozen at.
+    ///
+    /// `seat_zone::refreeze_resized_seat_zones` is the reader. Grading sites use
+    /// [`Self::seat_zone`] and never see this, because a grading site has no
+    /// business knowing what radius the band was cut at.
+    #[must_use]
+    pub(crate) fn seat_zone_record(&self, key: MemberKey) -> Option<&SeatZoneRecord> {
+        self.state.seat_zones.get(&key)
     }
 
     #[must_use]
@@ -926,8 +1019,150 @@ impl Forest {
         Ok(())
     }
 
+    /// Quarantines each named member **together with everything that hangs off
+    /// it**, deepest child first, and returns every member actually condemned
+    /// in the order it was condemned.
+    ///
+    /// **Why this exists, and why it is not a weakening of
+    /// [`Forest::quarantine`]'s childless rule.** `quarantine` refuses a member
+    /// with live tree children for the same reason [`Forest::retire`] does: the
+    /// arena cannot re-anchor a child, because choosing between extending it,
+    /// splicing it onto its grandparent and condemning the subtree is a
+    /// geometric decision belonging to the caller who owns the plate frame.
+    /// This entry point is a caller making the third choice — *retire the
+    /// subtree* — explicitly, by name, at the arena's own leaf-first order. The
+    /// childless rule is untouched: every individual quarantine this performs
+    /// sees a member with no live children, because the descendants went first.
+    ///
+    /// **The second choice is not available to a model-seated arm, which is
+    /// what forces the third.** `cco::apply_model_anchor` mints the arm as a
+    /// ROOT (nothing ever sets its parent — its rootward end is seated on the
+    /// model, not on the plate) and re-parents the contact stub onto it. So the
+    /// grandparent a splice would need does not exist, and `set_parent(stub,
+    /// None)` is exactly the promotion-to-root that `retire`'s doc names as
+    /// "the one reachable path to shipping a floating support member". Cascading
+    /// is the only option the invariants leave.
+    ///
+    /// **The load argument, which is the physical one.** A condemned carrier
+    /// takes its dependants' only route to ground with it. Every member of the
+    /// subtree below a condemned member has no closed load path afterwards, so
+    /// shipping it would ship a support that holds its tip up with nothing
+    /// underneath. Condemning it is not collateral damage; it is the same
+    /// verdict, propagated to the members the verdict applies to.
+    ///
+    /// **All-or-nothing.** Every member in the union is validated active before
+    /// any state changes, so a refused sweep leaves the topology and the
+    /// terminal ledger exactly as it found them — the same property `retire`
+    /// keeps. Keys that name a member already inside another named member's
+    /// subtree are swept once, not twice, so an overlapping batch is legal.
+    ///
+    /// **Disclosure rides the records that already exist.** A cascaded member
+    /// gets an ordinary [`QuarantineRecord`], so it appears in
+    /// [`ForestReport::quarantined`] and — when it is a contact stub —
+    /// in [`Forest::terminal_quarantine`], which is what SPEC §6's removal and
+    /// the noncoverage `quarantined` component already read. No new reporting
+    /// channel is introduced and no digest gains a field: the forest digest
+    /// moves because the members left the live view, which is the honest signal.
+    pub fn quarantine_subtrees(
+        &mut self,
+        keys: &[MemberKey],
+    ) -> Result<Vec<MemberKey>, ForestError> {
+        let order = self.plan_quarantine_subtrees(keys)?;
+        for key in &order {
+            self.quarantine(*key)?;
+        }
+        Ok(order)
+    }
+
+    /// The **planner half** of [`Forest::quarantine_subtrees`]: exactly what
+    /// that sweep would condemn, in exactly the order it would condemn it, with
+    /// nothing mutated.
+    ///
+    /// **Why this is a split rather than a second walk.** A caller that needs
+    /// to know the condemnation set BEFORE deciding whether the sweep may run
+    /// at all — the seal-semantics classifier in `brace` (design
+    /// `seal-semantics-2026-08-22.md` §4 Stage A(b)) — must read the same
+    /// answer the mutation would produce. Exposing
+    /// [`Forest::collect_subtree_leaf_first`] alone would reproduce the walk
+    /// but neither `require_active` pass nor the union-dedup contract, and the
+    /// query and the mutation would then drift. Here they cannot: the mutation
+    /// is this function plus a `quarantine` per planned key, so the query is a
+    /// literal prefix of the mutation rather than a copy of it.
+    ///
+    /// **It keeps the all-or-nothing refusal.** A key naming an inactive member
+    /// is a [`ForestError`] here, at the same point and for the same reason it
+    /// is one in the sweep: asking to condemn something already condemned is an
+    /// engine defect, not a physical verdict, and the classifier must not
+    /// swallow it.
+    pub fn plan_quarantine_subtrees(
+        &self,
+        keys: &[MemberKey],
+    ) -> Result<Vec<MemberKey>, ForestError> {
+        let mut order = Vec::new();
+        let mut seen = BTreeSet::new();
+        for key in keys {
+            if seen.contains(key) {
+                continue;
+            }
+            self.require_active(*key)?;
+            self.collect_subtree_leaf_first(*key, &mut seen, &mut order)?;
+        }
+        // Validate the whole union before touching any state: a sweep that
+        // refuses halfway would leave a forest neither caller could reason
+        // about.
+        for key in &order {
+            self.require_active(*key)?;
+        }
+        Ok(order)
+    }
+
+    /// The terminal ledger inverted: which terminal each registered contact
+    /// member belongs to, built once for a whole batch.
+    ///
+    /// `terminal_of` is the only map that binds a member to a terminal, so the
+    /// inverse is taken from it rather than hand-rolled from key comparisons —
+    /// member generations move (a Giant Bat arm is `slot 377, generation 2`),
+    /// and a hand-rolled comparison against a stale key is a defect waiting.
+    /// The inverse is injective by construction: [`Forest::register_terminal`]
+    /// refuses a member whose owner is not `Owner::Contact(terminal)`, so two
+    /// terminals can never name one member.
+    pub(crate) fn terminals_by_member(&self) -> BTreeMap<MemberKey, u32> {
+        self.state
+            .terminal_of
+            .iter()
+            .map(|(terminal, key)| (*key, *terminal))
+            .collect()
+    }
+
+    /// Post-order walk of `key`'s live subtree, pushing each member after its
+    /// own children so every entry is childless by the time it is quarantined.
+    ///
+    /// The forest is a tree — [`Forest::set_parent`] refuses a cycle — so the
+    /// walk terminates; `seen` is the union bookkeeping across sibling roots in
+    /// one batch, not a cycle guard.
+    fn collect_subtree_leaf_first(
+        &self,
+        key: MemberKey,
+        seen: &mut BTreeSet<MemberKey>,
+        order: &mut Vec<MemberKey>,
+    ) -> Result<(), ForestError> {
+        if !seen.insert(key) {
+            return Ok(());
+        }
+        for child in self.children_of(key) {
+            self.collect_subtree_leaf_first(child, seen, order)?;
+        }
+        order.push(key);
+        Ok(())
+    }
+
     /// Quarantines a terminal stub: it remains recorded as condemned but is
     /// structurally absent from all live tree and emission views.
+    ///
+    /// **Refuses a member with live tree children.** Use
+    /// [`Forest::quarantine_subtrees`] when the caller's verdict is meant to
+    /// carry to the dependants too; that entry point states the choice rather
+    /// than making it silently here.
     pub fn quarantine(&mut self, key: MemberKey) -> Result<(), ForestError> {
         self.require_active(key)?;
         if !self.children_of(key).is_empty() {
@@ -1465,6 +1700,160 @@ mod tests {
             model_contact_end: None,
             carried_mm2: finite(1.0),
         })
+    }
+    /// A side-table entry with a chosen face list and band radius. The axis and
+    /// the seat face are irrelevant to what these tests measure — they are about
+    /// the TABLE's behaviour, not about geometry — so they are stated once here
+    /// rather than repeated per test.
+    fn test_seat_zone_record(faces: Vec<u32>, band_radius_mm: f64) -> SeatZoneRecord {
+        SeatZoneRecord::new(
+            Arc::from(faces),
+            &crate::seat_zone::SeatZoneRequest {
+                p0_mm: [0.0; 3],
+                p1_mm: [1.0, 0.0, 0.0],
+                seat_face_id: 0,
+                band_radius_mm,
+            },
+        )
+    }
+
+    /// **The exact-prefix proof for the seal-semantics classifier.**
+    ///
+    /// `plan_quarantine_subtrees` exists so the brace stage can read what a
+    /// sweep WOULD condemn before deciding whether the sweep may run. That is
+    /// only sound while the plan is the same answer the mutation produces, in
+    /// the same order — including the union dedup across overlapping keys.
+    /// Re-implement the walk one layer up and the two drift; this test stands
+    /// on the shortcut.
+    #[test]
+    fn the_planner_returns_precisely_the_order_the_sweep_removes() {
+        let build = || {
+            let mut forest = Forest::new();
+            let root = forest.add_member(member(MemberKind::Strut));
+            let mid = forest.add_member(member(MemberKind::Shoot));
+            let leaf_a = forest.add_member(member(MemberKind::Stub));
+            let leaf_b = forest.add_member(member(MemberKind::Stub));
+            forest.set_parent(mid, Some(root)).unwrap();
+            forest.set_parent(leaf_a, Some(mid)).unwrap();
+            forest.set_parent(leaf_b, Some(root)).unwrap();
+            (forest, root, mid)
+        };
+
+        // Overlapping keys on purpose: `mid` is already inside `root`'s
+        // subtree, so a batch that names both must sweep each member once.
+        let (planning, root, mid) = build();
+        let planned = planning.plan_quarantine_subtrees(&[root, mid]).unwrap();
+        let planning_digest = planning.digest();
+
+        let (mut sweeping, root, mid) = build();
+        let removed = sweeping.quarantine_subtrees(&[root, mid]).unwrap();
+
+        assert_eq!(
+            planned, removed,
+            "the planner must return the sweep's own order, member for member"
+        );
+        assert_eq!(
+            planned.len(),
+            4,
+            "the union dedup must condemn each member exactly once"
+        );
+        assert_eq!(
+            planning.digest(),
+            planning_digest,
+            "planning must not mutate the forest"
+        );
+        for key in &removed {
+            assert!(
+                sweeping.quarantine_record(*key).is_some(),
+                "every planned member must actually carry a quarantine record"
+            );
+        }
+    }
+
+    /// A directly named inactive key stays a `ForestError` in the PLANNER, at
+    /// the same point the sweep raises it. Design §4 Stage A(a): asking to
+    /// condemn something already condemned is an engine defect, not a physical
+    /// verdict, and the classifier must not be able to swallow it.
+    #[test]
+    fn planning_a_directly_named_inactive_key_still_refuses() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        forest.quarantine(key).unwrap();
+        assert!(matches!(
+            forest.plan_quarantine_subtrees(&[key]),
+            Err(ForestError::InactiveKey(_))
+        ));
+    }
+
+    /// The side table tracks NOTHING, and that is the property the whole rule
+    /// rests on.
+    ///
+    /// A resize is `set_radii` on the SAME `MemberKey` (`brace::apply_resize`),
+    /// and it leaves the table untouched. If the storage layer followed the
+    /// radius implicitly, `Z` would move underneath a grading pass — a fatter
+    /// arm would claim a wider band, a wider band would swallow more faces, and
+    /// the fatter arm would be graded against strictly LESS surface than a thin
+    /// one on the same axis: the retired skip-length's inversion, rebuilt one
+    /// level up.
+    ///
+    /// Re-sizing an exemption to a grown arm's final footprint (Craig's ruling,
+    /// 2026-08-23) is therefore something a caller has to ASK for, at a defined
+    /// point between a sizing pass and the next grading pass —
+    /// `seat_zone::refreeze_resized_seat_zones`. This test is what makes that
+    /// explicitness true rather than merely intended.
+    #[test]
+    fn a_frozen_seat_zone_survives_the_resize_that_changes_its_member_radius() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        forest.set_seat_zone(key, test_seat_zone_record(vec![3_u32, 11, 42], 0.95));
+
+        forest
+            .set_radii(
+                key,
+                TerminalEndRadius::new(radius(1.7)),
+                RootwardEndRadius::new(radius(1.7)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            forest.seat_zone(key).map(|zone| zone.to_vec()),
+            Some(vec![3, 11, 42]),
+            "a resize must not move the frozen zone"
+        );
+        assert_eq!(
+            forest
+                .seat_zone_record(key)
+                .map(SeatZoneRecord::band_radius_mm),
+            Some(0.95),
+            "and it must not move the band radius either — the band the zone was \
+             cut at is how the explicit re-size pass later recognises that this \
+             member's radius moved"
+        );
+    }
+
+    /// The side table is invisible to the digest, which is what makes "a model
+    /// with no affected arms stays bit-identical" provable by inspection.
+    #[test]
+    fn freezing_a_seat_zone_does_not_move_the_forest_digest() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        let before = forest.digest();
+        forest.set_seat_zone(key, test_seat_zone_record(vec![7_u32, 9], 0.95));
+        assert_eq!(
+            forest.digest(),
+            before,
+            "the frozen face list is an implementation detail of a VERDICT, not \
+             disclosed geometry: it must not reach the digest"
+        );
+    }
+
+    /// A member that declared no contact has no zone, and `None` is read as
+    /// "exempt nothing" — the strict direction.
+    #[test]
+    fn a_member_with_no_contact_has_no_zone_and_therefore_exempts_nothing() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member(MemberKind::Strut));
+        assert!(forest.seat_zone(key).is_none());
     }
 
     #[test]

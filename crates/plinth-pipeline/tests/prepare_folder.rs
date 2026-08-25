@@ -157,7 +157,6 @@ impl Scratch {
     fn write(&self, name: &str, bytes: &[u8]) {
         std::fs::write(self.input().join(name), bytes).expect("write scratch input");
     }
-
 }
 
 /// The refusal fixture every coverage-refusal test in this file uses.
@@ -317,6 +316,8 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         filled_back_chambers_ml,
         ownerless_islands,
         contacts,
+        repair_report,
+        repair_ledger,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -325,6 +326,259 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         );
     };
     assert_eq!(emit.artifact_path, artifact);
+    // SPEC-A4 §G.1 stage 4. The folder executor's own door reaches the
+    // one-winner controller, so every artifact it produces states what the
+    // repair controller spent — `trials=0 commits=0` for a model that covered
+    // on its baseline layout. `None` means the read in `seal_and_emit` was cut,
+    // which makes this the second, independent revert-proof beside
+    // `tests/a4_production_door.rs`.
+    let repair = repair_report.as_ref().expect(
+        "the production door reports what coverage repair cost; `None` means `seal_and_emit` \
+         no longer reads the ledger off the sealed authority",
+    );
+    assert!(
+        repair.trials >= repair.commits,
+        "every commit is a trial: {repair:?}"
+    );
+
+    // **SPEC-A4 §D.2 — the sealed-run attribution reaches DISK, on a model that
+    // spent nothing.**
+    //
+    // This half is the awkward one and it is the half worth pinning here: the
+    // toed slab covers on its baseline layout, so its ledger is honestly empty.
+    // Writing nothing at all would make "this model paid nothing" and "nobody
+    // wrote it down" look identical on disk, which is the same distinction §A.8
+    // prints a line of zeros for. Before this landed, `seal_and_emit` deleted
+    // any stale sidecar on the way in and wrote NOTHING for a sealing model, so
+    // an emitting model's attribution existed nowhere.
+    let ledger = repair_ledger
+        .as_ref()
+        .expect("an emitting model must record where its repair ledger was written");
+    assert_eq!(
+        ledger.path,
+        scratch.output().join("mini.coverage.repair.json"),
+        "the ledger belongs beside the artifact, at the model's own stem"
+    );
+    assert_eq!(ledger.write_error, None, "the ledger must reach disk");
+    assert_eq!(
+        (ledger.trials, ledger.commits, ledger.steps),
+        (0, 0, 0),
+        "the toed slab covers on its baseline layout, so its ledger is honestly empty"
+    );
+    let ledger_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&ledger.path).expect("the sealed repair ledger must exist on disk"),
+    )
+    .expect("the sealed repair ledger must be valid JSON");
+    assert_eq!(
+        ledger_json["schema"], "plinth.coverage-repair.v1",
+        "the ledger carries its own versioned schema tag, as the refusal sidecar does"
+    );
+    assert_eq!(ledger_json["model"], "mini");
+    assert_eq!(ledger_json["commits"], 0);
+    assert_eq!(
+        ledger_json["steps"]
+            .as_array()
+            .expect("steps is an array even when empty")
+            .len(),
+        0,
+        "a model that never entered a transaction has no step to attribute"
+    );
+    // **Task #71 — the disclosure that lets a byte movement be attributed.**
+    //
+    // The gap: `commits`, `trials`, the §A.8 counters and the §D stream are all
+    // properties of the repair SEARCH. None is a function of the load partition
+    // or of tip sizing, so two runs that partition this model's load
+    // differently, or size the same contact's tip differently, wrote different
+    // artifacts and printed identical summaries. This fixture spends ZERO
+    // trials, so before this every disclosed field on it was a constant and the
+    // artifact's bytes were unexplainable by construction.
+    let contact_rows = ledger_json["contacts"]
+        .as_array()
+        .expect("the sealed ledger carries one row per routed contact");
+    assert!(
+        !contact_rows.is_empty(),
+        "a model that emitted supports must disclose the contacts that carry them: \
+         {ledger_json}"
+    );
+    // **The disclosure must not be able to move silently EITHER**, or its
+    // attribution is a misattribution — which is worse than the silence #71
+    // names, because a reader would act on it. Finiteness, positivity and the
+    // exact doubling prove a row is well FORMED; they do not prove it is TRUE.
+    // A projection that multiplied every carried area, or read the radius off
+    // the rootward end of the member instead of the terminalward end, would
+    // still print finite positive numbers and still satisfy `diameter == 2 x
+    // radius`. So each of the two substantive fields is checked against a
+    // source that does not pass through the projection that wrote it:
+    //
+    // * the RADIUS against the artifact on disk, below — the one source
+    //   downstream of growth, rewire, the brace resize, lowering and the emit;
+    // * the AREA against the registered area law, here. The area comes from the
+    //   accepted plan and the radius from the final live forest, joined only by
+    //   contact id, and the law is what ties the two together. Nothing is
+    //   re-derived: `registered_tip_radius_mm_for_carried_area` calls the same
+    //   `FrozenTipLoadPolicy::tip_radius_mm` that sized every stub, with both
+    //   registered clamps inside the answer.
+    //
+    // A tip the run GREW is the one documented exception, and it is exempted by
+    // name rather than by loosening the rule for everyone: grow-to-attest emits
+    // a radius at or above the law's, so those rows are held to `>=` and, more
+    // sharply, to agreeing exactly with the grown-tip disclosure's own reading
+    // of the same tip.
+    let grown_tip_radius_by_contact: std::collections::BTreeMap<u64, f64> = contacts
+        .as_ref()
+        .grown_contact_tips
+        .iter()
+        .map(|grown| (u64::from(grown.contact_id()), grown.emitted_tip_radius_mm()))
+        .collect();
+    let mut rows_a_carried_area_change_would_move = 0usize;
+    for contact in contact_rows {
+        let contact_id = contact["contact_id"].as_u64().expect("a contact id");
+        // `null` here is the disclosure saying "this routed row is not in the
+        // accepted plan" — a real state it must be able to say, and one the
+        // healthy fixture must never be in.
+        let carried = contact["carried_area_mm2"].as_f64().expect(
+            "an emitted contact resolves in the accepted plan, so its carried area is known; \
+             null means the transcript row named a contact the plan no longer holds",
+        );
+        assert!(
+            carried.is_finite() && carried >= 0.0,
+            "a carried area is a finite non-negative mm²: {contact}"
+        );
+        assert!(
+            contact["position_mm"].is_array(),
+            "a contact whose area resolved must disclose the seat it resolved to: {contact}"
+        );
+        let radius = contact["tip_radius_mm"]
+            .as_f64()
+            .expect("an emitted contact resolves to a live member, so its tip radius is known");
+        let diameter = contact["tip_diameter_mm"]
+            .as_f64()
+            .expect("and the diameter travels beside it");
+        assert!(
+            radius > 0.0,
+            "a printed tip has a positive radius: {contact}"
+        );
+        // UNITS. The registry speaks radius and the slicer UI speaks diameter;
+        // a number carried between them without doubling lands 2x wrong, which
+        // is precisely the class of silent movement this disclosure exists to
+        // expose. Exact, not approximate: it is one multiplication by two.
+        assert!(
+            (diameter - radius * 2.0).abs() < f64::EPSILON * diameter.max(1.0),
+            "tip_diameter_mm must be exactly twice tip_radius_mm: {contact}"
+        );
+        let law_radius_mm =
+            plinth_support::perception::registered_tip_radius_mm_for_carried_area(carried)
+                .expect("the registered area law must evaluate for a disclosed carried area");
+        if let Some(grown_radius_mm) = grown_tip_radius_by_contact.get(&contact_id) {
+            assert!(
+                (radius - grown_radius_mm).abs() <= 1.0e-12 * grown_radius_mm.max(1.0),
+                "two disclosures of the same grown tip must name the same radius: this row says \
+                 {radius} mm, the grown-tip disclosure says {grown_radius_mm} mm; {contact}"
+            );
+            assert!(
+                radius >= law_radius_mm - 1.0e-12 * law_radius_mm.max(1.0),
+                "grow-to-attest only ever moves a tip in the conservative direction, so a grown \
+                 tip is never SMALLER than the law asked for its carried area: {radius} mm \
+                 against a law radius of {law_radius_mm} mm; {contact}"
+            );
+        } else {
+            assert!(
+                (radius - law_radius_mm).abs() <= 1.0e-12 * law_radius_mm.max(1.0),
+                "a tip the run did not grow is sized by the area law from the area this row \
+                 discloses: {carried} mm² asks for {law_radius_mm} mm RADIUS and the row says \
+                 {radius} mm. The two numbers no longer belong to each other; {contact}"
+            );
+        }
+        // Non-vacuity, MEASURED rather than assumed. Both clamps are inside the
+        // law, so a row pinned at the registered minimum or maximum answers the
+        // same radius however its area moves, and a check made only of such
+        // rows would pass a tripled area in silence. This counts the rows where
+        // the law's answer DOES move when the area does, which is the only
+        // place the check has teeth. Measured 2026-08-21: 4 of the fixture's
+        // 18 rows.
+        let doubled =
+            plinth_support::perception::registered_tip_radius_mm_for_carried_area(carried * 2.0)
+                .expect("the registered area law must evaluate");
+        if doubled > law_radius_mm {
+            rows_a_carried_area_change_would_move += 1;
+        }
+    }
+    assert!(
+        rows_a_carried_area_change_would_move > 0,
+        "every disclosed contact sits at a clamp, so the area law would answer the same radius \
+         however the carried areas moved and the cross-check above proves nothing on this \
+         fixture; it needs a fixture with at least one load-sized tip"
+    );
+    // The disclosure covers the plan, not a sample of it: one row per routed
+    // contact, each named by its own id, so a reader diffing two runs sees an
+    // added or removed contact rather than inferring one from a byte count.
+    let mut ids: Vec<i64> = contact_rows
+        .iter()
+        .map(|contact| contact["contact_id"].as_i64().expect("a contact id"))
+        .collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        total,
+        "a contact id names one contact, so a repeated id means two rows describe the same seat"
+    );
+    // **And the disclosed radii are the radii that reached the FILE.**
+    //
+    // `plinth_support`'s lowering builds each contact ball at
+    // `tip_ball_factor` x the member's terminalward radius (`lower.rs`,
+    // `lower_stub`), so every `SegmentType::TIP` record ChituBox holds is one
+    // disclosed radius scaled by one registered factor — and the factor is READ
+    // from the registry here, never written down. This is the leg that makes
+    // the disclosure a statement about the artifact rather than about the
+    // producer's own bookkeeping: a projection that read the member's ROOTWARD
+    // radius, or scaled it, satisfies every check above and fails this one.
+    //
+    // It also states the relation a reader needs and would otherwise get wrong.
+    // The disclosed radius is the MEMBER's tip radius; the record in the file
+    // is 1.5x that, so diffing the two directly lands 1.5x off.
+    let registered_tip_ball_factor = plinth_core::m0_constants()
+        .expect("the M0 registry must construct")
+        .scar_area_cap_policy()
+        .tip_ball_factor()
+        .diagnostic()
+        .get();
+    let mut tip_radii_on_disk_mm: Vec<f64> = chitubox_io::Project::open(&artifact)
+        .expect("the artifact must reopen")
+        .supports(0)
+        .expect("the artifact's support section must parse")
+        .iter()
+        .filter(|record| record.segment_type == chitubox_io::SegmentType::TIP)
+        .map(|record| f64::from(record.r_start))
+        .collect();
+    tip_radii_on_disk_mm.sort_by(f64::total_cmp);
+    let mut disclosed_ball_radii_mm: Vec<f64> = contact_rows
+        .iter()
+        .map(|contact| {
+            contact["tip_radius_mm"].as_f64().expect("a tip radius") * registered_tip_ball_factor
+        })
+        .collect();
+    disclosed_ball_radii_mm.sort_by(f64::total_cmp);
+    assert_eq!(
+        tip_radii_on_disk_mm.len(),
+        disclosed_ball_radii_mm.len(),
+        "one routed contact, one contact ball on disk: the artifact holds {} TIP records and the \
+         disclosure names {} contacts",
+        tip_radii_on_disk_mm.len(),
+        disclosed_ball_radii_mm.len()
+    );
+    for (on_disk_mm, disclosed_mm) in tip_radii_on_disk_mm.iter().zip(&disclosed_ball_radii_mm) {
+        // The container stores binary32, so the comparison is at f32 resolution
+        // and no finer. Nothing is being loosened: this is the width of the
+        // number the file can hold.
+        assert!(
+            (on_disk_mm - disclosed_mm).abs() <= f64::from(f32::EPSILON) * disclosed_mm.max(1.0),
+            "the tip radii on disk are the disclosed radii scaled by the registered ball factor \
+             {registered_tip_ball_factor}; got {tip_radii_on_disk_mm:?} on disk against \
+             {disclosed_ball_radii_mm:?} disclosed"
+        );
+    }
     // Task #49. This fixture's every island keeps a routed contact, so the
     // accepted contact set charges no face to nobody and the disclosure is
     // empty. Asserted rather than ignored: an empty list here is the claim
@@ -640,17 +894,14 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     let scratch = Scratch::new("refusal");
     refusal_fixture(&scratch, "blade");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("a refused model is a disposition, not a run failure");
+    let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
+        .expect("a refused model is a disposition, not a run failure");
 
     let ModelPreparationOutcome::Failed {
         exit_code,
         detail,
         evidence,
+        repair_report,
     } = outcome(&report, "blade")
     else {
         panic!(
@@ -662,6 +913,38 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     assert!(
         detail.contains("coverage closure refused"),
         "the detail must name the refusal: {detail}"
+    );
+
+    // **SPEC-A4 §A.8's third destination, on the path that needs it most.**
+    // Ruling R10 deleted the failed-tries cap and put loud reporting in its
+    // place, and §A.8 puts the report in three places "on every path — sealed
+    // or refused". This is the refused path: no cap, the pool runs all the way
+    // out, and this model spends 45 one-row transactions and commits none of
+    // them. Until 2026-08-20 the run report said NOTHING about that — the
+    // ledger reached the `Artifact` disposition only, so the run report priced
+    // the cheap path and stayed silent about the expensive one.
+    //
+    // Measured, not chosen: 45 is `NoImprovingRepair { candidates_tried: 45 }`
+    // on this fixture, the same number the sidecar carries below and the same
+    // one the support-side gate pins. A change that moves it is a change to
+    // what the search does, and it has to be re-measured deliberately.
+    let repair = repair_report.as_ref().expect(
+        "a coverage-closure refusal states what the controller spent; `None` means §A.8's \
+         third destination is wired on the sealed path only again",
+    );
+    assert_eq!(
+        (repair.trials, repair.commits),
+        (45, 0),
+        "the raking blade runs its pool out and commits nothing: {repair:?}"
+    );
+    assert_eq!(
+        repair.candidates_remaining, 0,
+        "\"remaining=0\" is the claim that the loop stopped because nothing could help, \
+         not because a counter said stop: {repair:?}"
+    );
+    assert!(
+        repair.trials >= repair.commits,
+        "every commit is a trial: {repair:?}"
     );
 
     assert!(
@@ -684,12 +967,25 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
         evidence.source,
         plinth_pipeline::EvidenceSource::CoverageClosureController
     );
-    // 8, the registered `coverage_repair_max_attempts` bound, fully exhausted.
-    // (It was 5 while this test ran the doubly-decimated `.prepped.stl`, which
-    // stopped early on `NoEligibleRepairRows`; the procedural fixture has 14
-    // eligible rows for its island and burns every attempt on them.)
-    assert_eq!(evidence.attempts, Some(8));
-    assert!(!evidence.islands.is_empty(), "the unclosable island must be named");
+    // **Re-measured 2026-08-20 by SPEC-A4 §G.1 stage 4, from 8 to 0, and the
+    // number means something different now.** Under the batch loop this field
+    // counted passes of the loop and read 8 — the registered
+    // `coverage_repair_max_attempts` bound, fully exhausted, each pass having
+    // appended a whole batch of rows whether or not any of them helped. Under
+    // ruling R6 the same bound counts COMMITTED steps, and this model commits
+    // nothing: it spends 45 one-row transactions and rolls back every one, so
+    // the honest reading of a field named for that bound is zero.
+    //
+    // This is not the loop giving up early. `CoverageClosureReason` on the
+    // support side is `NoImprovingRepair { candidates_tried: 45, .. }` and the
+    // §A.8 report reads `trials=45 commits=0 remaining=0` — the search ran the
+    // pool out. The sidecar schema moves to `v2` below for exactly this reason:
+    // the same field name now carries a different fact.
+    assert_eq!(evidence.attempts, Some(0));
+    assert!(
+        !evidence.islands.is_empty(),
+        "the unclosable island must be named"
+    );
     // **The refusal is a real hole, not censored dust.** This is the other half
     // of the 2026-08-14 censor change (SPEC-A3-A4-COVERAGE.md §4): a model whose
     // uncovered area is genuinely above `voxel_pitch_mm²` must still be refused,
@@ -716,7 +1012,10 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     // FU-56 (2026-08-12 fix): per-island nomination accounting, so the card
     // says whether an island was ever attempted at all.
     assert!(
-        evidence.islands.iter().any(|island| island.face_count() > 0),
+        evidence
+            .islands
+            .iter()
+            .any(|island| island.face_count() > 0),
         "the refused islands must name their faces"
     );
     assert!(
@@ -726,16 +1025,33 @@ fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
     );
     let sidecar_path = scratch.output().join("blade.coverage.json");
     assert_eq!(evidence.sidecar_path, sidecar_path);
-    assert!(sidecar_path.exists(), "the sidecar must actually be on disk");
+    assert!(
+        sidecar_path.exists(),
+        "the sidecar must actually be on disk"
+    );
     let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
     let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
-    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v1");
+    // §G.2: re-meaning `attempts` is a wire FORMAT change, not a rename, so the
+    // schema string moves with it. A reader holding a v1 sidecar and a v2
+    // sidecar must be able to tell "the loop ran 8 times" from "0 rows earned
+    // their place" without guessing which controller wrote the file.
+    assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v2");
     assert_eq!(sidecar["source"], "coverage_closure_controller");
-    assert_eq!(sidecar["attempts"], 8);
+    assert_eq!(sidecar["attempts"], 0);
     assert!(
         sidecar["closure"].is_object(),
         "the sidecar must embed the typed closure refusal verbatim"
     );
+    // **§A.8's SECOND destination, pinned pipeline-side for the first time.**
+    // The schema bump to `v2` above is justified by "a reader must be able to
+    // tell `the loop ran 8 times` from `0 rows earned their place`" — and that
+    // only holds because `closure.repair` is in the same file saying 45 trials
+    // bought 0 commits. Nothing on this side asserted that, so `repair: None`
+    // could be reintroduced with the whole pipeline gate staying green while
+    // the v2 claim quietly became false. It cannot now.
+    assert_eq!(sidecar["closure"]["repair"]["trials"], 45);
+    assert_eq!(sidecar["closure"]["repair"]["commits"], 0);
+    assert_eq!(sidecar["closure"]["repair"]["candidates_remaining"], 0);
     assert!(
         sidecar["report"].is_null(),
         "a controller refusal must not carry a gate report"
@@ -785,7 +1101,10 @@ fn a_model_that_starts_passing_clears_its_own_stale_coverage_evidence() {
         .expect("a model that now passes is a disposition, not a run failure");
 
     assert!(
-        matches!(outcome(&report, "mini"), ModelPreparationOutcome::Artifact { .. }),
+        matches!(
+            outcome(&report, "mini"),
+            ModelPreparationOutcome::Artifact { .. }
+        ),
         "mini must still emit; it reported {:?}",
         outcome(&report, "mini")
     );
@@ -817,12 +1136,8 @@ fn a_refusal_removes_an_earlier_runs_artifact_at_the_same_target() {
     let target = scratch.output().join("blade.chitubox");
     std::fs::write(&target, b"an artifact from an earlier run").expect("plant a stale artifact");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("run");
+    let report =
+        prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json")).expect("run");
     // FU-56, 2026-08-12: `overhang` now refuses at the sealed run (coverage
     // closure), not at the gate — see
     // `a_sealed_run_refused_model_writes_no_artifact_and_exits_five` for the
@@ -986,12 +1301,8 @@ fn every_failure_disposition_clears_an_earlier_runs_artifact_at_its_target() {
 
     // Only `blade` is pinned, so `unpinned` reaches the missing-baseline
     // refusal and `broken` never loads: three different pre-gate stops.
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("a folder of failures is still a successful run");
+    let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
+        .expect("a folder of failures is still a successful run");
 
     for (stem, target) in &planted {
         assert!(
@@ -1204,12 +1515,8 @@ fn a_coverage_closure_refusal_is_not_masked_by_an_earlier_load_failure() {
     scratch.write("aa-not-a-model.stl", b"a sidecar, or a truncated download");
     refusal_fixture(&scratch, "blade");
 
-    let report = prepare(pinned(
-        &scratch,
-        "blade",
-        "make_raking_blade.pipeline.json",
-    ))
-    .expect("run");
+    let report =
+        prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json")).expect("run");
 
     assert_eq!(
         report
@@ -1402,9 +1709,7 @@ fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_rep
     );
 
     let wall_of = |outcome: &ModelPreparationOutcome| match outcome {
-        ModelPreparationOutcome::Artifact { wall_mm, .. } => {
-            wall_mm.map(plinth_core::Finite::get)
-        }
+        ModelPreparationOutcome::Artifact { wall_mm, .. } => wall_mm.map(plinth_core::Finite::get),
         other => panic!("the fixture must reach an artifact; got {other:?}"),
     };
     assert_eq!(wall_of(&thin), Some(default_wall.get()));
@@ -1414,4 +1719,3 @@ fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_rep
         "two runs differing only in --wall-mm must not produce identical artifact records"
     );
 }
-

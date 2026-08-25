@@ -34,6 +34,11 @@ pub use plinth_support::CoverageClosureGap;
 // refusal wording to live inline in a `println!` instead of in a line builder a
 // test can read back.
 pub use plinth_support::{AbandonedContactDisclosure, GrownContactTipDisclosure};
+// Same reason again, for SPEC-A4 §A.8's report. It is the type of a public
+// field on three of [`ModelPreparationOutcome`]'s four variants, so it is part
+// of this crate's surface either way — and §A.8's third destination is the
+// CLI's per-model line, which cannot NAME the type it prints without this.
+pub use plinth_support::RepairRunReport;
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -506,6 +511,44 @@ pub enum ModelPreparationOutcome {
         /// existed keeps deserializing.
         #[serde(default)]
         contacts: Box<ContactAttestationDisclosure>,
+        /// **SPEC-A4 §A.8's third destination — what the one-winner coverage
+        /// repair controller spent to produce this artifact.** Trials,
+        /// commits, the rejection histogram by class, the per-trial wall-time
+        /// order statistics, and rule N4's demotion pair.
+        ///
+        /// It is here because ruling R10 deleted the failed-tries cap and put
+        /// loud reporting in its place. A cost that only ever reaches stderr
+        /// is a cost nobody can compare between two runs, and the trade R10
+        /// made would not hold. `trials=0 commits=0` is the ordinary model
+        /// that covered on its baseline layout and paid nothing.
+        ///
+        /// `None` means the sealed run kept no repair ledger. Since §G.1
+        /// stage 4 no production path produces that; `default` for the same
+        /// reason the fields above are, so a report frozen before this field
+        /// existed keeps deserializing. Boxed for the same reason `contacts`
+        /// is: inline it is over a hundred bytes that every other variant of
+        /// this enum has to be moved with.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
+        /// **SPEC-A4 §D.2 — where this artifact's EXACT attribution was
+        /// written.**
+        ///
+        /// `repair_report` above says what the controller spent; this says
+        /// where to read what it BOUGHT, contact by contact: which repair-pool
+        /// row was appended on which trial, which routes its global score came
+        /// from, and which route's failing patch it closed. The stream is too
+        /// large to inline in a run report — a model that spends thousands of
+        /// trials carries thousands of rows — so the report carries the path,
+        /// the counts and any write error, and the file carries §D.
+        ///
+        /// `None` means the sealed run wrote no ledger; since this landed no
+        /// production path produces that. `default` for the same reason the
+        /// fields above are. Boxed for the same reason `repair_report` above
+        /// is: a `PathBuf`, three counts and an owned error string inline are
+        /// weight every OTHER variant of this enum has to be moved with, and
+        /// only `Artifact` ever carries one.
+        #[serde(default)]
+        repair_ledger: Option<Box<crate::coverage_evidence::SealedRepairLedger>>,
     },
     Stopped {
         after: StageStop,
@@ -538,6 +581,23 @@ pub enum ModelPreparationOutcome {
         /// `Refused` value, including a non-coverage gate refusal.
         #[serde(default)]
         evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
+        /// **SPEC-A4 §A.8's third destination on the REFUSED path** — what
+        /// the one-winner coverage-repair controller spent before the gate
+        /// refused this model. Same fields, same meaning and same reason as
+        /// [`Self::Artifact`]'s copy.
+        ///
+        /// It is here because §A.8 says the report goes to three places "on
+        /// every path — sealed or refused", and because the refused path is
+        /// the expensive one: ruling R10 deleted the failed-tries cap, so a
+        /// model that refuses runs its candidate pool all the way out. A run
+        /// report that states the spend for the cheap path and nothing for
+        /// the costly one is not the visibility R10 traded the cap for.
+        ///
+        /// `None` means no controller ledger exists for this refusal — the
+        /// model never reached a sealed run at all. `default` for the same
+        /// reason `evidence` is.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
     },
     /// The model did not reach the gates at all. `exit_code` is the frozen
     /// per-stage projection of the typed error behind `detail`.
@@ -552,6 +612,25 @@ pub enum ModelPreparationOutcome {
         /// reason as `Refused::evidence`; boxed for the same reason too.
         #[serde(default)]
         evidence: Option<Box<coverage_evidence::CoverageRefusalEvidence>>,
+        /// **SPEC-A4 §A.8's third destination on the FAILED path** — what the
+        /// one-winner coverage-repair controller spent before this failure.
+        ///
+        /// Two failure classes reach it, and they are the two that matter
+        /// most to ruling R10's trade:
+        ///
+        /// 1. the controller's own refusal (`SupportRunError::CoverageClosure`
+        ///    — the disposition FU-56 gave the coverage verdict), where the
+        ///    ledger comes off the typed refusal, because there is no sealed
+        ///    authority on that path; and
+        /// 2. a model that SEALED and then failed to lower or to emit, where
+        ///    it comes off the authority before it was handed over.
+        ///
+        /// `None` on every other failure, and that is a measurement, not a
+        /// gap: a model that failed at or before attempt 0 never entered the
+        /// repair loop, and writing `trials=0` for it would claim the loop ran
+        /// and spent nothing. `default` for the same reason `evidence` is.
+        #[serde(default)]
+        repair_report: Option<Box<plinth_support::RepairRunReport>>,
     },
 }
 
@@ -564,6 +643,33 @@ impl ModelPreparationOutcome {
         match self {
             Self::Refused { evidence, .. } | Self::Failed { evidence, .. } => evidence.as_deref(),
             Self::Artifact { .. } | Self::Stopped { .. } => None,
+        }
+    }
+
+    /// **SPEC-A4 §A.8's third destination, read the same way on every
+    /// disposition** — what the one-winner coverage-repair controller spent on
+    /// this model, whether the model emitted, was refused by a gate, or
+    /// failed.
+    ///
+    /// One accessor rather than three match arms at every reader, for the
+    /// reason `coverage_evidence` above is one: §A.8 says the report is
+    /// reported "on every path", and a reader that has to remember which
+    /// variants carry it is a reader that will forget one. That is exactly the
+    /// defect this method was added to close — the `Artifact` arm printed the
+    /// spend and the `Refused` and `Failed` arms printed nothing, on the path
+    /// where ruling R10 removed the cap.
+    ///
+    /// `Stopped` carries none because a run told to stop before the sealed
+    /// stage never ran a controller. A run told to stop AFTER it did still
+    /// prints the operator's stderr line; carrying it into the report as well
+    /// is not wired, and is disclosed rather than claimed.
+    #[must_use]
+    pub fn repair_report(&self) -> Option<&plinth_support::RepairRunReport> {
+        match self {
+            Self::Artifact { repair_report, .. }
+            | Self::Refused { repair_report, .. }
+            | Self::Failed { repair_report, .. } => repair_report.as_deref(),
+            Self::Stopped { .. } => None,
         }
     }
 
@@ -1433,6 +1539,8 @@ mod tests {
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
+                        repair_report: None,
+                        repair_ledger: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1466,19 +1574,35 @@ mod tests {
     /// codes, and the run's code is the first non-Ok one in model order.
     #[test]
     fn a_gate_refusal_reports_gates_and_a_stage_failure_reports_its_own_stage() {
+        // SPEC-A4 §A.8's third destination on the refused path. The gate
+        // refused a model the repair controller had already spent 45 rolled-
+        // back transactions on, and the run report has to say so: this is the
+        // path ruling R10 deleted the failed-tries cap on.
+        let spent = plinth_support::RepairRunReport {
+            trials: 45,
+            commits: 0,
+            ..plinth_support::RepairRunReport::default()
+        };
         let refused = ModelPreparationOutcome::Refused {
             gate: Some(PreWriteGate::UncoveredIslands),
             geometry: Some(SupportedGeometry::DrilledShellSealed),
             violation: "nine uncovered islands".to_owned(),
             evidence: None,
+            repair_report: Some(Box::new(spent.clone())),
         };
         assert_eq!(refused.exit_code(), PipelineExitCode::Gates);
+        assert_eq!(refused.repair_report(), Some(&spent));
+        // A model that never reached a sealed run carries no ledger, and that
+        // is a measurement rather than a gap — "the loop never ran" is not
+        // "the loop ran and spent nothing".
         let failed = ModelPreparationOutcome::Failed {
             exit_code: PipelineExitCode::Input,
             detail: "unreadable".to_owned(),
             evidence: None,
+            repair_report: None,
         };
         assert_eq!(failed.exit_code(), PipelineExitCode::Input);
+        assert_eq!(failed.repair_report(), None);
 
         let model = |name: &str, outcome| ModelPreparationReport {
             model: ModelId::new(name),
@@ -1507,6 +1631,8 @@ mod tests {
                         filled_back_chambers_ml: Vec::new(),
                         ownerless_islands: Vec::new(),
                         contacts: Box::default(),
+                        repair_report: None,
+                        repair_ledger: None,
                     },
                 ),
                 model("refused", refused),
@@ -1527,7 +1653,17 @@ mod tests {
             wire["models"][1]["outcome"]["geometry"]["kind"],
             "drilled_shell_sealed"
         );
+        // §A.8's third destination has to survive the wire, not just the
+        // struct: the run report on disk is the machine-readable half of the
+        // owner's summary, and a refused model's spend is the figure two runs
+        // get compared on.
+        assert_eq!(wire["models"][1]["outcome"]["repair_report"]["trials"], 45);
+        assert_eq!(wire["models"][1]["outcome"]["repair_report"]["commits"], 0);
         assert_eq!(wire["models"][2]["outcome"]["exit_code"], "input");
+        assert!(
+            wire["models"][2]["outcome"]["repair_report"].is_null(),
+            "a model that never reached a sealed run must not claim a repair ledger"
+        );
         assert_eq!(
             wire["models"][0]["outcome"]["geometry"]["kind"], "drilled_shell_sealed",
             "a successful artifact must carry the geometry it was built from"
@@ -1560,6 +1696,7 @@ mod tests {
                 exit_code: PipelineExitCode::Input,
                 detail: "not a binary STL".to_owned(),
                 evidence: None,
+                repair_report: None,
             },
         );
         let refused = model(
@@ -1569,6 +1706,7 @@ mod tests {
                 geometry: Some(SupportedGeometry::DrilledShellSealed),
                 violation: "nine uncovered islands".to_owned(),
                 evidence: None,
+                repair_report: None,
             },
         );
 
@@ -1603,6 +1741,7 @@ mod tests {
                         exit_code: PipelineExitCode::Supports,
                         detail: "sealed run refused".to_owned(),
                         evidence: None,
+                        repair_report: None,
                     },
                 ),
             ],
@@ -2050,6 +2189,109 @@ mod tests {
                 // re-frozen by this line, and nothing here touches the
                 // coverage radius, the patch-area floor, the zero-tolerance
                 // verdict, or any registered constant.
+                //
+                // Re-recorded a SIXTH time, 2026-08-21, by #51 (the
+                // model-anchor clearance-mask convergence, PR-7 seating and
+                // the PR-3 emergence screen), true -> false, with this
+                // attribution rather than an edited expectation.
+                //
+                // **MEASURED at this tip, same process, same settings:**
+                //
+                //   measured -> Err("sealed support run failed during
+                //               Lowering: Lowering(RootRunTooShort
+                //               { member: MemberKey { slot: 40, ... } })")
+                //   zeros    -> Err("sealed support run failed during
+                //               Lowering: Lowering(RootRunTooShort
+                //               { member: MemberKey { slot: 38, ... } })")
+                //
+                // **What changed and what did not.** The Sphere still does not
+                // seal, still stops at Lowering, and still stops for the same
+                // measured reason — `RootRunTooShort`, which is task #29's
+                // known defect and is untouched here. What changed is that the
+                // two fields now name DIFFERENT members, so the refusal texts
+                // differ and the outcomes compare unequal again.
+                //
+                // The mechanism: with the mask converged, the CCO model-anchor
+                // family can clear at all, so both runs route a different
+                // forest than they did — and the delicacy field orders the
+                // candidate pool, so the two forests differ by which members
+                // exist and in what order. That is FU-38's contact-selection
+                // tie-break, still real, once again observable on this fixture
+                // — this time through the failing member's identity rather
+                // than through a sealed digest. The row is back to the state
+                // it held before the wall-target ruling pushed the Sphere's
+                // stop earlier than the stage the tie-break lives in.
+                //
+                // No pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // floor, the zero-tolerance verdict, or any registered
+                // constant.
+                //
+                // Re-recorded a SEVENTH time, 2026-08-23, by #36's honest
+                // contact exemption — frozen seat zones at every creation site
+                // (`0a72bc8`) and the full axis graded against surface-minus-Z
+                // at all four grading sites (`edcadd6`) — false -> true, with
+                // this attribution rather than an edited expectation.
+                //
+                // **MEASURED at BOTH ends, this row's own `outcome` closure,
+                // same process, same settings.** The parked state was re-run in
+                // a linked worktree at `56a8782`, which is the same negative
+                // control the corpus re-baseline used, rather than read off the
+                // comment above:
+                //
+                //   at 56a8782: measured -> Err("... during Lowering:
+                //               Lowering(RootRunTooShort { member: MemberKey
+                //               { slot: 40, generation: 0 } })")
+                //               zeros    -> the same string with slot 38.
+                //               Two refusals, DIFFERENT text: divergent, and
+                //               the SIXTH re-record's numbers reproduce exactly.
+                //   at this tip: measured -> the same string with slot 32.
+                //               zeros    -> byte-identical, slot 32.
+                //               One refusal, identical text under both: neutral.
+                //
+                // **The delicacy channel is NOT erased, and that is why this is
+                // a re-pin and not a defect report.** MEASURED, static:
+                // `git diff 56a8782..HEAD` over `plinth-support` changes no line
+                // containing `delicacy` anywhere, and `lib.rs` (contact
+                // selection and its exact-Z tie-break), `perception.rs`, and
+                // `lower.rs` — the stage that raises `RootRunTooShort` — are
+                // byte-identical. The Sphere also stays under the 0.5 anchor cap
+                // (the guard above), so `AnchorSeatRefusalReason::TooDelicate`
+                // never fires, and the anchor seat ranking sorts on length then
+                // sample index, never on delicacy. MEASURED, dynamic: the other
+                // two fixtures in this very loop still diverge at the tip, and a
+                // THIRD field on the Sphere — `0.5 - measured`, which reverses
+                // the tie order and stays under the cap — SEALS at the tip
+                // (digest 9257918106102347092) exactly as it sealed at 56a8782
+                // (4192059247452978990). The Sphere's run is still strongly
+                // field-sensitive; what converged is these two fields.
+                //
+                // **The mechanism.** `RootRunTooShort` is task #29's defect:
+                // `lower::root_boss_top` refuses a plate-rooted member whose
+                // `p0` stands less than `root_no_bend` above the plate, and
+                // `checked_support_count` walks
+                // `live_members_in_creation_order_iter`, so the member it names
+                // is the FIRST such member in creation order. The honest
+                // exemption legalizes arms the retired radius-proportional
+                // skip-length refused — MEASURED corpus-wide by the re-baseline
+                // in EMISSION-CANARY-LEDGER.md, where record counts ROSE on all
+                // five emitting models — so members that were quarantined, and
+                // therefore excluded from the live view, now survive into it.
+                // The first offender moved EARLIER in creation order, to slot
+                // 32, below both of the parked state's 38 and 40, and both
+                // fields stop there. INFERRED, not measured: that slot 32 is a
+                // member the retired rule refused and this rule keeps. What the
+                // instrument reads is refusal TEXT, so what is pinned here is
+                // that the two fields now stop identically — the same
+                // convention this row's FIFTH re-record used when the wall
+                // target pushed the Sphere's stop earlier than the stage the
+                // tie-break lives in.
+                //
+                // The Sphere has not sealed here since FU-56 and does not seal
+                // now; this records WHICH refusal, not a new one. No pinned
+                // digest anywhere is re-frozen by this line, and nothing here
+                // touches the coverage radius, the patch-area minimum, the
+                // zero-tolerance verdict, or any registered constant.
                 "Sphere.prepped.stl" => true,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,

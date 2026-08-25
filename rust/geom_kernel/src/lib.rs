@@ -55,8 +55,8 @@ pub use queries::{
     AllowedFaceProjection, AllowedFaceProjectionError, AllowedFaceProjectionLimits,
     AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
     BatchInputError, CapsuleRay, CapsuleRays, CastRaysBatch, Interval, NativeSurface,
-    PenetrationBatchError, PenetrationBatchLimits, PenetrationBatchMeter, PenetrationRowCensus,
-    SphereBreachBatch,
+    NearFaceBatchError, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
+    PenetrationBatchMeter, PenetrationRowCensus, SphereBreachBatch,
 };
 pub use segment_batch::{
     point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,

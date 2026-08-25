@@ -6,6 +6,8 @@
 //! ordering prevents an undersized provisional radius from certifying geometry
 //! that the actually emitted support would breach.
 
+use std::borrow::Cow;
+
 use geom_kernel::{
     indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest, MOLLER_PARAMETER_SLACK,
 };
@@ -192,13 +194,29 @@ impl GeometryFingerprint {
 /// checks. Callers cannot overwrite the digest stored by a native surface.
 pub struct AnchorGeometryAuthority<'a> {
     surface: &'a NativeSurface,
+    /// **#36 step 3 — the face adjacency the honest contact exemption needs.**
+    ///
+    /// The topology was always an INPUT here: `new` validates it, binds its
+    /// content digest into the fingerprint, and then dropped the reference.
+    /// The seat-zone flood fill needs that same adjacency at every creation
+    /// site, and this is the one already-checked authority all of them hold —
+    /// so retaining what was already validated is strictly cheaper than
+    /// threading a second, unbound `&FaceTopology` down three call chains, and
+    /// it makes the surface and the adjacency provably the SAME pair the
+    /// fingerprint attests rather than two arguments a caller could mismatch.
+    ///
+    /// The identity the fill rests on: `validate_perception_input` builds this
+    /// with `WeldPolicy::ExactBits`, and `NativeSurface::from_indexed` indexes
+    /// faces in the same triangle order, so `surface.project`'s face ID and
+    /// `topology.neighbors` address the same faces.
+    topology: &'a FaceTopology,
     fingerprint: GeometryFingerprint,
 }
 
 impl<'a> AnchorGeometryAuthority<'a> {
     pub fn new(
         mesh: &Mesh,
-        topology: &FaceTopology,
+        topology: &'a FaceTopology,
         surface: &'a NativeSurface,
     ) -> Result<Self, AnchorSearchError> {
         validate_face_topology(topology)
@@ -211,6 +229,7 @@ impl<'a> AnchorGeometryAuthority<'a> {
         let native_triangle_soup_digest = validate_surface_matches_mesh(mesh, surface)?;
         Ok(Self {
             surface,
+            topology,
             fingerprint: GeometryFingerprint {
                 mesh_sha256: actual_mesh,
                 topology_sha256: topology.content_digest().to_owned(),
@@ -223,6 +242,14 @@ impl<'a> AnchorGeometryAuthority<'a> {
     #[must_use]
     pub const fn surface(&self) -> &NativeSurface {
         self.surface
+    }
+
+    /// The validated face adjacency this authority binds — #36's seat-zone
+    /// flood fill reads it, and reads it from HERE so it cannot be handed a
+    /// topology the fingerprint never attested.
+    #[must_use]
+    pub(crate) const fn topology(&self) -> &FaceTopology {
+        self.topology
     }
 
     #[must_use]
@@ -274,10 +301,64 @@ impl<'a> AnchorGeometryAuthority<'a> {
 )]
 pub(crate) struct SurfaceAnchorPool<'a> {
     surface: &'a NativeSurface,
+    geometry: Cow<'a, GeometryFingerprint>,
+    digest: u64,
+    rows: Cow<'a, [SurfaceAnchorSample]>,
+    delicacy_by_face: Cow<'a, [f64]>,
+}
+
+/// The pool's own contents, kept alive independently of the pool.
+///
+/// # Why this exists (task #36 Stage C, design §2.4 item 1)
+///
+/// [`SurfaceAnchorPool::from_geometry`] reads only `geometry` and
+/// `delicacy_by_face`, and BOTH are fixed for a whole support run: the
+/// geometry is the retained mesh/topology/`NativeSurface` trio the run
+/// context is built around once per model, and the delicacy sidecar is a
+/// perception-config field. The pool was nevertheless rebuilt at two
+/// production sites — the Routing stage and the Rewire stage — on every
+/// attempt the coverage-closure controller makes.
+///
+/// This type is the run-invariant half of the pool, held on the context so
+/// the later builds can borrow it instead of walking the exterior face mask,
+/// re-pushing one row per exterior face and re-hashing the result. It owns
+/// its data outright and borrows nothing, which is what lets the context hold
+/// it beside the `NativeSurface` the pool points at without becoming
+/// self-referential.
+///
+/// **It decides nothing.** The rows a reused pool serves are the rows a fresh
+/// build would have produced from the same two inputs, and both production
+/// sites still run `validate_against` — a full content re-hash compared with
+/// the pool's own sealed digest — before any query reads a row.
+pub(crate) struct SurfaceAnchorPoolMemo {
     geometry: GeometryFingerprint,
     digest: u64,
     rows: Vec<SurfaceAnchorSample>,
     delicacy_by_face: Vec<f64>,
+}
+
+impl SurfaceAnchorPoolMemo {
+    /// The exact inputs test: does this memo hold the pool the caller is
+    /// about to build?
+    ///
+    /// Exact comparison rather than a digest of the inputs. A digest would be
+    /// the weaker claim, and neither walk is the cost this hoist removes: the
+    /// fingerprint is four small fields and the sidecar is one `f64` per
+    /// face, against a row per exterior face plus a five-word-per-row hash.
+    fn serves(&self, geometry: &AnchorGeometryAuthority<'_>, delicacy_by_face: &[f64]) -> bool {
+        self.geometry == geometry.fingerprint && self.delicacy_by_face == delicacy_by_face
+    }
+
+    /// FU-32 J1's mutation-hook precedent (see
+    /// [`GeometryFingerprint::corrupt_mesh_sha256_for_test`]): move a stored
+    /// row away from the contents its sealed digest attests, so the
+    /// validation that reads the memo can be proved load-bearing.
+    #[cfg(test)]
+    pub(crate) fn corrupt_first_row_for_test(&mut self) {
+        if let Some(row) = self.rows.first_mut() {
+            row.point_mm[0] += 1.0;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,10 +444,57 @@ impl<'a> SurfaceAnchorPool<'a> {
         let digest = surface_anchor_pool_digest(&geometry.fingerprint, delicacy_by_face, &rows);
         Ok(Self {
             surface: geometry.surface(),
-            geometry: owned_geometry,
+            geometry: Cow::Owned(owned_geometry),
             digest,
-            rows,
-            delicacy_by_face: owned_delicacy,
+            rows: Cow::Owned(rows),
+            delicacy_by_face: Cow::Owned(owned_delicacy),
+        })
+    }
+
+    /// **Task #36 Stage C — the same pool, built once per run instead of once
+    /// per stage per attempt.**
+    ///
+    /// `slot` holds the run-invariant contents (§2.4 item 1). On the first
+    /// call for a given `geometry`/`delicacy_by_face` pair it is filled by
+    /// [`Self::from_geometry`] — same function, same arguments, same error on
+    /// the same input, so a first-build refusal is the refusal this stage has
+    /// always raised. Every later call borrows what is already there.
+    ///
+    /// The slot is checked, not trusted: a memo whose fingerprint or sidecar
+    /// is not the pair being asked for is REPLACED by a fresh build rather
+    /// than served. The content itself is then checked again downstream —
+    /// both production callers hand the pool to a `validate_against` that
+    /// re-hashes every row and compares against the pool's own sealed digest.
+    pub(crate) fn memoized(
+        slot: &'a mut Option<SurfaceAnchorPoolMemo>,
+        geometry: &'a AnchorGeometryAuthority<'a>,
+        delicacy_by_face: &[f64],
+    ) -> Result<Self, AnchorSearchError> {
+        let served = slot
+            .as_ref()
+            .is_some_and(|memo| memo.serves(geometry, delicacy_by_face));
+        if !served {
+            let built = Self::from_geometry(geometry, delicacy_by_face)?;
+            *slot = Some(SurfaceAnchorPoolMemo {
+                geometry: built.geometry.into_owned(),
+                digest: built.digest,
+                rows: built.rows.into_owned(),
+                delicacy_by_face: built.delicacy_by_face.into_owned(),
+            });
+        }
+        let memo = match slot.as_ref() {
+            Some(memo) => memo,
+            // Unreachable: the branch above either filled the slot or
+            // returned. Written as a refusal rather than an `expect` so no
+            // production path can panic on a future edit.
+            None => return Err(AnchorSearchError::StaleSurfaceAnchorPool),
+        };
+        Ok(Self {
+            surface: geometry.surface(),
+            geometry: Cow::Borrowed(&memo.geometry),
+            digest: memo.digest,
+            rows: Cow::Borrowed(memo.rows.as_slice()),
+            delicacy_by_face: Cow::Borrowed(memo.delicacy_by_face.as_slice()),
         })
     }
 
@@ -415,7 +543,7 @@ impl<'a> SurfaceAnchorPool<'a> {
         geometry: &AnchorGeometryAuthority<'_>,
         hoisted_content_digest: u64,
     ) -> Result<(), AnchorSearchError> {
-        if !std::ptr::eq(self.surface, geometry.surface()) || self.geometry != geometry.fingerprint
+        if !std::ptr::eq(self.surface, geometry.surface()) || *self.geometry != geometry.fingerprint
         {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
@@ -1277,6 +1405,31 @@ pub enum AnchorFootRefusalReason {
     /// When PR-7 seats this family, the witness refuses at candidacy like the
     /// other two contact families and this reason becomes unreachable.
     SeatNotAttached,
+    /// **PR-3 `CONTACT_EMERGENCE_ADMISSIBILITY` at CCO/rewire candidacy.**
+    ///
+    /// The member cannot leave its own contact mask: the PR-2 mask the row
+    /// claims, plus whatever its other end claims, does not leave
+    /// `min_illegal_len_mm` of free span for the distance check to return a
+    /// verdict on. A member that cannot emerge is not a member.
+    ///
+    /// **This refusal is the price of the #51 mask fix and must never be
+    /// separated from it.** PR-2 without PR-3 is not a loosening — it is an
+    /// ERASURE. `NativeSurface::seg_clear_one_excluding` returns `INFINITY` when the
+    /// insets consume the segment (`queries.rs:1786-1788`), so a mask that
+    /// grows past the member's own length admits an arm that was never
+    /// distance-tested at all. At 80 degrees of incidence the rootward mask is
+    /// 7.47 mm against a 2.5 mm stub; the untested band is not marginal.
+    /// Before the mask converged, `brace.rs` was the only family with a PR-3
+    /// screen (`contact::admit`, its single production caller); the CCO and
+    /// rewire families had none, and `within_cone` does not substitute for one
+    /// because it measures the PARENT axis, not the surface normal.
+    SeatGrazingIncidence,
+    /// **PR-2** — the incidence at this contact is numerically zero, so the
+    /// mask diverges and no finite exemption solves the kernel's criterion.
+    /// The correct disposition is refusal, not a cosine floor (which is what
+    /// OD-8 retired: a floor makes the mask SMALLER and the check STRICTER,
+    /// and hides the divergence behind a constant inset).
+    SeatDegenerateIncidence,
     /// FU-88 — this candidate's own proposed geometry could not carry the seat
     /// attestation, so there was nothing to measure. On the corpus it is an
     /// anchor arm shorter than the one process resolution (0.050 mm) the
@@ -1345,6 +1498,26 @@ impl AnchorFootRefusal {
         Self {
             provenance,
             reason: AnchorFootRefusalReason::SeatGeometryUnusable,
+        }
+    }
+
+    /// PR-3 — the candidacy refusal channel for a model anchor that cannot
+    /// emerge from its own contact mask, and for the degenerate-incidence case
+    /// where the mask has no finite value.
+    ///
+    /// Same narrowness as the channels above: crate-private, mintable only by
+    /// the CCO stage, and able to carry only the two contact-physics reasons.
+    pub(crate) const fn seat_emergence(
+        provenance: AnchorCandidateProvenance,
+        degenerate: bool,
+    ) -> Self {
+        Self {
+            provenance,
+            reason: if degenerate {
+                AnchorFootRefusalReason::SeatDegenerateIncidence
+            } else {
+                AnchorFootRefusalReason::SeatGrazingIncidence
+            },
         }
     }
 }
@@ -2220,6 +2393,95 @@ mod tests {
         .unwrap()
         .into_seats()
         .remove(0)
+    }
+
+    /// Task #36 Stage C. Three claims about the run-invariant memo, in one
+    /// place because they are one mechanism: it serves the pool a fresh build
+    /// would have produced, it is REPLACED rather than served when the inputs
+    /// it holds are not the inputs asked for, and what it stores is
+    /// load-bearing — corrupt one row and the validation both production
+    /// sites run refuses.
+    ///
+    /// # What this witness is, and what it is not
+    ///
+    /// The design record asks for "corrupt a stored value and the ARTIFACT
+    /// must change". This asserts something different and stronger: a
+    /// corrupted memo does not emit different bytes, it REFUSES
+    /// (`StaleSurfaceAnchorPool`), because the content re-hash both stages
+    /// already ran is what reads it. An artifact-level witness would need the
+    /// refusal removed first, so it is not available on this code and is not
+    /// claimed.
+    ///
+    /// Claim (2), the MISS, has no model witness either. Production reaches
+    /// it only when one model runs a second sealed support run against
+    /// different geometry — the drilled-shell-then-substituted-solid path.
+    /// None of the three models measured for this change does that
+    /// (zombie-3-a and Round 25 are solid by the hollow stage's own decision;
+    /// the Deinonychus refuses before any substitution). This test is the
+    /// only cover that branch has.
+    #[test]
+    fn memoized_surface_anchor_pool_serves_the_same_rows_and_is_checked_not_trusted() {
+        let (mesh, topology, surface) = box_parts(10.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let delicacy = (0..surface.nfaces())
+            .map(|index| index as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let fresh = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let fresh_rows = fresh.rows().to_vec();
+        let fresh_digest = fresh.digest();
+
+        // (1) First call builds, second call serves — same rows, same sealed
+        // digest, and the pool still validates against the same geometry.
+        let mut slot = None;
+        let built = SurfaceAnchorPool::memoized(&mut slot, &geometry, &delicacy).unwrap();
+        assert_eq!(built.digest(), fresh_digest);
+        assert_eq!(built.rows(), fresh_rows.as_slice());
+        built.validate_against(&geometry).unwrap();
+        drop(built);
+        assert!(slot.is_some(), "the first call must fill the slot");
+        let served = SurfaceAnchorPool::memoized(&mut slot, &geometry, &delicacy).unwrap();
+        assert_eq!(served.digest(), fresh_digest);
+        assert_eq!(served.rows(), fresh_rows.as_slice());
+        served.validate_against(&geometry).unwrap();
+        drop(served);
+
+        // (2) A memo built for a different sidecar is a MISS: the second
+        // call's own delicacy reaches the rows, and the slot is replaced.
+        let mut changed_delicacy = delicacy.clone();
+        changed_delicacy[0] = 99.0;
+        let rebuilt = SurfaceAnchorPool::memoized(&mut slot, &geometry, &changed_delicacy).unwrap();
+        let expected_changed = SurfaceAnchorPool::from_geometry(&geometry, &changed_delicacy)
+            .unwrap()
+            .digest();
+        assert_eq!(
+            rebuilt.digest(),
+            expected_changed,
+            "a stale sidecar must be rebuilt, never served"
+        );
+        assert_ne!(rebuilt.digest(), fresh_digest);
+        drop(rebuilt);
+
+        // (3) Sabotage. Move one stored row away from the digest that
+        // attests it; the pool served from that memo carries the moved row,
+        // and `validate_against` — which BOTH production sites run before any
+        // query reads a row — refuses.
+        let mut sabotaged = None;
+        let honest = SurfaceAnchorPool::memoized(&mut sabotaged, &geometry, &delicacy)
+            .unwrap()
+            .rows()
+            .to_vec();
+        sabotaged.as_mut().unwrap().corrupt_first_row_for_test();
+        let corrupted = SurfaceAnchorPool::memoized(&mut sabotaged, &geometry, &delicacy).unwrap();
+        assert_ne!(
+            corrupted.rows(),
+            honest.as_slice(),
+            "the sabotage hook must actually move a served row"
+        );
+        assert_eq!(
+            corrupted.validate_against(&geometry),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool),
+            "a memo whose contents moved must refuse, not be served to a query"
+        );
     }
 
     #[test]

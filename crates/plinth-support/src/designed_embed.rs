@@ -993,11 +993,13 @@ pub(crate) fn attest_seats_batch(
     seats
         .iter()
         .enumerate()
-        .map(|(index, seat)| match (attested[index].take(), unusable[index]) {
-            (Some(outcome), None) => Ok(outcome),
-            (None, Some(cause)) => Ok(unusable_attestation(index, seat, cause)),
-            _ => Err(DesignedMaskError::CorruptKernelResult),
-        })
+        .map(
+            |(index, seat)| match (attested[index].take(), unusable[index]) {
+                (Some(outcome), None) => Ok(outcome),
+                (None, Some(cause)) => Ok(unusable_attestation(index, seat, cause)),
+                _ => Err(DesignedMaskError::CorruptKernelResult),
+            },
+        )
         .collect()
 }
 
@@ -3079,6 +3081,7 @@ mod tests {
             floor_depth_mm: 0.3,
             process_resolution_mm: 0.05,
             standoff_mm: 0.6,
+            demanded_gap_mm: 0.6,
             min_free_span_mm: 0.05,
             ball_factor_stub: 1.5,
             tip_load: crate::perception::FrozenTipLoadPolicy::for_contact_tests(),

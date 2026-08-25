@@ -380,6 +380,16 @@ pub struct GatedEmission {
     /// it is consumed. Both empty on the ordinary model.
     pub abandoned_contacts: Vec<plinth_support::AbandonedContactDisclosure>,
     pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
+    /// **SPEC-A4 §A.8's third destination is NOT read here**, deliberately —
+    /// see `prepare::seal_and_emit`, which reads the repair ledger off the
+    /// authority one frame out, before it hands the authority to
+    /// [`judge_then_emit`].
+    ///
+    /// It used to be read here, and that put the ledger on the SEALED path
+    /// only: a gate refusal returns `Err` from this function and the clone
+    /// died with it, so the refused path — the path ruling R10 deleted the
+    /// failed-tries cap on, the expensive one — reported nothing. One read,
+    /// one frame out, reaches both dispositions.
     pub routed_contacts: usize,
     pub final_live_members: usize,
     pub snapshot_digest: u64,
@@ -458,6 +468,9 @@ fn judged_emission(
     let ownerless_islands = authority.ownerless_islands().to_vec();
     let abandoned_contacts = authority.abandoned_contacts().to_vec();
     let grown_contact_tips = authority.grown_contact_tips().to_vec();
+    // SPEC-A4 §A.8's repair ledger is read by the CALLER, before it hands the
+    // authority over — see `GatedEmission::routed_contacts`'s neighbouring
+    // doc. Reading it here would only reach the sealed path.
     let (gates, routed_contacts, final_live_members, snapshot_digest) = {
         let snapshot =
             authority

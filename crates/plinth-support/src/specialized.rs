@@ -508,6 +508,47 @@ pub(crate) enum RepairRowSourceKind {
     SyntheticIsland,
 }
 
+/// The public, wire-readable NAME of one repair row — SPEC-A4 §D's "the
+/// winner, by exact pool identity", as it goes on disk.
+///
+/// **A name, never an authority.** [`RepairRowId`] stays opaque and
+/// unforgeable: only the specialized planner constructs one, and that rule is
+/// what stops a caller from handing the plan editor a row the pool never
+/// froze. This type is the other half of the same rule — it is freely
+/// constructible and freely deserializable precisely BECAUSE it cannot be
+/// turned back into a `RepairRowId` and cannot edit anything. A reader that
+/// parses a sealed-run ledger gets the four numbers that identify the row in
+/// the pool, and nothing that acts.
+///
+/// Design §D.2 named this the missing piece: "persisting it needs
+/// `RepairRowId` to gain a public wire encoding it has never had".
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct RepairRowWire {
+    /// The logical island the row was frozen for.
+    pub owner_island_id: u32,
+    /// The immutable contact candidate the row expands.
+    pub candidate_id: u64,
+    /// The coverage face the row seats against.
+    pub face_id: u32,
+    /// The topology component the row was frozen for.
+    pub component_id: u32,
+    /// Which candidate authority supplied it.
+    pub source_kind: RepairRowSource,
+}
+
+/// [`RepairRowSourceKind`] on the wire. Public and serializable for the same
+/// reason [`RepairRowWire`] is: it names a provenance, it does not grant one.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairRowSource {
+    Generic,
+    SyntheticIsland,
+}
+
 /// Opaque, stable identity of one route-expanded repair row carried in public
 /// error evidence. It can be compared, hashed, and rendered for diagnostics,
 /// but only the specialized planner may construct one. The owner, topology
@@ -535,6 +576,51 @@ impl RepairRowId {
     #[must_use]
     pub(crate) const fn component_id(self) -> u32 {
         self.component_id
+    }
+
+    /// This row's wire-readable NAME — SPEC-A4 §D's exact pool identity, in the
+    /// form a sealed-run ledger can carry to disk.
+    ///
+    /// One-way on purpose. There is no `from_wire`, and adding one would hand
+    /// every caller the construction right the opaque id exists to withhold.
+    #[must_use]
+    pub const fn wire(self) -> RepairRowWire {
+        RepairRowWire {
+            owner_island_id: self.owner_island_id,
+            candidate_id: self.candidate_id.0,
+            face_id: self.face_id,
+            component_id: self.component_id,
+            source_kind: match self.source_kind {
+                RepairRowSourceKind::Generic => RepairRowSource::Generic,
+                RepairRowSourceKind::SyntheticIsland => RepairRowSource::SyntheticIsland,
+            },
+        }
+    }
+
+    /// A synthetic identity for a unit test, and **only** for a unit test.
+    ///
+    /// The production rule — "only the specialized planner may construct one" —
+    /// is unchanged: this is `#[cfg(test)]`, so it does not exist in any shipped
+    /// binary and no production path can reach it. It exists because the A4
+    /// search rules (design §A.4 N2/N3/N4) are decisions about ORDER over a list
+    /// of `(seat, route, score, pool order)` tuples, and proving them through a
+    /// whole `SpecializedContactPlan` would prove the plan builder instead of
+    /// the rule. The rule is what the ruling is about, so the rule is what gets
+    /// its own test.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn for_search_rule_test(
+        owner_island_id: u32,
+        component_id: u32,
+        candidate_id: u64,
+    ) -> Self {
+        Self {
+            owner_island_id,
+            candidate_id: crate::ContactCandidateId(candidate_id),
+            face_id: 0,
+            component_id,
+            source_kind: RepairRowSourceKind::Generic,
+        }
     }
 }
 
@@ -1412,13 +1498,38 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             });
             next_contact_id = contact_id.checked_add(1);
         }
-        self.derive_child(contacts, next_contact_id)
+        let appended = contacts.len() - self.plan.contacts.len();
+        self.derive_child_from(contacts, next_contact_id, Some(appended))
     }
 
     fn derive_child(
         &self,
+        contacts: Vec<SpecializedPhysicalContact>,
+        next_contact_id: Option<u64>,
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        self.derive_child_from(contacts, next_contact_id, None)
+    }
+
+    /// Derive a child plan.
+    ///
+    /// `appended` is `Some(n)` exactly when the child's contact vector is this
+    /// plan's own contact vector with `n` contacts pushed onto the end and
+    /// nothing else changed — the repair-append seam, and the only shape task
+    /// #68 contract (1) covers. Then the child's load partition is EXTENDED
+    /// from this plan's (`perception::append_to_specialized_load_partition`):
+    /// every surviving contact keeps its charge bit for bit and only the
+    /// appended contacts are charged, so a trial append cannot move a load
+    /// block onto a contact that was routing.
+    ///
+    /// `None` is the general edit — removal, or any derivation that is not a
+    /// pure append — where the finalizer is replayed over the whole set,
+    /// because a removal really does free the load its contacts were carrying
+    /// and somebody has to take it or the disclosure has to say nobody did.
+    fn derive_child_from(
+        &self,
         mut contacts: Vec<SpecializedPhysicalContact>,
         next_contact_id: Option<u64>,
+        appended: Option<usize>,
     ) -> Result<SpecializedContactPlan, SpecializedError> {
         // An edit never runs selected-to-specialized consolidation.  It only
         // proves the retained records and replays the one authoritative load
@@ -1437,21 +1548,35 @@ impl<'a> SpecializedContactPlanEdit<'a> {
         // FU-8f phase G2: an edit replay is a one-shot path, not the gate's
         // per-round loop, so it hashes its own mesh here.  Threading a proof
         // in would change this public edit boundary for no saving.
-        let load_partition = finalize_specialized_load_partition(
-            &self.plan.generic_authority,
-            &VerifiedMeshFingerprint::compute(&self.plan.mesh_authority)?,
-            &self.surface,
-            &load_inputs.contacts,
-            &load_inputs.specialized_owner_faces,
-            LoadFinalizeLimits {
-                max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
-                // Already a remaining budget carved out of the batch-materialized
-                // cap upstream, so it is the whole bound here: coefficient 0.
-                max_operations_floor: load_inputs.remaining_load_operations,
-                operations_per_batch_unit: 0,
-            },
-            None,
-        )?;
+        let verified_mesh = VerifiedMeshFingerprint::compute(&self.plan.mesh_authority)?;
+        let limits = LoadFinalizeLimits {
+            max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
+            // Already a remaining budget carved out of the batch-materialized
+            // cap upstream, so it is the whole bound here: coefficient 0.
+            max_operations_floor: load_inputs.remaining_load_operations,
+            operations_per_batch_unit: 0,
+        };
+        let load_partition = match appended {
+            Some(appended) => crate::perception::append_to_specialized_load_partition(
+                &self.plan.generic_authority,
+                &verified_mesh,
+                &self.surface,
+                &self.plan.load_partition,
+                &load_inputs.contacts,
+                contacts.len() - appended,
+                &load_inputs.specialized_owner_faces,
+                limits,
+            )?,
+            None => finalize_specialized_load_partition(
+                &self.plan.generic_authority,
+                &verified_mesh,
+                &self.surface,
+                &load_inputs.contacts,
+                &load_inputs.specialized_owner_faces,
+                limits,
+                None,
+            )?,
+        };
         for row in load_partition.rows() {
             let contact = contacts
                 .iter_mut()
@@ -1604,6 +1729,31 @@ pub struct FrozenSpecializedGateVector {
 }
 
 impl FrozenSpecializedGateVector {
+    /// Project SPEC-A4 §6 clause 1's coverage objective into the vector the
+    /// merge tournament's own `coverage_key` already orders.
+    ///
+    /// The A4 controller reuses `coverage_key` rather than restating the
+    /// lexicographic order beside it — one implementation, one place to change,
+    /// and `numeric_cmp`'s infinity handling comes along for free (a route with
+    /// NO routed contact has a `+inf` worst gap, and that must order as worse
+    /// than any finite distance rather than as a NaN).
+    ///
+    /// The two noncoverage counts are carried at zero because clause 1 is only
+    /// about coverage: clause 2 compares those counts componentwise on the
+    /// [`crate::runner::NoncoverageVector`] instead, which is a strictly wider
+    /// vector than this one.
+    #[must_use]
+    pub(crate) const fn coverage_only(coverage: CoverageObjective) -> Self {
+        Self {
+            failing_uncovered_area_mm2: coverage.failing_uncovered_area_mm2,
+            max_patch_area_mm2: coverage.max_patch_area_mm2,
+            failing_patch_count: coverage.failing_patch_count,
+            worst_gap_mm: coverage.worst_gap_mm,
+            load_violation_count: 0,
+            unsupported_specialized_count: 0,
+        }
+    }
+
     fn from_live(
         coverage: CoverageObjective,
         load_violation_count: usize,
@@ -3420,7 +3570,7 @@ const fn demand_representative_key(demand: &SpecializedDemand) -> Representative
     }
 }
 
-fn gate_not_worse(
+pub(crate) fn gate_not_worse(
     candidate: FrozenSpecializedGateVector,
     baseline: FrozenSpecializedGateVector,
 ) -> bool {
@@ -3780,7 +3930,7 @@ fn gate_header_preflight(
     Ok(())
 }
 
-fn coverage_key(
+pub(crate) fn coverage_key(
     vector: FrozenSpecializedGateVector,
 ) -> (OrderedF64, OrderedF64, usize, OrderedF64) {
     (
@@ -3792,7 +3942,7 @@ fn coverage_key(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct OrderedF64(f64);
+pub(crate) struct OrderedF64(f64);
 
 impl Eq for OrderedF64 {}
 impl PartialOrd for OrderedF64 {
@@ -12977,6 +13127,222 @@ mod tests {
         ));
     }
 
+    /// **Task #68 contract (1) — A TRIAL APPEND CHARGES ONLY WHAT IT NEWLY
+    /// TAKES, and moves nothing else by a single bit.**
+    ///
+    /// The predecessor derived every trial child by replaying
+    /// `finalize_specialized_load_partition` over the whole contact set
+    /// (`runner.rs:1754` -> `specialized.rs` `derive_child` -> the recompute at
+    /// the fold). The membership probe of 2026-08-21 measured what that costs
+    /// on the dust fixture: appending ANY repair row, anywhere — including a
+    /// seat 30 mm away — moved a 546.0 mm² face onto contact 52, the very
+    /// contact providing island 4's coverage; contact 52 then failed routing on
+    /// clearance and the 0.6998291015625 mm² the previous commit had bought
+    /// evaporated. 182 trials out of 182, bit-exact, three probe runs
+    /// identical.
+    ///
+    /// So this asserts the whole invariant, not a symptom of it: after an
+    /// append, every pre-existing contact is the SAME RECORD — same carried
+    /// area to the bit, same seat, same normal, same primary identity, same
+    /// route list, same demands — and every prior load row survives verbatim
+    /// with only the appended contact naming any new one.
+    ///
+    /// **Why that settles the routing cadence too, without re-sorting
+    /// anything here.** `initial::routing_order` sorts stub seeds by
+    /// `(p1[2], carried_mm2 descending, terminal)`. Every one of those three
+    /// keys is a function of the fields asserted below — the seat, the carried
+    /// area, and the contact's own identity — so a cadence built from
+    /// survivors that are bit-identical is bit-identical. Re-implementing that
+    /// comparator here would test a copy of the rule instead of the rule.
+    ///
+    /// **The fixture, and why it is the THIN FIN.** A fixture only proves this
+    /// if its replay would really have moved something, so the four procedural
+    /// specialized fixtures were measured on the pre-change tree, 2026-08-21,
+    /// over their first 60 unoccupied pool rows each:
+    ///
+    /// | fixture | contacts | load rows | appends that moved a survivor's load |
+    /// | --- | --- | --- | --- |
+    /// | overhang table | 95 | 14 | 0 / 60 |
+    /// | toed slab | 73 | 7 | 0 / 60 |
+    /// | raking blade | 40 | 13 | 0 / 60 |
+    /// | **thin fin** | **19** | **2** | **21 / 60** |
+    ///
+    /// The first three are silent because their eligibility is coarse — 7 to 14
+    /// faces against 40 to 95 contacts, so a new seat almost never becomes the
+    /// nearest for any of them. The thin fin has TWO load faces and 19
+    /// contacts, and an appended seat wins one of them better than a third of
+    /// the time. Sweeping rows one at a time across both a silent fixture and
+    /// the loud one is deliberate: the table shows the common case is
+    /// untouched, and the fin is the revert-proof half.
+    ///
+    /// **Revert-proof, MEASURED 2026-08-21:** with `append_regular_repair_rows`
+    /// routed back through the unconditional replay
+    /// (`derive_child_from(.., None)`) this test fails on the very first thin-fin
+    /// row, and it fails LOUDLY rather than by an ulp: `thin fin: contact 2
+    /// carried 40 mm² and now carries 0 mm²`. The appended seat takes the whole
+    /// face off its incumbent, which is exactly the hand-to-hand pass task #68
+    /// measured 182 times on the dust fixture.
+    #[test]
+    fn an_append_moves_no_other_contacts_load_route_or_cadence_key() {
+        for (mesh, name) in [
+            (make_overhang_table().unwrap(), "overhang table"),
+            (make_thin_fin().unwrap(), "thin fin"),
+        ] {
+            let (_mesh, _generic, plan) =
+                edit_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
+            let routes = plan
+                .contacts()
+                .iter()
+                .filter_map(|contact| contact.regular_routes().first().copied())
+                .map(|route| (route.owner_island_id(), route.component_id()))
+                .collect::<BTreeSet<_>>();
+            let mut rows = Vec::new();
+            for (owner_island_id, component_id) in routes {
+                rows.extend(
+                    plan.eligible_repair_rows(owner_island_id, component_id, &BTreeSet::new())
+                        .unwrap()
+                        .into_iter()
+                        .filter(|row| {
+                            plan.contacts()
+                                .iter()
+                                .all(|contact| contact.position_mm() != row.candidate().point_mm)
+                        })
+                        .map(|row| row.id()),
+                );
+            }
+            assert!(
+                rows.len() >= 60,
+                "{name}: the sweep needs unoccupied pool rows to append"
+            );
+            let mut appended_rows = 0usize;
+            for &row in rows.iter().take(60) {
+                let child = plan
+                    .begin_regular_edit()
+                    .unwrap()
+                    .append_regular_repair_row(row)
+                    .unwrap_or_else(|error| panic!("{name}: append {row:?} refused: {error:?}"));
+                appended_rows += 1;
+                assert_append_charged_only_what_it_newly_took(&plan, &child, name);
+            }
+            assert_eq!(appended_rows, 60, "{name}: every swept row must append");
+        }
+    }
+
+    /// The whole of task #68 contract (1), asserted on one parent/child pair.
+    fn assert_append_charged_only_what_it_newly_took(
+        plan: &SpecializedContactPlan,
+        child: &SpecializedContactPlan,
+        name: &str,
+    ) {
+        assert_eq!(child.contacts().len(), plan.contacts().len() + 1);
+        let appended_id = child
+            .contacts()
+            .last()
+            .expect("the child has the appended contact")
+            .contact_id();
+
+        // 1. Every other contact is the same record, to the bit.
+        for (before, after) in plan.contacts().iter().zip(child.contacts()) {
+            assert_eq!(before.contact_id(), after.contact_id());
+            assert_eq!(
+                before.carried_area_mm2().to_bits(),
+                after.carried_area_mm2().to_bits(),
+                "{name}: contact {} carried {} mm² and now carries {} mm²; an append must charge \
+                 the new row only what it NEWLY takes",
+                before.contact_id(),
+                before.carried_area_mm2(),
+                after.carried_area_mm2()
+            );
+            assert_eq!(before.position_mm(), after.position_mm());
+            assert_eq!(before.normal(), after.normal());
+            assert_eq!(before.seat_provenance(), after.seat_provenance());
+            assert_eq!(before.primary_regular(), after.primary_regular());
+            assert_eq!(
+                before.regular_routes(),
+                after.regular_routes(),
+                "{name}: contact {}'s route list moved",
+                before.contact_id()
+            );
+            assert_eq!(before.demands(), after.demands());
+        }
+
+        // 2. Every prior load row survives verbatim, and nothing but the
+        //    appended contact appears in a new one.
+        let kept = child
+            .load_partition()
+            .rows()
+            .iter()
+            .filter(|row| row.contact_id != appended_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            plan.load_partition().rows().to_vec(),
+            "{name}: an append must copy the prior partition's rows, not re-derive them"
+        );
+
+        // 3. The appended contact takes only load nothing carried before, and
+        //    the ledger conserves: charged + disclosed is unchanged except for
+        //    what the appended contact newly picked up.
+        let before_charged = plan
+            .load_partition()
+            .rows()
+            .iter()
+            .map(|row| row.carried_area_mm2)
+            .sum::<f64>();
+        let after_charged = child
+            .load_partition()
+            .rows()
+            .iter()
+            .map(|row| row.carried_area_mm2)
+            .sum::<f64>();
+        assert!(
+            after_charged >= before_charged,
+            "{name}: an append can only ever ADD charge: {before_charged} -> {after_charged}"
+        );
+        let before_disclosed = plan
+            .load_partition()
+            .ownerless_faces()
+            .iter()
+            .map(|face| face.area_mm2)
+            .sum::<f64>();
+        let after_disclosed = child
+            .load_partition()
+            .ownerless_faces()
+            .iter()
+            .map(|face| face.area_mm2)
+            .sum::<f64>();
+        assert!(
+            after_disclosed <= before_disclosed,
+            "{name}: an append can only ever REDUCE what nothing carries: {before_disclosed} -> \
+             {after_disclosed}"
+        );
+        assert!(
+            ((after_charged - before_charged) - (before_disclosed - after_disclosed)).abs()
+                < 1.0e-12,
+            "{name}: what the appended contact gained must be exactly what the disclosure lost"
+        );
+
+        // 4. Contract (2) at this seam: the appended contact is never handed a
+        //    block above the area law's single-contact maximum.
+        let maximum = crate::perception::registered_max_carriable_area_mm2()
+            .expect("registered area law maximum");
+        for row in child
+            .load_partition()
+            .rows()
+            .iter()
+            .filter(|row| row.contact_id == appended_id)
+        {
+            assert!(
+                row.carried_area_mm2 <= maximum,
+                "{name}: face {} charged {} mm² to the appended contact; the law allows {maximum} \
+                 mm² on one contact",
+                row.face_id,
+                row.carried_area_mm2
+            );
+        }
+    }
+
     /// FU-56 test #6: `append_regular_repair_rows(&[r])` is byte-identical to
     /// `append_regular_repair_row(r)` — there is one implementation, not two
     /// that could drift.
@@ -13114,20 +13480,41 @@ mod tests {
         assert_eq!(batched.finalized_load_plan_digest(), batched.digest());
     }
 
-    /// FU-56 tests #1-#3: nomination is deterministic, never nominates an
-    /// occupied or `failed` row, and stays inside a blocking patch's own
-    /// `(island_id, component_id)`.
+    /// **FU-56 tests #1–#3, ported onto the shipped ranking at §G.1 stage 4.**
+    ///
+    /// The retired `nominate_repair_rows` picked one row per patch per attempt.
+    /// `rank_repair_candidates` replaces it, and the three properties this test
+    /// was written for are properties of ELIGIBILITY, not of picking, so all
+    /// three carry over unchanged:
+    ///
+    /// * **deterministic** — repeated calls on the same plan are byte-identical;
+    /// * **never an occupied row** — a seat already held by a contact in the
+    ///   accepted plan is not offered;
+    /// * **never a ledgered row** — SPEC §6's "exact failed rows are excluded",
+    ///   which the one-winner controller fills with rows a TRIAL rolled back
+    ///   (the batch loop's identically-named set never was that);
+    /// * **only worklist routes** — a row whose own `(island_id,
+    ///   component_id)` is not on the worklist is not eligible at all.
+    ///
+    /// **The one property that legitimately changed, from→to.** The batch
+    /// version also asserted that a nominated row's SCORE stayed inside its own
+    /// key. That is rule N2's deletion (design §A.4): the score is now GLOBAL,
+    /// because a contact covers whatever falls inside its coverage radius and
+    /// does not know about island ids. Route-local scoring under-valued exactly
+    /// the rows task #27 exists to keep. The ROUTE that owns a row is unchanged
+    /// and is still asserted; only the sample set the row is scored against is
+    /// wider, and `scored_from` is what makes that visible.
     #[test]
-    fn coverage_closure_nomination_is_deterministic_and_respects_occupancy_and_failed_rows() {
+    fn coverage_closure_ranking_is_deterministic_and_respects_occupancy_and_ledgered_rows() {
         let (_mesh, _generic, plan) =
-            edit_fixture(make_overhang_table().unwrap(), "closure nomination")
+            edit_fixture(make_overhang_table().unwrap(), "closure ranking")
                 .unwrap_or_else(|error| panic!("{error}"));
 
         let mut seen_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
-        let mut blocking = Vec::new();
+        let mut worklist = Vec::new();
         for sample in plan.coverage_samples() {
             if seen_keys.insert((sample.island_id, sample.component_id)) {
-                blocking.push(crate::coverage_closure::BlockingPatchKey {
+                worklist.push(crate::coverage_closure::BlockingPatchKey {
                     island_id: sample.island_id,
                     component_id: sample.component_id,
                     representative_face_id: sample.face_id,
@@ -13137,38 +13524,38 @@ mod tests {
                 });
             }
         }
-        assert!(!blocking.is_empty(), "required fixture has coverage samples");
+        assert!(!worklist.is_empty(), "required fixture has coverage samples");
 
         // This fixture stands in for a measurement in which every sample is
-        // still uncovered, which is what the synthetic blocking set above
-        // claims. Nomination scores against exactly this set (FU-56 fix:
-        // never against covered samples on a partially covered face).
+        // still uncovered, which is what the synthetic worklist above claims.
+        // The ranking scores against exactly this set — never against covered
+        // samples on a partially covered face.
         let uncovered: Vec<usize> = (0..plan.coverage_samples().len()).collect();
-        let empty_failed = BTreeSet::new();
-        let first = crate::coverage_closure::nominate_repair_rows(
+        let empty_ledger = BTreeSet::new();
+        let first = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &uncovered,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        let second = crate::coverage_closure::nominate_repair_rows(
+        let second = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &uncovered,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
         assert_eq!(
             first, second,
-            "nomination must be byte-identical across repeated calls on the same plan"
+            "the ranking must be byte-identical across repeated calls on the same plan"
         );
         assert!(
-            !first.rows.is_empty(),
+            !first.ranked.is_empty(),
             "required fixture has at least one eligible repair row"
         );
 
@@ -13178,63 +13565,76 @@ mod tests {
             .into_iter()
             .map(|occupancy| occupancy.row_id())
             .collect();
-        for &row_id in &first.rows {
+        for row in &first.ranked {
             assert!(
-                !occupied.contains(&row_id),
-                "an occupied row must never be nominated"
+                !occupied.contains(&row.id),
+                "an occupied row must never be ranked"
             );
             assert!(
-                seen_keys.contains(&(row_id.owner_island_id(), row_id.component_id())),
-                "nomination must stay inside a blocking patch's own island/component"
+                seen_keys.contains(&(row.id.owner_island_id(), row.id.component_id())),
+                "only a row whose OWN route is on the worklist may be eligible"
             );
         }
 
-        let already_nominated = *first.rows.first().expect("checked non-empty above");
-        let mut failed_with_row = BTreeSet::new();
-        failed_with_row.insert(already_nominated);
-        let excluded = crate::coverage_closure::nominate_repair_rows(
-            &plan,
-            &blocking,
-            &uncovered,
-            6.0,
-            65_536,
-            &failed_with_row,
+        let already_ranked = first.ranked.first().expect("checked non-empty above").id;
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(already_ranked);
+        let excluded = crate::coverage_closure::rank_repair_candidates(
+            &plan, &worklist, &uncovered, 6.0, 65_536, &ledgered,
         )
         .unwrap();
         assert!(
-            !excluded.rows.contains(&already_nominated),
-            "a row recorded as failed must never be re-nominated"
+            !excluded.ranked.iter().any(|row| row.id == already_ranked),
+            "a row a trial rolled back must never be offered again — SPEC §6's exact-failed-row \
+             exclusion"
         );
-        // FU-56 (2026-08-12 fix): every blocking key is accounted for, so a
-        // refusal can say per island whether it was ever attempted at all.
+
+        // Every worklist key is accounted for, so a refusal can say per island
+        // whether it had anything to try at all. A key with zero eligible rows
+        // must still appear, with zero.
         assert_eq!(
             first.per_key.len(),
             seen_keys.len(),
-            "every blocking (island, component) key must be recorded, including keys with zero eligible rows"
+            "every worklist (island, component) key must be recorded, including keys with zero \
+             eligible rows"
         );
         for (key, counts) in &first.per_key {
-            assert!(
-                counts.nominated_rows <= counts.eligible_rows,
-                "key {key:?} nominated more rows than it had eligible"
+            let ranked_here = first.ranked.iter().filter(|row| row.key == *key).count();
+            assert_eq!(
+                ranked_here, counts.eligible_rows,
+                "key {key:?} reports {} eligible rows but {ranked_here} reached the ranking; \
+                 the count a refusal prints must be the count the search actually had",
+                counts.eligible_rows
             );
         }
     }
 
-    /// FU-56 (2026-08-12 fix): nomination scores against the samples the
-    /// measurement found UNCOVERED, never against every sample on a blocking
-    /// patch's faces. Scoring a candidate against already-covered area is how
-    /// a row beside a large covered region outranks the row that closes the
-    /// residual gap — and because the score set is fixed across attempts,
-    /// that mis-ranking burns the whole attempt bound while a viable closer
-    /// waits below it.
+    /// **FU-56's scoring fix, ported onto the shipped ranking at §G.1 stage 4 —
+    /// INTENT UNCHANGED.**
+    ///
+    /// The claim is the same one it always was: the score follows the samples
+    /// the measurement found UNCOVERED, never every sample on a worklist
+    /// patch's faces. Scoring a candidate against already-covered area is how a
+    /// row beside a large covered region outranks the row that closes the
+    /// residual gap — and because that score set does not change while the
+    /// search runs, the mis-ranking burns the whole budget while a viable
+    /// closer waits below it.
+    ///
+    /// **What moved:** the batch version compared which ROW was nominated. Here
+    /// nothing is "nominated" — the ranking holds every eligible row (rule N1)
+    /// and the controller takes the head of it — so the assertion is on the
+    /// ORDER, which is the thing the score decides, and on the score itself
+    /// falling when the uncovered set shrinks. That is a strictly stronger read
+    /// of the same property: a scorer blind to coverage state would keep both
+    /// the head row AND its score.
     #[test]
-    fn coverage_closure_nomination_scores_only_the_uncovered_samples() {
+    fn coverage_closure_ranking_scores_only_the_uncovered_samples() {
         let (_mesh, _generic, plan) =
-            edit_fixture(make_overhang_table().unwrap(), "closure nomination scoring")
+            edit_fixture(make_overhang_table().unwrap(), "closure ranking scoring")
                 .unwrap_or_else(|error| panic!("{error}"));
 
-        // One blocking key, its own faces, and two different claims about
-        // which of its samples are still uncovered.
+        // One worklist key, its own faces, and two different claims about which
+        // of its samples are still uncovered.
         let first_sample = plan.coverage_samples().first().expect("fixture samples");
         let key = (first_sample.island_id, first_sample.component_id);
         let indices_for_key: Vec<usize> = plan
@@ -13254,7 +13654,7 @@ mod tests {
             .collect();
         faces.sort_unstable();
         faces.dedup();
-        let blocking = vec![crate::coverage_closure::BlockingPatchKey {
+        let worklist = vec![crate::coverage_closure::BlockingPatchKey {
             island_id: key.0,
             component_id: key.1,
             representative_face_id: faces[0],
@@ -13263,33 +13663,55 @@ mod tests {
             worst_gap: crate::coverage_closure::CoverageClosureGap::Finite(0.5),
         }];
 
-        let empty_failed = BTreeSet::new();
-        let all_uncovered = crate::coverage_closure::nominate_repair_rows(
+        let empty_ledger = BTreeSet::new();
+        let all_uncovered = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &indices_for_key,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        // The same patch, but with only its LAST sample still uncovered: a
-        // face that is almost entirely covered with one residual gap.
+        // The same patch, but with only its LAST sample still uncovered: a face
+        // that is almost entirely covered with one residual gap.
         let residual = vec![*indices_for_key.last().expect("non-empty")];
-        let residual_only = crate::coverage_closure::nominate_repair_rows(
+        let residual_only = crate::coverage_closure::rank_repair_candidates(
             &plan,
-            &blocking,
+            &worklist,
             &residual,
             6.0,
             65_536,
-            &empty_failed,
+            &empty_ledger,
         )
         .unwrap();
-        assert!(!all_uncovered.rows.is_empty() && !residual_only.rows.is_empty());
+        assert!(!all_uncovered.ranked.is_empty() && !residual_only.ranked.is_empty());
+        assert_eq!(
+            all_uncovered.ranked.len(),
+            residual_only.ranked.len(),
+            "the ELIGIBLE set is a property of the plan and the worklist, not of the uncovered \
+             samples; only the order and the scores may move"
+        );
+
+        let broad_head = all_uncovered.ranked.first().expect("non-empty");
+        let residual_head = residual_only.ranked.first().expect("non-empty");
         assert_ne!(
-            all_uncovered.rows, residual_only.rows,
-            "the nominated row must follow the uncovered set: if it does not, the score is \
-             blind to coverage state and the controller cannot close a residual gap"
+            broad_head.id, residual_head.id,
+            "the winning row must follow the uncovered set: if it does not, the score is blind \
+             to coverage state and the controller cannot close a residual gap"
+        );
+        assert!(
+            residual_head.marginal_area_mm2 < broad_head.marginal_area_mm2,
+            "one residual sample cannot be worth as much covered area as the whole patch; a \
+             score that did not fall is a score that never read the uncovered set: {} mm² \
+             against {} mm²",
+            residual_head.marginal_area_mm2,
+            broad_head.marginal_area_mm2
+        );
+        assert!(
+            residual_head.marginal_area_mm2 > 0.0,
+            "the residual gap is still real area, and a winner that covers nothing would be \
+             stopped by §B.3's zero-score guard before it ever became a trial"
         );
     }
 
@@ -13553,6 +13975,7 @@ mod tests {
                 config: AnchorSearchConfig::current().unwrap(),
                 process_resolution_mm: 0.05,
             },
+            None,
         );
         assert!(matches!(result, Err(CcoError::FinalizedContactMismatch)));
         assert_eq!(forest.digest(), before);

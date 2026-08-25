@@ -230,6 +230,7 @@ fn print_model(model: &ModelPreparationReport) {
             savings_shortfall,
             ownerless_islands,
             contacts,
+            ..
         } => {
             println!(
                 "  result  EMITTED  {}  ({} support records, {} bytes)",
@@ -404,7 +405,38 @@ fn print_model(model: &ModelPreparationReport) {
             println!("  result  STOPPED after {after:?}");
         }
     }
+    for line in coverage_repair_lines(model) {
+        println!("{line}");
+    }
     print_coverage_evidence(model);
+}
+
+/// **SPEC-A4 §A.8's third destination: what the one-winner coverage-repair
+/// controller SPENT on this model.** One line, every disposition — emitted,
+/// gate-refused, or failed.
+///
+/// **Printed unconditionally, and deliberately not behind a verbosity
+/// switch.** Ruling R10 deleted the failed-tries cap and put visibility in its
+/// place; a cost printed only when someone asks for it is a cost that is
+/// hidden, and the trade R10 made would not hold. `trials=0 commits=0` is the
+/// ordinary model that covered on its baseline layout and paid nothing, and
+/// saying so is what makes the expensive model legible beside it.
+///
+/// **Outside the disposition match, on purpose.** This used to be printed
+/// inside the `Artifact` arm, which put it on the sealed path only — and the
+/// refused path is the one with no failed-tries cap, the one that runs the
+/// candidate pool all the way out, the expensive half. Reading it through
+/// [`ModelPreparationOutcome::repair_report`] out here means one call site
+/// instead of one per variant, and that accessor's match is exhaustive, so a
+/// new disposition is a compile error rather than another silent omission.
+///
+/// Built rather than printed for the `repair_lines` pattern's reason: what
+/// gets reported is testable without capturing stdout.
+fn coverage_repair_lines(model: &ModelPreparationReport) -> Vec<String> {
+    let Some(repair) = model.outcome.repair_report() else {
+        return Vec::new();
+    };
+    vec![format!("  coverage repair  {}", repair.summary_line())]
 }
 
 /// **The `remedies tried` line under one ABANDONED LOAD, in full.**
@@ -667,10 +699,10 @@ mod tests {
     use plinth_mesh::RepairEvidence;
     use plinth_pipeline::{
         CoverageClosureGap, CoverageRefusalEvidence, EvidenceSource, ModelPreparationOutcome,
-        ModelPreparationReport, UncoveredIslandSummary,
+        ModelPreparationReport, RepairRunReport, UncoveredIslandSummary,
     };
 
-    use super::{coverage_lines, remedies_tried_line, repair_lines};
+    use super::{coverage_lines, coverage_repair_lines, remedies_tried_line, repair_lines};
 
     fn report(repair: Option<RepairEvidence>) -> ModelPreparationReport {
         ModelPreparationReport {
@@ -881,6 +913,66 @@ mod tests {
         );
     }
 
+    /// **SPEC-A4 §A.8's third destination is printed on EVERY disposition, not
+    /// only the one that emitted.**
+    ///
+    /// Ruling R10 removed the failed-tries cap and paid for it with
+    /// visibility. The refused path is where the cap used to bite — no cap, so
+    /// the candidate pool runs all the way out — and it was the one path whose
+    /// spend never reached the owner's summary. The three asserts below are
+    /// the sabotage-visible ones: drop the print out of any disposition and
+    /// one of them goes red.
+    #[test]
+    fn the_repair_spend_is_printed_on_the_refused_and_failed_cards_too() {
+        let spent = RepairRunReport {
+            trials: 45,
+            commits: 0,
+            candidates_remaining: 0,
+            ..RepairRunReport::default()
+        };
+        let refused = coverage_repair_lines(&with_outcome(ModelPreparationOutcome::Refused {
+            gate: Some(plinth_pipeline::PreWriteGate::UncoveredIslands),
+            geometry: None,
+            violation: "nine uncovered islands".to_owned(),
+            evidence: None,
+            repair_report: Some(Box::new(spent.clone())),
+        }));
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].contains("coverage repair")
+                && refused[0].contains("trials=45")
+                && refused[0].contains("commits=0"),
+            "a gate-refused model must state what the controller spent: {refused:?}"
+        );
+
+        let failed = coverage_repair_lines(&with_outcome(ModelPreparationOutcome::Failed {
+            exit_code: plinth_pipeline::PipelineExitCode::Supports,
+            detail: "coverage closure refused".to_owned(),
+            evidence: None,
+            repair_report: Some(Box::new(spent)),
+        }));
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].contains("trials=45") && failed[0].contains("remaining=0"),
+            "a controller-refused model must state what the controller spent: {failed:?}"
+        );
+
+        // And silence where there is genuinely no ledger: a model that never
+        // reached a sealed run must not print `trials=0`, which would claim
+        // the loop ran and found nothing to do.
+        let unreadable = coverage_repair_lines(&with_outcome(ModelPreparationOutcome::Failed {
+            exit_code: plinth_pipeline::PipelineExitCode::Input,
+            detail: "not a binary STL".to_owned(),
+            evidence: None,
+            repair_report: None,
+        }));
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        let stopped = coverage_repair_lines(&with_outcome(ModelPreparationOutcome::Stopped {
+            after: plinth_pipeline::StageStop::Decimate,
+        }));
+        assert!(stopped.is_empty(), "{stopped:?}");
+    }
+
     fn island(id: u32, area: f64, gap: CoverageClosureGap, faces: usize) -> UncoveredIslandSummary {
         UncoveredIslandSummary {
             island_id: id,
@@ -913,12 +1005,14 @@ mod tests {
             geometry: None,
             violation: "unrelated".to_owned(),
             evidence: None,
+            repair_report: None,
         }))
         .is_empty());
         assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
             exit_code: plinth_pipeline::PipelineExitCode::Supports,
             detail: "unrelated stage failure".to_owned(),
             evidence: None,
+            repair_report: None,
         }))
         .is_empty());
     }
@@ -955,6 +1049,7 @@ mod tests {
             violation: "gate UncoveredIslands refused emission with 4 blocking defect(s)"
                 .to_owned(),
             evidence: Some(Box::new(evidence)),
+            repair_report: None,
         }));
 
         assert!(
@@ -1020,6 +1115,7 @@ mod tests {
             exit_code: plinth_pipeline::PipelineExitCode::Supports,
             detail: "coverage closure refused".to_owned(),
             evidence: Some(Box::new(evidence)),
+            repair_report: None,
         }));
         assert!(lines[0].contains("1 island(s), 1 shown worst-first"), "{lines:?}");
         assert!(

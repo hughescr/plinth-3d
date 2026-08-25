@@ -72,6 +72,7 @@ mod coverage;
 /// [`coverage_closure::registered_coverage_request`].
 pub mod coverage_closure;
 mod coverage_measurement;
+pub mod coverage_repair;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints
 // never fired on it before. The consumers that must mint and read these masks
 // (brace/cco/rewire) are gated on the open owner decisions recorded in
@@ -94,6 +95,21 @@ pub(crate) mod initial;
 )]
 mod joints;
 pub mod legacy_compat;
+/// **Stage B's vocabulary** — the steering no-good and the confirmation round.
+/// Deliberately its own module: the one hard obligation on the mechanism is
+/// that the no-good set is never a field of anything a `digest()` walks, and a
+/// set that lives in a module of its own, reached only as a borrowed
+/// parameter, is easier to keep that way than one folded into the controller.
+#[allow(
+    dead_code,
+    reason = "the vocabulary and its tests land one commit ahead of the attempt-0 loop that \
+              mints, holds and drives it — the ordering is deliberate, because the \
+              digest-isolation proof this module carries is what makes the loop's termination \
+              argument non-circular and it must be green BEFORE the loop exists; \
+              docs/engineering-journal/designs/seal-semantics-2026-08-22.md section 4 Stage B \
+              pieces 3-5 name every reader"
+)]
+pub(crate) mod legalization;
 #[allow(
     dead_code,
     reason = "crate-private current-parity lowering is consumed by the pending support runner"
@@ -112,6 +128,12 @@ pub(crate) mod rewire;
     reason = "crate-private sealed preparation is consumed by the pending support controller"
 )]
 pub(crate) mod runner;
+#[allow(
+    dead_code,
+    reason = "the frozen seat zone lands one commit ahead of the clearance sites that read it; \
+              docs/engineering-journal/designs/honest-exemption-2026-08-22.md section 8 names them"
+)]
+pub(crate) mod seat_zone;
 pub mod specialized;
 pub mod transient;
 #[allow(
@@ -129,24 +151,31 @@ use thiserror::Error;
 
 pub use coverage_closure::{
     coverage_patch_blocks_verdict, coverage_patch_needs_repair,
-    registered_coverage_censor_area_mm2, registered_coverage_request, CoverageClosureAttempt,
+    registered_coverage_censor_area_mm2, registered_coverage_request, BlockedCause,
     CoverageClosureGap, CoverageClosureIsland, CoverageClosureReason, CoverageClosureRefusal,
-    CoverageClosureSetupError,
+    CoverageClosureSetupError, CoverageScoreShare, RouteRepairOutcome,
 };
 pub use coverage_measurement::{
     CoverageGap, CoverageMeasurement, CoverageMeasurementError, CoverageMeasurementEvidence,
     CoverageMeasurementIslandEvidence, CoverageMeasurementLimits, CoverageMeasurementPatchEvidence,
     CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
 };
+pub use coverage_repair::{
+    repair_step_outcome, ConfirmationRoundDisclosure, ConfirmationRoundOutcome, CoverageRepairStep,
+    CoverageRepairStepWire, LegalizationDisclosure, LegalizationDisturbance, NoncoverageComponent,
+    NoncoverageVector, OwnContactNoWinnerEvidence, OwnContactNoWinnerStage, RepairGateVector,
+    RepairRunReport, RepairStepOutcome, RouteDelta, StageClock,
+};
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, AbandonedContactDisclosure, FinalLiveMemberEvidence, FinalSupportAuthority,
-    GrownContactTipDisclosure, OwnerlessIslandDisclosure, RoutedPhysicalContactEvidence,
-    SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
-    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
-    TipGrowthRungDisclosure, UnroutedContactReason, UnroutedRegularRemoval,
-    UnroutedSpecializedContact,
+    run_support, AbandonedContactDisclosure, EmittedContactDisclosure, FinalLiveMemberEvidence,
+    FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
+    RoutedPhysicalContactEvidence, SupportPreparationInput, SupportPreparationLimits,
+    SupportPreparationLimitsError, SupportRunError, SupportRunPhase, SupportVerificationError,
+    SupportVerificationSnapshot, TipGrowthRungDisclosure, UnroutedContactReason,
+    UnroutedRegularRemoval, UnroutedSpecializedContact,
 };
+pub use specialized::{RepairRowSource, RepairRowWire};
 
 /// Request data shared by the support and raft pass.
 #[derive(Clone, Debug, PartialEq)]
@@ -1661,12 +1690,30 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct CoverageObjective {
-    pub(crate) failing_uncovered_area_mm2: f64,
-    pub(crate) max_patch_area_mm2: f64,
-    pub(crate) failing_patch_count: usize,
-    pub(crate) worst_gap_mm: f64,
+/// **SPEC-A3-A4-COVERAGE.md §6 clause 1's objective, in the spec's own order.**
+///
+/// > the coverage objective strictly improves lexicographically in this order:
+/// > total failing area, maximum failing-patch area, failing-patch count,
+/// > worst gap
+///
+/// Censored, because §6 says "failing": a patch counts here only if its
+/// uncovered area is above the registered A3 censor (`voxel_pitch_mm²`,
+/// 0.16 mm²) or it touches an ambiguous topology cut. Sub-censor dust is
+/// §4's "diagnostic only" and may not justify committing a contact.
+///
+/// `worst_gap_mm` is `+inf` when a failing route has no routed contact at all;
+/// `specialized::coverage_key` orders that as worse than any finite distance,
+/// which is the reading the pre-write gate already uses.
+///
+/// Public since the A4 controller: it is the quantity the accept test compares
+/// and the quantity the refusal evidence prints, so it crosses the crate
+/// boundary into `plinth-pipeline`'s sidecar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoverageObjective {
+    pub failing_uncovered_area_mm2: f64,
+    pub max_patch_area_mm2: f64,
+    pub failing_patch_count: usize,
+    pub worst_gap_mm: f64,
 }
 
 pub(crate) struct CoverageAssessment {

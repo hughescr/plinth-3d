@@ -742,6 +742,17 @@
       "provenance_detail": "native writer compatibility version checked before emission and by the ChituBox test gate"
     },
     {
+      "id": "FINAL_CLEARANCE_GAP_MM",
+      "classification": "external_requirement",
+      "normative": "03-physics-and-constants.md §3.5 = 0.300 mm TRUE surface-to-surface gap. CLASS: EXTERNAL REQUIREMENT -- field data, NOT physics. Craig ruling 2026-08-22, provenance verbatim: \"0.3mm gap features are preserved fine in prints\". THE QUANTITY: the shortest distance from the arm's own SOLID SURFACE to the model surface, i.e. the kernel's axis-to-surface distance minus the arm radius at the nearest station; never a centreline distance and never a radius. WHAT IT DECIDES: the FINAL clearance pass only -- the pass whose verdict refuses an arm (brace::exact_clearance_rows and the grading of load-assigned radii), over BOTH contact-declaring members (struts, model rungs, CCO model anchors) and non-contact members (shoots, transients). It is the only refusing clearance number in the engine. WHAT IT IS NOT: the placement-family search margin; that is STANDOFF_MM = 0.600 mm, which prunes a search and refuses nothing final. The two-tier split of 2026-08-22 is why these are two registered numbers with two jobs; both stages call the SAME shared clearance predicate and each reads its own registered value through ContactPolicy, so the math is never forked. HONESTY PRECONDITION: this number only means what it says because the predicate it feeds grades a TRUE gap. Before the honest-exemption change of the same date the test skipped a radius-proportional length of every contact-declaring arm and read its verdict at the boundary station; the measured audit (.git/mask-honesty-evidence, Giant Bat slots 250/377) found that rule excusing an arm 0.242 mm INSIDE the model while refusing a same-axis thinner arm with 0.569 mm of real gap. No physics derives 0.300 mm and none is claimed; it is registered as an external requirement so a future coupon measurement of gap-feature preservation supersedes it rather than colliding with it.",
+      "source_locators": [
+        "docs/engineering-journal/03-physics-and-constants.md:heading 3.5 Routing / clearance",
+        "crates/plinth-support/src/brace.rs:exact_clearance_rows"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"final-clearance-demanded-gap-owner-field-data\", record=\"docs/engineering-journal/03-physics-and-constants.md\", locator=\"§3.5\", date=exact(\"2026-08-22\")); err=null"
+    },
+    {
       "id": "FLARE_LEN_MM",
       "classification": "runtime_geometry",
       "normative": "03-physics-and-constants.md §3.2 = 1.5 mm",
@@ -2174,12 +2185,14 @@
     {
       "id": "STANDOFF_MM",
       "classification": "runtime_routing",
-      "normative": "03-physics-and-constants.md §3.5 = 0.6 mm; Placeholder clearance policy",
+      "normative": "03-physics-and-constants.md §3.5 = 0.600 mm TRUE surface-to-surface gap. THE PLACEMENT-FAMILY DEMANDED GAP, relabelled honestly on 2026-08-22 (this entry previously said only 'legacy clearance policy'). ROLE: SEARCH MARGIN -- it PRUNES and refuses nothing final. Its readers are CCO candidacy clearance_survival, rewire changed-set validation, and brace evaluate_candidates; a candidate any of them drops loses a tournament entry, it does not condemn a contact or a model. The brace reader is there by owner ruling R-1495 of 2026-08-22: brace::evaluate_candidates grades a per-(need, site) candidate TOURNAMENT, refuses no model, and Unplaceable is an accepted termination. The FINAL, refusing demand is the separately registered FINAL_CLEARANCE_GAP_MM = 0.300 mm (Craig ruling 2026-08-22). ONE PREDICATE, TWO DEMANDS: both stages call the same shared clearance functions and each reads its own registered value through ContactPolicy. HISTORY RECOVERED (mask-honesty audit, 2026-08-22) -- the reason the old 'legacy' label was not good enough: the value was selected against a v0 CENTERLINE clearance test, where the quantity compared against 0.6 was an AXIS-to-surface distance, so 0.6 of demand meant roughly 0.6 MINUS THE ARM RADIUS of real surface-to-surface gap -- about 0.2 mm on a 0.4 mm-radius arm. The kernel now subtracts the radius itself (seg_clear_one_excluding tests best_d - (r_max + standoff)), so the SAME 0.6 demands a full 0.6 mm of TRUE gap: the number never moved, the quantity under it did, and the demand silently tightened by one arm radius. That is a placeholder's history, not a derivation. UNITS: mm of TRUE gap, arm surface to model surface.",
       "source_locators": [
-        "scripts/support_placement/config.py:standoff_mm"
+        "scripts/support_placement/config.py:standoff_mm",
+        "crates/plinth-support/src/cco.rs:clearance_rows",
+        "crates/plinth-support/src/rewire.rs:validate_changed_geometry"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "non-AcceptSafe legacy clearance policy; corpus use does not derive the selected distance"
+      "provenance_detail": "non-AcceptSafe placement-family search margin; no measurement derives the selected distance. Its recovered history is a v0 CENTERLINE test in which 0.6 meant about 0.6-minus-arm-radius of true gap; the predicate under it has since changed to a true-gap test while the number stayed, so the demand tightened by one arm radius without a decision. Registered as a search margin that prunes, never as a refusing gate -- the refusing number is FINAL_CLEARANCE_GAP_MM."
     },
     {
       "id": "STRUT_FALLBACK_MAX_ANGLE_DEG",
