@@ -2292,7 +2292,68 @@ mod tests {
                 // digest anywhere is re-frozen by this line, and nothing here
                 // touches the coverage radius, the patch-area minimum, the
                 // zero-tolerance verdict, or any registered constant.
-                "Sphere.prepped.stl" => true,
+                //
+                // Re-recorded an EIGHTH time, 2026-08-23, by `a4f5f3f` —
+                // feat(support): re-size a seated arm's exemption to its final
+                // footprint (#36 F1); Craig's ruling of 2026-08-23
+                // (docs/engineering-journal/designs/honest-exemption-2026-08-22.md
+                // §11.9); landed via the #77/f1 lane, merged to develop at
+                // `7e11319` / `225b6a7` — true -> false, with this attribution
+                // rather than an edited expectation.
+                //
+                // **MEASURED at BOTH ends, this row's own `outcome` closure,
+                // same process, same settings.** The negative control is
+                // `600be86`, the f1 lane's own branch point, which reproduces
+                // the SEVENTH re-record exactly:
+                //
+                //   at 600be86: measured -> Err("sealed support run failed
+                //               during Lowering: Lowering(RootRunTooShort
+                //               { member: MemberKey { slot: 32, generation: 0 } })")
+                //               zeros    -> byte-identical, slot 32.
+                //               One refusal, identical text: neutral (true).
+                //   at 225b6a7: measured -> the same string with slot 40.
+                //               zeros    -> the same string with slot 38.
+                //               Two refusals, DIFFERENT text: divergent (false).
+                //
+                // **The mechanism.** `refreeze_resized_seat_zones` re-cuts
+                // seated anchors' exemption zones at their final radius; on the
+                // Sphere 90 of 1,383 calls re-cut, 237 zones total, every
+                // re-cut row `kind=Strut end=Rootward` (model anchors, zero
+                // stubs); band 0.95 mm at creation
+                // (`min_shoot_radius` 0.35 mm + `STANDOFF_MM` 0.6 mm) widens to
+                // 1.016-1.165 mm after sizing. The wider exemption changes
+                // which anchors survive `clearance_survival`, which changes the
+                // forest, and the two fields' first `RootRunTooShort` offenders
+                // land on different members (slots 40 vs 38). This is FU-38's
+                // delicacy tie-break in contact selection, visible through the
+                // failing member's identity — the same mechanism and the same
+                // slot numbers the SIXTH re-record recorded; the SEVENTH's
+                // neutral state is restored away by the ruled widening.
+                // `RootRunTooShort` itself is #29's pre-existing defect,
+                // untouched.
+                //
+                // The row's standing convention, used twice before: the Sphere
+                // has not sealed here since FU-56 and does not seal now; the
+                // instrument reads refusal TEXT, so what is pinned is WHICH
+                // refusal.
+                //
+                // No pinned digest anywhere is re-frozen by this line, and
+                // nothing here touches the coverage radius, the patch-area
+                // minimum, the zero-tolerance verdict, or any registered
+                // constant — `a4f5f3f` moves no constant.
+                //
+                // Collateral the lane's canary could not see, recorded here
+                // rather than there, MEASURED: `a4f5f3f` also moved the other
+                // two fixtures' sealed digests under both fields —
+                // `make_toed_slab` 4947160085783245097 -> 10930853158640110202
+                // (measured field) and 5369532763750555334 ->
+                // 3354890655869741690 (zeros); `make_overhang_table`
+                // 10255008353173954784 -> 15531597726392284403 and
+                // 12821069608981672338 -> 2596335542476817664, later moving
+                // again within the f1 lane to 14687084109130015768 /
+                // 5807625924837936723 at `225b6a7`. Their verdicts stayed
+                // `false` (both-diverge), so this row stayed green on them.
+                "Sphere.prepped.stl" => false,
                 // Both move, and neither crosses the anchor cap (the guard
                 // above proves that): this is the contact-selection tie-break,
                 // not the cap.
