@@ -899,10 +899,7 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
         ));
     }
 
-    Ok(PrepareReport {
-        no_cache: request.no_cache,
-        models,
-    })
+    Ok(PrepareReport { models })
 }
 
 /// Every `*.stl` in one folder, in sorted path order.

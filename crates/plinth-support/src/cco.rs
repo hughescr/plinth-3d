@@ -54,6 +54,19 @@ pub(crate) struct XiaAngles {
 }
 
 /// Frozen Xia alpha=1/2 closed form from `cco.py::xia_angles`.
+///
+/// The exponent is `.sqrt()` by DERIVATION, not by configuration:
+/// `acos(sqrt(m_i / m_total))` is the closed form Xia's law collapses to at
+/// alpha = 1/2, and it is not the general law with a substitutable exponent.
+/// Raising the ratio to some other alpha here would produce a number that
+/// looks like a generalisation and is not one, so `CCO_XIA_ALPHA` is
+/// deliberately NOT read: a different alpha needs a different derivation, not
+/// a different constant. The registry entry says as much itself ("legacy
+/// topology-search heuristic whose conditional equations do not derive
+/// alpha"). A hard precondition on that constant used to stand in
+/// `Config::current`; it was removed on 2026-08-26 because it decided whether
+/// the whole CCO stage could run on the value of a constant no production path
+/// reads, which the physics-first constants doctrine forbids.
 #[cfg(test)]
 pub(crate) fn xia_angles(m1: f64, m2: f64) -> XiaAngles {
     let total = m1 + m2;
@@ -1356,11 +1369,6 @@ impl Config {
         let constants = m0_constants().map_err(|error| CcoError::Constants(error.to_string()))?;
         let p = constants.placeholders();
         let slide = p.cco_split_slide_policy();
-        if p.cco_xia_alpha().diagnostic().get() != 0.5 {
-            return Err(CcoError::Constants(
-                "live CCO port requires registered Xia alpha=0.5".to_owned(),
-            ));
-        }
         Ok(Self {
             contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
             standoff_mm: p.standoff_mm().diagnostic().get(),

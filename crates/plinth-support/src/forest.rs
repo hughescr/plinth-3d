@@ -103,9 +103,8 @@ pub enum Owner {
 ///
 /// This was named `EmbedEnd`, which conflated three separate jobs:
 ///
-/// 1. *this end meets the model* — read by SCAR/transit selection
-///    (`transit_measurement`), the joints `embedded` ball flag, the transient
-///    brace-endpoint exclusion, `lower::is_embedded_taper`, and the
+/// 1. *this end meets the model* — read by the joints `embedded` ball flag, the
+///    transient brace-endpoint exclusion, `lower::is_embedded_taper`, and the
 ///    clearance-certificate fast path in [`Member::certificate_valid`];
 /// 2. *this end carries a designed clearance extent* — the `designed_embed`
 ///    mask domain;

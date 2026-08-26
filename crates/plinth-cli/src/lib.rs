@@ -26,21 +26,7 @@ use plinth_pipeline::OutputProfile;
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CacheMode {
-    #[default]
-    Enabled,
-    Disabled,
-}
-
-impl CacheMode {
-    #[must_use]
-    pub const fn no_cache(self) -> bool {
-        matches!(self, Self::Disabled)
-    }
-}
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  -h, --help             Show help";
 
 /// The orientation authority the operator selected.
 ///
@@ -86,7 +72,6 @@ pub struct PrepareSelection {
     /// absent. Nothing here infers it from the model; the resolver hands this
     /// value straight to `plinth_hollow::HollowRequest::wall_mm`.
     pub wall_mm: PositiveFinite,
-    pub cache: CacheMode,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -210,8 +195,6 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut output_profile = None;
     let mut wall_mm = None;
     let mut orientation = None;
-    let mut cache = CacheMode::Enabled;
-    let mut no_cache_seen = false;
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
@@ -291,13 +274,6 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     },
                 });
             }
-            Some("--no-cache") => {
-                if no_cache_seen {
-                    return Err(ParseError::DuplicateFlag("--no-cache"));
-                }
-                no_cache_seen = true;
-                cache = CacheMode::Disabled;
-            }
             Some(value) if value.starts_with('-') => {
                 return Err(ParseError::UnknownFlag(argument.clone()));
             }
@@ -316,7 +292,6 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
             Some(selected) => selected,
             None => registered_wall_default()?,
         },
-        cache,
     }))
 }
 
@@ -386,8 +361,6 @@ mod tests {
         assert_eq!(parsed.output_dir, PathBuf::from("prepared output"));
         assert_eq!(parsed.orientation, OrientSelection::Dense);
         assert_eq!(parsed.output_profile, OutputProfile::Saturn4Ultra);
-        assert_eq!(parsed.cache, CacheMode::Enabled);
-        assert!(!parsed.cache.no_cache());
         assert_eq!(
             parsed.wall_mm,
             registered_wall(WallSelection::Default).expect("registered wall default")
@@ -449,14 +422,14 @@ mod tests {
         );
     }
 
+    /// `--no-cache` used to parse and thread a `no_cache` flag that no cache
+    /// ever read (T3.6-12 / review finding: surface describing machinery that
+    /// was never built). Deleted along with the rest of that plumbing; this
+    /// asserts the removal is complete rather than accidental — the spelling
+    /// is refused exactly like any other unrecognized flag.
     #[test]
-    fn no_cache_is_the_only_cache_off_form() {
-        let mut arguments = stable_arguments().map(OsString::from).to_vec();
-        arguments.push("--no-cache".into());
-        let parsed = selection(parse_args(arguments).unwrap());
-        assert_eq!(parsed.cache, CacheMode::Disabled);
-        assert!(parsed.cache.no_cache());
-        for alias in ["--cache=false", "--no_cache", "--disable-cache"] {
+    fn no_cache_and_its_aliases_are_all_unknown_flags_now() {
+        for alias in ["--no-cache", "--cache=false", "--no_cache", "--disable-cache"] {
             let mut arguments = stable_arguments().map(OsString::from).to_vec();
             arguments.push(alias.into());
             assert_eq!(

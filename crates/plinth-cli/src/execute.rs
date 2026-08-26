@@ -24,7 +24,7 @@ use plinth_pipeline::{
     PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
-use crate::{CacheMode, OrientSelection, PrepareSelection};
+use crate::{OrientSelection, PrepareSelection};
 
 /// Run one parsed `plinth prepare` invocation to completion.
 ///
@@ -81,7 +81,6 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
             wall_mm: selection.wall_mm,
         },
         support,
-        no_cache: selection.cache.no_cache(),
         // `--stop-after` is not on the ratified command line. A stage stop is a
         // testing outcome; the CLI runs the whole chain or reports why it could
         // not.
@@ -157,16 +156,10 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
         selection.input_models_dir.display()
     );
     println!(
-        "  out-dir {}  profile {}  wall {:.3} mm  cache {}",
+        "  out-dir {}  profile {}  wall {:.3} mm",
         selection.output_dir.display(),
         plinth_pipeline::OutputProfile::SATURN4_ULTRA_CLI_VALUE,
         selection.wall_mm.get(),
-        match selection.cache {
-            // No cache exists yet. Saying "bypassed" would describe machinery
-            // that is not there; this states what actually happened.
-            CacheMode::Enabled => "no cache implemented (flag absent)",
-            CacheMode::Disabled => "no cache implemented (--no-cache is a no-op)",
-        }
     );
 
     // Which orientation authority ran. A searched rotation and a replayed one

@@ -67,7 +67,7 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM]"
     ));
     for essential in [
         "--input-models-dir DIR",
@@ -75,7 +75,6 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
         "--out-dir DIR",
         "--orient MODE",
         "--wall-mm MM",
-        "--no-cache",
     ] {
         assert!(stdout.contains(essential), "missing help item {essential}");
     }
@@ -105,7 +104,6 @@ fn prepare_searches_each_model_orientation_and_writes_one_artifact_each() {
         "prepare",
         "--out-dir",
         scratch.output().to_str().expect("scratch path is Unicode"),
-        "--no-cache",
         "--input-models-dir",
         scratch.input().to_str().expect("scratch path is Unicode"),
         "--output",
@@ -136,13 +134,6 @@ fn prepare_searches_each_model_orientation_and_writes_one_artifact_each() {
         stdout.contains("SUMMARY  emitted=1  gate-refused=0  failed=0  stopped=0"),
         "the run report must total the dispositions: {stdout}"
     );
-    // `--no-cache` is accepted and honestly reported: no cache exists yet, so
-    // the flag is a no-op rather than a bypass of machinery that is not there.
-    assert!(
-        stdout.contains("--no-cache is a no-op"),
-        "the cache state must be reported honestly: {stdout}"
-    );
-
     // The pipeline's own exit-code projection, not a second contract.
     assert_eq!(output.status.code(), Some(0), "stdout was: {stdout}");
     assert!(

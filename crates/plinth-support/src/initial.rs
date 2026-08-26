@@ -586,7 +586,8 @@ pub(crate) fn build_initial_contacts(
     // this call rests on, is unaffected.) Demanding placement depth of every rim
     // ray conflates
     // attestation with the mask-validity proof, which is a different question
-    // and legitimately does demand totality (see `validate_members_batch`).
+    // and legitimately does demand totality (a mask is minted only on a TOTAL
+    // engagement).
     // What the shallow rim actually costs is AREA, and that is measured and
     // charged to PR-4 below rather than paid for by deleting the support.
     //
@@ -1208,9 +1209,8 @@ fn attest_initial_contacts(
     // quarantine (`refusal.is_some()` in `build_initial_contacts`) and delete a
     // placed stub on a measurement nobody made, while the run carried on
     // quietly — a silent deletion where this path used to stop loudly. So the
-    // inner result is collected back into a TOTAL refusal, for the same reason
-    // `validate_members_batch` is total and with the same failure this path
-    // produced before grading went per-row.
+    // inner result is collected back into a TOTAL refusal, with the same failure
+    // this path produced before grading went per-row.
     if let Some(cause) = outcomes.iter().find_map(|outcome| match &outcome.verdict {
         Err(ContactAttestationRefusal::UnusableGeometry { cause, .. }) => Some(*cause),
         _ => None,

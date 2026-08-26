@@ -9,10 +9,7 @@
 //! and a pre-write gate refusal are all per-model dispositions in
 //! [`PrepareReport`]. The returned `Err` is reserved for failures of the run
 //! itself. Stage stops remain a typed testing outcome, not a stringly alternate
-//! state machine. Cache bypass has exactly one data flag, `no_cache`, wired
-//! only from the CLI spelling `--no-cache`; no cache exists yet, so the flag is
-//! recorded in the report and changes nothing, which is the honest state rather
-//! than a faked one (design record OQ-5).
+//! state machine.
 #![forbid(unsafe_code)]
 
 pub mod coverage_evidence;
@@ -369,8 +366,6 @@ pub struct PrepareRequest {
     pub decimation_budget: DecimationBudget,
     pub hollow: HollowRequest,
     pub support: SupportRequest,
-    /// The sole cache-bypass control, corresponding only to CLI `--no-cache`.
-    pub no_cache: bool,
     pub stop_after: Option<StageStop>,
 }
 
@@ -766,7 +761,6 @@ pub struct ModelPreparationReport {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareReport {
-    pub no_cache: bool,
     pub models: Vec<ModelPreparationReport>,
 }
 
@@ -1532,7 +1526,6 @@ mod tests {
     #[test]
     fn report_distinguishes_one_artifact_from_an_explicit_stage_stop() {
         let report = PrepareReport {
-            no_cache: true,
             models: vec![
                 ModelPreparationReport {
                     model: ModelId::new("mini-a"),
@@ -1575,7 +1568,6 @@ mod tests {
             vec![Path::new("out/mini-a.chitubox")]
         );
         let wire = serde_json::to_value(&report).expect("prepare report serializes");
-        assert_eq!(wire["no_cache"], true);
         assert_eq!(wire["models"][0]["outcome"]["kind"], "artifact");
         assert_eq!(
             wire["models"][0]["assumed_print_size"]["longest_axis_mm"],
@@ -1628,7 +1620,6 @@ mod tests {
             outcome,
         };
         let report = PrepareReport {
-            no_cache: false,
             models: vec![
                 model(
                     "emitted",
@@ -1728,7 +1719,6 @@ mod tests {
         );
 
         let report = PrepareReport {
-            no_cache: false,
             models: vec![sidecar.clone(), refused.clone()],
         };
         assert_eq!(
@@ -1741,7 +1731,6 @@ mod tests {
         // Order-independent, which is the point: the same run enumerated the
         // other way round must report the same verdict.
         let reversed = PrepareReport {
-            no_cache: false,
             models: vec![refused, sidecar.clone()],
         };
         assert_eq!(reversed.exit_code(), PipelineExitCode::Gates);
@@ -1749,7 +1738,6 @@ mod tests {
         // And with no refusal in it, the run is first-in-order as before --
         // `Gates` is the only sticky code, not a new severity ranking.
         let no_refusal = PrepareReport {
-            no_cache: false,
             models: vec![
                 sidecar,
                 model(

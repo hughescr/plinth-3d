@@ -2868,47 +2868,6 @@ impl NativeSurface {
         Ok(())
     }
 
-    /// Crate-internal compatibility entry point retained solely for the inline
-    /// PyO3 frozen-oracle surface. Delete it with that Python surface in M9.
-    /// Rust production callers cannot bypass an explicit resource policy.
-    #[allow(
-        dead_code,
-        reason = "retained until the inline PyO3 frozen-oracle surface is deleted in M9"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn penetration_intervals_batch(
-        &self,
-        p0s: &[V3],
-        p1s: &[V3],
-        r0s: &[f64],
-        r1s: &[f64],
-        n_offset_rays: usize,
-        majority_step_mm: f64,
-        cap: usize,
-        min_illegal_len_mm: f64,
-        rays_all: bool,
-    ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
-        Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
-        let limits = self.penetration_intervals_batch_worst_case_limits(
-            p0s.len(),
-            n_offset_rays,
-            cap,
-            rays_all,
-        )?;
-        self.penetration_intervals_batch_bounded(
-            p0s,
-            p1s,
-            r0s,
-            r1s,
-            n_offset_rays,
-            majority_step_mm,
-            cap,
-            min_illegal_len_mm,
-            rays_all,
-            limits,
-        )
-    }
-
     // ---- sphere breach ----------------------------------------------------
     /// Collect faces whose exact point-distance to `c` is within `tol` of `nd`
     /// (for measured-tie detection). Branch & bound, ascending face index.

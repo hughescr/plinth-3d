@@ -1670,8 +1670,8 @@ struct ModelRungAttestation {
 /// the stub family and for the same reason: attestation asks whether a
 /// renderable interface EXISTS, and the resolvability floor is one layer.
 /// Demanding the full PR-1 seat depth of every rim ray would conflate
-/// attestation with the mask-validity proof, which `validate_members_batch`
-/// enforces separately and TOTALLY.
+/// attestation with the mask-validity proof, which the mask minted by
+/// `attest_members_batch` only claims on a TOTAL engagement.
 ///
 /// A batch-level integrity failure (starved admission, kernel refusal,
 /// malformed row set) is an error, because nothing can be concluded about any

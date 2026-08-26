@@ -70,7 +70,6 @@ fn request(scratch: &Scratch, stop_after: Option<StageStop>) -> PrepareRequest {
         hollow: plinth_hollow::HollowRequest::with_registered_wall_default(printer.clone())
             .expect("registered wall"),
         support: registered_support_request(&printer).expect("registered lift"),
-        no_cache: false,
         stop_after,
     }
 }

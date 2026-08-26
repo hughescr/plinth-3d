@@ -501,6 +501,17 @@ impl FormatReport {
 /// structural interval audit), then requires byte-for-byte equality with the
 /// fresh disk bytes. It intentionally does not reopen any cached producer
 /// state or modify the artifact.
+///
+/// **CURRENTLY UNREACHED IN PRODUCTION.** `plinth-pipeline`'s `prepare` route
+/// never calls this function; the only format check that actually runs today
+/// is `plinth-emit`'s own fresh-open disk audit. The only callers in this
+/// workspace are this crate's own tests and the
+/// `plinth-pipeline/examples/shared/first_artifact_chain.rs` example. This is
+/// not dead code to delete: it is the structural format gate the pre-write
+/// gate porting work (see the remediation plan's Phase 7, "schedule the
+/// remaining nine safety gates") will want to wire in as a real, judged-from-
+/// recorded-evidence check. Keep it, and give it a production caller when that
+/// work lands.
 #[must_use]
 pub fn verify_artifact(artifact: ArtifactId, path: &Path) -> FormatReport {
     let disk_bytes = match std::fs::read(path) {

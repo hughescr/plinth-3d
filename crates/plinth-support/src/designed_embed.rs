@@ -5,16 +5,16 @@
 //! Three properties are load bearing and are the reason this lives in its own
 //! crate-private module rather than beside the forest data model:
 //!
-//! * A mask is *minted*, never asserted. [`DesignedMaskTable::validate_forest`]
-//!   is the sole production entry point, and every extent it returns has been
+//! * A mask is *minted*, never asserted. [`attest_members_batch`] is the sole
+//!   production entry point, and every extent it mints a mask for has been
 //!   proven connected to its endpoint through the actual tapered member.
 //! * Observed penetration thickness is separate evidence. Nothing here reads a
 //!   penetration interval, a projection distance, or a breach test to *derive*
 //!   an extent; the caller supplies a design-time number and the kernel batch
 //!   only ever refuses it.
-//! * Validation is whole-forest and batched. One native
+//! * Validation is whole-stage and batched. One native
 //!   `penetration_intervals_batch_bounded` call serves every requested endpoint
-//!   in the forest, in an order that does not depend on caller order or on the
+//!   in the stage, in an order that does not depend on caller order or on the
 //!   thread count.
 //!
 //! Kernel-call census invariant: [`record_endpoint_validation_kernel_call`] runs
@@ -33,7 +33,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::contact::ContactPolicy;
-use crate::forest::{mask_binding, ContactEnd, Forest, Member, MemberKey};
+use crate::forest::{mask_binding, ContactEnd, Member};
 
 /// A requested designed clearance extent in millimetres. This is deliberately
 /// distinct from observed penetration evidence and cannot be zero or non-finite.
@@ -153,150 +153,6 @@ impl std::fmt::Debug for DesignedEndMask {
     }
 }
 
-/// Independent end masks. Construction is crate-private so callers cannot inject
-/// an unvalidated clearance claim into a member or verifier.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct DesignedClearanceMasks {
-    terminalward: Option<DesignedEndMask>,
-    rootward: Option<DesignedEndMask>,
-}
-
-impl DesignedClearanceMasks {
-    #[must_use]
-    pub(crate) const fn terminalward(&self) -> Option<&DesignedEndMask> {
-        self.terminalward.as_ref()
-    }
-
-    #[must_use]
-    pub(crate) const fn rootward(&self) -> Option<&DesignedEndMask> {
-        self.rootward.as_ref()
-    }
-
-    #[must_use]
-    pub(crate) const fn end(&self, end: ContactEnd) -> Option<&DesignedEndMask> {
-        match end {
-            ContactEnd::Terminalward => self.terminalward(),
-            ContactEnd::Rootward => self.rootward(),
-        }
-    }
-
-    /// The order is a contract: terminalward before rootward, independent of
-    /// construction order or thread count.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (ContactEnd, &DesignedEndMask)> {
-        [
-            (ContactEnd::Terminalward, self.terminalward.as_ref()),
-            (ContactEnd::Rootward, self.rootward.as_ref()),
-        ]
-        .into_iter()
-        .filter_map(|(end, mask)| mask.map(|mask| (end, mask)))
-    }
-}
-
-/// One design-time extent request for one declared embed end.
-///
-/// The extent is a policy number chosen by the design family that placed the
-/// member. Sizing it from a projection distance, a penetration interval, or a
-/// breach test would be inference from observed geometry and is forbidden.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct DesignedMaskRequest {
-    pub(crate) member: MemberKey,
-    pub(crate) end: ContactEnd,
-    pub(crate) extent: PositiveFiniteMm,
-}
-
-/// Per-forest-version side table of validated masks.
-///
-/// Masks deliberately do not live on [`Member`]: `Member` is serialized and
-/// digested, so carrying evidence there would perturb `Forest::digest`. The
-/// table needs no manual invalidation either — `mask_binding` digests the whole
-/// member including its clearance certificate's `geom_version`, so any mutation
-/// makes the stored entry fail `validated_extent_for` with `StaleBinding`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct DesignedMaskTable {
-    by_member: BTreeMap<MemberKey, DesignedClearanceMasks>,
-}
-
-impl DesignedMaskTable {
-    #[must_use]
-    pub(crate) fn masks_for(&self, key: MemberKey) -> Option<&DesignedClearanceMasks> {
-        self.by_member.get(&key)
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (MemberKey, &DesignedClearanceMasks)> {
-        self.by_member.iter().map(|(key, masks)| (*key, masks))
-    }
-
-    #[must_use]
-    pub(crate) fn len(&self) -> usize {
-        self.by_member.len()
-    }
-
-    #[must_use]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.by_member.is_empty()
-    }
-
-    /// The extent a path that *requires* a designed embed must consume.
-    ///
-    /// There is no recovery from observed geometry and no fallback constant: an
-    /// absent entry and a stale binding are both hard refusals.
-    pub(crate) fn required_extent(
-        &self,
-        key: MemberKey,
-        member: &Member,
-        end: ContactEnd,
-        surface: &NativeSurface,
-    ) -> Result<PositiveFiniteMm, DesignedMaskError> {
-        self.masks_for(key)
-            .and_then(|masks| masks.end(end))
-            .ok_or(DesignedMaskError::MissingRequiredExtent { end })?
-            .validated_extent_for(member, end, surface)
-    }
-
-    /// The sole production mint for designed clearance masks.
-    ///
-    /// Every requested endpoint in the forest is validated by exactly one native
-    /// batch call. Validation is total over the forest: a live member that
-    /// declares an embed end but carries no request refuses the whole mint, so
-    /// the `MissingRequiredExtent` refusal fires here rather than silently
-    /// deferring to a consumer.
-    pub(crate) fn validate_forest(
-        forest: &Forest,
-        surface: &NativeSurface,
-        requests: &[DesignedMaskRequest],
-        limits: EndpointMaskValidationLimits,
-    ) -> Result<Self, DesignedMaskError> {
-        let keys = forest.live_members();
-        let members = keys
-            .iter()
-            .map(|key| forest.member(*key).ok_or(DesignedMaskError::UnknownMember))
-            .collect::<Result<Vec<_>, _>>()?;
-        let index_of = keys
-            .iter()
-            .enumerate()
-            .map(|(index, key)| (*key, index))
-            .collect::<BTreeMap<_, _>>();
-        let indexed = requests
-            .iter()
-            .map(|request| {
-                index_of
-                    .get(&request.member)
-                    .copied()
-                    .map(|index| (index, request.end, request.extent))
-                    .ok_or(DesignedMaskError::UnknownMember)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let masks = validate_members_batch(surface, &members, &indexed, limits)?;
-        Ok(Self {
-            by_member: keys
-                .into_iter()
-                .zip(masks)
-                .filter(|(_, masks)| masks.iter().next().is_some())
-                .collect(),
-        })
-    }
-}
-
 /// Gather every requested endpoint across every member into one ordered row set,
 /// applying every scalar refusal before any native work is admitted.
 ///
@@ -397,19 +253,18 @@ fn prepare_rows(
 /// 1803 times, never once because the whole batch was bad.
 ///
 /// **Per-row grading is for CANDIDATE geometry only, and the split is by
-/// CALLER, not by entry point.** Both entry points below reach this witness:
+/// CALLER, not by entry point.** Both callers below reach this witness:
 ///
 /// * `attest_seats_batch` (brace model rungs, CCO model anchors) grades
 ///   candidates competing in a tournament. A row it cannot measure leaves the
 ///   tournament and costs nothing else. This is the case #28 exists for.
-/// * [`validate_members_batch`] and `initial.rs`'s `attest_initial_contacts`
-///   both hand in already-PLACED geometry, and both collect the inner results
-///   back into a TOTAL refusal — the first refusing the mint, the second
-///   refusing the whole initial-contact build. A caller with placed geometry
-///   this witness cannot grade has a defect, and the alternative is worse than
-///   an error: the placed callers dispose of a refusal by DELETING the member
-///   (a mask withheld, a stub quarantined), so a per-row verdict there would
-///   silently delete a load-carrying member on a measurement nobody made.
+/// * `initial.rs`'s `attest_initial_contacts` hands in already-PLACED geometry
+///   and collects the inner results back into a TOTAL refusal of the whole
+///   initial-contact build. A caller with placed geometry this witness cannot
+///   grade has a defect, and the alternative is worse than an error: the placed
+///   caller disposes of a refusal by DELETING the member (a stub quarantined),
+///   so a per-row verdict there would silently delete a load-carrying member on
+///   a measurement nobody made.
 ///
 /// Note that `attest_initial_contacts` reaches this witness through
 /// `attest_members_batch`, which `attest_seats_batch` also uses; that shared
@@ -479,53 +334,6 @@ fn mint_mask(
     }
 }
 
-/// Whole-batch endpoint-connectivity validation: gather every requested endpoint
-/// across every member into one set of rows, issue exactly one native call, then
-/// scatter the evidence back index-aligned with `members`.
-///
-/// Requests are member-indexed rather than keyed so that provisional candidate
-/// members can be validated without minting forgeable forest keys.
-///
-/// This entry point is TOTAL: one refused row refuses the whole mint. Callers
-/// that must survive an individual refusal — every PR-8 attestation caller,
-/// because OD-4 forbids a hard pipeline failure — use
-/// [`attest_members_batch`] instead.
-pub(crate) fn validate_members_batch(
-    surface: &NativeSurface,
-    members: &[&Member],
-    requests: &[(usize, ContactEnd, PositiveFiniteMm)],
-    limits: EndpointMaskValidationLimits,
-) -> Result<Vec<DesignedClearanceMasks>, DesignedMaskError> {
-    let rows = prepare_rows(members, requests)?;
-    let mut minted = vec![DesignedClearanceMasks::default(); members.len()];
-    let engagements = witness_batch(surface, &rows, limits)?;
-    let surface_identity = surface.source_triangle_soup_digest();
-    for (row, engagement) in rows.iter().zip(engagements) {
-        // TOTAL by design. `witness_batch` grades per row so a CANDIDATE can be
-        // discarded alone, but this entry point mints masks for PLACED members:
-        // a row here that cannot be graded is a caller defect, and the mint
-        // must not proceed on the strength of the rows that happened to grade.
-        let engagement = engagement?;
-        // TOTALITY, not mere attachment. A mask tells the distance check to
-        // ignore this extent of the member; any ray that leaves the solid
-        // inside it is geometry that would then go unchecked.
-        if !engagement.is_total() {
-            return Err(DesignedMaskError::DisconnectedGeometry { end: row.end });
-        }
-        let mask = mint_mask(
-            members[row.member],
-            row,
-            engagement.witness,
-            surface_identity,
-        );
-        match row.end {
-            ContactEnd::Terminalward => minted[row.member].terminalward = Some(mask),
-            ContactEnd::Rootward => minted[row.member].rootward = Some(mask),
-        }
-    }
-    Ok(minted)
-}
-
 /// One PR-8 attestation request: a declared model-contact end, the design-time
 /// extent that end claims, and the OD-9 exterior-ness probe for its attachment
 /// point.
@@ -584,7 +392,7 @@ pub(crate) enum ContactAttestationRefusal {
     /// **The check is unchanged; only who pays for it moved.** These are
     /// exactly the scalar refusals [`prepare_rows`] applies, evaluated per row
     /// instead of over the whole batch. Applying them batch-wide is right for
-    /// PLACED members — a caller that hands `validate_members_batch` a bad row
+    /// PLACED members — a caller that hands `attest_members_batch` a bad row
     /// has a defect, and nothing can be concluded about the batch. It is wrong
     /// for CANDIDATES: one unusable candidate out of forty used to abort the
     /// whole model, where the other thirty-nine were fine and one of them was
@@ -1906,11 +1714,11 @@ pub(crate) fn with_scar_bound_disabled<T>(body: impl FnOnce() -> T) -> T {
 /// driven through the real path on the SAME row.
 ///
 /// `attest_seats_batch` must discard an ungradable CANDIDATE row and grade the
-/// rest; the PLACED callers — `validate_members_batch` and `initial.rs`'s
-/// `attest_initial_contacts` — must refuse totally on it. Getting that
-/// divergence wrong is the specific defect #28 is about, and no fixture can
-/// make a real kernel emit an out-of-span boundary on demand — the values that
-/// actually occur are all a few ULP out, i.e. INSIDE what the fix admits.
+/// rest; the PLACED caller — `initial.rs`'s `attest_initial_contacts` — must
+/// refuse totally on it. Getting that divergence wrong is the specific defect
+/// #28 is about, and no fixture can make a real kernel emit an out-of-span
+/// boundary on demand — the values that actually occur are all a few ULP out,
+/// i.e. INSIDE what the fix admits.
 #[cfg(test)]
 fn sabotage_endpoint_intervals(
     mut interval_rows: Vec<Vec<geom_kernel::Interval>>,
@@ -1998,7 +1806,7 @@ impl EndpointValidationRow {
 /// * **Is masking this axial extent from the distance check safe?** That needs
 ///   TOTALITY: any ray that leaves the solid inside the mask is a part of the
 ///   member the check was told to ignore and should not have been. Hence
-///   [`validate_members_batch`] still demands `is_total()`.
+///   [`attest_members_batch`] still demands `is_total()`.
 /// * **Is the tip attached, and over how much area?** That is a MEASUREMENT.
 ///   A contact placed within a tip radius of a model edge genuinely engages
 ///   only part of its end disc — it is not disconnected, it is smaller. Deleting
@@ -2392,50 +2200,6 @@ mod tests {
         surface_from(&vertices, &faces, 0.25)
     }
 
-    /// A tessellated sphere: the fixture the suite lacked. Every existing
-    /// fixture is a flat-faced box, so nothing measured what convex curvature
-    /// does to a rim ray that starts inside the solid.
-    fn sphere_surface(radius_mm: f64, segments: usize, rings: usize) -> NativeSurface {
-        let mut vertices = vec![[0.0, 0.0, radius_mm]];
-        for ring in 1..rings {
-            let phi = std::f64::consts::PI * (ring as f64) / (rings as f64);
-            for segment in 0..segments {
-                let theta = 2.0 * std::f64::consts::PI * (segment as f64) / (segments as f64);
-                vertices.push([
-                    radius_mm * phi.sin() * theta.cos(),
-                    radius_mm * phi.sin() * theta.sin(),
-                    radius_mm * phi.cos(),
-                ]);
-            }
-        }
-        vertices.push([0.0, 0.0, -radius_mm]);
-        let south = u32::try_from(vertices.len() - 1).unwrap();
-        let ring_base = |ring: usize| u32::try_from(1 + (ring - 1) * segments).unwrap();
-        let mut faces = Vec::new();
-        for segment in 0..segments {
-            let a = ring_base(1) + u32::try_from(segment).unwrap();
-            let b = ring_base(1) + u32::try_from((segment + 1) % segments).unwrap();
-            faces.push([0, a, b]);
-        }
-        for ring in 1..rings - 1 {
-            for segment in 0..segments {
-                let next = (segment + 1) % segments;
-                let a = ring_base(ring) + u32::try_from(segment).unwrap();
-                let b = ring_base(ring) + u32::try_from(next).unwrap();
-                let c = ring_base(ring + 1) + u32::try_from(next).unwrap();
-                let d = ring_base(ring + 1) + u32::try_from(segment).unwrap();
-                faces.push([a, d, c]);
-                faces.push([a, c, b]);
-            }
-        }
-        for segment in 0..segments {
-            let a = ring_base(rings - 1) + u32::try_from(segment).unwrap();
-            let b = ring_base(rings - 1) + u32::try_from((segment + 1) % segments).unwrap();
-            faces.push([a, south, b]);
-        }
-        surface_from(&vertices, &faces, 0.5)
-    }
-
     fn validation_limits(surface: &NativeSurface, rows: usize) -> EndpointMaskValidationLimits {
         EndpointMaskValidationLimits::for_batch(surface, rows, extent(0.01), 8).unwrap()
     }
@@ -2460,616 +2224,6 @@ mod tests {
             model_contact_end,
             carried_mm2: finite(1.0),
         }
-    }
-
-    fn embedded_member(p0: f64, p1: f64, model_contact_end: Option<ContactEnd>) -> Member {
-        Member::new(spec(
-            [p0, 0.5, 0.5],
-            [p1, 0.5, 0.5],
-            0.05,
-            model_contact_end,
-            0,
-        ))
-    }
-
-    /// Members are spread along y so each one is a distinct row, and the ends
-    /// alternate so the batch exercises both row shapes at once.
-    fn spread_forest(count: usize) -> (Forest, Vec<MemberKey>) {
-        let mut forest = Forest::new();
-        let keys = (0..count)
-            .map(|index| {
-                let y = 0.2 + 0.15 * (index as f64);
-                let end = if index % 2 == 0 {
-                    ContactEnd::Terminalward
-                } else {
-                    ContactEnd::Rootward
-                };
-                let (p0, p1) = match end {
-                    ContactEnd::Terminalward => ([0.2, y, 0.5], [0.8, y, 0.5]),
-                    ContactEnd::Rootward => ([0.8, y, 0.5], [0.2, y, 0.5]),
-                };
-                forest.add_member(Member::new(spec(
-                    p0,
-                    p1,
-                    0.05,
-                    Some(end),
-                    u32::try_from(index).unwrap(),
-                )))
-            })
-            .collect::<Vec<_>>();
-        (forest, keys)
-    }
-
-    fn spread_requests(forest: &Forest, keys: &[MemberKey]) -> Vec<DesignedMaskRequest> {
-        keys.iter()
-            .map(|key| DesignedMaskRequest {
-                member: *key,
-                end: forest.member(*key).unwrap().model_contact_end().unwrap(),
-                extent: extent(0.1),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn whole_forest_validation_issues_exactly_one_kernel_call() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let (forest, keys) = spread_forest(5);
-        let requests = spread_requests(&forest, &keys);
-        assert_eq!(requests.len(), 5);
-        reset_endpoint_validation_kernel_calls();
-        assert_eq!(endpoint_validation_kernel_calls(), 0);
-        let table = DesignedMaskTable::validate_forest(
-            &forest,
-            &surface,
-            &requests,
-            validation_limits(&surface, requests.len()),
-        )
-        .unwrap();
-        // N members must cost one native call, not N.
-        assert_eq!(endpoint_validation_kernel_calls(), 1);
-        assert_eq!(table.len(), keys.len());
-        for key in &keys {
-            let member = forest.member(*key).unwrap();
-            let end = member.model_contact_end().unwrap();
-            assert_eq!(
-                table.required_extent(*key, member, end, &surface),
-                Ok(extent(0.1))
-            );
-        }
-        assert_eq!(
-            table
-                .iter()
-                .flat_map(|(_, masks)| masks.iter().map(|(end, _)| end))
-                .count(),
-            5
-        );
-    }
-
-    #[test]
-    fn a_single_bad_row_refuses_the_whole_batch_before_any_kernel_call() {
-        for value in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(
-                PositiveFiniteMm::new(value),
-                Err(DesignedMaskError::InvalidExtent)
-            );
-        }
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let (forest, keys) = spread_forest(4);
-        let good = spread_requests(&forest, &keys);
-        let limits = validation_limits(&surface, 8);
-
-        let refuse = |mutate: &dyn Fn(&mut Vec<DesignedMaskRequest>)| {
-            let mut requests = good.clone();
-            mutate(&mut requests);
-            reset_endpoint_validation_kernel_calls();
-            let outcome = DesignedMaskTable::validate_forest(&forest, &surface, &requests, limits);
-            assert_eq!(endpoint_validation_kernel_calls(), 0);
-            outcome.expect_err("a single bad row refuses the batch")
-        };
-
-        assert_eq!(
-            refuse(&|requests| requests[2].extent = extent(0.61)),
-            DesignedMaskError::ExtentOutOfSpan
-        );
-        assert_eq!(
-            refuse(&|requests| {
-                let mut both = requests[1];
-                both.end = ContactEnd::Terminalward;
-                both.extent = extent(0.31);
-                requests[1].extent = extent(0.31);
-                requests.push(both);
-            }),
-            DesignedMaskError::OverlappingExtents
-        );
-        assert_eq!(
-            refuse(&|requests| {
-                requests.remove(3);
-            }),
-            DesignedMaskError::MissingRequiredExtent {
-                end: ContactEnd::Rootward,
-            }
-        );
-        assert_eq!(
-            refuse(&|requests| requests[0].end = ContactEnd::Rootward),
-            DesignedMaskError::EndNotDesigned {
-                end: ContactEnd::Rootward,
-            }
-        );
-        assert_eq!(
-            refuse(&|requests| {
-                let duplicate = requests[2];
-                requests.push(duplicate);
-            }),
-            DesignedMaskError::DuplicateRequest {
-                end: ContactEnd::Terminalward,
-            }
-        );
-        assert_eq!(
-            refuse(&|requests| {
-                requests[0].member = MemberKey::transit_test_fixture(999, 0);
-            }),
-            DesignedMaskError::UnknownMember
-        );
-
-        reset_endpoint_validation_kernel_calls();
-        let starved = EndpointMaskValidationLimits::new(
-            extent(0.01),
-            8,
-            PenetrationBatchLimits {
-                max_rows: 3,
-                ..limits.penetration
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            DesignedMaskTable::validate_forest(&forest, &surface, &good, starved),
-            Err(DesignedMaskError::ResourceLimit)
-        );
-        assert_eq!(endpoint_validation_kernel_calls(), 0);
-    }
-
-    #[test]
-    fn degenerate_member_spans_refuse_before_any_kernel_call() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        reset_endpoint_validation_kernel_calls();
-        let limits = validation_limits(&surface, 2);
-        for (p0, p1, extent_mm) in [
-            ([0.0, 0.0, 0.0], [1e200, 0.0, 0.0], 1e300),
-            ([-1e308, 0.0, 0.0], [1e308, 0.0, 0.0], 1.0),
-            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1.0),
-        ] {
-            let member = Member::new(spec(p0, p1, 0.2, Some(ContactEnd::Terminalward), 0));
-            assert_eq!(
-                validate_members_batch(
-                    &surface,
-                    &[&member],
-                    &[(0, ContactEnd::Terminalward, extent(extent_mm))],
-                    limits,
-                ),
-                Err(DesignedMaskError::InvalidMemberSpan)
-            );
-        }
-        assert_eq!(endpoint_validation_kernel_calls(), 0);
-    }
-
-    #[test]
-    fn row_order_is_member_then_terminal_then_root_regardless_of_request_order() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let (forest, keys) = spread_forest(4);
-        let requests = spread_requests(&forest, &keys);
-        let bindings = |requests: &[DesignedMaskRequest]| {
-            DesignedMaskTable::validate_forest(
-                &forest,
-                &surface,
-                requests,
-                validation_limits(&surface, requests.len()),
-            )
-            .unwrap()
-            .iter()
-            .map(|(key, masks)| {
-                (
-                    key,
-                    masks
-                        .iter()
-                        .map(|(end, mask)| (end, mask.validation_binding()))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-        };
-        let baseline = bindings(&requests);
-        assert_eq!(baseline.len(), 4);
-        let mut reversed = requests.clone();
-        reversed.reverse();
-        assert_eq!(bindings(&reversed), baseline);
-        let mut rotated = requests.clone();
-        rotated.rotate_left(3);
-        assert_eq!(bindings(&rotated), baseline);
-
-        // The terminal-before-root iteration contract holds even when a single
-        // member carries both ends.
-        let mut forest = Forest::new();
-        let key = forest.add_member(embedded_member(0.2, 0.8, None));
-        let member = forest.member(key).unwrap();
-        let masks = validate_members_batch(
-            &surface,
-            &[member],
-            &[
-                (0, ContactEnd::Rootward, extent(0.1)),
-                (0, ContactEnd::Terminalward, extent(0.1)),
-            ],
-            validation_limits(&surface, 2),
-        );
-        assert_eq!(
-            masks.unwrap_err(),
-            DesignedMaskError::EndNotDesigned {
-                end: ContactEnd::Terminalward,
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_a_request_for_an_end_the_member_does_not_declare() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let member = embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward));
-        assert_eq!(
-            validate_members_batch(
-                &surface,
-                &[&member],
-                &[(0, ContactEnd::Rootward, extent(0.1))],
-                validation_limits(&surface, 1),
-            ),
-            Err(DesignedMaskError::EndNotDesigned {
-                end: ContactEnd::Rootward,
-            })
-        );
-        let unembedded = embedded_member(0.2, 0.8, None);
-        assert_eq!(
-            validate_members_batch(
-                &surface,
-                &[&unembedded],
-                &[(0, ContactEnd::Terminalward, extent(0.1))],
-                validation_limits(&surface, 1),
-            ),
-            Err(DesignedMaskError::EndNotDesigned {
-                end: ContactEnd::Terminalward,
-            })
-        );
-    }
-
-    #[test]
-    fn a_member_without_a_declared_contact_end_needs_no_designed_extent() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let mut forest = Forest::new();
-        let key = forest.add_member(embedded_member(0.2, 0.8, None));
-        reset_endpoint_validation_kernel_calls();
-        let table = DesignedMaskTable::validate_forest(
-            &forest,
-            &surface,
-            &[],
-            validation_limits(&surface, 1),
-        )
-        .unwrap();
-        assert!(table.is_empty());
-        assert_eq!(endpoint_validation_kernel_calls(), 0);
-        assert_eq!(
-            table.required_extent(
-                key,
-                forest.member(key).unwrap(),
-                ContactEnd::Terminalward,
-                &surface,
-            ),
-            Err(DesignedMaskError::MissingRequiredExtent {
-                end: ContactEnd::Terminalward,
-            })
-        );
-    }
-
-    #[test]
-    fn disconnected_geometry_is_rejected_and_the_binding_covers_member_end_and_surface() {
-        let disconnected = surface_with_cubes(&[(0.0, 0.35), (0.55, 1.0)]);
-        let member = embedded_member(0.1, 0.9, Some(ContactEnd::Terminalward));
-        assert_eq!(
-            validate_members_batch(
-                &disconnected,
-                &[&member],
-                &[(0, ContactEnd::Terminalward, extent(0.45))],
-                validation_limits(&disconnected, 1),
-            ),
-            Err(DesignedMaskError::DisconnectedGeometry {
-                end: ContactEnd::Terminalward,
-            })
-        );
-
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let mut forest = Forest::new();
-        let key = forest.add_member(embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward)));
-        let requests = [DesignedMaskRequest {
-            member: key,
-            end: ContactEnd::Terminalward,
-            extent: extent(0.1),
-        }];
-        let table = DesignedMaskTable::validate_forest(
-            &forest,
-            &surface,
-            &requests,
-            validation_limits(&surface, 1),
-        )
-        .unwrap();
-        assert_eq!(
-            table.required_extent(
-                key,
-                forest.member(key).unwrap(),
-                ContactEnd::Terminalward,
-                &surface,
-            ),
-            Ok(extent(0.1))
-        );
-        let rebound = surface_with_cubes(&[(0.0, 1.1)]);
-        assert_eq!(
-            table.required_extent(
-                key,
-                forest.member(key).unwrap(),
-                ContactEnd::Terminalward,
-                &rebound,
-            ),
-            Err(DesignedMaskError::StaleBinding)
-        );
-    }
-
-    /// Any mutation that could change the member invalidates prior validation.
-    /// One case per mutator, so a future mutator that forgets to bump
-    /// `geom_version` fails here rather than silently reusing stale evidence.
-    #[test]
-    fn every_member_mutation_invalidates_a_prior_validation() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        type Mutator = &'static dyn Fn(&mut Forest, MemberKey);
-        let mutators: [(&str, Mutator); 4] = [
-            ("set_endpoints", &|forest: &mut Forest, key: MemberKey| {
-                forest
-                    .set_endpoints(
-                        key,
-                        [finite(0.25), finite(0.5), finite(0.5)],
-                        [finite(0.8), finite(0.5), finite(0.5)],
-                    )
-                    .unwrap();
-            }),
-            ("set_radii", &|forest: &mut Forest, key: MemberKey| {
-                forest
-                    .set_radii(
-                        key,
-                        TerminalEndRadius::new(radius(0.06)),
-                        RootwardEndRadius::new(radius(0.06)),
-                    )
-                    .unwrap();
-            }),
-            ("set_kind", &|forest: &mut Forest, key: MemberKey| {
-                forest.set_kind(key, MemberKind::Trunk).unwrap();
-            }),
-            (
-                "set_model_contact_end",
-                &|forest: &mut Forest, key: MemberKey| {
-                    forest
-                        .set_model_contact_end(key, Some(ContactEnd::Rootward))
-                        .unwrap();
-                },
-            ),
-        ];
-        for (name, mutate) in mutators {
-            let mut forest = Forest::new();
-            let key = forest.add_member(embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward)));
-            let table = DesignedMaskTable::validate_forest(
-                &forest,
-                &surface,
-                &[DesignedMaskRequest {
-                    member: key,
-                    end: ContactEnd::Terminalward,
-                    extent: extent(0.1),
-                }],
-                validation_limits(&surface, 1),
-            )
-            .unwrap();
-            assert_eq!(
-                table.required_extent(
-                    key,
-                    forest.member(key).unwrap(),
-                    ContactEnd::Terminalward,
-                    &surface,
-                ),
-                Ok(extent(0.1)),
-                "{name} baseline"
-            );
-            mutate(&mut forest, key);
-            assert_eq!(
-                table.required_extent(
-                    key,
-                    forest.member(key).unwrap(),
-                    ContactEnd::Terminalward,
-                    &surface,
-                ),
-                Err(DesignedMaskError::StaleBinding),
-                "{name} must invalidate prior validation"
-            );
-        }
-    }
-
-    /// The connectivity proof caps a requested extent at the true embedded
-    /// depth: it can never justify an inset that reaches outside the solid.
-    #[test]
-    fn validation_refuses_an_extent_deeper_than_the_solid() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        // p0 sits 0.15 mm inside the x = 1.0 face and the body leaves the solid.
-        let member = Member::new(spec(
-            [0.85, 0.5, 0.5],
-            [2.0, 0.5, 0.5],
-            0.05,
-            Some(ContactEnd::Terminalward),
-            0,
-        ));
-        let limits = validation_limits(&surface, 1);
-        assert!(validate_members_batch(
-            &surface,
-            &[&member],
-            &[(0, ContactEnd::Terminalward, extent(0.09))],
-            limits,
-        )
-        .is_ok());
-        assert_eq!(
-            validate_members_batch(
-                &surface,
-                &[&member],
-                &[(0, ContactEnd::Terminalward, extent(0.225))],
-                limits,
-            ),
-            Err(DesignedMaskError::DisconnectedGeometry {
-                end: ContactEnd::Terminalward,
-            })
-        );
-    }
-
-    /// Quantifies the margin question a contact stub faces on a real model: the
-    /// rim rays start at `p0 + unit * r0`, so on a convex surface they leave the
-    /// solid *before* the centerline does. Requesting exactly the placement
-    /// depth is therefore refused on any curved model, and the margin needed
-    /// scales as `r0^2 / (2 R)`.
-    #[test]
-    fn a_convex_surface_refuses_an_extent_equal_to_the_placement_depth() {
-        let sphere_radius_mm = 5.0;
-        let surface = sphere_surface(sphere_radius_mm, 96, 48);
-        let depth_mm = 0.3;
-        let stub_radius_mm = 0.35;
-        // A contact stub placed exactly the way `initial.rs` places one: the
-        // axis is the contact normal, so there is no incidence angle at all.
-        let member = Member::new(spec(
-            [sphere_radius_mm - depth_mm, 0.0, 0.0],
-            [sphere_radius_mm + 3.0, 0.0, 0.0],
-            stub_radius_mm,
-            Some(ContactEnd::Terminalward),
-            0,
-        ));
-        let limits =
-            EndpointMaskValidationLimits::for_batch(&surface, 1, extent(0.002), 8).unwrap();
-        assert_eq!(
-            validate_members_batch(
-                &surface,
-                &[&member],
-                &[(0, ContactEnd::Terminalward, extent(depth_mm))],
-                limits,
-            ),
-            Err(DesignedMaskError::DisconnectedGeometry {
-                end: ContactEnd::Terminalward,
-            }),
-            "an extent equal to the placement depth must be refused on a convex surface"
-        );
-        // r0^2 / (2 R) = 0.35^2 / 10 = 0.01225 mm, so a 0.02 mm margin clears it.
-        assert!(
-            validate_members_batch(
-                &surface,
-                &[&member],
-                &[(0, ContactEnd::Terminalward, extent(depth_mm - 0.02))],
-                limits,
-            )
-            .is_ok(),
-            "a margin larger than r0^2 / (2 R) must validate"
-        );
-    }
-
-    #[test]
-    fn endpoint_validator_handles_reversed_root_coordinates() {
-        let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let member = embedded_member(-0.2, 0.8, Some(ContactEnd::Rootward));
-        let masks = validate_members_batch(
-            &surface,
-            &[&member],
-            &[(0, ContactEnd::Rootward, extent(0.1))],
-            validation_limits(&surface, 1),
-        )
-        .unwrap();
-        assert_eq!(
-            masks[0].iter().map(|(end, _)| end).collect::<Vec<_>>(),
-            vec![ContactEnd::Rootward]
-        );
-        assert_eq!(
-            masks[0].rootward().unwrap().validated_extent_for(
-                &member,
-                ContactEnd::Rootward,
-                &surface
-            ),
-            Ok(extent(0.1))
-        );
-        // The rootward row swaps p0/p1 and r0/r1, so the proof walks outward
-        // from p1 even though the member's stored p0 lies outside the solid.
-        assert_eq!(
-            masks[0].terminalward().map(|_| ()),
-            None,
-            "only the declared end is minted"
-        );
-    }
-
-    /// A real 1/4/16 thread sweep: the kernel re-reads `PLINTH_THREADS` on every
-    /// batch call, so the sweep only means anything if the child process
-    /// actually runs under the requested count.
-    #[test]
-    fn endpoint_validation_is_thread_setting_independent() {
-        const CHILD: &str = "PLINTH_EMBED_MASK_SWEEP_CHILD";
-        const LINE: &str = "EMBED_MASK_SWEEP=";
-        if std::env::var(CHILD).is_ok() {
-            let surface = surface_with_cubes(&[(0.0, 1.0)]);
-            let (forest, keys) = spread_forest(4);
-            let requests = spread_requests(&forest, &keys);
-            let table = DesignedMaskTable::validate_forest(
-                &forest,
-                &surface,
-                &requests,
-                validation_limits(&surface, requests.len()),
-            )
-            .unwrap();
-            let payload = table
-                .iter()
-                .flat_map(|(_, masks)| {
-                    masks
-                        .iter()
-                        .map(|(_, mask)| format!("{:016x}", mask.validation_binding()))
-                })
-                .collect::<Vec<_>>();
-            println!(
-                "{LINE}{}:{}:{}",
-                geom_kernel::current_threads(),
-                payload.len(),
-                payload.join(":")
-            );
-            return;
-        }
-        let test_name = "designed_embed::tests::endpoint_validation_is_thread_setting_independent";
-        let mut payloads = Vec::new();
-        for threads in [1, 4, 16] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", test_name, "--nocapture"])
-                .env(CHILD, "1")
-                .env("PLINTH_THREADS", threads.to_string())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8(output.stdout).unwrap();
-            let row = stdout
-                .lines()
-                .find_map(|line| line.strip_prefix(LINE))
-                .expect("child emitted a sweep payload");
-            let mut fields = row.splitn(3, ':');
-            let effective = fields.next().unwrap();
-            let count = fields.next().unwrap();
-            let payload = fields.next().unwrap();
-            // Non-vacuity: the env var reached the kernel, and the payload is
-            // not an empty table.
-            assert_eq!(effective.parse::<usize>().unwrap(), threads);
-            assert!(count.parse::<usize>().unwrap() >= 2);
-            payloads.push(payload.to_owned());
-        }
-        assert!(payloads.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     // ---------------------------------------------------------------------
@@ -3396,7 +2550,7 @@ mod tests {
     ///    LONGER than the extent attests, so the boundary is exactly where it
     ///    was and only the blast radius moved;
     /// 4. the PLACED-member entry point still fails the whole batch on the very
-    ///    same row, because a caller that hands `validate_members_batch` an
+    ///    same row, because a caller that hands `attest_members_batch` an
     ///    unusable member has a defect and nothing can be concluded from it.
     #[test]
     fn one_unusable_candidate_is_discarded_and_the_other_thirty_nine_still_attest() {
@@ -3692,19 +2846,6 @@ mod tests {
         // Partial engagement mints no mask: there is no extent whose totality
         // was proven, so nothing may be exempted from the distance check.
         assert_eq!(outcome.verdict, Ok(None));
-        // The same geometry, asked for a MASK rather than an attestation, is
-        // refused — the two questions have different answers by design.
-        assert_eq!(
-            validate_members_batch(
-                &surface,
-                &members,
-                &[(0, ContactEnd::Terminalward, extent(0.05))],
-                validation_limits(&surface, 1),
-            ),
-            Err(DesignedMaskError::DisconnectedGeometry {
-                end: ContactEnd::Terminalward,
-            })
-        );
     }
 
     #[test]
@@ -4035,15 +3176,15 @@ mod tests {
     }
 
     /// **#28 acceptance, whole path — one ungradable row out of eight costs
-    /// that row, and the PLACED-member entry point still refuses everything.**
+    /// that row and nothing else.**
     ///
-    /// This is FU-88's argument one layer down, and the two halves are pinned
-    /// together because either alone can be satisfied by a wrong fix: making
-    /// the witness per-row without keeping `validate_members_batch` total would
-    /// let a defective PLACED member mint a mask, and keeping totality without
-    /// the per-row split leaves #28 exactly where it was.
+    /// This is FU-88's argument one layer down. The matching PLACED-caller half
+    /// — the same injected row refusing an entire build — is pinned by
+    /// `initial.rs`'s `attest_initial_contacts` test, which drives this same
+    /// `with_sabotaged_interval` injection; the two together are what keep a
+    /// per-row witness from letting a defective PLACED member through.
     #[test]
-    fn one_ungradable_row_is_discarded_while_the_placed_entry_point_stays_total() {
+    fn one_ungradable_row_is_discarded_while_the_rest_of_the_batch_attests() {
         const DEPTH: f64 = 0.3;
         const RADIUS: f64 = 0.2;
         const EXTENT_MM: f64 = 0.05;
@@ -4115,37 +3256,6 @@ mod tests {
         assert_eq!(outcomes[BAD_ROW].attested_radius_mm, 0.0);
         assert_eq!(outcomes[BAD_ROW].engagement, EndpointEngagement::UNGRADABLE);
         assert_eq!(outcomes[BAD_ROW].area_deficit, None);
-
-        // The PLACED-member entry point is deliberately TOTAL on the very same
-        // evidence: a caller that hands it a row this validator cannot grade
-        // has a defect, and no mask may be minted from the rows that happened
-        // to grade beside it.
-        let members = seats
-            .iter()
-            .map(SeatAttestationRow::provisional_member)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("every provisional member is well formed on its own");
-        let borrowed = members.iter().collect::<Vec<_>>();
-        let requests = (0..ROWS)
-            .map(|index| (index, ContactEnd::Rootward, extent(EXTENT_MM)))
-            .collect::<Vec<_>>();
-        let mint = |limits| validate_members_batch(&surface, &borrowed, &requests, limits);
-        assert!(
-            mint(validation_limits(&surface, ROWS)).is_ok(),
-            "the same members mint cleanly with nothing injected, so the \
-             refusal below is the injected row and not the fixture"
-        );
-        let minted = with_sabotaged_interval(BAD_ROW, OUT_OF_SPAN_S_A, || {
-            mint(validation_limits(&surface, ROWS))
-        });
-        assert!(
-            matches!(
-                minted,
-                Err(DesignedMaskError::EndpointEvidenceOutsideAdmittedSpan { .. })
-            ),
-            "the placed-member mint must refuse the whole batch, naming the \
-             check that refused it: {minted:?}"
-        );
     }
 
     // ---------------------------------------------------------------------
