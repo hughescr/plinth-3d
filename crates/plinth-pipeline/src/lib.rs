@@ -549,6 +549,21 @@ pub enum ModelPreparationOutcome {
         /// only `Artifact` ever carries one.
         #[serde(default)]
         repair_ledger: Option<Box<crate::coverage_evidence::SealedRepairLedger>>,
+        /// **Disclosure half of the pre-write gate's #1 finding.** The gates
+        /// named in [`PreWriteGate`] that this artifact was NOT checked
+        /// against, because no Rust implementation exists for them yet — see
+        /// `gates::judge`. This artifact was authorized on however many gates
+        /// `PreWriteGate::ALL.len()` minus this list's length actually ran,
+        /// not on all twelve.
+        ///
+        /// `#[serde(default)]` for the same reason every other field added
+        /// here is: a report frozen before this field existed keeps
+        /// deserializing, reading as `Vec::new()` — which would misreport an
+        /// old, honestly-incomplete run as fully gated. That is accepted
+        /// because no run old enough to predate this field is a current
+        /// production artifact; a fresh run always carries the true list.
+        #[serde(default)]
+        pending_gates: Vec<PreWriteGate>,
     },
     Stopped {
         after: StageStop,
@@ -1541,6 +1556,7 @@ mod tests {
                         contacts: Box::default(),
                         repair_report: None,
                         repair_ledger: None,
+                        pending_gates: Vec::new(),
                     },
                 },
                 ModelPreparationReport {
@@ -1633,6 +1649,7 @@ mod tests {
                         contacts: Box::default(),
                         repair_report: None,
                         repair_ledger: None,
+                        pending_gates: Vec::new(),
                     },
                 ),
                 model("refused", refused),

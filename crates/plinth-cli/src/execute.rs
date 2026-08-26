@@ -21,7 +21,7 @@ use plinth_orient::PinnedBaseline;
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
-    PipelineExitCode, PrepareReport, PrepareRequest, SupportedGeometry,
+    PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
 use crate::{CacheMode, OrientSelection, PrepareSelection};
@@ -230,6 +230,7 @@ fn print_model(model: &ModelPreparationReport) {
             savings_shortfall,
             ownerless_islands,
             contacts,
+            pending_gates,
             ..
         } => {
             println!(
@@ -238,6 +239,32 @@ fn print_model(model: &ModelPreparationReport) {
                 emit.support_record_count,
                 emit.artifact_bytes
             );
+            // Disclosure half of the pre-write gate's #1 review finding: this
+            // file was written after only some of the twelve named safety
+            // checks actually ran, because most have no Rust implementation
+            // yet (see `plinth_pipeline::gates::judge`). Printed unconditionally
+            // and right under EMITTED, in plain words, so an operator does not
+            // have to read the source to learn that "emitted" does not mean
+            // "every safety check passed" -- it means the checks that exist
+            // passed, and the rest did not run at all.
+            let total_gates = PreWriteGate::ALL.len();
+            let ran_gates = total_gates.saturating_sub(pending_gates.len());
+            if pending_gates.is_empty() {
+                println!(
+                    "  safety checks  all {total_gates} pre-write gates ran and passed"
+                );
+            } else {
+                println!(
+                    "  safety checks  ran {ran_gates} of {total_gates} pre-write gates; \
+                     the other {} did NOT run and could not have refused this model: {}",
+                    pending_gates.len(),
+                    pending_gates
+                        .iter()
+                        .map(|gate| format!("{gate:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             // What is actually in the file. Two of the four geometries are
             // substitutions -- the chain planned a drilled shell, could not
             // seal or could not hollow it, and carried the oriented solid

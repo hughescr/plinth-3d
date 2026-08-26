@@ -64,8 +64,8 @@ use std::path::{Path, PathBuf};
 
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    OrientationPolicy, OutputProfile, PipelineExitCode, PrepareReport, PrepareRequest, StageStop,
-    SupportedGeometry,
+    OrientationPolicy, OutputProfile, PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest,
+    StageStop, SupportedGeometry,
 };
 
 #[path = "../examples/shared/first_artifact_chain.rs"]
@@ -318,6 +318,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         contacts,
         repair_report,
         repair_ledger,
+        pending_gates,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -364,6 +365,20 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         (ledger.trials, ledger.commits, ledger.steps),
         (0, 0, 0),
         "the toed slab covers on its baseline layout, so its ledger is honestly empty"
+    );
+
+    // Disclosure half of the pre-write gate's #1 finding, through the real
+    // folder executor rather than a constructed fixture: this artifact was
+    // authorized on `UncoveredIslands` alone, and the run report must name
+    // the other eleven named gates as not yet run rather than staying silent
+    // about them.
+    let expected_pending: Vec<PreWriteGate> = PreWriteGate::ALL
+        .into_iter()
+        .filter(|gate| *gate != PreWriteGate::UncoveredIslands)
+        .collect();
+    assert_eq!(
+        pending_gates, &expected_pending,
+        "an emitted artifact must name every named gate that did not run"
     );
     let ledger_json: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&ledger.path).expect("the sealed repair ledger must exist on disk"),

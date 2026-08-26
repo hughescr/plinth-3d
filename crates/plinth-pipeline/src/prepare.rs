@@ -2084,6 +2084,10 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
             abandoned_contacts: outcome.abandoned_contacts,
             grown_contact_tips: outcome.grown_contact_tips,
         }),
+        // Disclosure half of the pre-write gate's #1 finding: this artifact
+        // was authorized on the gates that ran, not on all twelve, and this
+        // is the list of the ones that did not.
+        pending_gates: outcome.pending_gates,
     }
 }
 
@@ -2712,7 +2716,16 @@ mod tests {
             routed_contacts: 0,
             final_live_members: 0,
             snapshot_digest: 0,
-            pending_gates: Vec::new(),
+            // Non-empty and non-default on purpose: this is the field the
+            // guard exists to protect. An empty `Vec::new()` here could not
+            // tell "the eleven pending gates survived the hop" apart from
+            // "the field was dropped and defaulted to empty" -- see
+            // `crate::PreWriteGate::ALL` for the full twelve.
+            pending_gates: vec![
+                PreWriteGate::Clearance,
+                PreWriteGate::Load,
+                PreWriteGate::BallBreach,
+            ],
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -2727,11 +2740,24 @@ mod tests {
             ownerless_islands,
             contacts,
             repair_report,
+            pending_gates,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // The disclosure this guard exists to protect: the pending-gate list
+        // must reach the report unchanged, not get dropped on this hop and
+        // silently read back as "every gate ran".
+        assert_eq!(
+            pending_gates,
+            vec![
+                PreWriteGate::Clearance,
+                PreWriteGate::Load,
+                PreWriteGate::BallBreach,
+            ],
+            "the gates that did not run must reach the run report unchanged"
+        );
         // SPEC-A4 §A.8's third destination. Ruling R10 traded the failed-tries
         // cap for loud reporting, and a report that is dropped on this hop is
         // exactly the silence the ruling refused. Asserted as the whole value,
