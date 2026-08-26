@@ -3,6 +3,13 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+/// Exact SI-derived conversion: one millilitre is one cubic centimetre, which
+/// is one thousand cubic millimetres. A millilitre has no length dimension of
+/// its own, so this constant only ever divides a volume already in mm^3 — a
+/// name like "millimetres per millilitre" would claim a length-to-volume
+/// ratio that does not exist.
+pub const CUBIC_MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
+
 /// The fidelity level of a cost estimate; a cost always states how much it lied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

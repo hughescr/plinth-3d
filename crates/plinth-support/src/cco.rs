@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::NativeSurface;
-use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_core::{m0_constants, Finite, PositiveFinite, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use plinth_mesh::FaceTopology;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -34,7 +34,6 @@ use crate::{
     BuildFrame,
 };
 
-const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
 const REWIRE_DEGENERATE_MM: f64 = 1e-4;
 const KDTREE_REBUILD_EVERY: usize = 25;
@@ -5614,7 +5613,7 @@ fn candidate_price(
         request.carried_mm2(),
     )?;
     let column_price = std::f64::consts::PI * priced_radius.get().powi(2) * column_length
-        / MILLIMETRES_PER_MILLILITRE;
+        / CUBIC_MILLIMETRES_PER_MILLILITRE;
     let rung_count = (column_length / brace_span).floor() as usize;
     let brace_price = if rung_count == 0 {
         0.0
@@ -5635,7 +5634,7 @@ fn candidate_price(
         )?;
         let rod_radius = config.brace_radius_mm.max(raw.get() * 0.5_f64.powf(0.25));
         rung_count as f64 * 2.0 * std::f64::consts::PI * rod_radius.powi(2) * rod_length
-            / MILLIMETRES_PER_MILLILITRE
+            / CUBIC_MILLIMETRES_PER_MILLILITRE
     };
     Ok(diagonal_delta + column_price + brace_price)
 }
@@ -5679,7 +5678,7 @@ fn member_volume(member: &Member) -> Result<f64, CcoError> {
     let r0 = member.terminal_radius_mm().get().get();
     let r1 = member.rootward_radius_mm().get().get();
     let volume = std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
-        / MILLIMETRES_PER_MILLILITRE;
+        / CUBIC_MILLIMETRES_PER_MILLILITRE;
     volume.is_finite().then_some(volume).ok_or_else(|| {
         CcoError::InvalidGeometry(format!(
             "member_volume: computed volume is not finite (volume_ml = {volume}) for a \

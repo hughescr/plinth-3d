@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_core::{m0_constants, Finite, PositiveFinite, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -1184,7 +1184,8 @@ fn member_length(member: &Member) -> f64 {
     )
 }
 fn frustum_raw(length: f64, r0: f64, r1: f64) -> f64 {
-    std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1) / 1000.0
+    std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
+        / CUBIC_MILLIMETRES_PER_MILLILITRE
 }
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     norm(sub(a, b))

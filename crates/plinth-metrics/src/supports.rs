@@ -13,7 +13,7 @@
 use std::f64::consts::PI;
 
 use chitubox_io::SegmentType;
-use plinth_core::{MetricId, MetricSet, MetricValue};
+use plinth_core::{MetricId, MetricSet, MetricValue, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use thiserror::Error;
 
 use crate::{signed_shell_volumes, DiskArtifact, Mesh, MetricsError, ShellWinding};
@@ -26,9 +26,6 @@ pub const SUPPORT_METRIC_ORDER: [&str; 5] = [
     "resin_support",
     "resin_total",
 ];
-
-/// Exact SI-derived conversion: one millilitre is one thousand cubic millimetres.
-const CUBIC_MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 
 /// One independently supplied Voronoi load cell for a disk contact taper.
 ///
