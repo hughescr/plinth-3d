@@ -1130,18 +1130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "plinth-metrics"
-version = "0.1.0"
-dependencies = [
- "chitubox_io",
- "geom_kernel",
- "plinth-core",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "plinth-orient"
 version = "0.1.0"
 dependencies = [
