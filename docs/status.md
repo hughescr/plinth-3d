@@ -14,23 +14,25 @@ for the stage-by-stage pipeline this drives.
 
 ## Corpus state
 
-**22 of the 37 real corpus minis emit a ChituBox file end to end** (MEASURED, census
-2026-08-24, `.git/census-2026-08-24/CENSUS-REPORT.md`, at the pre-#77 seal tip).
+**24 of the 37 real corpus minis emit a ChituBox file end to end** (MEASURED 2026-08-25,
+corpus re-baseline at `develop @ 5d546cb`, all 37 models run — see the
+"2026-08-25 corpus re-baseline" section of
+[`docs/evidence/emission-canary.md`](evidence/emission-canary.md) for the ledger entry and
+`.git/rerun-2026-08-25/RERUN-REPORT.md` for the full report).
 
-**This count has a pending-recount caveat.** Task #77 (the crevice-contact seat-footprint
-ruling, see [`docs/physics.md`](physics.md)) merged *since* that census and is MEASURED to
-change support outcomes on models that place model-seated anchors — the corpus counts above
-are therefore **not verified unchanged** at the current tip (`develop @ 7eb5f30`). A fresh
-corpus run at the current tip is pending and is the next thing that should happen before any
-of these numbers are quoted as current.
+**The prior pending-recount caveat is resolved.** Task #77 (the crevice-contact
+seat-footprint ruling, see [`docs/physics.md`](physics.md)) was measured against the
+2026-08-24 pre-#77 census and produced zero disposition regressions; the +2 gain over that
+census (Tavey Badger, Tavey Base) are first-ever measurements, not recoveries. 24/37 is the
+number of record at the current tip.
 
-Of the 15 real minis that do not emit, as measured at the census tip:
+Of the 13 real minis that do not emit, as measured at the 2026-08-25 re-baseline:
 
 | outcome | count | cause |
 | --- | --- | --- |
-| hit the 25-minute harness ceiling | 9 | dominant cause: the zero-commit coverage-repair loop — tasks #24, #37, #39 below |
-| crash | 2 | Giant Toad (swallowing) — `RootRunTooShort` at Lowering, slot 280 (task #29); `zombie-2-a` fails the final ChituBox disk audit (untracked — no task number assigned yet) |
-| unmeasured | 4 | Giant Bat, Warhorse, Tavey Badger, Tavey Base |
+| hit the 1500 s harness ceiling | 10 | the zero/low-commit coverage-repair loop — tasks #24, #37, #39 below; now the sole systematic blocker, gating 10-11 models |
+| ceiling with an evidenced refusal past the ceiling | 1 | Awakened Tree — at the 1500 s ceiling it reads CEILING like census; run unbounded it terminates at ~2997 s with an evidenced `CoverageClosureRefusal` |
+| crash | 2 | Giant Toad (swallowing) — `RootRunTooShort` at Lowering, task #29; `zombie-2-a` fails the final ChituBox disk audit (untracked — no task number assigned yet) |
 
 **Zero models are refused by clearance rules.** Sub-0.300 mm true-gap residue is **0 in all 33
 measured rows; 12 of 45 unmeasured** — see

@@ -75,6 +75,37 @@ verdict is claimed for any model at this commit; the last measured emission evid
 seal-semantics class remains the 2026-08-24 census above, and the last measured evidence for
 the footprint-search closure (Rule Z's rejection) is `.git/rule-z-2026-08-25/`.
 
+## 2026-08-25 corpus re-baseline @ 5d546cb
+
+A full corpus run, one run each of all 37 minis-to-process models, 1500 s loud ceiling,
+`--no-cache`, `saturn4-ultra`, binary sha256 `bc2cdc1d…`. Comparison basis: the 2026-08-24
+census at `fe91555` (PRE-#77), byte-compared where census artifacts survive. Full report:
+`.git/rerun-2026-08-25/RERUN-REPORT.md`.
+
+**Headline: 24 of 37 emit** [MEASURED, all 37 rows run] — up from the census's 22 of 37
+[which measured 33 rows]. The +2 are two first-ever measurements: Tavey Badger (12 s) and
+Tavey Base (112 s). No census emitter was lost. Zero disposition regressions anywhere. Both
+crash classes are unchanged from census: Giant Toad (swallowing, task #29, `RootRunTooShort`,
+same member slot 256) and `zombie-2-a` (final ChituBox disk-audit failure after full
+processing).
+
+**Byte identity vs census artifacts (17 comparable emitters):** BYTE-IDENTICAL (4): Myconid
+Adult, Bat Cat Owl, zombie-9-b, Giant Wolf Spider. MOVED (13): Round 50/100, zombie-1/5/6/8-a,
+Plague Zombie, Deinonychus, Skeleton_2, Zombie Cat, Morel base, Thorny Vegepygmy, Decomposing
+Zombie — all diverge at the same byte offset, 27685 (header end). NEW BASELINE, no comparable
+census artifact (7): Round 25, Skulker Zombie, Tavey, zombie-3-a, Tavey Badger, Tavey Base,
+Crawler Zombie. The shared divergence offset across all 13 MOVED rows is attributed to task
+#77 (the crevice-contact seat-footprint exemption re-size), merged at `7e11319`.
+
+**Awakened Tree — character change, with bracket.** At the like-for-like 1500 s ceiling this
+run reads CEILING, same as census: still grinding, no artifact either side. Run unbounded
+(ceiling unenforced by a failed watcher) it instead TERMINATED at **~2997 s** — past the
+1500 s ceiling, not within it — with an evidenced `CoverageClosureRefusal`
+(`CommitBudgetExhausted` committed=8, candidates_remaining=7709; islands include
+`Blocked(ClearanceMaskUnsatisfiable standoff 0.6 mm)` and `Blocked(StubReentry)`; seal class
+terminal 257 fired, own-arm, no cascade). The change is from a silent timeout to an honest,
+evidenced refusal — observed only past the ceiling, not at it.
+
 ## Gap in the evidence, still open
 
 The count of final-pass clearance refusals whose true gap is under 0.300 mm is a real,
