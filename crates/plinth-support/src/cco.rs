@@ -4052,17 +4052,23 @@ fn evaluate_descriptors(
     descriptors: &[Descriptor],
     config: &Config,
 ) -> Result<Vec<Option<EvaluatedCandidate>>, CcoError> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(geom_kernel::current_threads())
-        .build()
+    // The kernel's cached pool for this `PLINTH_THREADS` width, NOT a private
+    // pool built here. This function is called once per rewire candidate batch,
+    // and the rewire optimiser runs once per repair trial, so a private pool was
+    // being spawned and torn down hundreds of times per model. Measured on
+    // `a4_transactional_controller`: 1,294 of 9,491 test-thread samples (13.6%)
+    // were `pthread_create` and pool teardown. The width authority, the explicit
+    // (non-global) pool and the index-parallel map-collect below are all
+    // unchanged, so the collected order — and therefore the result — is too.
+    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> =
+        geom_kernel::run_in_pool(|| {
+            descriptors
+                .par_iter()
+                .enumerate()
+                .map(|(index, descriptor)| evaluate(snapshot, request, descriptor, index, config))
+                .collect()
+        })
         .map_err(|error| CcoError::Constants(error.to_string()))?;
-    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> = pool.install(|| {
-        descriptors
-            .par_iter()
-            .enumerate()
-            .map(|(index, descriptor)| evaluate(snapshot, request, descriptor, index, config))
-            .collect()
-    });
     evaluated.into_iter().collect()
 }
 

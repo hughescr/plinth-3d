@@ -722,14 +722,6 @@ pub fn score_candidates(
         section_breakpoints: 0,
     };
 
-    // One explicit pool per call at the workspace thread count, never rayon's
-    // global pool: a one-shot global pool makes the thread sweep inert
-    // (06-conventions §3).
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(geom_kernel::current_threads())
-        .build()
-        .map_err(|error| ScoreError::Pool(error.to_string()))?;
-
     for tile in candidates.chunks(plan.candidate_tile) {
         // The one batched product: faces outer, candidates inner, so the normal
         // array streams once per tile instead of once per candidate.
@@ -755,22 +747,30 @@ pub fn score_candidates(
         // Index-parallel map-collect across candidates: every output lands in
         // the slot of its own index, so the tile's results are bit-identical at
         // any thread count.
-        let tile_outcomes: Vec<(CandidateOutcome, CandidateWork)> = pool.install(|| {
-            tile.par_iter()
-                .enumerate()
-                .map(|(column, candidate)| {
-                    score_one(
-                        table,
-                        *candidate,
-                        column,
-                        tile.len(),
-                        &nz,
-                        weights,
-                        down_limit,
-                    )
-                })
-                .collect()
-        });
+        // The kernel's cached explicit pool at the workspace thread count,
+        // never rayon's global pool: a one-shot global pool makes the thread
+        // sweep inert (06-conventions §3). Caching it there rather than
+        // building one per call keeps that property — the pool is still
+        // explicit and still re-reads `PLINTH_THREADS` — while removing a
+        // `pthread_create` storm from a function called once per tile batch.
+        let tile_outcomes: Vec<(CandidateOutcome, CandidateWork)> =
+            geom_kernel::run_in_pool(|| {
+                tile.par_iter()
+                    .enumerate()
+                    .map(|(column, candidate)| {
+                        score_one(
+                            table,
+                            *candidate,
+                            column,
+                            tile.len(),
+                            &nz,
+                            weights,
+                            down_limit,
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|error| ScoreError::Pool(error.to_string()))?;
         for (outcome, work) in tile_outcomes {
             executed.vertex_direction_products = executed
                 .vertex_direction_products

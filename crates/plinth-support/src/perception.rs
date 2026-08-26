@@ -1908,16 +1908,19 @@ mod orientation {
         normals: &[[f64; 3]],
     ) -> Result<Vec<OrientedLayer>, GenericPerceptionError> {
         let layer_count = batch.plane_offsets.len().saturating_sub(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(geom_kernel::current_threads())
-            .build()
+        // The kernel's cached pool for this width rather than a private pool
+        // built per call — same `PLINTH_THREADS` authority, same explicit
+        // (non-global) pool, same index-parallel map-collect, so the assembly
+        // by layer index and the result are unchanged. See
+        // `geom_kernel::run_in_pool` for the measurement that motivated it.
+        let layers: Vec<Result<OrientedLayer, GenericPerceptionError>> =
+            geom_kernel::run_in_pool(|| {
+                (0..layer_count)
+                    .into_par_iter()
+                    .map(|layer| orient_layer(space.site(layer), batch.plane(layer), normals))
+                    .collect()
+            })
             .map_err(|error| GenericPerceptionError::OrientationPool(error.to_string()))?;
-        let layers: Vec<Result<OrientedLayer, GenericPerceptionError>> = pool.install(|| {
-            (0..layer_count)
-                .into_par_iter()
-                .map(|layer| orient_layer(space.site(layer), batch.plane(layer), normals))
-                .collect()
-        });
         // Collected in index order, so a raised seam error is the LOWEST
         // failing layer's -- the same one the per-layer stitch loops this
         // replaced would have surfaced first.

@@ -695,25 +695,27 @@ pub fn normalize_layers_batch(
     preflight(layers, limits)?;
 
     let effective_threads = geom_kernel::current_threads();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(effective_threads)
-        .build()
-        .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
     let worker_mask = AtomicU64::new(0);
-    let results: Vec<Result<NormalizedLayer, LayerUnionError>> = pool.install(|| {
-        layers
-            .par_iter()
-            .enumerate()
-            .map(|(layer_index, layer)| {
-                if let Some(index) = rayon::current_thread_index() {
-                    if index < 64 {
-                        worker_mask.fetch_or(1u64 << index, Ordering::Relaxed);
+    // The kernel's cached pool for this width, not a private one built per
+    // call. Same `PLINTH_THREADS` authority and the same explicit (non-global)
+    // pool, so `effective_threads` still reports the requested width and the
+    // participation mask still ranges over that pool's own worker indices.
+    let results: Vec<Result<NormalizedLayer, LayerUnionError>> =
+        geom_kernel::run_in_pool(|| {
+            layers
+                .par_iter()
+                .enumerate()
+                .map(|(layer_index, layer)| {
+                    if let Some(index) = rayon::current_thread_index() {
+                        if index < 64 {
+                            worker_mask.fetch_or(1u64 << index, Ordering::Relaxed);
+                        }
                     }
-                }
-                normalize_one_layer(layer_index, layer, min_area_mm2)
-            })
-            .collect()
-    });
+                    normalize_one_layer(layer_index, layer, min_area_mm2)
+                })
+                .collect()
+        })
+        .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
     let layers_out = results.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     let mut output_vertices = 0usize;
