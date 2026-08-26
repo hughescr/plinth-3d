@@ -38,6 +38,13 @@ const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
 const REWIRE_DEGENERATE_MM: f64 = 1e-4;
 const KDTREE_REBUILD_EVERY: usize = 25;
+/// `generate_descriptors` prunes a plate-spiral trunk candidate whose implied
+/// top sits within this margin of the plate: a candidate that shallow adds no
+/// distinct anchor position over the `Descriptor::Plate` already pushed at
+/// the stub's own `(x, y)`. Search-pruning only (physics-first constants
+/// doctrine) — it decides which of the `trunk_radii_mm` x `trunk_directions`
+/// candidates are even generated, never whether a generated one is accepted.
+const TRUNK_SPIRAL_MIN_RISE_ABOVE_PLATE_MM: f64 = 1.0;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1895,7 +1902,7 @@ impl CcoController {
             Vec::new(),
             None,
             0,
-            Some(hosts),
+            hosts,
             process_resolution_mm,
             None,
         )?;
@@ -1986,7 +1993,7 @@ impl CcoController {
             anchor_seat_refusals,
             Some(&context),
             anchor_ray_batches,
-            Some(hosts),
+            hosts,
             context.route.process_resolution_mm,
             // **Stage B — the read side of the key.** Not "the same five
             // digests" assembled by hand: the SAME CALL that seals this
@@ -2145,11 +2152,10 @@ impl CcoController {
             &binding.excluded_hosts,
         );
         let descriptors = generate_descriptors(
-            &binding.snapshot,
             &binding.request,
             &config,
             &seats,
-            Some(hosts),
+            hosts,
             false,
             anchor_route.process_resolution_mm,
             anchor_route.geometry.surface(),
@@ -3019,13 +3025,8 @@ fn finalize_transcript_row(
 }
 
 fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
+    let mut word = |value: u64| fnv.word(value);
     word(rows.len() as u64);
     for row in rows {
         word(row.cadence_index as u64);
@@ -3114,17 +3115,12 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             }
         }
     }
-    hash
+    fnv.finish()
 }
 
 fn finalized_transcript_digest(transcript: &FinalizedCcoTranscript) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
+    let mut word = |value: u64| fnv.word(value);
     word(transcript.plan_digest);
     word(transcript.finalized_load_digest);
     word(transcript.load_partition_digest);
@@ -3135,29 +3131,23 @@ fn finalized_transcript_digest(transcript: &FinalizedCcoTranscript) -> u64 {
     word(transcript.final_controller_digest);
     word(transcript.ordered_disposition_digest);
     word(transcript_rows_digest(&transcript.rows));
-    hash
+    fnv.finish()
 }
 
 fn finalized_load_partition_digest(plan: &SpecializedContactPlan) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
     let rows = plan.load_partition().rows();
-    word(rows.len() as u64);
+    fnv.word(rows.len() as u64);
     for row in rows {
-        word(u64::from(row.face_id));
-        word(row.contact_id);
-        word(match row.owner {
+        fnv.word(u64::from(row.face_id));
+        fnv.word(row.contact_id);
+        fnv.word(match row.owner {
             crate::perception::LoadOwner::Specialized(owner) => u64::from(owner) << 1,
             crate::perception::LoadOwner::GenericIsland(owner) => (u64::from(owner) << 1) | 1,
         });
-        word(row.carried_area_mm2.to_bits());
+        fnv.word(row.carried_area_mm2.to_bits());
     }
-    hash
+    fnv.finish()
 }
 
 fn candidate_family_digest(family: CandidateFamily) -> u64 {
@@ -3672,7 +3662,7 @@ fn grow_terminal_inner(
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
     anchor_ray_batches: usize,
-    cached_hosts: Option<Vec<MemberKey>>,
+    cached_hosts: Vec<MemberKey>,
     process_resolution_mm: f64,
     steering: Option<PassSteering<'_>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
@@ -3683,7 +3673,6 @@ fn grow_terminal_inner(
     // seat derivation and the clearance screen so the two cannot disagree.
     let contact_policy = seat_contact_policy(process_resolution_mm)?;
     let descriptors = generate_descriptors(
-        forest,
         request,
         &config,
         &seats,
@@ -4159,15 +4148,15 @@ fn clearance_survival(
     }
     // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY.**
     //
-    // These two vectors no longer reach the kernel's distance path. They are
-    // kept because `emergence_ok` needs the claimed mask, and PR-3 is not
-    // optional under the honest rule but MORE necessary (design §5, reader 1):
-    // at grazing incidence the whole nearby surface falls inside the band and
-    // is connected, so `Z` swallows everything, nothing is left to grade, and
-    // the kernel returns `INFINITY` — a pass by erasure. PR-3 is the gate that
-    // refuses that member, and the mask is its yardstick.
-    let mut mask_inset0 = vec![0.0; p0.len()];
-    let mut mask_inset1 = vec![0.0; p0.len()];
+    // The per-row mask no longer reaches the kernel's distance path (the
+    // batch below passes `zero`/`zero` insets). It is kept as
+    // `claimed_mask_mm` because `emergence_ok` needs the claimed mask, and
+    // PR-3 is not optional under the honest rule but MORE necessary (design
+    // §5, reader 1): at grazing incidence the whole nearby surface falls
+    // inside the band and is connected, so `Z` swallows everything, nothing
+    // is left to grade, and the kernel returns `INFINITY` — a pass by
+    // erasure. PR-3 is the gate that refuses that member, and the mask is
+    // its yardstick.
     // PR-3 bookkeeping, row-aligned: the total mask a row's contact ends claim,
     // and whether any of them had no finite mask at all.
     let mut claimed_mask_mm = vec![0.0_f64; p0.len()];
@@ -4202,10 +4191,6 @@ fn clearance_survival(
             ) {
                 Some(mask) => {
                     claimed_mask_mm[*row] += mask;
-                    match contact.end {
-                        ContactEnd::Terminalward => mask_inset0[*row] = mask,
-                        ContactEnd::Rootward => mask_inset1[*row] = mask,
-                    }
                 }
                 // A degenerate incidence masks NOTHING here, so the row is
                 // fully distance-checked rather than silently exempted — and
@@ -4500,11 +4485,10 @@ impl RewireCandidateBatch {
               seat-zone freeze and are the same validated pair the caller already holds"
 )]
 fn generate_descriptors(
-    forest: &Forest,
     request: &TerminalCcoRequest,
     config: &Config,
     anchor_seats: &[QualifiedAnchorSeat],
-    cached_hosts: Option<Vec<MemberKey>>,
+    cached_hosts: Vec<MemberKey>,
     include_plate_spiral: bool,
     process_resolution_mm: f64,
     surface: &NativeSurface,
@@ -4525,7 +4509,7 @@ fn generate_descriptors(
                     std::f64::consts::TAU * direction as f64 / config.trunk_directions as f64;
                 let xy = [se[0] + radius * angle.cos(), se[1] + radius * angle.sin()];
                 let top_z = se[2] - radius / config.branch_angle_deg.to_radians().tan().max(1e-9);
-                if top_z > request.plate_z_mm().get() + 1.0 {
+                if top_z > request.plate_z_mm().get() + TRUNK_SPIRAL_MIN_RISE_ABOVE_PLATE_MM {
                     out.push(Descriptor::Plate { xy, top_z });
                 }
             }
@@ -4609,9 +4593,11 @@ fn generate_descriptors(
             *seat_zone = record;
         }
     }
-    let hosts = cached_hosts
-        .unwrap_or_else(|| HostCache::default().nearest(se, config.bifurcation_hosts, forest));
-    out.extend(hosts.into_iter().map(|host| Descriptor::Bifurcate { host }));
+    out.extend(
+        cached_hosts
+            .into_iter()
+            .map(|host| Descriptor::Bifurcate { host }),
+    );
     Ok(out)
 }
 
@@ -5292,6 +5278,17 @@ fn apply_bifurcation(
     Ok(true)
 }
 
+/// The plate-descent topology predicate: does `member`'s rootward end land
+/// exactly on the plate (the two-member Xia diagonal-only shape), or does it
+/// stop short with a COLUMN still below it? `size_plate_candidate` and
+/// `candidate_price` must agree on this to size and price the same shape, so
+/// there is exactly one statement of it.
+fn plate_descent_reaches_plate(forest: &Forest, member: MemberKey, plate_z_mm: Finite) -> bool {
+    forest
+        .member(member)
+        .is_some_and(|member| member.p1_mm()[2] == plate_z_mm)
+}
+
 fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Result<(), CcoError> {
     let first = forest.parent_of(request.stub).ok_or_else(|| {
         CcoError::InvalidGeometry(format!(
@@ -5300,9 +5297,7 @@ fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Re
             request.stub
         ))
     })?;
-    let first_reaches_plate = forest
-        .member(first)
-        .is_some_and(|member| member.p1_mm()[2] == request.plate_z_mm());
+    let first_reaches_plate = plate_descent_reaches_plate(forest, first, request.plate_z_mm());
     if first_reaches_plate {
         let radius = required_rootward_without_tree_fanin(forest, first)?;
         forest.set_radii(
@@ -5583,9 +5578,7 @@ fn candidate_price(
             request.stub
         ))
     })?;
-    let (diagonal, column) = if candidate
-        .member(first)
-        .is_some_and(|member| member.p1_mm()[2].get() == request.plate_z_mm().get())
+    let (diagonal, column) = if plate_descent_reaches_plate(candidate, first, request.plate_z_mm())
     {
         (None, first)
     } else {
@@ -10822,7 +10815,7 @@ mod tests {
             Vec::new(),
             None,
             0,
-            Some(vec![host]),
+            vec![host],
             0.05,
             None,
         )

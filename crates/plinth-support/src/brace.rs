@@ -36,7 +36,14 @@ use crate::{
 };
 
 const HEIGHT_TOLERANCE_MM: f64 = 1e-9;
-const CROSS_LINK_DUTY_FACTOR: f64 = 0.840_896_415_253_714_5; // 0.5^(1/4)
+/// `rungs_that_fit`'s minimum spacing between adjacent evenly-placed rungs
+/// (and between the end rungs and the span's own ends). `n` rungs divide a
+/// span into `n + 1` equal gaps of `span / (n + 1)`; requiring each gap be at
+/// least this wide is exactly `n <= span - MIN_RUNG_SPACING_MM` when the
+/// spacing is 1 mm, which is the bound below. Search-pruning only (physics-
+/// first constants doctrine): it caps how many of the requested rungs are
+/// even offered a position, never whether an offered one is accepted.
+const MIN_RUNG_SPACING_MM: f64 = 1.0;
 
 #[derive(Clone, Debug)]
 struct BraceConfig {
@@ -64,6 +71,12 @@ struct BraceConfig {
     ball_factor_foot: f64,
     ball_breach_epsilon_mm: f64,
     min_illegal_len_mm: f64,
+    /// `CCO_X_PAIR_LOAD_DISCOUNT` — the registered proof-backed fourth-root
+    /// relation `(F/2)^0.25 / F^0.25 = 0.5^0.25`, the discount a cross-linked
+    /// pair earns for sharing load. Previously restated here as a literal
+    /// twin (`CROSS_LINK_DUTY_FACTOR`); now read from the one registered
+    /// statement of it.
+    cross_link_duty_factor: f64,
     /// `max(LayerPlan::heights_mm())` for the run being braced — the PR-1
     /// slicer-resolution seat floor and the PR-2 mask margin.  Carried on the
     /// config because it is a property of the RUN, not of the registry.
@@ -141,6 +154,7 @@ impl BraceConfig {
             ball_factor_foot: p.ball_factor_foot().diagnostic().get(),
             ball_breach_epsilon_mm: p.ball_breach_eps_mm().diagnostic().get(),
             min_illegal_len_mm: p.min_illegal_len_mm().diagnostic().get(),
+            cross_link_duty_factor: *constants.evidence().cco_x_pair_load_discount().value(),
         })
     }
 }
@@ -2105,7 +2119,7 @@ fn cross_link_rods(
                     .brace_radius_mm
                     .get()
                     .max(own.get())
-                    .max(raw * CROSS_LINK_DUTY_FACTOR),
+                    .max(raw * config.cross_link_duty_factor),
             )
         } else {
             // Frozen twin parity deliberately uses the 45-degree construction
@@ -3005,7 +3019,11 @@ fn rungs_that_fit(span: f64, requested: usize) -> usize {
     if requested == 0 {
         return 0;
     }
-    requested.min((span - 1.0 + HEIGHT_TOLERANCE_MM).floor().max(0.0) as usize)
+    requested.min(
+        (span - MIN_RUNG_SPACING_MM + HEIGHT_TOLERANCE_MM)
+            .floor()
+            .max(0.0) as usize,
+    )
 }
 
 fn map_height_to_path_member(forest: &Forest, path: &[MemberKey], z: f64) -> Option<MemberKey> {

@@ -4117,23 +4117,7 @@ impl RetainedLoadTranspose {
         if verified_mesh.fingerprint() != plan.authority.mesh {
             return Err(GenericPerceptionError::StaleAuthority);
         }
-        let mut contact_order = Vec::with_capacity(contacts.len());
-        for contact in contacts {
-            if contact.point_mm.iter().any(|value| !value.is_finite()) {
-                return Err(GenericPerceptionError::NonFinitePhysicalContact {
-                    contact_id: contact.contact_id,
-                });
-            }
-            contact_order.push(contact_order.len());
-        }
-        contact_order.sort_unstable_by_key(|&index| contacts[index].contact_id);
-        for pair in contact_order.windows(2) {
-            if contacts[pair[0]].contact_id == contacts[pair[1]].contact_id {
-                return Err(GenericPerceptionError::DuplicatePhysicalContact {
-                    contact_id: contacts[pair[0]].contact_id,
-                });
-            }
-        }
+        let contact_order = validated_contact_order(contacts)?;
         let mut retention = LoadRowRetention {
             witnesses: Vec::new(),
             centroids_mm: Vec::new(),
@@ -4180,18 +4164,9 @@ impl RetainedLoadTranspose {
                 carried_area_mm2: self.row_area_mm2[row_index],
             });
         }
-        let mut contact_hash = Fnv::new();
-        for index in contact_order {
-            let contact = &contacts[index];
-            contact_hash.u64(contact.contact_id);
-            hash_owner(&mut contact_hash, contact.owner);
-            for value in contact.point_mm {
-                contact_hash.f64(value);
-            }
-        }
         let partition = FinalizedLoadPartition {
             authority: plan.authority.clone(),
-            contacts_fingerprint: contact_hash.finish(),
+            contacts_fingerprint: hash_physical_contacts(contacts, &contact_order),
             rows,
             ownerless,
         };

@@ -2079,7 +2079,6 @@ pub fn prepare_specialized_contacts(
         });
     }
     add_synthetic_islands(
-        mesh,
         &surface,
         topology.component_ids(),
         &seeds,
@@ -2452,7 +2451,6 @@ fn owners_by_face(islands: &[SupportIsland]) -> BTreeMap<u32, Vec<u32>> {
 
 #[allow(clippy::too_many_arguments)]
 fn add_synthetic_islands(
-    mesh: &Mesh,
     surface: &NativeSurface,
     components: &[u32],
     seeds: &[DemandSeed],
@@ -2517,10 +2515,13 @@ fn add_synthetic_islands(
             id: next_id,
             face_ids: faces,
         };
+        // `next_id` strictly increases across this whole loop (checked_add,
+        // never reused) and starts above every id already in `islands`/
+        // `owners`, so each push lands strictly after every existing entry
+        // for `face` — the vector stays sorted and the id is fresh, so no
+        // re-sort or dedup is needed to restore either invariant.
         for &face in &island.face_ids {
             owners.entry(face).or_default().push(next_id);
-            owners.get_mut(&face).expect("inserted").sort_unstable();
-            owners.get_mut(&face).expect("inserted").dedup();
         }
         islands.push(island);
         next_id = next_id
@@ -2528,7 +2529,6 @@ fn add_synthetic_islands(
             .ok_or(SpecializedError::OwnerIdOverflow)?;
     }
     islands.sort_by_key(|island| island.id);
-    let _ = mesh;
     Ok(())
 }
 
@@ -6224,13 +6224,16 @@ pub(crate) fn plan_route_points_nearest(
     })
 }
 
-fn plan_variant_nearest_routes(
+/// The regular-route and demand points a variant's coverage graph contains —
+/// every contact except the merge proposal's own two members, which are
+/// added back once under the proposal's shared `physical_id`. Shared by
+/// [`plan_variant_nearest_routes`] and [`fill_variant_nearest`] so the two
+/// passes cannot hand-drift apart: a divergence here would have surfaced as a
+/// fingerprint mismatch, not a compile error.
+fn gather_variant_route_points(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
-    samples: &[CoverageSample],
-    limits: KnnBatchLimits,
-    retention: NearestWitnessRetention,
-) -> Result<CoverageRouteNearestPlan, SpecializedError> {
+) -> Result<Vec<CoverageRoutePoint>, SpecializedError> {
     let mut points = Vec::new();
     let mut add_contact = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
         points.extend(
@@ -6266,6 +6269,17 @@ fn plan_variant_nearest_routes(
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.left]);
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.right]);
     }
+    Ok(points)
+}
+
+fn plan_variant_nearest_routes(
+    contacts: &[WorkingContact],
+    proposal: Option<&MergeProposal>,
+    samples: &[CoverageSample],
+    limits: KnnBatchLimits,
+    retention: NearestWitnessRetention,
+) -> Result<CoverageRouteNearestPlan, SpecializedError> {
+    let points = gather_variant_route_points(contacts, proposal)?;
     plan_route_points_nearest(&points, samples, limits, retention)
 }
 
@@ -6277,40 +6291,7 @@ fn fill_variant_nearest(
     planned: CoverageRouteNearestPlan,
     witnesses: Option<&mut NearestWitnessTable>,
 ) -> Result<(), SpecializedError> {
-    let mut points = Vec::new();
-    let mut add = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
-        points.extend(
-            contact
-                .regular_routes
-                .iter()
-                .map(|candidate| CoverageRoutePoint {
-                    physical_id,
-                    island_id: candidate.owner_island_id,
-                    component_id: candidate.component_id,
-                    position_mm,
-                }),
-        );
-        points.extend(contact.demands.iter().map(|demand| CoverageRoutePoint {
-            physical_id,
-            island_id: demand.owner_island_id,
-            component_id: demand.coverage_component_id,
-            position_mm,
-        }));
-    };
-    for (physical_id, contact) in contacts.iter().enumerate() {
-        if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
-            add(
-                u64::try_from(physical_id).expect("usize fits u64"),
-                contact.position_mm,
-                contact,
-            );
-        }
-    }
-    if let Some(proposal) = proposal {
-        let physical_id = u64::try_from(proposal.left).expect("usize fits u64");
-        add(physical_id, proposal.position_mm, &contacts[proposal.left]);
-        add(physical_id, proposal.position_mm, &contacts[proposal.right]);
-    }
+    let points = gather_variant_route_points(contacts, proposal)?;
     fill_route_points_nearest(&points, samples, nearest, planned, witnesses)
 }
 
@@ -8210,7 +8191,11 @@ where
         loop {
             match (left.next(), right.next()) {
                 (Some(a), Some(b)) => {
-                    let ordering = a.to_ne_bytes().cmp(&b.to_ne_bytes());
+                    // `total_cmp`, not a byte-cmp on `to_ne_bytes`: the raw
+                    // bytes are native-endian (platform-dependent) and their
+                    // lexicographic order is not numeric order for negative
+                    // values, and this key reaches the sealed plan digest.
+                    let ordering = a.total_cmp(&b);
                     if ordering != Ordering::Equal {
                         return ordering;
                     }
@@ -12500,21 +12485,27 @@ mod tests {
         assert_eq!(demands[0].kind, SpecializedDemandKind::IslandBirth);
     }
 
+    // Pinned value updated for the `to_ne_bytes` -> `total_cmp` fix (review
+    // finding specialized.rs:8213): a byte-cmp on native-endian bytes is not
+    // numeric order for negative values, and this key reaches the sealed
+    // plan digest. `total_cmp`'s IEEE-754 total order still distinguishes
+    // signed zero, but the other way around (`-0.0 < +0.0`, not `+0.0 <
+    // -0.0`), so the expected ordering below is the corrected one.
     #[test]
-    fn demand_array_key_distinguishes_signed_zero_raw_bytes() {
+    fn demand_array_key_distinguishes_signed_zero_by_total_order() {
         let position = [0.0, 0.0, 0.1];
         let mut positive = minimum_demand(0, 2, 7, position);
         positive.region_points_mm = vec![[0.0, 1.0, 2.0]];
         let mut negative = positive.clone();
         negative.region_points_mm[0][0] = -0.0;
-        assert_eq!(compare_demands(&positive, &negative), Ordering::Less);
+        assert_eq!(compare_demands(&positive, &negative), Ordering::Greater);
 
         let mut demands = vec![negative, positive];
         demands.sort_by(compare_demands);
         demands.dedup_by(|left, right| compare_demands(left, right) == Ordering::Equal);
         assert_eq!(demands.len(), 2);
-        assert_eq!(demands[0].region_points_mm[0][0].to_bits(), 0);
-        assert_eq!(demands[1].region_points_mm[0][0].to_bits(), 1_u64 << 63);
+        assert_eq!(demands[0].region_points_mm[0][0].to_bits(), 1_u64 << 63);
+        assert_eq!(demands[1].region_points_mm[0][0].to_bits(), 0);
     }
 
     #[test]

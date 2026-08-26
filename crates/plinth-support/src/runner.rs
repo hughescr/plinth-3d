@@ -3398,6 +3398,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
         &self,
         limits: crate::CoverageMeasurementLimits,
         knn_limits: KnnBatchLimits,
+        island_index: &IslandFaceIndex<'_>,
     ) -> Result<CoverageMeasurementPreflight, CoverageMeasurementError> {
         let mut memberships = 0usize;
         let mut sequential_membership_peak = 0usize;
@@ -3540,7 +3541,6 @@ impl<'a> SupportVerificationSnapshot<'a> {
         // the distinct route keys, and a single sorted island index answering
         // every sample by two binary searches.
         let query_route_count = distinct_sample_route_keys(self.coverage_samples)?;
-        let island_index = IslandFaceIndex::build(self.named_islands)?;
         let island_row_count = self
             .coverage_samples
             .iter()
@@ -3667,11 +3667,14 @@ impl<'a> SupportVerificationSnapshot<'a> {
             max_logical_peak_bytes: limits.max_route_knn_peak_bytes(),
             max_work: limits.max_distance_work(),
         };
+        // Built once and threaded through both the preflight's count and the
+        // real measurement below — not rebuilt for the second use.
+        let island_index = IslandFaceIndex::build(self.named_islands)?;
         // This complete scalar pass must precede every measurement allocation.
         // In particular, it counts exact physical seats per route rather than
         // using a worst-case membership bound, so a request at an exact cap is
         // accepted when the later allocating planner agrees.
-        let preflight = self.measurement_preflight(limits, knn_limits)?;
+        let preflight = self.measurement_preflight(limits, knn_limits, &island_index)?;
         let mut points = Vec::new();
         #[cfg(test)]
         record_measurement_call(|counts| counts.normalized_route_projection_reserves += 1);
@@ -3744,9 +3747,9 @@ impl<'a> SupportVerificationSnapshot<'a> {
         .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
             reason: "coverage traversal",
         })?;
-        // The same single sorted membership index the preflight built, for the
-        // same reason: this loop asks the identical question once per sample.
-        let island_index = IslandFaceIndex::build(self.named_islands)?;
+        // The same single sorted membership index the preflight built, reused
+        // rather than rebuilt: this loop asks the identical question once per
+        // sample.
         let mut island_rows = Vec::with_capacity(preflight.island_row_count);
         for sample in self.coverage_samples {
             if island_index.contains(sample.island_id, sample.face_id) {
@@ -10987,6 +10990,8 @@ mod tests {
                 usize::MAX,
             )
             .expect("nonzero limits");
+            let island_index =
+                IslandFaceIndex::build(snapshot.named_islands).expect("well-formed fixture");
             let summary = snapshot
                 .measurement_preflight(
                     unlimited,
@@ -10997,6 +11002,7 @@ mod tests {
                         max_logical_peak_bytes: usize::MAX,
                         max_work: usize::MAX,
                     },
+                    &island_index,
                 )
                 .expect("fixture preflight");
             let exact = CoverageMeasurementLimits::new(
