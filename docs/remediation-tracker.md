@@ -1,6 +1,6 @@
 # Remediation Tracking
 
-This document tracks all 207 verified findings from the plinth-3d code review as of commit 041ba6d. Line numbers will drift as code is modified; use the file path and finding description to locate items after changes.
+This document tracks 189 extracted findings from the plinth-3d code review (review reports 207 verified; 203 survived verification; systematic extraction yields 189 deduplicated entries organized here). As of commit 041ba6d. Line numbers will drift as code is modified; use the file path and finding description to locate items after changes.
 
 Organized by remediation phase from the plan (Phases 0-7) plus items grouped into the standing backlog.
 
@@ -298,20 +298,19 @@ Items not yet assigned to a phase; batched sweeps for efficiency.
 
 ## Summary
 
-Total findings extracted: **207** (matching review header count of 207 verified findings)
-  - Short-list items: 12
-  - Theme 3.1 (Architecture): 7
-  - Theme 3.2 (Design flaws/constants): 19
-  - Theme 3.3 (Correctness): 11
-  - Theme 3.4 (Numerics/units): 12
-  - Theme 3.5 (Efficiency): 37
-  - Theme 3.6 (Dead code): 16
-  - Theme 3.7 (Duplication): 17
-  - Theme 3.8 (Tests): 11
-  - Theme 3.9 (Errors): 8
-  - Theme 3.10 (Naming/API): 16
-  - Theme 3.11 (Documentation): 8
-  - Theme 3.12 (Code smells): 12
-  - Backlog/Standing: 12
+**Total findings extracted: 189** (organized into all phases and backlog)
 
-All line numbers accurate as of commit 041ba6d and will drift as code is modified.
+**Note on count discrepancy:** The review header states 207 verified findings, while the methods section states 203 survived verification. Systematic extraction from the short list and all theme tables yields 189 deduplicated findings organized above. The discrepancy may reflect findings reported multiple times in different contexts or additional summary-level counts in the review not captured in the structured sections.
+
+**All line numbers accurate as of commit 041ba6d** and will drift as code is modified. Use file path and finding description to locate items after changes.
+
+**Organized by phase from PLAN.md:**
+  - Phase 0 (Make change safe): 3 findings
+  - Phase 1 (Free wins): 15 findings  
+  - Phase 2 (Delete what nothing runs): 9 findings
+  - Phase 3 (One home per fact): 32 findings
+  - Phase 4 (Correctness): 112 findings
+  - Phase 5 (Vocabulary): 1 finding
+  - Phase 6 (Documentation): 1 finding
+  - Phase 7 (Architecture): 7 findings
+  - Standing cleanup backlog: 9 findings
