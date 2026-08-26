@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 chitubox_io = { path = "../../rust/chitubox_io" }
 plinth-core = { path = "../plinth-core" }

@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 # Throwaway 2026-08-04 embed-incidence census instrumentation, quarantined so it
 # cannot reach a production build (MAJOR-8). Off by default; the census example

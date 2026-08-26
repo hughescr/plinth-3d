@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # The shared, batch-first geometry kernel (owner override O-5: one spatial
 # implementation).  The delicacy evaluator's thinness proxy needs a batched ray

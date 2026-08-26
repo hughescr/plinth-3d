@@ -6,6 +6,9 @@ rust-version = "1.97"
 publish = false
 build = "build.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 cxx = { workspace = true }
 thiserror = { workspace = true }

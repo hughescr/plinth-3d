@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # The shared kernel is depended on for exactly one thing: `current_threads`,
 # the single `PLINTH_THREADS` pool authority every crate's batch calls share

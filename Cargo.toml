@@ -33,6 +33,73 @@ inherits = "dev"
 opt-level = 2
 debug-assertions = true
 
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+# Real signal: keep strict_comparison, cast_possible_truncation,
+# cast_sign_loss, cast_possible_wrap, cast_precision_loss, and
+# suspicious_operation_groupings at "warn" (inherited from pedantic/nursery
+# above); everything below is style noise this project should not carry.
+suboptimal_flops = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+items_after_statements = "allow"
+unreadable_literal = "allow"
+redundant_closure_for_method_calls = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+redundant_pub_crate = "allow"
+doc_lazy_continuation = "allow"
+too_many_lines = "allow"
+missing_fields_in_debug = "allow"
+struct_field_names = "allow"
+must_use_candidate = "allow"
+# Manual-midpoint is real but zero-risk on mm-scale f64; leave at warn as a
+# free cleanup queue, don't allow it away.
+#
+# The block above is the census-drafted list. Running it against the live
+# workspace surfaced ~990 more warnings across 27 additional pedantic/nursery
+# idiom lints the census never sampled (nursery's lint set is unstable and
+# grows between clippy releases). Every one read is a style/idiom preference
+# with no correctness content — sampled at least one site per lint below and
+# confirmed none touches the risk classes the census flagged (strict
+# comparison, casts, suspicious operator groupings). Allowed for the same
+# reason as the block above: noise, not signal.
+missing_const_for_fn = "allow"
+too_long_first_doc_paragraph = "allow"
+use_self = "allow"
+cast_lossless = "allow"
+derive_partial_eq_without_eq = "allow"
+format_push_string = "allow"
+option_if_let_else = "allow"
+map_unwrap_or = "allow"
+single_match_else = "allow"
+manual_let_else = "allow"
+match_same_arms = "allow"
+elidable_lifetime_names = "allow"
+or_fun_call = "allow"
+if_not_else = "allow"
+tuple_array_conversions = "allow"
+used_underscore_items = "allow"
+unnecessary_wraps = "allow"
+wildcard_imports = "allow"
+uninlined_format_args = "allow"
+trivially_copy_pass_by_ref = "allow"
+useless_let_if_seq = "allow"
+nonminimal_bool = "allow"
+large_types_passed_by_value = "allow"
+struct_excessive_bools = "allow"
+semicolon_if_nothing_returned = "allow"
+return_self_not_must_use = "allow"
+ignored_unit_patterns = "allow"
+bool_to_int_with_if = "allow"
+# debug_assert_with_mut_call stays at warn (nursery default): calling a
+# mutating expression inside debug_assert! means the mutation silently
+# vanishes in a release build — a real debug/release behaviour split, not
+# style. Only 2 sites (brace.rs:1634, specialized.rs:6339); worth a look.
+
 # Cheap-but-honest test gate: release SEMANTICS (debug-assertions off,
 # overflow-checks matching release) at a much cheaper compile cost.
 # Used by lane gates; the merge gate to develop stays full --release.

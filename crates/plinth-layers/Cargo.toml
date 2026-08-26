@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 geom_kernel = { path = "../../rust/geom_kernel" }
 i_overlay = { workspace = true }
