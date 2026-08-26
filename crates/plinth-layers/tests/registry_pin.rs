@@ -24,10 +24,17 @@ fn quantum_and_domain_match_the_m0_registry() {
 }
 
 /// The quantum is the stitch key: the design's OQ-1 i64 branch fixed it at
-/// exactly 1e-8 mm so quantization is lossless with respect to stitched
-/// vertices. Perception's `LOOP_MERGE_MM` is private; this pins the value the
-/// phase-C cutover will rely on.
+/// exactly the same tolerance the kernel already merges plane-slice
+/// crossings on, so quantization is lossless with respect to stitched
+/// vertices. `plinth-support::perception`'s private `LOOP_MERGE_MM` is
+/// itself just `geom_kernel::PLANE_SLICE_MERGE_TOLERANCE_MM` (a public
+/// constant `plinth-layers` already depends on), so this pins against that
+/// constant directly rather than against a bare literal that could drift
+/// from it unnoticed.
 #[test]
 fn quantum_is_exactly_the_stitch_key() {
-    assert_eq!(plinth_layers::SLICE_UNION_QUANTUM_MM, 1.0e-8);
+    assert_eq!(
+        plinth_layers::SLICE_UNION_QUANTUM_MM,
+        geom_kernel::PLANE_SLICE_MERGE_TOLERANCE_MM
+    );
 }

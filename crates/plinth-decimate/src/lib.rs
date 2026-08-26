@@ -1733,11 +1733,19 @@ fn run_budget_search(
         });
     }
 
+    // Built once and reused by every bisection round and every final
+    // verification below: `vertex_locks` never changes across a search, only
+    // `target_ratio` does, so cloning `protected` per candidate bought
+    // nothing but an unchanged-slice copy on every round.
+    let mut request = SimplifyRequest {
+        target_ratio: 0.0,
+        vertex_locks: protected.to_vec(),
+    };
     let mut low = policy.ratio_low;
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
         let midpoint = (low + high) / 2.0;
-        let step = match sampled_step(original, protected, midpoint, budget.probe, error_budget)
+        let step = match sampled_step(original, &mut request, midpoint, budget.probe, error_budget)
             .map_err(|error| BudgetSearchError::SearchExecution {
                 phase: "ratio bisection",
                 message: error,
@@ -1813,13 +1821,8 @@ fn run_budget_search(
     }
 
     for candidate in candidates {
-        let final_outcome = match simplify_locked(
-            original,
-            &SimplifyRequest {
-                target_ratio: candidate.ratio,
-                vertex_locks: protected.to_vec(),
-            },
-        ) {
+        request.target_ratio = candidate.ratio;
+        let final_outcome = match simplify_locked(original, &request) {
             Ok(outcome) => outcome,
             Err(error) => {
                 // The deterministic rebuild of a sampled-safe candidate found
@@ -2339,18 +2342,16 @@ enum SampledStepOutcome {
 
 fn sampled_step(
     original: &Mesh,
-    protected: &[bool],
+    request: &mut SimplifyRequest,
     ratio: f64,
     probe_config: ProbeConfig,
     budget: ErrorBudget,
 ) -> Result<SampledStepOutcome, String> {
-    let outcome = match simplify_locked(
-        original,
-        &SimplifyRequest {
-            target_ratio: ratio,
-            vertex_locks: protected.to_vec(),
-        },
-    ) {
+    // `vertex_locks` is the caller's unchanged lock set for the whole
+    // bisection; only the ratio moves per round, so only it is written here
+    // -- see the allocation note where `request` is built.
+    request.target_ratio = ratio;
+    let outcome = match simplify_locked(original, &*request) {
         Ok(outcome) => outcome,
         Err(error) => {
             return candidate_free_cause(&error)

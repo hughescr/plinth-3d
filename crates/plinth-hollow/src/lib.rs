@@ -403,10 +403,11 @@ pub struct CavityRepairEvidence {
     pub cell_visits: usize,
     /// Passes over the whole grid: the opening cell scan plus one per component
     /// re-selection. Counted separately because the cell-visit bound does not
-    /// cover them. Since FU-47 a re-selection pass is **thirteen** whole-grid
-    /// traversals — the twelve resin-flow selection makes plus the sweep
-    /// applying its verdict — so `p` here is `13p − 12` traversals of the
-    /// grid; it was `2p − 1` when re-selection was plain 6-connectivity.
+    /// cover them. Since FU-47 a re-selection pass is **twelve** whole-grid
+    /// traversals — the eleven resin-flow selection makes (`flow.rs` names
+    /// them one by one) plus the sweep applying its verdict — so `p` here is
+    /// `12p − 11` traversals of the grid; it was `2p − 1` when re-selection
+    /// was plain 6-connectivity.
     pub full_grid_passes: usize,
 }
 
@@ -2422,8 +2423,8 @@ fn grid_spec_from_bounds(
         if !low_index.is_finite() || !high_index.is_finite() {
             return Err(HollowError::VoxelGridTooLarge);
         }
-        let origin_index = round_ties_even(low_index);
-        let end_index = round_ties_even(high_index);
+        let origin_index = low_index.round_ties_even();
+        let end_index = high_index.round_ties_even();
         let span_index = end_index - origin_index;
         origin[axis] = origin_index * pitch;
         if !origin[axis].is_finite()
@@ -3089,20 +3090,6 @@ fn mark_voxel_index(
         .get_mut(flat)
         .ok_or(HollowError::VoxelGridTooLarge)? = true;
     Ok(())
-}
-
-fn round_ties_even(value: f64) -> f64 {
-    let lower = value.floor();
-    let fractional = value - lower;
-    if fractional < 0.5 {
-        lower
-    } else if fractional > 0.5 {
-        lower + 1.0
-    } else if lower.rem_euclid(2.0) == 0.0 {
-        lower
-    } else {
-        lower + 1.0
-    }
 }
 
 fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<usize, HollowError> {
@@ -3829,7 +3816,14 @@ pub enum HollowError {
     Kernel,
     #[error("the established EDT/label/marching-surface adapter rejected the voxel field")]
     VoxelStack,
-    #[error("the model has no interior beyond the 10mm bulk threshold")]
+    // The message names no figure: `HOLLOW_BULK_MIN_MM` is a registered,
+    // owner-tunable constant (currently 10 mm), and baking today's value into
+    // this text would silently go stale the moment the registry changes it.
+    // This variant deliberately carries no measurement -- see the FU-79
+    // rationale at `crates/plinth-pipeline/tests/prepare_folder.rs` for why a
+    // bulk refusal is not given a `SavingsShortfall` the way the savings gate
+    // is.
+    #[error("the model has no interior beyond the registered bulk-size threshold")]
     IneligibleBelowBulk,
     #[error("the wall offset leaves no cavity")]
     IneligibleNoCavity,
@@ -3851,7 +3845,7 @@ pub enum HollowError {
     /// anything — see [`SavingsShortfall`], which carries the same pair
     /// onto the solid decision this becomes.
     #[error(
-        "the largest cavity saves {saved_mm3:.3} mm3, short of the registered {threshold_mm3:.3} \
+        "the cavity saves {saved_mm3:.3} mm3, short of the registered {threshold_mm3:.3} \
          mm3 minimum resin saving"
     )]
     IneligibleSavings { saved_mm3: f64, threshold_mm3: f64 },
@@ -3878,7 +3872,7 @@ pub enum HollowError {
     /// the repair is not claimed here — what is claimed is that a repair ran,
     /// how big it was, and that the gate was judged after it.
     #[error(
-        "the largest cavity saves {saved_mm3:.3} mm3 after the well-composedness repair returned \
+        "the cavity saves {saved_mm3:.3} mm3 after the well-composedness repair returned \
          {repaired_voxels} voxels to material ({critical_cells} critical cells, {cell_visits} \
          cell visits, {full_grid_passes} whole-grid passes), short of the registered \
          {threshold_mm3:.3} mm3 minimum resin saving"
@@ -4273,13 +4267,16 @@ mod tests {
 
     #[test]
     fn frozen_voxel_rounding_and_exterior_fill_rules_are_independently_pinned() {
-        // NumPy's `round` is nearest with half-to-even, including negatives.
-        assert_eq!(round_ties_even(-2.5), -2.0);
-        assert_eq!(round_ties_even(-1.5), -2.0);
-        assert_eq!(round_ties_even(-0.5), 0.0);
-        assert_eq!(round_ties_even(0.5), 0.0);
-        assert_eq!(round_ties_even(1.5), 2.0);
-        assert_eq!(round_ties_even(2.5), 2.0);
+        // NumPy's `round` is nearest with half-to-even, including negatives;
+        // pin `f64::round_ties_even` (std since 1.77) against those corners
+        // since this crate now takes that method as its one ties-to-even
+        // implementation rather than hand-rolling it.
+        assert_eq!((-2.5_f64).round_ties_even(), -2.0);
+        assert_eq!((-1.5_f64).round_ties_even(), -2.0);
+        assert_eq!((-0.5_f64).round_ties_even(), 0.0);
+        assert_eq!((0.5_f64).round_ties_even(), 0.0);
+        assert_eq!((1.5_f64).round_ties_even(), 2.0);
+        assert_eq!((2.5_f64).round_ties_even(), 2.0);
 
         // The complement flood uses SciPy's default face connectivity. The
         // central empty cell is only diagonally connected to the boundary,
@@ -4548,8 +4545,8 @@ mod tests {
     fn frozen_mark_voxel_vertex(point: [f64; 3], spec: GridSpec, occupancy: &mut [bool]) {
         let mut index = [0_usize; 3];
         for axis in 0..3 {
-            let grid = round_ties_even(point[axis] / spec.pitch);
-            let origin = round_ties_even(spec.origin[axis] / spec.pitch);
+            let grid = (point[axis] / spec.pitch).round_ties_even();
+            let origin = (spec.origin[axis] / spec.pitch).round_ties_even();
             index[axis] = (grid - origin) as usize;
         }
         mark_voxel_index(index, spec, occupancy).expect("fixture-sized grid");

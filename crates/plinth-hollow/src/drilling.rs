@@ -903,13 +903,7 @@ fn prepare_audit_plan(
     let qualifying_count = components
         .iter()
         .filter(|component| {
-            qualifies_audit_drain(
-                component.len(),
-                field.pitch_mm().get(),
-                0,
-                audit_min_ml,
-                audit_max_drains,
-            )
+            qualifies_audit_drain(component.len(), field.pitch_mm().get(), audit_min_ml, audit_max_drains)
         })
         .count();
     let candidate_upper_bound = qualifying_count
@@ -922,13 +916,7 @@ fn prepare_audit_plan(
     )?;
     let mut candidates = Vec::with_capacity(candidate_upper_bound);
     for (component_id, component) in components.iter().enumerate() {
-        if qualifies_audit_drain(
-            component.len(),
-            field.pitch_mm().get(),
-            0,
-            audit_min_ml,
-            audit_max_drains,
-        ) {
+        if qualifies_audit_drain(component.len(), field.pitch_mm().get(), audit_min_ml, audit_max_drains) {
             let origin = component_low_origin(field, component)?;
             for (direction_order, direction) in AUDIT_DIRECTIONS.into_iter().enumerate() {
                 let direction = normalize(direction)?;
@@ -1002,6 +990,12 @@ fn prepare_audit_plan(
             return Err(DrillingRefusal::ResourceAccountingOverflow);
         }
         for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
+            // This is the cap that actually binds the number of audit drains
+            // a model can receive — `qualifies_audit_drain` only screens
+            // which trapped components are worth generating candidates for,
+            // it does not see this running count. No test drives this loop
+            // past `audit_max_drains` qualifying components to pin the
+            // boundary directly.
             if audit_holes.len() == audit_max_drains {
                 break;
             }
@@ -1118,14 +1112,17 @@ fn select_exact_audit_candidate(
     Ok(None)
 }
 
-fn qualifies_audit_drain(
-    component_voxels: usize,
-    pitch_mm: f64,
-    added: usize,
-    min_pocket_ml: f64,
-    max_extra_drains: usize,
-) -> bool {
-    component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= min_pocket_ml && added < max_extra_drains
+/// Whether a trapped component is big enough to be worth an audit drain at
+/// all. This decides candidate *generation*, not the count actually cut: the
+/// cap that binds the number of audit drains added to a model is the
+/// `audit_holes.len() == audit_max_drains` break in `prepare_audit_plan`'s
+/// drilling loop, which this predicate does not see and cannot enforce (an
+/// earlier revision took a per-call `added` count here to approximate that
+/// cap, but every production caller always passed `0`, so the parameter
+/// tested a boundary that could never occur and was removed rather than left
+/// as a false signal).
+fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, min_pocket_ml: f64, max_extra_drains: usize) -> bool {
+    component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= min_pocket_ml && max_extra_drains > 0
 }
 
 fn trapped_components(
@@ -1734,22 +1731,13 @@ fn flat_if_in(q: [isize; 3], dims: [usize; 3]) -> Option<usize> {
     Some(q[0] as usize + q[1] as usize * dims[0] + q[2] as usize * dims[0] * dims[1])
 }
 
-fn round_ties_even(value: f64) -> f64 {
-    let floor = value.floor();
-    let fraction = value - floor;
-    if fraction < 0.5 {
-        floor
-    } else if fraction > 0.5 {
-        floor + 1.0
-    } else if floor % 2.0 == 0.0 {
-        floor
-    } else {
-        floor + 1.0
-    }
-}
-
 fn grid_index_ties_even(point: V3, origin: V3, pitch: f64) -> [isize; 3] {
-    [0, 1, 2].map(|axis| round_ties_even((point[axis] - origin[axis]) / pitch) as isize)
+    // `f64::round_ties_even` (std since 1.77) matches the frozen NumPy
+    // rounding this grid indexing must reproduce; the negative/positive/
+    // averaged half-cell corners are pinned in
+    // `numpy_grid_rounding_pins_negative_positive_and_averaged_half_cells`
+    // below.
+    [0, 1, 2].map(|axis| ((point[axis] - origin[axis]) / pitch).round_ties_even() as isize)
 }
 
 fn bounds_within_source(source: ([f64; 3], [f64; 3]), drilled: ([f64; 3], [f64; 3])) -> bool {
@@ -2440,7 +2428,7 @@ mod tests {
     #[test]
     fn numpy_grid_rounding_pins_negative_positive_and_averaged_half_cells() {
         assert_eq!(
-            [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5].map(round_ties_even),
+            [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5].map(f64::round_ties_even),
             [-2.0, -2.0, 0.0, 0.0, 2.0, 2.0]
         );
         let origin = [0.0, 0.0, 0.0];
@@ -2706,12 +2694,16 @@ mod tests {
     }
 
     #[test]
-    fn frozen_audit_threshold_and_three_drain_cap_are_inclusive_and_ordered() {
+    fn frozen_audit_threshold_is_inclusive_and_zero_cap_disqualifies_everything() {
         // 4000 half-millimetre voxels are exactly 0.5ml.
-        assert!(qualifies_audit_drain(4000, 0.5, 0, 0.5, 3));
-        assert!(qualifies_audit_drain(4000, 0.5, 2, 0.5, 3));
-        assert!(!qualifies_audit_drain(3999, 0.5, 0, 0.5, 3));
-        assert!(!qualifies_audit_drain(4000, 0.5, 3, 0.5, 3));
+        assert!(qualifies_audit_drain(4000, 0.5, 0.5, 3));
+        assert!(!qualifies_audit_drain(3999, 0.5, 0.5, 3));
+        // A registry-set cap of zero extra drains disqualifies every
+        // component outright, regardless of size — the actual per-model
+        // drain count cap is `prepare_audit_plan`'s
+        // `audit_holes.len() == audit_max_drains` loop break, which this
+        // predicate cannot see (see its doc comment).
+        assert!(!qualifies_audit_drain(4000, 0.5, 0.5, 0));
     }
 
     #[test]

@@ -246,7 +246,11 @@ impl ObjectiveWeights {
     }
 
     /// The down-facing cutoff, byte for byte the expression
-    /// `plinth-support/src/lib.rs:814` evaluates from the same constant.
+    /// `plinth_support::perceive_contacts_on_surface` evaluates from the same
+    /// constant (`crates/plinth-support/src/lib.rs`, `let down_limit = ...`).
+    /// A source-line citation drifted stale here once already (recorded 814,
+    /// actually 871 by the time this was caught, a 57-line drift); naming the
+    /// function instead of a line number is the fix, not just the number.
     #[must_use]
     pub fn down_limit(self) -> f64 {
         -self.overhang_angle_deg.to_radians().sin()

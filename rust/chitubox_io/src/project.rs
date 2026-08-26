@@ -796,7 +796,7 @@ fn validate_name(name: &str) -> Result<()> {
 fn append_into(sec: &mut crate::document::SupportSection, records: &[SupportRecord]) -> Result<()> {
     let mut off = sec
         .orig_smesh_off
-        .checked_add(sec.smesh.len() as u32)
+        .checked_add(u32_of(sec.smesh.len())?)
         .ok_or(ChituboxError::ArithmeticOverflow {
             context: "append offset",
         })?;
@@ -818,7 +818,7 @@ fn append_into(sec: &mut crate::document::SupportSection, records: &[SupportReco
             });
         }
         let blob = f32_to_bytes(&r.mesh.xyz);
-        let mesh_len = blob.len() as u32;
+        let mesh_len = u32_of(blob.len())?;
         let mut raw = [0u8; SEG_RECORD_LEN];
         raw[S_MAGIC..S_MAGIC + 4].copy_from_slice(&SEG_MAGIC.to_le_bytes());
         raw[S_TYPE..S_TYPE + 4].copy_from_slice(&r.segment_type.0.to_le_bytes());

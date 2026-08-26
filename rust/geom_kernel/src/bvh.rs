@@ -267,10 +267,15 @@ fn build_range(
         if best_plane < 0 {
             use_median = true;
         } else {
-            // stable partition preserving index order within each side
+            // stable partition preserving index order within each side.
+            // `l_cnt[plane]`/`r_cnt[plane + 1]` are this exact plane's exact
+            // left/right counts, already computed by the sweep above, and
+            // sum to `count` -- reserving `count` for each of two vectors
+            // whose combined length is `count` would double-book capacity
+            // this partition never uses.
             let plane = best_plane as usize;
-            let mut left: Vec<u32> = Vec::with_capacity(count);
-            let mut right: Vec<u32> = Vec::with_capacity(count);
+            let mut left: Vec<u32> = Vec::with_capacity(l_cnt[plane]);
+            let mut right: Vec<u32> = Vec::with_capacity(r_cnt[plane + 1]);
             for (j, &p) in order[lo..hi].iter().enumerate() {
                 if bin_of[j] <= plane {
                     left.push(p);
@@ -290,11 +295,16 @@ fn build_range(
 
     if use_median {
         // index-median split: order[lo..hi] is already ascending by face index
-        // (stable partitions preserve the initial ascending order), so a
-        // midpoint split IS the index median (spec sec 3.2).
+        // -- the root order is `mesh.face_ids()`, contractually ascending
+        // (`Mesh::subset`'s own debug_assert), and every recursive range
+        // reaching here is either that root range or the untouched or
+        // stably-repartitioned output of an earlier split, both of which
+        // preserve per-side ascending order. So a midpoint split IS the
+        // index median (spec sec 3.2) with no sort needed to make it one;
+        // an earlier version of this function re-sorted the range here
+        // "to be sure", which was strictly redundant work on data already
+        // known sorted by construction.
         split_pos = lo + count / 2;
-        // ensure the range is sorted by face index for a true index median
-        order[lo..hi].sort_unstable();
     }
 
     let left = build_range(

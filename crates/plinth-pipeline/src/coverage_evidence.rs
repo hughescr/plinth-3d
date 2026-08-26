@@ -87,8 +87,19 @@ const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v2";
 /// existing cap. The value is this change's own, not owner-derived: bounded
 /// generously enough that essentially every corpus mini (a "150k-face mini"
 /// is the largest cited in the ledger) still renders full-fidelity per
-/// island at typical island sizes, while a pathological island selection
-/// cannot blow the sidecar past a few megabytes.
+/// island at typical island sizes.
+///
+/// **What it actually bounds, stated correctly: the per-island SVG files,
+/// not the sidecar.** The refusal sidecar (`<target-stem>.coverage.json`)
+/// carries only each island's SVG *filename* ([`sidecar_path`] is the
+/// pattern), so it stays kilobytes regardless of this cap. `render_island_svg`
+/// draws up to three panels, each iterating up to this many `<polygon>`
+/// elements at roughly 90 bytes apiece, so one at-the-cap island SVG is
+/// roughly 3 x 20,000 x 90 B =~ 5 MB, and a refusal with
+/// [`COVERAGE_RENDER_MAX_ISLANDS`] such islands can write on the order of
+/// several tens of megabytes of *SVGs* -- an order of magnitude past "a few
+/// megabytes", which is what an earlier version of this note said and named
+/// the wrong file for.
 pub const COVERAGE_RENDER_MAX_FACES: usize = 20_000;
 
 /// How many of the worst islands get a render each. Bounds total evidence
