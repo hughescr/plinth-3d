@@ -80,7 +80,8 @@ the footprint-search closure (Rule Z's rejection) is `.git/rule-z-2026-08-25/`.
 A full corpus run, one run each of all 37 minis-to-process models, 1500 s loud ceiling,
 `--no-cache`, `saturn4-ultra`, binary sha256 `bc2cdc1d…`. Comparison basis: the 2026-08-24
 census at `fe91555` (PRE-#77), byte-compared where census artifacts survive. Full report:
-`.git/rerun-2026-08-25/RERUN-REPORT.md`.
+`dnd-campaigns/plinth-rerun-2026-08-25/RERUN-REPORT.md` (one directory above the
+repo, outside git).
 
 **Headline: 24 of 37 emit** [MEASURED, all 37 rows run] — up from the census's 22 of 37
 [which measured 33 rows]. The +2 are two first-ever measurements: Tavey Badger (12 s) and

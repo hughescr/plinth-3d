@@ -18,7 +18,8 @@ for the stage-by-stage pipeline this drives.
 corpus re-baseline at `develop @ 5d546cb`, all 37 models run — see the
 "2026-08-25 corpus re-baseline" section of
 [`docs/evidence/emission-canary.md`](evidence/emission-canary.md) for the ledger entry and
-`.git/rerun-2026-08-25/RERUN-REPORT.md` for the full report).
+`dnd-campaigns/plinth-rerun-2026-08-25/RERUN-REPORT.md` (one directory above the
+repo, outside git) for the full report).
 
 **The prior pending-recount caveat is resolved.** Task #77 (the crevice-contact
 seat-footprint ruling, see [`docs/physics.md`](physics.md)) was measured against the
