@@ -36,10 +36,10 @@
 //!
 //! **Expected values are never recomputed from production logic.** Where a
 //! test needs a number it comes from one of three places: the fixture's own
-//! stated geometry (the generator in `tests/fixtures/generate.py` writes the
-//! boxes out in millimetres), an analytic reference derived from that geometry,
-//! or the M0 constants registry read live. No test here re-derives what the
-//! engine derives.
+//! stated geometry (`tests/fixtures/PROVENANCE.md` records the boxes each
+//! fixture was built from, in millimetres), an analytic reference derived
+//! from that geometry, or the M0 constants registry read live. No test here
+//! re-derives what the engine derives.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -56,10 +56,10 @@ use plinth_orient::{
 };
 
 // ---------------------------------------------------------------------------
-// Fixture geometry, restated from `tests/fixtures/generate.py`.
+// Fixture geometry, restated from `tests/fixtures/PROVENANCE.md`.
 //
-// These are the fixture's OWN dimensions, in millimetres, as the generator
-// wrote them. They are inputs to this test, not expected outputs of the
+// These are the fixture's OWN dimensions, in millimetres, as recorded in that
+// document. They are inputs to this test, not expected outputs of the
 // engine: an assertion built on them says "a drain must be inside this box of
 // space", which is a claim about the model, not a paraphrase of the planner.
 // ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ fn fixture_orientation_history() -> OrientationHistory {
         audit,
         OrientationReport {
             provenance: OrientationProvenance::Pinned {
-                pinned_report: PathBuf::from("tests/fixtures/generate.py"),
+                pinned_report: PathBuf::from("tests/fixtures/PROVENANCE.md"),
             },
             selection: BaselineSelection::Identity,
             transform: RigidTransform::identity(),
