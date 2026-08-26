@@ -100,6 +100,42 @@ bool_to_int_with_if = "allow"
 # vanishes in a release build — a real debug/release behaviour split, not
 # style. Only 2 sites (brace.rs:1634, specialized.rs:6339); worth a look.
 
+# Third pass, after the two blocks above: `cargo clippy --workspace
+# --all-targets` still surfaced ~51 warnings across 24 more pedantic/nursery
+# lints neither prior pass sampled (same unstable-nursery-lint-set cause).
+# Read every site; all are style/idiom preferences on already-safe code
+# (a const-array-of-descriptors macro, a Vec::drain, a while loop with an
+# epsilon-guarded float bound, an unused &mut self param, etc.) — none
+# touches the risk classes this file deliberately keeps at warn (strict
+# float comparison, the cast_* family, suspicious_operation_groupings,
+# needless_pass_by_value, redundant_clone, manual_midpoint,
+# debug_assert_with_mut_call). Allowed for the same reason as the blocks
+# above: noise, not signal.
+assigning_clones = "allow"
+borrow_as_ptr = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+cloned_instead_of_copied = "allow"
+copy_iterator = "allow"
+duration_suboptimal_units = "allow"
+fn_params_excessive_bools = "allow"
+imprecise_flops = "allow"
+iter_on_single_items = "allow"
+iter_with_drain = "allow"
+large_stack_arrays = "allow"
+manual_is_variant_and = "allow"
+match_wild_err_arm = "allow"
+needless_collect = "allow"
+needless_pass_by_ref_mut = "allow"
+needless_raw_string_hashes = "allow"
+option_option = "allow"
+range_plus_one = "allow"
+stable_sort_primitive = "allow"
+unnecessary_debug_formatting = "allow"
+unnecessary_semicolon = "allow"
+unnested_or_patterns = "allow"
+unused_self = "allow"
+while_float = "allow"
+
 # Cheap-but-honest test gate: release SEMANTICS (debug-assertions off,
 # overflow-checks matching release) at a much cheaper compile cost.
 # Used by lane gates; the merge gate to develop stays full --release.
