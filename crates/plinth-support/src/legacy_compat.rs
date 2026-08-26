@@ -35,10 +35,6 @@ pub struct LegacyCompatibility {
 impl LegacyCompatibility {
     /// Returns the only live current-support/raft compatibility policy.
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "the future current-support controller is the sole O-10 caller"
-    )]
     pub(crate) fn o10_live_current_support_and_raft() -> Self {
         Self {
             shaft_drag_force_n: Placeholder::new(
@@ -74,10 +70,6 @@ impl LegacyCompatibility {
     /// into current production parity geometry.  Its terminal end is returned
     /// exactly from the member, so a one-sided taper cannot be accidentally
     /// replaced by uniform sizing.
-    #[allow(
-        dead_code,
-        reason = "the future current-support controller is the sole O-10 caller"
-    )]
     pub(crate) fn size_live_current_support_member(
         &self,
         forest: &Forest,
@@ -154,10 +146,6 @@ impl LegacyCompatibility {
     /// Frozen O-10 deflection component for a transient path length. It calls
     /// the same mechanics leaf as full-span sizing and cannot be constructed
     /// outside this crate.
-    #[allow(
-        dead_code,
-        reason = "the crate-private current-support controller integration follows this parity leaf"
-    )]
     pub(crate) fn deflection_radius_for_geometry(
         &self,
         length_3d_mm: PositiveFinite,

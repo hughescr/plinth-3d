@@ -22,15 +22,7 @@ use crate::{
 
 const BRACE_ENDPOINT_BATCH_SIZE: usize = 256;
 const TRANSIENT_TIE_TOLERANCE_MM: f64 = 1e-9;
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 const MIN_GEOMETRY_LENGTH_MM: f64 = 1e-6;
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 const MIN_Z_EXTENT_MM: f64 = 1e-9;
 
 /// A restraint grips the path at `point_z_mm`, but exists only once the build
@@ -421,10 +413,6 @@ pub fn transient_report(
 /// Compute a new complete radius array in child-before-parent order. The
 /// O-10 bridge supplies the sole frozen 0.01 N compatibility load; this module
 /// neither calibrates it nor promotes it to acceptance evidence.
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 pub(crate) fn resize_forest_current_parity(
     forest: &Forest,
     plate_z_mm: Finite,
@@ -682,10 +670,6 @@ fn free_gaps(zlo: f64, zhi: f64, restraints: &[Finite]) -> Result<Vec<ZInterval>
         .collect()
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn postorder(forest: &Forest) -> Vec<MemberKey> {
     fn visit(
         forest: &Forest,
@@ -754,10 +738,6 @@ fn best_member_interval(
     (best, winner)
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn equivalent_free_length_mm(worst_gap_z_mm: f64, own_length_mm: f64, z_extent_mm: f64) -> f64 {
     worst_gap_z_mm * own_length_mm / z_extent_mm.max(MIN_Z_EXTENT_MM)
 }
@@ -773,10 +753,6 @@ fn finite(value: f64) -> Result<Finite, TransientError> {
     Finite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn positive(value: f64) -> Result<PositiveFinite, TransientError> {
     PositiveFinite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }

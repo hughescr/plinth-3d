@@ -597,10 +597,6 @@ pub struct CoverageScoreShare {
 
 /// One eligible repair-pool row with its GLOBAL marginal uncovered area.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) struct RankedRepairRow {
     pub(crate) id: RepairRowId,
     /// The route that OWNS the row. Rule N2 changes how a row is scored, never
@@ -628,10 +624,6 @@ pub(crate) struct RankedRepairRow {
 /// (rule N2); the controller picks exactly one winner from it per trial, and
 /// re-sorts rather than re-scores after a rejection.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) struct RankedRepairCandidates {
     pub(crate) ranked: Vec<RankedRepairRow>,
     pub(crate) per_key: BTreeMap<(u32, u32), KeyNomination>,
@@ -642,10 +634,6 @@ pub(crate) struct RankedRepairCandidates {
 
 /// One candidate seat's GLOBAL score and the routes that produced it.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) struct GlobalCandidateScore {
     pub(crate) marginal_area_mm2: f64,
     pub(crate) scored_from: Vec<CoverageScoreShare>,
@@ -674,10 +662,6 @@ pub(crate) struct GlobalCandidateScore {
 /// what a seat COVERS. Splitting them is what lets the cross-route credit that
 /// task #27's population depends on be proved from a handful of samples instead
 /// of from a model run.
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) fn score_candidates_globally(
     seats: &[[f64; 3]],
     samples: &[crate::CoverageSample],
@@ -742,10 +726,6 @@ pub(crate) fn score_candidates_globally(
 /// Rule N4 re-sorts on top of this after every rejection (see
 /// [`choose_winner`]); it never re-scores, because a dropped child plan leaves
 /// the uncovered sample set and every candidate seat bit-identical.
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) fn sort_ranked_rows(ranked: &mut [RankedRepairRow]) {
     ranked.sort_by(|left, right| {
         left.marginal_area_mm2
@@ -1084,10 +1064,6 @@ impl DiversityDiscs {
 
 /// Which candidate the controller tries next, and why it was chosen.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) struct ChosenCandidate {
     pub(crate) index: usize,
     /// **Rule N3.** True when the first-trial guarantee chose this route rather
@@ -1140,10 +1116,6 @@ pub(crate) struct ChosenCandidate {
 ///
 /// `ledgered` holds the rows already tried and rolled back; SPEC §6 requires
 /// exact failed rows to be excluded, and they stay excluded across a rollback.
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 pub(crate) fn choose_winner(
     candidates: &RankedRepairCandidates,
     ledgered: &BTreeSet<RepairRowId>,
@@ -1260,10 +1232,6 @@ pub(crate) fn best_live_score_mm2(
 /// can hold, including the zero a candidate covering nothing carries.
 /// `total_cmp` reversed, so `min_by` on it means "largest area first".
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "SPEC-A4 design §A.4: the one-winner controller consumes these; it lands in the next commit of this lane and the allow goes with it"
-)]
 struct OrderedScore(f64);
 
 impl Eq for OrderedScore {}
