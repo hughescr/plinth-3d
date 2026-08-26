@@ -13,15 +13,37 @@ mod closest;
 mod consts;
 mod mesh;
 mod moller;
-mod par;
+/// Deterministic rayon thread-pool cache (spec sec 4, Amendment A4).
+///
+/// Public so a consumer that needs to run its own work under this kernel's
+/// cached, `PLINTH_THREADS`-sized pool can reuse [`run`]/[`try_run`] and
+/// [`current_threads`] directly, instead of building and tearing down a
+/// private `rayon::ThreadPoolBuilder` pool per call at the same width this
+/// module already caches.
+pub mod par;
 mod parity;
 mod point_index;
 mod queries;
 mod segment_batch;
 mod slicing;
-mod vec3;
+/// Minimal `[f64; 3]` vector arithmetic (`V3`), evaluated in the fixed element
+/// order the kernel's bit-parity guarantees depend on (spec sec 5.1).
+///
+/// Public so a consumer working with [`V3`] values reuses these primitives
+/// instead of re-implementing vector add/sub/scale/dot/cross/norm/dist above
+/// the kernel.
+pub mod vec3;
 mod winding;
 
+/// Synthetic mesh generators, brute-force oracles, and other test-only
+/// surface constructors used by this crate's and its consumers' integration
+/// tests.
+///
+/// Gated behind the `testkit` feature: unlike the rest of this crate's public
+/// surface, several constructors here `unwrap()` instead of returning
+/// [`SurfaceBuildError`], so this module must never ship in a release build
+/// that does not explicitly opt in.
+#[cfg(feature = "testkit")]
 pub mod testkit;
 
 use std::borrow::Cow;

@@ -25,6 +25,10 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# testkit feature: crate::seat_zone's unit tests use geom_kernel::testkit;
+# this dev-only re-declaration turns the feature on for test/bench builds
+# without enabling it for the normal [dependencies] entry above.
+geom_kernel = { path = "../../rust/geom_kernel", features = ["testkit"] }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
 serde_json = { workspace = true }

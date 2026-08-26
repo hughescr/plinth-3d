@@ -11,7 +11,20 @@ workspace = true
 [lib]
 name = "geom_kernel"
 
+[features]
+# Synthetic mesh generators, brute-force oracles, and unwrap()-ping test
+# constructors (src/testkit.rs). Never enabled by default: it must not ship
+# in a release build. Enabled below for this crate's own dev-dependencies so
+# its integration tests keep compiling.
+testkit = []
+
 [dependencies]
 kiddo.workspace = true
 rayon = "1.10"
 sha2 = "0.10"
+
+[dev-dependencies]
+# Self-dependency so `cargo test`/integration tests build the lib with the
+# `testkit` feature enabled, without turning it on for ordinary (release)
+# consumers of this crate.
+geom_kernel = { path = ".", features = ["testkit"] }
