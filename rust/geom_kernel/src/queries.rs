@@ -1823,11 +1823,15 @@ impl NativeSurface {
                     let start = node.a as usize;
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
-                        if !excluded.is_empty() {
-                            let global = self.mesh.face_ids()[tid as usize];
-                            if excluded.binary_search(&global).is_ok() {
-                                continue;
-                            }
+                        // `tid` IS the global face ID: leaf order carries global
+                        // IDs even for a narrowed view (bvh.rs `build`), which is
+                        // the same fact `seg_tri_dist` relies on one line below to
+                        // index the shared geometry. `face_ids()` is the
+                        // slot-to-global map and is indexed by SLOT, so looking
+                        // `tid` up in it is out of bounds on a narrowed view and a
+                        // no-op only on a full one.
+                        if !excluded.is_empty() && excluded.binary_search(&tid).is_ok() {
+                            continue;
                         }
                         let (d, pt) = self.seg_tri_dist(a, b, tid as usize);
                         if d < best_d {
@@ -2139,7 +2143,10 @@ impl NativeSurface {
                                 limit: max_faces,
                             });
                         }
-                        found.push(self.mesh.face_ids()[tid as usize]);
+                        // Global already -- see `seg_surface_min_excluding`:
+                        // BVH leaf order carries global face IDs, so `tid` is
+                        // the ID to report, not a slot to resolve.
+                        found.push(tid);
                     }
                 }
             } else {
