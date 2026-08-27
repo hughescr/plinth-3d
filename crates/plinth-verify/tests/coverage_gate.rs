@@ -276,6 +276,43 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // the ceilings that moved are this test's own hand-counted fixture bounds,
 // re-counted against the fixture they describe. One constant was ADDED — the
 // scar maximum above — under the owner ruling that authorized it.
+//
+// **Refreshed a twelfth time on 2026-08-27, for the RAFT PAD/BRIDGE SPLIT.**
+// `SupportSegmentKind::RaftPadOrBridge` was one variant whose pad-versus-bridge
+// shape downstream consumers recovered by testing `start == end`. It is now two
+// variants the producer states outright, `RaftPad` and `RaftBridge`, so a
+// zero-length MST edge between two roots that coincide in XY can no longer
+// masquerade as a pad. `snapshot_digest` **12136443226163403608 ->
+// 13198418135389558006, and NOTHING ELSE in this file moved.**
+//
+// **The cause is measured here, not inferred.** `lower.rs`'s `primitive_digest`
+// folds `segment_kind as u8`, and the split gave `RaftBridge` discriminant 6
+// where the retired `RaftPadOrBridge` was 5 (`RaftPad` kept 5). The toed slab's
+// raft is 47 of its 402 primitives: **24 pads and 23 MST bridges**, so exactly
+// 23 discriminant bytes moved 5 -> 6 and no other digest input changed at all.
+// That attribution was CONFIRMED BY EXPERIMENT, not argued: mapping `RaftBridge`
+// back to 5 at the two digest sites (`lower.rs:493`, `raft.rs:151`) and nowhere
+// else reproduced the previous golden **bit-identically — all 169 scalar leaves,
+// including the digest itself.** The experiment was then reverted.
+//
+// The golden was REGENERATED THROUGH THIS FILE'S OWN PRODUCER PATH (the
+// `THREAD_CHILD` arm of `public_coverage_report_is_frozen_without_evidence_loss`),
+// never hand-edited, exactly as every refresh above was, and the two documents
+// were diffed leaf by leaf: **169 scalar leaves, EXACTLY 1 moved**
+// (`snapshot_digest`). Every `request` bound, all 11 `resources` counters, all 9
+// islands with their face ids, all 9 patches (`uncovered_area_mm2`,
+// `cut_ambiguous`, `assessment_failed`, `worst_gap`) and all 7 defects are
+// byte-identical — no evidence was lost, no count moved, and the report still
+// refuses with the same 7 defects on the same 7 islands.
+//
+// The movement is DECISION-NEUTRAL: a discriminant is an identity label, not a
+// measurement, so renumbering one cannot change what the support does. The
+// pinned input-list test `verification_snapshot_digest_input_list_is_pinned`
+// (plinth-support `runner.rs`) stayed GREEN and unmoved at
+// 11833545896309364349 across this refresh, which is the independent
+// confirmation that the digest's input SHAPE did not widen — only one input's
+// value moved. No cap, gate, minimum, radius, tolerance or registered constant
+// was touched, and none was added.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
