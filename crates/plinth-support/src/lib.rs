@@ -191,6 +191,11 @@ pub enum FrustumRingNormal {
 }
 
 /// Closed support-domain vocabulary. Wire-format identities belong to `plinth-emit`.
+///
+/// `RaftPad` and `RaftBridge` are two distinct variants, not one variant plus
+/// a geometric test, precisely so no consumer has to infer which raft shape a
+/// primitive is from whether its endpoints happen to coincide. The producer
+/// in `raft.rs` always knows which one it is building; it says so here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SupportSegmentKind {
     ContactSphere,
@@ -198,7 +203,8 @@ pub enum SupportSegmentKind {
     JointSphere,
     Member,
     RootFlare,
-    RaftPadOrBridge,
+    RaftPad,
+    RaftBridge,
 }
 
 /// Canonical authority for native sphere records.  The serialized endpoints
@@ -580,7 +586,14 @@ impl SupportPrimitive {
             SupportSegmentKind::ContactTaper
                 | SupportSegmentKind::Member
                 | SupportSegmentKind::RootFlare
+                | SupportSegmentKind::RaftBridge
         ) || self.start_mm != self.end_mm;
+        // A pad is a single point by construction; enforcing that here (rather
+        // than only at the `RaftPad`/`RaftBridge` producer) means the emitter
+        // can trust `segment_kind` alone and never re-derive the pad/bridge
+        // shape from endpoint equality.
+        let raft_pad_is_a_point =
+            self.segment_kind != SupportSegmentKind::RaftPad || self.start_mm == self.end_mm;
         let taper_depth_matches = (self.segment_kind == SupportSegmentKind::ContactTaper)
             == self.contact_depth_mm.is_some();
         let ring_provenance_matches = match self.ring_normal {
@@ -613,7 +626,11 @@ impl SupportPrimitive {
             (_, None) => true,
             _ => false,
         };
-        nonzero_frustum && taper_depth_matches && ring_provenance_matches && sphere_poles_match
+        nonzero_frustum
+            && raft_pad_is_a_point
+            && taper_depth_matches
+            && ring_provenance_matches
+            && sphere_poles_match
     }
 }
 
@@ -2520,7 +2537,12 @@ mod tests {
         );
         let raft_primitive_count = primitives
             .iter()
-            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge)
+            .filter(|primitive| {
+                matches!(
+                    primitive.segment_kind,
+                    SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
+                )
+            })
             .count();
         SupportHistory::from_reports(
             hollow,
@@ -2536,10 +2558,18 @@ mod tests {
     }
 
     fn non_sphere_primitive(kind: SupportSegmentKind, point: [f64; 3]) -> SupportPrimitive {
+        non_sphere_primitive_span(kind, point, point)
+    }
+
+    fn non_sphere_primitive_span(
+        kind: SupportSegmentKind,
+        start: [f64; 3],
+        end: [f64; 3],
+    ) -> SupportPrimitive {
         SupportPrimitive {
             segment_kind: kind,
-            start_mm: point.map(|value| Finite::new(value).expect("fixture coordinate")),
-            end_mm: point.map(|value| Finite::new(value).expect("fixture coordinate")),
+            start_mm: start.map(|value| Finite::new(value).expect("fixture coordinate")),
+            end_mm: end.map(|value| Finite::new(value).expect("fixture coordinate")),
             start_radius_mm: PositiveFinite::new(1.0).expect("fixture radius"),
             end_radius_mm: PositiveFinite::new(0.5).expect("fixture radius"),
             contact_depth_mm: (kind == SupportSegmentKind::ContactTaper)
@@ -2969,13 +2999,50 @@ mod tests {
             ));
         }
 
-        let raft_pad = non_sphere_primitive(SupportSegmentKind::RaftPadOrBridge, [0.0; 3]);
+        let raft_pad = non_sphere_primitive(SupportSegmentKind::RaftPad, [0.0; 3]);
         let history = fixture_history(std::slice::from_ref(&raft_pad));
         let model = SupportedModel::from_parts(small_closed_tetra(), vec![raft_pad], history)
             .expect("coincident raft primitive is a valid pad");
         assert_eq!(
             model.primitives()[0].segment_kind,
-            SupportSegmentKind::RaftPadOrBridge
+            SupportSegmentKind::RaftPad
+        );
+    }
+
+    /// The pad/bridge shape is decided by `segment_kind` alone, not inferred
+    /// from whether the endpoints happen to coincide -- so the validator
+    /// must enforce, not merely permit, that agreement: a `RaftPad` whose
+    /// endpoints differ, or a `RaftBridge` whose endpoints coincide, is
+    /// exactly as invalid as a zero-length frustum.
+    #[test]
+    fn raft_pad_and_bridge_shapes_are_enforced_not_merely_permitted() {
+        let non_point_pad =
+            non_sphere_primitive_span(SupportSegmentKind::RaftPad, [0.0; 3], [3.0, 0.0, 0.0]);
+        let history = fixture_history(std::slice::from_ref(&non_point_pad));
+        assert!(
+            matches!(
+                SupportedModel::from_parts(small_closed_tetra(), vec![non_point_pad], history),
+                Err(SupportError::InvalidPrimitive)
+            ),
+            "a RaftPad with distinct endpoints is not a point and must be rejected"
+        );
+
+        let coincident_bridge = non_sphere_primitive(SupportSegmentKind::RaftBridge, [0.0; 3]);
+        let history = fixture_history(std::slice::from_ref(&coincident_bridge));
+        assert!(
+            matches!(
+                SupportedModel::from_parts(small_closed_tetra(), vec![coincident_bridge], history),
+                Err(SupportError::InvalidPrimitive)
+            ),
+            "a RaftBridge with coincident endpoints connects nothing and must be rejected"
+        );
+
+        let bridge =
+            non_sphere_primitive_span(SupportSegmentKind::RaftBridge, [0.0; 3], [3.0, 0.0, 0.0]);
+        let history = fixture_history(std::slice::from_ref(&bridge));
+        assert!(
+            SupportedModel::from_parts(small_closed_tetra(), vec![bridge], history).is_ok(),
+            "a RaftBridge with distinct endpoints is exactly the valid shape"
         );
     }
 

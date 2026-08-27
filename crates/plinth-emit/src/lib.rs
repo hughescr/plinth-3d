@@ -47,6 +47,13 @@ pub enum EmitError {
     RecordEncodingRejected,
     #[error("the freshly reopened ChituBox artifact failed its disk audit")]
     DiskAuditRejected,
+    /// The rename onto `target_path` itself succeeded and its bytes are
+    /// correct, but the directory sync that makes that rename survive a
+    /// power loss could not be confirmed. Unlike every other variant, this
+    /// one is raised AFTER a valid artifact is already in place at `path` --
+    /// see `write`'s doc for why that artifact is deliberately not removed.
+    #[error("could not confirm the emitted artifact's name is durable at {path}")]
+    DurabilitySyncFailed { path: PathBuf },
     #[error("M0 constants publication failed")]
     Constants,
 }
@@ -60,14 +67,29 @@ pub enum EmitError {
 /// **A refused write leaves no path at `target_path`.**  The project is saved to a sibling
 /// staging path and reaches `target_path` only by a rename performed *after* the disk audit
 /// has accepted it, so an audit rejection cannot hand anyone the file it just refused.  On
-/// every failure path the staging file is removed and so is `target_path` itself, which is
-/// what makes the invariant hold for a *stale* artifact left by an earlier run: a caller
-/// that asks for this file and is refused is left with no file, not with last week's.
+/// every failure path *up to and including that rename* the staging file is removed and so
+/// is `target_path` itself, which is what makes the invariant hold for a *stale* artifact
+/// left by an earlier run: a caller that asks for this file and is refused is left with no
+/// file, not with last week's.
+///
+/// **Durability of the accepted name.**  `chitubox_io::Project::save` (used by
+/// `write_staged`) fsyncs its bytes before its own rename and then fsyncs the directory that
+/// rename lands in, so that first rename survives a crash.  This function performs a
+/// *second* rename -- staging path to `target_path` -- and that rename needs the same
+/// directory fsync to survive a crash in turn; it is not a side effect of the first one, and
+/// this function performs it.  If that final sync cannot be confirmed, the artifact at
+/// `target_path` is genuinely correct (the rename itself already succeeded) but its
+/// survival across a power loss is not, and [`EmitError::DurabilitySyncFailed`] is returned
+/// *without* deleting `target_path` -- unlike every other failure path, deleting a correct
+/// artifact here would trade an open durability question for certain data loss.
 ///
 /// # Errors
 ///
 /// - [`EmitError::TargetUnavailable`] if the target or its staging sibling cannot be created,
 ///   or if the accepted staging file cannot be renamed into place.
+/// - [`EmitError::DurabilitySyncFailed`] if the rename onto `target_path` succeeded but the
+///   directory sync that makes it survive a crash could not be confirmed. `target_path`
+///   holds the correct artifact regardless.
 /// - [`EmitError::RecordEncodingRejected`] if the scene does not convert to wire records.
 /// - [`EmitError::DiskAuditRejected`] if the freshly reopened staging file fails its audit.
 pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport, EmitError> {
@@ -85,6 +107,17 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
                     path: request.target_path.clone(),
                 });
             }
+            // See "Durability of the accepted name" above: this rename can
+            // return `Ok` while the directory entry it just repointed is
+            // still only in the filesystem's in-memory page cache, so a
+            // crash right after this point could leave `target_path`
+            // absent or pointing at the previous artifact even though the
+            // rename syscall itself succeeded.
+            if sync_dir(&request.target_path).is_err() {
+                return Err(EmitError::DurabilitySyncFailed {
+                    path: request.target_path.clone(),
+                });
+            }
             report.artifact_path = request.target_path.clone();
             Ok(report)
         }
@@ -94,6 +127,14 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
             Err(error)
         }
     }
+}
+
+/// Fsync the directory containing `path`, so a prior rename onto `path`
+/// survives a crash. Content durability is a separate concern already
+/// handled before any rename; this is name durability only.
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// The staging sibling `write` builds before the audit decides.
@@ -592,10 +633,8 @@ fn record_frame_and_soup(
         // standalone joint sphere; types 1 and 3 are frusta.
         SupportSegmentKind::ContactSphere => sphere_triangles(midpoint(start, end), r_start)?,
         SupportSegmentKind::JointSphere => sphere_triangles(midpoint(start, end), r_start)?,
-        SupportSegmentKind::RaftPadOrBridge if same_point(start, end) => {
-            raft_pad_triangles(start, r_start, r_end, raft_sides)?
-        }
-        SupportSegmentKind::RaftPadOrBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
+        SupportSegmentKind::RaftPad => raft_pad_triangles(start, r_start, r_end, raft_sides)?,
+        SupportSegmentKind::RaftBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
         SupportSegmentKind::ContactTaper
         | SupportSegmentKind::Member
         | SupportSegmentKind::RootFlare => frustum_triangles(
@@ -644,8 +683,11 @@ fn encode_record(
     if let Some(depth) = frame.contact_depth_mm {
         record = record.with_contact_depth(f32_of(depth)?);
     }
-    if frame.segment_kind == SupportSegmentKind::RaftPadOrBridge {
-        let is_bridge = !same_point(frame.start, frame.end);
+    if matches!(
+        frame.segment_kind,
+        SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
+    ) {
+        let is_bridge = frame.segment_kind == SupportSegmentKind::RaftBridge;
         record.trailing[0..4]
             .copy_from_slice(&(if is_bridge { 1.0_f32 } else { 0.0_f32 }).to_le_bytes());
         record.trailing[4..8].copy_from_slice(&4.0_f32.to_le_bytes());
@@ -661,7 +703,10 @@ const fn segment_type(kind: SupportSegmentKind) -> SegmentType {
         SupportSegmentKind::JointSphere => SegmentType::SHAFT,
         SupportSegmentKind::Member => SegmentType::JOINER,
         SupportSegmentKind::RootFlare => SegmentType::FLARE,
-        SupportSegmentKind::RaftPadOrBridge => SegmentType::PAD_OR_BRIDGE,
+        // Two distinct producer-side shapes, one wire identity: the format
+        // itself does not distinguish a raft pad from a raft bridge (that is
+        // what the `is_bridge` trailing flag in `encode_record` is for).
+        SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge => SegmentType::PAD_OR_BRIDGE,
     }
 }
 
@@ -675,21 +720,6 @@ fn sub_center(point: [f64; 3], center: [f64; 3]) -> [f64; 3] {
         point[1] - center[1],
         point[2] - center[2],
     ]
-}
-
-#[allow(
-    clippy::float_cmp,
-    reason = "pad-vs-bridge is an identity question, not a distance one.  A \
-              raft PAD is authored by passing one root's xy for BOTH ends \
-              (`plinth-support/src/raft.rs` `raft_primitive(root.xy_mm, \
-              root.xy_mm, ..)`), and both ends then go through the same \
-              `sub_center` with the same centre, so a pad is bit-identical by \
-              construction.  A bridge whose ends differ only by rounding dust \
-              does not silently degenerate either: `raft_bridge_triangles` \
-              rejects it on its own `length <= f64::EPSILON` guard"
-)]
-fn same_point(a: [f64; 3], b: [f64; 3]) -> bool {
-    a == b
 }
 
 fn midpoint(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1198,7 +1228,12 @@ mod tests {
         );
         let raft_count = primitives
             .iter()
-            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge)
+            .filter(|primitive| {
+                matches!(
+                    primitive.segment_kind,
+                    SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
+                )
+            })
             .count();
         let frame = BuildFrame::new(
             // Fixture model minimum is 0: its sole lift establishes the
@@ -1489,12 +1524,12 @@ mod tests {
                 [0.0, 0.0, 12.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftBridge,
                 [0.0, 0.0, 0.0],
                 [3.0, 0.0, 0.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftPad,
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
             ),
@@ -1606,12 +1641,12 @@ mod tests {
                 [0.0, 0.0, 12.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftBridge,
                 [0.0, 0.0, 0.0],
                 [3.0, 0.0, 0.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftPad,
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
             ),
@@ -1910,12 +1945,12 @@ mod tests {
                 0.6,
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftBridge,
                 [0.0, 0.0, 0.0],
                 [3.0, 0.0, 0.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftPad,
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
             ),
@@ -1977,11 +2012,7 @@ mod tests {
         }
 
         let model = fixture_model(
-            vec![primitive(
-                SupportSegmentKind::RaftPadOrBridge,
-                [0.0; 3],
-                [0.0; 3],
-            )],
+            vec![primitive(SupportSegmentKind::RaftPad, [0.0; 3], [0.0; 3])],
             3.0,
         );
         let records = build_records(model.primitives(), [0.0; 3])
@@ -1997,7 +2028,8 @@ mod tests {
             (SupportSegmentKind::JointSphere, 9),
             (SupportSegmentKind::Member, 3),
             (SupportSegmentKind::RootFlare, 4),
-            (SupportSegmentKind::RaftPadOrBridge, 6),
+            (SupportSegmentKind::RaftPad, 6),
+            (SupportSegmentKind::RaftBridge, 6),
         ];
         for (kind, id) in expected {
             assert_eq!(segment_type(kind), SegmentType(id));
@@ -2163,12 +2195,12 @@ mod tests {
                 [0.0, 0.0, 10.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftBridge,
                 [0.0, 0.0, 0.0],
                 [3.0, 0.0, 0.0],
             ),
             primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftPad,
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
             ),
@@ -2401,7 +2433,7 @@ mod tests {
 
         let model = fixture_model(
             vec![primitive(
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftPad,
                 [0.0, 0.0, -lift],
                 [0.0, 0.0, -lift],
             )],

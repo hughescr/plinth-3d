@@ -289,7 +289,16 @@ pub(crate) fn plan_bottom_connected(
 
     let mut primitives = Vec::with_capacity(primitive_count);
     for (i, j) in euclidean_mst_edges(&roots) {
+        // Each edge connects two DISTINCT roots by construction, so this is
+        // always the bridge shape -- explicitly, not because its endpoints
+        // happen to differ. The rare case of two roots sharing an exact XY
+        // position (a zero-length bridge) is now a genuine
+        // `InvalidPrimitive` below rather than a silent fallback to pad
+        // geometry: an accidental-looking bridge is a modelling anomaly
+        // worth surfacing, not one to paper over as a pad it was never
+        // built to be.
         primitives.push(raft_primitive(
+            SupportSegmentKind::RaftBridge,
             roots[i].xy_mm,
             roots[j].xy_mm,
             plate_z_mm,
@@ -298,7 +307,9 @@ pub(crate) fn plan_bottom_connected(
         ));
     }
     for root in &roots {
+        // One pad per physical root, always a single point by construction.
         primitives.push(raft_primitive(
+            SupportSegmentKind::RaftPad,
             root.xy_mm,
             root.xy_mm,
             plate_z_mm,
@@ -321,15 +332,24 @@ pub(crate) fn plan_bottom_connected(
     })
 }
 
+/// Builds one raft primitive. `segment_kind` states the caller's intent
+/// (`RaftPad` for a single physical root, `RaftBridge` for an MST edge
+/// between two roots) -- it is never inferred here from `start_xy`/`end_xy`,
+/// which is exactly the incidental coupling this shape replaces.
 fn raft_primitive(
+    segment_kind: SupportSegmentKind,
     start_xy: [Finite; 2],
     end_xy: [Finite; 2],
     plate_z_mm: Finite,
     pad_diameter: PositiveFinite,
     raft_height: PositiveFinite,
 ) -> SupportPrimitive {
+    debug_assert!(matches!(
+        segment_kind,
+        SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
+    ));
     SupportPrimitive {
-        segment_kind: SupportSegmentKind::RaftPadOrBridge,
+        segment_kind,
         start_mm: [start_xy[0], start_xy[1], plate_z_mm],
         end_mm: [end_xy[0], end_xy[1], plate_z_mm],
         start_radius_mm: pad_diameter,
@@ -448,7 +468,7 @@ mod tests {
         assert_eq!(one.primitives().len(), 1, "one pad");
         assert_eq!(
             one.primitives()[0].segment_kind,
-            SupportSegmentKind::RaftPadOrBridge
+            SupportSegmentKind::RaftPad
         );
 
         let four = plan(&[
@@ -458,6 +478,22 @@ mod tests {
             [2.0, 2.0, 0.0],
         ]);
         assert_eq!(four.primitives().len(), 7, "3 bridges + 4 pads");
+        assert_eq!(
+            four.primitives()
+                .iter()
+                .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftBridge)
+                .count(),
+            3,
+            "explicit kind, not inferred from endpoints"
+        );
+        assert_eq!(
+            four.primitives()
+                .iter()
+                .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftPad)
+                .count(),
+            4,
+            "explicit kind, not inferred from endpoints"
+        );
         assert!(four
             .primitives()
             .iter()
