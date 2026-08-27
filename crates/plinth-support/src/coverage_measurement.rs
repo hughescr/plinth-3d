@@ -551,6 +551,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn limits_and_request_reject_invalid_numeric_boundaries() {
         assert_eq!(
             CoverageMeasurementLimits::new(0, 1, 1, 1, 1, 1),

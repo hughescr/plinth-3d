@@ -87,6 +87,12 @@ fn round_ties_even(value: f64) -> f64 {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn grid_spec(mesh: &Mesh, pitch: f64) -> GridSpec {
     let mut low = [f64::INFINITY; 3];
     let mut high = [f64::NEG_INFINITY; 3];
@@ -157,6 +163,12 @@ fn raster_leaf(node: RasterNode, pitch: f64) -> bool {
         && !edge_too_long(node.c, node.a, max_edge)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn mark_vertex_old(point: [f64; 3], spec: GridSpec, occupancy: &mut [bool]) {
     let mut index = [0_usize; 3];
     for axis in 0..3 {
@@ -306,13 +318,22 @@ fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) 
     d <= r && d >= -r
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> [[isize; 2]; 3] {
     let mut axis_range = [[0_isize; 2]; 3];
     for axis in 0..3 {
         let lo = tri[0][axis].min(tri[1][axis]).min(tri[2][axis]) - 0.5;
         let hi = tri[0][axis].max(tri[1][axis]).max(tri[2][axis]) + 0.5;
         let dim_max = (spec.dims[axis].saturating_sub(1)) as isize;
-        axis_range[axis] = [(lo.floor() as isize).max(0), (hi.ceil() as isize).min(dim_max)];
+        axis_range[axis] = [
+            (lo.floor() as isize).max(0),
+            (hi.ceil() as isize).min(dim_max),
+        ];
     }
     axis_range
 }
@@ -452,6 +473,11 @@ impl ColumnPolygon {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn candidate_index_span(low: f64, high: f64, clamp: [isize; 2]) -> Option<[isize; 2]> {
     let slack = extent_slack(low.abs().max(high.abs()));
     let first = (low - 0.5 - slack).ceil();
@@ -471,6 +497,11 @@ fn candidate_axis_order(axis_range: [[isize; 2]; 3]) -> [usize; 3] {
     order
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn walk_triangle_candidates(
     tri: [[f64; 3]; 3],
     spec: GridSpec,
@@ -621,9 +652,12 @@ fn padded_edt(material: &Array3<bool>, pitch: f64) -> Array3<f64> {
             && x <= nx
             && material[[z - 1, y - 1, x - 1]]
     });
-    let (distances, _) = distance_transform_edt(&bordered.into_dyn(), Some(&[pitch; 3]), true, false)
-        .expect("EDT");
-    let distances: Array3<f64> = distances.expect("distances").into_dimensionality().expect("3d");
+    let (distances, _) =
+        distance_transform_edt(&bordered.into_dyn(), Some(&[pitch; 3]), true, false).expect("EDT");
+    let distances: Array3<f64> = distances
+        .expect("distances")
+        .into_dimensionality()
+        .expect("3d");
     Array3::from_shape_fn((nz, ny, nx), |(z, y, x)| distances[[z + 1, y + 1, x + 1]])
 }
 
@@ -634,6 +668,13 @@ struct Measurement {
     approx_min_wall_mm: Option<f64>,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn measure(occupancy: Vec<bool>, spec: GridSpec, wall_mm: f64) -> Measurement {
     let mut occupancy = occupancy;
     fill_voxel_holes(&mut occupancy, spec.dims);
@@ -694,7 +735,9 @@ fn measure(occupancy: Vec<bool>, spec: GridSpec, wall_mm: f64) -> Measurement {
                         }
                         if material[[nz2, ny2, nx2]] {
                             let candidate = edt[[nz2, ny2, nx2]];
-                            min_wall = Some(min_wall.map_or(candidate, |current: f64| current.min(candidate)));
+                            min_wall = Some(
+                                min_wall.map_or(candidate, |current: f64| current.min(candidate)),
+                            );
                         }
                     }
                 }
@@ -721,7 +764,11 @@ fn run_model(name: &str, path: &Path, settings: HollowSettings, cap: usize) {
     let wall_mm = settings.wall_thickness_mm().get();
     let spec = grid_spec(&mesh, pitch);
 
-    println!("== {name} ({} triangles, grid {:?}) ==", mesh.tris().len(), spec.dims);
+    println!(
+        "== {name} ({} triangles, grid {:?}) ==",
+        mesh.tris().len(),
+        spec.dims
+    );
 
     let old = old_marked_set(&mesh, spec);
     let (new_count, new_occupancy) = new_marked_set(&mesh, spec);
@@ -814,7 +861,10 @@ fn main() -> ExitCode {
     for file in CORPUS_MODELS {
         let path = baseline.join(file);
         if !path.is_file() {
-            eprintln!("RequiredCorpusFixtureMissing: {} is committed evidence and must be present", path.display());
+            eprintln!(
+                "RequiredCorpusFixtureMissing: {} is committed evidence and must be present",
+                path.display()
+            );
             return ExitCode::FAILURE;
         }
         run_model(file, &path, settings, cap);

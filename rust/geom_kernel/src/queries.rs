@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::bvh::Bvh;
 use crate::closest::{closest_on_tri, segseg};
-use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
+use crate::consts::{DEDUP_LOC_MM, EPS, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
 use crate::moller::{dedup_loc_into, moller};
 use crate::par;
@@ -125,6 +125,14 @@ pub struct CapsuleRays {
 impl Iterator for CapsuleRays {
     type Item = CapsuleRay;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn next(&mut self) -> Option<Self::Item> {
         if self.next == 0 {
             self.next = 1;
@@ -861,6 +869,151 @@ fn reserve_penetration_vec<T>(
 pub type CastRaysBatch = (Vec<i64>, Vec<f64>, Vec<i64>);
 pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
 
+/// Why a clearance row carries NO measurement.
+///
+/// Both reasons are properties of the row's own geometry, decided before any
+/// surface is touched. Neither is an error: a caller can legitimately hand this
+/// batch a row it has already masked out of existence. What a caller must NOT
+/// do is read the absence of a measurement as a good measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnmeasuredSegment {
+    /// `p0` and `p1` are the same point to within the kernel's axis-degeneracy
+    /// guard (`|p1 - p0| < 1e-9`). There is no axis to sweep, so no length of
+    /// it was tested.
+    DegenerateAxis,
+    /// `inset0` and `inset1` together consume the whole axis
+    /// (`length - inset1 - inset0 <= 1e-9`). The masks left nothing to test.
+    ///
+    /// This is the erasure case that matters in practice: a mask wide enough to
+    /// swallow the member makes the row pass by having nothing to fail on.
+    InsetsConsumeAxis,
+    /// The row's exclusion set removed EVERY face the distance walk could
+    /// reach, so the walk had no candidate to measure against.
+    ///
+    /// This one does not come from the row's endpoints; it comes from the
+    /// exclusion set, and it is reported by the walk rather than predicted
+    /// before it. It is the third way to get no measurement and by far the
+    /// easiest to mistake for a good one: the walk's "no candidate found"
+    /// marker IS `f64::INFINITY`, so the demanded-gap subtraction
+    /// `INFINITY - thresh` is also `INFINITY`, a perfectly finite-LOOKING
+    /// arithmetic result that satisfies every `>= threshold` test ever written
+    /// against it. Erasure by exemption is exactly the failure the per-row face
+    /// exclusion was introduced to avoid, so the predicate must not be able to
+    /// launder it into a measurement.
+    AllFacesExcluded,
+}
+
+impl std::fmt::Display for UnmeasuredSegment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DegenerateAxis => {
+                write!(formatter, "segment endpoints coincide; no axis to test")
+            }
+            Self::InsetsConsumeAxis => write!(
+                formatter,
+                "insets consume the whole axis; no length left to test"
+            ),
+            Self::AllFacesExcluded => write!(
+                formatter,
+                "the row's exclusion set removed every face; nothing to measure against"
+            ),
+        }
+    }
+}
+
+/// One row's answer from the clearance predicate.
+///
+/// **This type exists because the two answers below are not the same answer,
+/// and a bare `f64` cannot tell them apart.** The pre-existing float form
+/// encoded [`Self::Unmeasured`] as `f64::INFINITY` -- in band, orderable,
+/// and greater than every threshold a caller could compare it against -- so
+/// `clearance >= 0.0` silently reported "we did not look" as "enormous
+/// clearance, definitely fine". `INFINITY` is exactly the wrong sentinel:
+/// the safe reading of "not measured" is the STRICTEST verdict, and the value
+/// chosen was the most permissive one representable.
+///
+/// The enum removes the choice. A caller cannot compare an
+/// [`Self::Unmeasured`] row against a threshold without first saying, in code,
+/// what an unmeasured row means to it -- see [`Self::clears_or`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SegmentClearance {
+    /// The axis was swept against the surface. `clearance_mm` is
+    /// `nearest_surface_distance - (r_max + standoff)`: negative means the
+    /// demanded gap is violated, non-negative means it is met. `witness` is the
+    /// surface point that produced the nearest distance.
+    Measured { clearance_mm: f64, witness: V3 },
+    /// No part of the axis was tested. There is no number, and inventing one is
+    /// the defect this type exists to prevent.
+    Unmeasured(UnmeasuredSegment),
+}
+
+impl SegmentClearance {
+    /// The measured gap in mm, or `None` when nothing was measured.
+    #[must_use]
+    pub const fn clearance_mm(self) -> Option<f64> {
+        match self {
+            Self::Measured { clearance_mm, .. } => Some(clearance_mm),
+            Self::Unmeasured(_) => None,
+        }
+    }
+
+    /// The nearest surface point, or `None` when nothing was measured.
+    #[must_use]
+    pub const fn witness(self) -> Option<V3> {
+        match self {
+            Self::Measured { witness, .. } => Some(witness),
+            Self::Unmeasured(_) => None,
+        }
+    }
+
+    /// Why the row was not measured, or `None` when it was.
+    #[must_use]
+    pub const fn unmeasured(self) -> Option<UnmeasuredSegment> {
+        match self {
+            Self::Measured { .. } => None,
+            Self::Unmeasured(reason) => Some(reason),
+        }
+    }
+
+    /// Does this row meet its demanded gap?
+    ///
+    /// `when_unmeasured` is the verdict for a row that was never tested, and it
+    /// has NO default on purpose: the caller must state which way an untested
+    /// row falls, at the call site, where the consequence is visible.
+    ///
+    /// A stage that REFUSES on this predicate passes `false` -- an untested row
+    /// has earned nothing. A stage that merely PRUNES a search may pass `true`,
+    /// because keeping an untested candidate alive costs a later test rather
+    /// than shipping an unsupported claim.
+    #[must_use]
+    pub fn clears_or(self, when_unmeasured: bool) -> bool {
+        match self {
+            Self::Measured { clearance_mm, .. } => clearance_mm >= 0.0,
+            Self::Unmeasured(_) => when_unmeasured,
+        }
+    }
+
+    /// **LOSSY.** Collapse back to the historical `(clearance, witness)` float
+    /// pair, mapping [`Self::Unmeasured`] to `(f64::INFINITY, [NaN; 3])`.
+    ///
+    /// This is the exact encoding the float entry points still return, and it
+    /// is the encoding this type exists to replace: two different answers land
+    /// on one float, and the float they land on passes every `>= threshold`
+    /// test. It is public only so a caller migrating off the float form can
+    /// prove, one call site at a time, that it produces byte-identical numbers
+    /// before it changes what it does with them. Do not introduce new uses.
+    #[must_use]
+    pub fn to_lossy_pair(self) -> (f64, V3) {
+        match self {
+            Self::Measured {
+                clearance_mm,
+                witness,
+            } => (clearance_mm, witness),
+            Self::Unmeasured(_) => (f64::INFINITY, [f64::NAN; 3]),
+        }
+    }
+}
+
 pub struct NativeSurface {
     pub(crate) mesh: Mesh,
     pub bvh: Bvh,
@@ -1047,6 +1200,21 @@ impl NativeSurface {
         STACK.with(|s| self.nearest_one_with_stack(p, upper_bound, &mut s.borrow_mut()))
     }
 
+    #[allow(
+        clippy::float_cmp,
+        reason = "the equal-distance/lowest-index tie-break IS the determinism \
+                  contract (see the strict-pruning comment below); an epsilon here \
+                  would make the answer depend on traversal order"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn nearest_one_with_stack(
         &self,
         p: V3,
@@ -1102,6 +1270,13 @@ impl NativeSurface {
     }
 
     /// query facade: (dist, idx) with over-bound => (inf, global_nfaces).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn query(&self, pts: &[V3], upper_bound: f64) -> (Vec<f64>, Vec<i64>) {
         let nf = self.mesh.global_nfaces();
         let res: Vec<(f64, i64)> = par::run(|| {
@@ -1126,6 +1301,13 @@ impl NativeSurface {
     }
 
     /// project: (dist, closest_point, tri_idx, face_normal).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn project(&self, pts: &[V3]) -> (Vec<f64>, Vec<V3>, Vec<i64>, Vec<V3>) {
         let res: Vec<(f64, V3, i64, V3)> = par::run(|| {
             pts.par_iter()
@@ -1204,6 +1386,21 @@ impl NativeSurface {
         })
     }
 
+    #[allow(
+        clippy::float_cmp,
+        reason = "the equal-distance/lowest-index tie-break IS the determinism \
+                  contract; an epsilon here would make the answer depend on \
+                  traversal order"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn nearest_allowed_one_with_stack(
         &self,
         point: V3,
@@ -1304,6 +1501,14 @@ impl NativeSurface {
     /// `N` is bounded by the admitted surface and by this call's face/node mask
     /// memory charge.
     /// No geometry, BVH, parity grid, or per-point subset is constructed.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn project_allowed_faces_batch(
         &self,
         allowed_face_ids: &[u32],
@@ -1540,6 +1745,13 @@ impl NativeSurface {
     /// two walks. The metered penetration path
     /// ([`Self::penetration_intervals_batch_bounded_metered`], FU-8g H2)
     /// compares them; every other caller may ignore it.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn collect_hits_with_stack(
         &self,
         o: V3,
@@ -1597,6 +1809,13 @@ impl NativeSurface {
     ///
     /// Any edit to one walk must be mirrored in the other; the fill pass
     /// refuses with [`PenetrationBatchError::CensusDrift`] if they disagree.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn count_hits_with_stack(
         &self,
         o: V3,
@@ -1712,6 +1931,13 @@ impl NativeSurface {
     }
 
     /// Batched cast_rays -> ragged (offsets, t_all, face_all).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn cast_rays(
         &self,
         origins: &[V3],
@@ -1805,6 +2031,15 @@ impl NativeSurface {
     /// bound over the subset that survives exclusion; dropping faces can only
     /// raise the true minimum, never lower it, so a subtree the full-surface
     /// walk could skip is a subtree this walk can skip too.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn seg_surface_min_excluding(&self, a: V3, b: V3, excluded: &[u32]) -> (f64, V3) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
@@ -1823,11 +2058,15 @@ impl NativeSurface {
                     let start = node.a as usize;
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
-                        if !excluded.is_empty() {
-                            let global = self.mesh.face_ids()[tid as usize];
-                            if excluded.binary_search(&global).is_ok() {
-                                continue;
-                            }
+                        // `tid` IS the global face ID: leaf order carries global
+                        // IDs even for a narrowed view (bvh.rs `build`), which is
+                        // the same fact `seg_tri_dist` relies on one line below to
+                        // index the shared geometry. `face_ids()` is the
+                        // slot-to-global map and is indexed by SLOT, so looking
+                        // `tid` up in it is out of bounds on a narrowed view and a
+                        // no-op only on a full one.
+                        if !excluded.is_empty() && excluded.binary_search(&tid).is_ok() {
+                            continue;
                         }
                         let (d, pt) = self.seg_tri_dist(a, b, tid as usize);
                         if d < best_d {
@@ -1884,18 +2123,17 @@ impl NativeSurface {
         inset0: f64,
         inset1: f64,
         excluded: &[u32],
-    ) -> (f64, V3) {
-        let nan3: V3 = [f64::NAN; 3];
+    ) -> SegmentClearance {
         let d = sub(p1, p0);
         let l = norm(d);
         if l < 1e-9 {
-            return (f64::INFINITY, nan3);
+            return SegmentClearance::Unmeasured(UnmeasuredSegment::DegenerateAxis);
         }
         let u = scale(d, 1.0 / l);
         let s_lo = inset0;
         let s_hi = l - inset1;
         if s_hi - s_lo <= 1e-9 {
-            return (f64::INFINITY, nan3);
+            return SegmentClearance::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis);
         }
         let a = add(p0, scale(u, s_lo));
         let b = add(p0, scale(u, s_hi));
@@ -1904,16 +2142,80 @@ impl NativeSurface {
         let r_max = r_lo.max(r_hi);
         let thresh = r_max + standoff;
         let (best_d, best_pt) = self.seg_surface_min_excluding(a, b, excluded);
+        // NO CANDIDATE IS NOT A MEASUREMENT. `seg_surface_min_excluding` seeds
+        // `best_d` with `f64::INFINITY` and only ever lowers it, so a
+        // non-finite `best_d` means the walk found no face to measure against.
+        // With a non-empty mesh (`SurfaceBuildError::EmptyFaces` forbids the
+        // other case) and a walk whose prune is `> best_d` -- never true while
+        // `best_d` is infinite, so every leaf is descended into -- the only way
+        // to reach here with no candidate is that `excluded` covered every
+        // face. Subtracting `thresh` from that infinity would yield an infinite
+        // "clearance" that reads as the best possible result. It is the worst:
+        // nothing was tested.
+        if !best_d.is_finite() {
+            return SegmentClearance::Unmeasured(UnmeasuredSegment::AllFacesExcluded);
+        }
         let clr = best_d - thresh;
         // clearance-vs-0 threshold band (spec sec 5.4 item 3)
         self.band_check(clr, 0.0);
-        (clr, best_pt)
+        SegmentClearance::Measured {
+            clearance_mm: clr,
+            witness: best_pt,
+        }
     }
 
     // Same rationale as `seg_clear_one_excluding` immediately above: this is
     // that primitive.s batched (SoA) entry point, one argument per per-member
     // input array plus the shared `standoff` -- the established batch shape,
     // not a candidate for bundling.
+    /// **THE CLEARANCE PREDICATE.** One [`SegmentClearance`] per row, in row
+    /// order.
+    ///
+    /// This is [`Self::segment_clearance_excluding_typed`] with an empty
+    /// exclusion set, i.e. the whole-surface test.
+    ///
+    /// Prefer this over the float-returning [`Self::segment_clearance`]. The
+    /// float form cannot say "this row was never tested"; it says `INFINITY`,
+    /// which every `>= threshold` comparison reads as a pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_clearance_typed(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+    ) -> Result<Vec<SegmentClearance>, BatchInputError> {
+        self.segment_clearance_excluding_typed(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            standoff,
+            inset0s,
+            inset1s,
+            &[], //
+        )
+    }
+
+    /// **LOSSY SHIM over [`Self::segment_clearance_typed`]. New code must not
+    /// call this.**
+    ///
+    /// Returns the historical `(clearances, witnesses)` float pair, in which a
+    /// row that was never measured is encoded as `f64::INFINITY` with a
+    /// `[NaN; 3]` witness -- see [`SegmentClearance::to_lossy_pair`]. That
+    /// encoding is the defect: `INFINITY` is in band, it is orderable, and it
+    /// is larger than any demanded gap, so a caller that writes
+    /// `clearances.iter().all(|c| *c >= 0.0)` grades an untested row as a pass.
+    /// The witness `NaN` is the only trace left, and no caller reads it.
+    ///
+    /// Retained solely so the call sites that predate
+    /// [`SegmentClearance`] keep compiling while they are migrated one at a
+    /// time. Migrating a call site means calling the typed form and stating,
+    /// with [`SegmentClearance::clears_or`], what an untested row means to that
+    /// stage.
     #[allow(clippy::too_many_arguments)]
     pub fn segment_clearance(
         &self,
@@ -1937,13 +2239,20 @@ impl NativeSurface {
         )
     }
 
-    /// [`Self::segment_clearance`] with a PER-ROW set of global face IDs the
-    /// distance test must not see.
+    /// **THE CLEARANCE PREDICATE, with exclusions.**
+    /// [`Self::segment_clearance_typed`] with a PER-ROW set of global face IDs
+    /// the distance test must not see. Every other clearance entry point in
+    /// this file -- typed or float -- delegates here.
     ///
     /// `excluded_faces` is either empty -- which is exactly
-    /// [`Self::segment_clearance`], and the reason that entry point delegates
-    /// here rather than repeating the loop -- or one SORTED, deduplicated slice
-    /// of global face IDs per row, in row order.
+    /// [`Self::segment_clearance_typed`], and the reason that entry point
+    /// delegates here rather than repeating the loop -- or one SORTED,
+    /// deduplicated slice of global face IDs per row, in row order.
+    ///
+    /// One [`SegmentClearance`] per row, in row order. A row the predicate
+    /// never tested comes back as [`SegmentClearance::Unmeasured`], which the
+    /// type system will not let a caller compare against a threshold: see
+    /// [`SegmentClearance::clears_or`].
     ///
     /// WHAT THIS IS FOR, and what it deliberately is not. A contact-declaring
     /// arm is legitimately inside the material it is seated in, so its own seat
@@ -1968,10 +2277,10 @@ impl NativeSurface {
     /// pass would price a check the two production callers already satisfy by
     /// construction -- it simply fails to exclude, which is the SAFE direction:
     /// an unexcluded face can only make the verdict stricter.
-    // Same signature rationale as `segment_clearance` above, plus one slice of
-    // per-row exclusions; every field is read at every call site.
+    // Same signature rationale as `segment_clearance_typed` above, plus one
+    // slice of per-row exclusions; every field is read at every call site.
     #[allow(clippy::too_many_arguments)]
-    pub fn segment_clearance_excluding(
+    pub fn segment_clearance_excluding_typed(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -1981,7 +2290,7 @@ impl NativeSurface {
         inset0s: &[f64],
         inset1s: &[f64],
         excluded_faces: &[&[u32]],
-    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
+    ) -> Result<Vec<SegmentClearance>, BatchInputError> {
         let n = p0s.len();
         BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
         BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
@@ -1996,7 +2305,7 @@ impl NativeSurface {
                 excluded_faces.len(),
             )?;
         }
-        let res: Vec<(f64, V3)> = par::run(|| {
+        Ok(par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
@@ -2006,10 +2315,39 @@ impl NativeSurface {
                     )
                 })
                 .collect()
-        });
-        let mut clr = Vec::with_capacity(n);
-        let mut pt = Vec::with_capacity(n);
-        for (c, p) in res {
+        }))
+    }
+
+    /// **LOSSY SHIM over [`Self::segment_clearance_excluding_typed`]. New code
+    /// must not call this.** Same hazard, same reason, same migration as
+    /// [`Self::segment_clearance`]: a row that was never tested comes back as
+    /// `f64::INFINITY` and reads as a pass under any `>= threshold` test.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_clearance_excluding(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+        excluded_faces: &[&[u32]],
+    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
+        let rows = self.segment_clearance_excluding_typed(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            standoff,
+            inset0s,
+            inset1s,
+            excluded_faces,
+        )?;
+        let mut clr = Vec::with_capacity(rows.len());
+        let mut pt = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (c, p) = row.to_lossy_pair();
             clr.push(c);
             pt.push(p);
         }
@@ -2110,6 +2448,13 @@ impl NativeSurface {
     /// band edge is IN the band -- the exemption must not depend on a knife
     /// edge, and admitting the boundary face only ever makes the exemption
     /// larger by one face of the seat's own zone, never smaller.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn faces_near_segment(
         &self,
         a: V3,
@@ -2139,7 +2484,10 @@ impl NativeSurface {
                                 limit: max_faces,
                             });
                         }
-                        found.push(self.mesh.face_ids()[tid as usize]);
+                        // Global already -- see `seg_surface_min_excluding`:
+                        // BVH leaf order carries global face IDs, so `tid` is
+                        // the ID to report, not a slot to resolve.
+                        found.push(tid);
                     }
                 }
             } else {
@@ -2158,6 +2506,14 @@ impl NativeSurface {
     // (SPEC-EMBED-POLICY rule-4 transit detection) -- every argument is the
     // geometry + sampling config a single interval extraction needs.
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn pen_intervals_one(
         &self,
         p0: V3,
@@ -2861,50 +3217,16 @@ impl NativeSurface {
         Ok(())
     }
 
-    /// Crate-internal compatibility entry point retained solely for the inline
-    /// PyO3 frozen-oracle surface. Delete it with that Python surface in M9.
-    /// Rust production callers cannot bypass an explicit resource policy.
-    #[allow(
-        dead_code,
-        reason = "retained until the inline PyO3 frozen-oracle surface is deleted in M9"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn penetration_intervals_batch(
-        &self,
-        p0s: &[V3],
-        p1s: &[V3],
-        r0s: &[f64],
-        r1s: &[f64],
-        n_offset_rays: usize,
-        majority_step_mm: f64,
-        cap: usize,
-        min_illegal_len_mm: f64,
-        rays_all: bool,
-    ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
-        Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
-        let limits = self.penetration_intervals_batch_worst_case_limits(
-            p0s.len(),
-            n_offset_rays,
-            cap,
-            rays_all,
-        )?;
-        self.penetration_intervals_batch_bounded(
-            p0s,
-            p1s,
-            r0s,
-            r1s,
-            n_offset_rays,
-            majority_step_mm,
-            cap,
-            min_illegal_len_mm,
-            rays_all,
-            limits,
-        )
-    }
-
     // ---- sphere breach ----------------------------------------------------
     /// Collect faces whose exact point-distance to `c` is within `tol` of `nd`
     /// (for measured-tie detection). Branch & bound, ascending face index.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn faces_at_distance(&self, c: V3, nd: f64, tol: f64) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         let thr = nd + tol;
@@ -2943,14 +3265,44 @@ impl NativeSurface {
         out
     }
 
-    /// far-wall thickness along the inward cone for one orientation.
-    /// inf if no far wall beyond the near-wall skip.
+    /// Distance from `c` to the far side of the wall it is resting against,
+    /// minimised over an inward cone. `INFINITY` when no ray in the cone leaves
+    /// the material within `r`.
+    ///
+    /// **WHAT THE FILTER IS FOR, and why it is no longer a distance.** Every
+    /// ray here starts at the ball centre and points into the wall, so its
+    /// first crossing is the ball's own ENTRY through the near face — the face
+    /// the ball is already sitting on. That crossing is not a far side and must
+    /// not be reported as one.
+    ///
+    /// This used to be discarded by absolute distance: throw away any crossing
+    /// closer than `nd + NEAR_WALL_SKIP`, with `NEAR_WALL_SKIP = 0.05 mm`. A
+    /// distance cannot tell "this is the near face again" from "this is the far
+    /// face, and the wall is thin", so it threw away both. A wall thinner than
+    /// the skip lost its far face along with its near face, `dmin` stayed
+    /// infinite, and `breach_one` reported NO BREACH — a support foot admitted
+    /// straight through a sub-0.05 mm feature such as a fin or a cape edge, and
+    /// reported safe. The predicate was not merely coarse there, it was
+    /// INVERTED: a 0.10 mm wall breached and a 0.02 mm wall at the same standoff
+    /// did not. `tests/near_wall_thin_feature.rs` is that witness.
+    ///
+    /// The replacement asks the question the skip was always a proxy for. A
+    /// crossing where the ray runs AGAINST the face's outward normal is the ray
+    /// entering material; one where it runs WITH the outward normal is the ray
+    /// leaving it. The far side of the wall is the first crossing the ray
+    /// leaves through, at any thickness whatsoever. The test is a sign, so it
+    /// carries no tolerance, no length scale and no tuned number — it cannot be
+    /// wrong by a little for a thin wall the way a distance was.
+    ///
+    /// `nd` is retained in the signature because the caller's tie detection
+    /// and reach precondition are stated in terms of it; this routine no longer
+    /// reads it.
     fn cone_thickness(
         &self,
         c: V3,
         r: f64,
         inward: V3,
-        nd: f64,
+        _nd: f64,
         half_deg: f64,
         n_cone: usize,
     ) -> f64 {
@@ -2959,9 +3311,13 @@ impl NativeSurface {
             let dir = scale(dcone, r);
             let hits = self.collect_hits(c, dir, 1.0);
             let mut dmin = f64::INFINITY;
-            for (tv, _f) in hits {
+            for (tv, face) in hits {
                 let dd = tv * r;
-                if dd > nd + NEAR_WALL_SKIP && dd < dmin {
+                // `collect_hits` yields GLOBAL face IDs (BVH leaf order carries
+                // them even for a narrowed view), which is what `mesh.normal`
+                // is indexed by.
+                let leaving = dot(dcone, self.mesh.normal(face as usize)) > 0.0;
+                if leaving && dd < dmin {
                     dmin = dd;
                 }
             }

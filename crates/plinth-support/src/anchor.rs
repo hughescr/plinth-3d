@@ -1158,6 +1158,14 @@ pub(crate) fn discover_finalized_anchor_seats(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn discover_anchor_seats_bound(
     anchor_start_mm: [Finite; 3],
     contact_fingerprint: Option<AnchorContactFingerprint>,
@@ -2145,6 +2153,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn surface_anchor_pool_is_exterior_face_ordered_and_binds_sidecar_and_native_pitch() {
         let (mesh, topology, surface) = box_parts(10.0);
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
@@ -2629,6 +2642,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn zero_length_first_hit_is_a_measured_candidate_refusal() {
         let (mesh, topology, surface) = box_parts(10.0);
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();

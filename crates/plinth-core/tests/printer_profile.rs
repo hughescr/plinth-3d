@@ -176,6 +176,11 @@ fn categorical_and_structured_measurements_forbid_error_payloads() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn printer_profile_preserves_wrappers_axes_and_distinct_release_fields() {
     let profile = valid_profile();
     assert_eq!(profile.id().as_str(), "saturn4-ultra");

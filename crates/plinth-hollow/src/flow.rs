@@ -159,7 +159,10 @@ pub(crate) fn flow_labels(
     pitch_mm: f64,
     throat_r_mm: f64,
 ) -> Result<(Array3<i32>, FlowStats), HollowError> {
-    let dims: [usize; 3] = mask.shape().try_into().map_err(|_| HollowError::VoxelStack)?;
+    let dims: [usize; 3] = mask
+        .shape()
+        .try_into()
+        .map_err(|_| HollowError::VoxelStack)?;
     let voxel_count = dims[0]
         .checked_mul(dims[1])
         .and_then(|value| value.checked_mul(dims[2]))
@@ -233,7 +236,14 @@ pub(crate) fn flow_labels(
         }
     }
     drop(core);
-    downhill_flood(&admitted, &clearance, &mut labels, &mut overlay, frontier, dims);
+    downhill_flood(
+        &admitted,
+        &clearance,
+        &mut labels,
+        &mut overlay,
+        frontier,
+        dims,
+    );
 
     stats.unreached_voxels = mask
         .iter()
@@ -249,6 +259,13 @@ pub(crate) fn flow_labels(
 /// Ties inside one wave take the minimum label, so the result does not depend
 /// on scan order. `overlay` is the caller's reusable one-slot-per-voxel
 /// scratch and is left all-zero on return.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn downhill_flood(
     admitted: &Array3<bool>,
     clearance: &Array3<f64>,
@@ -354,6 +371,13 @@ pub(crate) fn select_all_flow_components(
     Ok(Some((selected, stats)))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn linear_index(dims: [usize; 3], voxel: [usize; 3]) -> u32 {
     let index = (voxel[0] * dims[1] + voxel[1]) * dims[2] + voxel[2];
     // The voxel count was already proven to fit `u32` before any index was
@@ -408,8 +432,9 @@ mod tests {
         let pitch = 0.5;
         let throat = 1.5; // 3 voxel steps at 0.5 mm.
         let mask = wide_block(4);
-        let (selected, stats) =
-            select_all_flow_components(&mask, pitch, throat).expect("flow ok").expect("some");
+        let (selected, stats) = select_all_flow_components(&mask, pitch, throat)
+            .expect("flow ok")
+            .expect("some");
         assert_eq!(stats.flow_components, 1);
         assert_eq!(stats.unreached_voxels, 0);
         assert_eq!(selected, mask, "not one voxel of the cavity was eroded");
@@ -417,6 +442,11 @@ mod tests {
 
     /// Two blobs joined by a neck whose free radius is `neck_half_width`
     /// voxel steps everywhere along its length.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn dumbbell(neck_half_width: usize) -> Array3<bool> {
         let lobe = 6_usize; // half-width of each lobe, well above any throat under test
         let neck_len = 5_usize;
@@ -482,11 +512,9 @@ mod tests {
                 continue;
             }
             let voxel = [index.0, index.1, index.2];
-            let has_matching_neighbor = six_neighbors(
-                labels.shape().try_into().expect("3 dims"),
-                voxel,
-            )
-            .any(|neighbor| labels[neighbor] == label);
+            let has_matching_neighbor =
+                six_neighbors(labels.shape().try_into().expect("3 dims"), voxel)
+                    .any(|neighbor| labels[neighbor] == label);
             let component_size = labels.iter().filter(|&&l| l == label).count();
             assert!(
                 has_matching_neighbor || component_size == 1,
@@ -604,6 +632,11 @@ mod tests {
     /// the correction by any amount in either direction, splits the dumbbell
     /// and fails.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_core_test_admits_clearance_exactly_equal_to_the_corrected_threshold() {
         let pitch = 0.5;
         let throat = 1.25;
@@ -702,6 +735,11 @@ mod tests {
     /// **Test 7 — the threshold comes from the registry.** A future edit
     /// that restates the constant instead of reading it fails this.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_registered_throat_matches_the_publication() {
         let expected = plinth_core::m0_constants()
             .expect("constants publish")

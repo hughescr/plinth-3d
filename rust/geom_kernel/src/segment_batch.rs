@@ -220,6 +220,145 @@ impl PointSegmentDistanceBatch {
     }
 }
 
+/// The nearest segment to one query point, and how far away it is.
+///
+/// `segment` indexes the caller's `segment_starts`/`segment_ends` arrays. Ties
+/// resolve to the LOWEST index, which makes the answer a pure function of the
+/// inputs and independent of thread count -- the same reason the dense form
+/// scatters each row in original segment order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NearestSegment {
+    segment: usize,
+    distance_mm: f64,
+}
+
+impl NearestSegment {
+    /// Index into the caller's segment arrays.
+    #[must_use]
+    pub const fn segment(self) -> usize {
+        self.segment
+    }
+
+    /// Distance from the query point to that segment, in mm.
+    #[must_use]
+    pub const fn distance_mm(self) -> f64 {
+        self.distance_mm
+    }
+}
+
+/// One [`NearestSegment`] per query point, plus the pool size the batch ran
+/// under.
+///
+/// `nearest` is `None` for every point when the caller supplied no segments;
+/// there is no nearest segment in an empty set, and no float stands in for one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointNearestSegmentBatch {
+    nearest: Vec<Option<NearestSegment>>,
+    effective_threads: usize,
+}
+
+impl PointNearestSegmentBatch {
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.nearest.len()
+    }
+
+    #[must_use]
+    pub const fn effective_threads(&self) -> usize {
+        self.effective_threads
+    }
+
+    /// The nearest segment to point `point`, or `None` when the segment set was
+    /// empty. Out-of-range `point` is `None` too -- ask with an index you own.
+    #[must_use]
+    pub fn nearest(&self, point: usize) -> Option<NearestSegment> {
+        self.nearest.get(point).copied().flatten()
+    }
+
+    #[must_use]
+    pub fn all(&self) -> &[Option<NearestSegment>] {
+        &self.nearest
+    }
+}
+
+/// Nearest segment per query point, in ONE batch.
+///
+/// **Why this exists.** The only shape this module offered was the dense
+/// `points x segments` matrix, so a caller that wanted "which segment is
+/// nearest, and how near" had to allocate the whole matrix and reduce it
+/// itself -- or, as happened, skip this module entirely and hand-roll a scalar
+/// point-to-segment routine with its own copy of the degeneracy epsilon. Two
+/// copies of one predicate drift; the copy in the caller is the one nobody
+/// tests. This is the reduction, done once, against the SAME
+/// [`point_segment_evaluation`] the dense form uses, so the two can never
+/// disagree.
+///
+/// **Memory.** Peak output is one `Option<NearestSegment>` per POINT, not one
+/// f64 per point-segment pair, so a caller reducing over a large segment set no
+/// longer pays for the matrix it was going to throw away. `limits` is still
+/// checked against the notional dense pair count, because that is what bounds
+/// the WORK; it just no longer bounds an allocation this function makes.
+///
+/// Distances use [`Association::AcceptedDistance`], identical to
+/// [`point_segment_distances_batch`]. This is a reduction over that function's
+/// values, not a second opinion about them.
+pub fn point_nearest_segment_batch(
+    points: &[[f64; 3]],
+    segment_starts: &[[f64; 3]],
+    segment_ends: &[[f64; 3]],
+    limits: PointSegmentBatchLimits,
+) -> Result<PointNearestSegmentBatch, PointSegmentBatchError> {
+    let plan = plan_batch(points, segment_starts, segment_ends, None, limits)?;
+    let mut nearest: Vec<Option<NearestSegment>> = vec![None; plan.point_count];
+    let effective_threads = par::run(|| {
+        let effective_threads = rayon::current_num_threads();
+        if plan.segment_count != 0 {
+            nearest
+                .par_iter_mut()
+                .zip(points.par_iter())
+                .for_each(|(slot, point)| {
+                    let mut best: Option<NearestSegment> = None;
+                    for (segment, (start, end)) in
+                        segment_starts.iter().zip(segment_ends).enumerate()
+                    {
+                        let distance = point_segment_evaluation(
+                            *point,
+                            *start,
+                            *end,
+                            Association::AcceptedDistance,
+                        )
+                        .distance;
+                        // Strict `<` keeps the LOWEST index on a tie.
+                        if best.is_none_or(|current| distance < current.distance_mm) {
+                            best = Some(NearestSegment {
+                                segment,
+                                distance_mm: distance,
+                            });
+                        }
+                    }
+                    *slot = best;
+                });
+        }
+        effective_threads
+    });
+    // Same finiteness contract as the dense form: a non-finite distance is an
+    // error, never a value a caller silently minimises over.
+    for (point, slot) in nearest.iter().enumerate() {
+        if let Some(found) = slot {
+            if !found.distance_mm.is_finite() {
+                return Err(PointSegmentBatchError::NonFiniteOutput {
+                    point,
+                    segment: found.segment,
+                });
+            }
+        }
+    }
+    Ok(PointNearestSegmentBatch {
+        nearest,
+        effective_threads,
+    })
+}
+
 /// Evaluate a complete Cartesian batch while retaining fixed per-pair operand
 /// order. Callers bound memory by supplying a bounded point window.
 pub fn point_segment_distances_batch(
@@ -268,13 +407,27 @@ struct EvaluatedBatch {
     effective_threads: usize,
 }
 
-fn evaluate_batch(
+/// Shape of a validated, budget-checked batch, before any output exists.
+#[derive(Clone, Copy)]
+struct BatchPlan {
+    point_count: usize,
+    segment_count: usize,
+}
+
+/// Validate inputs and charge the output budget for one batch.
+///
+/// Split out of [`evaluate_batch`] so [`point_nearest_segment_batch`] is held
+/// to the IDENTICAL input contract -- same finiteness checks, same mismatch
+/// errors, same pair and byte budgets, in the same order -- without allocating
+/// the dense matrix it does not produce. A second copy of these checks would be
+/// a second thing to keep in step; there is one.
+fn plan_batch(
     points: &[[f64; 3]],
     segment_starts: &[[f64; 3]],
     segment_ends: &[[f64; 3]],
     taper: Option<FrozenJointTaperBatch<'_>>,
     limits: PointSegmentBatchLimits,
-) -> Result<EvaluatedBatch, PointSegmentBatchError> {
+) -> Result<BatchPlan, PointSegmentBatchError> {
     if segment_starts.len() != segment_ends.len() {
         return Err(PointSegmentBatchError::SegmentEndpointCountMismatch {
             starts: segment_starts.len(),
@@ -326,6 +479,24 @@ fn evaluate_batch(
             maximum: limits.max_output_bytes,
         });
     }
+    Ok(BatchPlan {
+        point_count,
+        segment_count,
+    })
+}
+
+fn evaluate_batch(
+    points: &[[f64; 3]],
+    segment_starts: &[[f64; 3]],
+    segment_ends: &[[f64; 3]],
+    taper: Option<FrozenJointTaperBatch<'_>>,
+    limits: PointSegmentBatchLimits,
+) -> Result<EvaluatedBatch, PointSegmentBatchError> {
+    let BatchPlan {
+        point_count,
+        segment_count,
+    } = plan_batch(points, segment_starts, segment_ends, taper, limits)?;
+    let output_pairs = point_count * segment_count;
 
     let mut distances_mm = vec![0.0; output_pairs];
     let mut local_radii_mm = taper.map(|_| vec![0.0; output_pairs]);

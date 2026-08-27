@@ -33,6 +33,66 @@ inherits = "dev"
 opt-level = 2
 debug-assertions = true
 
+# ---------------------------------------------------------------------------
+# Lint configuration.  READ THE RULE BEFORE ADDING TO IT.
+#
+# `docs/development.md` runs clippy as part of the gate with `-D warnings` and
+# documents the expected count as ZERO.  A lint set that is not FULLY
+# ENUMERATED here cannot keep that promise.  `clippy::pedantic` and especially
+# `clippy::nursery` are OPEN GROUPS: their membership grows between clippy
+# releases, so enabling a group signs the gate up for lints that do not exist
+# yet.  Enabling both wholesale is what broke this branch -- the live workspace
+# surfaced ~990 warnings across 27 pedantic/nursery lints the clippy census
+# never sampled, every one of them an ERROR under `-D warnings`, in a build
+# that had changed no code.  Chasing that with an ever-growing `allow` list
+# loses the race by construction: the next clippy release adds the next batch.
+#
+# THE RULE: no lint GROUPS in this table.  Every lint the workspace enforces is
+# named individually below, so a clippy upgrade can change how an enabled lint
+# fires but can never enlarge the gate on its own.
+#
+# The list is the signal set from
+# `docs/evidence/remediation-2026-08-26/census/census-clippy.md`, which triaged
+# all 3,817 pedantic/nursery warnings and separated signal from noise.  These
+# classes carry real correctness weight in a geometry codebase, and the census
+# found live defects in the first two:
+#
+#   * `float_cmp` -- exact equality on COMPUTED geometry.  Found `cco.rs`
+#     equating a computed member endpoint against a computed plate height to
+#     gate a topology branch, and `plinth-emit`'s `same_point` deciding
+#     pad-vs-bridge emission on arithmetically-derived endpoints.
+#   * the `cast_*` family -- truncation, sign loss and wraparound in index and
+#     coordinate arithmetic.  Found geom_kernel's BVH carrying an undocumented,
+#     unasserted 32-bit index-width assumption.  `cast_precision_loss` is the
+#     one member of the family deliberately LEFT OUT: every one of its 187
+#     sites is an integer mesh index or count widened to `f64`, and `f64`
+#     represents every integer up to 2^53 (~9.0e15) exactly -- nine orders of
+#     magnitude above the largest mesh this project handles (the 429,120-face
+#     treant corpus).  A lint that cannot fire on a reachable value is noise by
+#     the census's own standard.  The three members that CAN change a value in
+#     this domain are enabled.
+#   * `suspicious_operation_groupings` -- mis-grouped operands in a formula.
+#     All 10 census hits read out as false positives, but the class is cheap to
+#     carry and the failure it catches is silent.
+#
+# `debug_assert_with_mut_call` is kept for a different reason: a mutating call
+# inside `debug_assert!` silently vanishes in a release build, which is a
+# debug/release behaviour split rather than a style preference.
+#
+# Everything else the census read -- doc style, `mul_add`, `pub(crate)` in a
+# private module, function length, manual midpoint on mm-scale coordinates, and
+# the redundant clones / by-value arguments that were every one inside a test
+# module -- is style noise and is simply NOT ENABLED.  Do not re-add a group to
+# get it back.
+# ---------------------------------------------------------------------------
+[workspace.lints.clippy]
+float_cmp = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+suspicious_operation_groupings = "warn"
+debug_assert_with_mut_call = "warn"
+
 # Cheap-but-honest test gate: release SEMANTICS (debug-assertions off,
 # overflow-checks matching release) at a much cheaper compile cost.
 # Used by lane gates; the merge gate to develop stays full --release.

@@ -7,6 +7,94 @@ use crate::SurfaceBuildError;
 
 pub type FaceBounds = [V3; 2];
 
+/// Why an indexed face has no normal.
+///
+/// A triangle whose three corners span no area has no plane and therefore no
+/// normal. There is nothing to store for it and nothing a consumer can do with
+/// it, so [`crate::SurfaceBuildError::DegenerateFace`] carries one of these
+/// instead of a fabricated direction. The three cases are separated because
+/// they say different things about the CALLER's mesh: the first is an index
+/// bug, the second a weld/precision bug, the third a genuine sliver collapsed
+/// to a line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DegenerateFaceCause {
+    /// Two of the face's three corners name the SAME vertex index. The face is
+    /// a line segment by construction; no coordinate value can rescue it.
+    RepeatedVertexIndex {
+        /// The two corner slots (0, 1 or 2) that carry the repeated index.
+        corners: (usize, usize),
+        /// The vertex index they both name.
+        index: u32,
+    },
+    /// The corners are three DISTINCT indices, but two of them sit at exactly
+    /// the same coordinates -- a mesh that was never welded, or one welded with
+    /// a tolerance coarser than its own feature size.
+    CoincidentVertices {
+        /// The two corner slots (0, 1 or 2) whose coordinates are equal.
+        corners: (usize, usize),
+    },
+    /// Three distinct, non-coincident corners that lie on one line, so the edge
+    /// cross product is exactly zero. This is a real triangle that has
+    /// collapsed, not a bookkeeping mistake.
+    CollinearVertices,
+}
+
+impl DegenerateFaceCause {
+    /// Name the reason a face's edge cross product came out exactly zero.
+    ///
+    /// Classification only: the CALLER has already established that the face is
+    /// degenerate. This never decides degeneracy itself, so it cannot disagree
+    /// with the predicate that did.
+    #[allow(
+        clippy::float_cmp,
+        reason = "classification of an ALREADY-degenerate face, as the doc above \
+                  says: coincident means the two stored vertices are the same \
+                  value.  This never decides degeneracy, so it cannot disagree \
+                  with the predicate that did"
+    )]
+    fn classify(indices: [u32; 3], points: [V3; 3]) -> Self {
+        for (left, right) in [(0_usize, 1_usize), (0, 2), (1, 2)] {
+            if indices[left] == indices[right] {
+                return Self::RepeatedVertexIndex {
+                    corners: (left, right),
+                    index: indices[left],
+                };
+            }
+        }
+        for (left, right) in [(0_usize, 1_usize), (0, 2), (1, 2)] {
+            if points[left] == points[right] {
+                return Self::CoincidentVertices {
+                    corners: (left, right),
+                };
+            }
+        }
+        Self::CollinearVertices
+    }
+}
+
+impl std::fmt::Display for DegenerateFaceCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RepeatedVertexIndex {
+                corners: (left, right),
+                index,
+            } => write!(
+                formatter,
+                "corners {left} and {right} both name vertex {index}"
+            ),
+            Self::CoincidentVertices {
+                corners: (left, right),
+            } => write!(
+                formatter,
+                "corners {left} and {right} are distinct indices at identical coordinates"
+            ),
+            Self::CollinearVertices => {
+                write!(formatter, "the three corners are collinear")
+            }
+        }
+    }
+}
+
 /// Immutable global face data. Query indexes and caches deliberately do not
 /// live here: a future subset can share this store but own independent indexes.
 pub struct FaceGeometry {
@@ -93,6 +181,13 @@ impl Mesh {
     }
 
     #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn from_parts(
         v0: Vec<V3>,
         v1: Vec<V3>,
@@ -240,11 +335,27 @@ impl Mesh {
                     operation: "normal length",
                 });
             }
-            let normal = [
-                cross[0] / length.max(1e-30),
-                cross[1] / length.max(1e-30),
-                cross[2] / length.max(1e-30),
-            ];
+            // A face with no area has no normal. The previous code divided by
+            // `length.max(1e-30)`, which turns `length == 0` into a stored
+            // "normal" of [0, 0, 0] -- a vector every consumer downstream reads
+            // as a DIRECTION (inward = -normal in the breach predicate,
+            // dot(normal, ...) in the exterior mask and the contact tests).
+            // Zero is not a direction, and it is not a detectable one either:
+            // it is finite, so the `is_finite` guard below waves it through.
+            //
+            // The predicate is exact and carries no tolerance. `length > 0.0`
+            // is precisely the condition under which the three divisions
+            // produce a unit vector: `|cross[k]| <= length` for every k, so no
+            // component can overflow, and only `length == 0.0` can make the
+            // quotient meaningless. There is nothing here for a magic number to
+            // decide (PHYSICS-FIRST CONSTANTS).
+            if length <= 0.0 {
+                return Err(SurfaceBuildError::DegenerateFace {
+                    face,
+                    cause: DegenerateFaceCause::classify(*indices, [a, b, c]),
+                });
+            }
+            let normal = [cross[0] / length, cross[1] / length, cross[2] / length];
             if !normal.iter().all(|v| v.is_finite()) {
                 return Err(SurfaceBuildError::IndexedDerivedArithmetic {
                     face,

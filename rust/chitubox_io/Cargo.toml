@@ -7,6 +7,9 @@ description = "Read/write ChituBox Basic .chitubox project files: add STL models
 license = "MIT OR Apache-2.0"
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 name = "chitubox_io"
 # Plain rlib. The crate once also built as a `cdylib` so maturin could package

@@ -383,14 +383,20 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn move_characterization_production_settings_pin_m0_registry_values() {
         let registry = m0_constants()
             .expect("m0 constants registry")
             .placeholders();
         let settings = DelicacySettings::production().expect("production delicacy settings");
 
-        // The production path is the sole reader in this crate of these three
-        // registry entries (`plinth-metrics`'s scar.rs reads them too); pin
+        // The production path is now the sole reader of these three registry
+        // entries anywhere in the workspace: `plinth-metrics`'s scar.rs used
+        // to read them too, and that crate was deleted on 2026-08-26.  Pin
         // both the plumbing (field-for-field) and the registry values
         // themselves so either drifting fails here.
         assert_eq!(

@@ -21,13 +21,17 @@
 //!   decimated proxy, so scar magnitudes moved with the decimation ratio —
 //!   cannot recur here, because the field and its evaluation mesh are one
 //!   object.
-//! * **Auditor independence is preserved.**  `plinth-metrics`'s `scar.rs`
-//!   carries its own, deliberately different delicacy field, and there is no
-//!   dependency in either direction between the two.  That crate keeps
-//!   auditing this crate's output; an audit that shared this implementation
-//!   would be checking a thing against itself.  Nothing in this module may
-//!   ever be expressed in terms of `plinth-metrics`, and nothing there may be
-//!   expressed in terms of this.
+//! * **The independent auditor is gone, and nothing replaced it.**  Until
+//!   2026-08-26 `plinth-metrics`'s `scar.rs` carried its own, deliberately
+//!   different delicacy field, with no dependency in either direction, so the
+//!   audit was never checking a thing against itself.  That crate was deleted
+//!   by owner ruling as an orphan: it had no production consumer once the
+//!   `plinth score` subcommand was removed.  Deleting it also deleted the
+//!   second opinion, so this module is now the SOLE delicacy implementation
+//!   and its output is checked only by its own tests.  That is a real loss of
+//!   cross-checking, recorded here rather than quietly dropped: anything that
+//!   restores an independent delicacy audit must still not be expressed in
+//!   terms of this module, or it will be checking a thing against itself.
 //!
 //! # The blend
 //!
@@ -298,6 +302,14 @@ fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64
 /// rather than a neighbour across a convex crease, and which excludes the
 /// originating face itself without needing a self-hit epsilon: a face's normal
 /// dotted with itself is `+1`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn thinness_by_face(
     mesh: &Mesh,
     geometry: &FaceGeometryPass,

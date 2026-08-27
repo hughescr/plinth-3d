@@ -138,11 +138,6 @@ pub(crate) mod runner;
 pub(crate) mod seat_zone;
 pub mod specialized;
 pub mod transient;
-#[allow(
-    dead_code,
-    reason = "crate-private raw transit evidence is reserved for the later verifier"
-)]
-pub(crate) mod transit_measurement;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
@@ -856,6 +851,17 @@ pub(crate) fn validate_perception_input<'a>(
     Ok((topology, delicacy))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26); integer-width casts in \
+          mesh/voxel index arithmetic, NOT individually audited -- triaged as a class, and the one \
+          architecture item the class carried (geom_kernel's 32-bit BVH index width) is now a named, \
+          enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub(crate) fn perceive_contacts_on_surface(
     _mesh: &Mesh,
     config: &SupportPerceptionConfig<'_>,
@@ -2150,6 +2156,21 @@ fn failing_coverage_samples(
     .failing_sample_indices)
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "a determinism tie-break, not a geometric decision: when two \
+              accumulated scores are bit-equal the lowest row index wins.  An \
+              epsilon here would be a magic number deciding which candidate is \
+              chosen, which the physics-first constants rule forbids"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub(crate) fn rank_coverage_repair_rows<'a>(
     candidates: &'a [ContactCandidate],
     samples: &[CoverageSample],
@@ -2255,6 +2276,13 @@ impl CoverageContactIndex {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn key(&self, point: [f64; 3]) -> (i64, i64, i64) {
         let cell = |coordinate: f64| (coordinate / self.radius_mm).floor() as i64;
         (cell(point[0]), cell(point[1]), cell(point[2]))
@@ -2319,6 +2347,13 @@ impl PoissonGrid {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn key(&self, point: [f64; 3]) -> (i64, i64, i64) {
         let cell = |coordinate: f64| (coordinate / self.cell_width).floor() as i64;
         (cell(point[0]), cell(point[1]), cell(point[2]))
@@ -2583,6 +2618,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn contact_normal_is_the_specific_shared_face_normal_not_vertex_average() {
         let mesh = Mesh::new(
             vec![
@@ -2736,6 +2776,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn consuming_scene_transition_moves_model_and_primitives_together() {
         let mesh = Mesh::new(
             vec![
@@ -3069,6 +3114,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn overlapping_islands_use_one_candidate_face_index_not_pool_rescans() {
         const COUNT: usize = 512;
         const ISLANDS: usize = 512;
@@ -3407,6 +3457,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn measurement_evidence_preserves_boundary_and_repair_contracts() {
         let mesh = small_closed_tetra();
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
@@ -3528,6 +3583,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn s1_consumes_s0_fixture_and_retains_face_specific_evidence() {
         let mesh = small_closed_tetra();
         let pool = perceive_fixture(&mesh);
@@ -3911,6 +3971,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn dyadic_preflight_refuses_each_cap_at_the_exact_next_byte_or_cell() {
         let mesh = small_closed_tetra();
         let delicacy = vec![0.25; mesh.tris().len()];

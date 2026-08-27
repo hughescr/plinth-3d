@@ -164,6 +164,13 @@ impl RepairEvidence {
     /// actions were planned and then deliberately not applied, and the
     /// actions-skipped case, where no action ran at all.
     #[must_use]
+    #[allow(
+        clippy::suspicious_operation_groupings,
+        reason = "the two evidence rows are different shapes: shard stripping \
+                  counts faces, duplicate merging counts groups. \
+                  `DuplicateFaceEvidence` has no `faces_removed` field for \
+                  clippy's suggested symmetry to reach"
+    )]
     pub fn changed(&self) -> bool {
         self.refused_to_empty.is_none()
             && self.actions_skipped.is_none()
@@ -930,6 +937,13 @@ fn is_forward(triple: [u32; 3], ascending: [u32; 3]) -> bool {
 }
 
 /// Drop unreferenced vertices, renumbering in first-use order.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn compact(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let mut renumbered = vec![u32::MAX; verts.len()];
     let mut compacted = Vec::new();
@@ -1017,6 +1031,11 @@ mod tests {
     /// its reverse. The box is what makes the test mean anything: a duplicate
     /// group is judged by what the *rest of the mesh* does with its three
     /// edges, so a two-triangle universe cannot distinguish the rules.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn box_with_copies(face: usize, copies: &[bool]) -> (Vec<[u32; 3]>, Vec<u32>) {
         let mesh = crate::make_box_default().expect("box");
         let mut tris = mesh.tris().to_vec();
@@ -1118,6 +1137,11 @@ mod tests {
     /// the scope question against widening — the conservative keep-first rule
     /// stands as landed — so this is pinned behaviour, not a placeholder.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_later_member_is_not_promoted_for_having_the_better_winding() {
         let mesh = crate::make_box_default().expect("box");
         let mut tris = mesh.tris().to_vec();
@@ -1143,6 +1167,11 @@ mod tests {
     /// rule stands, is *recorded* as having stood, and the reduction still
     /// comes out right because every group keeps one.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_doubled_shell_falls_back_to_the_plain_rule_and_says_so() {
         let mesh = crate::make_box_default().expect("box");
         let mut tris = mesh.tris().to_vec();
@@ -1254,5 +1283,4 @@ mod tests {
         // `triage`'s own "refusal precedes input-proportional work" test reads,
         // so a second in-process triage call here would race it.
     }
-
 }

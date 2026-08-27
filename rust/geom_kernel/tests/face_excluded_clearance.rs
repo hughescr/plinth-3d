@@ -8,7 +8,9 @@
 //! gap).
 
 use geom_kernel::testkit::build_from_tris;
-use geom_kernel::{NativeSurface, NearFaceBatchError, NearFaceBatchLimits};
+use geom_kernel::{
+    NativeSurface, NearFaceBatchError, NearFaceBatchLimits, SegmentClearance, UnmeasuredSegment,
+};
 
 fn uncapped() -> NearFaceBatchLimits {
     NearFaceBatchLimits {
@@ -83,6 +85,24 @@ fn excluding_the_nearest_face_hands_the_verdict_to_the_next_one() {
     );
 }
 
+/// A fully exempted row is UNTESTED, and the kernel must say so IN THE TYPE.
+///
+/// This test used to assert `clearance[0].is_infinite()`, on the reasoning that
+/// "the caller's admissibility rule is what must refuse it". That reasoning was
+/// wrong in one specific way, and the wrongness is the whole defect: `INFINITY`
+/// is not a refusal a caller can act on, it is the single most permissive value
+/// in the ordering. Every caller that grades with `clearance >= demand` passes
+/// this row, and rewire.rs:1088 is a caller that does exactly that. A row where
+/// nothing was measured was scoring better than a row measured with a metre of
+/// air around it.
+///
+/// So the assertion moved from the float to the variant. `AllFacesExcluded` is
+/// not comparable to a demand, which is the point: a caller has to say what an
+/// untested row means before it can grade one.
+///
+/// The second half pins the LOSSINESS as a fact rather than a comment: the
+/// float shim collapses "not measured" and "measured, enormous" onto the same
+/// `f64::INFINITY`, so on the float form the two are indistinguishable.
 #[test]
 fn excluding_every_face_leaves_nothing_to_grade() {
     let surface = crevice();
@@ -91,14 +111,40 @@ fn excluding_every_face_leaves_nothing_to_grade() {
     let r = vec![0.25];
     let insets = vec![0.0];
     let all: Vec<&[u32]> = vec![&[0, 1]];
+
+    let typed = surface
+        .segment_clearance_excluding_typed(&p0, &p1, &r, &r, 0.0, &insets, &insets, &all)
+        .unwrap();
+    assert_eq!(
+        typed[0],
+        SegmentClearance::Unmeasured(UnmeasuredSegment::AllFacesExcluded),
+        "a row whose exclusion set covers every face was never measured; the \
+         kernel must not hand back a number for it"
+    );
+    assert_eq!(
+        typed[0].clearance_mm(),
+        None,
+        "there is no clearance to report"
+    );
+    assert!(
+        !typed[0].clears_or(false),
+        "a stage that REFUSES must be able to refuse an untested row"
+    );
+
+    // The float shim, for contrast: same row, same call, and the answer is the
+    // most permissive float there is.
     let (clearance, _) = surface
         .segment_clearance_excluding(&p0, &p1, &r, &r, 0.0, &insets, &insets, &all)
         .unwrap();
     assert!(
         clearance[0].is_infinite() && clearance[0] > 0.0,
-        "a fully exempted row is UNTESTED, and the kernel says so with INFINITY \
-         rather than a number. The caller's admissibility rule is what must \
-         refuse it; a quiet 0.0 here would read as a pass"
+        "the shim still encodes UNTESTED as +INFINITY -- that is why callers \
+         must migrate off it, not a property to rely on"
+    );
+    assert!(
+        clearance[0] >= 0.0,
+        "and this is the bug in one line: the untested row passes the same \
+         `>= demand` test a well-cleared row passes"
     );
 }
 

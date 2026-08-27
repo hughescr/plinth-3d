@@ -175,6 +175,13 @@ impl BridgeSagLimit {
     }
 }
 
+/// Deterministic candidate grid for a CCO split-slide step. "CCO" is
+/// Constrained Constructive Optimization, the terminal-by-terminal
+/// tree-growth algorithm this project's support-forest generator
+/// (`plinth-support::cco`) is built on; the vocabulary it shares with that
+/// literature -- terminal, forest, bifurcation, rewire -- is not
+/// coincidental. The acronym is otherwise unexpanded anywhere else in the
+/// workspace, so this is the one glossary line for it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct CcoSplitSlidePolicy {
     start: UnitFraction,
@@ -522,6 +529,12 @@ impl<'de> Deserialize<'de> for DrainDirections {
 pub struct VentDirections([DrainDirection; 4]);
 
 impl VentDirections {
+    #[allow(
+        clippy::float_cmp,
+        reason = "a whitelist, not a measurement: the four vent directions must be \
+                  the axis unit vectors themselves, and 0.0/1.0/-1.0 are exactly \
+                  representable, so anything else is correctly rejected"
+    )]
     pub fn new(directions: [DrainDirection; 4]) -> Result<Self, PlaceholderValueError> {
         let expected = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
         if directions.iter().zip(expected).all(|(direction, (x, y))| {
@@ -1340,13 +1353,13 @@ placeholder_declarations! {
     peel_pressure_pa: PositiveFinite = PositiveFinite::new(3000.0)?;
     "PEEL_PRESSURE_PA", "Pa", "scalar", "Legacy diagnostic split, potentially about four times low.";
     perf_anchor_cap: TrialSetting<AnchorCandidateCap> = TrialSetting::disabled();
-    "PERF_ANCHOR_CAP", "count", "trial_setting<anchor_candidate_cap>", "Experimental B2 remains Disabled; no enabled candidate is selected.";
+    "PERF_ANCHOR_CAP", "count", "trial_setting<anchor_candidate_cap>", "Experimental B2 remains Disabled; no enabled candidate is selected. Registered but unread outside this disabled check: no production code queries it.";
     perf_beam_k: TrialSetting<BeamWidth> = TrialSetting::disabled();
-    "PERF_BEAM_K", "count", "trial_setting<beam_width>", "Experimental B1 remains Disabled; no enabled candidate is selected.";
+    "PERF_BEAM_K", "count", "trial_setting<beam_width>", "Experimental B1 remains Disabled; no enabled candidate is selected. Registered but unread outside this disabled check: no production code queries it.";
     perf_fix_iter_caps: TrialSetting<FixBraceIterationCap> = TrialSetting::disabled();
-    "PERF_FIX_ITER_CAPS", "count", "trial_setting<brace_iteration_cap>", "Experimental B4 models only the consumed brace-iteration cap and remains Disabled.";
+    "PERF_FIX_ITER_CAPS", "count", "trial_setting<brace_iteration_cap>", "Experimental B4 models only the consumed brace-iteration cap and remains Disabled. Registered but unread outside this disabled check: no production code queries it.";
     perf_seed_spacing_factor: TrialSetting<SeedSpacingFactor> = TrialSetting::disabled();
-    "PERF_SEED_SPACING_FACTOR", "1", "trial_setting<seed_spacing_factor>", "Experimental B3 remains Disabled and cannot loosen the coverage gate.";
+    "PERF_SEED_SPACING_FACTOR", "1", "trial_setting<seed_spacing_factor>", "Experimental B3 remains Disabled and cannot loosen the coverage gate. Registered but unread outside this disabled check: no production code queries it.";
     pipeline_hollow_enable_default: bool = true;
     "PIPELINE_HOLLOW_ENABLE_DEFAULT", "1", "scalar", "Pipeline hollow-stage interface default.";
     pipeline_p8_relocate_default: bool = false;

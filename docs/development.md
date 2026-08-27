@@ -52,7 +52,16 @@ something through:
 - **`--no-fail-fast`.** Without it, one red test masks the rest, and a single failure gets
   mistaken for a smaller or a larger problem than it is.
 - **Clippy with `-D warnings`, over all targets and all features**, so lint coverage includes
-  tests, examples and benches rather than just the library.
+  tests, examples and benches rather than just the library. **The workspace lint table names
+  every lint it enables and enables no GROUPS** — see the rule written at
+  `[workspace.lints.clippy]` in the root `Cargo.toml`. `clippy::pedantic` and
+  `clippy::nursery` gain members between clippy releases, so enabling either signs this gate
+  up for lints that do not exist yet: measured on this workspace, the two groups raise 4,256
+  warnings across 68 lints, every one of them an error here, and no `allow` list can win that
+  race because the next release adds the next batch. The enabled set is the signal set from
+  `docs/evidence/remediation-2026-08-26/census/census-clippy.md`; what is suppressed at a site
+  is suppressed with `#[expect]`, named lints and a reason, and is inventoried in
+  `docs/evidence/remediation-2026-08-26/census/cast-audit.md`.
 - **`cargo fmt --check`** as its own gate. Formatting violations otherwise ride in on the
   back of a green test run.
 - **`git diff --check`** for whitespace damage, which nothing above catches.
@@ -66,30 +75,74 @@ in behaviour, whichever direction it moved.
 - `retired_formula_guard` (`crates/plinth-support/tests/retired_formula_guard.rs`):
   **13/13**.
 - `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`: **0**
-  warnings.
+  warnings. Held by the named-lints rule above; re-measured 2026-08-27 on
+  `feature/remediation-kernel`.
 - `cargo fmt --all -- --check`: **exactly 104 hunks** (re-confirmed directly, 2026-08-25,
   at the current tip `7eb5f30`). This is standing fmt debt in already-committed code, not a
   target — it must not be edited down opportunistically inside an unrelated change (that
   produces an unreviewable diff), and it must never **grow**. A change that adds a 105th
   hunk is not gate-clean.
+  - **This number is stale and the drift is not attributed.** Measured 2026-08-27 against a
+    clean `git archive` of `feature/remediation-kernel`'s tip, the count is **120**, so 16
+    hunks arrived between `7eb5f30` and here without being named. Left as found rather than
+    re-pinned: moving the number to 120 would be exactly the re-freeze this section forbids,
+    and the 16 belong to whichever change introduced them. What the lint-reconciliation
+    change asserts is only that it added none of them — it leaves the count at 120.
 
 A change that moves any of these numbers without explaining why is not done; attribute the
 movement in the commit, the way every re-pin below has to.
 
-### The four documented reds (task `#76`)
+### The four documented reds (task `#76`) — CLOSED 2026-08-26
 
+**All nine are now green, and no test in the tree is knowingly left red for a judge.** Two
+tests in `crates/plinth-support/tests/support_runner_integration.rs` are outside that
+statement and were outside the recorded baseline too, because that binary exceeds the
+baseline harness's 240 s budget and was never observed to completion:
+
+- `closure_repairs_censored_dust_because_that_repair_closes_a_real_hole` fails, by design and
+  with its own `expect` message saying so — it reports FINDING 1, a live support-planning
+  defect. VERIFIED unchanged at `5d0420e` in a detached worktree on 2026-08-26: identical
+  panic, identical `candidates_tried: 274`. It is a pre-existing deliberate red, not a
+  regression, and nothing in the fixture work below touches it.
+- `a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule` did not
+  finish: 887 trials over 47 minutes with 2,548 candidate rows still ranked. That is
+  REVIEW.md short-list 12, the uncapped trial count, and it is why the binary blows every
+  budget. Its verdict is unmeasured, before this change and after it.
+
+The binary's other three tests, including the re-pinned one, pass in 3.7 s together. A red
+test outside those two is a new finding.
+
+The record of what they were, because the fix is a re-pin and re-pins are attributed here:
 `crates/plinth-pipeline/tests/a4_production_door.rs` and
-`crates/plinth-pipeline/tests/first_artifact.rs` carry four tests that are **known red**,
-not ignored — they run, and they fail, on `trials:0 commits:0` (no coverage-repair pass ever
-triggers on their fixtures), and none of the four is digest-related:
+`crates/plinth-pipeline/tests/first_artifact.rs` carried four tests that ran and failed on
+`trials:0 commits:0` — no coverage-repair pass triggered on their fixtures — and
+`crates/plinth-support/tests/a4_transactional_controller.rs` (4) and
+`crates/plinth-support/tests/support_runner_integration.rs` (1) carried five more of the
+same cluster, nine in all. None was digest-related.
 
 - `a4_production_door::the_production_door_reports_what_the_one_winner_controller_spent`
 - `a4_production_door::the_sealed_ledger_on_disk_names_the_row_that_closed_the_hole`
 - `first_artifact::corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
 - `first_artifact::a_coverage_refusal_removes_a_stale_artifact_already_at_the_target`
 
-These four are the only documented pipeline test reds in the tree. A gate run that turns up
-a red test outside this set is a new finding, not this one.
+**One cause, and it was a fixture, not a defect.** `3a6526f` (`fix(support): converge the
+clearance mask and seat the model anchor`) let the model-seated anchor family route for the
+first time. `make_overhang_table` and the corpus `Sphere` had both been chosen BECAUSE their
+baseline layouts did not cover; afterwards they do, they seal at attempt 0, and every test
+that reads a COMMITTED repair step or a coverage REFUSAL from them was left with nothing to
+observe. The tests were vacuous, not wrong, and `3a6526f`'s own message says so and leaves
+them red for a judge.
+
+**The fix, per the owner's ruling of 2026-08-26: a new fixture, no edited expectation.**
+`plinth_mesh::make_uncovered_rim_table` — the `make_overhang_table` generator at
+25 x 25 x 4 mm on 2 x 2 x 20 mm legs — still measures a blocking patch at attempt 0
+(0.553 mm² uncovered, 6.901 mm worst gap against the registered 6.0 mm radius, above the
+0.16 mm² censor) and closes it from its own repair pool: `trials=2 commits=1 remaining=539`.
+The committed-repair tests were re-pointed at it; the stale-artifact refusal test was
+re-pointed at `make_raking_blade`, which still refuses; and
+`corpus_sphere_drilled_plan_is_refused_before_any_file_exists` was DELETED, because its
+claims are all made by `procedural_raking_blade_is_refused_before_any_file_exists` on a
+fixture that still refuses. No assertion was weakened and no expected value was re-frozen.
 
 ### The golden re-pin rule, with `from → to` attribution
 

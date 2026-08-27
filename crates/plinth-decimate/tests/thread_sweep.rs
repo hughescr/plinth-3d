@@ -298,6 +298,11 @@ fn unique_output_directory() -> PathBuf {
     ))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn smooth_print_scale_sphere() -> Mesh {
     const LONGITUDE: usize = 256;
     const LATITUDE: usize = 128;

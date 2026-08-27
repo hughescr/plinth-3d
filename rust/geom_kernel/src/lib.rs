@@ -13,15 +13,37 @@ mod closest;
 mod consts;
 mod mesh;
 mod moller;
-mod par;
+/// Deterministic rayon thread-pool cache (spec sec 4, Amendment A4).
+///
+/// Public so a consumer that needs to run its own work under this kernel's
+/// cached, `PLINTH_THREADS`-sized pool can reuse [`run`]/[`try_run`] and
+/// [`current_threads`] directly, instead of building and tearing down a
+/// private `rayon::ThreadPoolBuilder` pool per call at the same width this
+/// module already caches.
+pub mod par;
 mod parity;
 mod point_index;
 mod queries;
 mod segment_batch;
 mod slicing;
-mod vec3;
+/// Minimal `[f64; 3]` vector arithmetic (`V3`), evaluated in the fixed element
+/// order the kernel's bit-parity guarantees depend on (spec sec 5.1).
+///
+/// Public so a consumer working with [`V3`] values reuses these primitives
+/// instead of re-implementing vector add/sub/scale/dot/cross/norm/dist above
+/// the kernel.
+pub mod vec3;
 mod winding;
 
+/// Synthetic mesh generators, brute-force oracles, and other test-only
+/// surface constructors used by this crate's and its consumers' integration
+/// tests.
+///
+/// Gated behind the `testkit` feature: unlike the rest of this crate's public
+/// surface, several constructors here `unwrap()` instead of returning
+/// [`SurfaceBuildError`], so this module must never ship in a release build
+/// that does not explicitly opt in.
+#[cfg(feature = "testkit")]
 pub mod testkit;
 
 use std::borrow::Cow;
@@ -44,7 +66,7 @@ use sha2::{Digest, Sha256};
 /// difference between them as corruption.
 pub use consts::EPS as MOLLER_EPS;
 use mesh::Mesh;
-pub use mesh::{FaceBounds, FaceGeometry};
+pub use mesh::{DegenerateFaceCause, FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
 pub use point_index::{
     knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr,
@@ -56,12 +78,13 @@ pub use queries::{
     AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
     BatchInputError, CapsuleRay, CapsuleRays, CastRaysBatch, Interval, NativeSurface,
     NearFaceBatchError, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
-    PenetrationBatchMeter, PenetrationRowCensus, SphereBreachBatch,
+    PenetrationBatchMeter, PenetrationRowCensus, SegmentClearance, SphereBreachBatch,
+    UnmeasuredSegment,
 };
 pub use segment_batch::{
-    point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,
-    PointSegmentBatchError, PointSegmentBatchLimits, PointSegmentDistanceBatch,
-    PointSegmentTaperBatch,
+    point_nearest_segment_batch, point_segment_distances_batch, point_segment_taper_batch,
+    FrozenJointTaperBatch, NearestSegment, PointNearestSegmentBatch, PointSegmentBatchError,
+    PointSegmentBatchLimits, PointSegmentDistanceBatch, PointSegmentTaperBatch,
 };
 pub use slicing::{
     PlaneIntersection, PlaneIntersectionKind, PlaneSliceBatch, PlaneSliceError, PlaneSliceLimits,
@@ -284,6 +307,17 @@ pub enum SurfaceBuildError {
         face: usize,
         operation: &'static str,
     },
+    /// An indexed face spans no area, so it has no normal to store.
+    ///
+    /// Distinct from [`Self::IndexedDerivedArithmetic`] on purpose: that
+    /// variant means an intermediate came out non-finite, which is an
+    /// arithmetic failure. This one is finite arithmetic reporting a real
+    /// geometric fact -- the triangle is a line. Filing it under the other
+    /// variant would read as precision the value does not have.
+    DegenerateFace {
+        face: usize,
+        cause: DegenerateFaceCause,
+    },
     MemoryEstimateOverflow {
         section: &'static str,
     },
@@ -336,6 +370,10 @@ impl std::fmt::Display for SurfaceBuildError {
             Self::IndexedDerivedArithmetic { face, operation } => write!(
                 formatter,
                 "indexed face {face} produced non-finite {operation}"
+            ),
+            Self::DegenerateFace { face, cause } => write!(
+                formatter,
+                "indexed face {face} spans no area and has no normal: {cause}"
             ),
             Self::MemoryEstimateOverflow { section } => {
                 write!(formatter, "native memory estimate overflow in {section}")
@@ -678,6 +716,8 @@ pub fn current_threads() -> usize {
     par::current_threads()
 }
 
+pub use par::{try_run as run_in_pool, PoolBuildError};
+
 /// Preflight limits for the only generic workspace-parallel operation:
 /// ordered, independent index mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -931,6 +971,13 @@ mod thread_tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn ordered_index_map_is_identical_at_one_four_and_sixteen_threads() {
         if let Some(signatures) = sweep_threads(
             "thread_tests::ordered_index_map_is_identical_at_one_four_and_sixteen_threads",

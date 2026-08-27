@@ -246,7 +246,11 @@ impl ObjectiveWeights {
     }
 
     /// The down-facing cutoff, byte for byte the expression
-    /// `plinth-support/src/lib.rs:814` evaluates from the same constant.
+    /// `plinth_support::perceive_contacts_on_surface` evaluates from the same
+    /// constant (`crates/plinth-support/src/lib.rs`, `let down_limit = ...`).
+    /// A source-line citation drifted stale here once already (recorded 814,
+    /// actually 871 by the time this was caught, a 57-line drift); naming the
+    /// function instead of a line number is the fix, not just the number.
     #[must_use]
     pub fn down_limit(self) -> f64 {
         -self.overhang_angle_deg.to_radians().sin()
@@ -722,14 +726,6 @@ pub fn score_candidates(
         section_breakpoints: 0,
     };
 
-    // One explicit pool per call at the workspace thread count, never rayon's
-    // global pool: a one-shot global pool makes the thread sweep inert
-    // (06-conventions §3).
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(geom_kernel::current_threads())
-        .build()
-        .map_err(|error| ScoreError::Pool(error.to_string()))?;
-
     for tile in candidates.chunks(plan.candidate_tile) {
         // The one batched product: faces outer, candidates inner, so the normal
         // array streams once per tile instead of once per candidate.
@@ -755,22 +751,30 @@ pub fn score_candidates(
         // Index-parallel map-collect across candidates: every output lands in
         // the slot of its own index, so the tile's results are bit-identical at
         // any thread count.
-        let tile_outcomes: Vec<(CandidateOutcome, CandidateWork)> = pool.install(|| {
-            tile.par_iter()
-                .enumerate()
-                .map(|(column, candidate)| {
-                    score_one(
-                        table,
-                        *candidate,
-                        column,
-                        tile.len(),
-                        &nz,
-                        weights,
-                        down_limit,
-                    )
-                })
-                .collect()
-        });
+        // The kernel's cached explicit pool at the workspace thread count,
+        // never rayon's global pool: a one-shot global pool makes the thread
+        // sweep inert (06-conventions §3). Caching it there rather than
+        // building one per call keeps that property — the pool is still
+        // explicit and still re-reads `PLINTH_THREADS` — while removing a
+        // `pthread_create` storm from a function called once per tile batch.
+        let tile_outcomes: Vec<(CandidateOutcome, CandidateWork)> =
+            geom_kernel::run_in_pool(|| {
+                tile.par_iter()
+                    .enumerate()
+                    .map(|(column, candidate)| {
+                        score_one(
+                            table,
+                            *candidate,
+                            column,
+                            tile.len(),
+                            &nz,
+                            weights,
+                            down_limit,
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|error| ScoreError::Pool(error.to_string()))?;
         for (outcome, work) in tile_outcomes {
             executed.vertex_direction_products = executed
                 .vertex_direction_products
@@ -1273,6 +1277,11 @@ mod tests {
     /// scar-free score bit-identical, and the registered weight moves it, so the
     /// independence is structural rather than arithmetic.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_zero_scar_weight_never_reads_the_delicacy_field() {
         let (_mesh, table) = cube_table();
         let mut poisoned = table.clone();
@@ -1519,6 +1528,11 @@ mod tests {
     /// (`crates/plinth-support/src/lib.rs:814`), applied with the same strict
     /// `<`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_down_facing_cutoff_is_the_support_engines_own_expression() {
         let weights = ObjectiveWeights::registered().expect("registered objective");
         assert_eq!(weights.overhang_angle_deg(), 45.0);
@@ -1533,6 +1547,11 @@ mod tests {
 
     /// The registered objective is exactly §3.8's, read from the one registry.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_objective_weights_are_the_registered_placeholders() {
         let weights = ObjectiveWeights::registered().expect("registered objective");
         assert_eq!(weights.support_area_cm2(), 0.5);

@@ -12,7 +12,10 @@
 //! state machine. Cache bypass has exactly one data flag, `no_cache`, wired
 //! only from the CLI spelling `--no-cache`; no cache exists yet, so the flag is
 //! recorded in the report and changes nothing, which is the honest state rather
-//! than a faked one (design record OQ-5).
+//! than a faked one (design record OQ-5). It is retained deliberately:
+//! `06-conventions.md` § 6 makes cache-disabled equality CI-mandatory and names
+//! that flag as the sole cache-off mechanism, so the spelling is load-bearing
+//! for a documented procedure even while it is unread by the compiler.
 #![forbid(unsafe_code)]
 
 pub mod coverage_evidence;
@@ -549,6 +552,21 @@ pub enum ModelPreparationOutcome {
         /// only `Artifact` ever carries one.
         #[serde(default)]
         repair_ledger: Option<Box<crate::coverage_evidence::SealedRepairLedger>>,
+        /// **Disclosure half of the pre-write gate's #1 finding.** The gates
+        /// named in [`PreWriteGate`] that this artifact was NOT checked
+        /// against, because no Rust implementation exists for them yet — see
+        /// `gates::judge`. This artifact was authorized on however many gates
+        /// `PreWriteGate::ALL.len()` minus this list's length actually ran,
+        /// not on all twelve.
+        ///
+        /// `#[serde(default)]` for the same reason every other field added
+        /// here is: a report frozen before this field existed keeps
+        /// deserializing, reading as `Vec::new()` — which would misreport an
+        /// old, honestly-incomplete run as fully gated. That is accepted
+        /// because no run old enough to predate this field is a current
+        /// production artifact; a fresh run always carries the true list.
+        #[serde(default)]
+        pending_gates: Vec<PreWriteGate>,
     },
     Stopped {
         after: StageStop,
@@ -816,9 +834,7 @@ impl PrepareReport {
                 }
             }
         }
-        coverage
-            .or(first_non_ok)
-            .unwrap_or(PipelineExitCode::Ok)
+        coverage.or(first_non_ok).unwrap_or(PipelineExitCode::Ok)
     }
 
     /// Whether the pre-write physics gates refused any model in this run.
@@ -1541,6 +1557,7 @@ mod tests {
                         contacts: Box::default(),
                         repair_report: None,
                         repair_ledger: None,
+                        pending_gates: Vec::new(),
                     },
                 },
                 ModelPreparationReport {
@@ -1633,6 +1650,7 @@ mod tests {
                         contacts: Box::default(),
                         repair_report: None,
                         repair_ledger: None,
+                        pending_gates: Vec::new(),
                     },
                 ),
                 model("refused", refused),
@@ -1825,6 +1843,11 @@ mod tests {
     /// reads the *same* numbers every hand-written call site in this workspace
     /// already passed — so publishing them moved no decimation digest.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_registered_production_budget_is_the_budget_every_gate_already_used() {
         let registered = registered_decimation_budget().expect("registered production budget");
         assert_eq!(registered, finite_decimation_budget());
@@ -1836,6 +1859,11 @@ mod tests {
     /// The lift the whole run plans and emits at is the profile's registered
     /// one, not a literal restated at the CLI boundary.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_run_lift_is_the_profiles_own_registered_placeholder() {
         let printer = OutputProfile::Saturn4Ultra
             .resolve()
@@ -1945,6 +1973,11 @@ mod tests {
     /// deliberately not claimed here — it is not one of the models these
     /// fixtures seal.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_committed_prepare_fixtures_stay_under_the_anchor_delicacy_cap() {
         let cap = m0_constants()
             .expect("registered constants")
@@ -2005,6 +2038,12 @@ mod tests {
     /// either direction is a change in what the record has to say, and a support
     /// change that moves a digest without changing neutrality is not.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_zero_field_divergence_is_measured_per_committed_fixture() {
         let printer = OutputProfile::Saturn4Ultra
             .resolve()
@@ -2385,7 +2424,7 @@ mod tests {
                 // fixture's island 0 closes from its own repair pool and the
                 // run seals under both fields
                 // (`plinth-support/tests/support_runner_integration.rs`,
-                // `public_runner_closes_overhang_table_only_after_appending_repair_contacts`).
+                // `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`).
                 // Two sealed runs mean two sealed digests, and they differ —
                 // which is exactly FU-38's original contact-selection
                 // tie-break finding for this fixture, restored to visibility

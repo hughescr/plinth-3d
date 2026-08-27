@@ -578,6 +578,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_registered_coverage_request_is_the_planners_own_radius_and_floor() {
         let limits = SupportPreparationLimits::production().expect("production limits");
         let request = registered_coverage_request().expect("registered request");

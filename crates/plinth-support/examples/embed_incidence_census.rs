@@ -119,6 +119,12 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn run_model(root: &Path, name: &str) -> Result<String, String> {
     let stl = root.join("corpus/models").join(format!("{name}.stl"));
     let mesh = load_binary_stl(&stl, WeldPolicy::None).map_err(|error| format!("load: {error}"))?;

@@ -768,6 +768,13 @@ const OPAQUE_FRONT_FILLER: u32 = 2;
 const OPAQUE_GROUP_HEADER: u32 = 3;
 const OPAQUE_POST_FILLER: u32 = 4;
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn encode_opaque(kind: u32, index: usize) -> OpaqueRegionId {
     // index is bounded by model_count, itself bounded by the u32 model table;
     // mask defensively so the kind bits are never clobbered.
@@ -796,7 +803,7 @@ fn validate_name(name: &str) -> Result<()> {
 fn append_into(sec: &mut crate::document::SupportSection, records: &[SupportRecord]) -> Result<()> {
     let mut off = sec
         .orig_smesh_off
-        .checked_add(sec.smesh.len() as u32)
+        .checked_add(u32_of(sec.smesh.len())?)
         .ok_or(ChituboxError::ArithmeticOverflow {
             context: "append offset",
         })?;
@@ -818,7 +825,7 @@ fn append_into(sec: &mut crate::document::SupportSection, records: &[SupportReco
             });
         }
         let blob = f32_to_bytes(&r.mesh.xyz);
-        let mesh_len = blob.len() as u32;
+        let mesh_len = u32_of(blob.len())?;
         let mut raw = [0u8; SEG_RECORD_LEN];
         raw[S_MAGIC..S_MAGIC + 4].copy_from_slice(&SEG_MAGIC.to_le_bytes());
         raw[S_TYPE..S_TYPE + 4].copy_from_slice(&r.segment_type.0.to_le_bytes());

@@ -779,6 +779,11 @@ fn named_authority_paths_exist_without_runtime_ledger_parsing() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn scalar_domains_reject_invalid_values_and_preserve_signed_zero() {
     assert!(PositiveFinite::new(1.0).is_ok());
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
@@ -870,6 +875,11 @@ fn coupled_structures_validate_domains_accessors_and_strict_wire_shapes() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn hollow_structures_validate_every_condition_and_strict_wire_shape() {
     let directions = DrainDirections::new([
         DrainDirection::new(0.0, 0.0, -1.0).unwrap(),
@@ -917,6 +927,11 @@ fn hollow_structures_validate_every_condition_and_strict_wire_shape() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn performance_types_are_disabled_strict_and_reject_invalid_enabled_values() {
     assert!(BeamWidth::new(0).is_err());
     assert!(AnchorCandidateCap::new(0).is_err());
@@ -981,6 +996,11 @@ fn performance_types_are_disabled_strict_and_reject_invalid_enabled_values() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn named_accessors_preserve_lift_contact_bridge_and_search_distinctions() {
     let constants = component();
     assert_eq!(constants.lift_mm().diagnostic().get(), 5.0);

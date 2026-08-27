@@ -367,6 +367,13 @@ pub(crate) fn freeze_production_seat_zones(
 ///
 /// Returns the number of members re-frozen, so a caller can disclose it and a
 /// test can prove the pass actually ran.
+#[allow(
+    clippy::float_cmp,
+    reason = "a skip-if-unchanged test against the values the record was cut \
+              from.  Unchanged inputs re-derive bit-identically, so a false \
+              SKIP cannot happen; the only error this equality can make is a \
+              redundant re-cut, which is the safe direction"
+)]
 pub(crate) fn refreeze_resized_seat_zones<'forest, I>(
     surface: &NativeSurface,
     topology: &FaceTopology,
@@ -902,6 +909,11 @@ mod tests {
     /// Quad `(segment, strip)` owns faces `2*(segment*10 + strip)` and `+1`, but
     /// no test below depends on that arithmetic: faces are identified by where
     /// they are in space, which is what the geometry argument is actually about.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn extruded_parts(section: &[[f64; 2]]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let strips = 10_u32;
         let mut vertices = Vec::new();
@@ -950,6 +962,11 @@ mod tests {
 
     /// The face whose centroid is nearest `point` — how every face in these
     /// tests is named, so no assertion depends on triangulation order.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn face_nearest(centroids: &[[f64; 3]], point: [f64; 3]) -> u32 {
         let mut best = (f64::INFINITY, 0_u32);
         for (index, centroid) in centroids.iter().enumerate() {

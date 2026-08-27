@@ -685,6 +685,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_member_tip_brace_joint_root_and_raft_vectors_preserve_python_order() {
         let plan = lower_fixture(100, 100 * size_of::<SupportPrimitive>());
         let p = &plan.primitives;

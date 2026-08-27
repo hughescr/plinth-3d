@@ -218,6 +218,13 @@ impl NativeSurface {
         candidates
     }
 
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn visit_z_candidates(
         &self,
         z: f64,

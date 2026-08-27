@@ -87,8 +87,19 @@ const SIDECAR_SCHEMA: &str = "plinth.coverage-refusal.v2";
 /// existing cap. The value is this change's own, not owner-derived: bounded
 /// generously enough that essentially every corpus mini (a "150k-face mini"
 /// is the largest cited in the ledger) still renders full-fidelity per
-/// island at typical island sizes, while a pathological island selection
-/// cannot blow the sidecar past a few megabytes.
+/// island at typical island sizes.
+///
+/// **What it actually bounds, stated correctly: the per-island SVG files,
+/// not the sidecar.** The refusal sidecar (`<target-stem>.coverage.json`)
+/// carries only each island's SVG *filename* ([`sidecar_path`] is the
+/// pattern), so it stays kilobytes regardless of this cap. `render_island_svg`
+/// draws up to three panels, each iterating up to this many `<polygon>`
+/// elements at roughly 90 bytes apiece, so one at-the-cap island SVG is
+/// roughly 3 x 20,000 x 90 B =~ 5 MB, and a refusal with
+/// [`COVERAGE_RENDER_MAX_ISLANDS`] such islands can write on the order of
+/// several tens of megabytes of *SVGs* -- an order of magnitude past "a few
+/// megabytes", which is what an earlier version of this note said and named
+/// the wrong file for.
 pub const COVERAGE_RENDER_MAX_FACES: usize = 20_000;
 
 /// How many of the worst islands get a render each. Bounds total evidence
@@ -501,7 +512,9 @@ fn write_sidecar(path: &Path, inputs: SidecarWrite<'_>) -> Result<(), String> {
         // Embedded verbatim via `serde_json::to_value`: no re-derivation, no
         // second format, and it deserializes back into the original typed
         // report/closure exactly (both are `Serialize + Deserialize`).
-        report: inputs.report.and_then(|report| serde_json::to_value(report).ok()),
+        report: inputs
+            .report
+            .and_then(|report| serde_json::to_value(report).ok()),
         closure: inputs
             .closure
             .and_then(|closure| serde_json::to_value(closure).ok()),
@@ -684,6 +697,13 @@ fn fmt3(value: f64) -> String {
 /// vertex to `(screen_x, screen_y, depth)`) into one `<g>` of painter's-order
 /// triangles, plus the panel's own viewBox transform.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn render_panel(
     out: &mut String,
     title: &str,
@@ -1308,7 +1328,10 @@ mod tests {
         let report = two_island_report();
         let islands = islands_from_gate_report(&report);
         assert_eq!(
-            islands.iter().map(|island| island.island_id).collect::<Vec<_>>(),
+            islands
+                .iter()
+                .map(|island| island.island_id)
+                .collect::<Vec<_>>(),
             vec![12, 7]
         );
         assert!((islands[0].uncovered_area_mm2 - 3.418).abs() < 1e-9);
@@ -1326,9 +1349,15 @@ mod tests {
         // this test is about.
         let first = islands_from_gate_report(&report);
         let second = islands_from_gate_report(&report);
-        assert_eq!(first, second, "two builds of the same fixture must match byte-for-byte");
         assert_eq!(
-            first.iter().map(|island| island.island_id).collect::<Vec<_>>(),
+            first, second,
+            "two builds of the same fixture must match byte-for-byte"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|island| island.island_id)
+                .collect::<Vec<_>>(),
             vec![3, 9]
         );
     }
@@ -1384,7 +1413,10 @@ mod tests {
         };
         let islands = islands_from_closure(&refusal);
         assert_eq!(
-            islands.iter().map(|island| island.island_id).collect::<Vec<_>>(),
+            islands
+                .iter()
+                .map(|island| island.island_id)
+                .collect::<Vec<_>>(),
             vec![2, 5]
         );
         let merged = &islands[1];
@@ -1616,9 +1648,20 @@ mod tests {
         };
         let first = render_island_svg(&mesh, &island, false);
         let second = render_island_svg(&mesh, &island, false);
-        assert_eq!(first, second, "two renders of the same fixture must be byte-identical");
-        assert_eq!(first.matches("class=\"uncovered\"").count(), 3, "one highlighted triangle per panel");
-        assert_eq!(first.matches("class=\"neutral\"").count(), 3, "one neutral triangle per panel");
+        assert_eq!(
+            first, second,
+            "two renders of the same fixture must be byte-identical"
+        );
+        assert_eq!(
+            first.matches("class=\"uncovered\"").count(),
+            3,
+            "one highlighted triangle per panel"
+        );
+        assert_eq!(
+            first.matches("class=\"neutral\"").count(),
+            3,
+            "one neutral triangle per panel"
+        );
         assert!(first.contains("island 1"));
         assert!(first.contains("worst gap 2.250 mm"));
     }
@@ -1765,9 +1808,16 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let target = dir.join("fixture.chitubox");
         let outcome = render_worst_islands(&mesh, std::slice::from_ref(&island), &target);
-        assert_eq!(outcome.paths.len(), 1, "the render is still written, degraded rather than dropped");
+        assert_eq!(
+            outcome.paths.len(),
+            1,
+            "the render is still written, degraded rather than dropped"
+        );
         assert!(
-            outcome.skipped.as_deref().is_some_and(|note| note.contains("COVERAGE_RENDER_MAX_FACES")),
+            outcome
+                .skipped
+                .as_deref()
+                .is_some_and(|note| note.contains("COVERAGE_RENDER_MAX_FACES")),
             "{:?}",
             outcome.skipped
         );
@@ -1823,9 +1873,16 @@ mod tests {
         let model = ModelId::new("fixture");
         let evidence = persist_gate_refusal(&model, &target, &mesh, None, None, &report);
 
-        assert!(evidence.write_error.is_some(), "the write failure must be named");
+        assert!(
+            evidence.write_error.is_some(),
+            "the write failure must be named"
+        );
         assert_eq!(
-            evidence.islands.iter().map(|island| island.island_id).collect::<Vec<_>>(),
+            evidence
+                .islands
+                .iter()
+                .map(|island| island.island_id)
+                .collect::<Vec<_>>(),
             vec![12, 7],
             "a write failure must not corrupt the ranked evidence still returned"
         );

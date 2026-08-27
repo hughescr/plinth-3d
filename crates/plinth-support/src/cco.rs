@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::NativeSurface;
-use plinth_core::{m0_constants, Finite, PositiveFinite};
+use plinth_core::{m0_constants, Finite, PositiveFinite, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use plinth_mesh::FaceTopology;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -34,10 +34,16 @@ use crate::{
     BuildFrame,
 };
 
-const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
 const REWIRE_DEGENERATE_MM: f64 = 1e-4;
 const KDTREE_REBUILD_EVERY: usize = 25;
+/// `generate_descriptors` prunes a plate-spiral trunk candidate whose implied
+/// top sits within this margin of the plate: a candidate that shallow adds no
+/// distinct anchor position over the `Descriptor::Plate` already pushed at
+/// the stub's own `(x, y)`. Search-pruning only (physics-first constants
+/// doctrine) — it decides which of the `trunk_radii_mm` x `trunk_directions`
+/// candidates are even generated, never whether a generated one is accepted.
+const TRUNK_SPIRAL_MIN_RISE_ABOVE_PLATE_MM: f64 = 1.0;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,6 +54,19 @@ pub(crate) struct XiaAngles {
 }
 
 /// Frozen Xia alpha=1/2 closed form from `cco.py::xia_angles`.
+///
+/// The exponent is `.sqrt()` by DERIVATION, not by configuration:
+/// `acos(sqrt(m_i / m_total))` is the closed form Xia's law collapses to at
+/// alpha = 1/2, and it is not the general law with a substitutable exponent.
+/// Raising the ratio to some other alpha here would produce a number that
+/// looks like a generalisation and is not one, so `CCO_XIA_ALPHA` is
+/// deliberately NOT read: a different alpha needs a different derivation, not
+/// a different constant. The registry entry says as much itself ("legacy
+/// topology-search heuristic whose conditional equations do not derive
+/// alpha"). A hard precondition on that constant used to stand in
+/// `Config::current`; it was removed on 2026-08-26 because it decided whether
+/// the whole CCO stage could run on the value of a constant no production path
+/// reads, which the physics-first constants doctrine forbids.
 #[cfg(test)]
 pub(crate) fn xia_angles(m1: f64, m2: f64) -> XiaAngles {
     let total = m1 + m2;
@@ -1346,15 +1365,17 @@ struct Config {
 }
 
 impl Config {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn current() -> Result<Self, CcoError> {
         let constants = m0_constants().map_err(|error| CcoError::Constants(error.to_string()))?;
         let p = constants.placeholders();
         let slide = p.cco_split_slide_policy();
-        if p.cco_xia_alpha().diagnostic().get() != 0.5 {
-            return Err(CcoError::Constants(
-                "live CCO port requires registered Xia alpha=0.5".to_owned(),
-            ));
-        }
         Ok(Self {
             contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
             standoff_mm: p.standoff_mm().diagnostic().get(),
@@ -1778,6 +1799,12 @@ impl CcoController {
     /// successful return no further initial terminal can be advanced, so a
     /// transcript cannot be replayed against a controller with hidden pending
     /// work.
+    #[allow(
+        clippy::suspicious_operation_groupings,
+        reason = "`build.load_digest()` and `loads.digest()` are the two sides \
+                  of the same comparison spelled by their own types; \
+                  `FinalizedContactLoads` exposes `digest`, not `load_digest`"
+    )]
     pub(crate) fn finalize_transcript(
         &mut self,
         build: &InitialContactBuild,
@@ -1895,7 +1922,7 @@ impl CcoController {
             Vec::new(),
             None,
             0,
-            Some(hosts),
+            hosts,
             process_resolution_mm,
             None,
         )?;
@@ -1986,7 +2013,7 @@ impl CcoController {
             anchor_seat_refusals,
             Some(&context),
             anchor_ray_batches,
-            Some(hosts),
+            hosts,
             context.route.process_resolution_mm,
             // **Stage B — the read side of the key.** Not "the same five
             // digests" assembled by hand: the SAME CALL that seals this
@@ -2145,11 +2172,10 @@ impl CcoController {
             &binding.excluded_hosts,
         );
         let descriptors = generate_descriptors(
-            &binding.snapshot,
             &binding.request,
             &config,
             &seats,
-            Some(hosts),
+            hosts,
             false,
             anchor_route.process_resolution_mm,
             anchor_route.geometry.surface(),
@@ -3019,13 +3045,8 @@ fn finalize_transcript_row(
 }
 
 fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
+    let mut word = |value: u64| fnv.word(value);
     word(rows.len() as u64);
     for row in rows {
         word(row.cadence_index as u64);
@@ -3114,17 +3135,12 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             }
         }
     }
-    hash
+    fnv.finish()
 }
 
 fn finalized_transcript_digest(transcript: &FinalizedCcoTranscript) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
+    let mut word = |value: u64| fnv.word(value);
     word(transcript.plan_digest);
     word(transcript.finalized_load_digest);
     word(transcript.load_partition_digest);
@@ -3135,29 +3151,23 @@ fn finalized_transcript_digest(transcript: &FinalizedCcoTranscript) -> u64 {
     word(transcript.final_controller_digest);
     word(transcript.ordered_disposition_digest);
     word(transcript_rows_digest(&transcript.rows));
-    hash
+    fnv.finish()
 }
 
 fn finalized_load_partition_digest(plan: &SpecializedContactPlan) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut word = |value: u64| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut fnv = FnvWords::new();
     let rows = plan.load_partition().rows();
-    word(rows.len() as u64);
+    fnv.word(rows.len() as u64);
     for row in rows {
-        word(u64::from(row.face_id));
-        word(row.contact_id);
-        word(match row.owner {
+        fnv.word(u64::from(row.face_id));
+        fnv.word(row.contact_id);
+        fnv.word(match row.owner {
             crate::perception::LoadOwner::Specialized(owner) => u64::from(owner) << 1,
             crate::perception::LoadOwner::GenericIsland(owner) => (u64::from(owner) << 1) | 1,
         });
-        word(row.carried_area_mm2.to_bits());
+        fnv.word(row.carried_area_mm2.to_bits());
     }
-    hash
+    fnv.finish()
 }
 
 fn candidate_family_digest(family: CandidateFamily) -> u64 {
@@ -3672,7 +3682,7 @@ fn grow_terminal_inner(
     anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
     anchor_ray_batches: usize,
-    cached_hosts: Option<Vec<MemberKey>>,
+    cached_hosts: Vec<MemberKey>,
     process_resolution_mm: f64,
     steering: Option<PassSteering<'_>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
@@ -3683,7 +3693,6 @@ fn grow_terminal_inner(
     // seat derivation and the clearance screen so the two cannot disagree.
     let contact_policy = seat_contact_policy(process_resolution_mm)?;
     let descriptors = generate_descriptors(
-        forest,
         request,
         &config,
         &seats,
@@ -4052,17 +4061,23 @@ fn evaluate_descriptors(
     descriptors: &[Descriptor],
     config: &Config,
 ) -> Result<Vec<Option<EvaluatedCandidate>>, CcoError> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(geom_kernel::current_threads())
-        .build()
+    // The kernel's cached pool for this `PLINTH_THREADS` width, NOT a private
+    // pool built here. This function is called once per rewire candidate batch,
+    // and the rewire optimiser runs once per repair trial, so a private pool was
+    // being spawned and torn down hundreds of times per model. Measured on
+    // `a4_transactional_controller`: 1,294 of 9,491 test-thread samples (13.6%)
+    // were `pthread_create` and pool teardown. The width authority, the explicit
+    // (non-global) pool and the index-parallel map-collect below are all
+    // unchanged, so the collected order — and therefore the result — is too.
+    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> =
+        geom_kernel::run_in_pool(|| {
+            descriptors
+                .par_iter()
+                .enumerate()
+                .map(|(index, descriptor)| evaluate(snapshot, request, descriptor, index, config))
+                .collect()
+        })
         .map_err(|error| CcoError::Constants(error.to_string()))?;
-    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> = pool.install(|| {
-        descriptors
-            .par_iter()
-            .enumerate()
-            .map(|(index, descriptor)| evaluate(snapshot, request, descriptor, index, config))
-            .collect()
-    });
     evaluated.into_iter().collect()
 }
 
@@ -4153,15 +4168,15 @@ fn clearance_survival(
     }
     // **#36 step 5 — the PR-2 mask survives here for PR-3 ONLY.**
     //
-    // These two vectors no longer reach the kernel's distance path. They are
-    // kept because `emergence_ok` needs the claimed mask, and PR-3 is not
-    // optional under the honest rule but MORE necessary (design §5, reader 1):
-    // at grazing incidence the whole nearby surface falls inside the band and
-    // is connected, so `Z` swallows everything, nothing is left to grade, and
-    // the kernel returns `INFINITY` — a pass by erasure. PR-3 is the gate that
-    // refuses that member, and the mask is its yardstick.
-    let mut mask_inset0 = vec![0.0; p0.len()];
-    let mut mask_inset1 = vec![0.0; p0.len()];
+    // The per-row mask no longer reaches the kernel's distance path (the
+    // batch below passes `zero`/`zero` insets). It is kept as
+    // `claimed_mask_mm` because `emergence_ok` needs the claimed mask, and
+    // PR-3 is not optional under the honest rule but MORE necessary (design
+    // §5, reader 1): at grazing incidence the whole nearby surface falls
+    // inside the band and is connected, so `Z` swallows everything, nothing
+    // is left to grade, and the kernel returns `INFINITY` — a pass by
+    // erasure. PR-3 is the gate that refuses that member, and the mask is
+    // its yardstick.
     // PR-3 bookkeeping, row-aligned: the total mask a row's contact ends claim,
     // and whether any of them had no finite mask at all.
     let mut claimed_mask_mm = vec![0.0_f64; p0.len()];
@@ -4196,10 +4211,6 @@ fn clearance_survival(
             ) {
                 Some(mask) => {
                     claimed_mask_mm[*row] += mask;
-                    match contact.end {
-                        ContactEnd::Terminalward => mask_inset0[*row] = mask,
-                        ContactEnd::Rootward => mask_inset1[*row] = mask,
-                    }
                 }
                 // A degenerate incidence masks NOTHING here, so the row is
                 // fully distance-checked rather than silently exempted — and
@@ -4494,11 +4505,10 @@ impl RewireCandidateBatch {
               seat-zone freeze and are the same validated pair the caller already holds"
 )]
 fn generate_descriptors(
-    forest: &Forest,
     request: &TerminalCcoRequest,
     config: &Config,
     anchor_seats: &[QualifiedAnchorSeat],
-    cached_hosts: Option<Vec<MemberKey>>,
+    cached_hosts: Vec<MemberKey>,
     include_plate_spiral: bool,
     process_resolution_mm: f64,
     surface: &NativeSurface,
@@ -4519,7 +4529,7 @@ fn generate_descriptors(
                     std::f64::consts::TAU * direction as f64 / config.trunk_directions as f64;
                 let xy = [se[0] + radius * angle.cos(), se[1] + radius * angle.sin()];
                 let top_z = se[2] - radius / config.branch_angle_deg.to_radians().tan().max(1e-9);
-                if top_z > request.plate_z_mm().get() + 1.0 {
+                if top_z > request.plate_z_mm().get() + TRUNK_SPIRAL_MIN_RISE_ABOVE_PLATE_MM {
                     out.push(Descriptor::Plate { xy, top_z });
                 }
             }
@@ -4603,9 +4613,11 @@ fn generate_descriptors(
             *seat_zone = record;
         }
     }
-    let hosts = cached_hosts
-        .unwrap_or_else(|| HostCache::default().nearest(se, config.bifurcation_hosts, forest));
-    out.extend(hosts.into_iter().map(|host| Descriptor::Bifurcate { host }));
+    out.extend(
+        cached_hosts
+            .into_iter()
+            .map(|host| Descriptor::Bifurcate { host }),
+    );
     Ok(out)
 }
 
@@ -5286,6 +5298,17 @@ fn apply_bifurcation(
     Ok(true)
 }
 
+/// The plate-descent topology predicate: does `member`'s rootward end land
+/// exactly on the plate (the two-member Xia diagonal-only shape), or does it
+/// stop short with a COLUMN still below it? `size_plate_candidate` and
+/// `candidate_price` must agree on this to size and price the same shape, so
+/// there is exactly one statement of it.
+fn plate_descent_reaches_plate(forest: &Forest, member: MemberKey, plate_z_mm: Finite) -> bool {
+    forest
+        .member(member)
+        .is_some_and(|member| member.p1_mm()[2] == plate_z_mm)
+}
+
 fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Result<(), CcoError> {
     let first = forest.parent_of(request.stub).ok_or_else(|| {
         CcoError::InvalidGeometry(format!(
@@ -5294,9 +5317,7 @@ fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Re
             request.stub
         ))
     })?;
-    let first_reaches_plate = forest
-        .member(first)
-        .is_some_and(|member| member.p1_mm()[2] == request.plate_z_mm());
+    let first_reaches_plate = plate_descent_reaches_plate(forest, first, request.plate_z_mm());
     if first_reaches_plate {
         let radius = required_rootward_without_tree_fanin(forest, first)?;
         forest.set_radii(
@@ -5547,6 +5568,14 @@ fn changed_forest_volume_delta(before: &Forest, after: &Forest) -> Result<f64, C
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn candidate_price(
     descriptor: &Descriptor,
     candidate: &Forest,
@@ -5577,9 +5606,7 @@ fn candidate_price(
             request.stub
         ))
     })?;
-    let (diagonal, column) = if candidate
-        .member(first)
-        .is_some_and(|member| member.p1_mm()[2].get() == request.plate_z_mm().get())
+    let (diagonal, column) = if plate_descent_reaches_plate(candidate, first, request.plate_z_mm())
     {
         (None, first)
     } else {
@@ -5615,7 +5642,7 @@ fn candidate_price(
         request.carried_mm2(),
     )?;
     let column_price = std::f64::consts::PI * priced_radius.get().powi(2) * column_length
-        / MILLIMETRES_PER_MILLILITRE;
+        / CUBIC_MILLIMETRES_PER_MILLILITRE;
     let rung_count = (column_length / brace_span).floor() as usize;
     let brace_price = if rung_count == 0 {
         0.0
@@ -5636,7 +5663,7 @@ fn candidate_price(
         )?;
         let rod_radius = config.brace_radius_mm.max(raw.get() * 0.5_f64.powf(0.25));
         rung_count as f64 * 2.0 * std::f64::consts::PI * rod_radius.powi(2) * rod_length
-            / MILLIMETRES_PER_MILLILITRE
+            / CUBIC_MILLIMETRES_PER_MILLILITRE
     };
     Ok(diagonal_delta + column_price + brace_price)
 }
@@ -5669,6 +5696,11 @@ fn o10_uniform_radius_for_span(
         .get())
 }
 
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`r0 * r0 + r0 * r1 + r1 * r1` is the exact conical-frustum \
+              volume factor; the mixed term is meant to be `r0 * r1`"
+)]
 fn member_volume(member: &Member) -> Result<f64, CcoError> {
     let delta = sub(
         member.p1_mm().map(Finite::get),
@@ -5680,7 +5712,7 @@ fn member_volume(member: &Member) -> Result<f64, CcoError> {
     let r0 = member.terminal_radius_mm().get().get();
     let r1 = member.rootward_radius_mm().get().get();
     let volume = std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
-        / MILLIMETRES_PER_MILLILITRE;
+        / CUBIC_MILLIMETRES_PER_MILLILITRE;
     volume.is_finite().then_some(volume).ok_or_else(|| {
         CcoError::InvalidGeometry(format!(
             "member_volume: computed volume is not finite (volume_ml = {volume}) for a \
@@ -7342,6 +7374,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_xia_vectors_sum_to_right_angle() {
         let equal = xia_angles(1.0, 1.0);
         assert!((equal.child_one_turn_deg - 45.0).abs() < 1e-12);
@@ -7355,6 +7392,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn brace_price_reads_the_single_o10_placeholder_authority() {
         let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
         let authority = compatibility.brace_free_span_mm();
@@ -7363,6 +7405,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn bounded_weiszfeld_matches_frozen_numeric_vector() {
         let result = weighted_fermat_point(
             &[
@@ -7692,6 +7739,11 @@ mod tests {
     /// digest walks: all three disposition variants and all three
     /// `NoWinnerEvidence` variants, with non-empty seat-refusal lists (the
     /// Θ(N·R) term the accumulator exists to collapse).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn scripted_disposition(index: usize, entry: &TerminalLedgerEntry) -> TerminalCadenceRecord {
         let seed = index as u64 + 1;
         let refusals = |count: usize| -> Vec<AnchorSeatRefusal> {
@@ -9275,6 +9327,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn rewire_batch_is_indexed_stably_uses_one_clearance_batch_and_never_commits() {
         let (forest, keys) = rewire_fixture();
         let before = forest.digest();
@@ -10249,6 +10306,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn candidate_source_ledger_vectors() {
         let (mut forest, request, _) = growth_fixture();
         let finite = |value| Finite::new(value).unwrap();
@@ -10536,6 +10598,12 @@ mod tests {
     /// cannot do this job: its top face is two 40 mm triangles, so every band
     /// that reaches the seat at all reaches both of them and the zone never
     /// moves with the radius.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const HALF_MM: f64 = 4.0;
         const DEPTH_MM: f64 = 10.0;
@@ -10816,7 +10884,7 @@ mod tests {
             Vec::new(),
             None,
             0,
-            Some(vec![host]),
+            vec![host],
             0.05,
             None,
         )

@@ -1390,6 +1390,29 @@ impl<T> Placeholder<T> {
     }
 }
 /// An explicitly unresolved calibration range.
+///
+/// **NO REGISTERED CONSTANT CURRENTLY USES THIS, AND THAT IS BY OWNER RULING,
+/// NOT BY DECAY.** It is scaffolding, not vestige, and the distinction was
+/// checked before this note was written rather than assumed. The ruling is
+/// recorded in `docs/engineering-journal/03-physics-and-constants.md`
+/// (the paragraph closing the B1–B5 table): "`Pending<T>` remains unchanged:
+/// it requires two concrete executable branches and a real `PlateId`. Do not
+/// generalize `ResolutionTarget` now; a corpus-resolved Pending design is
+/// deferred until an actual candidate exists."
+///
+/// So the empty occupancy is the ruling working as intended: the type demands
+/// two genuinely executable branches and a real calibration plate that will
+/// decide between them, and no constant in the registry can honestly supply
+/// those yet. The bar is deliberately high — inventing a `PlateId` or a
+/// null/zero sentinel to give this type an occupant is expressly forbidden by
+/// the same paragraph. Registry integration is complete and exercised
+/// (`RegistryProvenanceClass::Pending`, `RegistryProvenanceView::Pending`,
+/// `from_pending`), and `constants_registry.rs` / `core_contracts.rs` hold it
+/// to its contract, so it is ready for its first real occupant.
+///
+/// Do not delete this as dead code. A dead-code census will keep flagging it,
+/// correctly on the mechanical evidence and wrongly on the intent; this note
+/// is here so the next census reads the ruling before acting on the count.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pending<T> {
     pub conservative: T,

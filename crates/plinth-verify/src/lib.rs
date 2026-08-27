@@ -501,6 +501,17 @@ impl FormatReport {
 /// structural interval audit), then requires byte-for-byte equality with the
 /// fresh disk bytes. It intentionally does not reopen any cached producer
 /// state or modify the artifact.
+///
+/// **CURRENTLY UNREACHED IN PRODUCTION.** `plinth-pipeline`'s `prepare` route
+/// never calls this function; the only format check that actually runs today
+/// is `plinth-emit`'s own fresh-open disk audit. The only callers in this
+/// workspace are this crate's own tests and the
+/// `plinth-pipeline/examples/shared/first_artifact_chain.rs` example. This is
+/// not dead code to delete: it is the structural format gate the pre-write
+/// gate porting work (see the remediation plan's Phase 7, "schedule the
+/// remaining nine safety gates") will want to wire in as a real, judged-from-
+/// recorded-evidence check. Keep it, and give it a production caller when that
+/// work lands.
 #[must_use]
 pub fn verify_artifact(artifact: ArtifactId, path: &Path) -> FormatReport {
     let disk_bytes = match std::fs::read(path) {
@@ -801,6 +812,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exact_roundtrip_drift_is_a_named_structural_failure() {
         let report = report_for_roundtrip(ArtifactId::from("test-artifact"), &[1, 2], vec![1, 3]);
         assert_eq!(
@@ -817,6 +833,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn coverage_defects_are_one_finite_area_sum_per_island_and_keep_gap_as_evidence() {
         let patches = vec![
             patch(2, 1.5, false, true),
@@ -836,6 +857,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn immutable_projection_keeps_same_island_aggregation_order_and_gap_evidence() {
         let patches = vec![
             patch(2, 1.5, false, true),

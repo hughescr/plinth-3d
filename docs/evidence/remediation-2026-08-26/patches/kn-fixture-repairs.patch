@@ -1,0 +1,74 @@
+--- /dev/fd/11	2026-08-27 02:28:06.018440546 -0700
++++ /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/verify-salvage/rust/geom_kernel/src/parity.rs	2026-08-27 02:24:08.111595259 -0700
+@@ -674,8 +674,8 @@
+ 
+     #[test]
+     fn grid_dimension_rejects_saturating_quotient_without_debug_release_divergence() {
+-        let vertices = [[0.0, 0.0, 0.0]];
+-        let faces = [[0, 0, 0]];
++        let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
++        let faces = [[0, 1, 2]];
+         let bounds = [[0.0; 3], [0.0; 3]];
+ 
+         let direct = checked_grid_layout(bounds, [0, 1], f64::MIN_POSITIVE);
+@@ -715,9 +715,10 @@
+         let overflowing_extent = 4_000_000_000.0;
+         let vertices = [
+             [0.0, 0.0, 0.0],
+-            [overflowing_extent, overflowing_extent, overflowing_extent],
++            [overflowing_extent, overflowing_extent, 0.0],
++            [0.0, 0.0, overflowing_extent],
+         ];
+-        let faces = [[0, 0, 0], [1, 1, 1]];
++        let faces = [[0, 1, 2]];
+         let bounds = [[0.0; 3], [overflowing_extent; 3]];
+ 
+         assert!(checked_grid_layout(bounds, [0, 1], 1.0)
+--- /dev/fd/12	2026-08-27 02:28:06.048513777 -0700
++++ /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/verify-salvage/rust/geom_kernel/tests/native_api.rs	2026-08-27 02:27:42.967984118 -0700
+@@ -188,7 +188,7 @@
+     let faces = [
+         [0, 1, 2],  // positive owner: shared edge is emitted
+         [1, 0, 3],  // negative owner: shared edge is suppressed
+-        [0, 1, 4],  // fully coplanar patch
++        [0, 1, 5],  // fully coplanar patch
+         [1, 5, 4],  // fully coplanar patch
+         [0, 6, 7],  // vertex crossing
+         [0, 2, 6],  // vertex tangent, suppressed
+@@ -2144,17 +2144,23 @@
+ }
+ 
+ #[test]
+-fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
+-    let surface = NativeSurface::from_indexed(
+-        &[[0.0, 0.0, 0.0]],
+-        &[[0, 0, 0]],
+-        NativeSurfaceConfig {
+-            grid_pitch_mm: 2.0,
+-            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
+-        },
+-    )
+-    .unwrap();
+-    assert_eq!(surface.nfaces(), 1);
+-    assert_eq!(surface.geometry().areas(), &[0.0]);
+-    assert_eq!(surface.geometry().normals(), &[[0.0, 0.0, 0.0]]);
++fn indexed_repeated_index_face_is_refused_rather_than_given_a_zero_normal() {
++    assert_eq!(
++        NativeSurface::from_indexed(
++            &[[0.0, 0.0, 0.0]],
++            &[[0, 0, 0]],
++            NativeSurfaceConfig {
++                grid_pitch_mm: 2.0,
++                max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
++            },
++        )
++        .err(),
++        Some(SurfaceBuildError::DegenerateFace {
++            face: 0,
++            cause: geom_kernel::DegenerateFaceCause::RepeatedVertexIndex {
++                corners: (0, 1),
++                index: 0
++            },
++        })
++    );
+ }

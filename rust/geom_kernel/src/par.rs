@@ -38,19 +38,42 @@ fn all_cores() -> usize {
         .max(1)
 }
 
-fn pool_for(k: usize) -> Arc<ThreadPool> {
+/// A pool of the requested width could not be constructed.
+///
+/// Carries Rayon's own build-failure text rather than a bare unit so a caller
+/// that surfaces this in its own error type keeps the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolBuildError(String);
+
+impl std::fmt::Display for PoolBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PoolBuildError {}
+
+fn try_pool_for(k: usize) -> Result<Arc<ThreadPool>, PoolBuildError> {
     let mut guard = pools().lock().unwrap();
     if let Some((_, p)) = guard.iter().find(|(kk, _)| *kk == k) {
-        return p.clone();
+        return Ok(p.clone());
     }
     let p = Arc::new(
         rayon::ThreadPoolBuilder::new()
             .num_threads(k)
             .build()
-            .expect("failed to build rayon pool"),
+            .map_err(|error| PoolBuildError(error.to_string()))?,
     );
     guard.push((k, p.clone()));
-    p
+    // Released before returning: the cache is now shared by every caller that
+    // used to build a private pool, so holding it past the last use would
+    // serialise them on a lock they no longer need.
+    drop(guard);
+    Ok(p)
+}
+
+fn pool_for(k: usize) -> Arc<ThreadPool> {
+    try_pool_for(k).expect("failed to build rayon pool")
 }
 
 /// Number of workers in the explicit pool selected for the next batch.
@@ -70,4 +93,25 @@ where
     let k = current_threads();
     let pool = pool_for(k);
     pool.install(f)
+}
+
+/// [`run`], but surfacing a pool-construction failure instead of panicking.
+///
+/// This exists for callers OUTSIDE the kernel that were each building a private
+/// `ThreadPoolBuilder` per call at the same `PLINTH_THREADS` width this module
+/// already caches. Measured on `a4_transactional_controller`: constructing and
+/// dropping those private pools was 1,294 of 9,491 samples (13.6%) of the test
+/// thread's wall time, all of it `pthread_create`/teardown rather than work.
+/// Sharing the cache removes that without changing a result: the sanctioned
+/// pattern is still index-parallel map-collect, the width still re-reads
+/// `PLINTH_THREADS` on every call, and the pool is still explicit rather than
+/// rayon's global one (Amendment A4).
+pub fn try_run<F, R>(f: F) -> Result<R, PoolBuildError>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let k = current_threads();
+    let pool = try_pool_for(k)?;
+    Ok(pool.install(f))
 }

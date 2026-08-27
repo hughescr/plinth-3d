@@ -336,6 +336,11 @@ fn fingerprint_canonicalizes_signed_zero_but_welding_remains_an_explicit_choice(
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn triage_settings_are_read_from_the_atomic_typed_m0_publication() {
     let settings = triage_settings().expect("M0 constants");
     let placeholders = plinth_core::m0_constants()

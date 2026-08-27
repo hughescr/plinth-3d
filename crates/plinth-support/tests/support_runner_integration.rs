@@ -4,8 +4,8 @@ use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_toed_slab, DelicacyBuildConfig, DelicacySettings,
-    Mesh,
+    evaluate_delicacy, make_overhang_table, make_toed_slab, make_uncovered_rim_table,
+    DelicacyBuildConfig, DelicacySettings, Mesh,
 };
 use plinth_orient::{
     run as run_orientation, BaselineSelection, OrientRequest, OrientationHistory,
@@ -18,30 +18,6 @@ use plinth_support::{
 
 type FrozenIslandEvidence = (u32, u32, u32, &'static [u32]);
 type FrozenPatchEvidence = (u32, u32, u32, &'static [u32], u64, bool, bool, u64);
-
-fn hollowed_overhang_table() -> HollowedModel {
-    let mesh = make_overhang_table().expect("procedural overhang table");
-    let budget =
-        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
-            .expect("ratified decimation budget");
-    let decimated = run_decimation(&mesh, budget)
-        .expect("decimate procedural overhang table")
-        .into_decimated_model()
-        .expect("print-scale procedural overhang table");
-    let oriented = run_orientation(
-        decimated,
-        &OrientRequest {
-            pinned: PinnedBaseline {
-                pipeline_report: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../corpus/baseline/make_overhang_table.pipeline.json"),
-            },
-        },
-    )
-    .expect("orient from checked-in overhang-table baseline");
-    let (mesh, orientation) = oriented.into_parts();
-    HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
-        .expect("solid decision handoff")
-}
 
 fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
     let budget =
@@ -329,6 +305,11 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// TWICE per gate for one set of facts. Gate cost is a real cost (task #44) and
 /// a duplicated expensive fixture is the wrong place to spend it.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
@@ -543,31 +524,39 @@ fn support_input<'a>(
         .input(layers, delicacy_by_face, &[])
 }
 
-/// **FU-56's happy path, demonstrated end to end: `make_overhang_table`
+/// **FU-56's happy path, demonstrated end to end: `make_uncovered_rim_table`
 /// CLOSES, and only because the controller appended repair contacts.**
 ///
-/// Re-pinned 2026-08-12 by the FU-56 review fixes, from a refusal
-/// (`AttemptsExhausted`, one island named unclosable) to a sealed authority,
-/// with this attribution rather than an edited expectation. What changed is
-/// nomination scoring, not the gate: candidates are now scored against the
-/// samples the measurement found UNCOVERED instead of against every sample on
-/// the blocking patch's faces. Face 51 is a large, MOSTLY COVERED face with a
-/// residual gap, so summing its covered samples' area into every candidate's
-/// score ranked rows beside the covered region above the row that closes the
-/// gap — and, because that score set never changes between attempts, the old
-/// controller walked a fixed ranking of eight useless rows and then declared
-/// the island unclosable. Scored against the uncovered rows only, the closing
-/// candidate ranks first and the island shuts.
+/// **The fixture was re-pinned on 2026-08-26, and not one assertion below
+/// moved with it.** This test read `make_overhang_table` until `3a6526f`
+/// converged the clearance mask and seated the model anchor, which let the
+/// model-seated anchor family route for the first time; the 30 mm table's
+/// baseline layout then covered every island, `coverage_repair_rounds()` fell
+/// to 0, and the panic this test printed named an EMPTY blocking list. That is
+/// a fixture that stopped posing the question, not a runner that stopped
+/// answering it, so the fixture was replaced rather than the expectation
+/// edited (OD-8). `make_uncovered_rim_table` is the same generator at
+/// 25 x 25 x 4 mm on 2 x 2 x 20 mm legs, and it measures 0.553 mm² uncovered
+/// on island 8 at attempt 0 with a 6.901 mm worst gap against the 6.0 mm
+/// registered radius — above the censor, so it BLOCKS — while one regular
+/// contact on that same route is retired `NoWinner` in the run's own §6
+/// removal ledger. The controller closes the hole with one committed contact
+/// on its second trial.
 ///
 /// **Nothing was loosened to get here.** The coverage radius is still the
 /// registered `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm, the
 /// patch-area floor is still `VOXEL_PITCH_MM²`, the uncovered-area tolerance
 /// is still zero, and closure is still achieved only by appending immutable
-/// repair-pool contacts. This is the emission FU-56 said the controller
-/// should be able to produce, on the first committed fixture to produce one.
+/// repair-pool contacts. Every assertion is on the SHAPE of a committed step —
+/// that attempt 0 measured a blocking patch, that the sealing step measures
+/// clean, that each commit strictly reduced uncensored uncovered area — so no
+/// number frozen to the retired fixture survives here to be re-pinned.
 #[test]
-fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
-    let hollowed = hollowed_overhang_table();
+fn public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts() {
+    let hollowed = hollowed_corpus_model(
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
+    );
     // FU-38 (2026-08-12): real delicacy, not the zero field -- see
     // `real_delicacy`'s doc comment for what production this now matches.
     let delicacy = real_delicacy(&hollowed);
@@ -579,7 +568,7 @@ fn public_runner_closes_overhang_table_only_after_appending_repair_contacts() {
         },
         support_input(&delicacy, &layers),
     )
-    .expect("make_overhang_table closes coverage from its own repair pool");
+    .expect("make_uncovered_rim_table closes coverage from its own repair pool");
 
     let steps = authority.repair_steps();
     let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
@@ -1525,8 +1514,8 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
                 );
             }
         }
-        Err(other) => panic!(
-            "a buried half must reach the coverage judgment, not a stage failure: {other:?}"
-        ),
+        Err(other) => {
+            panic!("a buried half must reach the coverage judgment, not a stage failure: {other:?}")
+        }
     }
 }

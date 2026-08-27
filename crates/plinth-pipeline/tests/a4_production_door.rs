@@ -31,7 +31,7 @@ mod chain;
 
 use std::path::PathBuf;
 
-use plinth_mesh::{make_overhang_table, make_toed_slab};
+use plinth_mesh::{make_toed_slab, make_uncovered_rim_table};
 
 /// A per-test scratch path that is removed on the way in and on the way out.
 struct Scratch(PathBuf);
@@ -69,10 +69,10 @@ impl Drop for Scratch {
 
 /// **The revert-proof, on a model that NEEDS repair.**
 ///
-/// `make_overhang_table` does not cover on its baseline layout: it closes only
-/// after the controller commits repair rows. Under the transactional loop that
-/// costs measurable trials and commits, and the §A.8 report carries them out to
-/// the run report. Cut the read in `seal_and_emit` and there is no report to
+/// `make_uncovered_rim_table` does not cover on its baseline layout: it closes
+/// only after the controller commits repair rows. Under the transactional loop
+/// that costs measurable trials and commits, and the §A.8 report carries them
+/// out to the run report. Cut the read in `seal_and_emit` and there is no report to
 /// carry.
 ///
 /// The assertions are on the SHAPE of what the loop spent, not on frozen
@@ -88,13 +88,13 @@ impl Drop for Scratch {
 ///   `commits > trials` would mean the accounting is invented.
 #[test]
 fn the_production_door_reports_what_the_one_winner_controller_spent() {
-    let scratch = Scratch::new("overhang-table");
+    let scratch = Scratch::new("uncovered-rim-table");
     let outcome = chain::run_procedural_model(
-        "make_overhang_table",
-        make_overhang_table().expect("procedural overhang table"),
+        "make_uncovered_rim_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
         scratch.path(),
     )
-    .expect("make_overhang_table emits through coverage repair");
+    .expect("make_uncovered_rim_table emits through coverage repair");
 
     let repair = outcome.repair_report.as_ref().expect(
         "SPEC-A4 §G.1 stage 4: the controller reports on every path, and `seal_and_emit` \
@@ -194,18 +194,22 @@ fn a_model_that_needs_no_repair_still_reports_that_it_spent_nothing() {
 /// three things §D.2 says it must be able to state: which row, what it was
 /// credited for, and what it closed.
 ///
-/// `make_overhang_table` is used because it COMMITS — the toed slab's honestly
-/// empty ledger is pinned in `prepare_folder.rs`, and an empty stream cannot
-/// prove that a populated one survives the trip.
+/// `make_uncovered_rim_table` is used because it COMMITS — the toed slab's
+/// honestly empty ledger is pinned in `prepare_folder.rs`, and an empty stream
+/// cannot prove that a populated one survives the trip.
+///
+/// **It replaced `make_overhang_table` here on 2026-08-26**, when that model
+/// stopped needing repair at `3a6526f` and left both tests in this file
+/// reading a ledger with nothing in it. The fixture changed; no assertion did.
 #[test]
 fn the_sealed_ledger_on_disk_names_the_row_that_closed_the_hole() {
-    let scratch = Scratch::new("overhang-table-ledger");
+    let scratch = Scratch::new("uncovered-rim-table-ledger");
     let outcome = chain::run_procedural_model(
-        "make_overhang_table",
-        make_overhang_table().expect("procedural overhang table"),
+        "make_uncovered_rim_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
         scratch.path(),
     )
-    .expect("make_overhang_table emits through coverage repair");
+    .expect("make_uncovered_rim_table emits through coverage repair");
 
     let ledger = outcome
         .repair_ledger
@@ -228,7 +232,7 @@ fn the_sealed_ledger_on_disk_names_the_row_that_closed_the_hole() {
         json["schema"], "plinth.coverage-repair.v1",
         "the ledger carries its own versioned schema tag"
     );
-    assert_eq!(json["model"], "make_overhang_table");
+    assert_eq!(json["model"], "make_uncovered_rim_table");
     assert_eq!(
         json["commits"], ledger.commits,
         "the report's count and the file's count are the same fact"

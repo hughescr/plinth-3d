@@ -19,8 +19,6 @@ use std::time::Duration;
 use crate::forest::{ContactEnd, MemberKind};
 use crate::runner::SupportVerificationSnapshot;
 
-/// Legal model-rung length band, quoted from `brace.rs` config for reporting.
-const RUNG_BAND_MM: (f64, f64) = (1.0, 5.0);
 /// The floored-cos model-rung inset: 0.3 + (0.5 + 0.6) / 0.5.
 const FLOORED_RUNG_INSET_MM: f64 = 2.5;
 
@@ -946,6 +944,19 @@ fn row(model: &str, table: &str, cells: &[String]) {
     println!("{}", format_row(model, table, cells));
 }
 
+/// The legal model-rung length band, read from the registry live rather than
+/// transcribed as a literal twin — a census that hard-codes `brace.rs`'s own
+/// band would silently lie about the very change it exists to measure the
+/// moment that band moved.
+fn rung_band_mm() -> Option<(f64, f64)> {
+    let constants = plinth_core::m0_constants().ok()?;
+    let p = constants.placeholders();
+    Some((
+        p.bracing_model_rung_min_length_mm().diagnostic().get(),
+        p.model_brace_max_len_mm().diagnostic().get(),
+    ))
+}
+
 fn stat(values: &mut [f64]) -> (f64, f64, f64, f64) {
     values.sort_by(f64::total_cmp);
     let count = values.len();
@@ -996,7 +1007,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
             format!("grazing_lt_0.5={}", grazing.len()),
             format!("grazing_L_le_2.50mm={short_band}"),
             format!("grazing_L_gt_2.50mm={}", grazing.len() - short_band),
-            format!("legal_band_mm={:?}", RUNG_BAND_MM),
+            format!("legal_band_mm={:?}", rung_band_mm()),
         ],
     );
 

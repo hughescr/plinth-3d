@@ -1,10 +1,11 @@
 use plinth_mesh::{
     build_face_topology, certify_closed_components, load_binary_stl, make_box, make_box_default,
     make_dual_cavity_pawn, make_dual_cavity_pawn_with_throat_radius, make_overhang_table,
-    make_raking_blade, make_thin_fin, make_toed_slab, mesh_fingerprint, write_binary_stl, Mesh,
-    MeshError, WeldPolicy, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
-    DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE,
-    TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+    make_raking_blade, make_thin_fin, make_toed_slab, make_uncovered_rim_table, mesh_fingerprint,
+    write_binary_stl, Mesh, MeshError, WeldPolicy, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM,
+    DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE,
+    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
+    TOPOLOGY_CUT_SAME_DIRECTION,
 };
 
 type FixtureExpectation = (
@@ -16,6 +17,11 @@ type FixtureExpectation = (
 );
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn box_matches_frozen_trimesh_order_and_bottom_translation() {
     let mesh = make_box([2.0, 4.0, 6.0], [3.0, 5.0, 7.0]).expect("valid box");
     assert_eq!(mesh.verts()[0], [2.0, 3.0, 7.0]);
@@ -69,7 +75,61 @@ fn native_fixture_shapes_have_frozen_counts_bounds_and_face_order() {
     }
 }
 
+/// **The coverage-repair witness is five closed, outward-wound boxes and
+/// nothing else.**
+///
+/// `make_uncovered_rim_table` is the fixture that gives the committed-repair
+/// tests something to observe (`plinth-support`'s
+/// `a4_transactional_controller.rs`, `plinth-pipeline`'s
+/// `a4_production_door.rs`), and what it is FOR is a measured coverage hole in
+/// the support planner. That makes its geometry load-bearing evidence, so it
+/// is pinned here the way the other native fixtures are: exact counts, exact
+/// bounds, and the closed-solid certificate — a fixture that quietly stopped
+/// being manifold would move every number those tests read and none of them
+/// would say why.
 #[test]
+fn uncovered_rim_table_is_five_closed_boxes_at_frozen_dimensions() {
+    let mesh = make_uncovered_rim_table().expect("procedural uncovered-rim table");
+    assert_eq!(
+        mesh.verts().len(),
+        40,
+        "four legs and one top, eight verts each"
+    );
+    assert_eq!(mesh.tris().len(), 60, "twelve triangles per box");
+    let (low, high) = mesh.bounds_z();
+    assert!(low.abs() < 1e-12, "the legs stand on z = 0: {low}");
+    assert!(
+        (high - 24.0).abs() < 1e-12,
+        "20 mm legs under a 4 mm top: {high}"
+    );
+
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.counts().boundary_edges,
+        0,
+        "an open edge here would make the hole a meshing artifact instead of a planning fact"
+    );
+    let certificate = certify_closed_components(&mesh, &topology).expect("certificate");
+    assert_eq!(
+        certificate.components().len(),
+        5,
+        "four legs and one top, each its own closed solid"
+    );
+    assert!(
+        certificate
+            .components()
+            .iter()
+            .all(|component| component.signed_volume_mm3() > 0.0),
+        "every component must be outward wound"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn face_normal_z_is_batched_and_reports_degenerate_triangles() {
     let mesh = make_box_default().expect("valid box");
     let normals = mesh.face_normals_z().expect("box normals");
@@ -237,7 +297,10 @@ fn dual_cavity_pawn_is_a_single_closed_oriented_solid() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(topology.counts().boundary_edges, 0, "{name} boundary edges");
         assert!(
-            topology.cut_flags().iter().all(|flags| *flags & gate_mask == 0),
+            topology
+                .cut_flags()
+                .iter()
+                .all(|flags| *flags & gate_mask == 0),
             "{name}: a closed-solid-gate cut flag survived construction"
         );
         let certificate = certify_closed_components(&mesh, &topology)
@@ -285,7 +348,8 @@ fn dual_cavity_pawn_has_no_degenerate_face_after_the_f32_snap() {
 #[test]
 fn dual_cavity_pawn_encloses_positive_volume() {
     let slices = plinth_mesh::DUAL_CAVITY_SLICES as f64;
-    let azimuthal_deficit = 1.0 - (std::f64::consts::TAU / slices).sin() * slices / std::f64::consts::TAU;
+    let azimuthal_deficit =
+        1.0 - (std::f64::consts::TAU / slices).sin() * slices / std::f64::consts::TAU;
     // The polar chord deficit: the coarsest arc step is the upper arc's, and
     // a chord's sagitta on a circle of radius R across an angle `d` is
     // `R (1 - cos(d/2))`, a relative volume loss under `2 (1 - cos(d/2))`.
@@ -299,7 +363,10 @@ fn dual_cavity_pawn_encloses_positive_volume() {
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
         let certificate = certify_closed_components(&mesh, &topology).expect("certificate");
         let volume = certificate.signed_volume_mm3();
-        assert!(volume > 0.0, "{name}: expected outward winding, got {volume}");
+        assert!(
+            volume > 0.0,
+            "{name}: expected outward winding, got {volume}"
+        );
 
         let analytic = plinth_mesh::dual_cavity_pawn_analytic_volume_mm3(throat_radius_mm);
         let deficit = (analytic - volume) / analytic;
@@ -371,6 +438,11 @@ impl Drop for ScratchStl {
 /// strict writer) accepts it outright, and the reloaded triangle soup
 /// expands to the same coordinates the source mesh named.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn dual_cavity_pawn_survives_the_stl_wire_round_trip() {
     let mesh = make_dual_cavity_pawn().expect("default fixture");
     let scratch = ScratchStl::new("wire");

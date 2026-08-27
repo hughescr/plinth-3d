@@ -21,7 +21,7 @@ use plinth_orient::PinnedBaseline;
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
-    PipelineExitCode, PrepareReport, PrepareRequest, SupportedGeometry,
+    PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
 use crate::{CacheMode, OrientSelection, PrepareSelection};
@@ -230,6 +230,7 @@ fn print_model(model: &ModelPreparationReport) {
             savings_shortfall,
             ownerless_islands,
             contacts,
+            pending_gates,
             ..
         } => {
             println!(
@@ -238,6 +239,30 @@ fn print_model(model: &ModelPreparationReport) {
                 emit.support_record_count,
                 emit.artifact_bytes
             );
+            // Disclosure half of the pre-write gate's #1 review finding: this
+            // file was written after only some of the twelve named safety
+            // checks actually ran, because most have no Rust implementation
+            // yet (see `plinth_pipeline::gates::judge`). Printed unconditionally
+            // and right under EMITTED, in plain words, so an operator does not
+            // have to read the source to learn that "emitted" does not mean
+            // "every safety check passed" -- it means the checks that exist
+            // passed, and the rest did not run at all.
+            let total_gates = PreWriteGate::ALL.len();
+            let ran_gates = total_gates.saturating_sub(pending_gates.len());
+            if pending_gates.is_empty() {
+                println!("  safety checks  all {total_gates} pre-write gates ran and passed");
+            } else {
+                println!(
+                    "  safety checks  ran {ran_gates} of {total_gates} pre-write gates; \
+                     the other {} did NOT run and could not have refused this model: {}",
+                    pending_gates.len(),
+                    pending_gates
+                        .iter()
+                        .map(|gate| format!("{gate:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             // What is actually in the file. Two of the four geometries are
             // substitutions -- the chain planned a drilled shell, could not
             // seal or could not hollow it, and carried the oriented solid
@@ -253,10 +278,9 @@ fn print_model(model: &ModelPreparationReport) {
             // presenting a query bound as a measurement.
             if let Some(wall) = wall_mm {
                 match realized_wall {
-                    Some(realized) => println!(
-                        "  wall  requested {} mm, realized {realized}",
-                        wall.get()
-                    ),
+                    Some(realized) => {
+                        println!("  wall  requested {} mm, realized {realized}", wall.get())
+                    }
                     None => println!("  wall  requested {} mm, no shell measured", wall.get()),
                 }
             }
@@ -526,7 +550,11 @@ fn coverage_lines(model: &ModelPreparationReport) -> Vec<String> {
     if let Some(error) = &evidence.measurement_error {
         lines.push(format!("  coverage unmeasurable  {error}"));
     }
-    for island in evidence.islands.iter().take(COVERAGE_CARD_MAX_ISLANDS_SHOWN) {
+    for island in evidence
+        .islands
+        .iter()
+        .take(COVERAGE_CARD_MAX_ISLANDS_SHOWN)
+    {
         let gap = match island.worst_gap {
             plinth_pipeline::CoverageClosureGap::Finite(value) => {
                 format!("worst gap {value:.2} mm")
@@ -807,9 +835,11 @@ mod tests {
     fn the_refusal_line_blames_the_registered_ceiling_only_where_it_stopped_a_rescue() {
         let walked = remedies_tried_line(&refused_contact(true));
         assert!(
-            walked.contains("then 1 growth rung(s) up to the registered 0.4000 mm radius \
+            walked.contains(
+                "then 1 growth rung(s) up to the registered 0.4000 mm radius \
                              (0.8000 mm diameter), the maximum set by \
-                             TIP_RADIUS_MAX_GROWN_SCAR_MM"),
+                             TIP_RADIUS_MAX_GROWN_SCAR_MM"
+            ),
             "a rescue the registered maximum really did stop must say so: {walked}"
         );
         let unwalked = remedies_tried_line(&refused_contact(false));
@@ -973,6 +1003,11 @@ mod tests {
         assert!(stopped.is_empty(), "{stopped:?}");
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn island(id: u32, area: f64, gap: CoverageClosureGap, faces: usize) -> UncoveredIslandSummary {
         UncoveredIslandSummary {
             island_id: id,
@@ -996,25 +1031,31 @@ mod tests {
     /// block is evidence for a coverage refusal, not a generic footer.
     #[test]
     fn coverage_lines_is_empty_without_coverage_evidence() {
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Stopped {
-            after: plinth_pipeline::StageStop::Decimate,
-        }))
-        .is_empty());
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
-            gate: Some(plinth_pipeline::PreWriteGate::Clearance),
-            geometry: None,
-            violation: "unrelated".to_owned(),
-            evidence: None,
-            repair_report: None,
-        }))
-        .is_empty());
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
-            exit_code: plinth_pipeline::PipelineExitCode::Supports,
-            detail: "unrelated stage failure".to_owned(),
-            evidence: None,
-            repair_report: None,
-        }))
-        .is_empty());
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Stopped {
+                after: plinth_pipeline::StageStop::Decimate,
+            }))
+            .is_empty()
+        );
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
+                gate: Some(plinth_pipeline::PreWriteGate::Clearance),
+                geometry: None,
+                violation: "unrelated".to_owned(),
+                evidence: None,
+                repair_report: None,
+            }))
+            .is_empty()
+        );
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
+                exit_code: plinth_pipeline::PipelineExitCode::Supports,
+                detail: "unrelated stage failure".to_owned(),
+                evidence: None,
+                repair_report: None,
+            }))
+            .is_empty()
+        );
     }
 
     /// **FU-57.** Worst-first, truncated at the shown count with an explicit
@@ -1076,7 +1117,9 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("(1 more in the sidecar)")),
+            lines
+                .iter()
+                .any(|line| line.contains("(1 more in the sidecar)")),
             "{lines:?}"
         );
         assert!(
@@ -1117,21 +1160,28 @@ mod tests {
             evidence: Some(Box::new(evidence)),
             repair_report: None,
         }));
-        assert!(lines[0].contains("1 island(s), 1 shown worst-first"), "{lines:?}");
         assert!(
-            lines.iter().any(|line| line.contains("renders") && line.contains("0 image(s)")),
+            lines[0].contains("1 island(s), 1 shown worst-first"),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("render note") && line.contains("COVERAGE_RENDER_MAX_FACES")),
+                .any(|line| line.contains("renders") && line.contains("0 image(s)")),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("evidence write error") && line.contains("permission denied")),
+                .any(|line| line.contains("render note")
+                    && line.contains("COVERAGE_RENDER_MAX_FACES")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("evidence write error")
+                    && line.contains("permission denied")),
             "{lines:?}"
         );
     }

@@ -366,6 +366,13 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types() {
     let descriptors = component().descriptors().unwrap();
     assert_eq!(
@@ -517,6 +524,11 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
     );
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn assert_interval(
     descriptor: &ConstantDescriptor,
     lower: f64,
@@ -702,6 +714,11 @@ fn micron_measurement_is_sealed_to_null_error_and_unsigned_registry_value() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn derived_sources_and_relations_are_exact_and_do_not_launder_authority() {
     let constants = component();
     let descriptors = constants.descriptors().unwrap();
@@ -890,6 +907,11 @@ fn release_directions_are_distinct_named_facts() {
 /// moves only one of them, this test goes red and that is correct — it is a
 /// prompt to re-read both notes, not a licence to re-point one at the other.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_validator_tip_minimum_was_superseded_to_the_owners_own_field_practice() {
     let descriptors = component().descriptors().unwrap();
 
@@ -989,6 +1011,11 @@ fn the_validator_tip_minimum_was_superseded_to_the_owners_own_field_practice() {
 /// **What it deliberately does not assert**: any physics. There is none here to
 /// assert. The note says so and this test does not pretend otherwise.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_grown_scar_maximum_is_craigs_field_ceiling_labelled_as_field_data() {
     let descriptors = component().descriptors().unwrap();
 
@@ -1076,6 +1103,11 @@ fn the_grown_scar_maximum_is_craigs_field_ceiling_labelled_as_field_data() {
 /// that keeps them from being mistaken for each other — because the whole
 /// point of the split is that only one of them refuses.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_two_tier_demanded_gaps_are_a_pruning_0_6_and_a_refusing_0_3() {
     let descriptors = component().descriptors().unwrap();
 

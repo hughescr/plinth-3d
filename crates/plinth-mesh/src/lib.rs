@@ -25,11 +25,12 @@ pub use fixtures::{
     make_dual_cavity_pawn_with_throat_radius, make_duplicated_face_box, make_dust_shard_box,
     make_edge_shared_boxes, make_overhang_table, make_overhang_table_with, make_pinched_boxes,
     make_raking_blade, make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab,
-    make_toed_slab_with, make_triply_wound_face_box, DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM,
-    DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_CENTRE_SPACING_MM,
-    DUAL_CAVITY_LOWER_ARC_STEPS, DUAL_CAVITY_LOWER_SPHERE_R_MM, DUAL_CAVITY_LOWER_SPHERE_Z_MM,
-    DUAL_CAVITY_MIN_THROAT_R_MM, DUAL_CAVITY_SLICES, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
-    DUAL_CAVITY_THROAT_SEPARATED_MM, DUAL_CAVITY_UPPER_ARC_STEPS, DUAL_CAVITY_UPPER_SPHERE_R_MM,
+    make_toed_slab_with, make_triply_wound_face_box, make_uncovered_rim_table,
+    DUAL_CAVITY_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM,
+    DUAL_CAVITY_CENTRE_SPACING_MM, DUAL_CAVITY_LOWER_ARC_STEPS, DUAL_CAVITY_LOWER_SPHERE_R_MM,
+    DUAL_CAVITY_LOWER_SPHERE_Z_MM, DUAL_CAVITY_MIN_THROAT_R_MM, DUAL_CAVITY_SLICES,
+    DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM, DUAL_CAVITY_UPPER_ARC_STEPS,
+    DUAL_CAVITY_UPPER_SPHERE_R_MM,
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use repair::{

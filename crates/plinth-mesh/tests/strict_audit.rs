@@ -45,6 +45,11 @@ fn strict_audit_rejects_distinct_index_geometric_degeneracy() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn strict_audit_uses_adaptive_predicate_for_near_collinearity() {
     let epsilon = f64::EPSILON;
     let a = [1.0 + epsilon, 1.0, 0.0];

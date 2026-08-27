@@ -16,6 +16,24 @@ static BVH_BUILD_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 pub const LEAF_MAX: usize = 8;
 const N_BINS: usize = 16;
 
+/// The largest face count `Bvh::build` can represent, DERIVED from the storage
+/// it has to represent it in rather than picked.
+///
+/// [`Node::a`] and [`Node::b`] are `i32`.  They carry two different things: for
+/// a leaf, a start offset and a count into `order` (both `< n`); for an internal
+/// node, the indices of its two children (both `< nodes.len()`).  A binary tree
+/// whose every leaf holds at least one face has at most `2n - 1` nodes, so
+/// `2n - 1 <= i32::MAX` bounds BOTH uses at once, and that is this value.
+///
+/// Before this bound was named, the four `as i32` writes below simply wrapped:
+/// a mesh past the ceiling produced a silently corrupt tree with negative node
+/// indices and no error.  The ceiling is ~1.07e9 faces, roughly 2,500x the
+/// largest corpus model this project handles (the 429,120-face treant), so it
+/// refuses nothing real -- but it is now a REFUSAL rather than a wrap, and it
+/// is written where a reader can find it instead of being implied by a field
+/// type.
+pub const MAX_FACES: usize = (i32::MAX as usize).div_ceil(2);
+
 #[derive(Clone)]
 pub struct Node {
     pub bmin: V3,
@@ -57,9 +75,23 @@ fn surface_area(mn: V3, mx: V3) -> f64 {
 }
 
 impl Bvh {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
         BVH_BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let n = mesh.nfaces();
+        if n > MAX_FACES {
+            return Err(format!(
+                "BVH face count {n} exceeds the {MAX_FACES} representable in a \
+                 node's i32 index fields"
+            ));
+        }
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
         let tri_pad: Vec<f64> = mesh
             .face_ids()
@@ -105,6 +137,18 @@ pub(crate) fn build_attempt_count() -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26); integer-width casts in \
+          mesh/voxel index arithmetic, NOT individually audited -- triaged as a class, and the one \
+          architecture item the class carried (geom_kernel's 32-bit BVH index width) is now a named, \
+          enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn build_range(
     mesh: &Mesh,
     tri_pad: &[f64],
@@ -153,8 +197,17 @@ fn build_range(
     });
 
     if count <= LEAF_MAX {
-        nodes[node_idx].a = lo as i32;
-        nodes[node_idx].b = count as i32;
+        // `lo` and `count` are both `<= n <= MAX_FACES`, which `Bvh::build`
+        // refuses above precisely so these two writes cannot wrap.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "bounded by MAX_FACES, enforced at the Bvh::build boundary"
+        )]
+        {
+            nodes[node_idx].a = lo as i32;
+            nodes[node_idx].b = count as i32;
+        }
         nodes[node_idx].leaf = true;
         return Ok(node_idx);
     }
@@ -267,10 +320,15 @@ fn build_range(
         if best_plane < 0 {
             use_median = true;
         } else {
-            // stable partition preserving index order within each side
+            // stable partition preserving index order within each side.
+            // `l_cnt[plane]`/`r_cnt[plane + 1]` are this exact plane's exact
+            // left/right counts, already computed by the sweep above, and
+            // sum to `count` -- reserving `count` for each of two vectors
+            // whose combined length is `count` would double-book capacity
+            // this partition never uses.
             let plane = best_plane as usize;
-            let mut left: Vec<u32> = Vec::with_capacity(count);
-            let mut right: Vec<u32> = Vec::with_capacity(count);
+            let mut left: Vec<u32> = Vec::with_capacity(l_cnt[plane]);
+            let mut right: Vec<u32> = Vec::with_capacity(r_cnt[plane + 1]);
             for (j, &p) in order[lo..hi].iter().enumerate() {
                 if bin_of[j] <= plane {
                     left.push(p);
@@ -290,11 +348,16 @@ fn build_range(
 
     if use_median {
         // index-median split: order[lo..hi] is already ascending by face index
-        // (stable partitions preserve the initial ascending order), so a
-        // midpoint split IS the index median (spec sec 3.2).
+        // -- the root order is `mesh.face_ids()`, contractually ascending
+        // (`Mesh::subset`'s own debug_assert), and every recursive range
+        // reaching here is either that root range or the untouched or
+        // stably-repartitioned output of an earlier split, both of which
+        // preserve per-side ascending order. So a midpoint split IS the
+        // index median (spec sec 3.2) with no sort needed to make it one;
+        // an earlier version of this function re-sorted the range here
+        // "to be sure", which was strictly redundant work on data already
+        // known sorted by construction.
         split_pos = lo + count / 2;
-        // ensure the range is sorted by face index for a true index median
-        order[lo..hi].sort_unstable();
     }
 
     let left = build_range(
@@ -319,8 +382,17 @@ fn build_range(
         max_depth,
         depth_cap,
     )?;
-    nodes[node_idx].a = left as i32;
-    nodes[node_idx].b = right as i32;
+    // Child node indices are `< nodes.len() <= 2n - 1 <= i32::MAX`, which
+    // `Bvh::build`'s MAX_FACES refusal is exactly what bounds.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "bounded by MAX_FACES, enforced at the Bvh::build boundary"
+    )]
+    {
+        nodes[node_idx].a = left as i32;
+        nodes[node_idx].b = right as i32;
+    }
     nodes[node_idx].leaf = false;
     Ok(node_idx)
 }
@@ -339,5 +411,27 @@ mod instrumentation_tests {
         let before = build_attempt_count();
         Bvh::build(&mesh).unwrap();
         assert!(build_attempt_count() > before);
+    }
+
+    /// `MAX_FACES` exists to keep the `i32` node fields from wrapping, and it
+    /// has to be the LAST face count for which that holds -- one face lower and
+    /// it needlessly refuses a mesh a 32-bit tree could carry; one face higher
+    /// and a build wraps into negative node indices with no error.
+    ///
+    /// This checks the property, not the arithmetic: the worst-case node count
+    /// of a binary tree whose every leaf holds at least one face is `2n - 1`,
+    /// and the question asked of each side of the boundary is simply whether
+    /// that count still converts to `i32`.
+    #[test]
+    fn max_faces_is_the_last_count_whose_worst_case_tree_fits_i32() {
+        let worst_case_nodes = |faces: usize| 2 * faces - 1;
+        assert!(
+            i32::try_from(worst_case_nodes(MAX_FACES)).is_ok(),
+            "MAX_FACES refuses a mesh whose tree would have fitted"
+        );
+        assert!(
+            i32::try_from(worst_case_nodes(MAX_FACES + 1)).is_err(),
+            "one face past MAX_FACES must be the count that stops fitting"
+        );
     }
 }

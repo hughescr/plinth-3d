@@ -195,6 +195,11 @@ fn verify_native_synthetic_builders(out_dir: &Path, frozen: &[Mesh]) -> Result<(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn normalize_stl_wire(mesh: &Mesh, name: &str) -> Result<Mesh, String> {
     let verts = mesh
         .verts()

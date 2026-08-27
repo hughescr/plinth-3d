@@ -138,6 +138,10 @@ fn prepare_searches_each_model_orientation_and_writes_one_artifact_each() {
     );
     // `--no-cache` is accepted and honestly reported: no cache exists yet, so
     // the flag is a no-op rather than a bypass of machinery that is not there.
+    // This is the end-to-end half of the guard in plinth-cli's
+    // `no_cache_is_the_only_cache_off_form` — the flag must survive as a real
+    // accepted spelling all the way through a process invocation, because
+    // 06-conventions.md § 6 makes it the sole CI cache-off mechanism.
     assert!(
         stdout.contains("--no-cache is a no-op"),
         "the cache state must be reported honestly: {stdout}"

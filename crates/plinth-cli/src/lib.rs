@@ -28,6 +28,20 @@ pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prep
 
 pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
+/// Whether this request may use a `plinth-pipeline` cache.
+///
+/// **No cache exists yet, so `Disabled` changes no computation.** The spelling
+/// is kept anyway, and is not dead surface: `06-conventions.md` § 6 makes
+/// cache-disabled equality CI-mandatory and names *this exact flag* as the one
+/// and only cache-off mechanism — "one spelling, defined here, used verbatim in
+/// M8's acceptance commands. There is no environment-variable form ... a second
+/// way to disable the cache is a second thing that can silently stop working."
+/// `04-migration-plan.md`'s determinism runs invoke it verbatim.
+///
+/// It was briefly deleted on 2026-08-26 as an unread flag and restored the same
+/// day: "no production code reads this" was true of the compiler and false of
+/// the procedure. Keep it accepted and keep it reported honestly as a no-op
+/// until a cache exists to bypass; do not add a second spelling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheMode {
     #[default]
@@ -449,6 +463,16 @@ mod tests {
         );
     }
 
+    /// `--no-cache` is the ONE cache-off spelling `06-conventions.md` § 6
+    /// defines, and cache-disabled equality is CI-mandatory, so this pins two
+    /// things at once: that the mandated spelling is accepted, and that no
+    /// second spelling is. A second way to disable the cache is a second thing
+    /// that can silently stop working.
+    ///
+    /// It stays accepted while it is still a no-op — no cache exists to bypass
+    /// yet. Deleting the flag for having no reader is what this test now
+    /// guards against; that deletion was made on 2026-08-26 and reverted the
+    /// same day.
     #[test]
     fn no_cache_is_the_only_cache_off_form() {
         let mut arguments = stable_arguments().map(OsString::from).to_vec();
@@ -467,6 +491,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn wall_mm_is_optional_and_defaults_to_the_registered_constant() {
         let registered =
             registered_wall(WallSelection::Default).expect("registered wall default must publish");
@@ -488,6 +517,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn wall_mm_refuses_a_wall_finer_than_the_frozen_voxel_pitch() {
         let pitch = plinth_hollow::minimum_representable_wall_mm().expect("frozen pitch publishes");
         assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");

@@ -187,6 +187,14 @@ impl GridSettings {
 
 /// A registered count constant, refused rather than rounded if it is not a
 /// whole number of candidates.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn count(value: f64, id: &'static str) -> Result<usize, ScoreError> {
     if !value.is_finite() || value < 1.0 || value.fract() != 0.0 || value > 1_048_576.0 {
         return Err(ScoreError::Constants(format!(
@@ -563,6 +571,11 @@ mod tests {
     /// not a re-derivation: a dense winner at −30° about X and a pinned −30°
     /// about X must be the same rotation, bit for bit.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn legacy_directions_come_from_the_pinned_rotation_builder() {
         let grid = SweepGrid::build(&table(), GridSettings::registered().unwrap()).unwrap();
         let matrix = rotation(BaselineAxis::X, -30.0).unwrap();

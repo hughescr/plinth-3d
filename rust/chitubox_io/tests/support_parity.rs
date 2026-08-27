@@ -97,6 +97,11 @@ fn replace_with_same_records_roundtrips() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn asymmetric_multi_model_supports() {
     // 3 records on model 0, 17 on model 1 — the interleaved-offset stress case.
     let mut proj = open_required("sphere-cylinder.chitubox");

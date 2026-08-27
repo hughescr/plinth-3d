@@ -109,7 +109,7 @@ JSON this page was built from). Grouped by theme; within a group, dependency ord
 | #19 | Drilling drainability must respect the flow-based connectivity rule. |
 | #38 | Continuous realized-wall proof — acceptance blocker for hollow output. |
 | #42 | O-5 ownership consolidation and the remaining pre-write gates before final acceptance. |
-| #50 | Audit plinth-metrics' own `ray_triangle_distance` for the behind-origin defect already fixed elsewhere. |
+| #50 | ~~Audit plinth-metrics' own `ray_triangle_distance` for the behind-origin defect already fixed elsewhere.~~ **MOOT 2026-08-26** — `plinth-metrics` was deleted by owner ruling, and the suspect copy went with it. Nothing was fixed and nothing was measured: the defect is simply no longer reachable because the code is gone. The corrected implementation in `plinth-mesh` is unaffected. |
 | #52 | (see above — also a correctness fix, contacts condemned before any arm is tried) |
 | #59 | Port `PreWriteGate::Load` — plans are never re-checked for load violations right before write. |
 | #64 | Reach-rule gap: narrow-neck amplification unmodelled (a wide ledge on a thin stalk can pass the reach check). |

@@ -184,13 +184,27 @@ this spec prices the wall around such a plug. This is open follow-on work
 
 ## Implementation
 
+> **NEITHER IMPLEMENTATION NAMED BELOW STILL EXISTS, and the agreement check
+> between them is therefore not running.** `crates/plinth-metrics` was deleted
+> on 2026-08-26 by owner ruling as an orphan (it had no production consumer
+> once the `plinth score` subcommand was removed), taking its `scar.rs` with
+> it; the independent Python census went with the Rust migration, and no `.py`
+> file remains in the repository. The rules and constants above are unaffected
+> and remain owner-ratified — what is gone is the two-independent-implementation
+> cross-check that this section describes as the alignment evidence. Restoring
+> that evidence needs a second implementation that does not call the first.
+> Note that the SCAR-AREA-CAP authority itself (`ScarAreaCapPolicy` in
+> `plinth-core`) is a separate, pre-existing gap: it has no production reader
+> either, and the deleted crate never read it, so this deletion neither caused
+> nor worsened that.
+
 Both implementations must apply every rule and constant above identically:
 
-- **Engine** (`crates/plinth-metrics/src/scar.rs`): computes every input via
-  exact projection and exact signed distance, and never applies an area cap
-  outside this predicate.
-- **Census** (independent Python): computes `cosang`/`d`/`T` from its own
-  independent exact machinery; it never calls the engine kernel.
+- **Engine** (formerly `crates/plinth-metrics/src/scar.rs`, deleted): computed
+  every input via exact projection and exact signed distance, and never applied
+  an area cap outside this predicate.
+- **Census** (formerly independent Python, removed): computed `cosang`/`d`/`T`
+  from its own independent exact machinery; it never called the engine kernel.
 
 Known approximation (accepted): patch areas use a locally-planar surface
 model; the `2*r_x*T` and `T+2*r_x` caps bound the curvature error. A future

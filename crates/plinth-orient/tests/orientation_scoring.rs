@@ -219,6 +219,11 @@ fn the_section_solver_agrees_with_the_kernel_slice_oracle() {
 // ---------------------------------------------------------------------------
 
 /// A closed, outward-wound UV sphere with exact poles.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn uv_sphere(radius: f64, latitudes: usize, longitudes: usize) -> Mesh {
     let mut verts = Vec::with_capacity(2 + (latitudes - 1) * longitudes);
     verts.push([0.0, 0.0, radius]);

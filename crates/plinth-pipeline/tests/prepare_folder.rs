@@ -64,8 +64,8 @@ use std::path::{Path, PathBuf};
 
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    OrientationPolicy, OutputProfile, PipelineExitCode, PrepareReport, PrepareRequest, StageStop,
-    SupportedGeometry,
+    OrientationPolicy, OutputProfile, PipelineExitCode, PreWriteGate, PrepareReport,
+    PrepareRequest, StageStop, SupportedGeometry,
 };
 
 #[path = "../examples/shared/first_artifact_chain.rs"]
@@ -136,6 +136,11 @@ impl Scratch {
     /// made explicit at the one place the narrowing happens. The alternative —
     /// letting the writer refuse — would just mean this fixture could not be a
     /// file at all.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn place_procedural(&self, mesh: &plinth_mesh::Mesh, stem: &str) {
         let verts: Vec<[f64; 3]> = mesh
             .verts()
@@ -277,6 +282,11 @@ const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 1;
 /// sort *after* the good one for exactly that reason... and a third, sorting
 /// *before* it, closes the other direction.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itself() {
     let scratch = Scratch::new("folder");
     scratch.place("make_toed_slab.prepped.stl", "mini");
@@ -318,6 +328,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         contacts,
         repair_report,
         repair_ledger,
+        pending_gates,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -364,6 +375,20 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         (ledger.trials, ledger.commits, ledger.steps),
         (0, 0, 0),
         "the toed slab covers on its baseline layout, so its ledger is honestly empty"
+    );
+
+    // Disclosure half of the pre-write gate's #1 finding, through the real
+    // folder executor rather than a constructed fixture: this artifact was
+    // authorized on `UncoveredIslands` alone, and the run report must name
+    // the other eleven named gates as not yet run rather than staying silent
+    // about them.
+    let expected_pending: Vec<PreWriteGate> = PreWriteGate::ALL
+        .into_iter()
+        .filter(|gate| *gate != PreWriteGate::UncoveredIslands)
+        .collect();
+    assert_eq!(
+        pending_gates, &expected_pending,
+        "an emitted artifact must name every named gate that did not run"
     );
     let ledger_json: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&ledger.path).expect("the sealed repair ledger must exist on disk"),
@@ -870,11 +895,13 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
 /// **Re-pinned onto `make_raking_blade` (2026-08-12).** This test used to run
 /// `make_overhang_table`, which was the coverage-refusing fixture; with
 /// nomination scored against the measurement's uncovered samples that model
-/// now CLOSES and emits
-/// (`plinth-support/tests/support_runner_integration.rs`,
-/// `public_runner_closes_overhang_table_only_after_appending_repair_contacts`),
-/// so it can no longer stand for a refusal. `make_raking_blade` can — and as of
-/// 2026-08-14 it is the PROCEDURAL blade, not the `.prepped.stl` (see
+/// now CLOSES and emits. (That test is
+/// `plinth-support/tests/support_runner_integration.rs`,
+/// `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`;
+/// it was re-pointed off the overhang table onto `make_uncovered_rim_table`
+/// on 2026-08-26, when the overhang table stopped needing repair at all.)
+/// So the overhang table can no longer stand for a refusal. `make_raking_blade`
+/// can — and as of 2026-08-14 it is the PROCEDURAL blade, not the `.prepped.stl` (see
 /// [`refusal_fixture`] for the measured reason). Its island 5 has
 /// `NoRoutedContact` on every one of the 8 attempts, 5.135 mm² uncovered on one
 /// patch: the CCO transcript admits none of the 8 repair rows nominated from
@@ -1386,7 +1413,9 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     // is not answered by substituting different geometry. In that window this
     // block asserted one artifact, exit 3, and the same verdict
     // `first_artifact.rs`'s `corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
-    // pinned running the sphere alone.
+    // pinned running the sphere alone. (That test was DELETED on 2026-08-26:
+    // at `3a6526f` the sphere's islands became coverable, it seals at attempt
+    // 0 and emits, so the refusal it pinned had stopped existing.)
     //
     // **2026-08-12, FU-53 landed: the sphere's route moved a second time, and
     // it now diverges from `first_artifact.rs`'s single-model run.** FU-53
@@ -1669,6 +1698,11 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 /// twice on the same fixture, changing nothing but `--wall-mm`, and asserts
 /// the serialized reports differ in the wall and only there.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_report() {
     let printer = OutputProfile::Saturn4Ultra
         .resolve()

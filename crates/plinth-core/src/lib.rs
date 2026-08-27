@@ -37,7 +37,7 @@ pub use constants::{
 };
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
-    ParetoPoint, PartialCost, Resin, Risk, Scar, SearchEvidence,
+    ParetoPoint, PartialCost, Resin, Risk, Scar, SearchEvidence, CUBIC_MILLIMETRES_PER_MILLILITRE,
 };
 pub use defect::{
     Defect, DefectError, DefectReport, ReportError, Severity, SiteId, Termination, TerminationError,

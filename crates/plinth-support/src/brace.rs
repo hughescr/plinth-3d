@@ -36,7 +36,14 @@ use crate::{
 };
 
 const HEIGHT_TOLERANCE_MM: f64 = 1e-9;
-const CROSS_LINK_DUTY_FACTOR: f64 = 0.840_896_415_253_714_5; // 0.5^(1/4)
+/// `rungs_that_fit`'s minimum spacing between adjacent evenly-placed rungs
+/// (and between the end rungs and the span's own ends). `n` rungs divide a
+/// span into `n + 1` equal gaps of `span / (n + 1)`; requiring each gap be at
+/// least this wide is exactly `n <= span - MIN_RUNG_SPACING_MM` when the
+/// spacing is 1 mm, which is the bound below. Search-pruning only (physics-
+/// first constants doctrine): it caps how many of the requested rungs are
+/// even offered a position, never whether an offered one is accepted.
+const MIN_RUNG_SPACING_MM: f64 = 1.0;
 
 #[derive(Clone, Debug)]
 struct BraceConfig {
@@ -64,6 +71,12 @@ struct BraceConfig {
     ball_factor_foot: f64,
     ball_breach_epsilon_mm: f64,
     min_illegal_len_mm: f64,
+    /// `CCO_X_PAIR_LOAD_DISCOUNT` — the registered proof-backed fourth-root
+    /// relation `(F/2)^0.25 / F^0.25 = 0.5^0.25`, the discount a cross-linked
+    /// pair earns for sharing load. Previously restated here as a literal
+    /// twin (`CROSS_LINK_DUTY_FACTOR`); now read from the one registered
+    /// statement of it.
+    cross_link_duty_factor: f64,
     /// `max(LayerPlan::heights_mm())` for the run being braced — the PR-1
     /// slicer-resolution seat floor and the PR-2 mask margin.  Carried on the
     /// config because it is a property of the RUN, not of the registry.
@@ -141,6 +154,7 @@ impl BraceConfig {
             ball_factor_foot: p.ball_factor_foot().diagnostic().get(),
             ball_breach_epsilon_mm: p.ball_breach_eps_mm().diagnostic().get(),
             min_illegal_len_mm: p.min_illegal_len_mm().diagnostic().get(),
+            cross_link_duty_factor: *constants.evidence().cco_x_pair_load_discount().value(),
         })
     }
 }
@@ -1046,6 +1060,14 @@ fn clearance_relief_site(
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn compute_needs(
     forest: &Forest,
     report: &TransientReport,
@@ -1630,7 +1652,12 @@ fn gather_candidates(
             candidates.push(candidate);
         }
     }
-    debug_assert!(
+    // `debug_assert!` would hide a MUTATION here: `frozen.next()` advances the
+    // iterator, and that advance disappears with the assertion in a release
+    // build.  Nothing below reads `frozen`, so the two builds agree today --
+    // but the split is spelled out rather than left implicit.
+    #[cfg(debug_assertions)]
+    assert!(
         frozen.next().is_none(),
         "every frozen seat zone must be claimed by the candidate that requested it"
     );
@@ -1656,8 +1683,8 @@ struct ModelRungAttestation {
 /// the stub family and for the same reason: attestation asks whether a
 /// renderable interface EXISTS, and the resolvability floor is one layer.
 /// Demanding the full PR-1 seat depth of every rim ray would conflate
-/// attestation with the mask-validity proof, which `validate_members_batch`
-/// enforces separately and TOTALLY.
+/// attestation with the mask-validity proof, which the mask minted by
+/// `attest_members_batch` only claims on a TOTAL engagement.
 ///
 /// A batch-level integrity failure (starved admission, kernel refusal,
 /// malformed row set) is an error, because nothing can be concluded about any
@@ -2105,7 +2132,7 @@ fn cross_link_rods(
                     .brace_radius_mm
                     .get()
                     .max(own.get())
-                    .max(raw * CROSS_LINK_DUTY_FACTOR),
+                    .max(raw * config.cross_link_duty_factor),
             )
         } else {
             // Frozen twin parity deliberately uses the 45-degree construction
@@ -3001,11 +3028,23 @@ fn largest_gap(gaps: &[ZInterval]) -> Option<ZInterval> {
     }))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn rungs_that_fit(span: f64, requested: usize) -> usize {
     if requested == 0 {
         return 0;
     }
-    requested.min((span - 1.0 + HEIGHT_TOLERANCE_MM).floor().max(0.0) as usize)
+    requested.min(
+        (span - MIN_RUNG_SPACING_MM + HEIGHT_TOLERANCE_MM)
+            .floor()
+            .max(0.0) as usize,
+    )
 }
 
 fn map_height_to_path_member(forest: &Forest, path: &[MemberKey], z: f64) -> Option<MemberKey> {
@@ -3239,6 +3278,12 @@ mod tests {
     /// grid emitted, closed by one triangle to the other bottom corner. The four
     /// edge traversals are each the previous one rotated 90° about `z`, so all
     /// four walls inherit the top face's outward winding.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const HALF_MM: f64 = 4.0;
         const DEPTH_MM: f64 = 10.0;
@@ -3333,6 +3378,11 @@ mod tests {
     /// split invites is a hand-typed 0.3 somewhere, which would go stale the
     /// day a coupon measurement supersedes the owner decision.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn each_stage_reads_its_own_demanded_gap_from_the_registry() {
         let constants = m0_constants().unwrap();
         let registered_placement = constants.placeholders().standoff_mm().diagnostic().get();
@@ -3727,6 +3777,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_cross_link_thresholds_and_twin_parity_match_source_ledger() {
         let mut forest = Forest::new();
         let a = forest.add_member(member(
@@ -4021,6 +4076,11 @@ mod tests {
     /// The flat table PLUS one small foreign panel, welded into ONE surface, so
     /// a grazing arm has something to be graded against that is not the surface
     /// it is seated in.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn table_with_foreign_panel_parts(
         lo: [f64; 3],
         hi: [f64; 3],
@@ -4377,6 +4437,11 @@ mod tests {
     /// performs that sabotage itself rather than describing it, so the
     /// difference between the two rules is a number in this file.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_foreign_wall_inside_the_retired_mask_is_graded_now_that_the_exemption_names_faces() {
         let config = BraceConfig::current(0.05).unwrap();
         let policy = config.contact_policy(contact::ClearanceStage::Final);
@@ -4529,6 +4594,11 @@ mod tests {
     /// needs a mesh-connected crevice fixture, which does not exist in this tree.
     /// It is recorded so it is a known edge rather than a surprise.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn re_sizing_a_grown_arms_exemption_does_not_swallow_the_foreign_panel() {
         let config = BraceConfig::current(0.05).unwrap();
         let policy = config.contact_policy(contact::ClearanceStage::Final);
@@ -5240,6 +5310,11 @@ mod tests {
     /// radius rather than as a face count, so it pins WHICH band was cut rather
     /// than merely that some band moved.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_tapered_arm_is_re_sized_from_its_contact_end_and_not_its_free_end() {
         let config = BraceConfig::current(0.05).unwrap();
         const PITCH_MM: f64 = 0.25;
@@ -6602,6 +6677,11 @@ mod tests {
     /// EQUALITY with the number `exact_clearance_rows` measured for this exact
     /// member, taken independently in this test.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_final_pass_discloses_its_refusal_count_and_the_true_gaps_in_millimetres() {
         let surface = remote_box();
         let topology = remote_box_topology();
@@ -6890,6 +6970,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn activation_span_maps_a_rung_across_the_winning_path() {
         let mut forest = Forest::new();
         let lower = forest.add_member(member(
@@ -6944,6 +7029,11 @@ mod tests {
     /// wholly inside `lower`. The old code hosted the need on `upper`; the
     /// driver is on `lower`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_clearance_need_is_hosted_on_the_span_that_sets_the_radius() {
         // `remote_box` spans 100..110 on every axis. `lower` sits below it with
         // room to spare, `upper` runs up into it, so exactly one member reads
@@ -7096,6 +7186,11 @@ mod tests {
     /// the whole axis for both and the tested faces are `surface \ Z` for both,
     /// so nothing about seating can move the distance verdict.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_exact_pass_no_longer_reads_the_seat_depth_that_the_mask_still_carries() {
         let config = BraceConfig::current(0.05).unwrap();
         let policy = config.contact_policy(contact::ClearanceStage::Final);

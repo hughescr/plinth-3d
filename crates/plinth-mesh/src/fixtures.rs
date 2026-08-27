@@ -247,6 +247,51 @@ pub fn make_overhang_table_with(leg: [f64; 3], top: [f64; 3], z0: f64) -> Result
     Mesh::new(verts, tris)
 }
 
+/// **The coverage-repair witness: an overhang table whose own baseline layout
+/// leaves a strip of its underside outside the registered coverage radius.**
+///
+/// Same family and same generator as [`make_overhang_table`] — four legs, one
+/// top, no new geometry code — at 25 x 25 x 4 mm on 2 x 2 x 20 mm legs instead
+/// of 30 x 30 x 4 mm on 4 x 4 x 20 mm legs. It exists for one measured
+/// property, and the property is what the dimensions were chosen to produce:
+///
+/// * **the hole is measured, not asserted.** Attempt 0 leaves **0.553 mm²** of
+///   the underside uncovered on island 8, component 4, with a worst gap of
+///   **6.901 mm** to the nearest contact ROUTED to that same route — against
+///   the registered coverage radius
+///   `COVERAGE_RADIUS_FACTOR × TARGET_SPACING_MM` = 6.0 mm. That area is 3.4x
+///   the registered A3 censor `VOXEL_PITCH_MM²` = 0.16 mm², which is what
+///   makes the patch BLOCK the verdict rather than be forgiven as A3
+///   uncertainty.
+/// * **why a hole can exist here at all.** Baseline seat selection is an
+///   ordered Poisson pass at `TARGET_SPACING_MM` (`plinth-support`'s
+///   `select_island_contacts`), so no candidate is ever more than 4 mm from a
+///   selected seat and the selection alone cannot leave a 6 mm gap. Coverage
+///   counts only contacts that ROUTED, and this run's own §6 removal ledger
+///   names one regular contact on the hole's own route — candidate row 959,
+///   island 8, component 4, carrying 312.5 mm² before the removal — retired
+///   `NoWinner` because the routing cadence found it no arm. A seat that is
+///   chosen and then cannot be built is how a Poisson-covered island still
+///   measures uncovered.
+/// * the hole is closable from this model's own repair pool, so the run does
+///   not merely refuse: the controller spends two trials and commits one
+///   contact at the +X rim, and the sealing step measures zero failing
+///   patches.
+///
+/// **Nothing is loosened to get here.** The radius, the censor and the
+/// zero-area tolerance are the registered production values; the fixture
+/// changes the geometry, not the rule that judges it.
+///
+/// Its predecessor in this role was [`make_overhang_table`] itself, until
+/// `3a6526f` converged the clearance mask and seated the model anchor. That
+/// fix let the model-seated anchor family route for the first time, the 30 mm
+/// table's baseline layout began covering every island, and every test that
+/// reads a COMMITTED repair step lost its witness. This fixture is that
+/// witness, rebuilt against the fixed code rather than against the bug.
+pub fn make_uncovered_rim_table() -> Result<Mesh, MeshError> {
+    make_overhang_table_with([2.0, 2.0, 20.0], [25.0, 25.0, 4.0], 0.0)
+}
+
 /// The Python `make_toed_slab()` default.
 pub fn make_toed_slab() -> Result<Mesh, MeshError> {
     make_toed_slab_with([30.0, 30.0, 4.0], 15.0)
@@ -344,6 +389,13 @@ fn append_box(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn append_down_cone(
     verts: &mut Vec<[f64; 3]>,
     tris: &mut Vec<[u32; 3]>,
@@ -746,6 +798,13 @@ pub fn make_dual_cavity_pawn() -> Result<Mesh, MeshError> {
 /// throat ring into a point. Both are new admitted domains, not loosened
 /// ones — FU-8b permits adding a bound and forbids only loosening or
 /// bypassing an existing one.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn make_dual_cavity_pawn_with_throat_radius(throat_radius_mm: f64) -> Result<Mesh, MeshError> {
     validate_positive("throat_radius_mm", throat_radius_mm)?;
     if !(DUAL_CAVITY_MIN_THROAT_R_MM..DUAL_CAVITY_UPPER_SPHERE_R_MM).contains(&throat_radius_mm) {
@@ -777,8 +836,7 @@ pub fn make_dual_cavity_pawn_with_throat_radius(throat_radius_mm: f64) -> Result
     let ring_count = lower_rings + 1 + upper_rings; // + the throat's upper-junction ring
 
     let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 + ring_count * slices);
-    let mut tris: Vec<[u32; 3]> =
-        Vec::with_capacity(2 * slices + 2 * slices * (ring_count - 1));
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(2 * slices + 2 * slices * (ring_count - 1));
 
     verts.push(snap_vertex([0.0, 0.0, 0.0])); // index 0: foot_centre
 
@@ -949,6 +1007,11 @@ fn push_lathe_ring(verts: &mut Vec<[f64; 3]>, r: f64, z: f64, slices: usize) {
 
 /// Snap a vertex onto the STL f32 wire: `v -> (v as f32) as f64`. See the
 /// "Mandatory f32 snap" section of [`make_dual_cavity_pawn_with_throat_radius`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "deliberate narrowing to the binary32 the printer file format stores. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn snap_vertex(point: [f64; 3]) -> [f64; 3] {
     [
         f64::from(point[0] as f32),

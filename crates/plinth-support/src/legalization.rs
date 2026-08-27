@@ -409,12 +409,6 @@ impl LegalizationSteering {
         self.no_goods.len()
     }
 
-    #[allow(
-        dead_code,
-        reason = "the vocabulary lands one commit ahead of the confirmation round that drives \
-                  it; docs/specs/seal-semantics.md §\"Stage B — the legalization retry (attempt \
-                  0 only)\" piece 5 (\"The confirmation round\") names the reader"
-    )]
     pub(crate) const fn round(&self) -> Option<&ConfirmationRound> {
         self.round.as_ref()
     }

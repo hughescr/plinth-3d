@@ -612,10 +612,9 @@ impl ChainStop {
     pub fn is_support_refusal(&self) -> bool {
         match &*self.error {
             PipelineError::Support { .. } => true,
-            PipelineError::SealedRun { source, .. } => !matches!(
-                source,
-                plinth_support::SupportRunError::CoverageClosure(_)
-            ),
+            PipelineError::SealedRun { source, .. } => {
+                !matches!(source, plinth_support::SupportRunError::CoverageClosure(_))
+            }
             _ => false,
         }
     }
@@ -1729,6 +1728,14 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
 ///
 /// [`ChainStop`] carrying the typed stage error; a gate stop additionally
 /// carries the gate and the geometry it judged, and leaves no file at `target`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn seal_and_emit(
     model: &ModelId,
     source_faces: usize,
@@ -2084,6 +2091,10 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
             abandoned_contacts: outcome.abandoned_contacts,
             grown_contact_tips: outcome.grown_contact_tips,
         }),
+        // Disclosure half of the pre-write gate's #1 finding: this artifact
+        // was authorized on the gates that ran, not on all twelve, and this
+        // is the list of the ones that did not.
+        pending_gates: outcome.pending_gates,
     }
 }
 
@@ -2625,6 +2636,11 @@ mod tests {
     /// frozen report on disk takes back in, so the numbers below are the
     /// numbers a reader sees.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_chain_outcomes_disclosure_reaches_the_run_report() {
         let disclosure: plinth_support::OwnerlessIslandDisclosure = serde_json::from_str(
             r#"{"island_id":3,"ownerless_face_count":1,
@@ -2712,7 +2728,16 @@ mod tests {
             routed_contacts: 0,
             final_live_members: 0,
             snapshot_digest: 0,
-            pending_gates: Vec::new(),
+            // Non-empty and non-default on purpose: this is the field the
+            // guard exists to protect. An empty `Vec::new()` here could not
+            // tell "the eleven pending gates survived the hop" apart from
+            // "the field was dropped and defaulted to empty" -- see
+            // `crate::PreWriteGate::ALL` for the full twelve.
+            pending_gates: vec![
+                PreWriteGate::Clearance,
+                PreWriteGate::Load,
+                PreWriteGate::BallBreach,
+            ],
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -2727,11 +2752,24 @@ mod tests {
             ownerless_islands,
             contacts,
             repair_report,
+            pending_gates,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // The disclosure this guard exists to protect: the pending-gate list
+        // must reach the report unchanged, not get dropped on this hop and
+        // silently read back as "every gate ran".
+        assert_eq!(
+            pending_gates,
+            vec![
+                PreWriteGate::Clearance,
+                PreWriteGate::Load,
+                PreWriteGate::BallBreach,
+            ],
+            "the gates that did not run must reach the run report unchanged"
+        );
         // SPEC-A4 §A.8's third destination. Ruling R10 traded the failed-tries
         // cap for loud reporting, and a report that is dropped on this hop is
         // exactly the silence the ruling refused. Asserted as the whole value,

@@ -452,6 +452,11 @@ struct FrozenAt {
 }
 
 impl<'de> Deserialize<'de> for FrozenAt {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -742,6 +747,11 @@ fn expected_prepped_stl(name: &str) -> PathBuf {
     PathBuf::from("corpus/baseline").join(format!("{name}.prepped.stl"))
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn assert_freeze_settings(name: &str, settings: &PipelineSettings) {
     assert_eq!(settings.wall_mm, 2.5, "{name}: baseline wall differs");
     assert!(settings.orient, "{name}: orientation was disabled");

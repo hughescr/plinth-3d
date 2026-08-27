@@ -57,6 +57,11 @@ fn parsed_project_model_addition_fails_closed_without_mutation() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn underlength_descriptor_region_is_rejected_before_mesh_decode() {
     let mut project = Project::new_empty();
     let models: Vec<_> = (0..6)

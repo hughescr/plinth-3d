@@ -295,6 +295,13 @@ pub(crate) fn well_composed_cavity_component(
 }
 
 /// The linear index of a voxel in the mask's C-order layout.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn linear_index(dims: [usize; 3], voxel: [usize; 3]) -> u32 {
     let index = (voxel[0] * dims[1] + voxel[1]) * dims[2] + voxel[2];
     // The caller proved `dims[0] * dims[1] * dims[2]` fits in a `u32` before
@@ -616,7 +623,8 @@ mod tests {
     fn a_solid_block_is_already_well_composed_and_is_not_touched() {
         let mask = Array3::from_elem((4, 4, 4), true);
         assert_eq!(critical_cell_count(&mask), 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
+        let (repaired, stats) =
+            well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
         assert_eq!(stats.removed_voxels(), 0);
         assert_eq!(stats.critical_cells(), 0);
         // Nothing was removed, so the component was never re-selected: one
@@ -657,8 +665,8 @@ mod tests {
         // caller must be able to say "the repair ate the cavity" and not
         // "this geometry never had one", and the evidence must survive the
         // refusal rather than being discarded with the candidate.
-        let error =
-            well_composed_cavity_component(mask, 8, 0.5, 0.0).expect_err("repair removes everything");
+        let error = well_composed_cavity_component(mask, 8, 0.5, 0.0)
+            .expect_err("repair removes everything");
         let HollowError::CavityRepairRemovedCavity {
             critical_cells,
             repaired_voxels,
@@ -682,7 +690,8 @@ mod tests {
         mask[[0, 0, 0]] = false;
         mask[[1, 1, 1]] = false;
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
+        let (repaired, stats) =
+            well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         assert!(stats.removed_voxels() > 0);
         // Removal only: no background voxel ever became foreground.
@@ -708,7 +717,8 @@ mod tests {
         // Bridge them through the shared corner only.
         mask[[3, 3, 3]] = true;
         assert!(critical_cell_count(&mask) > 0);
-        let (repaired, stats) = well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
+        let (repaired, stats) =
+            well_composed_cavity_component(mask.clone(), 8, 0.5, 0.0).expect("repair");
         assert_eq!(critical_cell_count(&repaired), 0);
         for (original, result) in mask.iter().zip(repaired.iter()) {
             assert!(*original || !*result, "repair added a cavity voxel");
@@ -810,7 +820,10 @@ mod tests {
         assert_eq!(passes, 1, "refused at the opening scan's own pass count");
         assert_eq!(max_passes, 1);
         assert!(critical_cells > 0, "the fixture is pinched");
-        assert!(repaired_voxels > 0, "the opening scan already removed voxels");
+        assert!(
+            repaired_voxels > 0,
+            "the opening scan already removed voxels"
+        );
         assert!(cell_visits > 0);
     }
 
@@ -908,6 +921,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_repair_is_a_pure_function_of_the_configuration() {
         // Order-freedom: the removal set for a cell depends only on its eight
         // bits, so two scans of the same mask can never disagree.

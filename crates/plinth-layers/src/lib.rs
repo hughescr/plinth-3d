@@ -262,6 +262,13 @@ pub enum LayerUnionError {
 }
 
 #[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn quantize(value: f64) -> i64 {
     // Identical rounding to perception's `point_key`, which is what makes the
     // 1e-8 quantum lossless with respect to stitched vertices.
@@ -273,8 +280,15 @@ fn dequantize(value: i64) -> f64 {
     value as f64 * SLICE_UNION_QUANTUM_MM
 }
 
-/// Shoelace area over emitted f64 points, identical to the perception
-/// stitcher's `signed_area`.
+/// Shoelace area over emitted f64 points, intended to match
+/// `plinth-support::perception`'s private `signed_area` byte for byte, but
+/// nothing enforces that: the two are separate hand-copies with no shared
+/// implementation or cross-crate pin test. `geom_kernel::vec3` (public since
+/// this note was written) does not close this gap -- it is 3-vector
+/// arithmetic on `[f64; 3]`, not the 2D polygon primitives (shoelace area,
+/// point-in-polygon, segment distance) this function is one copy of. Moving
+/// those to one shared home with one named degeneracy tolerance is tracked
+/// as the standing duplication-consolidation sweep, not done here.
 fn signed_area(points: &[[f64; 2]]) -> f64 {
     if points.len() < 3 {
         return 0.0;
@@ -695,12 +709,12 @@ pub fn normalize_layers_batch(
     preflight(layers, limits)?;
 
     let effective_threads = geom_kernel::current_threads();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(effective_threads)
-        .build()
-        .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
     let worker_mask = AtomicU64::new(0);
-    let results: Vec<Result<NormalizedLayer, LayerUnionError>> = pool.install(|| {
+    // The kernel's cached pool for this width, not a private one built per
+    // call. Same `PLINTH_THREADS` authority and the same explicit (non-global)
+    // pool, so `effective_threads` still reports the requested width and the
+    // participation mask still ranges over that pool's own worker indices.
+    let results: Vec<Result<NormalizedLayer, LayerUnionError>> = geom_kernel::run_in_pool(|| {
         layers
             .par_iter()
             .enumerate()
@@ -713,7 +727,8 @@ pub fn normalize_layers_batch(
                 normalize_one_layer(layer_index, layer, min_area_mm2)
             })
             .collect()
-    });
+    })
+    .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
     let layers_out = results.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     let mut output_vertices = 0usize;

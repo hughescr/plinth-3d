@@ -525,6 +525,13 @@ fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, Em
 /// There is deliberately no per-primitive winding call in this path. The
 /// registered frustum/raft side counts are likewise read exactly once, here,
 /// rather than once per primitive.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn build_records(
     primitives: &[SupportPrimitive],
     center: [f64; 3],
@@ -670,6 +677,17 @@ fn sub_center(point: [f64; 3], center: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "pad-vs-bridge is an identity question, not a distance one.  A \
+              raft PAD is authored by passing one root's xy for BOTH ends \
+              (`plinth-support/src/raft.rs` `raft_primitive(root.xy_mm, \
+              root.xy_mm, ..)`), and both ends then go through the same \
+              `sub_center` with the same centre, so a pad is bit-identical by \
+              construction.  A bridge whose ends differ only by rounding dust \
+              does not silently degenerate either: `raft_bridge_triangles` \
+              rejects it on its own `length <= f64::EPSILON` guard"
+)]
 fn same_point(a: [f64; 3], b: [f64; 3]) -> bool {
     a == b
 }
@@ -690,6 +708,11 @@ fn same_f32_frame_value(actual: f32, expected: f32) -> bool {
     (actual - expected).abs() <= 32.0 * f32::EPSILON * scale
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "deliberate narrowing to the binary32 the printer file format stores. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn f32_of(value: f64) -> Result<f32, EmitError> {
     let value = value as f32;
     value
@@ -1287,6 +1310,12 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_contact_joiner_and_joint_ball_records_keep_their_distinct_roles() {
         // This is the frozen `member_chain_specs` vocabulary: a type-7
         // contact sphere, adjacent type-1 taper carrying configured depth,
@@ -1361,6 +1390,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn plate_root_joiner_uses_frozen_horizontal_ring_normal() {
         let mut root = primitive_with_radii(
             SupportSegmentKind::Member,
@@ -1623,6 +1657,11 @@ mod tests {
     /// two-manifold. Before the fix this fails at the origin centre with 32
     /// unmatched directed edges around the 16-sliver south seam.
     #[test]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn every_emitted_sphere_is_a_closed_two_manifold() {
         for center in SPHERE_TEST_CENTERS {
             for &radius in &SPHERE_TEST_RADII {
@@ -1676,6 +1715,11 @@ mod tests {
     /// that would have caught the original bug (the south "pole" used to be
     /// a 16-gon of radius `r * 1.2246e-16`, not a point).
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn both_pole_caps_are_exact_single_apex_fans() {
         for center in SPHERE_TEST_CENTERS {
             for &radius in &SPHERE_TEST_RADII {
@@ -1746,6 +1790,11 @@ mod tests {
     ///    ring pair is congruent at every centre and radius, not only the
     ///    origin.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_generated_sphere_is_exactly_north_south_symmetric() {
         let radius = 2.2;
         let triangles = sphere_triangles([0.0, 0.0, 0.0], radius).expect("valid radius");
@@ -2085,6 +2134,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn writes_and_reopens_one_fresh_supported_artifact_in_exact_record_order() {
         let primitives = vec![
             primitive(
@@ -2156,6 +2210,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn writes_zero_support_scene_and_applies_retained_lift_once() {
         let model = fixture_model(Vec::new(), 3.0);
         let target = fixture_path("zero-supports.chitubox");
@@ -2317,6 +2376,11 @@ mod tests {
     /// rounds to `8 + 2^-20`. One ulp of separation, the pad one ulp *below* the
     /// reopened plate, and the `min[2] < 0.0` floor used to refuse the file.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn raft_pad_exactly_on_the_plate_survives_a_one_ulp_plate_derivation_split() {
         let lift = 7.5 + 2.0_f64.powi(-21) + 2.0_f64.powi(-30);
         let center_z = 0.5_f64;

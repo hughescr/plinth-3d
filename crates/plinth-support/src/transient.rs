@@ -22,15 +22,7 @@ use crate::{
 
 const BRACE_ENDPOINT_BATCH_SIZE: usize = 256;
 const TRANSIENT_TIE_TOLERANCE_MM: f64 = 1e-9;
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 const MIN_GEOMETRY_LENGTH_MM: f64 = 1e-6;
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 const MIN_Z_EXTENT_MM: f64 = 1e-9;
 
 /// A restraint grips the path at `point_z_mm`, but exists only once the build
@@ -421,10 +413,6 @@ pub fn transient_report(
 /// Compute a new complete radius array in child-before-parent order. The
 /// O-10 bridge supplies the sole frozen 0.01 N compatibility load; this module
 /// neither calibrates it nor promotes it to acceptance evidence.
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 pub(crate) fn resize_forest_current_parity(
     forest: &Forest,
     plate_z_mm: Finite,
@@ -666,6 +654,12 @@ fn static_restraint_zs(
     Ok(zs)
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "collapsing bit-equal bounds after a `total_cmp` sort so \
+              `windows(2)` cannot emit a zero-length interval; two restraints \
+              that differ at all bound a real, if thin, gap"
+)]
 fn free_gaps(zlo: f64, zhi: f64, restraints: &[Finite]) -> Result<Vec<ZInterval>, TransientError> {
     let mut bounds = vec![zlo, zhi];
     bounds.extend(
@@ -682,10 +676,6 @@ fn free_gaps(zlo: f64, zhi: f64, restraints: &[Finite]) -> Result<Vec<ZInterval>
         .collect()
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn postorder(forest: &Forest) -> Vec<MemberKey> {
     fn visit(
         forest: &Forest,
@@ -754,10 +744,6 @@ fn best_member_interval(
     (best, winner)
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn equivalent_free_length_mm(worst_gap_z_mm: f64, own_length_mm: f64, z_extent_mm: f64) -> f64 {
     worst_gap_z_mm * own_length_mm / z_extent_mm.max(MIN_Z_EXTENT_MM)
 }
@@ -773,10 +759,6 @@ fn finite(value: f64) -> Result<Finite, TransientError> {
     Finite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }
 
-#[allow(
-    dead_code,
-    reason = "the crate-private current-support controller integration follows this parity leaf"
-)]
 fn positive(value: f64) -> Result<PositiveFinite, TransientError> {
     PositiveFinite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }
@@ -892,6 +874,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn active_z_sort_clamps_events_and_zero_events_use_the_trailing_span() {
         let events = [
             RestraintEvent {
@@ -934,6 +921,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn branch_report_counts_live_terminals_and_uses_lexicographically_first_path() {
         let (mut forest, root, shoot_a, shoot_b, _stub_a) = branched_fixture();
         let dead = forest.add_member(member(
@@ -965,6 +957,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn brace_endpoints_are_gathered_geometrically_and_model_embed_is_excluded() {
         let mut forest = Forest::new();
         let host = forest.add_member(member(
@@ -1058,6 +1055,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn leaning_free_gap_is_converted_back_to_true_3d_length() {
         let own_length = 20.0;
         let z_extent = 10.0;

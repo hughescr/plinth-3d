@@ -272,6 +272,11 @@ fn two_searches_over_one_mesh_agree_bit_for_bit() {
 
 /// **The funnel is the recorded one, and it narrows.**
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_three_tiers_promote_the_recorded_widths() {
     let mesh = committed("Sphere.prepped.stl");
     let outcome = search(&mesh, &request()).expect("the sphere is scorable");
@@ -324,6 +329,11 @@ fn the_three_tiers_promote_the_recorded_widths() {
 /// rotation is `u` by construction, so `(R·v)_z = v·u` and a later run that
 /// replays `up_model_frame` lands on the same frame.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_recorded_transform_is_the_rotation_the_winning_direction_defines() {
     let mesh = committed("make_raking_blade.prepped.stl");
     let outcome = search(&mesh, &request()).expect("the raking blade is scorable");
@@ -374,6 +384,11 @@ fn the_recorded_transform_is_the_rotation_the_winning_direction_defines() {
 /// the digest is unmoved by poisoning the field's inputs (there are none to
 /// poison, which is the point), and the scar terms are exactly zero.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn a_scar_free_sweep_never_builds_a_delicacy_field() {
     let mesh = committed("make_toed_slab.prepped.stl");
     let scar_free = SweepRequest {

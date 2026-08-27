@@ -1,7 +1,8 @@
 use geom_kernel::{
     indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, Interval, NativeSurface,
-    NativeSurfaceConfig, PenetrationBatchError, PenetrationBatchLimits, PlaneIntersectionKind,
-    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
+    NativeSurfaceConfig, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
+    PlaneIntersectionKind, PlaneSliceError, PlaneSliceLimits, SurfaceBuildError,
+    SurfaceSubsetError, TriangleSoup,
 };
 use std::process::Command;
 
@@ -20,6 +21,11 @@ fn surface() -> NativeSurface {
     .unwrap()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn cubes_surface(origins: &[[f64; 3]]) -> NativeSurface {
     const VERTICES: [[f64; 3]; 8] = [
         [0.0, 0.0, 0.0],
@@ -187,7 +193,7 @@ fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixtur
     let faces = [
         [0, 1, 2],  // positive owner: shared edge is emitted
         [1, 0, 3],  // negative owner: shared edge is suppressed
-        [0, 1, 4],  // fully coplanar patch
+        [0, 1, 5],  // fully coplanar patch
         [1, 5, 4],  // fully coplanar patch
         [0, 6, 7],  // vertex crossing
         [0, 2, 6],  // vertex tangent, suppressed
@@ -230,6 +236,11 @@ fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixtur
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn slice_z_batch_uses_exact_source_vertex_bits_at_tol_merge_boundary_neighbors() {
     const PLANE_BITS: u64 = 0x3eb0_9c04_82f1_8c75;
     const LOW_Z_BITS: u64 = 0x3eb0_c6f7_a0b5_ed8d;
@@ -503,6 +514,94 @@ fn generous_penetration_limits() -> PenetrationBatchLimits {
         max_total_intervals: usize::MAX,
         max_scratch_bytes: usize::MAX,
     }
+}
+
+fn generous_near_face_limits() -> NearFaceBatchLimits {
+    NearFaceBatchLimits {
+        max_rows: usize::MAX,
+        max_faces_per_row: usize::MAX,
+        max_total_faces: usize::MAX,
+    }
+}
+
+/// A probe held 0.1 mm above the top of the unit cube, over the half of that
+/// top face the FIRST of its two triangles owns.
+///
+/// Every distance the probe can reach is separated from every other one: 0.1 mm
+/// to that triangle, sqrt(0.02) = 0.1414 mm to the nearest `y = 0` side
+/// triangle, sqrt(0.03) = 0.1732 mm to the top face's OTHER triangle, and more
+/// than 0.4 mm to everything else. One triangle therefore wins each answer
+/// outright, so two views of the same geometry cannot disagree merely because
+/// their BVH leaf order broke a tie differently -- the equality assertions below
+/// are about the face IDs the views speak, not about traversal luck.
+const SEAT_PROBE_P0: [f64; 3] = [0.5, 0.1, 1.1];
+const SEAT_PROBE_P1: [f64; 3] = [0.5, 0.3, 1.1];
+/// Between 0.1 (the top triangle, IN) and 0.1414 (the nearest side, OUT).
+const SEAT_PROBE_BAND_MM: f64 = 0.12;
+/// Probe-to-top-triangle distance, with radii, standoff and insets all zero.
+const SEAT_PROBE_OPEN_CLEARANCE_MM: f64 = 0.1;
+/// Probe-to-nearest-`y = 0`-side-triangle distance, once the band is exempt:
+/// sqrt(0.1^2 + 0.1^2).
+const SEAT_PROBE_EXEMPT_CLEARANCE_MM: f64 = std::f64::consts::SQRT_2 * 0.1;
+
+/// What one view of the geometry answered when the seat-exemption pair was run
+/// against it.
+#[derive(Clone, Debug, PartialEq)]
+struct SeatExemptionAnswer {
+    band: Vec<u32>,
+    open_clearance_mm: f64,
+    open_point: [f64; 3],
+    exempt_clearance_mm: f64,
+    exempt_point: [f64; 3],
+}
+
+/// The production seat-exemption pair, run against one view of the geometry.
+///
+/// `faces_near_segments_batch` names the seat's own band and those exact global
+/// face IDs become the exclusion set of the `segment_clearance_excluding` row --
+/// the pairing `plinth-support` runs (seat_zone.rs -> brace.rs), and the pairing
+/// whose two halves both have to agree on what a face ID MEANS.
+fn seat_exemption_pair(surface: &NativeSurface) -> SeatExemptionAnswer {
+    let p0s = [SEAT_PROBE_P0];
+    let p1s = [SEAT_PROBE_P1];
+    let zero = [0.0];
+    let band = surface
+        .faces_near_segments_batch(
+            &p0s,
+            &p1s,
+            &[SEAT_PROBE_BAND_MM],
+            generous_near_face_limits(),
+        )
+        .unwrap();
+    let (open_clr, open_pt) = surface
+        .segment_clearance(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
+        .unwrap();
+    let exempt_rows: Vec<&[u32]> = band.iter().map(Vec::as_slice).collect();
+    let (exempt_clr, exempt_pt) = surface
+        .segment_clearance_excluding(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero, &exempt_rows)
+        .unwrap();
+    SeatExemptionAnswer {
+        band: band[0].clone(),
+        open_clearance_mm: open_clr[0],
+        open_point: open_pt[0],
+        exempt_clearance_mm: exempt_clr[0],
+        exempt_point: exempt_pt[0],
+    }
+}
+
+/// Assert the pair behaved: the exemption was NOT vacuous -- it moved the answer
+/// off the face it forgave -- and both halves landed on the frozen distances.
+fn assert_seat_exemption_answers(answer: &SeatExemptionAnswer, what: &str) {
+    let open = answer.open_clearance_mm;
+    let exempt = answer.exempt_clearance_mm;
+    assert!(
+        (open - SEAT_PROBE_OPEN_CLEARANCE_MM).abs() < 1e-12,
+        "{what}: unexempt clearance {open} is not the 0.1 mm gap to the top triangle"
+    );
+    assert!(
+        (exempt - SEAT_PROBE_EXEMPT_CLEARANCE_MM).abs() < 1e-12,
+        "{what}: exempting the band left {exempt}, not the sqrt(0.02) mm gap to the side"
+    );
 }
 
 /// The batch's counted (census-derived) limits — since FU-8g H1 these are the
@@ -873,6 +972,12 @@ fn penetration_census_severs_work_from_hits_and_prices_the_counted_row() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn penetration_census_sample_budget_is_the_closed_form_bound() {
     let surface = cubes_surface(&[[0.0, 0.0, 0.0]]);
     let p0s = [[-1.0, 0.5, 0.5]];
@@ -989,6 +1094,11 @@ fn update_penetration_hash(hash: &mut u64, value: u64) {
 }
 
 #[test]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn bounded_penetration_thread_identity_child() {
     let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
     let limits = surface
@@ -1375,6 +1485,11 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn identity_subset_matches_every_native_query_family() {
     let full = cube_surface();
     let subset = full
@@ -1442,6 +1557,15 @@ fn identity_subset_matches_every_native_query_family() {
             .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap()
     );
+    let full_seat = seat_exemption_pair(&full);
+    let subset_seat = seat_exemption_pair(&subset);
+    assert_eq!(
+        full_seat.band,
+        vec![2],
+        "the band names the top face's first triangle by its GLOBAL ID"
+    );
+    assert_eq!(full_seat, subset_seat);
+    assert_seat_exemption_answers(&full_seat, "identity subset");
     assert_eq!(full.exterior_face_mask(), subset.exterior_face_mask());
 }
 
@@ -1527,6 +1651,33 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
             .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap()
     );
+    // The seat-exemption pair, on views that are NOT the identity map. Both
+    // halves walk the BVH, whose leaf order carries GLOBAL face IDs (bvh.rs
+    // "Leaf order carries global face IDs even for a narrowed mesh view"), so
+    // both must report and match those IDs directly. Reading `face_ids()` --
+    // the slot-to-global map, whose length is the SUBSET size -- with a global
+    // ID is out of bounds here, and was silently the identity on every full
+    // mesh the suite tested before.
+    let full_seat = seat_exemption_pair(&full);
+    let parent_seat = seat_exemption_pair(&parent);
+    let child_seat = seat_exemption_pair(&child);
+    assert_eq!(
+        full_seat.band,
+        vec![14],
+        "the band names the second cube's first top triangle by its GLOBAL ID"
+    );
+    assert_eq!(
+        parent_seat, full_seat,
+        "a 13-face view of a 24-face mesh answers the seat pair exactly as the whole mesh does"
+    );
+    assert_eq!(
+        child_seat, full_seat,
+        "a 12-face view of a 24-face mesh answers the seat pair exactly as the whole mesh does"
+    );
+    assert_seat_exemption_answers(&full_seat, "whole mesh");
+    assert_seat_exemption_answers(&parent_seat, "13-face parent view");
+    assert_seat_exemption_answers(&child_seat, "12-face child view");
+
     assert_eq!(child.exterior_face_mask(), &parent_mask[1..]);
     assert_eq!(child.exterior_face_mask().len(), child.nfaces());
     assert_eq!(
@@ -1540,6 +1691,70 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
             .zip(parent_mask[1..].iter().copied())
             .collect::<Vec<_>>(),
         "sparse mask entries pair one-to-one with ascending global face IDs"
+    );
+}
+
+/// The seat-exemption pair on a view chosen so that reading `face_ids()` with a
+/// global face ID stays IN BOUNDS and answers with the wrong face.
+///
+/// The nested-subset test above catches the mistake as an out-of-bounds panic,
+/// which is the loud half. This is the quiet half: 15 face slots, and the band's
+/// winning face -- global 14 -- lands on slot 14, which holds global 16. A
+/// slot-lookup answers `[16]`, a face this view really does own, sorted,
+/// deduplicated, inside every documented postcondition, and simply not the face
+/// the walk found. Downstream that face ID becomes a clearance exemption, so the
+/// wrong answer forgives a face nobody asked to forgive.
+#[test]
+fn a_narrowed_view_reports_the_face_the_walk_found_not_the_slot_it_sat_in() {
+    let full = cubes_surface(&[[-20.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+    let mut view_ids: Vec<u32> = (0..12).collect();
+    view_ids.extend([14, 15, 16]);
+    let view = full.subset(&view_ids).unwrap();
+    assert_eq!(view.nfaces(), 15);
+    assert_eq!(view.geometry().nfaces(), 24);
+    assert_eq!(
+        view.face_ids()[14],
+        16,
+        "slot 14 of this view holds global face 16, so a slot lookup on global 14 \
+         is in bounds and wrong -- which is what gives this test its teeth"
+    );
+
+    let p0s = [SEAT_PROBE_P0];
+    let p1s = [SEAT_PROBE_P1];
+    let zero = [0.0];
+    let band = view
+        .faces_near_segments_batch(
+            &p0s,
+            &p1s,
+            &[SEAT_PROBE_BAND_MM],
+            generous_near_face_limits(),
+        )
+        .unwrap();
+    assert_eq!(
+        band,
+        vec![vec![14]],
+        "the band holds the top triangle the walk actually measured at 0.1 mm"
+    );
+
+    let exempt_rows: Vec<&[u32]> = band.iter().map(Vec::as_slice).collect();
+    let (open_clr, _) = view
+        .segment_clearance(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
+        .unwrap();
+    let (exempt_clr, _) = view
+        .segment_clearance_excluding(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero, &exempt_rows)
+        .unwrap();
+    assert!(
+        (open_clr[0] - SEAT_PROBE_OPEN_CLEARANCE_MM).abs() < 1e-12,
+        "unexempt clearance {} is not the 0.1 mm gap to the top triangle",
+        open_clr[0]
+    );
+    // This view does not own the `y = 0` side triangle the fuller views fall back
+    // to, so exempting face 14 leaves the top face's OTHER triangle nearest, at
+    // sqrt(0.1^2 + 0.1^2 + 0.1^2) mm.
+    assert!(
+        (exempt_clr[0] - 0.03_f64.sqrt()).abs() < 1e-12,
+        "exempting face 14 left {}, not the sqrt(0.03) mm gap to the top face's other triangle",
+        exempt_clr[0]
     );
 }
 
@@ -1955,17 +2170,23 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
 }
 
 #[test]
-fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
-    let surface = NativeSurface::from_indexed(
-        &[[0.0, 0.0, 0.0]],
-        &[[0, 0, 0]],
-        NativeSurfaceConfig {
-            grid_pitch_mm: 2.0,
-            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
-        },
-    )
-    .unwrap();
-    assert_eq!(surface.nfaces(), 1);
-    assert_eq!(surface.geometry().areas(), &[0.0]);
-    assert_eq!(surface.geometry().normals(), &[[0.0, 0.0, 0.0]]);
+fn indexed_repeated_index_face_is_refused_rather_than_given_a_zero_normal() {
+    assert_eq!(
+        NativeSurface::from_indexed(
+            &[[0.0, 0.0, 0.0]],
+            &[[0, 0, 0]],
+            NativeSurfaceConfig {
+                grid_pitch_mm: 2.0,
+                max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
+            },
+        )
+        .err(),
+        Some(SurfaceBuildError::DegenerateFace {
+            face: 0,
+            cause: geom_kernel::DegenerateFaceCause::RepeatedVertexIndex {
+                corners: (0, 1),
+                index: 0
+            },
+        })
+    );
 }

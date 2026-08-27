@@ -60,6 +60,11 @@ use plinth_solid::{BooleanLimits, ManifoldBackend, Mesh as SolidMesh};
 /// builders before comparing them to the frozen corpus. Only meshes that
 /// passed through the Manifold boolean kernel need this: the fixture itself
 /// is f32-exact by construction and passes the strict writer untouched.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn on_the_wire(mesh: &Mesh) -> Result<Mesh, MeshError> {
     let verts = mesh
         .verts()
@@ -275,9 +280,8 @@ fn run_setting(dir: &Path, name: &str, throat_radius_mm: f64) {
 /// certification `create_shell` runs internally, reproduced here because the
 /// `ShellCandidate` this binary receives back no longer owns the source mesh.
 fn closed_solid_volume_mm3(mesh: &Mesh) -> f64 {
-    let topology =
-        plinth_mesh::build_face_topology(mesh, plinth_mesh::WeldPolicy::ExactBits)
-            .expect("source topology is buildable");
+    let topology = plinth_mesh::build_face_topology(mesh, plinth_mesh::WeldPolicy::ExactBits)
+        .expect("source topology is buildable");
     let certificate = plinth_mesh::certify_closed_components(mesh, &topology)
         .expect("source is a closed, oriented solid");
     certificate.signed_volume_mm3()
