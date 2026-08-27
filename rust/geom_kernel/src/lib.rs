@@ -66,7 +66,7 @@ use sha2::{Digest, Sha256};
 /// difference between them as corruption.
 pub use consts::EPS as MOLLER_EPS;
 use mesh::Mesh;
-pub use mesh::{FaceBounds, FaceGeometry};
+pub use mesh::{DegenerateFaceCause, FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
 pub use point_index::{
     knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr,
@@ -78,12 +78,13 @@ pub use queries::{
     AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
     BatchInputError, CapsuleRay, CapsuleRays, CastRaysBatch, Interval, NativeSurface,
     NearFaceBatchError, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
-    PenetrationBatchMeter, PenetrationRowCensus, SphereBreachBatch,
+    PenetrationBatchMeter, PenetrationRowCensus, SegmentClearance, SphereBreachBatch,
+    UnmeasuredSegment,
 };
 pub use segment_batch::{
-    point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,
-    PointSegmentBatchError, PointSegmentBatchLimits, PointSegmentDistanceBatch,
-    PointSegmentTaperBatch,
+    point_nearest_segment_batch, point_segment_distances_batch, point_segment_taper_batch,
+    FrozenJointTaperBatch, NearestSegment, PointNearestSegmentBatch, PointSegmentBatchError,
+    PointSegmentBatchLimits, PointSegmentDistanceBatch, PointSegmentTaperBatch,
 };
 pub use slicing::{
     PlaneIntersection, PlaneIntersectionKind, PlaneSliceBatch, PlaneSliceError, PlaneSliceLimits,
@@ -306,6 +307,17 @@ pub enum SurfaceBuildError {
         face: usize,
         operation: &'static str,
     },
+    /// An indexed face spans no area, so it has no normal to store.
+    ///
+    /// Distinct from [`Self::IndexedDerivedArithmetic`] on purpose: that
+    /// variant means an intermediate came out non-finite, which is an
+    /// arithmetic failure. This one is finite arithmetic reporting a real
+    /// geometric fact -- the triangle is a line. Filing it under the other
+    /// variant would read as precision the value does not have.
+    DegenerateFace {
+        face: usize,
+        cause: DegenerateFaceCause,
+    },
     MemoryEstimateOverflow {
         section: &'static str,
     },
@@ -358,6 +370,10 @@ impl std::fmt::Display for SurfaceBuildError {
             Self::IndexedDerivedArithmetic { face, operation } => write!(
                 formatter,
                 "indexed face {face} produced non-finite {operation}"
+            ),
+            Self::DegenerateFace { face, cause } => write!(
+                formatter,
+                "indexed face {face} spans no area and has no normal: {cause}"
             ),
             Self::MemoryEstimateOverflow { section } => {
                 write!(formatter, "native memory estimate overflow in {section}")

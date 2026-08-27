@@ -674,8 +674,8 @@ mod memory_tests {
 
     #[test]
     fn grid_dimension_rejects_saturating_quotient_without_debug_release_divergence() {
-        let vertices = [[0.0, 0.0, 0.0]];
-        let faces = [[0, 0, 0]];
+        let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let faces = [[0, 1, 2]];
         let bounds = [[0.0; 3], [0.0; 3]];
 
         let direct = checked_grid_layout(bounds, [0, 1], f64::MIN_POSITIVE);
@@ -715,9 +715,10 @@ mod memory_tests {
         let overflowing_extent = 4_000_000_000.0;
         let vertices = [
             [0.0, 0.0, 0.0],
-            [overflowing_extent, overflowing_extent, overflowing_extent],
+            [overflowing_extent, overflowing_extent, 0.0],
+            [0.0, 0.0, overflowing_extent],
         ];
-        let faces = [[0, 0, 0], [1, 1, 1]];
+        let faces = [[0, 1, 2]];
         let bounds = [[0.0; 3], [overflowing_extent; 3]];
 
         assert!(checked_grid_layout(bounds, [0, 1], 1.0)

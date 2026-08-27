@@ -188,7 +188,7 @@ fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixtur
     let faces = [
         [0, 1, 2],  // positive owner: shared edge is emitted
         [1, 0, 3],  // negative owner: shared edge is suppressed
-        [0, 1, 4],  // fully coplanar patch
+        [0, 1, 5],  // fully coplanar patch
         [1, 5, 4],  // fully coplanar patch
         [0, 6, 7],  // vertex crossing
         [0, 2, 6],  // vertex tangent, suppressed
@@ -2144,17 +2144,23 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
 }
 
 #[test]
-fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
-    let surface = NativeSurface::from_indexed(
-        &[[0.0, 0.0, 0.0]],
-        &[[0, 0, 0]],
-        NativeSurfaceConfig {
-            grid_pitch_mm: 2.0,
-            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
-        },
-    )
-    .unwrap();
-    assert_eq!(surface.nfaces(), 1);
-    assert_eq!(surface.geometry().areas(), &[0.0]);
-    assert_eq!(surface.geometry().normals(), &[[0.0, 0.0, 0.0]]);
+fn indexed_repeated_index_face_is_refused_rather_than_given_a_zero_normal() {
+    assert_eq!(
+        NativeSurface::from_indexed(
+            &[[0.0, 0.0, 0.0]],
+            &[[0, 0, 0]],
+            NativeSurfaceConfig {
+                grid_pitch_mm: 2.0,
+                max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
+            },
+        )
+        .err(),
+        Some(SurfaceBuildError::DegenerateFace {
+            face: 0,
+            cause: geom_kernel::DegenerateFaceCause::RepeatedVertexIndex {
+                corners: (0, 1),
+                index: 0
+            },
+        })
+    );
 }
