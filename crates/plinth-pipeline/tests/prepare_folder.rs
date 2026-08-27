@@ -884,11 +884,13 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
 /// **Re-pinned onto `make_raking_blade` (2026-08-12).** This test used to run
 /// `make_overhang_table`, which was the coverage-refusing fixture; with
 /// nomination scored against the measurement's uncovered samples that model
-/// now CLOSES and emits
-/// (`plinth-support/tests/support_runner_integration.rs`,
-/// `public_runner_closes_overhang_table_only_after_appending_repair_contacts`),
-/// so it can no longer stand for a refusal. `make_raking_blade` can — and as of
-/// 2026-08-14 it is the PROCEDURAL blade, not the `.prepped.stl` (see
+/// now CLOSES and emits. (That test is
+/// `plinth-support/tests/support_runner_integration.rs`,
+/// `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`;
+/// it was re-pointed off the overhang table onto `make_uncovered_rim_table`
+/// on 2026-08-26, when the overhang table stopped needing repair at all.)
+/// So the overhang table can no longer stand for a refusal. `make_raking_blade`
+/// can — and as of 2026-08-14 it is the PROCEDURAL blade, not the `.prepped.stl` (see
 /// [`refusal_fixture`] for the measured reason). Its island 5 has
 /// `NoRoutedContact` on every one of the 8 attempts, 5.135 mm² uncovered on one
 /// patch: the CCO transcript admits none of the 8 repair rows nominated from
@@ -1400,7 +1402,9 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     // is not answered by substituting different geometry. In that window this
     // block asserted one artifact, exit 3, and the same verdict
     // `first_artifact.rs`'s `corpus_sphere_drilled_plan_is_refused_before_any_file_exists`
-    // pinned running the sphere alone.
+    // pinned running the sphere alone. (That test was DELETED on 2026-08-26:
+    // at `3a6526f` the sphere's islands became coverable, it seals at attempt
+    // 0 and emits, so the refusal it pinned had stopped existing.)
     //
     // **2026-08-12, FU-53 landed: the sphere's route moved a second time, and
     // it now diverges from `first_artifact.rs`'s single-model run.** FU-53

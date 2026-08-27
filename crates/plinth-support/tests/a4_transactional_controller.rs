@@ -11,8 +11,8 @@
 //! | test | the claim it holds |
 //! | --- | --- |
 //! | `toed_slab…zero_trials…` | design §E.5 case 6 and §G.3: a model that closes at attempt 0 never enters a transaction, so its digest CANNOT move under this change. The regression pin for the whole controller. |
-//! | `overhang_table…three_clauses…` | design §G.2's strengthened assertion: every committed step proved all three accept clauses, and the proof is re-run through the production predicate rather than restated here. |
-//! | `overhang_table…attribution…` | design §D.1: one step, one row, one delta. The batch loop could not produce this at all. |
+//! | `uncovered_rim_table…three_clauses…` | design §G.2's strengthened assertion: every committed step proved all three accept clauses, and the proof is re-run through the production predicate rather than restated here. |
+//! | `uncovered_rim_table…attribution…` | design §D.1: one step, one row, one delta. The batch loop could not produce this at all. |
 //! | `raking_blade…measured_class…` | design §E.1 and rulings R7/R14: the refusal names a MEASURED defect class per route, never a distance claim, and it names the same island at the same area the batch controller does. The class is pinned EXACTLY — see the test's own note on why "one of six" proved nothing. |
 //! | `every_run_reports…` | design §A.8 and ruling R10: no failed-tries cap, so the trial count and the wall time are LOUD on every path. |
 //! | `the_loop_streams…` | task #67: the loop is loud DURING, not only at the end — a progress line lands before the summary on both the sealed and the refused path, and the 45-trial fixture trips the trial cadence mid-run. |
@@ -23,8 +23,8 @@ use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_raking_blade, make_toed_slab, DelicacyBuildConfig,
-    DelicacySettings, Mesh,
+    evaluate_delicacy, make_raking_blade, make_toed_slab, make_uncovered_rim_table,
+    DelicacyBuildConfig, DelicacySettings, Mesh,
 };
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::coverage_repair::capture::RunLogCapture;
@@ -175,7 +175,7 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
     );
 }
 
-/// **Design §G.2's strengthened overhang-table assertion.** The batch
+/// **Design §G.2's strengthened committed-step assertion.** The batch
 /// controller's version of this test asserts that the blocking count is
 /// non-increasing and falls at least once, which is a PROXY for "a repair
 /// worked". Under one-winner transactions the property is a guarantee by
@@ -190,13 +190,22 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
 /// The proof is re-run through the production predicate `repair_step_outcome`
 /// rather than restated here. A test that re-implements the rule it is checking
 /// proves only that two copies of the same mistake agree.
+///
+/// **The fixture moved from `make_overhang_table` to
+/// `make_uncovered_rim_table` on 2026-08-26** and not one assertion moved with
+/// it: `3a6526f` let the model-seated anchor family route, the 30 mm table's
+/// baseline layout began covering every island, and this test was left reading
+/// an empty committed-step list — vacuous rather than wrong. The replacement
+/// is the same generator at 25 x 25 x 4 mm on 2 x 2 x 20 mm legs, chosen
+/// because it still measures 0.553 mm² uncovered at attempt 0, over three
+/// times the registered censor, and closes it from its own repair pool.
 #[test]
-fn every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses() {
+fn every_committed_step_on_the_uncovered_rim_table_proved_all_three_accept_clauses() {
     let authority = run(
-        make_overhang_table().expect("procedural overhang table"),
-        "make_overhang_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
     )
-    .expect("make_overhang_table closes through repair");
+    .expect("make_uncovered_rim_table closes through repair");
 
     let report = authority.repair_report();
     assert!(
@@ -303,10 +312,10 @@ fn every_committed_step_on_the_overhang_table_proved_all_three_accept_clauses() 
 #[test]
 fn a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered() {
     let authority = run(
-        make_overhang_table().expect("procedural overhang table"),
-        "make_overhang_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
     )
-    .expect("make_overhang_table closes through repair");
+    .expect("make_uncovered_rim_table closes through repair");
 
     let committing = authority
         .repair_steps()
@@ -653,10 +662,10 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
 #[test]
 fn every_run_reports_its_trials_and_its_wall_time_on_the_sealed_path() {
     let authority = run(
-        make_overhang_table().expect("procedural overhang table"),
-        "make_overhang_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
     )
-    .expect("make_overhang_table closes through repair");
+    .expect("make_uncovered_rim_table closes through repair");
     let report = authority.repair_report();
 
     assert!(report.wall_time_per_trial_min_ms <= report.wall_time_per_trial_median_ms);
@@ -682,12 +691,20 @@ fn every_run_reports_its_trials_and_its_wall_time_on_the_sealed_path() {
 
 /// **Rule N1, through the production door.**
 ///
-/// `make_overhang_table` carries ONE worklist route and 1,011 eligible repair
-/// rows, and it seals on its first trial — so every one of the other 1,010 rows
-/// is still ranked and untried when the loop stops. That number is the rule:
-/// the batch loop's `picked >= patches.len()` throttle would leave a handful,
-/// which is how the Rotting Warhorse's single-patch 11.879 mm² island got 8
-/// seats out of 377 and refused with 361 never tried.
+/// `make_uncovered_rim_table` carries ONE worklist route and ONE blocking
+/// patch, and it seals on its second trial — so **539 eligible rows are still
+/// ranked and untried** when the loop stops (measured 2026-08-26; it was 1,010
+/// on `make_overhang_table`, which stopped needing repair at `3a6526f`). The
+/// count is the rule: the batch loop's `picked >= patches.len()` throttle
+/// would leave a handful on a one-patch model, which is how the Rotting
+/// Warhorse's single-patch 11.879 mm² island got 8 seats out of 377 and
+/// refused with 361 never tried.
+///
+/// **The threshold below does not move with the fixture, and that is why it is
+/// the assertion.** A per-patch or per-route cap on this model leaves ~1 row
+/// ranked, not 100; the bound separates "every eligible row" from "a handful"
+/// by two orders of magnitude at either measured figure, so re-pinning the
+/// fixture re-pinned no expectation.
 ///
 /// The direct revert proof lives on `rank_eligible_candidates`; this is the
 /// same rule read off the shipped controller, so a cap re-added anywhere on the
@@ -696,10 +713,10 @@ fn every_run_reports_its_trials_and_its_wall_time_on_the_sealed_path() {
 #[test]
 fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
     let authority = run(
-        make_overhang_table().expect("procedural overhang table"),
-        "make_overhang_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
     )
-    .expect("make_overhang_table closes through repair");
+    .expect("make_uncovered_rim_table closes through repair");
     let report = authority.repair_report();
 
     assert!(
@@ -722,9 +739,10 @@ fn the_production_ranking_keeps_every_eligible_row_and_not_one_per_patch() {
 /// Three claims, and each fails independently:
 ///
 /// 1. **A progress line lands BEFORE the summary, on the sealed path.** The
-///    overhang table seals on its first trial, so what this pins is the entry
-///    line — which is exactly the line that makes a run killed during trial 1
-///    leave a non-empty log.
+///    uncovered-rim table seals on its second trial, so what this pins is the
+///    entry line — which is exactly the line that makes a run killed during
+///    trial 1 leave a non-empty log, and it is asserted by its `trials=0`
+///    count rather than by its position alone.
 /// 2. **The 30-trial cadence really fires on a live loop.** The raking blade
 ///    spends 45 trials, so a correct pacer emits at entry AND at trial 30: two
 ///    progress lines, not one. A pacer that never re-arms, or one wired
@@ -768,10 +786,10 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
     // ---- the sealed path -------------------------------------------------
     let capture = RunLogCapture::install();
     let authority = run(
-        make_overhang_table().expect("procedural overhang table"),
-        "make_overhang_table",
+        make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+        "make_uncovered_rim_table",
     )
-    .expect("make_overhang_table closes through repair");
+    .expect("make_uncovered_rim_table closes through repair");
     let sealed_lines = capture.lines();
     drop(capture);
     let sealed_report = authority.repair_report();

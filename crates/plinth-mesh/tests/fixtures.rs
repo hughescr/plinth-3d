@@ -1,10 +1,11 @@
 use plinth_mesh::{
     build_face_topology, certify_closed_components, load_binary_stl, make_box, make_box_default,
     make_dual_cavity_pawn, make_dual_cavity_pawn_with_throat_radius, make_overhang_table,
-    make_raking_blade, make_thin_fin, make_toed_slab, mesh_fingerprint, write_binary_stl, Mesh,
-    MeshError, WeldPolicy, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
-    DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE,
-    TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+    make_raking_blade, make_thin_fin, make_toed_slab, make_uncovered_rim_table, mesh_fingerprint,
+    write_binary_stl, Mesh, MeshError, WeldPolicy, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM,
+    DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE,
+    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
+    TOPOLOGY_CUT_SAME_DIRECTION,
 };
 
 type FixtureExpectation = (
@@ -67,6 +68,55 @@ fn native_fixture_shapes_have_frozen_counts_bounds_and_face_order() {
             "{name} changed first source face"
         );
     }
+}
+
+/// **The coverage-repair witness is five closed, outward-wound boxes and
+/// nothing else.**
+///
+/// `make_uncovered_rim_table` is the fixture that gives the committed-repair
+/// tests something to observe (`plinth-support`'s
+/// `a4_transactional_controller.rs`, `plinth-pipeline`'s
+/// `a4_production_door.rs`), and what it is FOR is a measured coverage hole in
+/// the support planner. That makes its geometry load-bearing evidence, so it
+/// is pinned here the way the other native fixtures are: exact counts, exact
+/// bounds, and the closed-solid certificate — a fixture that quietly stopped
+/// being manifold would move every number those tests read and none of them
+/// would say why.
+#[test]
+fn uncovered_rim_table_is_five_closed_boxes_at_frozen_dimensions() {
+    let mesh = make_uncovered_rim_table().expect("procedural uncovered-rim table");
+    assert_eq!(
+        mesh.verts().len(),
+        40,
+        "four legs and one top, eight verts each"
+    );
+    assert_eq!(mesh.tris().len(), 60, "twelve triangles per box");
+    let (low, high) = mesh.bounds_z();
+    assert!(low.abs() < 1e-12, "the legs stand on z = 0: {low}");
+    assert!(
+        (high - 24.0).abs() < 1e-12,
+        "20 mm legs under a 4 mm top: {high}"
+    );
+
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.counts().boundary_edges,
+        0,
+        "an open edge here would make the hole a meshing artifact instead of a planning fact"
+    );
+    let certificate = certify_closed_components(&mesh, &topology).expect("certificate");
+    assert_eq!(
+        certificate.components().len(),
+        5,
+        "four legs and one top, each its own closed solid"
+    );
+    assert!(
+        certificate
+            .components()
+            .iter()
+            .all(|component| component.signed_volume_mm3() > 0.0),
+        "every component must be outward wound"
+    );
 }
 
 #[test]

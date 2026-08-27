@@ -1,0 +1,23 @@
+{
+  "input_stl": "procedural: plinth_mesh::make_uncovered_rim_table()",
+  "status": "ok",
+  "note": "HAND-AUTHORED ORIENTATION PIN, not a legacy-engine run. plinth_mesh::make_uncovered_rim_table() is procedural geometry built in code, so there is no retired-engine report to recover one from. plinth_orient::selection_from_report reads exactly three things out of this file -- the single hollow stage, its status, and its orientation axis and angle -- and this record carries those and nothing it cannot stand behind. The axis and angle are make_overhang_table's own ratified pin (axis X, -30 deg), which applies here because this fixture IS that fixture's generator at different dimensions: same four legs, same top, same family. No volume, cavity, drain or verification claim is made, because none was measured.",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "report": {
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": -30
+        },
+        "orientation_provenance": "synthetic-fixture-pin-from-make_overhang_table",
+        "oriented": true
+      }
+    }
+  ]
+}

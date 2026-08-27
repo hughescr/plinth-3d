@@ -2390,7 +2390,7 @@ mod tests {
                 // fixture's island 0 closes from its own repair pool and the
                 // run seals under both fields
                 // (`plinth-support/tests/support_runner_integration.rs`,
-                // `public_runner_closes_overhang_table_only_after_appending_repair_contacts`).
+                // `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`).
                 // Two sealed runs mean two sealed digests, and they differ —
                 // which is exactly FU-38's original contact-selection
                 // tie-break finding for this fixture, restored to visibility

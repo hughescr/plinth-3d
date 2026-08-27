@@ -52,21 +52,6 @@ impl Drop for Scratch {
     }
 }
 
-/// The corpus STLs are provisioned inputs, not source, so they are gitignored
-/// and fetched by the M0 corpus step. Follow the precedent already set by
-/// `plinth-decimate`'s `corpus_budgets` gate: name the missing path in the
-/// failure rather than skipping silently.
-fn require_corpus_stl(name: &str) -> PathBuf {
-    let path = chain::corpus_stl(name);
-    assert!(
-        path.is_file(),
-        "RequiredCorpusModelMissing: required corpus model {} is missing; \
-         provision corpus/models per the M0 corpus step",
-        path.display()
-    );
-    path
-}
-
 /// Assert every property of the written artifact that does not depend on how
 /// many members the support gate happened to keep.
 fn assert_artifact_is_sound(outcome: &chain::ChainOutcome, audit: &chain::DiskAudit) {
@@ -156,62 +141,6 @@ fn assert_artifact_is_sound(outcome: &chain::ChainOutcome, audit: &chain::DiskAu
     );
 }
 
-/// **The corpus Sphere no longer reaches disk, and that is the fix.**
-///
-/// The Sphere hollows, drains, drills and seals — every one of those arrows
-/// still works, and this test still drives all of them. What changed is the
-/// last arrow: the pre-write coverage gate now judges the sealed plan, and the
-/// drilled shell's plan leaves uncovered islands. Before the gate was wired,
-/// that plan was written to a `.chitubox` and handed to the owner anyway,
-/// because *nothing* consulted a physics verdict before the write.
-///
-/// The refusal is terminal by design: neither a gate refusal nor a
-/// coverage-closure refusal falls back to the oriented-solid reserve. The
-/// reserve answers "this geometry could not be sealed"; substituting a
-/// different geometry for a model the engine just declared under-supported
-/// would hand the owner a plausible artifact for a question it failed.
-///
-/// **FU-56 plus the 2026-08-12 review fix: the refusal moved one stage
-/// earlier, and stayed terminal.** `run_support` is the coverage-closure
-/// controller and measures ROUTED coverage under the SAME registered radius
-/// the gate measures, so the Sphere's uncovered islands are now found before
-/// the gate is reached. The controller repairs them from the immutable repair
-/// pool; on this geometry the repair-extended plan is eventually one the CCO
-/// router refuses (`Cco(InvalidGeometry)`), and that refusal is classified as
-/// the coverage refusal it is (`RepairPlanRefused`) rather than as a bare
-/// routing failure — because attempt 0 sealed this geometry all the way
-/// through lowering, so the geometry is not what failed. Classified as a bare
-/// routing failure it would have been handed to the oriented-solid reserve
-/// and emitted a SUBSTITUTED solid after a coverage verdict, which is exactly
-/// the substitution this test exists to prevent.
-///
-/// The uncovered islands themselves are a support-planning finding, not this
-/// seam's to fix. What this seam owes is that they stop the file.
-#[test]
-fn corpus_sphere_drilled_plan_is_refused_before_any_file_exists() {
-    require_corpus_stl("Sphere");
-    let scratch = Scratch::new("sphere");
-
-    let refusal = chain::run_corpus_model("Sphere", scratch.path())
-        .expect_err("the Sphere's drilled plan does not cover its islands");
-    assert!(
-        refusal.is_coverage_closure_refusal(),
-        "Sphere must be refused on coverage, by the closure controller: {refusal}"
-    );
-    assert!(
-        !refusal.is_support_refusal(),
-        "a coverage refusal must never be answered with a substitute geometry: {refusal}"
-    );
-
-    // The whole point: refused *before* the write, so there is nothing on disk
-    // to hand anyone — not a truncated file, not an empty one.
-    assert!(
-        !scratch.path().exists(),
-        "a coverage-refused model wrote {}",
-        scratch.path().display()
-    );
-}
-
 /// The refusal removes a *stale* artifact at the target too.
 ///
 /// "A refused model leaves no path on disk" is a claim about the path, not
@@ -220,19 +149,30 @@ fn corpus_sphere_drilled_plan_is_refused_before_any_file_exists() {
 /// where the next thing to read it — the owner, or `run_one` in
 /// `examples/first_artifact.rs`, which unlike `Scratch` does not unlink first —
 /// would take it for this run's answer.
+///
+/// **Re-pinned off the corpus Sphere onto `make_raking_blade` (2026-08-26).**
+/// The claim is unchanged and so is every assertion; what changed is which
+/// model still produces a coverage refusal to make it with. `3a6526f`
+/// converged the clearance mask and seated the model anchor, the Sphere's
+/// islands became coverable, and it now seals and emits — so a test that
+/// demanded a refusal from it was asserting something that had stopped being
+/// true. `make_raking_blade` is this file's standing refusal fixture (see
+/// `procedural_raking_blade_is_refused_before_any_file_exists` below), it is
+/// procedural, and it needs no provisioned `corpus/models/`, which is task
+/// #16's known hole closed here as a side effect.
 #[test]
 fn a_coverage_refusal_removes_a_stale_artifact_already_at_the_target() {
-    require_corpus_stl("Sphere");
-    let scratch = Scratch::new("sphere-stale");
+    let scratch = Scratch::new("raking-blade-stale");
     std::fs::write(scratch.path(), b"an artifact from an earlier run")
         .expect("plant a stale artifact");
 
-    let refusal = chain::run_corpus_model("Sphere", scratch.path())
-        .expect_err("the Sphere's drilled plan does not cover its islands");
-    // FU-56: the coverage verdict is now spoken one stage earlier, by the
-    // closure controller. The claim under test — a stale artifact does not
-    // survive a refusal at this target — is about the path, not about which
-    // stage spoke.
+    let mesh = plinth_mesh::make_raking_blade().expect("procedural raking blade");
+    let refusal = chain::run_procedural_model("make_raking_blade", mesh, scratch.path())
+        .expect_err("make_raking_blade's residual islands have no closing repair-pool candidate");
+    // FU-56: the coverage verdict is spoken by the closure controller, one
+    // stage before the pre-write gate. The claim under test — a stale artifact
+    // does not survive a refusal at this target — is about the path, not about
+    // which stage spoke.
     assert!(refusal.is_coverage_closure_refusal(), "{refusal}");
     assert!(
         !scratch.path().exists(),
@@ -245,12 +185,23 @@ fn a_coverage_refusal_removes_a_stale_artifact_already_at_the_target() {
 /// `make_raking_blade`, whose islands 3 and 5 have `NoRoutedContact` on every
 /// one of the 8 closure attempts.
 ///
+/// **This is now the only coverage-refusal fixture in this file.** The corpus
+/// Sphere was the other one until 2026-08-26: `corpus_sphere_drilled_plan_is_
+/// refused_before_any_file_exists` asserted that the Sphere's drilled plan
+/// does not cover its islands, and at `3a6526f` that stopped being true — the
+/// model-seated anchor family can route, the Sphere seals at attempt 0 and
+/// emits a complete artifact. That test was DELETED rather than re-pinned,
+/// because every claim it made is made here on a fixture that still refuses:
+/// the refusal is a coverage-closure refusal, it is not answered with a
+/// substitute geometry, and it leaves nothing on disk. This test additionally
+/// pins that it never reaches the pre-write gate, so nothing was lost.
+///
 /// **Re-pinned off `make_overhang_table` (2026-08-12).** This test used to run
 /// the overhang table, the model `plinth-verify`'s frozen coverage golden is
 /// built from. With nomination scored against the measurement's uncovered
 /// samples that model now CLOSES from its own repair pool and emits
 /// (`plinth-support/tests/support_runner_integration.rs`,
-/// `public_runner_closes_overhang_table_only_after_appending_repair_contacts`),
+/// `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`),
 /// so it is no longer a refusal fixture. `make_raking_blade` is: the CCO
 /// transcript never admits any repair-pool candidate for either of its two
 /// residual islands, at the registered radius, from this fixture's pool. That
@@ -269,7 +220,8 @@ fn procedural_raking_blade_is_refused_before_any_file_exists() {
 
     let refusal = chain::run_procedural_model("make_raking_blade", mesh, scratch.path())
         .expect_err(
-            "make_raking_blade's residual islands have no closing repair-pool candidate at the registered radius",
+            "make_raking_blade's residual islands have no closing repair-pool \
+             candidate at the registered radius",
         );
     assert!(
         refusal.is_coverage_closure_refusal(),
@@ -301,13 +253,21 @@ fn procedural_raking_blade_is_refused_before_any_file_exists() {
 /// covered face. Scored against the uncovered rows, the closing candidate
 /// ranks first, the island shuts, and the model emits. Nothing was loosened
 /// to get here: same radius, same floor, same zero tolerance.
+///
+/// **Since `3a6526f` this model does not repair at all: it seals at attempt 0
+/// with 0 trials and 0 commits.** The paragraph above is kept as the history
+/// of the fixture, not as a description of this run. The claim this test still
+/// holds is the one in its name — the table's coverage closes and the model
+/// reaches a written file — and it holds it whether the closing happened on
+/// the baseline layout or through repair. The committed-repair path moved to
+/// `make_uncovered_rim_table`; see `a4_production_door.rs`.
 #[test]
 fn procedural_overhang_table_closes_its_coverage_and_emits() {
     let scratch = Scratch::new("overhang-table");
     let mesh = make_overhang_table().expect("procedural overhang table");
 
     let outcome = chain::run_procedural_model("make_overhang_table", mesh, scratch.path())
-        .expect("make_overhang_table closes coverage from its own repair pool and emits");
+        .expect("make_overhang_table's coverage closes and the model emits");
     assert!(
         scratch.path().exists(),
         "the closed model must reach a written file at {}",
