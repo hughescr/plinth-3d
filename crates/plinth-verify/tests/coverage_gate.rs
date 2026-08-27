@@ -467,7 +467,9 @@ fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
     expected_islands.sort_unstable();
     expected_islands.dedup();
 
-    let defects = parsed["defects"].as_array().expect("frozen report has defects");
+    let defects = parsed["defects"]
+        .as_array()
+        .expect("frozen report has defects");
     let mut actual_islands: Vec<u32> = defects
         .iter()
         .map(|defect| defect["site"]["id"].as_u64().unwrap() as u32)

@@ -612,10 +612,9 @@ impl ChainStop {
     pub fn is_support_refusal(&self) -> bool {
         match &*self.error {
             PipelineError::Support { .. } => true,
-            PipelineError::SealedRun { source, .. } => !matches!(
-                source,
-                plinth_support::SupportRunError::CoverageClosure(_)
-            ),
+            PipelineError::SealedRun { source, .. } => {
+                !matches!(source, plinth_support::SupportRunError::CoverageClosure(_))
+            }
             _ => false,
         }
     }

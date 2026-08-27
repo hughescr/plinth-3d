@@ -8672,12 +8672,9 @@ mod tests {
         );
         // Drop the duplicate and the same four walls stitch as they always
         // did, values unchanged, through the normalized path.
-        let loops = normalized_test_layer(
-            SliceStitchSpace::PrintLayer,
-            events[..4].to_vec(),
-            &normals,
-        )
-        .unwrap();
+        let loops =
+            normalized_test_layer(SliceStitchSpace::PrintLayer, events[..4].to_vec(), &normals)
+                .unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(
             loops[0].outer().points_xy_mm(),
@@ -9127,12 +9124,9 @@ mod tests {
         assert_eq!(probe.loops, layer.loops);
 
         // And through the union: 2 mm^2 of solid, in two squares.
-        let solids = normalized_test_layer(
-            SliceStitchSpace::PrintLayer,
-            events[0].clone(),
-            &normals,
-        )
-        .unwrap();
+        let solids =
+            normalized_test_layer(SliceStitchSpace::PrintLayer, events[0].clone(), &normals)
+                .unwrap();
         assert_eq!(
             solids
                 .iter()
@@ -9222,10 +9216,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             directed,
-            vec![
-                ([4.0, 2.0], [0.0, 2.0]),
-                ([0.0, 2.0], [4.0, 2.0]),
-            ]
+            vec![([4.0, 2.0], [0.0, 2.0]), ([0.0, 2.0], [4.0, 2.0]),]
         );
 
         let verdicts = stitch_verdicts(&verts, &tris, &[1.0, 1.5]);
@@ -9385,7 +9376,10 @@ mod tests {
         assert!(closed_and_consistently_wound(&tris));
         let planes = [0.75, 1.5, 3.0, 4.5, 5.25];
         for verdict in stitch_verdicts(&verts, &tris, &planes) {
-            assert!(verdict.is_ok(), "the intact box must section at every plane");
+            assert!(
+                verdict.is_ok(),
+                "the intact box must section at every plane"
+            );
         }
 
         let mut checked = 0usize;

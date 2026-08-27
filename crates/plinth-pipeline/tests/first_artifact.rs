@@ -453,8 +453,8 @@ fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
 #[test]
 fn shell_under_walled_solid_decision_still_reaches_a_written_artifact() {
     let scratch = Scratch::new("shell-under-walled");
-    let mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
-        .expect("closed fixture box");
+    let mesh =
+        plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("closed fixture box");
     let (_, oriented) = chain::prepare_from_mesh(mesh.clone(), "make_box")
         .expect("fixture box orients against the committed make_box baseline");
     let (_, orientation) = oriented.into_parts();

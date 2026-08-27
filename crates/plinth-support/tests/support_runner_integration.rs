@@ -1514,8 +1514,8 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
                 );
             }
         }
-        Err(other) => panic!(
-            "a buried half must reach the coverage judgment, not a stage failure: {other:?}"
-        ),
+        Err(other) => {
+            panic!("a buried half must reach the coverage judgment, not a stage failure: {other:?}")
+        }
     }
 }

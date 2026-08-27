@@ -64,8 +64,8 @@ use std::path::{Path, PathBuf};
 
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    OrientationPolicy, OutputProfile, PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest,
-    StageStop, SupportedGeometry,
+    OrientationPolicy, OutputProfile, PipelineExitCode, PreWriteGate, PrepareReport,
+    PrepareRequest, StageStop, SupportedGeometry,
 };
 
 #[path = "../examples/shared/first_artifact_chain.rs"]

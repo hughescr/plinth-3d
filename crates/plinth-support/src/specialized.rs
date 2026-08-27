@@ -13508,9 +13508,11 @@ mod tests {
     /// every row is validated before any contact is appended.
     #[test]
     fn batched_repair_row_append_validates_every_row_before_appending_any() {
-        let (_mesh, _generic, plan) =
-            edit_fixture(make_overhang_table().unwrap(), "batched append all-or-nothing")
-                .unwrap_or_else(|error| panic!("{error}"));
+        let (_mesh, _generic, plan) = edit_fixture(
+            make_overhang_table().unwrap(),
+            "batched append all-or-nothing",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         let occupied = plan
             .occupied_repair_rows()
             .unwrap()
@@ -13653,7 +13655,10 @@ mod tests {
                 });
             }
         }
-        assert!(!worklist.is_empty(), "required fixture has coverage samples");
+        assert!(
+            !worklist.is_empty(),
+            "required fixture has coverage samples"
+        );
 
         // This fixture stands in for a measurement in which every sample is
         // still uncovered, which is what the synthetic worklist above claims.

@@ -31,10 +31,7 @@ fn config() -> NativeSurfaceConfig {
     }
 }
 
-fn build(
-    vertices: &[[f64; 3]],
-    faces: &[[u32; 3]],
-) -> Result<NativeSurface, SurfaceBuildError> {
+fn build(vertices: &[[f64; 3]], faces: &[[u32; 3]]) -> Result<NativeSurface, SurfaceBuildError> {
     NativeSurface::from_indexed(vertices, faces, config())
 }
 
@@ -48,9 +45,9 @@ fn a_repeated_vertex_index_is_a_degenerate_face() {
     // Corners 0 and 2 both name vertex 0.
     let faces = vec![[0, 1, 0]];
 
-    let error = build(&vertices, &faces).err().expect(
-        "a face with a repeated corner index spans no area and cannot be given a normal",
-    );
+    let error = build(&vertices, &faces)
+        .err()
+        .expect("a face with a repeated corner index spans no area and cannot be given a normal");
     assert_eq!(
         error,
         SurfaceBuildError::DegenerateFace {
@@ -186,8 +183,7 @@ fn a_sound_mesh_still_builds_and_its_normals_are_unit_length() {
     assert_eq!(surface.nfaces(), 3);
 
     for (face, normal) in surface.geometry().normals().iter().enumerate() {
-        let length =
-            (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         assert!(
             (length - 1.0).abs() < 1e-12,
             "face {face} must carry a UNIT normal, got length {length}. A stored \

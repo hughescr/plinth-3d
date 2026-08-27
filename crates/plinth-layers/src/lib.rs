@@ -714,22 +714,21 @@ pub fn normalize_layers_batch(
     // call. Same `PLINTH_THREADS` authority and the same explicit (non-global)
     // pool, so `effective_threads` still reports the requested width and the
     // participation mask still ranges over that pool's own worker indices.
-    let results: Vec<Result<NormalizedLayer, LayerUnionError>> =
-        geom_kernel::run_in_pool(|| {
-            layers
-                .par_iter()
-                .enumerate()
-                .map(|(layer_index, layer)| {
-                    if let Some(index) = rayon::current_thread_index() {
-                        if index < 64 {
-                            worker_mask.fetch_or(1u64 << index, Ordering::Relaxed);
-                        }
+    let results: Vec<Result<NormalizedLayer, LayerUnionError>> = geom_kernel::run_in_pool(|| {
+        layers
+            .par_iter()
+            .enumerate()
+            .map(|(layer_index, layer)| {
+                if let Some(index) = rayon::current_thread_index() {
+                    if index < 64 {
+                        worker_mask.fetch_or(1u64 << index, Ordering::Relaxed);
                     }
-                    normalize_one_layer(layer_index, layer, min_area_mm2)
-                })
-                .collect()
-        })
-        .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
+                }
+                normalize_one_layer(layer_index, layer, min_area_mm2)
+            })
+            .collect()
+    })
+    .map_err(|error| LayerUnionError::Pool(error.to_string()))?;
     let layers_out = results.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     let mut output_vertices = 0usize;

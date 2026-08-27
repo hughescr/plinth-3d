@@ -122,7 +122,10 @@ fn every_unmeasured_reason_is_its_own_variant_and_none_is_a_number() {
         witness,
     } = rows[3]
     else {
-        panic!("row 3 tests the whole surface and must be a measurement, got {:?}", rows[3]);
+        panic!(
+            "row 3 tests the whole surface and must be a measurement, got {:?}",
+            rows[3]
+        );
     };
     assert!(
         (clearance_mm - 0.75).abs() < 1e-12,
@@ -184,7 +187,10 @@ fn a_measured_violation_is_still_a_violation() {
         .expect("well-formed batch");
 
     let Some(clearance_mm) = rows[0].clearance_mm() else {
-        panic!("this row is fully testable and must be measured, got {:?}", rows[0]);
+        panic!(
+            "this row is fully testable and must be measured, got {:?}",
+            rows[0]
+        );
     };
     assert!(
         (clearance_mm + 0.2).abs() < 1e-12,
@@ -339,7 +345,10 @@ fn a_genuinely_enormous_clearance_is_still_a_measurement() {
         .expect("well-formed batch");
 
     let Some(clearance_mm) = rows[0].clearance_mm() else {
-        panic!("a row 1000 mm from the surface was measured, not skipped: {:?}", rows[0]);
+        panic!(
+            "a row 1000 mm from the surface was measured, not skipped: {:?}",
+            rows[0]
+        );
     };
     // The nearest point of the axis to the triangle is its lower endpoint,
     // directly above the triangle's interior: 1000 mm, less the 0.5 mm radius.

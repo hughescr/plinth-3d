@@ -330,7 +330,10 @@ fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> [[isize; 2]; 3] {
         let lo = tri[0][axis].min(tri[1][axis]).min(tri[2][axis]) - 0.5;
         let hi = tri[0][axis].max(tri[1][axis]).max(tri[2][axis]) + 0.5;
         let dim_max = (spec.dims[axis].saturating_sub(1)) as isize;
-        axis_range[axis] = [(lo.floor() as isize).max(0), (hi.ceil() as isize).min(dim_max)];
+        axis_range[axis] = [
+            (lo.floor() as isize).max(0),
+            (hi.ceil() as isize).min(dim_max),
+        ];
     }
     axis_range
 }
@@ -649,9 +652,12 @@ fn padded_edt(material: &Array3<bool>, pitch: f64) -> Array3<f64> {
             && x <= nx
             && material[[z - 1, y - 1, x - 1]]
     });
-    let (distances, _) = distance_transform_edt(&bordered.into_dyn(), Some(&[pitch; 3]), true, false)
-        .expect("EDT");
-    let distances: Array3<f64> = distances.expect("distances").into_dimensionality().expect("3d");
+    let (distances, _) =
+        distance_transform_edt(&bordered.into_dyn(), Some(&[pitch; 3]), true, false).expect("EDT");
+    let distances: Array3<f64> = distances
+        .expect("distances")
+        .into_dimensionality()
+        .expect("3d");
     Array3::from_shape_fn((nz, ny, nx), |(z, y, x)| distances[[z + 1, y + 1, x + 1]])
 }
 
@@ -729,7 +735,9 @@ fn measure(occupancy: Vec<bool>, spec: GridSpec, wall_mm: f64) -> Measurement {
                         }
                         if material[[nz2, ny2, nx2]] {
                             let candidate = edt[[nz2, ny2, nx2]];
-                            min_wall = Some(min_wall.map_or(candidate, |current: f64| current.min(candidate)));
+                            min_wall = Some(
+                                min_wall.map_or(candidate, |current: f64| current.min(candidate)),
+                            );
                         }
                     }
                 }
@@ -756,7 +764,11 @@ fn run_model(name: &str, path: &Path, settings: HollowSettings, cap: usize) {
     let wall_mm = settings.wall_thickness_mm().get();
     let spec = grid_spec(&mesh, pitch);
 
-    println!("== {name} ({} triangles, grid {:?}) ==", mesh.tris().len(), spec.dims);
+    println!(
+        "== {name} ({} triangles, grid {:?}) ==",
+        mesh.tris().len(),
+        spec.dims
+    );
 
     let old = old_marked_set(&mesh, spec);
     let (new_count, new_occupancy) = new_marked_set(&mesh, spec);
@@ -849,7 +861,10 @@ fn main() -> ExitCode {
     for file in CORPUS_MODELS {
         let path = baseline.join(file);
         if !path.is_file() {
-            eprintln!("RequiredCorpusFixtureMissing: {} is committed evidence and must be present", path.display());
+            eprintln!(
+                "RequiredCorpusFixtureMissing: {} is committed evidence and must be present",
+                path.display()
+            );
             return ExitCode::FAILURE;
         }
         run_model(file, &path, settings, cap);

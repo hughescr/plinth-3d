@@ -81,11 +81,10 @@ fn the_nearest_distance_is_bit_identical_to_the_dense_row_minimum() {
     assert_eq!(nearest.point_count(), points.len());
     for point in 0..points.len() {
         let row = dense.row(point).expect("one dense row per point");
-        let found = nearest.nearest(point).expect("a non-empty segment set has a nearest");
-        let minimum = row
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let found = nearest
+            .nearest(point)
+            .expect("a non-empty segment set has a nearest");
+        let minimum = row.iter().copied().fold(f64::INFINITY, f64::min);
         assert_eq!(
             found.distance_mm().to_bits(),
             minimum.to_bits(),
@@ -115,7 +114,9 @@ fn a_zero_length_segment_is_measured_by_the_same_predicate_as_every_other() {
     let nearest = point_nearest_segment_batch(&points, &starts, &ends, limits(5, 5))
         .expect("reduction fits its budget");
 
-    let found = nearest.nearest(3).expect("a non-empty segment set has a nearest");
+    let found = nearest
+        .nearest(3)
+        .expect("a non-empty segment set has a nearest");
     assert_eq!(
         found.segment(),
         3,
@@ -219,10 +220,7 @@ fn the_reduction_shares_the_dense_forms_input_contract() {
     let mismatched = point_nearest_segment_batch(&points, &starts, &ends[..3], limits(5, 5));
     assert_eq!(
         mismatched,
-        Err(PointSegmentBatchError::SegmentEndpointCountMismatch {
-            starts: 5,
-            ends: 3
-        }),
+        Err(PointSegmentBatchError::SegmentEndpointCountMismatch { starts: 5, ends: 3 }),
         "start/end count mismatch is rejected before any work"
     );
 

@@ -836,8 +836,7 @@ pub fn make_dual_cavity_pawn_with_throat_radius(throat_radius_mm: f64) -> Result
     let ring_count = lower_rings + 1 + upper_rings; // + the throat's upper-junction ring
 
     let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 + ring_count * slices);
-    let mut tris: Vec<[u32; 3]> =
-        Vec::with_capacity(2 * slices + 2 * slices * (ring_count - 1));
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(2 * slices + 2 * slices * (ring_count - 1));
 
     verts.push(snap_vertex([0.0, 0.0, 0.0])); // index 0: foot_centre
 

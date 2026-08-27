@@ -1537,13 +1537,9 @@ mod tests {
             [6, 5, 4],
             [7, 5, 6],
         ];
-        faces.extend(BOX_FACES.map(|face| {
-            [
-                box_base + face[0],
-                box_base + face[1],
-                box_base + face[2],
-            ]
-        }));
+        faces.extend(
+            BOX_FACES.map(|face| [box_base + face[0], box_base + face[1], box_base + face[2]]),
+        );
         Mesh::new(verts, faces).expect("closed octahedron + nested box")
     }
 
@@ -1601,8 +1597,8 @@ mod tests {
     /// infinite line -- a real intersection, behind the origin -- because
     /// the octahedron is centrally symmetric.
     #[test]
-    fn octahedron_centroid_reads_ambiguous_though_every_direction_has_exactly_one_forward_crossing(
-    ) {
+    fn octahedron_centroid_reads_ambiguous_though_every_direction_has_exactly_one_forward_crossing()
+    {
         let (verts, faces) = octahedron_faces(10.0);
         let face_ids = (0..faces.len()).collect::<Vec<_>>();
         let classifier = ContainmentClassifier::build(&verts, &faces, &face_ids).expect("build");

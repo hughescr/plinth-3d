@@ -810,10 +810,9 @@ fn reconstructed_source_if_refilled(
         .cavity_field()
         .mask_excluding(&audit.refill)
         .map_err(|_| DrillingRefusal::Boolean)?;
-    let retained_cavity_components =
-        scirs2_ndimage::morphology3d::label3d(retained_mask.view(), 6)
-            .map_err(|_| DrillingRefusal::Boolean)?
-            .1;
+    let retained_cavity_components = scirs2_ndimage::morphology3d::label3d(retained_mask.view(), 6)
+        .map_err(|_| DrillingRefusal::Boolean)?
+        .1;
     let retained_inner = marching_cavity(
         &retained_mask,
         planned.cavity_field().origin_mm().map(Finite::get),
@@ -903,7 +902,12 @@ fn prepare_audit_plan(
     let qualifying_count = components
         .iter()
         .filter(|component| {
-            qualifies_audit_drain(component.len(), field.pitch_mm().get(), audit_min_ml, audit_max_drains)
+            qualifies_audit_drain(
+                component.len(),
+                field.pitch_mm().get(),
+                audit_min_ml,
+                audit_max_drains,
+            )
         })
         .count();
     let candidate_upper_bound = qualifying_count
@@ -916,7 +920,12 @@ fn prepare_audit_plan(
     )?;
     let mut candidates = Vec::with_capacity(candidate_upper_bound);
     for (component_id, component) in components.iter().enumerate() {
-        if qualifies_audit_drain(component.len(), field.pitch_mm().get(), audit_min_ml, audit_max_drains) {
+        if qualifies_audit_drain(
+            component.len(),
+            field.pitch_mm().get(),
+            audit_min_ml,
+            audit_max_drains,
+        ) {
             let origin = component_low_origin(field, component)?;
             for (direction_order, direction) in AUDIT_DIRECTIONS.into_iter().enumerate() {
                 let direction = normalize(direction)?;
@@ -1121,7 +1130,12 @@ fn select_exact_audit_candidate(
 /// cap, but every production caller always passed `0`, so the parameter
 /// tested a boundary that could never occur and was removed rather than left
 /// as a false signal).
-fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, min_pocket_ml: f64, max_extra_drains: usize) -> bool {
+fn qualifies_audit_drain(
+    component_voxels: usize,
+    pitch_mm: f64,
+    min_pocket_ml: f64,
+    max_extra_drains: usize,
+) -> bool {
     component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= min_pocket_ml && max_extra_drains > 0
 }
 
@@ -2097,13 +2111,12 @@ mod tests {
     )]
     fn frozen_sphere_is_drilled_once_and_every_voxel_drains() {
         let plan = sphere_plan();
-        let (source_material_mm3, _, _) =
-            topology_evidence(
-                plan.shell(),
-                DrillingLimits::production(),
-                ProvenMesh::PreDrillShell,
-            )
-            .unwrap();
+        let (source_material_mm3, _, _) = topology_evidence(
+            plan.shell(),
+            DrillingLimits::production(),
+            ProvenMesh::PreDrillShell,
+        )
+        .unwrap();
         let drilled = drill_planned_shell(plan).expect("drilled Sphere");
         assert_eq!(drilled.evidence().holes.len(), 2);
         assert!(drilled
@@ -2383,13 +2396,12 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let (_, _, source_chi) =
-            topology_evidence(
-                plan.shell(),
-                DrillingLimits::production(),
-                ProvenMesh::PreDrillShell,
-            )
-            .unwrap();
+        let (_, _, source_chi) = topology_evidence(
+            plan.shell(),
+            DrillingLimits::production(),
+            ProvenMesh::PreDrillShell,
+        )
+        .unwrap();
         let (_, _, actual_chi) =
             topology_evidence(&mesh, DrillingLimits::production(), ProvenMesh::Drilled).unwrap();
         let expected_two_openings = source_chi - 4;
@@ -2694,9 +2706,7 @@ mod tests {
             0.5,
             query_limits(hole_count, 1),
         )
-        .expect(
-            "a cleanly drilled channel crosses the shell no further times, so cap 1 admits it",
-        );
+        .expect("a cleanly drilled channel crosses the shell no further times, so cap 1 admits it");
     }
 
     /// The audit-drain site's charge (`prepare_audit_plan`'s "audit
@@ -2849,20 +2859,18 @@ mod tests {
         // change that lost a chamber here would fail rather than pass quietly.
         assert_eq!(retained_cavity_components, 1);
         let reconstructed = orient_boolean_cavity(from_solid(reconstructed).unwrap()).unwrap();
-        let (post_refill_volume, components, _) =
-            topology_evidence(
-                &reconstructed,
-                DrillingLimits::production(),
-                ProvenMesh::PreDrillShell,
-            )
-            .unwrap();
-        let (original_volume, _, _) =
-            topology_evidence(
-                split.shell(),
-                DrillingLimits::production(),
-                ProvenMesh::PreDrillShell,
-            )
-            .unwrap();
+        let (post_refill_volume, components, _) = topology_evidence(
+            &reconstructed,
+            DrillingLimits::production(),
+            ProvenMesh::PreDrillShell,
+        )
+        .unwrap();
+        let (original_volume, _, _) = topology_evidence(
+            split.shell(),
+            DrillingLimits::production(),
+            ProvenMesh::PreDrillShell,
+        )
+        .unwrap();
         assert_eq!(components, retained_cavity_components + 1);
         assert!(post_refill_volume > original_volume);
     }
@@ -3112,8 +3120,8 @@ mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
     fn a_single_crossing_at_the_rays_origin_does_not_block_the_bore() {
-        let box_mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
-            .expect("10 mm box fixture");
+        let box_mesh =
+            plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("10 mm box fixture");
         let hole = HoleGeometry {
             role: HoleRole::Vent,
             lobe_id: None,
@@ -3161,8 +3169,8 @@ mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
     /// window.
     #[test]
     fn material_anywhere_past_the_origin_still_blocks_the_bore() {
-        let box_mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
-            .expect("10 mm box fixture");
+        let box_mesh =
+            plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("10 mm box fixture");
         let hole = HoleGeometry {
             role: HoleRole::Vent,
             lobe_id: None,

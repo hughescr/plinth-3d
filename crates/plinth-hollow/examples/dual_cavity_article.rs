@@ -280,9 +280,8 @@ fn run_setting(dir: &Path, name: &str, throat_radius_mm: f64) {
 /// certification `create_shell` runs internally, reproduced here because the
 /// `ShellCandidate` this binary receives back no longer owns the source mesh.
 fn closed_solid_volume_mm3(mesh: &Mesh) -> f64 {
-    let topology =
-        plinth_mesh::build_face_topology(mesh, plinth_mesh::WeldPolicy::ExactBits)
-            .expect("source topology is buildable");
+    let topology = plinth_mesh::build_face_topology(mesh, plinth_mesh::WeldPolicy::ExactBits)
+        .expect("source topology is buildable");
     let certificate = plinth_mesh::certify_closed_components(mesh, &topology)
         .expect("source is a closed, oriented solid");
     certificate.signed_volume_mm3()

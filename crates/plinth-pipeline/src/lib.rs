@@ -834,9 +834,7 @@ impl PrepareReport {
                 }
             }
         }
-        coverage
-            .or(first_non_ok)
-            .unwrap_or(PipelineExitCode::Ok)
+        coverage.or(first_non_ok).unwrap_or(PipelineExitCode::Ok)
     }
 
     /// Whether the pre-write physics gates refused any model in this run.

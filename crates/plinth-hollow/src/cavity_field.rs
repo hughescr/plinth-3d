@@ -189,9 +189,10 @@ impl CavityField {
             for dy in -1_isize..=1 {
                 for dx in -1_isize..=1 {
                     let q = [base[0] + dx, base[1] + dy, base[2] + dz];
-                    if q.iter().enumerate().any(|(axis, value)| {
-                        *value < 0 || *value as usize >= self.dims[axis]
-                    }) {
+                    if q.iter()
+                        .enumerate()
+                        .any(|(axis, value)| *value < 0 || *value as usize >= self.dims[axis])
+                    {
                         continue;
                     }
                     let flat = q[0] as usize

@@ -235,11 +235,21 @@ fn hollow_plan_drill_and_round_trip(
         .cavity_field()
         .deep_lobe_count(chamber_clearance_mm(settings))
         .expect("the cavity field admits its own distance transform");
-    let planned = plan_drains(candidate)
-        .unwrap_or_else(|failure| panic!("{name}: plan_drains refused under production limits: {}", failure.reason()));
+    let planned = plan_drains(candidate).unwrap_or_else(|failure| {
+        panic!(
+            "{name}: plan_drains refused under production limits: {}",
+            failure.reason()
+        )
+    });
     let holes = planned.drain_plan().holes();
-    let drains = holes.iter().filter(|hole| hole.role == HoleRole::Drain).count();
-    let vents = holes.iter().filter(|hole| hole.role == HoleRole::Vent).count();
+    let drains = holes
+        .iter()
+        .filter(|hole| hole.role == HoleRole::Drain)
+        .count();
+    let vents = holes
+        .iter()
+        .filter(|hole| hole.role == HoleRole::Vent)
+        .count();
     assert!(drains >= 1, "{name}: the planner placed no drain at all");
     assert_eq!(
         drains, vents,
@@ -284,8 +294,10 @@ fn hollow_plan_drill_and_round_trip(
         0,
         "{name}: the drilled STL on disk is not watertight"
     );
-    let certificate = plinth_mesh::certify_closed_components(&reloaded, &topology)
-        .unwrap_or_else(|error| panic!("{name}: the drilled STL on disk is not a closed oriented solid: {error}"));
+    let certificate =
+        plinth_mesh::certify_closed_components(&reloaded, &topology).unwrap_or_else(|error| {
+            panic!("{name}: the drilled STL on disk is not a closed oriented solid: {error}")
+        });
     // Two closed components: the outer skin and the inner cavity skin, joined
     // by nothing -- the drilled bores pass through both, so the drilled shell
     // is a single genus-raised solid. Whichever it certifies as, the volume
@@ -559,7 +571,6 @@ fn the_doctrine_survives_a_quarter_pitch_phase_shift() {
         at_bore.drains
     );
 }
-
 
 /// The whole point of the fixture's redesign on 2026-08-12: it fits under the
 /// **shipped** `H0AdmissionLimits::production()` drain-planning ceiling at

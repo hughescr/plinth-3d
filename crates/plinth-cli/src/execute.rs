@@ -250,9 +250,7 @@ fn print_model(model: &ModelPreparationReport) {
             let total_gates = PreWriteGate::ALL.len();
             let ran_gates = total_gates.saturating_sub(pending_gates.len());
             if pending_gates.is_empty() {
-                println!(
-                    "  safety checks  all {total_gates} pre-write gates ran and passed"
-                );
+                println!("  safety checks  all {total_gates} pre-write gates ran and passed");
             } else {
                 println!(
                     "  safety checks  ran {ran_gates} of {total_gates} pre-write gates; \
@@ -280,10 +278,9 @@ fn print_model(model: &ModelPreparationReport) {
             // presenting a query bound as a measurement.
             if let Some(wall) = wall_mm {
                 match realized_wall {
-                    Some(realized) => println!(
-                        "  wall  requested {} mm, realized {realized}",
-                        wall.get()
-                    ),
+                    Some(realized) => {
+                        println!("  wall  requested {} mm, realized {realized}", wall.get())
+                    }
                     None => println!("  wall  requested {} mm, no shell measured", wall.get()),
                 }
             }
@@ -553,7 +550,11 @@ fn coverage_lines(model: &ModelPreparationReport) -> Vec<String> {
     if let Some(error) = &evidence.measurement_error {
         lines.push(format!("  coverage unmeasurable  {error}"));
     }
-    for island in evidence.islands.iter().take(COVERAGE_CARD_MAX_ISLANDS_SHOWN) {
+    for island in evidence
+        .islands
+        .iter()
+        .take(COVERAGE_CARD_MAX_ISLANDS_SHOWN)
+    {
         let gap = match island.worst_gap {
             plinth_pipeline::CoverageClosureGap::Finite(value) => {
                 format!("worst gap {value:.2} mm")
@@ -834,9 +835,11 @@ mod tests {
     fn the_refusal_line_blames_the_registered_ceiling_only_where_it_stopped_a_rescue() {
         let walked = remedies_tried_line(&refused_contact(true));
         assert!(
-            walked.contains("then 1 growth rung(s) up to the registered 0.4000 mm radius \
+            walked.contains(
+                "then 1 growth rung(s) up to the registered 0.4000 mm radius \
                              (0.8000 mm diameter), the maximum set by \
-                             TIP_RADIUS_MAX_GROWN_SCAR_MM"),
+                             TIP_RADIUS_MAX_GROWN_SCAR_MM"
+            ),
             "a rescue the registered maximum really did stop must say so: {walked}"
         );
         let unwalked = remedies_tried_line(&refused_contact(false));
@@ -1028,25 +1031,31 @@ mod tests {
     /// block is evidence for a coverage refusal, not a generic footer.
     #[test]
     fn coverage_lines_is_empty_without_coverage_evidence() {
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Stopped {
-            after: plinth_pipeline::StageStop::Decimate,
-        }))
-        .is_empty());
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
-            gate: Some(plinth_pipeline::PreWriteGate::Clearance),
-            geometry: None,
-            violation: "unrelated".to_owned(),
-            evidence: None,
-            repair_report: None,
-        }))
-        .is_empty());
-        assert!(coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
-            exit_code: plinth_pipeline::PipelineExitCode::Supports,
-            detail: "unrelated stage failure".to_owned(),
-            evidence: None,
-            repair_report: None,
-        }))
-        .is_empty());
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Stopped {
+                after: plinth_pipeline::StageStop::Decimate,
+            }))
+            .is_empty()
+        );
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Refused {
+                gate: Some(plinth_pipeline::PreWriteGate::Clearance),
+                geometry: None,
+                violation: "unrelated".to_owned(),
+                evidence: None,
+                repair_report: None,
+            }))
+            .is_empty()
+        );
+        assert!(
+            coverage_lines(&with_outcome(ModelPreparationOutcome::Failed {
+                exit_code: plinth_pipeline::PipelineExitCode::Supports,
+                detail: "unrelated stage failure".to_owned(),
+                evidence: None,
+                repair_report: None,
+            }))
+            .is_empty()
+        );
     }
 
     /// **FU-57.** Worst-first, truncated at the shown count with an explicit
@@ -1108,7 +1117,9 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("(1 more in the sidecar)")),
+            lines
+                .iter()
+                .any(|line| line.contains("(1 more in the sidecar)")),
             "{lines:?}"
         );
         assert!(
@@ -1149,21 +1160,28 @@ mod tests {
             evidence: Some(Box::new(evidence)),
             repair_report: None,
         }));
-        assert!(lines[0].contains("1 island(s), 1 shown worst-first"), "{lines:?}");
         assert!(
-            lines.iter().any(|line| line.contains("renders") && line.contains("0 image(s)")),
+            lines[0].contains("1 island(s), 1 shown worst-first"),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("render note") && line.contains("COVERAGE_RENDER_MAX_FACES")),
+                .any(|line| line.contains("renders") && line.contains("0 image(s)")),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("evidence write error") && line.contains("permission denied")),
+                .any(|line| line.contains("render note")
+                    && line.contains("COVERAGE_RENDER_MAX_FACES")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("evidence write error")
+                    && line.contains("permission denied")),
             "{lines:?}"
         );
     }

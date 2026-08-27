@@ -297,7 +297,10 @@ fn dual_cavity_pawn_is_a_single_closed_oriented_solid() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(topology.counts().boundary_edges, 0, "{name} boundary edges");
         assert!(
-            topology.cut_flags().iter().all(|flags| *flags & gate_mask == 0),
+            topology
+                .cut_flags()
+                .iter()
+                .all(|flags| *flags & gate_mask == 0),
             "{name}: a closed-solid-gate cut flag survived construction"
         );
         let certificate = certify_closed_components(&mesh, &topology)
@@ -345,7 +348,8 @@ fn dual_cavity_pawn_has_no_degenerate_face_after_the_f32_snap() {
 #[test]
 fn dual_cavity_pawn_encloses_positive_volume() {
     let slices = plinth_mesh::DUAL_CAVITY_SLICES as f64;
-    let azimuthal_deficit = 1.0 - (std::f64::consts::TAU / slices).sin() * slices / std::f64::consts::TAU;
+    let azimuthal_deficit =
+        1.0 - (std::f64::consts::TAU / slices).sin() * slices / std::f64::consts::TAU;
     // The polar chord deficit: the coarsest arc step is the upper arc's, and
     // a chord's sagitta on a circle of radius R across an angle `d` is
     // `R (1 - cos(d/2))`, a relative volume loss under `2 (1 - cos(d/2))`.
@@ -359,7 +363,10 @@ fn dual_cavity_pawn_encloses_positive_volume() {
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
         let certificate = certify_closed_components(&mesh, &topology).expect("certificate");
         let volume = certificate.signed_volume_mm3();
-        assert!(volume > 0.0, "{name}: expected outward winding, got {volume}");
+        assert!(
+            volume > 0.0,
+            "{name}: expected outward winding, got {volume}"
+        );
 
         let analytic = plinth_mesh::dual_cavity_pawn_analytic_volume_mm3(throat_radius_mm);
         let deficit = (analytic - volume) / analytic;

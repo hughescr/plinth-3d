@@ -1283,5 +1283,4 @@ mod tests {
         // `triage`'s own "refusal precedes input-proportional work" test reads,
         // so a second in-process triage call here would race it.
     }
-
 }

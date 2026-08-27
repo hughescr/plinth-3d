@@ -30,8 +30,8 @@ use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, Printe
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
     StrictMeshAuditError, TopologyError, TopologyValidationError, TriageAdmissionError,
-    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh,
-    TOPOLOGY_CUT_CLOSED_SOLID_MASK, WeldPolicy,
+    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
+    TOPOLOGY_CUT_CLOSED_SOLID_MASK,
 };
 use plinth_orient::OrientationHistory;
 use plinth_solid::{
@@ -1847,7 +1847,8 @@ pub fn create_shell_recording_repair(
     // decisions this field feeds (cavity selection against `wall + margin`,
     // and the bulk gate against `bulk_min / 2`) with the smaller of the two
     // thresholds, which is the more inclusive (superset) filter of the two.
-    let wall_plus_margin_mm = settings.wall_thickness_mm.get() + settings.cavity_march_margin_mm.get();
+    let wall_plus_margin_mm =
+        settings.wall_thickness_mm.get() + settings.cavity_march_margin_mm.get();
     let candidate_threshold_mm = wall_plus_margin_mm.min(settings.bulk_min_mm.get() / 2.0);
     if !candidate_threshold_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic.into());
@@ -2704,10 +2705,7 @@ fn to_index_space(point: [f64; 3], spec: GridSpec) -> Result<[f64; 3], HollowErr
           or clamped into range after it (read site by site, 2026-08-26). See \
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
-fn dilated_index_aabb(
-    tri: [[f64; 3]; 3],
-    spec: GridSpec,
-) -> Result<[[isize; 2]; 3], HollowError> {
+fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> Result<[[isize; 2]; 3], HollowError> {
     let mut axis_range = [[0_isize; 2]; 3];
     for axis in 0..3 {
         let lo = tri[0][axis].min(tri[1][axis]).min(tri[2][axis]) - 0.5;
@@ -3090,8 +3088,7 @@ fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) 
 
     let normal = cross3(e[0], e[1]);
     let d = dot3(normal, v[0]);
-    let r =
-        half[0] * normal[0].abs() + half[1] * normal[1].abs() + half[2] * normal[2].abs();
+    let r = half[0] * normal[0].abs() + half[1] * normal[1].abs() + half[2] * normal[2].abs();
     if d > r || d < -r {
         return false;
     }
@@ -3864,9 +3861,7 @@ pub enum HollowError {
     /// 2026-08-12 (FU-47): resin cannot flow through a passage narrower than
     /// the bore, so cutting it would leave a trap, and leaving it uncut
     /// leaves solid material, which is always safe.
-    #[error(
-        "no cavity passage admits the registered {throat_radius_mm} mm drain bore radius"
-    )]
+    #[error("no cavity passage admits the registered {throat_radius_mm} mm drain bore radius")]
     IneligibleCavityBelowDrainThroat { throat_radius_mm: f64 },
     /// 2026-08-13 owner ruling: the savings gate is judged on absolute
     /// resin saved ([`HOLLOW_SAVE_MIN_ML`](crate)), not on percentage. Both
@@ -4795,11 +4790,7 @@ mod tests {
                 ]),
                 cube_spec,
             ),
-            (
-                "single point",
-                triangle([[7.25, 8.75, 1.5]; 3]),
-                flat_spec,
-            ),
+            ("single point", triangle([[7.25, 8.75, 1.5]; 3]), flat_spec),
             (
                 "flat fan base",
                 triangle([[5.0, 5.0, 1.0], [205.0, 5.0, 1.0], [5.0, 205.0, 1.0]]),
@@ -5533,8 +5524,8 @@ mod tests {
         reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    fn the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate()
-    {
+    fn the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate(
+    ) {
         let default = create_shell(
             frozen_mesh("Sphere.prepped.oriented-solid.stl"),
             HollowSettings::from_registered_constants().expect("M0 settings"),
@@ -5980,27 +5971,23 @@ mod fu53_exact_cavity_distance {
     #[test]
     fn frozen_oracle_edt_never_understates_the_exact_distance() {
         for (label, mesh) in [
-            (
-                "sphere",
-                frozen_mesh("Sphere.prepped.oriented-solid.stl"),
-            ),
+            ("sphere", frozen_mesh("Sphere.prepped.oriented-solid.stl")),
             (
                 "cylinder",
                 frozen_mesh("Cylinder.prepped.oriented-solid.stl"),
             ),
-            ("box", make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("box")),
             (
-                "ramped_box",
-                ramped_box(20.0, 4.0, 16.0, true),
+                "box",
+                make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("box"),
             ),
+            ("ramped_box", ramped_box(20.0, 4.0, 16.0, true)),
         ] {
             let source = triage_exact_with_measured_limits(&mesh)
                 .unwrap_or_else(|error| panic!("{label} triage: {error:?}"))
                 .into_mesh();
             let pitch = registered_settings().voxel_pitch_mm().get();
-            let spec = grid_spec(&source, pitch).unwrap_or_else(|error| {
-                panic!("{label} grid spec: {error:?}")
-            });
+            let spec = grid_spec(&source, pitch)
+                .unwrap_or_else(|error| panic!("{label} grid spec: {error:?}"));
             let work = raster_work_item_count(
                 &source,
                 spec,
@@ -6046,8 +6033,7 @@ mod fu53_exact_cavity_distance {
                 },
             )
             .unwrap_or_else(|error| panic!("{label} surface build: {error:?}"));
-            let points: Vec<[f64; 3]> =
-                candidates.iter().map(|(_, point)| *point).collect();
+            let points: Vec<[f64; 3]> = candidates.iter().map(|(_, point)| *point).collect();
             let (distances, _faces) = surface.query(&points, f64::INFINITY);
 
             for ((voxel, _), &d_true) in candidates.iter().zip(distances.iter()) {
@@ -6198,12 +6184,9 @@ mod fu53_exact_cavity_distance {
         // The realised minimum wall: brute-force nearest-source-surface
         // distance from every vertex of the shell's inner (negative) cavity
         // surface, exactly the FU-53 diagnosis's own measurement.
-        let native_estimate = NativeSurface::estimate_index_memory_from_indexed(
-            source.verts(),
-            source.tris(),
-            0.5,
-        )
-        .expect("surface estimate");
+        let native_estimate =
+            NativeSurface::estimate_index_memory_from_indexed(source.verts(), source.tris(), 0.5)
+                .expect("surface estimate");
         let native = NativeSurface::from_indexed(
             source.verts(),
             source.tris(),
@@ -6213,10 +6196,10 @@ mod fu53_exact_cavity_distance {
             },
         )
         .expect("surface build");
-        let topology = build_face_topology(candidate.mesh(), WeldPolicy::ExactBits)
-            .expect("shell topology");
-        let certificate = certify_closed_components(candidate.mesh(), &topology)
-            .expect("shell certificate");
+        let topology =
+            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("shell topology");
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("shell certificate");
         let cavity_component_id = certificate
             .components()
             .iter()
@@ -6237,10 +6220,7 @@ mod fu53_exact_cavity_distance {
             .map(|&index| candidate.mesh().verts()[index as usize])
             .collect();
         let (distances, _faces) = native.query(&cavity_points, 10.0);
-        let realised_wall_mm = distances
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let realised_wall_mm = distances.iter().copied().fold(f64::INFINITY, f64::min);
         assert!(
             realised_wall_mm.is_finite(),
             "every cavity vertex must be within the 10.0mm query bound of the source surface"
@@ -6720,7 +6700,10 @@ mod corpus_cavity_repair {
         // cavity field. The previous re-pin, 33_875 -> 34_453 on the
         // 2026-08-12 merge, came from FU-53's exact-nearest-surface-distance
         // selection replacing the pre-FU-53 `edt > wall` one.
-        assert_eq!(cavity_voxels, 33_889, "the fixture's own cavity field moved");
+        assert_eq!(
+            cavity_voxels, 33_889,
+            "the fixture's own cavity field moved"
+        );
         assert_eq!(
             stats.flow_components, 2,
             "the two lobes are separate resin-flow interiors: {stats:?}"
@@ -6897,7 +6880,11 @@ mod corpus_cavity_repair {
         //    deterministic voxel field, so these are equalities.
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
         assert_eq!(spec.count, 5_313_000, "the admitted grid moved");
-        assert_eq!(spec.dims, [165, 175, 184], "the admitted grid's own shape moved");
+        assert_eq!(
+            spec.dims,
+            [165, 175, 184],
+            "the admitted grid's own shape moved"
+        );
         let work = raster_work_item_count(
             &source,
             spec,
@@ -6919,7 +6906,12 @@ mod corpus_cavity_repair {
         let (labels, label_count) =
             scirs2_ndimage::morphology3d::label3d(cavity.view(), 6).expect("labels");
         let plain_largest = (1..=label_count)
-            .map(|label| labels.iter().filter(|value| **value == label as i32).count())
+            .map(|label| {
+                labels
+                    .iter()
+                    .filter(|value| **value == label as i32)
+                    .count()
+            })
             .max()
             .unwrap_or(0);
         // Re-pinned 64,466 -> 65,639, same cause as cavity_voxels above.
@@ -6927,10 +6919,9 @@ mod corpus_cavity_repair {
         drop(labels);
 
         let throat_r_mm = flow::registered_throat_radius_mm().expect("registered throat");
-        let (selected, stats) =
-            flow::select_all_flow_components(&cavity, grid.pitch, throat_r_mm)
-                .expect("flow selection")
-                .expect("the treant admits the bore somewhere");
+        let (selected, stats) = flow::select_all_flow_components(&cavity, grid.pitch, throat_r_mm)
+            .expect("flow selection")
+            .expect("the treant admits the bore somewhere");
         // Re-pinned 9 -> 13 interiors, same cause as cavity_voxels above: a
         // different material grid moves the EDT, which moves exactly where
         // the corrected throat comparison draws each branch boundary.
@@ -7039,7 +7030,9 @@ mod corpus_cavity_repair {
 mod fu55_realized_wall_check {
     use super::*;
     use plinth_mesh::{load_binary_stl, make_box, mesh_fingerprint};
-    use plinth_orient::{BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform};
+    use plinth_orient::{
+        BaselineSelection, OrientationProvenance, OrientationReport, RigidTransform,
+    };
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
@@ -7090,8 +7083,7 @@ mod fu55_realized_wall_check {
         let minimum = registered_minimum_wall_mm()
             .expect("the registered minimum wall must publish")
             .get();
-        checked_realized_wall_mm(minimum, minimum, 10.0)
-            .expect("exactly at the minimum passes");
+        checked_realized_wall_mm(minimum, minimum, 10.0).expect("exactly at the minimum passes");
         let error = checked_realized_wall_mm(minimum - 1e-9, minimum, 10.0)
             .expect_err("a hair under the minimum must refuse");
         match error {
@@ -7165,10 +7157,9 @@ mod fu55_realized_wall_check {
         // The two claims are distinguishable in the serialized record, which
         // is the whole point: the same 7.0 mm carries a different verdict.
         let bound_json = serde_json::to_string(&recorded).expect("serializes");
-        let exact_json = serde_json::to_string(&RealizedWall::measured(
-            Finite::new(7.0).expect("finite"),
-        ))
-        .expect("serializes");
+        let exact_json =
+            serde_json::to_string(&RealizedWall::measured(Finite::new(7.0).expect("finite")))
+                .expect("serializes");
         assert_ne!(
             bound_json, exact_json,
             "a bound and a measurement at the same number must not serialize alike"
@@ -7360,10 +7351,11 @@ mod fu55_realized_wall_check {
         let mesh = make_box([10.0; 3], [0.0; 3]).expect("closed fixture");
         let expected_digest = mesh_fingerprint(&mesh).expect("fixture fingerprint");
         let history = orientation_history();
-        let failure = HollowStageFailure::before_cavity_repair(HollowError::RealizedWallBelowSpec {
-            realized_wall_mm: 1.9,
-            minimum_wall_mm: 2.0,
-        });
+        let failure =
+            HollowStageFailure::before_cavity_repair(HollowError::RealizedWallBelowSpec {
+                realized_wall_mm: 1.9,
+                minimum_wall_mm: 2.0,
+            });
         let requested_wall_mm = Finite::new(2.5).expect("finite");
 
         let output = convert_shell_failure_to_solid(mesh, history, failure, requested_wall_mm)
@@ -7424,8 +7416,8 @@ mod fu55_realized_wall_check {
             "drilling_evidence": null,
             "drain_plan": null
         }"#;
-        let old_report: HollowReport =
-            serde_json::from_str(old_report_json).expect("a report predating this field must still parse");
+        let old_report: HollowReport = serde_json::from_str(old_report_json)
+            .expect("a report predating this field must still parse");
         assert_eq!(old_report.realized_wall_mm(), None);
         assert_eq!(old_report.cavity_repair(), None);
     }
@@ -8033,8 +8025,8 @@ mod dual_cavity_doctrine {
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let limits = H0AdmissionLimits::production();
         let throat_radius_mm = at_bore_throat_radius_mm(settings);
-        let source = make_dual_cavity_pawn_with_throat_radius(throat_radius_mm)
-            .expect("at-bore fixture");
+        let source =
+            make_dual_cavity_pawn_with_throat_radius(throat_radius_mm).expect("at-bore fixture");
         let (cavity_mask, grid) =
             corpus_cavity_repair::cavity_mask_and_grid(&source, settings, limits);
 
@@ -8120,8 +8112,7 @@ mod dual_cavity_doctrine {
         // The cavity's own floor is the plane `z = t`; the ball's bottom is
         // at `z1 - radius`. Whatever lies below the floor is not cavity.
         let cap_height = (t - (plinth_mesh::DUAL_CAVITY_LOWER_SPHERE_Z_MM - radius)).max(0.0);
-        let cap =
-            std::f64::consts::PI * cap_height.powi(2) * (3.0 * radius - cap_height) / 3.0;
+        let cap = std::f64::consts::PI * cap_height.powi(2) * (3.0 * radius - cap_height) / 3.0;
         ball - cap
     }
 
@@ -8206,13 +8197,10 @@ mod dual_cavity_doctrine {
             "ABOVE_BORE clearance {above_bore_measured} must be admitted by the corrected threshold {threshold}"
         );
 
-        let (selected, stats) = flow::select_all_flow_components(
-            &above_bore_mask,
-            above_bore_grid.pitch,
-            throat_r_mm,
-        )
-        .expect("flow selection")
-        .expect("the above-bore cavity admits the registered bore");
+        let (selected, stats) =
+            flow::select_all_flow_components(&above_bore_mask, above_bore_grid.pitch, throat_r_mm)
+                .expect("flow selection")
+                .expect("the above-bore cavity admits the registered bore");
         assert_eq!(
             stats.flow_components, 1,
             "the corrected threshold must admit one flow-connected interior at ABOVE_BORE"
@@ -8463,13 +8451,15 @@ mod dual_cavity_doctrine {
         // squares with `pitch * sqrt(k) > r`; pinning `r` strictly inside a
         // bracket of consecutive representable `k` is what pins the
         // clearance B4 asserts.
-        let representable = |k: i64| (0..=16_i64).any(|i| {
-            let remainder = k - i * i;
-            remainder >= 0 && {
-                let root = (remainder as f64).sqrt().round() as i64;
-                root * root == remainder
-            }
-        });
+        let representable = |k: i64| {
+            (0..=16_i64).any(|i| {
+                let remainder = k - i * i;
+                remainder >= 0 && {
+                    let root = (remainder as f64).sqrt().round() as i64;
+                    root * root == remainder
+                }
+            })
+        };
         let bracket = |r_cav: f64| -> (f64, f64) {
             let mut below = 0.0;
             for k in 0..=1024_i64 {
@@ -8631,11 +8621,8 @@ mod per_chamber_drains {
         let mut parts = Vec::new();
         for (index, &side) in sides.iter().enumerate() {
             parts.push(
-                make_box(
-                    [side, side, side],
-                    [centre_x(index), 0.0, bottom_z(index)],
-                )
-                .expect("cube fixture"),
+                make_box([side, side, side], [centre_x(index), 0.0, bottom_z(index)])
+                    .expect("cube fixture"),
             );
             if index + 1 == sides.len() {
                 continue;

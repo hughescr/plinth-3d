@@ -263,15 +263,17 @@ fn measure_model(
         .map_err(|scale| format!("scale suspicious: {} mm", scale.longest_axis_mm))?;
     let decimated_faces = decimated.mesh().tris().len();
 
-    let mut sweep = plinth_orient::registered_sweep_request().map_err(|e| format!("orient: {e}"))?;
+    let mut sweep =
+        plinth_orient::registered_sweep_request().map_err(|e| format!("orient: {e}"))?;
     sweep.limits = policy.orient();
     let oriented =
         plinth_orient::search_and_orient(decimated, &sweep).map_err(|e| format!("orient: {e}"))?;
     let (solid, _history) = oriented.into_parts();
 
     let constants = plinth_core::m0_constants().map_err(|e| format!("constants: {e}"))?;
-    let mut request = HollowRequest::with_registered_wall_default(constants.saturn4_ultra().clone())
-        .map_err(|e| format!("request: {e}"))?;
+    let mut request =
+        HollowRequest::with_registered_wall_default(constants.saturn4_ultra().clone())
+            .map_err(|e| format!("request: {e}"))?;
     if let Some(wall) = wall_override {
         request.wall_mm = plinth_core::PositiveFinite::new(wall)
             .map_err(|_| format!("wall {wall} is not a positive finite"))?;
@@ -301,7 +303,10 @@ fn measure_model(
     if let Some(directory) = dump_dir {
         std::fs::create_dir_all(directory).map_err(|e| format!("dump dir: {e}"))?;
         write_binary_stl(&directory.join(format!("{name}.shell.stl")), &shell)?;
-        write_binary_stl(&directory.join(format!("{name}.drilled.stl")), &drilled_mesh)?;
+        write_binary_stl(
+            &directory.join(format!("{name}.drilled.stl")),
+            &drilled_mesh,
+        )?;
     }
     let evidence = drilled.evidence();
     let mut holes = Vec::with_capacity(evidence.holes().len());
@@ -928,10 +933,7 @@ fn write_section_svg(
             if a.0 < -50.0 || a.0 > width + 50.0 || b.0 < -50.0 || b.0 > width + 50.0 {
                 continue;
             }
-            path_data.push_str(&format!(
-                "M{:.2} {:.2}L{:.2} {:.2}",
-                a.0, a.1, b.0, b.1
-            ));
+            path_data.push_str(&format!("M{:.2} {:.2}L{:.2} {:.2}", a.0, a.1, b.0, b.1));
         }
         body.push_str(&format!(
             "<path d=\"{path_data}\" stroke=\"{colour}\" stroke-width=\"{stroke}\" fill=\"none\"/>\n"
@@ -1064,8 +1066,10 @@ fn workspace_root() -> PathBuf {
 }
 
 fn stem(path: &Path) -> String {
-    path.file_stem()
-        .map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into())
+    path.file_stem().map_or_else(
+        || path.display().to_string(),
+        |s| s.to_string_lossy().into(),
+    )
 }
 
 fn fin3(value: [Finite; 3]) -> V3 {

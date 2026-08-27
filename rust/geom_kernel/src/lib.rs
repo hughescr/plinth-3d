@@ -716,7 +716,7 @@ pub fn current_threads() -> usize {
     par::current_threads()
 }
 
-pub use par::{PoolBuildError, try_run as run_in_pool};
+pub use par::{try_run as run_in_pool, PoolBuildError};
 
 /// Preflight limits for the only generic workspace-parallel operation:
 /// ordered, independent index mapping.

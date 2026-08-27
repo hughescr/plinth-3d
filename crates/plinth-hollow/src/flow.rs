@@ -159,7 +159,10 @@ pub(crate) fn flow_labels(
     pitch_mm: f64,
     throat_r_mm: f64,
 ) -> Result<(Array3<i32>, FlowStats), HollowError> {
-    let dims: [usize; 3] = mask.shape().try_into().map_err(|_| HollowError::VoxelStack)?;
+    let dims: [usize; 3] = mask
+        .shape()
+        .try_into()
+        .map_err(|_| HollowError::VoxelStack)?;
     let voxel_count = dims[0]
         .checked_mul(dims[1])
         .and_then(|value| value.checked_mul(dims[2]))
@@ -233,7 +236,14 @@ pub(crate) fn flow_labels(
         }
     }
     drop(core);
-    downhill_flood(&admitted, &clearance, &mut labels, &mut overlay, frontier, dims);
+    downhill_flood(
+        &admitted,
+        &clearance,
+        &mut labels,
+        &mut overlay,
+        frontier,
+        dims,
+    );
 
     stats.unreached_voxels = mask
         .iter()
@@ -422,8 +432,9 @@ mod tests {
         let pitch = 0.5;
         let throat = 1.5; // 3 voxel steps at 0.5 mm.
         let mask = wide_block(4);
-        let (selected, stats) =
-            select_all_flow_components(&mask, pitch, throat).expect("flow ok").expect("some");
+        let (selected, stats) = select_all_flow_components(&mask, pitch, throat)
+            .expect("flow ok")
+            .expect("some");
         assert_eq!(stats.flow_components, 1);
         assert_eq!(stats.unreached_voxels, 0);
         assert_eq!(selected, mask, "not one voxel of the cavity was eroded");
@@ -501,11 +512,9 @@ mod tests {
                 continue;
             }
             let voxel = [index.0, index.1, index.2];
-            let has_matching_neighbor = six_neighbors(
-                labels.shape().try_into().expect("3 dims"),
-                voxel,
-            )
-            .any(|neighbor| labels[neighbor] == label);
+            let has_matching_neighbor =
+                six_neighbors(labels.shape().try_into().expect("3 dims"), voxel)
+                    .any(|neighbor| labels[neighbor] == label);
             let component_size = labels.iter().filter(|&&l| l == label).count();
             assert!(
                 has_matching_neighbor || component_size == 1,

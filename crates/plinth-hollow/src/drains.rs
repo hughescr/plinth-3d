@@ -841,15 +841,14 @@ fn retain_candidate_path(
 /// would be two prisms, and the planner would be clearing a bore the driller
 /// never cuts.
 pub(crate) fn cutter_basis(direction: V3) -> Result<(V3, V3), DrainPlanningRefusal> {
-    let reference = if direction[0].abs() <= direction[1].abs()
-        && direction[0].abs() <= direction[2].abs()
-    {
-        [1.0, 0.0, 0.0]
-    } else if direction[1].abs() <= direction[2].abs() {
-        [0.0, 1.0, 0.0]
-    } else {
-        [0.0, 0.0, 1.0]
-    };
+    let reference =
+        if direction[0].abs() <= direction[1].abs() && direction[0].abs() <= direction[2].abs() {
+            [1.0, 0.0, 0.0]
+        } else if direction[1].abs() <= direction[2].abs() {
+            [0.0, 1.0, 0.0]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
     let across = normalize(cross(reference, direction))?;
     Ok((across, cross(direction, across)))
 }
@@ -950,9 +949,7 @@ impl RearOverTravel<'_> {
     )]
     fn points_per_candidate(&self) -> usize {
         let stations = (self.before_mm / self.station_step_mm).ceil() as usize + 1;
-        stations * self.sections * (REAR_EDGE_SAMPLES + 1)
-            + REAR_CAP_RINGS * self.sections
-            + 1
+        stations * self.sections * (REAR_EDGE_SAMPLES + 1) + REAR_CAP_RINGS * self.sections + 1
     }
 
     fn query_bytes(&self) -> Result<usize, DrainPlanningRefusal> {
@@ -1006,7 +1003,8 @@ fn best_buried<'a>(
         let Some((candidate, path)) = select(candidates, paths) else {
             return Ok(None);
         };
-        let outside_samples = rear.outside_samples(candidate.origin, candidate.direction, radius)?;
+        let outside_samples =
+            rear.outside_samples(candidate.origin, candidate.direction, radius)?;
         if outside_samples == 0 {
             return Ok(Some((candidate, path)));
         }
@@ -1474,11 +1472,7 @@ fn low_lobes(
 /// nearest one: the first sort key falls away, the other three do not. That is
 /// still a genuine cell centre rather than an average of several, and it fails,
 /// if it fails, with the same honest `NoExit` the caller reported before.
-fn drain_site(
-    field: &CavityField,
-    members: &[usize],
-    aim: V3,
-) -> Result<V3, DrainPlanningRefusal> {
+fn drain_site(field: &CavityField, members: &[usize], aim: V3) -> Result<V3, DrainPlanningRefusal> {
     members
         .iter()
         .map(|member| {
@@ -2663,7 +2657,10 @@ mod tests {
         for diagnostic in &breached {
             assert_eq!(diagnostic.direction[1].get(), 0.0);
             let across = diagnostic.direction[0].get().abs();
-            assert!((across - 0.5_f64 / 1.25_f64.sqrt()).abs() < 1e-12, "{across}");
+            assert!(
+                (across - 0.5_f64 / 1.25_f64.sqrt()).abs() < 1e-12,
+                "{across}"
+            );
         }
         assert_ne!(
             breached[0].direction[0].get(),
