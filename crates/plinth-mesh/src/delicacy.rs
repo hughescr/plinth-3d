@@ -389,8 +389,9 @@ mod tests {
             .placeholders();
         let settings = DelicacySettings::production().expect("production delicacy settings");
 
-        // The production path is the sole reader in this crate of these three
-        // registry entries (`plinth-metrics`'s scar.rs reads them too); pin
+        // The production path is now the sole reader of these three registry
+        // entries anywhere in the workspace: `plinth-metrics`'s scar.rs used
+        // to read them too, and that crate was deleted on 2026-08-26.  Pin
         // both the plumbing (field-for-field) and the registry values
         // themselves so either drifting fails here.
         assert_eq!(

@@ -21,13 +21,17 @@
 //!   decimated proxy, so scar magnitudes moved with the decimation ratio —
 //!   cannot recur here, because the field and its evaluation mesh are one
 //!   object.
-//! * **Auditor independence is preserved.**  `plinth-metrics`'s `scar.rs`
-//!   carries its own, deliberately different delicacy field, and there is no
-//!   dependency in either direction between the two.  That crate keeps
-//!   auditing this crate's output; an audit that shared this implementation
-//!   would be checking a thing against itself.  Nothing in this module may
-//!   ever be expressed in terms of `plinth-metrics`, and nothing there may be
-//!   expressed in terms of this.
+//! * **The independent auditor is gone, and nothing replaced it.**  Until
+//!   2026-08-26 `plinth-metrics`'s `scar.rs` carried its own, deliberately
+//!   different delicacy field, with no dependency in either direction, so the
+//!   audit was never checking a thing against itself.  That crate was deleted
+//!   by owner ruling as an orphan: it had no production consumer once the
+//!   `plinth score` subcommand was removed.  Deleting it also deleted the
+//!   second opinion, so this module is now the SOLE delicacy implementation
+//!   and its output is checked only by its own tests.  That is a real loss of
+//!   cross-checking, recorded here rather than quietly dropped: anything that
+//!   restores an independent delicacy audit must still not be expressed in
+//!   terms of this module, or it will be checking a thing against itself.
 //!
 //! # The blend
 //!
