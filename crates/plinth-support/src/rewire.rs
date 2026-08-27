@@ -98,8 +98,12 @@ fn extend_rewire_contact_attestation(head: u64, batch: u64, stage: u64) -> u64 {
 pub(crate) enum RewireError {
     #[error("registered rewire constants unavailable: {0}")]
     Constants(String),
-    #[error("registered rewire constant differs from the frozen current behavior: {0}")]
-    ConstantMismatch(&'static str),
+    #[error("registered rewire constant {name} cannot shape a search: {value} — {why}")]
+    ConstantUnusable {
+        name: &'static str,
+        value: String,
+        why: &'static str,
+    },
     #[error(transparent)]
     Forest(#[from] ForestError),
     #[error(transparent)]
@@ -160,22 +164,81 @@ impl Config {
             standoff_mm: p.standoff_mm().diagnostic().get(),
             process_resolution_mm,
         };
-        for (actual, expected, name) in [
-            (config.twig_mm, 0.5_f64, "REWIRE_TWIG_MERGE_LEN_MM"),
-            (config.degenerate_mm, 1e-4_f64, "REWIRE_DEGENERATE_LEN_MM"),
-            (config.roll_eps, 0.0025_f64, "REWIRE_ROLL_EPS"),
+        config.check_usable()?;
+        Ok(config)
+    }
+
+    /// **WELL-FORMEDNESS, NOT A FREEZE.**
+    ///
+    /// This gate used to read each registered value and then compare it,
+    /// bit-for-bit, against a hard-coded literal in this file — `0.5`, `1e-4`,
+    /// `0.0025`, `50`, `20`. That made the registry the SOURCE of these numbers
+    /// and a literal here their AUTHORITY, so retuning the registry could only
+    /// ever break this stage, never move it: every value but the one already
+    /// written down was refused, and the registry entry was decorative.
+    ///
+    /// What a search parameter actually has to satisfy is that the search it
+    /// shapes still means something. Each condition below names one way the
+    /// sweep would stop being a search, and none of them decides an
+    /// accept/reject outcome for any candidate move (physics-first constants
+    /// doctrine): they only reject a configuration under which the sweep has no
+    /// definable behaviour at all.
+    fn check_usable(&self) -> Result<(), RewireError> {
+        for (value, name, why) in [
+            (
+                self.twig_mm,
+                "REWIRE_TWIG_MERGE_LEN_MM",
+                "the twig-merge length is the span below which a single-child member is a twig; \
+                 a non-positive or non-finite length puts no member on either side of it",
+            ),
+            (
+                self.degenerate_mm,
+                "REWIRE_DEGENERATE_LEN_MM",
+                "the degenerate length is the span below which a member is a point and must be \
+                 retired; a non-positive or non-finite length retires nothing, ever",
+            ),
+            (
+                self.standoff_mm,
+                "STANDOFF_MM",
+                "the standoff is the gap this stage demands of every graded row and the band \
+                 radius its seat exemptions are cut at; both need a finite, positive distance",
+            ),
         ] {
-            if actual.to_bits() != expected.to_bits() {
-                return Err(RewireError::ConstantMismatch(name));
+            if !value.is_finite() || value <= 0.0 {
+                return Err(RewireError::ConstantUnusable {
+                    name,
+                    value: value.to_string(),
+                    why,
+                });
             }
         }
-        if config.max_slide_evals != 50 {
-            return Err(RewireError::ConstantMismatch("REWIRE_MAX_SLIDE_EVALS"));
+        if !self.roll_eps.is_finite() || self.roll_eps < 0.0 {
+            return Err(RewireError::ConstantUnusable {
+                name: "REWIRE_ROLL_EPS",
+                value: self.roll_eps.to_string(),
+                why:
+                    "the rolling-convergence fraction multiplies a volume to make the threshold a \
+                      window of savings is compared against; a negative fraction can never be met \
+                      and a non-finite one is met by every window",
+            });
         }
-        if config.roll_window != 20 {
-            return Err(RewireError::ConstantMismatch("REWIRE_ROLL_WINDOW"));
+        if self.max_slide_evals == 0 {
+            return Err(RewireError::ConstantUnusable {
+                name: "REWIRE_MAX_SLIDE_EVALS",
+                value: self.max_slide_evals.to_string(),
+                why: "the slide move walks at most this many candidates; a budget of zero deletes \
+                      the move rather than bounding it",
+            });
         }
-        Ok(config)
+        if self.roll_window == 0 {
+            return Err(RewireError::ConstantUnusable {
+                name: "REWIRE_ROLL_WINDOW",
+                value: self.roll_window.to_string(),
+                why: "the convergence window is full at this many accepted savings; a window of \
+                      zero is full before the first move and converges the sweep immediately",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -192,6 +255,76 @@ struct MoveDescriptor {
     saving_key_ml: f64,
     kind: MoveKind,
     member: MemberKey,
+}
+
+/// What one attempted move did to the forest, and what the sweep is entitled to
+/// conclude from its volume delta.
+///
+/// **The two accepted arms are not the same answer, which is why the sweep no
+/// longer reads a bare `Option<f64>`.**
+///
+/// [`Self::Saved`] is an OPTIMIZATION result. Reattach, slide and prune each
+/// refuse their own candidate unless it lowers the forest's volume, so their
+/// delta is a genuine saving and is exactly the evidence
+/// [`RewireTermination::RollingSavingsConverged`] grades.
+///
+/// [`Self::Repaired`] is the degenerate-retirement outcome, and its delta is
+/// INCIDENTAL. `try_retire` fires on a member shorter than
+/// `REWIRE_DEGENERATE_LEN_MM`, which lowering refuses outright, so the move is
+/// taken because the member must not survive — not because it pays. Re-anchoring
+/// the orphaned children onto the retiring member's plate-side end and widening
+/// the ancestors they now feed can legitimately RAISE the total, and both of
+/// this module's degenerate fixtures do exactly that.
+///
+/// Collapsing the two used to hide that twice over: a repair that grew the
+/// forest was reported as `Some(0.0)`, so the sweep's running volume — and with
+/// it the disclosed `curve` — drifted one repair further from the
+/// `final_volume_ml` recomputed at the end, and twenty such zeroes filled the
+/// convergence window with savings that had never happened and stopped the
+/// sweep with the rest of the forest unswept.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MoveOutcome {
+    /// The candidate was refused; the forest is untouched.
+    Declined,
+    /// Committed as an improvement. `volume_delta_ml` is `before - after` and
+    /// is positive by the move's own acceptance test.
+    Saved { volume_delta_ml: f64 },
+    /// Committed as a repair. `volume_delta_ml` is `before - after`, SIGNED:
+    /// negative means this repair grew the forest, which is a real, disclosable
+    /// outcome and not a saving of zero.
+    Repaired { volume_delta_ml: f64 },
+}
+
+impl MoveOutcome {
+    /// `before - after` for a committed move, `None` when nothing was
+    /// committed. Positive means the forest got smaller.
+    const fn volume_delta_ml(self) -> Option<f64> {
+        match self {
+            Self::Declined => None,
+            Self::Saved { volume_delta_ml } | Self::Repaired { volume_delta_ml } => {
+                Some(volume_delta_ml)
+            }
+        }
+    }
+
+    /// The delta the rolling-convergence window may grade. A repair has none:
+    /// it was not looking for a saving and its delta says nothing about whether
+    /// the search still has savings left to find.
+    const fn saving_ml(self) -> Option<f64> {
+        match self {
+            Self::Saved { volume_delta_ml } => Some(volume_delta_ml),
+            Self::Declined | Self::Repaired { .. } => None,
+        }
+    }
+
+    /// Lift one of the three optimization moves' `Option<f64>` into the shared
+    /// outcome. Those moves have no repair arm to choose between.
+    const fn from_saving(saving_ml: Option<f64>) -> Self {
+        match saving_ml {
+            Some(volume_delta_ml) => Self::Saved { volume_delta_ml },
+            None => Self::Declined,
+        }
+    }
 }
 
 pub(crate) fn optimize(
@@ -238,30 +371,30 @@ pub(crate) fn optimize(
             }
             report.move_evaluations += 1;
             let outcome = match descriptor.kind {
-                MoveKind::Reattach => try_reattach(
+                MoveKind::Reattach => MoveOutcome::from_saving(try_reattach(
                     forest,
                     descriptor.member,
                     &request,
                     &cco,
                     &config,
                     &mut report,
-                )?,
-                MoveKind::Slide => try_slide(
+                )?),
+                MoveKind::Slide => MoveOutcome::from_saving(try_slide(
                     forest,
                     descriptor.member,
                     request.geometry,
                     &braced_hosts,
                     &config,
                     &mut report.seat_zone_members_refrozen,
-                )?,
-                MoveKind::Prune => try_prune(
+                )?),
+                MoveKind::Prune => MoveOutcome::from_saving(try_prune(
                     forest,
                     descriptor.member,
                     request.geometry,
                     &braced_hosts,
                     &config,
                     &mut report.seat_zone_members_refrozen,
-                )?,
+                )?),
                 MoveKind::Retire => try_retire(
                     forest,
                     descriptor.member,
@@ -271,21 +404,34 @@ pub(crate) fn optimize(
                     &mut report.seat_zone_members_refrozen,
                 )?,
             };
-            if let Some(saved) = outcome {
+            if let Some(delta_ml) = outcome.volume_delta_ml() {
                 any_accepted = true;
                 report.accepted += 1;
-                current_volume_ml -= saved;
+                // THE TRUE, SIGNED DELTA, whichever arm produced it. A repair
+                // that grew the forest moves this the other way, which is what
+                // keeps the disclosed `curve` reconcilable against the
+                // `final_volume_ml` recomputed once the sweep ends.
+                current_volume_ml -= delta_ml;
                 report.curve.push((report.accepted, current_volume_ml));
-                recent.push_back(saved);
-                if recent.len() > config.roll_window {
-                    recent.pop_front();
-                }
-                if recent.len() == config.roll_window
-                    && recent.iter().sum::<f64>()
-                        < config.roll_eps * current_volume_ml.max(VOLUME_EPS_ML)
-                {
-                    report.termination = RewireTermination::RollingSavingsConverged;
-                    break 'sweeps;
+                // ONLY A SAVING MAY CONVERGE THE SWEEP. `saving_ml` is `None`
+                // for a degenerate retirement, so a run of repairs neither
+                // fills this window with savings that never happened nor —
+                // now that the delta is signed — poisons it with a negative
+                // that would satisfy the test outright. Repairs cannot run
+                // forever: each one permanently retires one member and none
+                // creates a new degenerate one, so the sweep still terminates.
+                if let Some(saved) = outcome.saving_ml() {
+                    recent.push_back(saved);
+                    if recent.len() > config.roll_window {
+                        recent.pop_front();
+                    }
+                    if recent.len() == config.roll_window
+                        && recent.iter().sum::<f64>()
+                            < config.roll_eps * current_volume_ml.max(VOLUME_EPS_ML)
+                    {
+                        report.termination = RewireTermination::RollingSavingsConverged;
+                        break 'sweeps;
+                    }
                 }
             } else {
                 report.rejected += 1;
@@ -741,6 +887,19 @@ fn try_prune(
     Ok(Some(before - after))
 }
 
+/// **THE DEGENERATE-RETIREMENT REPAIR — not an optimization.**
+///
+/// Every other move in this module is taken because it pays, and refuses its own
+/// candidate when it does not. This one is taken because a member shorter than
+/// `REWIRE_DEGENERATE_LEN_MM` is a point: as a root it is a plate root whose run
+/// to the plate is shorter than `root_boss_top` allows and lowering refuses it
+/// outright (`degenerate_root_retire_grounds_its_children_and_the_forest_still_lowers`).
+/// Re-anchoring the orphaned children and widening the ancestors they now feed
+/// routinely costs more volume than the retired point returns — both of this
+/// module's degenerate fixtures grow — so a volume test here would decline the
+/// repair in exactly the cases that need it. It commits on legality, and returns
+/// [`MoveOutcome::Repaired`] so the sweep books the delta without reading it as
+/// a saving.
 fn try_retire(
     forest: &mut Forest,
     key: MemberKey,
@@ -748,15 +907,15 @@ fn try_retire(
     braced: &BTreeSet<MemberKey>,
     config: &Config,
     refrozen: &mut u64,
-) -> Result<Option<f64>, RewireError> {
+) -> Result<MoveOutcome, RewireError> {
     if braced.contains(&key) {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     }
     let Some(member) = forest.member(key).cloned() else {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     };
     if matches!(member.kind(), MemberKind::Stub) || member_length(&member) >= config.degenerate_mm {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     }
     let children = forest.children_of(key);
     if children.len() == 1
@@ -764,10 +923,10 @@ fn try_retire(
             .member(children[0])
             .is_some_and(|m| !matches!(m.kind(), MemberKind::Stub))
     {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     }
     if children.iter().any(|child| braced.contains(child)) {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     }
     let before = total_volume_ml(forest)?;
     let mut candidate = forest.clone();
@@ -832,11 +991,19 @@ fn try_retire(
         reconcile_ancestors(&mut candidate, parent)?;
     }
     if !validate_changed_geometry(forest, &mut candidate, geometry, config, refrozen)? {
-        return Ok(None);
+        return Ok(MoveOutcome::Declined);
     }
     let after = total_volume_ml(&candidate)?;
     *forest = candidate;
-    Ok(Some((before - after).max(0.0)))
+    // THE SIGNED DELTA. This used to be `(before - after).max(0.0)`, which
+    // reported a repair that GREW the forest as a saving of exactly zero. The
+    // sweep subtracts what it is told from its running volume, so every clamped
+    // zero left the disclosed `curve` one repair further from the
+    // `final_volume_ml` recomputed at the end, and twenty of them filled the
+    // convergence window with savings that had never happened.
+    Ok(MoveOutcome::Repaired {
+        volume_delta_ml: before - after,
+    })
 }
 
 fn reconcile_ancestors(forest: &mut Forest, mut key: Option<MemberKey>) -> Result<(), RewireError> {
@@ -1072,9 +1239,9 @@ fn validate_changed_geometry(
     // read through the SAME shared predicate the final pass uses; only the
     // number differs (Craig's two-tier ruling, 2026-08-22).
     // #36 step 5 — the FULL axis against surface-minus-Z.
-    let (clearances, _) = geometry
+    let clearances = geometry
         .surface()
-        .segment_clearance_excluding(
+        .segment_clearance_excluding_typed(
             &p0,
             &p1,
             &r0,
@@ -1085,7 +1252,22 @@ fn validate_changed_geometry(
             &excluded,
         )
         .map_err(|e| RewireError::Native(e.to_string()))?;
-    Ok(clearances.into_iter().all(|value| value >= 0.0))
+    // **AN UNTESTED ROW REFUSES.** `clears_or` has no default because the
+    // verdict for a row nothing was measured on is a property of the STAGE, and
+    // this stage validates a move it is about to commit: an untested row has
+    // earned nothing, so `false`.
+    //
+    // The row that makes this load-bearing is
+    // `UnmeasuredSegment::AllFacesExcluded`. The seat exemption assembled into
+    // `excluded` above can cover every face the distance walk can reach — a
+    // small mesh under a fat arm's band is enough — and the walk then has no
+    // candidate to measure against. Through the float entry point this call
+    // used to make, that row came back as `f64::INFINITY`, and the
+    // `value >= 0.0` this line used to read graded it as the roomiest clearance
+    // in the forest: erasure by exemption laundered into a pass, which is
+    // precisely what naming the exempt FACES instead of a skipped LENGTH was
+    // introduced to prevent. A support was admitted on a check that never ran.
+    Ok(clearances.into_iter().all(|row| row.clears_or(false)))
 }
 
 /// The PR-1..PR-4 policy this stage validates under — every number the
@@ -1126,7 +1308,21 @@ fn assert_no_stale_braces(forest: &Forest) -> Result<(), RewireError> {
         .connectivity_axis_attach_tol_mm()
         .diagnostic()
         .get();
+    // ONE BATCH for the whole forest: every brace endpoint that still has to
+    // find a host, against every live tree member, in a single kernel call.
+    // What this replaces was a scalar fold per endpoint inside a loop over
+    // every brace, and it reached the kernel's own point-to-segment arithmetic
+    // through a private copy of it in this file — a copy that carried its own
+    // `1e-18` degeneracy epsilon. Two copies of one predicate drift, and the
+    // copy in the caller is the one nobody tests.
     let hosts = forest.live_tree_members();
+    let mut host_starts: Vec<[f64; 3]> = Vec::with_capacity(hosts.len());
+    let mut host_ends: Vec<[f64; 3]> = Vec::with_capacity(hosts.len());
+    for host in hosts.iter().filter_map(|key| forest.member(*key)) {
+        host_starts.push(host.p0_mm().map(Finite::get));
+        host_ends.push(host.p1_mm().map(Finite::get));
+    }
+    let mut endpoints: Vec<[f64; 3]> = Vec::new();
     for brace_key in forest.braces() {
         let brace = forest
             .member(brace_key)
@@ -1138,21 +1334,30 @@ fn assert_no_stale_braces(forest: &Forest) -> Result<(), RewireError> {
             if brace.model_contact_end() == Some(end) {
                 continue;
             }
-            let point = point.map(Finite::get);
-            let nearest = hosts
-                .iter()
-                .filter_map(|key| forest.member(*key))
-                .map(|host| {
-                    point_segment_distance(
-                        point,
-                        host.p0_mm().map(Finite::get),
-                        host.p1_mm().map(Finite::get),
-                    )
-                })
-                .fold(f64::INFINITY, f64::min);
-            if nearest > brace_host_tol_mm {
-                return Err(RewireError::StaleBrace);
-            }
+            endpoints.push(point.map(Finite::get));
+        }
+    }
+    if endpoints.is_empty() {
+        return Ok(());
+    }
+    // Charged over the notional dense window because that is what bounds the
+    // WORK; the output this call allocates is one row per ENDPOINT.
+    let limits =
+        geom_kernel::PointSegmentBatchLimits::for_dimensions(endpoints.len(), host_starts.len())
+            .map_err(|error| RewireError::Native(error.to_string()))?;
+    let nearest =
+        geom_kernel::point_nearest_segment_batch(&endpoints, &host_starts, &host_ends, limits)
+            .map_err(|error| RewireError::Native(error.to_string()))?;
+    for row in 0..endpoints.len() {
+        // AN EMPTY HOST SET HAS NO NEAREST HOST, and that is not "far away".
+        // The fold this replaces seeded with `f64::INFINITY` and so reached the
+        // same verdict — every brace stale — through a sentinel that happened
+        // to point the right way. `None` reaches it on purpose.
+        let Some(found) = nearest.nearest(row) else {
+            return Err(RewireError::StaleBrace);
+        };
+        if found.distance_mm() > brace_host_tol_mm {
+            return Err(RewireError::StaleBrace);
         }
     }
     Ok(())
@@ -1203,15 +1408,6 @@ fn lean_deg(p0: [f64; 3], p1: [f64; 3]) -> f64 {
     } else {
         (d[2].abs() / l).clamp(-1.0, 1.0).acos().to_degrees()
     }
-}
-fn point_segment_distance(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
-    let d = sub(b, a);
-    let l2 = dot(d, d);
-    if l2 < 1e-18 {
-        return distance(p, a);
-    }
-    let t = (dot(sub(p, a), d) / l2).clamp(0.0, 1.0);
-    distance(p, add(a, scale(d, t)))
 }
 fn finite3(v: [f64; 3]) -> Result<[Finite; 3], RewireError> {
     v.map(|x| Finite::new(x).map_err(|_| RewireError::InvalidGeometry))
@@ -1405,7 +1601,7 @@ mod tests {
         let before = forest.live_tree_members().len();
         let mut candidate = forest.clone();
         with_far_authority(|authority| {
-            assert!(try_retire(
+            let outcome = try_retire(
                 &mut candidate,
                 deg,
                 authority,
@@ -1413,8 +1609,9 @@ mod tests {
                 &cfg,
                 &mut 0,
             )
-            .unwrap()
-            .is_some());
+            .unwrap();
+            assert!(matches!(outcome, MoveOutcome::Repaired { .. }));
+            assert!(outcome.volume_delta_ml().is_some());
         });
         assert_eq!(candidate.live_tree_members().len(), before - 1);
         assert_eq!(candidate.parent_of(a), Some(parent));
@@ -1481,17 +1678,17 @@ mod tests {
 
         let mut candidate = forest.clone();
         with_far_authority(|authority| {
+            let outcome = try_retire(
+                &mut candidate,
+                deg,
+                authority,
+                &BTreeSet::new(),
+                &cfg,
+                &mut 0,
+            )
+            .unwrap();
             assert!(
-                try_retire(
-                    &mut candidate,
-                    deg,
-                    authority,
-                    &BTreeSet::new(),
-                    &cfg,
-                    &mut 0,
-                )
-                .unwrap()
-                .is_some(),
+                matches!(outcome, MoveOutcome::Repaired { .. }),
                 "a grounded degenerate root's children can inherit its plate end"
             );
         });
@@ -1829,10 +2026,19 @@ mod tests {
     ///
     /// The record starts on the old axis with the final radius already in place,
     /// so only the axis comparison can make `validate_changed_geometry` re-cut
-    /// it. The one-face surface is near both axes and is excluded by the stub's
-    /// zone, which keeps this test about the accepted slide rather than a
-    /// clearance refusal. A radius-only gate leaves the record's stored endpoint
-    /// at the old junction and reports zero re-cuts.
+    /// it. A radius-only gate leaves the record's stored endpoint at the old
+    /// junction and reports zero re-cuts.
+    ///
+    /// **The seat face is near both axes and the stub's zone exempts it, so a
+    /// clearance refusal cannot be what this test measures — but the surface
+    /// carries a SECOND face, far from everything, so that something is still
+    /// left to grade.** This fixture used to be one triangle, and the stub's
+    /// zone therefore exempted every face on the mesh; the row came back
+    /// unmeasured, the float entry point encoded that as `f64::INFINITY`, and
+    /// the admissibility rule read it as the roomiest clearance in the forest.
+    /// The slide was admitted on a check that never ran. The honest rule refuses
+    /// an unmeasured row, so the surface has to be one a seat band cannot
+    /// swallow whole — which is what a real model is.
     #[test]
     #[expect(
         clippy::float_cmp,
@@ -1841,8 +2047,20 @@ mod tests {
     )]
     fn try_slide_re_cuts_a_consumed_stubs_zone_to_follow_its_new_endpoint() {
         let mesh = Mesh::new(
-            vec![[-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [0.0, 0.2, 0.0]],
-            vec![[0, 1, 2]],
+            vec![
+                // The seat face, under the stub's plate-side end.
+                [-0.2, -0.2, 0.0],
+                [0.2, -0.2, 0.0],
+                [0.0, 0.2, 0.0],
+                // A second, unconnected face 20 mm away in +x: too far for the
+                // seat band to reach and too far to touch either axis, so the
+                // exemption cannot cover the whole surface and the graded rows
+                // still have something to be measured against.
+                [20.0, -0.2, 0.0],
+                [20.0, 0.2, 0.0],
+                [20.0, 0.0, 0.4],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
         )
         .unwrap();
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
@@ -2047,6 +2265,431 @@ mod tests {
         assert_eq!(
             stable_payload[0],
             "5336204845989297568:0000000000000000:0000000000000000:0000000000000000:3ff8000000000000"
+        );
+    }
+    /// **REGRESSION — the clearance verdict for a row NOTHING WAS MEASURED ON.**
+    ///
+    /// `validate_changed_geometry` hands the kernel one exemption set per row:
+    /// the faces a seated member's own seat forgives, so a contact-declaring arm
+    /// does not refuse itself for being inside the material it is seated in.
+    /// When that set covers EVERY face the distance walk can reach, the walk has
+    /// no candidate and the row carries no measurement at all
+    /// (`UnmeasuredSegment::AllFacesExcluded`). Through the float entry point
+    /// this site used to call, that row came back as `f64::INFINITY`, and the
+    /// `value >= 0.0` verdict read the absence of a measurement as the roomiest
+    /// clearance in the forest. Erasure by exemption laundered into a pass is
+    /// exactly what naming the exempt FACES rather than a skipped LENGTH was
+    /// introduced to prevent.
+    ///
+    /// **The control is the whole test.** Both halves below use the same member,
+    /// the same contact, the same seat face and the same frozen exemption — the
+    /// zone is `[0]` in both, and neither half re-cuts it. The only difference is
+    /// whether the surface carries a second face 20 mm away that the exemption
+    /// does not name. With something left to grade, the move is admitted; with
+    /// nothing left, it must be refused. Any refusal shared by both halves —
+    /// the cone test, the PR-2 mask, PR-3 emergence — is cancelled out by
+    /// construction, so what this measures is the unmeasured row and nothing
+    /// else.
+    #[test]
+    fn a_seat_exemption_that_covers_every_face_refuses_the_move_it_cannot_grade() {
+        // A seated arm: vertical, 4 mm long, rootward end on the seat face at
+        // the origin. `after` widens only the TERMINAL radius, so the row is a
+        // changed row while the band radius (cut from the contact end's radius)
+        // and both endpoints are untouched -- which is what keeps
+        // `refreeze_resized_seat_zones` from re-cutting the zone under the test.
+        let p0_mm = [0.0, 0.0, 4.0];
+        let p1_mm = [0.0, 0.0, 0.0];
+        let seat_radius_mm = 0.1;
+
+        let graded = |with_a_face_left_over: bool| {
+            let mut vertices = vec![[-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [0.0, 0.2, 0.0]];
+            let mut faces = vec![[0_u32, 1, 2]];
+            if with_a_face_left_over {
+                vertices.extend([[20.0, -0.2, 0.0], [20.0, 0.2, 0.0], [20.0, 0.0, 0.4]]);
+                faces.push([3, 4, 5]);
+            }
+            let mesh = Mesh::new(vertices, faces).unwrap();
+            let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+            let surface = NativeSurface::from_indexed(
+                mesh.verts(),
+                mesh.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: 1.0,
+                    max_grid_bytes: 8 * 1024 * 1024,
+                },
+            )
+            .unwrap();
+            let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let config = Config::current(0.05).unwrap();
+
+            let mut before = Forest::new();
+            let key = before.add_member(Member::new(MemberSpec {
+                p0_mm: p0_mm.map(f),
+                p1_mm: p1_mm.map(f),
+                r0_mm: TerminalEndRadius::new(p(seat_radius_mm)),
+                r1_mm: RootwardEndRadius::new(p(seat_radius_mm)),
+                kind: MemberKind::Trunk,
+                owner: Owner::Generated {
+                    family: "all-faces-excluded".into(),
+                    ordinal: 0,
+                },
+                model_contact_end: Some(crate::forest::ContactEnd::Rootward),
+                carried_mm2: f(1.0),
+            }));
+            let record = crate::seat_zone::freeze_production_seat_zones(
+                &surface,
+                &topology,
+                &[crate::seat_zone::SeatZoneRequest {
+                    p0_mm,
+                    p1_mm,
+                    seat_face_id: 0,
+                    band_radius_mm: seat_radius_mm + config.standoff_mm,
+                }],
+            )
+            .unwrap()
+            .remove(0);
+            let zone = record.zone().as_ref().to_vec();
+            before.set_seat_zone(key, record);
+
+            let mut after = before.clone();
+            after
+                .set_radii(
+                    key,
+                    TerminalEndRadius::new(p(0.5)),
+                    RootwardEndRadius::new(p(seat_radius_mm)),
+                )
+                .unwrap();
+
+            let mut refrozen = 0_u64;
+            let admitted =
+                validate_changed_geometry(&before, &mut after, &authority, &config, &mut refrozen)
+                    .unwrap();
+            (admitted, zone, refrozen, topology.n_faces())
+        };
+
+        let (admitted_with_a_face_left, zone_left, refrozen_left, faces_left) = graded(true);
+        let (admitted_with_nothing_left, zone_none, refrozen_none, faces_none) = graded(false);
+
+        // Same exemption on both sides, and neither side re-cut it: the halves
+        // differ only in what the exemption leaves behind.
+        assert_eq!(zone_left, vec![0_u32], "the arm forgives its own seat face");
+        assert_eq!(zone_none, vec![0_u32], "and exactly the same one here");
+        assert_eq!((refrozen_left, refrozen_none), (0, 0));
+        assert_eq!(faces_left, 2, "one face is left outside the exemption");
+        assert_eq!(
+            faces_none, 1,
+            "the exemption covers every face the walk can reach"
+        );
+
+        assert!(
+            admitted_with_a_face_left,
+            "CONTROL: with a face left to measure against, this move is clean and \
+             must be admitted -- so nothing else in this pass refuses it"
+        );
+        assert!(
+            !admitted_with_nothing_left,
+            "the exemption removed every face the distance walk could reach, so \
+             NOTHING was measured. That row is not a large clearance: reading it \
+             as one admits a support on a check that never ran"
+        );
+    }
+
+    /// **REGRESSION — a degenerate retirement is a REPAIR, and a repair that
+    /// grew the forest reports the increase.**
+    ///
+    /// `try_retire` used to close with `Ok(Some((before - after).max(0.0)))`.
+    /// The clamp is not cosmetic: the sweep subtracts what it is told from its
+    /// running volume, so a repair that cost volume was booked as a saving of
+    /// exactly zero and left the disclosed `curve` one repair further from the
+    /// `final_volume_ml` recomputed at the end. Twenty of them in a row also
+    /// filled the rolling window with savings that had never happened and
+    /// satisfied `RollingSavingsConverged`, stopping the sweep with the rest of
+    /// the forest unswept.
+    ///
+    /// The measured fact this pins: retiring a degenerate junction re-anchors
+    /// its children onto the retiring member's own rootward end and widens the
+    /// ancestors they now feed, and on this fixture that costs about 78% of the
+    /// forest's volume. A volume test would therefore DECLINE this repair, which
+    /// is why `try_retire` commits on legality instead and hands the sweep a
+    /// `Repaired` outcome rather than a saving.
+    #[test]
+    fn a_degenerate_retirement_that_costs_volume_reports_the_cost_not_a_zero() {
+        let cfg = Config::current(0.05).unwrap();
+        let mut forest = Forest::new();
+        let parent = forest.add_member(member(
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let deg = forest.add_member(member(
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0 + 5e-5],
+            MemberKind::Shoot,
+            1,
+        ));
+        let a = forest.add_member(member(
+            [1.0, 0.0, 3.0],
+            [0.0, 0.0, 2.0],
+            MemberKind::Shoot,
+            2,
+        ));
+        let b = forest.add_member(member(
+            [-1.0, 0.0, 3.0],
+            [0.0, 0.0, 2.0],
+            MemberKind::Shoot,
+            3,
+        ));
+        forest.set_parent(deg, Some(parent)).unwrap();
+        forest.set_parent(a, Some(deg)).unwrap();
+        forest.set_parent(b, Some(deg)).unwrap();
+
+        let before_ml = total_volume_ml(&forest).unwrap();
+        let mut candidate = forest.clone();
+        let outcome = with_far_authority(|authority| {
+            try_retire(
+                &mut candidate,
+                deg,
+                authority,
+                &BTreeSet::new(),
+                &cfg,
+                &mut 0,
+            )
+            .unwrap()
+        });
+        let after_ml = total_volume_ml(&candidate).unwrap();
+
+        assert!(
+            candidate.member(deg).is_none(),
+            "the repair commits: a degenerate member must not survive into lowering"
+        );
+        assert!(
+            after_ml > before_ml,
+            "fixture control: this repair really does cost volume \
+             ({before_ml} ml -> {after_ml} ml)"
+        );
+        let delta_ml = outcome
+            .volume_delta_ml()
+            .expect("a committed move books a delta");
+        assert!(
+            delta_ml < 0.0,
+            "the sweep must be told the forest GREW, not that it saved zero: \
+             {delta_ml} ml"
+        );
+        assert!(
+            (delta_ml - (before_ml - after_ml)).abs() <= f64::EPSILON,
+            "and the number it is told must be the real one"
+        );
+        assert_eq!(
+            outcome.saving_ml(),
+            None,
+            "a repair is not a saving, and the rolling-convergence window must \
+             not be able to read it as one"
+        );
+    }
+
+    /// **REGRESSION — the disclosed curve reconciles against the volume
+    /// recomputed once the sweep ends.**
+    ///
+    /// `curve` is the running volume after each accepted move and
+    /// `final_volume_ml` is recomputed from the forest itself, so the last point
+    /// on the curve and the final volume are two routes to one number. They stop
+    /// agreeing the moment an accepted move reports a delta that is not the one
+    /// it caused -- which is what the retirement clamp did, once per repair.
+    #[test]
+    fn the_disclosed_curve_reconciles_against_the_recomputed_final_volume() {
+        with_far_authority(|authority| {
+            let mut forest = Forest::new();
+            let parent = forest.add_member(member(
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+                MemberKind::Trunk,
+                0,
+            ));
+            let deg = forest.add_member(member(
+                [0.0, 0.0, 2.0],
+                [0.0, 0.0, 2.0 + 5e-5],
+                MemberKind::Shoot,
+                1,
+            ));
+            let a = forest.add_member(member(
+                [1.0, 0.0, 3.0],
+                [0.0, 0.0, 2.0],
+                MemberKind::Shoot,
+                2,
+            ));
+            let b = forest.add_member(member(
+                [-1.0, 0.0, 3.0],
+                [0.0, 0.0, 2.0],
+                MemberKind::Shoot,
+                3,
+            ));
+            forest.set_parent(deg, Some(parent)).unwrap();
+            forest.set_parent(a, Some(deg)).unwrap();
+            forest.set_parent(b, Some(deg)).unwrap();
+
+            let report = optimize(&mut forest, rewire_request(authority)).unwrap();
+            assert!(
+                forest.member(deg).is_none(),
+                "fixture control: the sweep really does take the degenerate repair"
+            );
+            assert!(
+                report.final_volume_ml > report.initial_volume_ml,
+                "fixture control: and that repair costs volume ({} ml -> {} ml)",
+                report.initial_volume_ml,
+                report.final_volume_ml
+            );
+            let (_, last_ml) = *report
+                .curve
+                .last()
+                .expect("the curve is seeded with the initial volume");
+            assert!(
+                (last_ml - report.final_volume_ml).abs() <= 1e-12,
+                "the disclosed curve ends at {last_ml} ml but the forest \
+                 recomputes to {} ml",
+                report.final_volume_ml
+            );
+        });
+    }
+
+    /// **REGRESSION — the registry may MOVE this stage's search parameters, and
+    /// is refused only where a value leaves the sweep with no definable
+    /// behaviour.**
+    ///
+    /// The gate this replaces read five registered values and then compared each
+    /// against a hard-coded literal in this file, so the registry was the source
+    /// of the numbers and a literal here was their authority: every value but
+    /// the one already written down was refused. Retuning the registry could
+    /// break the stage and never move it.
+    #[test]
+    fn the_constant_gate_admits_a_retuned_registry_and_refuses_only_an_unusable_one() {
+        let registered = Config::current(0.05).unwrap();
+        registered
+            .check_usable()
+            .expect("the registry's own values are usable");
+
+        // A registry that MOVED every one of these is a legal registry. Under
+        // the literal gate each line below was a `ConstantMismatch`.
+        let retuned = Config {
+            twig_mm: 0.7,
+            degenerate_mm: 5e-4,
+            max_slide_evals: 80,
+            roll_window: 12,
+            roll_eps: 0.01,
+            ..registered.clone()
+        };
+        retuned
+            .check_usable()
+            .expect("a retuned registry must be usable, not refused for differing");
+
+        for (broken, name) in [
+            (
+                Config {
+                    twig_mm: 0.0,
+                    ..registered.clone()
+                },
+                "a twig length of zero puts no member on either side of it",
+            ),
+            (
+                Config {
+                    degenerate_mm: f64::NAN,
+                    ..registered.clone()
+                },
+                "a non-finite degenerate length retires nothing, ever",
+            ),
+            (
+                Config {
+                    standoff_mm: -1.0,
+                    ..registered.clone()
+                },
+                "a negative standoff is not a gap",
+            ),
+            (
+                Config {
+                    roll_eps: -1.0,
+                    ..registered.clone()
+                },
+                "a negative convergence fraction can never be met",
+            ),
+            (
+                Config {
+                    max_slide_evals: 0,
+                    ..registered.clone()
+                },
+                "a slide budget of zero deletes the move rather than bounding it",
+            ),
+            (
+                Config {
+                    roll_window: 0,
+                    ..registered.clone()
+                },
+                "a window of zero is full before the first move",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    broken.check_usable(),
+                    Err(RewireError::ConstantUnusable { .. })
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    /// **REGRESSION — a brace endpoint with no live host is STALE, not
+    /// infinitely far away.**
+    ///
+    /// The scalar fold this check replaced seeded its minimum with
+    /// `f64::INFINITY`, so a forest with no live hosts reported every brace as
+    /// stale through a sentinel that happened to point the right way. The batch
+    /// answers `None` for a point with no nearest segment, and `None` is not a
+    /// large distance: reading it as one would pass every brace in a forest that
+    /// has nothing left to hold them.
+    ///
+    /// The fold also carried a private copy of the kernel's own
+    /// point-to-segment degeneracy epsilon into this file. Two copies of one
+    /// predicate drift, and the copy in the caller is the one nobody tests.
+    #[test]
+    fn a_brace_endpoint_with_no_live_host_is_stale_rather_than_infinitely_far() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let brace = forest.add_brace(member(
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.5],
+            MemberKind::Brace,
+            1,
+        ));
+        assert!(
+            assert_no_stale_braces(&forest).is_ok(),
+            "both ends sit on the host axis"
+        );
+
+        // The same brace, moved 10 mm off every host it could attach to.
+        forest
+            .set_endpoints(brace, [10.0, 0.0, 1.0].map(f), [10.0, 0.0, 1.5].map(f))
+            .unwrap();
+        assert!(matches!(
+            assert_no_stale_braces(&forest),
+            Err(RewireError::StaleBrace)
+        ));
+
+        // And the case the sentinel used to answer: nothing to attach TO.
+        forest.retire(host).unwrap();
+        assert!(
+            forest.live_tree_members().is_empty(),
+            "fixture control: the brace is the only member left"
+        );
+        assert!(
+            matches!(
+                assert_no_stale_braces(&forest),
+                Err(RewireError::StaleBrace)
+            ),
+            "an unanswerable question is not a comfortable pass"
         );
     }
 }
