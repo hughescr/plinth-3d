@@ -404,6 +404,12 @@ fn cap_minus_one_returns_a_typed_error_without_a_report() {
 /// positive area, and every one has `cut_ambiguous = false`, so a predicate
 /// that dropped either of the other two terms would still pass here.
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn shared_blocking_predicate_reproduces_the_frozen_reports_own_defect_set() {
     let parsed: serde_json::Value =
         serde_json::from_str(FROZEN_REPORT_JSON.trim_end()).expect("frozen report parses");

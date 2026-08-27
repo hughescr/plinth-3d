@@ -105,6 +105,11 @@ fn worst_residual_mm(rederived: &Mesh, artifact: &Mesh) -> f64 {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn every_pinned_orientation_record_rederives_its_committed_oriented_solid_artifact() {
     let root = repo_root();
 

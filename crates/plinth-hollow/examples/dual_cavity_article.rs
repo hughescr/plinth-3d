@@ -60,6 +60,11 @@ use plinth_solid::{BooleanLimits, ManifoldBackend, Mesh as SolidMesh};
 /// builders before comparing them to the frozen corpus. Only meshes that
 /// passed through the Manifold boolean kernel need this: the fixture itself
 /// is f32-exact by construction and passes the strict writer untouched.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn on_the_wire(mesh: &Mesh) -> Result<Mesh, MeshError> {
     let verts = mesh
         .verts()

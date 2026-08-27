@@ -1149,6 +1149,12 @@ fn ray_triangle_distance(
     Ok(RayHit::Hit(distance))
 }
 
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`dot_aa * dot_bb - dot_ab * dot_ab` is the determinant of the \
+              2x2 Gram matrix of the triangle's two edge vectors, not a \
+              mis-typed `dot_aa * dot_ab`"
+)]
 fn point_on_triangle(point: [f64; 3], face: ContainmentFace) -> Result<bool, TriageError> {
     if (0..3).any(|axis| point[axis] < face.lo[axis] - 1e-10 || point[axis] > face.hi[axis] + 1e-10)
     {

@@ -12,6 +12,11 @@ fn open_required(name: &str) -> Project {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn probe_translation_reads_exact() {
     let (base, moved) = (
         open_required("sphere-cylinder.chitubox"),
@@ -86,6 +91,11 @@ fn probe_rotation_matches_ry_rz_vertex_set() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn library_set_placements_persists_exact() {
     let mut proj = open_required("sphere-cylinder.chitubox");
     proj.set_placements(&[PlacementUpdate {
@@ -106,6 +116,11 @@ fn library_set_placements_persists_exact() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn library_rotate_z_90_rotates_vertices() {
     let mut proj = open_required("sphere-cylinder.chitubox");
     let before = proj.model_triangles(1).unwrap();
@@ -154,6 +169,11 @@ fn library_rotate_rebake_is_deterministic() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn rotate_supported_assembly_moves_records_and_blobs() {
     // Rotating a supported model rebakes model mesh, support blobs, AND record
     // endpoints as one rigid assembly.

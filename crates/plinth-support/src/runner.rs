@@ -4829,6 +4829,13 @@ pub(crate) enum AcceptedContactSetError {
 /// contact. Only `carried_area_mm2` is allowed to differ, because the
 /// repartition over the survivors is precisely what §6 orders after the
 /// removal.
+#[allow(
+    clippy::float_cmp,
+    reason = "a ledger check that the accepted set is the surviving planned \
+              contacts VERBATIM.  Both sides are the same stored values; any \
+              difference at all, including one ULP, is the mismatch this is \
+              looking for"
+)]
 fn validate_accepted_contact_set(
     state: &RoutedPlanState,
     forest: &Forest,
@@ -12658,6 +12665,11 @@ mod tests {
     /// only the uncensored side and the route looks like it went 0.41 → 0.05;
     /// read the censored side and it says the hole closed.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local exact pins over hand-written fixture values. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_route_delta_states_the_censored_and_the_uncensored_side_separately() {
         fn patch(area_mm2: f64, gap: f64) -> crate::coverage_closure::BlockingPatchKey {
             crate::coverage_closure::BlockingPatchKey {

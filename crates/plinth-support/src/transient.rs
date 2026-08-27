@@ -654,6 +654,12 @@ fn static_restraint_zs(
     Ok(zs)
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "collapsing bit-equal bounds after a `total_cmp` sort so \
+              `windows(2)` cannot emit a zero-length interval; two restraints \
+              that differ at all bound a real, if thin, gap"
+)]
 fn free_gaps(zlo: f64, zhi: f64, restraints: &[Finite]) -> Result<Vec<ZInterval>, TransientError> {
     let mut bounds = vec![zlo, zhi];
     bounds.extend(
@@ -868,6 +874,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn active_z_sort_clamps_events_and_zero_events_use_the_trailing_span() {
         let events = [
             RestraintEvent {
@@ -910,6 +921,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn branch_report_counts_live_terminals_and_uses_lexicographically_first_path() {
         let (mut forest, root, shoot_a, shoot_b, _stub_a) = branched_fixture();
         let dead = forest.add_member(member(
@@ -941,6 +957,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn brace_endpoints_are_gathered_geometrically_and_model_embed_is_excluded() {
         let mut forest = Forest::new();
         let host = forest.add_member(member(
@@ -1034,6 +1055,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn leaning_free_gap_is_converted_back_to_true_3d_length() {
         let own_length = 20.0;
         let z_extent = 10.0;

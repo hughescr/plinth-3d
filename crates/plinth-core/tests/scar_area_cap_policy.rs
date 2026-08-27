@@ -4,6 +4,11 @@ use plinth_core::{
 };
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn scar_area_cap_policy_reuses_the_canonical_typed_registry_authority() {
     let constants = m0_constants().expect("the complete M0 registry must construct");
     let policy = constants.scar_area_cap_policy();

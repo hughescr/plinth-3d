@@ -84,6 +84,11 @@ fn probe1_double_rotation_after_attach_supports() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn probe2_parse_panics_on_rec_off_inside_index_quad() {
     let mut p = one_model_project();
     p.attach_supports(&[SupportBatch {
@@ -110,6 +115,11 @@ fn probe2_parse_panics_on_rec_off_inside_index_quad() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn probe3_dead_smesh_tail_bytes_silently_dropped() {
     let mut p = one_model_project();
     p.attach_supports(&[SupportBatch {
@@ -204,6 +214,11 @@ fn probe4_nan_stl_bypasses_finite_check() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn probe6_empty_group_header_parses_and_saves_byte_identical() {
     // Build a normal supported file (synthetic writes emit a NON-empty group
     // header, so the empty case is otherwise unexercised).

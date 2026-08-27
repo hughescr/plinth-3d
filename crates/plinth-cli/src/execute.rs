@@ -1000,6 +1000,11 @@ mod tests {
         assert!(stopped.is_empty(), "{stopped:?}");
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn island(id: u32, area: f64, gap: CoverageClosureGap, faces: usize) -> UncoveredIslandSummary {
         UncoveredIslandSummary {
             island_id: id,

@@ -1729,6 +1729,14 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
 ///
 /// [`ChainStop`] carrying the typed stage error; a gate stop additionally
 /// carries the gate and the geometry it judged, and leaves no file at `target`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn seal_and_emit(
     model: &ModelId,
     source_faces: usize,
@@ -2629,6 +2637,11 @@ mod tests {
     /// frozen report on disk takes back in, so the numbers below are the
     /// numbers a reader sees.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_chain_outcomes_disclosure_reaches_the_run_report() {
         let disclosure: plinth_support::OwnerlessIslandDisclosure = serde_json::from_str(
             r#"{"island_id":3,"ownerless_face_count":1,

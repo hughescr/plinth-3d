@@ -887,6 +887,14 @@ impl RearOverTravel<'_> {
     ///
     /// The cutter's boundary is where the drilled model's new surface comes
     /// from, so this is the set that decides how many mouths the bore opens.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn boundary_points(
         &self,
         origin: V3,
@@ -932,6 +940,14 @@ impl RearOverTravel<'_> {
 
     /// The buffer this test allocates for one candidate, named before it is
     /// taken. One candidate's batch is alive at a time.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn points_per_candidate(&self) -> usize {
         let stations = (self.before_mm / self.station_step_mm).ceil() as usize + 1;
         stations * self.sections * (REAR_EDGE_SAMPLES + 1)
@@ -1047,6 +1063,14 @@ fn exit_length(
     }))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn sampled_exit_distances(
     field: &CavityField,
     candidates: &[Candidate],
@@ -1069,7 +1093,13 @@ fn sampled_exit_distances(
             let mut in_bounds = true;
             for axis in 0..3 {
                 let coordinate = ((point[axis] - origin[axis]) / pitch).round_ties_even();
-                if coordinate < 0.0 || coordinate >= dims[axis] as f64 {
+                // The NaN arm is not redundant.  NaN fails `< 0.0` and
+                // `>= dims` alike, so an unordered coordinate walked past both
+                // "out of bounds" tests into `NaN as usize`, which is a
+                // defined, silent 0 -- a false in-bounds hit on voxel 0.  Named
+                // first so an unordered coordinate is out of bounds, which is
+                // what it is.
+                if !coordinate.is_finite() || coordinate < 0.0 || coordinate >= dims[axis] as f64 {
                     in_bounds = false;
                     break;
                 }
@@ -1177,6 +1207,13 @@ fn hole(
 /// members of each chamber sit in that chamber's own low band and in its own
 /// top band, which is what sizes the planner's buffers. Two passes over the
 /// field, not two per chamber.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn label_chambers(
     field: &CavityField,
     low_band_mm: f64,
@@ -1278,6 +1315,13 @@ fn label_chambers(
 /// Each lobe's ray origin comes from [`drain_site`], which guarantees the one
 /// thing `plan` needs and cannot check for itself: the origin is inside the
 /// void of the extracted mesh, not inside wall material.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn low_lobes(
     field: &CavityField,
     chambers: &Chambers,
@@ -1528,6 +1572,14 @@ fn high_sites(
 /// model with many chambers therefore asks for more, and if it asks for more
 /// than the drain-planning cap allows the answer is the same refusal it has
 /// always been.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn planner_preflight(
     candidate: &ShellCandidate,
     field: &CavityField,
@@ -2293,6 +2345,11 @@ mod tests {
     /// re-freeze this protocol exists to prevent; it is stale Python-era
     /// data and is recorded as such rather than quietly refreshed.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_shell_field_has_an_enclosed_drain_and_vent_plan() {
         let baseline = frozen_hollow_report();
         let planned = plan_drains(frozen_candidate()).expect("source field must be usable");
@@ -2513,6 +2570,11 @@ mod tests {
     /// This is the Awakened Tree's refusal in miniature: same directions,
     /// same 4 mm over-travel, same razor-thin overshoot.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_bore_whose_rear_over_travel_leaves_the_model_is_not_chosen() {
         // `make_box` centres x and y on the translate and stands the box on
         // it in z, so these two share a centreline and the inner box floats
@@ -2881,6 +2943,12 @@ mod tests {
     /// the counted crossings have to bound the deduplicated output they pay
     /// for, ray by ray.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_ray_census_bounds_every_row_the_batch_actually_returns() {
         let candidate = frozen_candidate();
         let field = candidate.cavity_field();
@@ -3027,6 +3095,12 @@ mod drain_origins_start_in_the_void {
 
     /// Crossings of the shell along `direction` from `origin`, in order,
     /// counted with the same kernel the planner itself casts with.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn crossings(shell: &plinth_mesh::Mesh, pitch: f64, origin: V3, direction: V3) -> Vec<f64> {
         let surface = NativeSurface::from_indexed(
             shell.verts(),
@@ -3049,6 +3123,11 @@ mod drain_origins_start_in_the_void {
     #[cfg_attr(
         debug_assertions,
         ignore = "429,120-face corpus fixture; run under cargo test --release"
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
     fn the_committed_treant_aims_its_drain_from_inside_the_cavity_not_from_the_wall() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

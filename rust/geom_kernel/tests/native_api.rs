@@ -21,6 +21,11 @@ fn surface() -> NativeSurface {
     .unwrap()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn cubes_surface(origins: &[[f64; 3]]) -> NativeSurface {
     const VERTICES: [[f64; 3]; 8] = [
         [0.0, 0.0, 0.0],
@@ -231,6 +236,11 @@ fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixtur
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn slice_z_batch_uses_exact_source_vertex_bits_at_tol_merge_boundary_neighbors() {
     const PLANE_BITS: u64 = 0x3eb0_9c04_82f1_8c75;
     const LOW_Z_BITS: u64 = 0x3eb0_c6f7_a0b5_ed8d;
@@ -962,6 +972,12 @@ fn penetration_census_severs_work_from_hits_and_prices_the_counted_row() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn penetration_census_sample_budget_is_the_closed_form_bound() {
     let surface = cubes_surface(&[[0.0, 0.0, 0.0]]);
     let p0s = [[-1.0, 0.5, 0.5]];
@@ -1078,6 +1094,11 @@ fn update_penetration_hash(hash: &mut u64, value: u64) {
 }
 
 #[test]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn bounded_penetration_thread_identity_child() {
     let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
     let limits = surface
@@ -1464,6 +1485,11 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn identity_subset_matches_every_native_query_family() {
     let full = cube_surface();
     let subset = full

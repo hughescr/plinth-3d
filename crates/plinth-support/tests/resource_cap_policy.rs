@@ -451,6 +451,11 @@ fn batch_floors_and_coefficients() -> (usize, usize, usize, usize) {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_batch_product_coefficients_are_the_rule_applied_to_their_own_observations() {
     let (_, gate_per_unit, _, load_per_unit) = batch_floors_and_coefficients();
     let gate_units = (TREANT_GATE_SAMPLES + 1) * (TREANT_CONTACTS + 1);

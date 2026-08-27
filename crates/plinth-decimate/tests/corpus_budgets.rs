@@ -752,6 +752,11 @@ fn success_report(
     }
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn independently_audit_already_print_scale(
     expected: CorpusModel,
     original: &Mesh,

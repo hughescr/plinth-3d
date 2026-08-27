@@ -3,6 +3,11 @@
 //! cross-checked by plinth-core's FU-24 consistency gate).
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn quantum_and_domain_match_the_m0_registry() {
     let constants = plinth_core::m0_constants().expect("M0 constants registry must construct");
     assert_eq!(
@@ -32,6 +37,11 @@ fn quantum_and_domain_match_the_m0_registry() {
 /// constant directly rather than against a bare literal that could drift
 /// from it unnoticed.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn quantum_is_exactly_the_stitch_key() {
     assert_eq!(
         plinth_layers::SLICE_UNION_QUANTUM_MM,

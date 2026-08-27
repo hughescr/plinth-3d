@@ -788,6 +788,12 @@ pub(crate) fn sort_ranked_rows(ranked: &mut [RankedRepairRow]) {
 ///
 /// Propagates [`SpecializedError`] from
 /// [`SpecializedContactPlan::occupied_repair_rows`].
+#[allow(
+    clippy::float_cmp,
+    reason = "a claimed seat is the same stored `point_mm` copied out of the \
+              row that claimed it, so this is identity on a copy rather than \
+              a proximity test between two computed positions"
+)]
 pub(crate) fn rank_repair_candidates(
     plan: &SpecializedContactPlan,
     repair_targets: &[BlockingPatchKey],
@@ -1355,6 +1361,11 @@ mod tests {
     /// code carries. If someone re-registers the pitch, this test moves with it
     /// on the first line and pins the arithmetic on the second.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_censor_is_the_registered_voxel_pitch_squared_and_never_a_literal() {
         let constants = m0_constants().expect("registered constants");
         let pitch = constants.placeholders().voxel_pitch_mm().diagnostic().get();
@@ -1887,6 +1898,11 @@ mod tests {
     /// that the guard is reachable, i.e. that a zero-scoring row really can
     /// surface as the winner.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_zero_scoring_candidate_reaches_the_winner_slot_where_the_guard_can_see_it() {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
         let nothing = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 0.0);
@@ -2159,6 +2175,11 @@ mod tests {
     /// live row covers nothing — and a ledgered row, however large, does not
     /// count, because it has already been tried and rolled back.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_best_live_score_ignores_ledgered_rows_and_reaches_zero_only_when_nothing_covers() {
         let big = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 13.678);
         let nothing = ranked_row(5, 0, 2, [80.0, 0.0, 0.0], 0.0);

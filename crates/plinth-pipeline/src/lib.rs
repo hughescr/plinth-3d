@@ -1845,6 +1845,11 @@ mod tests {
     /// reads the *same* numbers every hand-written call site in this workspace
     /// already passed — so publishing them moved no decimation digest.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_registered_production_budget_is_the_budget_every_gate_already_used() {
         let registered = registered_decimation_budget().expect("registered production budget");
         assert_eq!(registered, finite_decimation_budget());
@@ -1856,6 +1861,11 @@ mod tests {
     /// The lift the whole run plans and emits at is the profile's registered
     /// one, not a literal restated at the CLI boundary.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_run_lift_is_the_profiles_own_registered_placeholder() {
         let printer = OutputProfile::Saturn4Ultra
             .resolve()
@@ -1965,6 +1975,11 @@ mod tests {
     /// deliberately not claimed here — it is not one of the models these
     /// fixtures seal.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_committed_prepare_fixtures_stay_under_the_anchor_delicacy_cap() {
         let cap = m0_constants()
             .expect("registered constants")
@@ -2025,6 +2040,12 @@ mod tests {
     /// either direction is a change in what the record has to say, and a support
     /// change that moves a digest without changing neutrality is not.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_zero_field_divergence_is_measured_per_committed_fixture() {
         let printer = OutputProfile::Saturn4Ultra
             .resolve()

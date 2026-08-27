@@ -414,6 +414,11 @@ mod tests {
         })
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn forest_for(points: &[[f64; 3]]) -> Forest {
         let mut forest = Forest::new();
         for (ordinal, point) in points.iter().enumerate() {
@@ -478,6 +483,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_sort_tolerance_dedup_and_prim_tie_order_match_python() {
         let raft = plan(&[
             [1.0, 0.0, 0.0],

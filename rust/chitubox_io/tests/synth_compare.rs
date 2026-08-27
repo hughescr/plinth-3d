@@ -14,6 +14,11 @@ fn stl(name: &str) -> PathBuf {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn build_from_scratch_matches_reference_geometry() {
     let (sphere, cylinder, reference) = (
         stl("Sphere.stl"),

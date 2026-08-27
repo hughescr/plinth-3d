@@ -529,6 +529,12 @@ impl<'de> Deserialize<'de> for DrainDirections {
 pub struct VentDirections([DrainDirection; 4]);
 
 impl VentDirections {
+    #[allow(
+        clippy::float_cmp,
+        reason = "a whitelist, not a measurement: the four vent directions must be \
+                  the axis unit vectors themselves, and 0.0/1.0/-1.0 are exactly \
+                  representable, so anything else is correctly rejected"
+    )]
     pub fn new(directions: [DrainDirection; 4]) -> Result<Self, PlaceholderValueError> {
         let expected = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
         if directions.iter().zip(expected).all(|(direction, (x, y))| {

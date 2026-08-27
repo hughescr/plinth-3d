@@ -191,6 +191,14 @@ impl LadderSettings {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn whole(value: f64, id: &'static str) -> Result<usize, ScoreError> {
     if !value.is_finite() || value < 1.0 || value.fract() != 0.0 || value > 1_048_576.0 {
         return Err(ScoreError::Constants(format!(

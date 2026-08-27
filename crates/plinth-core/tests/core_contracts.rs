@@ -707,6 +707,11 @@ fn cost_physical_magnitudes_are_finite_and_nonnegative() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn signed_report_measures_are_allowed_but_nonfinite_values_are_rejected() {
     let metric = MetricValue::new(-4.5).unwrap();
     assert_eq!(metric.get(), -4.5);
@@ -860,6 +865,11 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
     let numeric = Measured::new(
         12.0_f64,
@@ -1603,6 +1613,11 @@ fn optimization_summary_json_revalidates_every_cross_field_invariant() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn pending_resolves_to_accept_safe_derived_conservative_value() {
     let pending = Pending::new(12.0_f64, 18.0, PlateId::from("plate-7"), "load limit");
     let resolved: Derived<f64> = pending.resolve();

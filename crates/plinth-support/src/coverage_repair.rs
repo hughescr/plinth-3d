@@ -1269,6 +1269,11 @@ mod tests {
     /// `RepairRowId` (the cheap way to skip the wire type). The first fails the
     /// equality below; the second is what the wire type exists instead of.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_repair_step_reaches_the_wire_losslessly_and_names_its_row_without_granting_it() {
         let step = populated_step();
         let wire = step.to_wire();

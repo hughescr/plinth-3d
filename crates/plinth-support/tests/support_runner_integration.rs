@@ -305,6 +305,11 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// TWICE per gate for one set of facts. Gate cost is a real cost (task #44) and
 /// a duplicated expensive fixture is the wrong place to spend it.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),

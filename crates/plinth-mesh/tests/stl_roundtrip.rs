@@ -71,6 +71,11 @@ fn malformed_nonfinite_and_lossy_stls_are_semantic_errors() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn requested_welding_is_rejected_before_stl_decode() {
     let unreadable = PathBuf::from("this-file-must-not-be-read.stl");
     assert!(matches!(

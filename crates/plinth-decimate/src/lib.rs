@@ -1436,6 +1436,14 @@ pub fn select_feature_protection(
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn select_feature_protection_from_errors(
     original: &Mesh,
     errors: &[f64],
@@ -1545,6 +1553,13 @@ struct OperationalLockClosure {
 }
 
 impl OperationalLockTopology {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn build(mesh: &Mesh) -> Result<Self, FeatureProtectionError> {
         let view = WeldedView::build(mesh, WeldPolicy::ExactBits).map_err(|error| {
             FeatureProtectionError::OperationalLockTopology {
@@ -1651,6 +1666,13 @@ fn point_query_message(error: PointQueryError) -> String {
     error.to_string()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn feature_protection_policy() -> Result<FeatureProtectionPolicy, FeatureProtectionError> {
     let constants = m0_constants().map_err(|error| FeatureProtectionError::Constants {
         message: error.to_string(),
@@ -2070,6 +2092,12 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 ///   computed anyway so the registered claim is machine-checked rather than
 ///   asserted in prose. It stops at those two terms on purpose — see
 ///   [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`].
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "a candidate's measured `input_face_count` against the \
+              policy's `min_input_faces` limit; `UtilityPolicy` has no \
+              `input_face_count` for clippy's suggested symmetry to reach"
+)]
 fn assess_downstream_utility(
     policy: UtilityPolicy,
     candidate: &SimplifyOutcome,
@@ -2881,6 +2909,14 @@ fn surface(
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn query_batch(
     surface: &NativeSurface,
     points: &[[f64; 3]],
@@ -2971,6 +3007,13 @@ fn select_points(
     (indices, evidence)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn uniform_index(rng: &mut ChaCha8Rng, upper: usize) -> usize {
     let upper = upper as u64;
     let zone = u64::MAX - u64::MAX % upper;
@@ -2982,6 +3025,14 @@ fn uniform_index(rng: &mut ChaCha8Rng, upper: usize) -> usize {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn linear_percentile(sorted: &[f64], quantile: f64) -> Result<f64, ProbeError> {
     if sorted.is_empty() {
         return Err(ProbeError::EmptyPopulation);
@@ -3015,6 +3066,14 @@ fn digest_words(words: impl IntoIterator<Item = u64>) -> u64 {
 /// It is converted to a target index count by multiplication by three.  When
 /// topology or locks prevent reaching that target, the successful constrained
 /// result is returned unchanged for later M3 policy to decide.
+#[allow(
+    clippy::float_cmp,
+    reason = "`target_ratio == 1.0` is a caller-supplied sentinel meaning \
+              \"keep every face\", and 1.0 is exact.  A ratio that merely \
+              rounds near 1.0 SHOULD take the general path and decimate by \
+              that hair; widening this to a tolerance would silently ignore \
+              a request"
+)]
 pub fn simplify_locked(
     mesh: &Mesh,
     request: &SimplifyRequest,
@@ -3119,6 +3178,13 @@ struct WeldedSimplificationInput {
 /// simplifier input is welded.  Any locked source alias locks its entire
 /// equivalence class, and the first locked alias (otherwise first alias) is
 /// retained as deterministic f64 provenance.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn prepare_welded_input(
     mesh: &Mesh,
     source_locks: &[bool],
@@ -3157,10 +3223,23 @@ fn prepare_welded_input(
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn target_face_count(input_faces: usize, ratio: f64) -> usize {
     ((input_faces as f64 * ratio).floor() as usize).max(1)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "deliberate narrowing to the binary32 the printer file format stores. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn quantize_positions(vertices: &[[f64; 3]]) -> Result<(Vec<[f32; 3]>, f64), SimplifyError> {
     let mut positions = Vec::with_capacity(vertices.len());
     let mut max_delta = 0.0_f64;
@@ -3191,6 +3270,13 @@ fn flatten_mapped_indices(triangles: &[[u32; 3]], source_to_welded: &[u32]) -> V
     indices
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn identity_outcome(
     mesh: &Mesh,
     request: &SimplifyRequest,
@@ -3230,6 +3316,13 @@ struct ResultMetadata {
     locked_vertex_count: usize,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn compact_result(
     mesh: &Mesh,
     request: &SimplifyRequest,
@@ -3551,6 +3644,13 @@ fn compact_result(
 /// census named clean-raw-but-damaged-by-decimation come through with no
 /// manufactured duplicate faces, and that neither `CoincidentFacesRemain` nor
 /// `ZeroVolumePairOpensBoundary` fires on them.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn remove_zero_volume_face_pairs(
     faces: &[[u32; 3]],
     source_faces: &[[u32; 3]],
@@ -3777,6 +3877,11 @@ mod tests {
         .unwrap()
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn triangle_soup(mesh: &Mesh) -> Mesh {
         let mut vertices = Vec::with_capacity(mesh.tris().len() * 3);
         let mut triangles = Vec::with_capacity(mesh.tris().len());
@@ -3853,6 +3958,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn geometrically_distinct_one_ulp_seam_is_not_welded() {
         let soup = triangle_soup(&octahedron());
         assert_eq!(soup.verts()[1], soup.verts()[3]);
@@ -3883,6 +3993,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn lock_on_a_nonrepresentative_triangle_soup_alias_survives() {
         let soup = triangle_soup(&octahedron());
         // Soup IDs 1 and 3 are aliases of shared octahedron vertex 2. Lock
@@ -3995,6 +4110,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn all_locks_report_constrained_success() {
         let outcome = simplify_locked(&octahedron(), &request(0.25, vec![true; 6])).unwrap();
         assert_eq!(outcome.output_face_count, 8);
@@ -4090,6 +4210,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn numpy_linear_percentiles_cover_tiny_odd_even_and_boundaries() {
         assert_eq!(linear_percentile(&[4.0], 0.99).unwrap(), 4.0);
         assert_eq!(linear_percentile(&[0.0, 10.0], 0.99).unwrap(), 9.9);
@@ -4108,6 +4233,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn batched_two_sided_probe_has_exact_parallel_plane_distances() {
         let original = triangle(1.0);
         let candidate = triangle(0.0);
@@ -4333,6 +4463,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn ratified_default_uses_the_registered_measured_coarser_pixel_axis() {
         let budget = DecimationBudget::ratified_default(d2_probe_config()).unwrap();
         let constants = m0_constants().unwrap();
@@ -4366,6 +4501,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exhausted_reduction_search_returns_audited_already_print_scale() {
         let mesh = Mesh::new(
             vec![
@@ -4424,6 +4564,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn five_bisections_select_the_lowest_observed_passing_ratio_with_honest_locks() {
         let (mesh, locks) = locked_box(10.0);
         let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
@@ -4443,6 +4588,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_surface_build_counter_agrees_with_every_probe_the_trace_recorded() {
         // The counter is incremented at the call sites the search owns; this
         // rederives the same number from what the trace actually recorded, so a
@@ -4482,6 +4632,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn orientation_boundary_preserves_identity_without_registered_utility() {
         // A 12-face box is far below DECIMATION_UTILITY_MIN_INPUT_FACES, so the
         // witness refuses on its first clause and this whole path is
@@ -5034,6 +5189,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn production_feature_selection_pins_the_ratio_twenty_probe() {
         let mesh = torus(8, 4);
         let error = select_feature_protection(&mesh, d2_probe_config()).unwrap_err();
@@ -5044,6 +5204,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_model_too_coarse_for_the_probe_ratio_refuses_instead_of_failing() {
         // `make_box` is twelve faces, so the mandatory ratio-0.20 probe targets
         // two: whatever meshoptimizer returns there is one opposite-winding
@@ -5400,6 +5565,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn decimation_witness_bounds_agree_with_the_search_policy_bounds() {
         // The witness asserts Derived bounds; the search enforces the same two
         // numbers as products of Placeholder fractions. They must agree
@@ -5450,6 +5620,11 @@ mod tests {
     // happens locally on every organic model, where a limb pressed against a
     // body, a wing membrane or an eye socket is a torus-like neighbourhood.
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn torus(major_segments: usize, minor_segments: usize) -> Mesh {
         let (major_radius_mm, minor_radius_mm) = (10.0, 3.0);
         let mut vertices = Vec::with_capacity(major_segments * minor_segments);
@@ -5526,6 +5701,11 @@ mod tests {
     /// The face-count arithmetic every later stage reads must describe the
     /// emitted mesh, not meshoptimizer's pre-repair result.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn removed_pairs_are_absent_from_the_emitted_counts_and_ratio() {
         let mesh = torus(8, 4);
         let input_faces = mesh.tris().len();
@@ -5875,6 +6055,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_declined_reduction_is_never_repaired_into_a_reduction() {
         // meshoptimizer handing its own index buffer back is a *declined*
         // reduction. Repairing it would delete a pair that was in the SOURCE,
@@ -5896,6 +6081,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_reordered_no_op_is_a_declined_reduction_too() {
         // The guard is "no group of this answer holds anything the source did
         // not", never "the returned index buffer is byte-identical to its

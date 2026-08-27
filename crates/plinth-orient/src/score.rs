@@ -1277,6 +1277,11 @@ mod tests {
     /// scar-free score bit-identical, and the registered weight moves it, so the
     /// independence is structural rather than arithmetic.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_zero_scar_weight_never_reads_the_delicacy_field() {
         let (_mesh, table) = cube_table();
         let mut poisoned = table.clone();
@@ -1523,6 +1528,11 @@ mod tests {
     /// (`crates/plinth-support/src/lib.rs:814`), applied with the same strict
     /// `<`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_down_facing_cutoff_is_the_support_engines_own_expression() {
         let weights = ObjectiveWeights::registered().expect("registered objective");
         assert_eq!(weights.overhang_angle_deg(), 45.0);
@@ -1537,6 +1547,11 @@ mod tests {
 
     /// The registered objective is exactly §3.8's, read from the one registry.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_objective_weights_are_the_registered_placeholders() {
         let weights = ObjectiveWeights::registered().expect("registered objective");
         assert_eq!(weights.support_area_cm2(), 0.5);

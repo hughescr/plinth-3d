@@ -45,6 +45,13 @@ impl DegenerateFaceCause {
     /// Classification only: the CALLER has already established that the face is
     /// degenerate. This never decides degeneracy itself, so it cannot disagree
     /// with the predicate that did.
+    #[allow(
+        clippy::float_cmp,
+        reason = "classification of an ALREADY-degenerate face, as the doc above \
+                  says: coincident means the two stored vertices are the same \
+                  value.  This never decides degeneracy, so it cannot disagree \
+                  with the predicate that did"
+    )]
     fn classify(indices: [u32; 3], points: [V3; 3]) -> Self {
         for (left, right) in [(0_usize, 1_usize), (0, 2), (1, 2)] {
             if indices[left] == indices[right] {
@@ -174,6 +181,13 @@ impl Mesh {
     }
 
     #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn from_parts(
         v0: Vec<V3>,
         v1: Vec<V3>,

@@ -1170,6 +1170,13 @@ fn preflight_post_cluster_staging(
         .ok_or(JointError::ScratchLimit)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn point_cell(point: [f64; 3]) -> Result<[i64; 3], JointError> {
     let mut cell = [0_i64; 3];
     for axis in 0..3 {
@@ -1615,6 +1622,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn filtered_live_view_preflights_exact_caps_and_excludes_unrouted_before_joint_clustering() {
         let mut forest = Forest::new();
         let routed = add_member(
@@ -1722,6 +1734,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn mid_column_enclosure_drops_but_elbow_direct_witness_keeps() {
         let mut forest = Forest::new();
         add_member(
@@ -1788,6 +1805,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn credited_member_restriction_keeps_jittered_real_hub() {
         let mut forest = Forest::new();
         let rows = [
@@ -1891,6 +1913,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn real_plate_crossing_specimen_is_dropped() {
         let mut forest = Forest::new();
         let plate_z = -66.97575;
@@ -1959,6 +1986,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn coincidence_boundary_and_equal_radius_center_ties_are_frozen() {
         let node = |point, ordinal| Node {
             point,
@@ -2113,6 +2145,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn retire_reuse_keeps_python_birth_order_for_center_owner_and_ball_order() {
         let mut forest = Forest::new();
         let first = add_member(
@@ -2303,6 +2340,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn cap_and_depth_boundary_keep_when_uncertified() {
         let mut forest = Forest::new();
         add_member(

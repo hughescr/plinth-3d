@@ -1729,6 +1729,12 @@ fn routing_order(seeds: &[StubSeed]) -> Result<InitialRoutingOrder, InitialConta
     })
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "deliberate, and the whole point of the function: `==` first so \
+              +0.0 and -0.0 are ONE value, then `total_cmp` for a total order \
+              over everything else including NaN"
+)]
 fn cmp_number(left: f64, right: f64) -> Ordering {
     if left == right {
         Ordering::Equal
@@ -1997,6 +2003,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn terminalward_embed_classifies_clean_transit_and_buried_boundaries() {
         let exact_cutoff = geom_kernel::Interval {
             s_a: 0.0,
@@ -2295,6 +2306,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn real_table_build_materializes_exact_registered_stub_geometry_and_ledger() {
         let fixture = Fixture::new(make_overhang_table().unwrap());
         let build = fixture
@@ -2368,6 +2384,11 @@ mod tests {
     /// an out-of-span boundary on demand; the values that actually occur are a
     /// few ULP out, i.e. inside what #28 admits.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn ungradable_evidence_on_a_placed_stub_refuses_the_build() {
         /// Far outside anything `MOLLER_EPS` could excuse — a whole millimetre
         /// of negative arc length, not the 1e-16 the kernel legitimately emits.
@@ -2732,6 +2753,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn real_stacked_obstruction_accepts_cutoff_and_condemns_above_it() {
         let cutoff = m0_constants()
             .unwrap()
@@ -2833,6 +2859,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn buried_free_ends_quarantine_and_retain_both_ledger_records_and_loads() {
         let fixture = Fixture::new(make_overhang_table().unwrap());
         let build = fixture
@@ -2989,6 +3020,11 @@ mod tests {
     /// different contact set; the mechanism itself is pinned on a constructed
     /// edge seat in `designed_embed.rs`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_incurable_refusal_is_quarantined_with_its_seat_load_and_every_remedy_disclosed() {
         let constants = m0_constants().unwrap();
         let policy = constants.placeholders();
@@ -3141,6 +3177,13 @@ mod tests {
     /// the registered `TIP_RADIUS_MAX_LEGACY_MM`. This test states that
     /// relationship as arithmetic so a hand-edited ladder cannot pass.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_growth_ladder_doubles_the_interface_area_and_stops_at_the_registered_maximum() {
         let policy = m0_constants().unwrap().placeholders();
         let min_radius_mm = policy.tip_radius_default_mm().diagnostic().get();

@@ -52,7 +52,16 @@ something through:
 - **`--no-fail-fast`.** Without it, one red test masks the rest, and a single failure gets
   mistaken for a smaller or a larger problem than it is.
 - **Clippy with `-D warnings`, over all targets and all features**, so lint coverage includes
-  tests, examples and benches rather than just the library.
+  tests, examples and benches rather than just the library. **The workspace lint table names
+  every lint it enables and enables no GROUPS** — see the rule written at
+  `[workspace.lints.clippy]` in the root `Cargo.toml`. `clippy::pedantic` and
+  `clippy::nursery` gain members between clippy releases, so enabling either signs this gate
+  up for lints that do not exist yet: measured on this workspace, the two groups raise 4,256
+  warnings across 68 lints, every one of them an error here, and no `allow` list can win that
+  race because the next release adds the next batch. The enabled set is the signal set from
+  `docs/evidence/remediation-2026-08-26/census/census-clippy.md`; what is suppressed at a site
+  is suppressed with `#[expect]`, named lints and a reason, and is inventoried in
+  `docs/evidence/remediation-2026-08-26/census/cast-audit.md`.
 - **`cargo fmt --check`** as its own gate. Formatting violations otherwise ride in on the
   back of a green test run.
 - **`git diff --check`** for whitespace damage, which nothing above catches.
@@ -66,12 +75,19 @@ in behaviour, whichever direction it moved.
 - `retired_formula_guard` (`crates/plinth-support/tests/retired_formula_guard.rs`):
   **13/13**.
 - `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`: **0**
-  warnings.
+  warnings. Held by the named-lints rule above; re-measured 2026-08-27 on
+  `feature/remediation-kernel`.
 - `cargo fmt --all -- --check`: **exactly 104 hunks** (re-confirmed directly, 2026-08-25,
   at the current tip `7eb5f30`). This is standing fmt debt in already-committed code, not a
   target — it must not be edited down opportunistically inside an unrelated change (that
   produces an unreviewable diff), and it must never **grow**. A change that adds a 105th
   hunk is not gate-clean.
+  - **This number is stale and the drift is not attributed.** Measured 2026-08-27 against a
+    clean `git archive` of `feature/remediation-kernel`'s tip, the count is **120**, so 16
+    hunks arrived between `7eb5f30` and here without being named. Left as found rather than
+    re-pinned: moving the number to 120 would be exactly the re-freeze this section forbids,
+    and the 16 belong to whichever change introduced them. What the lint-reconciliation
+    change asserts is only that it added none of them — it leaves the count at 120.
 
 A change that moves any of these numbers without explaining why is not done; attribute the
 movement in the commit, the way every re-pin below has to.

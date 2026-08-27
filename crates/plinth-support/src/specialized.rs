@@ -1163,6 +1163,12 @@ impl SpecializedContactPlan {
     /// Reject replay against any changed generic, selected-contact, selection
     /// policy or result-inert refusal authority.
     #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::float_cmp,
+        reason = "a staleness check comparing the live config value against the \
+                  authority value stored from it verbatim; any difference is the \
+                  stale authority this is looking for"
+    )]
     pub fn validate_binding(
         &self,
         mesh: &Mesh,
@@ -1625,6 +1631,12 @@ fn next_contact_id(contacts: &[SpecializedPhysicalContact]) -> Option<u64> {
         .map_or(Some(0), |id| id.checked_add(1))
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "identity, not proximity: a contact's position/normal are COPIED \
+              from its primary regular route, and the duplicate-seat scan \
+              compares stored coordinates against stored coordinates"
+)]
 fn validate_child_contacts(
     contacts: &[SpecializedPhysicalContact],
     repair_pool: &RepairPool,
@@ -1987,6 +1999,14 @@ pub enum SpecializedError {
 /// signature is intentional: replay validation restates every independently
 /// stale-able authority input rather than accepting caller assertions.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn prepare_specialized_contacts(
     mesh: &Mesh,
     perception_config: &SupportPerceptionConfig<'_>,
@@ -2819,6 +2839,13 @@ struct RegularDisposition {
 /// Gather every minimum-region point, make one bounded point-index call, and
 /// scatter by bound owner. Birth polygons have no native batch primitive, so
 /// their z-windowed local predicates are counted against one explicit cap.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn regular_dispositions(
     contacts: &[WorkingContact],
     demands: &[SpecializedDemand],
@@ -3223,6 +3250,11 @@ fn coalesce_exact_regular_seats(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::float_cmp,
+    reason = "exact comparison against a value that was copied, not computed. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn consolidate(
     contacts: &mut Vec<WorkingContact>,
     generic: &GenericContactPlan,
@@ -6315,7 +6347,11 @@ pub(crate) fn fill_route_points_nearest(
     mut witnesses: Option<&mut NearestWitnessTable>,
 ) -> Result<(), SpecializedError> {
     debug_assert_eq!(nearest.len(), samples.len());
-    debug_assert!(witnesses
+    // Spelled as an explicitly debug-only assertion: the borrow of `witnesses`
+    // taken to check it exists only in a debug build, so the debug/release
+    // difference is visible at the site instead of hidden inside the macro.
+    #[cfg(debug_assertions)]
+    assert!(witnesses
         .as_ref()
         .is_none_or(|table| table.rows.len() == samples.len()));
     /* All route plans are checked before any geometric gather or query. */
@@ -7986,6 +8022,11 @@ fn commit_merge(
     })
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "identity, not proximity: a contact's position/normal are COPIED \
+              from its primary regular route"
+)]
 fn canonicalize_and_validate(
     contacts: &mut [WorkingContact],
     islands: &[SupportIsland],
@@ -8248,6 +8289,11 @@ fn compare_point3(left: [f64; 3], right: [f64; 3]) -> Ordering {
         .then_with(|| numeric_cmp(left[2], right[2]))
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "deliberate: `==` first so +0.0 and -0.0 are ONE value, then \
+              `total_cmp` for a total order over everything else"
+)]
 fn numeric_cmp(left: f64, right: f64) -> Ordering {
     if left == right {
         Ordering::Equal
@@ -8256,6 +8302,12 @@ fn numeric_cmp(left: f64, right: f64) -> Ordering {
     }
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "seat identity across stored coordinates -- the callers ask \
+              \"is this the same seat\", not \"are these two seats close\"; \
+              `distance3` directly below is what measures proximity"
+)]
 fn same_point(left: [f64; 3], right: [f64; 3]) -> bool {
     left == right
 }
@@ -9122,6 +9174,12 @@ mod tests {
     /// the witness is compared against, `(owner, point_mm)` on bits at every
     /// position.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8f_committed_renumbering_matches_append_variant_load_inputs() {
         // Five demand-carrying seats (they resolve specialized by
         // construction: `generic_owner_for_parts` returns `None` for any
@@ -9672,6 +9730,11 @@ mod tests {
     /// row's covered/uncovered status, one in each direction; the third flips
     /// nothing at all.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8e_coverage_delta_matches_assess_coverage() {
         let (mesh, samples) = fu8e_coverage_fixture();
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
@@ -10461,6 +10524,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn route_keyed_nearest_is_exact_deduplicated_and_leaves_unrouted_rows_infinite() {
         let first_route = RegularContactRoute {
             candidate_id: 7,
@@ -10738,6 +10806,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn repair_pool_binds_generic_and_synthetic_rows_in_exact_route_order() {
         let generic = ContactCandidatePool {
             candidates: vec![repair_candidate(7, 0, [1.0, 0.0, 0.0])],
@@ -11104,6 +11177,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exact_near_and_cross_face_demands_emit_every_canonical_representative() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let left = minimum_demand(0, 2, 7, [1.0, 2.0, 0.1]);
@@ -11362,6 +11440,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn candidate_normals_enumerate_seats_but_do_not_split_one_logical_demand() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [1.0, 2.0, 0.1];
@@ -11392,6 +11475,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn shared_regular_merge_enumerates_logical_keys_not_route_provenance() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [1.0, 2.0, 0.1];
@@ -11432,6 +11520,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn shared_regular_rejects_logical_keys_not_at_an_original_regular_lock() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let locked = [1.0, 2.0, 0.1];
@@ -11492,6 +11585,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn iterative_shared_commits_keep_regular_physical_normal() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let locked = [1.0, 2.0, 0.1];
@@ -11538,6 +11636,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn route_union_sorting_does_not_replace_the_first_regular_primary_identity() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [1.0, 2.0, 0.1];
@@ -12584,6 +12687,11 @@ mod tests {
     /// (`Specialized(DuplicatePhysicalSeat { left: 163, right: 164 })`) at
     /// unit scale.  With the aggregation restored, the test passes.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn one_birth_fanned_to_two_owners_seats_once_with_both_demands() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [0.1, 0.2, 0.1];
@@ -12649,6 +12757,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn different_owner_exact_prepass_makes_duplicate_invariant_unreachable() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [0.1, 0.0, 0.0];
@@ -12703,6 +12816,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exact_mixed_prepass_replaces_an_old_shared_primary_with_the_pure_regular() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [0.1, 0.0, 0.0];
@@ -12913,6 +13031,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn regular_child_edit_preserves_sparse_survivors_and_rebinds_loads() {
         let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "child edit")
             .unwrap_or_else(|error| panic!("{error}"));
@@ -13174,6 +13297,11 @@ mod tests {
     /// face off its incumbent, which is exactly the hand-to-hand pass task #68
     /// measured 182 times on the dust fixture.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_append_moves_no_other_contacts_load_route_or_cadence_key() {
         for (mesh, name) in [
             (make_overhang_table().unwrap(), "overhang table"),
@@ -13220,6 +13348,11 @@ mod tests {
     }
 
     /// The whole of task #68 contract (1), asserted on one parent/child pair.
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn assert_append_charged_only_what_it_newly_took(
         plan: &SpecializedContactPlan,
         child: &SpecializedContactPlan,
@@ -13432,6 +13565,11 @@ mod tests {
     /// FU-56 test #6: an admitted multi-row batch appends every named row in
     /// one replay.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn batched_repair_row_append_admits_every_named_row_in_one_replay() {
         let (_mesh, _generic, plan) =
             edit_fixture(make_overhang_table().unwrap(), "batched append two rows")

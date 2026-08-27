@@ -377,6 +377,13 @@ impl FaceTopology {
 
 /// Build the topology once.  The returned view records, and genuinely applies,
 /// the supplied welding policy; the source mesh is left unchanged.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn build_face_topology(
     mesh: &Mesh,
     weld_policy: WeldPolicy,
@@ -634,6 +641,13 @@ pub fn build_face_topology(
 }
 
 /// Expensive diagnostic validation, intentionally not a normal hot-path API.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyValidationError> {
     if FACE_TOPOLOGY_SCHEMA.is_empty()
         || topology.content_digest.schema() != TopologySchema::V4
@@ -799,6 +813,13 @@ fn validate_point_only_vertices(
 /// oriented, it simply has more face components than it has solids, and each
 /// of those components is closed, which is exactly what this function
 /// integrates over.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn certify_closed_components(
     mesh: &Mesh,
     topology: &FaceTopology,
@@ -896,6 +917,13 @@ pub struct WeldedView {
 
 impl WeldedView {
     /// Builds one explicit vertex-only weld view without changing `mesh`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn build(mesh: &Mesh, policy: WeldPolicy) -> Result<Self, TopologyError> {
         for (vertex, point) in mesh.verts().iter().enumerate() {
             for (axis, value) in point.iter().enumerate() {
@@ -941,6 +969,13 @@ impl WeldedView {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn exact_weld(points: &[[f64; 3]]) -> Result<WeldedView, TopologyError> {
     let mut ids = BTreeMap::<[u64; 3], u32>::new();
     let mut verts = Vec::new();
@@ -972,6 +1007,13 @@ fn exact_weld(points: &[[f64; 3]]) -> Result<WeldedView, TopologyError> {
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, TopologyError> {
     if !tolerance.is_finite() || tolerance <= 0.0 {
         return Err(TopologyError::InvalidWeldTolerance { tolerance });
@@ -1033,6 +1075,13 @@ fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, Topol
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn grid_cell(
     point: [f64; 3],
     tolerance: f64,

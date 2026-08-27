@@ -127,6 +127,13 @@ fn projection_axes(axis: usize) -> (usize, usize) {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn checked_grid_layout(
     bounds: [[f64; 3]; 2],
     axes: [usize; 2],
@@ -179,6 +186,13 @@ fn checked_grid_layout(
     Ok((origins, dimensions))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn projected_cell_bounds(
     a: [f64; 3],
     b: [f64; 3],
@@ -334,6 +348,13 @@ impl AxisGrid {
         Self::build_with_reserved_peak(mesh, ax, h, max_grid_bytes).map(|(grid, _)| grid)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn build_with_reserved_peak(
         mesh: &Mesh,
         ax: usize,
@@ -579,6 +600,13 @@ impl AxisGrid {
     /// Parity for one point along this axis: true iff an odd number of
     /// deduped crossings lie strictly above along +axis.
     #[inline]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn inside_point(&self, pt: [f64; 3], scratch: &mut Vec<f64>) -> bool {
         let c0 = pt[self.p0];
         let c1 = pt[self.p1];
@@ -673,6 +701,13 @@ mod memory_tests {
     use crate::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn grid_dimension_rejects_saturating_quotient_without_debug_release_divergence() {
         let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let faces = [[0, 1, 2]];

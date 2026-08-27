@@ -17,6 +17,11 @@ type FixtureExpectation = (
 );
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn box_matches_frozen_trimesh_order_and_bottom_translation() {
     let mesh = make_box([2.0, 4.0, 6.0], [3.0, 5.0, 7.0]).expect("valid box");
     assert_eq!(mesh.verts()[0], [2.0, 3.0, 7.0]);
@@ -120,6 +125,11 @@ fn uncovered_rim_table_is_five_closed_boxes_at_frozen_dimensions() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn face_normal_z_is_batched_and_reports_degenerate_triangles() {
     let mesh = make_box_default().expect("valid box");
     let normals = mesh.face_normals_z().expect("box normals");
@@ -421,6 +431,11 @@ impl Drop for ScratchStl {
 /// strict writer) accepts it outright, and the reloaded triangle soup
 /// expands to the same coordinates the source mesh named.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn dual_cavity_pawn_survives_the_stl_wire_round_trip() {
     let mesh = make_dual_cavity_pawn().expect("default fixture");
     let scratch = ScratchStl::new("wire");

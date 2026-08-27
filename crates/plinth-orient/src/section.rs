@@ -205,6 +205,13 @@ impl SectionProfile {
 /// Ascending distinct vertex heights: the exact breakpoint set of the piecewise
 /// quadratic. Sorted by `total_cmp` then vertex index, so the order is a pure
 /// function of the data.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn distinct_heights(tau: &[f64]) -> Vec<f64> {
     let mut order: Vec<u32> = (0..tau.len() as u32).collect();
     order.sort_unstable_by(|left, right| {
@@ -223,6 +230,14 @@ fn distinct_heights(tau: &[f64]) -> Vec<f64> {
 }
 
 /// Adds one face's two sub-interval quadratics into the difference array.
+#[allow(
+    clippy::float_cmp,
+    reason = "bit-equal lowest and highest corner heights is the definition of \
+              a face that crosses no plane interior.  No value is decided by \
+              the tightness of this test: every unequal pair falls through to \
+              the strict `<` tests below, which handle an arbitrarily thin \
+              sub-interval on its own terms"
+)]
 fn accumulate_face(
     triangle: [u32; 3],
     xy: &[[f64; 2]],

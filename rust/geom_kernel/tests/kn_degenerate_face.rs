@@ -149,7 +149,7 @@ fn the_error_names_which_face_is_degenerate() {
 #[test]
 fn a_degenerate_face_is_not_reported_as_an_arithmetic_failure() {
     let vertices = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
-    let error = build(&vertices, &vec![[0, 1, 2]])
+    let error = build(&vertices, &[[0, 1, 2]])
         .err()
         .expect("collinear corners fail the build");
     assert!(
@@ -208,7 +208,7 @@ fn a_sound_mesh_still_builds_and_its_normals_are_unit_length() {
 #[test]
 fn a_genuinely_thin_sliver_is_not_degenerate() {
     let vertices = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0e-9, 0.0]];
-    let surface = build(&vertices, &vec![[0, 1, 2]])
+    let surface = build(&vertices, &[[0, 1, 2]])
         .expect("a sliver with non-zero area is a real face, however thin");
     let normal = surface.geometry().normals()[0];
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();

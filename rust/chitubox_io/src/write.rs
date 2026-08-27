@@ -15,6 +15,15 @@ struct ModelPlan {
     rec_off: usize,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub(crate) fn serialize(doc: &Document) -> Result<Vec<u8>> {
     let count = doc.models.len();
     let off8 = add(EMPTY_BASELINE_LEN, doc.preview.len(), "off8")?;

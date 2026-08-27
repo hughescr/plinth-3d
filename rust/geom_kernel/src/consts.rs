@@ -32,6 +32,26 @@ pub const SEGSEG_EPS: f64 = 1e-14;
 pub const PARITY_DEN_EPS: f64 = 1e-14;
 
 /// sphere_breach near-wall skip margin (geometry_exact.py:842 `nd[i] + 0.05`).
+///
+/// RETIRED, and deliberately kept.  `breach_one` no longer discards a crossing
+/// by absolute distance: a distance cannot tell "this is the near face again"
+/// from "this is the far face, and the wall is thin", so the skip threw away
+/// both and a sub-0.05 mm feature reported NO BREACH.  The replacement asks the
+/// question the skip was a proxy for -- whether the ray runs with or against
+/// the face's outward normal -- and is documented at the filter itself in
+/// `queries.rs`; `tests/near_wall_thin_feature.rs` is the witness.
+///
+/// The NAME still carries meaning outside this crate: it is what
+/// `crates/plinth-hollow/tests/fixtures/PROVENANCE.md` names as the limit the
+/// 0.02 mm thin-fin fixture was cut to straddle, and what
+/// `crates/plinth-support/src/contact.rs` distinguishes its own mask margin
+/// from.  Deleting the constant would strand those references, so it stays,
+/// labelled, rather than being quietly removed.
+#[allow(
+    dead_code,
+    reason = "retired predicate constant kept as the named limit its fixtures and \
+              docs still cite; see the doc comment above"
+)]
 pub const NEAR_WALL_SKIP: f64 = 0.05;
 
 /// Threshold-band telemetry half-width (spec R3 / sec 4.2): a CONTINUOUS

@@ -638,6 +638,11 @@ fn line_window(mesh: &Mesh, center: V3, direction: V3, radius: f64) -> (f64, f64
 
 /// Conservative candidate gather: every triangle whose AABB meets the AABB of
 /// the probe cylinder. Supersets on both sides, so no crossing is dropped.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn gather(mesh: &Mesh, center: V3, direction: V3, radius: f64, t_lo: f64, t_hi: f64) -> Vec<u32> {
     let a = add(center, scale(direction, t_lo));
     let b = add(center, scale(direction, t_hi));
@@ -1011,6 +1016,11 @@ fn slice_plane(mesh: &Mesh, point: V3, normal: V3) -> Vec<(V3, V3)> {
 }
 
 /// Binary STL, written in one gathered buffer rather than per-triangle writes.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn write_binary_stl(path: &Path, mesh: &Mesh) -> Result<(), String> {
     let verts = mesh.verts();
     let tris = mesh.tris();

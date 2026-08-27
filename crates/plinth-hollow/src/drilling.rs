@@ -1125,6 +1125,13 @@ fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, min_pocket_ml: 
     component_voxels as f64 * pitch_mm.powi(3) / 1000.0 >= min_pocket_ml && max_extra_drains > 0
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn trapped_components(
     field: &CavityField,
     trapped: &[bool],
@@ -1195,6 +1202,14 @@ fn component_low_origin(field: &CavityField, component: &[usize]) -> Result<V3, 
     Ok(origin)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn sampled_exit_along(field: &CavityField, origin: V3, direction: V3, ceiling: f64) -> Option<f64> {
     let pitch = field.pitch_mm().get();
     let grid_origin = field.origin_mm().map(Finite::get);
@@ -1637,6 +1652,13 @@ fn drainability_map_excluding(
     drainability_map_admitted(field, holes, Some(excluded))
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn drainability_map_admitted(
     field: &CavityField,
     holes: &[HoleGeometry],
@@ -1721,6 +1743,13 @@ fn union(a: usize, b: usize, parent: &mut [usize], has: &mut [bool]) {
         has[ra] |= has[rb];
     }
 }
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn flat_if_in(q: [isize; 3], dims: [usize; 3]) -> Option<usize> {
     if q.iter()
         .enumerate()
@@ -1731,6 +1760,13 @@ fn flat_if_in(q: [isize; 3], dims: [usize; 3]) -> Option<usize> {
     Some(q[0] as usize + q[1] as usize * dims[0] + q[2] as usize * dims[0] * dims[1])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn grid_index_ties_even(point: V3, origin: V3, pitch: f64) -> [isize; 3] {
     // `f64::round_ties_even` (std since 1.77) matches the frozen NumPy
     // rounding this grid indexing must reproduce; the negative/positive/
@@ -1852,6 +1888,12 @@ fn normalize(a: V3) -> Result<V3, DrillingRefusal> {
     }
 }
 
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`a * c - b * b` is the segment-segment denominator |u|^2|v|^2 \
+              - (u.v)^2, a determinant whose middle term is squared by \
+              construction, not a mis-typed `a * b`"
+)]
 fn segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, DrillingRefusal> {
     let u = sub(q1, p1);
     let v = sub(q2, p2);
@@ -2048,6 +2090,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_sphere_is_drilled_once_and_every_voxel_drains() {
         let plan = sphere_plan();
         let (source_material_mm3, _, _) =
@@ -2426,6 +2473,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn numpy_grid_rounding_pins_negative_positive_and_averaged_half_cells() {
         assert_eq!(
             [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5].map(f64::round_ties_even),
@@ -2452,6 +2504,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_volume_gate_is_strict_at_two_percent_and_bounds_reject_excess_deletion() {
         let solid = 1000.0;
         let cavity = 400.0;
@@ -2707,6 +2764,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn qualifies_audit_drain_thresholds_match_the_registered_hollow_extra_drain_policy() {
         let policy = plinth_core::m0_constants()
             .expect("registered constants")
@@ -2910,6 +2972,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn production_drilling_succeeds_with_exact_refill_exclusion_and_public_report() {
         let plan = sphere_plan();
         let mut gap = vec![false; plan.cavity_field().flat_count()];
@@ -3037,6 +3104,13 @@ mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
     /// geometry with everything else stripped away: one crossing, at the ray's
     /// own origin, and nothing anywhere along the rest of the proof path.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_single_crossing_at_the_rays_origin_does_not_block_the_bore() {
         let box_mesh = plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0])
             .expect("10 mm box fixture");

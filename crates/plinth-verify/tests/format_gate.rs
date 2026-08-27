@@ -36,6 +36,11 @@ fn artifact_id() -> ArtifactId {
     ArtifactId::from("format-gate-fixture")
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn assert_single_failure(
     report: &plinth_verify::FormatReport,
     kind: ViolationKind,
@@ -129,6 +134,11 @@ fn scratch_projects_with_one_two_and_six_descriptors_pass() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn corrupt_truncated_pointer_and_underlength_descriptor_cases_fail_by_named_reason() {
     let corrupt = TempArtifact::new(&corrupt_bytes());
     assert_single_failure(

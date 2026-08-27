@@ -481,6 +481,18 @@ pub(crate) fn preflight_face_hook_count() -> usize {
 /// Frozen `placement._refine_depths` scalar rule, including the one-ULP edge
 /// correction. Both typed wrappers call this one implementation.
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26); integer-width casts in \
+          mesh/voxel index arithmetic, NOT individually audited -- triaged as a class, and the one \
+          architecture item the class carried (geom_kernel's 32-bit BVH index width) is now a named, \
+          enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn refine_depth(max_edge_mm: f64, cell_edge_limit_mm: f64) -> u32 {
     if max_edge_mm <= cell_edge_limit_mm {
         return 0;
@@ -673,6 +685,12 @@ impl DyadicRowPolicy for CandidateRowPolicy<'_> {
             .then_with(|| left.face_id.cmp(&right.face_id))
     }
 
+    #[allow(
+        clippy::float_cmp,
+        reason = "the dedup identity that pairs with `dedup_order` directly above, \
+                  which orders the very same fields by `total_cmp`; rows reach \
+                  here adjacent and carrying coordinates copied from one source"
+    )]
     fn same_row(&self, left: &mut Self::Row, right: &mut Self::Row) -> bool {
         left.island_id == right.island_id && left.point_mm == right.point_mm
     }
@@ -828,6 +846,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn depth_one_candidate_payload_matches_full_frozen_row_order() {
         let payload = build_candidate_payload(
             &triangle(),
@@ -915,6 +938,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn shared_position_keeps_most_negative_nz_then_lowest_face_id_in_final_order() {
         let mesh = Mesh::new(
             vec![

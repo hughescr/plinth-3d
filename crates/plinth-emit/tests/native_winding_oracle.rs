@@ -143,6 +143,11 @@ fn relative_closure_defect(soup: &[SoupTriangle]) -> f64 {
 /// convex native primitives: every face of a convex body wound outward has its
 /// geometric normal pointing away from the body's centroid.  It forms no
 /// tetrahedron sum, so agreement between the two is real agreement.
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn faces_wound_outward(soup: &[SoupTriangle]) -> (usize, usize) {
     let mut centroid = [0.0_f64; 3];
     let mut corners = 0.0;
@@ -278,6 +283,11 @@ fn only_closed_soups_are_decidable_and_the_natives_used_here_are_closed() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn reversing_a_native_soup_exactly_negates_its_volume_and_winding_restores_it() {
     for name in NATIVE_SPECIMENS {
         let records = native_records(name);

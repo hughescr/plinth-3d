@@ -241,6 +241,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn pins_o10_identity_placeholder_provenance_and_radius_vector() {
         let mut forest = Forest::new();
         let key = forest.add_member(member([50.0, 0.0, 50.0]));

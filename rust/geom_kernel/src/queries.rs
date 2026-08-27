@@ -125,6 +125,14 @@ pub struct CapsuleRays {
 impl Iterator for CapsuleRays {
     type Item = CapsuleRay;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn next(&mut self) -> Option<Self::Item> {
         if self.next == 0 {
             self.next = 1;
@@ -1192,6 +1200,21 @@ impl NativeSurface {
         STACK.with(|s| self.nearest_one_with_stack(p, upper_bound, &mut s.borrow_mut()))
     }
 
+    #[allow(
+        clippy::float_cmp,
+        reason = "the equal-distance/lowest-index tie-break IS the determinism \
+                  contract (see the strict-pruning comment below); an epsilon here \
+                  would make the answer depend on traversal order"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn nearest_one_with_stack(
         &self,
         p: V3,
@@ -1247,6 +1270,13 @@ impl NativeSurface {
     }
 
     /// query facade: (dist, idx) with over-bound => (inf, global_nfaces).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn query(&self, pts: &[V3], upper_bound: f64) -> (Vec<f64>, Vec<i64>) {
         let nf = self.mesh.global_nfaces();
         let res: Vec<(f64, i64)> = par::run(|| {
@@ -1271,6 +1301,13 @@ impl NativeSurface {
     }
 
     /// project: (dist, closest_point, tri_idx, face_normal).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn project(&self, pts: &[V3]) -> (Vec<f64>, Vec<V3>, Vec<i64>, Vec<V3>) {
         let res: Vec<(f64, V3, i64, V3)> = par::run(|| {
             pts.par_iter()
@@ -1349,6 +1386,21 @@ impl NativeSurface {
         })
     }
 
+    #[allow(
+        clippy::float_cmp,
+        reason = "the equal-distance/lowest-index tie-break IS the determinism \
+                  contract; an epsilon here would make the answer depend on \
+                  traversal order"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn nearest_allowed_one_with_stack(
         &self,
         point: V3,
@@ -1449,6 +1501,14 @@ impl NativeSurface {
     /// `N` is bounded by the admitted surface and by this call's face/node mask
     /// memory charge.
     /// No geometry, BVH, parity grid, or per-point subset is constructed.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn project_allowed_faces_batch(
         &self,
         allowed_face_ids: &[u32],
@@ -1685,6 +1745,13 @@ impl NativeSurface {
     /// two walks. The metered penetration path
     /// ([`Self::penetration_intervals_batch_bounded_metered`], FU-8g H2)
     /// compares them; every other caller may ignore it.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn collect_hits_with_stack(
         &self,
         o: V3,
@@ -1742,6 +1809,13 @@ impl NativeSurface {
     ///
     /// Any edit to one walk must be mirrored in the other; the fill pass
     /// refuses with [`PenetrationBatchError::CensusDrift`] if they disagree.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn count_hits_with_stack(
         &self,
         o: V3,
@@ -1857,6 +1931,13 @@ impl NativeSurface {
     }
 
     /// Batched cast_rays -> ragged (offsets, t_all, face_all).
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn cast_rays(
         &self,
         origins: &[V3],
@@ -1950,6 +2031,15 @@ impl NativeSurface {
     /// bound over the subset that survives exclusion; dropping faces can only
     /// raise the true minimum, never lower it, so a subtree the full-surface
     /// walk could skip is a subtree this walk can skip too.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn seg_surface_min_excluding(&self, a: V3, b: V3, excluded: &[u32]) -> (f64, V3) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
@@ -2358,6 +2448,13 @@ impl NativeSurface {
     /// band edge is IN the band -- the exemption must not depend on a knife
     /// edge, and admitting the boundary face only ever makes the exemption
     /// larger by one face of the seat's own zone, never smaller.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn faces_near_segment(
         &self,
         a: V3,
@@ -2409,6 +2506,14 @@ impl NativeSurface {
     // (SPEC-EMBED-POLICY rule-4 transit detection) -- every argument is the
     // geometry + sampling config a single interval extraction needs.
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26). See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn pen_intervals_one(
         &self,
         p0: V3,
@@ -3115,6 +3220,13 @@ impl NativeSurface {
     // ---- sphere breach ----------------------------------------------------
     /// Collect faces whose exact point-distance to `c` is within `tol` of `nd`
     /// (for measured-tie detection). Branch & bound, ascending face index.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn faces_at_distance(&self, c: V3, nd: f64, tol: f64) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         let thr = nd + tol;

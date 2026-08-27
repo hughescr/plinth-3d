@@ -2407,6 +2407,14 @@ fn grid_spec(mesh: &Mesh, pitch: f64) -> Result<GridSpec, HollowError> {
     grid_spec_from_bounds(low, high, pitch)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn grid_spec_from_bounds(
     low: [f64; 3],
     high: [f64; 3],
@@ -2689,6 +2697,13 @@ fn to_index_space(point: [f64; 3], spec: GridSpec) -> Result<[f64; 3], HollowErr
 /// Dilated per-axis index-space bounding box of `tri`, clamped to `spec`'s
 /// voxel index range: `[lo, hi]` inclusive on each axis, or `lo > hi` on an
 /// axis whose dilated extent misses the grid entirely.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn dilated_index_aabb(
     tri: [[f64; 3]; 3],
     spec: GridSpec,
@@ -2898,6 +2913,13 @@ impl ColumnPolygon {
 ///
 /// Cell `n` covers `[n - 0.5, n + 0.5]`, so it can meet `[low, high]` only
 /// when `n >= low - 0.5` and `n <= high + 0.5`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn candidate_index_span(low: f64, high: f64, clamp: [isize; 2]) -> Option<[isize; 2]> {
     let slack = extent_slack(low.abs().max(high.abs()));
     let first = (low - 0.5 - slack).ceil();
@@ -2948,6 +2970,13 @@ fn candidate_axis_order(axis_range: [[isize; 2]; 3]) -> [usize; 3] {
 /// work but can never mark a false positive, and the marked-voxel set is
 /// exactly the set of cells whose cube truly overlaps a triangle, unchanged
 /// by how tightly candidates are generated.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn walk_triangle_candidates(
     tri: [[f64; 3]; 3],
     spec: GridSpec,
@@ -4071,6 +4100,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_oracle_characterizes_transforms_boundaries_eligibility_and_extra_body() {
         // Record of record: corpus/baseline/Sphere.pipeline.json.
         let (sphere_components, sphere) =
@@ -4149,6 +4183,11 @@ mod tests {
     /// actually has: one voxel step out of the corner, three out of the
     /// centre of a 5-cube.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_cavity_field_measures_to_the_exterior_rather_than_the_array_edge() {
         let pitch = 0.5_f64;
         let filled = Array3::from_elem((5, 5, 5), true);
@@ -4183,6 +4222,11 @@ mod tests {
     /// not clear the registered resin-saving threshold, which is a different
     /// verdict and would not exercise the Boolean at all.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_solid_that_fills_its_own_bounding_box_hollows_instead_of_refusing_its_shell() {
         let source = make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("box fixture");
         let source_bounds = bounds(&source);
@@ -4266,6 +4310,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_voxel_rounding_and_exterior_fill_rules_are_independently_pinned() {
         // NumPy's `round` is nearest with half-to-even, including negatives;
         // pin `f64::round_ties_even` (std since 1.77) against those corners
@@ -4292,6 +4341,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn grid_spec_uses_numpy_ties_to_even_at_both_transform_ends() {
         let spec = grid_spec_from_bounds([0.5, -1.5, -0.5], [1.5, -0.5, 1.5], 1.0)
             .expect("all rounded endpoints span three samples");
@@ -4542,6 +4596,12 @@ mod tests {
             && !frozen_edge_too_long(node.c, node.a, max_edge)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_mark_voxel_vertex(point: [f64; 3], spec: GridSpec, occupancy: &mut [bool]) {
         let mut index = [0_usize; 3];
         for axis in 0..3 {
@@ -4656,6 +4716,11 @@ mod tests {
     /// The maximal candidate set: every cell of every triangle's dilated
     /// bounding box, exactly tested. Completeness by construction, and far
     /// too expensive to ship — which is the point of comparing against it.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exhaustive_marked_set(mesh: &Mesh, spec: GridSpec) -> Vec<bool> {
         let mut occupancy = vec![false; spec.count];
         for triangle in mesh.tris() {
@@ -5142,6 +5207,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn registered_shell_is_closed_with_one_retained_2_5mm_cavity() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let source_bounds = bounds(&source);
@@ -5262,6 +5332,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_wall_is_the_one_registry_value_a_request_states_and_both_options_are_registered() {
         let default = HollowRequest::with_registered_wall_default(registered_printer())
             .expect("registered wall default");
@@ -5304,6 +5379,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_wall_finer_than_the_frozen_voxel_pitch_is_refused_rather_than_silently_unrepresentable() {
         let pitch = minimum_representable_wall_mm().expect("the frozen pitch must publish");
         assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");
@@ -5369,6 +5449,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_requested_wall_reaches_the_extraction_and_is_recorded_as_cavity_evidence() {
         // FU-53 moved this off the frozen Sphere: at the corrected exact-distance
         // selection, the Sphere's cavity at the registered handling-heavy wall
@@ -5443,6 +5528,11 @@ mod tests {
     /// candidate and confirms the outer solid is untouched by the wall
     /// selection and both walls still clear the registered minimum wall.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_default_wall_clears_savings_and_the_heavier_wall_now_refuses_on_the_retired_percentage_gate()
     {
         let default = create_shell(
@@ -5994,6 +6084,11 @@ mod fu53_exact_cavity_distance {
     /// lowered by this ruling, which moved the guarantee elsewhere rather
     /// than tightening the margin's proof.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_cavity_march_margin_is_zero_or_one_body_diagonal_of_the_registered_pitch() {
         let settings = registered_settings();
         let pitch = settings.voxel_pitch_mm().get();
@@ -6027,6 +6122,11 @@ mod fu53_exact_cavity_distance {
     /// Both registered walls are checked, not only the default: the
     /// handling-heavy option is a wall an operator can actually ask for.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_registered_minimum_wall_is_below_the_registered_wall_target() {
         let minimum = registered_minimum_wall_mm()
             .expect("the registered minimum wall must publish")
@@ -6276,6 +6376,11 @@ mod corpus_cavity_repair {
     use plinth_mesh::load_binary_stl;
 
     /// A UV sphere, `stacks` latitude bands by `slices` longitude bands.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn sphere(radius: f64, center: [f64; 3], stacks: usize, slices: usize) -> Mesh {
         let mut verts = vec![[center[0], center[1], center[2] + radius]];
         for stack in 1..stacks {
@@ -6319,6 +6424,11 @@ mod corpus_cavity_repair {
     }
 
     /// A capped cylinder along `+x` from `0` to `length`, yawed about `z`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn rod(radius: f64, length: f64, yaw: f64, sides: usize) -> Mesh {
         let mut verts = Vec::new();
         for side in 0..sides {
@@ -6588,6 +6698,12 @@ mod corpus_cavity_repair {
     /// here. `well_composed.rs`'s own direct unit tests exercise the repair
     /// mechanism on synthetic masks and are unaffected.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_synthetic_pinched_dumbbells_waist_stays_solid_because_it_is_below_the_drain_bore() {
         let source = pinched_dumbbell_with_rod_radius(2.96875);
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
@@ -6757,6 +6873,12 @@ mod corpus_cavity_repair {
     #[cfg_attr(
         debug_assertions,
         ignore = "429,120-face corpus fixture; run under cargo test --release"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
     fn the_committed_treant_splits_into_thirteen_interiors_and_hollows_the_largest() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -6959,6 +7081,11 @@ mod fu55_realized_wall_check {
     /// literal, so this test cannot pass while the engine is checking a
     /// different number from the one the registry publishes.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_check_has_no_epsilon() {
         let minimum = registered_minimum_wall_mm()
             .expect("the registered minimum wall must publish")
@@ -7007,6 +7134,11 @@ mod fu55_realized_wall_check {
     /// the record carries [`RealizedWallClaim::AtLeast`] so a reader can tell
     /// them apart, which a bare `Option<Finite>` could not.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_over_bound_measurement_is_recorded_as_a_clamped_lower_bound() {
         let recorded = checked_realized_wall_mm(f64::INFINITY, 2.0, 7.0)
             .expect("an over-bound measurement still passes the check");
@@ -7052,6 +7184,11 @@ mod fu55_realized_wall_check {
     /// chunked, and an over-bound vertex reads as [`f64::INFINITY`] rather
     /// than a false minimum below the true one.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn measure_realized_wall_mm_is_batch_invariant_and_over_bound_reads_as_infinity() {
         // A 20mm cube centred on the origin (x, y in [-10, 10], z in
         // [0, 20]).
@@ -7160,6 +7297,11 @@ mod fu55_realized_wall_check {
     /// resource refusal instead of `RealizedWallBelowSpec`, so a passing
     /// assertion on the refusal's own variant is also a proof of ordering.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_shell_cut_at_the_minimum_wall_is_refused_before_the_starved_boolean_stage() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let registered = registered_settings();
@@ -7670,6 +7812,12 @@ mod dual_cavity_doctrine {
     /// `Array3` fields use throughout H0. The fixture's axis sits exactly on
     /// the lattice (see the module doc), so this index is exact, not merely
     /// nearest.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn axis_voxel_at_z(grid_origin: [f64; 3], pitch: f64, z: f64) -> (usize, usize, usize) {
         let index_of = |value: f64, origin: f64| ((value - origin) / pitch).round() as usize;
         (
@@ -7998,6 +8146,11 @@ mod dual_cavity_doctrine {
     /// admitted; the refused side of the line starts one rung lower. See
     /// [`DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM`] for the full derivation.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_throat_clearance_is_the_widest_lattice_rung_the_line_still_refuses() {
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let limits = H0AdmissionLimits::production();
@@ -8273,6 +8426,12 @@ mod dual_cavity_doctrine {
     /// wall, pitch, margin, or bore change fails **here**, naming the number
     /// that moved, instead of silently invalidating every test above.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_fixture_throat_settings_still_straddle_the_registered_core_threshold() {
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let t = registered_erosion_mm(settings);

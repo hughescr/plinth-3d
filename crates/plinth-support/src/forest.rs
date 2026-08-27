@@ -531,6 +531,13 @@ impl Forest {
     }
 
     /// Adds a normal tree member as a root until explicitly linked.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn add_member(&mut self, member: Member) -> MemberKey {
         let reused = self
             .state
@@ -771,6 +778,13 @@ impl Forest {
 
     /// All live members, including braces, in stable key order.
     #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub fn live_members(&self) -> Vec<MemberKey> {
         self.state
             .slots
@@ -2017,6 +2031,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn nested_snapshots_restore_carried_area_topology_and_certificates() {
         let mut forest = Forest::new();
         let root = forest.add_member(member(MemberKind::Trunk));

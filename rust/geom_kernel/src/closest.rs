@@ -80,6 +80,12 @@ pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
 /// P1Q1 is the (broadcast) query segment, P2Q2 the triangle edge. Returns
 /// `(dist, c1_on_seg, c2_on_edge)`. The re-clamp sequence is pinned (A21).
 #[inline]
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`a * e - b * b` is the segment-segment denominator |u|^2|v|^2 \
+              - (u.v)^2, a determinant whose middle term is squared by \
+              construction, not a mis-typed `a * b`"
+)]
 pub fn segseg(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3) {
     let d1 = sub(q1, p1);
     let d2 = sub(q2, p2);

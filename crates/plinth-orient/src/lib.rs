@@ -219,6 +219,12 @@ fn decode_selection(bytes: &[u8], path: &Path) -> Result<BaselineSelection, Orie
 }
 
 /// Returns `None` for any malformed required pipeline/stage/orientation record.
+#[allow(
+    clippy::float_cmp,
+    reason = "decoding a stored report's axis triple against the unit-axis \
+              literals; 0.0 and 1.0 are exactly representable and anything \
+              else is not one of the two baseline axes"
+)]
 fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     let stages = report.object_field("stages")?.as_array()?;
     let mut hollow = None;
@@ -852,6 +858,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn complete_already_print_scale_audit_survives_orientation_handoff() {
         let source = baseline("../models/Sphere.stl");
         let mesh = load_binary_stl(&source, WeldPolicy::None)
@@ -1051,6 +1062,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn rotation_and_reframing_record_the_exact_matrix_and_translation() {
         let mesh = Mesh::new(
             vec![[3.0, 5.0, -2.0], [7.0, 5.0, -2.0], [3.0, 9.0, 4.0]],

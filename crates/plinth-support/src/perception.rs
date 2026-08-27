@@ -1186,6 +1186,13 @@ fn build_surface(
     .map_err(|error| GenericPerceptionError::Surface(error.to_string()))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn connected_islands(
     raw: &ContactCandidatePool,
     topology: &FaceTopology,
@@ -1324,6 +1331,13 @@ fn layer_midplanes(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PointKey(i64, i64);
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn point_key(point: [f64; 2]) -> PointKey {
     PointKey(
         (point[0] / LOOP_MERGE_MM).round() as i64,
@@ -1986,6 +2000,13 @@ fn find_births(
     Ok(births)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn overlap_candidates(
     current: &[SliceSolid],
     previous: &[SliceSolid],
@@ -2193,6 +2214,14 @@ fn solids_overlap(
     Ok(false)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn find_local_minima(
     mesh: &Mesh,
     surface: &NativeSurface,
@@ -2527,6 +2556,13 @@ fn point_reach_mm(solids: &[SliceSolid], point: [f64; 2]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn filter_minima_to_exterior_faces(
     face_centroids: &[[f64; 3]],
     exterior: &[bool],
@@ -2952,6 +2988,13 @@ pub(crate) struct LoadRowRetention {
 /// unique (`finalize_load_rows` refuses duplicates before this runs).  So slot
 /// 0 is the argmin, exactly and unambiguously, and there is no tie for the
 /// insertion order to break differently from the running argmin beside it.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn insert_load_witness(
     slots: &mut [LoadWitness; LOAD_WITNESS_SLOTS],
     contacts: &[PhysicalContact],
@@ -3186,6 +3229,13 @@ impl LoadTransposeCounts {
     }
 
     /// Fill the buckets, rows ascending, so every bucket comes out ascending.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn finish(
         self,
         load_eligibility: &[LoadEligibility],
@@ -3733,6 +3783,13 @@ impl RetainedLoadTranspose {
     /// `merged_resolves_specialized` is guard 3's verdict, computed by the
     /// caller by re-running the `generic_owner_for_parts` predicate on the
     /// **committed** contact (never trusted from the proposal).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn record_commit(
         &mut self,
         left: usize,
@@ -4095,6 +4152,13 @@ impl RetainedLoadTranspose {
     /// The caller (`build_gate_load_state`) has already run the guard chain;
     /// this method requires it and asserts the one precondition it can check
     /// cheaply.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn finalize_retained_round(
         &self,
         plan: &GenericContactPlan,
@@ -4256,6 +4320,13 @@ impl RetainedLoadTranspose {
     /// [`Self::absorb_full_build`]'s real payload, never against this
     /// restatement.
     #[cfg(test)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn from_witness_for_test(
         contacts: &[PhysicalContact],
         buckets: Vec<Vec<u32>>,
@@ -4407,6 +4478,13 @@ impl<'mesh> VerifiedMeshFingerprint<'mesh> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn finalize_load_rows(
     plan: &GenericContactPlan,
     verified_mesh: &VerifiedMeshFingerprint<'_>,
@@ -4989,6 +5067,14 @@ pub(crate) enum CarriableMaximum {
 /// for a face that needs `k` carriers; `None` when no legal split can even be
 /// STATED (a non-finite area, or a maximum that is not a usable positive
 /// number), which the caller turns into the refusal arm rather than a guess.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn carriable_share_count(area_mm2: f64, maximum: CarriableMaximum) -> Option<usize> {
     if !area_mm2.is_finite() {
         return None;
@@ -5970,6 +6056,13 @@ impl SpecializedLoadBaseline {
     /// incrementally (`f64` addition is not associative; FU-8d F3's own rule),
     /// and the winner/won CSR is rebuilt from the scan's witnesses, so the
     /// assembled baseline cannot depend on which path produced its inputs.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn assemble(
         partition: &FinalizedLoadPartition,
         contacts: &[PhysicalContact],
@@ -6123,6 +6216,13 @@ impl SpecializedLoadBaseline {
     /// caller that can see the one case this path must not be used for: a
     /// merged seat whose parts resolve to a generic owner, which serves base
     /// rows rather than the union.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn merged_violation_count(
         &self,
         left: usize,
@@ -6485,6 +6585,11 @@ mod tests {
     /// MEASURED 2026-08-21: 37.69911184307752 mm², at `r_max` = 1.000 mm
     /// RADIUS (2.000 mm DIAMETER).
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_single_contact_maximum_is_exactly_where_the_law_runs_out() {
         let policy = registered_tip_policy();
         let maximum = policy.max_carriable_area_mm2();
@@ -6553,6 +6658,11 @@ mod tests {
     ///
     /// No other test in the suite catches either sabotage.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_over_block_is_split_law_legally_or_refused_but_never_charged_whole() {
         let policy = registered_tip_policy();
         let maximum = policy.max_carriable_area_mm2();
@@ -6797,6 +6907,11 @@ mod tests {
     /// Build the case with `appended_takers` contacts eligible for the
     /// over-maximum face, plus one more eligible for the small disclosed face
     /// alone, all appended after the fixture's own contacts.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn append_seam_case(appended_takers: usize) -> AppendSeamCase {
         let fixture = retention_fixture();
         let maximum = registered_max_carriable_area_mm2().expect("registry read");
@@ -7189,6 +7304,11 @@ mod tests {
     /// control and nothing else, so a passing arm cannot be a refusal of
     /// everything.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_append_refuses_a_prior_partition_that_is_not_this_plans() {
         let case = append_seam_case(2);
         let proof = case.fixture.proof();
@@ -7444,6 +7564,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn finalized_contact_loads_preserve_zero_load_contacts_and_frozen_tip_clamps() {
         let empty = test_partition_rows(Vec::new());
         let contact_ids = [100, 10, u64::MAX];
@@ -7675,6 +7800,11 @@ mod tests {
     /// UNITS: radii here are RADII in mm.  The owner and ChituBox speak
     /// DIAMETER; every radius below is half the diameter he would quote.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn tip_minimum_binds_only_tiny_areas_and_leaves_every_large_area_refusal_identical() {
         let policy = FrozenTipLoadPolicy::from_placeholders(m0_constants().unwrap().placeholders());
 
@@ -7790,6 +7920,11 @@ mod tests {
     /// over-sizing band by exactly 16x (the square of the 4x radius drop),
     /// and changed nothing else.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn smallest_legal_tip_is_0_05_mm_radius_0_1_mm_diameter_carrying_at_most_0_09425_mm2() {
         let policy = FrozenTipLoadPolicy::from_placeholders(m0_constants().unwrap().placeholders());
         let x = policy.implied_area_ratio();
@@ -7948,6 +8083,12 @@ mod tests {
         BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap())
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn covering_layer_plan(mesh: &Mesh) -> LayerPlan {
         let zmin = mesh
             .verts()
@@ -7964,6 +8105,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_birth_overlap_ignores_retained_negative_winding_holes_like_python() {
         let square =
             |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
@@ -8038,6 +8184,11 @@ mod tests {
     /// holds it is the cavity wall, and the distance to that wall is the
     /// cantilever it has to bridge. Reach measures that distance.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_low_point_over_a_cavity_reaches_to_the_cavity_wall() {
         let solid = SliceSolid {
             outer: SliceLoop {
@@ -8111,6 +8262,11 @@ mod tests {
     /// any area-shaped yardstick, or hardcoding an allowance, changes at least
     /// one of the three verdicts or the margins asserted with them.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_corpus_reach_table_reproduces_at_the_registered_allowance() {
         let constants = plinth_core::m0_constants().expect("M0 constants");
         let allowance_mm = registry_low_point_reach_allowance_mm(constants);
@@ -8185,6 +8341,11 @@ mod tests {
     /// law, linear in the layer height. A hardcoded 0.0707 mm survives
     /// neither check.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_reach_allowance_is_read_from_the_registry_not_hardcoded() {
         let constants = plinth_core::m0_constants().expect("M0 constants");
         let evidence = constants.evidence();
@@ -8309,6 +8470,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn island_neighbor_dense_output_accepts_exact_caps_and_rejects_cap_plus_one() {
         let mesh = plinth_mesh::make_box([0.01, 0.01, 0.01], [0.0; 3]).unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
@@ -8473,6 +8639,11 @@ mod tests {
     /// an inconsistently wound one, and it is now refused by name instead of
     /// being averaged away. Same fixture, opposite verdict, stated mechanism.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn duplicate_owners_that_vote_alike_are_an_inconsistent_winding_and_are_refused() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let edge = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -8521,6 +8692,11 @@ mod tests {
     /// segment endpoint order, and regardless of the frozen intersection
     /// kind.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn derived_orientation_walks_an_outer_loop_counter_clockwise() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, kind, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -8563,6 +8739,11 @@ mod tests {
     /// negative area, the nonzero-rule hole verdict -- with no parity probe
     /// involved anywhere.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn derived_orientation_walks_a_hole_loop_clockwise() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -8612,6 +8793,11 @@ mod tests {
     /// by name instead of filled with a guess. This is the synthetic twin of
     /// the flipped-winding mesh sabotage.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn one_flipped_face_normal_is_refused_by_the_balance_guard() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -8901,6 +9087,11 @@ mod tests {
     /// undirected degree four. Post-fix it balances -- two edges in, two out --
     /// and sections into the two unit squares the solid actually has there.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_saddle_pass_on_the_plane_pinches_the_contour_and_still_sections() {
         let (verts, tris) = saddle_pinch_mesh();
         assert!(closed_and_consistently_wound(&tris));
@@ -9005,6 +9196,11 @@ mod tests {
     /// and carries no area. The plane touches the solid along a line only, so
     /// an empty layer is the right answer.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_doubly_emitted_tangent_keel_edge_sections_and_leaves_no_spur() {
         let (verts, tris) = tangent_keel_mesh();
         assert!(closed_and_consistently_wound(&tris));
@@ -9052,6 +9248,11 @@ mod tests {
     /// squares sharing the corner (2,2), where the walk must pick one of two
     /// out-edges. Every value below is fixed, not re-derived.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_hierholzer_walk_is_pinned_to_one_deterministic_loop_set() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -9105,6 +9306,11 @@ mod tests {
     /// and the layer comes out identical to the same square with no keel at
     /// all, through the union as well as at the stitcher.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_two_vertex_spur_is_dropped_and_the_areas_do_not_move() {
         use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
         let wall = |face_id, a: [f64; 2], b: [f64; 2]| PlaneIntersection {
@@ -9278,6 +9484,11 @@ mod tests {
     /// this test is the tripwire: a changed value here means the risk went
     /// live, and it needs a real fix, not a quiet re-pin.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_degree_four_pinch_on_the_degraded_path_is_walked_not_refused() {
         let events = pinch_two_squares_fixture();
         let normals = degenerate_normals(events.len());
@@ -9426,6 +9637,11 @@ mod tests {
     /// (5,2) and (6,2) -- plus a separate `0.8` solid holding the `-0.36`
     /// island. Total filled area `32.84 mm^2`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn self_crossing_outer_contour_still_yields_solids_not_a_seam_error() {
         let events = self_crossing_fixture();
         let normals = degenerate_normals(events.len());
@@ -9464,6 +9680,11 @@ mod tests {
     /// accounts for every square millimetre the fill rule says is solid, so
     /// nothing was claimed by bounding box and nothing was dropped.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn every_normalized_hole_is_owned_by_construction_so_none_is_ever_dropped() {
         let events = self_crossing_fixture();
         let normals = degenerate_normals(events.len());
@@ -9506,6 +9727,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn unique_face_partition_is_finalized_from_physical_contacts() {
         let mesh = make_overhang_table().unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
@@ -9785,6 +10011,11 @@ mod tests {
     /// - a row **outside** `elig(left) ∪ elig(right)`, whose answer the delta
     ///   never touches.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8d_load_delta_matches_the_per_variant_finalize() {
         const CONTACTS: usize = 6;
         let mesh = make_overhang_table().unwrap();
@@ -10146,6 +10377,11 @@ mod tests {
     /// silently-dense transpose (or an eligibility that admits everything)
     /// fails the test rather than passing it trivially.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8f_transposed_finalize_reproduces_the_scan_bit_for_bit() {
         let mesh = make_overhang_table().unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
@@ -10852,6 +11088,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn box_full_birth_minimum_and_solid_area_vector_is_frozen() {
         let mesh = plinth_mesh::make_box_default().unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
@@ -11401,6 +11642,11 @@ mod tests {
     /// separated from an `==` comparison, which `-0.0` would pass.
     const RETENTION_ZERO_Z_SEAT: usize = 5;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn retention_fixture() -> RetentionFixture {
         const SEATS: usize = 6;
         let mesh = make_overhang_table().unwrap();
@@ -11529,6 +11775,11 @@ mod tests {
         /// partition's rows through `face_row`/`row_face` — so guard 4's
         /// positive control is an **independent** derivation and not the
         /// retained buckets restated.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+        )]
         fn contact_rows(&self) -> Vec<usize> {
             let proof = self.proof();
             let (partition, _, _) = SpecializedLoadBaseline::build(
@@ -12007,6 +12258,11 @@ mod tests {
     /// members (b) and (c) act on the retained *fast path*, which does not
     /// exist until G6b; they land with it, per the design's phase table.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8f_retained_commit_remaps_the_witness_and_merges_the_parent_buckets() {
         let fixture = retention_fixture();
         let (left, right) = (0usize, 1usize);
@@ -12394,6 +12650,11 @@ mod tests {
     /// `contact_id = position`, specialized `owner = position`
     /// (`first_specialized_owner == 0`), generic tail owners
     /// position-independent.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn harness_inputs(
         fixture: &RetentionFixture,
         seats: &[([f64; 3], Vec<u32>)],
@@ -12430,6 +12691,11 @@ mod tests {
     /// in `build_gate_load_state`: `face_row`/`row_face` from the retained
     /// `row_face_id`, then each specialized contact's `(owner, face)` run
     /// walked through them.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn contact_rows_from_row_faces(
         row_face: &[u32],
         mesh_faces: usize,
@@ -12513,6 +12779,11 @@ mod tests {
     /// A harness that stayed green under any of the three would be vacuous
     /// and must not land (the FU-8e/G1 rule); all three failed.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fu8f_retained_transpose_matches_a_fresh_rebuild_after_n_commits() {
         let fixture = retention_fixture();
         let proof = fixture.proof();

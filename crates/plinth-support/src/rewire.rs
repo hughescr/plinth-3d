@@ -1183,6 +1183,11 @@ fn member_length(member: &Member) -> f64 {
         member.p1_mm().map(Finite::get),
     )
 }
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`r0 * r0 + r0 * r1 + r1 * r1` is the exact conical-frustum \
+              volume factor; the mixed term is meant to be `r0 * r1`"
+)]
 fn frustum_raw(length: f64, r0: f64, r1: f64) -> f64 {
     std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
         / CUBIC_MILLIMETRES_PER_MILLILITRE
@@ -1433,6 +1438,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn degenerate_root_retire_grounds_its_children_and_the_forest_still_lowers() {
         let cfg = Config::current(0.05).unwrap();
         let mut forest = Forest::new();
@@ -1824,6 +1834,11 @@ mod tests {
     /// clearance refusal. A radius-only gate leaves the record's stored endpoint
     /// at the old junction and reports zero re-cuts.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn try_slide_re_cuts_a_consumed_stubs_zone_to_follow_its_new_endpoint() {
         let mesh = Mesh::new(
             vec![[-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [0.0, 0.2, 0.0]],

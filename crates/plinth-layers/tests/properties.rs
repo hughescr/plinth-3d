@@ -37,6 +37,11 @@ fn star_polygon(rng: &mut ChaCha8Rng) -> Vec<[f64; 2]> {
         .collect()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn soup(rng: &mut ChaCha8Rng, max_loops: usize) -> Vec<Vec<[f64; 2]>> {
     let count = 1 + (rng.next_u64() as usize) % max_loops;
     (0..count).map(|_| star_polygon(rng)).collect()

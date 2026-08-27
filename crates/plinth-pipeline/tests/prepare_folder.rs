@@ -136,6 +136,11 @@ impl Scratch {
     /// made explicit at the one place the narrowing happens. The alternative —
     /// letting the writer refuse — would just mean this fixture could not be a
     /// file at all.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn place_procedural(&self, mesh: &plinth_mesh::Mesh, stem: &str) {
         let verts: Vec<[f64; 3]> = mesh
             .verts()
@@ -277,6 +282,11 @@ const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 1;
 /// sort *after* the good one for exactly that reason... and a third, sorting
 /// *before* it, closes the other direction.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itself() {
     let scratch = Scratch::new("folder");
     scratch.place("make_toed_slab.prepped.stl", "mini");
@@ -1688,6 +1698,11 @@ fn each_stage_stop_halts_that_model_at_that_stage_and_writes_nothing() {
 /// twice on the same fixture, changing nothing but `--wall-mm`, and asserts
 /// the serialized reports differ in the wall and only there.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn two_prepare_runs_at_different_walls_are_distinguishable_in_the_serialized_report() {
     let printer = OutputProfile::Saturn4Ultra
         .resolve()

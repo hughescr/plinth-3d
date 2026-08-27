@@ -491,6 +491,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn wall_mm_is_optional_and_defaults_to_the_registered_constant() {
         let registered =
             registered_wall(WallSelection::Default).expect("registered wall default must publish");
@@ -512,6 +517,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn wall_mm_refuses_a_wall_finer_than_the_frozen_voxel_pitch() {
         let pitch = plinth_hollow::minimum_representable_wall_mm().expect("frozen pitch publishes");
         assert_eq!(pitch.get(), 0.5, "the frozen voxel pitch moved");

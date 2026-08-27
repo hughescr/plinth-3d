@@ -320,6 +320,11 @@ fn far_chamber_reference_mm3(settings: HollowSettings) -> f64 {
 /// Snap every coordinate onto the STL f32 wire. Only meshes that passed
 /// through the Manifold boolean kernel need it; the fixture's own source mesh
 /// is f32-exact by construction.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn on_the_wire(mesh: &plinth_mesh::Mesh) -> plinth_mesh::Mesh {
     let verts = mesh
         .verts()
@@ -357,6 +362,11 @@ fn scratch_path(name: &str) -> PathBuf {
 /// the real preprocessing chain, under production admission limits, and the one
 /// selected resin-flow interior occupies **both** chambers.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn above_bore_hollows_and_spans_both_chambers_after_the_real_preprocessing() {
     let outcome = hollow_plan_drill_and_round_trip(
         "above-bore",
@@ -439,6 +449,11 @@ fn at_bore_hollows_the_near_chamber_alone_after_the_real_preprocessing() {
 /// geometry class — AT_BORE's far chamber gets no drain of its own and is
 /// refilled, SEPARATED's is drained.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn separated_drains_each_disconnected_chamber_on_its_own_after_the_real_preprocessing() {
     let outcome = hollow_plan_drill_and_round_trip(
         "separated",
@@ -473,6 +488,11 @@ fn separated_drains_each_disconnected_chamber_on_its_own_after_the_real_preproce
 /// own phase. At the pre-2026-08-12 value of 1.90 mm the ABOVE_BORE half of
 /// this test fails.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_doctrine_survives_a_quarter_pitch_phase_shift() {
     let settings = registered_settings();
 

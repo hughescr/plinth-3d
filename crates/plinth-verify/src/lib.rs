@@ -812,6 +812,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn exact_roundtrip_drift_is_a_named_structural_failure() {
         let report = report_for_roundtrip(ArtifactId::from("test-artifact"), &[1, 2], vec![1, 3]);
         assert_eq!(
@@ -828,6 +833,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn coverage_defects_are_one_finite_area_sum_per_island_and_keep_gap_as_evidence() {
         let patches = vec![
             patch(2, 1.5, false, true),
@@ -847,6 +857,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn immutable_projection_keeps_same_island_aggregation_order_and_gap_evidence() {
         let patches = vec![
             patch(2, 1.5, false, true),

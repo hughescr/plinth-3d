@@ -695,6 +695,13 @@ fn fmt3(value: f64) -> String {
 /// vertex to `(screen_x, screen_y, depth)`) into one `<g>` of painter's-order
 /// triangles, plus the panel's own viewBox transform.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn render_panel(
     out: &mut String,
     title: &str,

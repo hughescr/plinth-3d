@@ -209,6 +209,11 @@ fn a_measured_violation_is_still_a_violation() {
 ///     VERDICT under every `>= demand` test a caller can write, which is the
 ///     comparison callers actually make.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn the_float_shim_collapses_all_three_unmeasured_reasons_onto_one_pass() {
     let surface = crevice();
     let p0 = vec![
@@ -257,9 +262,9 @@ fn the_float_shim_collapses_all_three_unmeasured_reasons_onto_one_pass() {
     // THE BUG, in the shape callers actually write it. Every untested row
     // passes the same test the well-cleared row passes, at every demand.
     for demand in [0.0_f64, 0.5, 5.0, 1.0e9] {
-        for row in 0..3 {
+        for (row, &value) in floats.iter().enumerate().take(3) {
             assert!(
-                floats[row] >= demand,
+                value >= demand,
                 "untested row {row} passes a demand of {demand} mm on the shim"
             );
         }

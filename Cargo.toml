@@ -33,108 +33,65 @@ inherits = "dev"
 opt-level = 2
 debug-assertions = true
 
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery  = { level = "warn", priority = -1 }
-# Real signal: keep strict_comparison, cast_possible_truncation,
-# cast_sign_loss, cast_possible_wrap, cast_precision_loss, and
-# suspicious_operation_groupings at "warn" (inherited from pedantic/nursery
-# above); everything below is style noise this project should not carry.
-suboptimal_flops = "allow"
-doc_markdown = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-items_after_statements = "allow"
-unreadable_literal = "allow"
-redundant_closure_for_method_calls = "allow"
-module_name_repetitions = "allow"
-similar_names = "allow"
-many_single_char_names = "allow"
-redundant_pub_crate = "allow"
-doc_lazy_continuation = "allow"
-too_many_lines = "allow"
-missing_fields_in_debug = "allow"
-struct_field_names = "allow"
-must_use_candidate = "allow"
-# Manual-midpoint is real but zero-risk on mm-scale f64; leave at warn as a
-# free cleanup queue, don't allow it away.
+# ---------------------------------------------------------------------------
+# Lint configuration.  READ THE RULE BEFORE ADDING TO IT.
 #
-# The block above is the census-drafted list. Running it against the live
-# workspace surfaced ~990 more warnings across 27 additional pedantic/nursery
-# idiom lints the census never sampled (nursery's lint set is unstable and
-# grows between clippy releases). Every one read is a style/idiom preference
-# with no correctness content — sampled at least one site per lint below and
-# confirmed none touches the risk classes the census flagged (strict
-# comparison, casts, suspicious operator groupings). Allowed for the same
-# reason as the block above: noise, not signal.
-missing_const_for_fn = "allow"
-too_long_first_doc_paragraph = "allow"
-use_self = "allow"
-cast_lossless = "allow"
-derive_partial_eq_without_eq = "allow"
-format_push_string = "allow"
-option_if_let_else = "allow"
-map_unwrap_or = "allow"
-single_match_else = "allow"
-manual_let_else = "allow"
-match_same_arms = "allow"
-elidable_lifetime_names = "allow"
-or_fun_call = "allow"
-if_not_else = "allow"
-tuple_array_conversions = "allow"
-used_underscore_items = "allow"
-unnecessary_wraps = "allow"
-wildcard_imports = "allow"
-uninlined_format_args = "allow"
-trivially_copy_pass_by_ref = "allow"
-useless_let_if_seq = "allow"
-nonminimal_bool = "allow"
-large_types_passed_by_value = "allow"
-struct_excessive_bools = "allow"
-semicolon_if_nothing_returned = "allow"
-return_self_not_must_use = "allow"
-ignored_unit_patterns = "allow"
-bool_to_int_with_if = "allow"
-# debug_assert_with_mut_call stays at warn (nursery default): calling a
-# mutating expression inside debug_assert! means the mutation silently
-# vanishes in a release build — a real debug/release behaviour split, not
-# style. Only 2 sites (brace.rs:1634, specialized.rs:6339); worth a look.
-
-# Third pass, after the two blocks above: `cargo clippy --workspace
-# --all-targets` still surfaced ~51 warnings across 24 more pedantic/nursery
-# lints neither prior pass sampled (same unstable-nursery-lint-set cause).
-# Read every site; all are style/idiom preferences on already-safe code
-# (a const-array-of-descriptors macro, a Vec::drain, a while loop with an
-# epsilon-guarded float bound, an unused &mut self param, etc.) — none
-# touches the risk classes this file deliberately keeps at warn (strict
-# float comparison, the cast_* family, suspicious_operation_groupings,
-# needless_pass_by_value, redundant_clone, manual_midpoint,
-# debug_assert_with_mut_call). Allowed for the same reason as the blocks
-# above: noise, not signal.
-assigning_clones = "allow"
-borrow_as_ptr = "allow"
-case_sensitive_file_extension_comparisons = "allow"
-cloned_instead_of_copied = "allow"
-copy_iterator = "allow"
-duration_suboptimal_units = "allow"
-fn_params_excessive_bools = "allow"
-imprecise_flops = "allow"
-iter_on_single_items = "allow"
-iter_with_drain = "allow"
-large_stack_arrays = "allow"
-manual_is_variant_and = "allow"
-match_wild_err_arm = "allow"
-needless_collect = "allow"
-needless_pass_by_ref_mut = "allow"
-needless_raw_string_hashes = "allow"
-option_option = "allow"
-range_plus_one = "allow"
-stable_sort_primitive = "allow"
-unnecessary_debug_formatting = "allow"
-unnecessary_semicolon = "allow"
-unnested_or_patterns = "allow"
-unused_self = "allow"
-while_float = "allow"
+# `docs/development.md` runs clippy as part of the gate with `-D warnings` and
+# documents the expected count as ZERO.  A lint set that is not FULLY
+# ENUMERATED here cannot keep that promise.  `clippy::pedantic` and especially
+# `clippy::nursery` are OPEN GROUPS: their membership grows between clippy
+# releases, so enabling a group signs the gate up for lints that do not exist
+# yet.  Enabling both wholesale is what broke this branch -- the live workspace
+# surfaced ~990 warnings across 27 pedantic/nursery lints the clippy census
+# never sampled, every one of them an ERROR under `-D warnings`, in a build
+# that had changed no code.  Chasing that with an ever-growing `allow` list
+# loses the race by construction: the next clippy release adds the next batch.
+#
+# THE RULE: no lint GROUPS in this table.  Every lint the workspace enforces is
+# named individually below, so a clippy upgrade can change how an enabled lint
+# fires but can never enlarge the gate on its own.
+#
+# The list is the signal set from
+# `docs/evidence/remediation-2026-08-26/census/census-clippy.md`, which triaged
+# all 3,817 pedantic/nursery warnings and separated signal from noise.  These
+# classes carry real correctness weight in a geometry codebase, and the census
+# found live defects in the first two:
+#
+#   * `float_cmp` -- exact equality on COMPUTED geometry.  Found `cco.rs`
+#     equating a computed member endpoint against a computed plate height to
+#     gate a topology branch, and `plinth-emit`'s `same_point` deciding
+#     pad-vs-bridge emission on arithmetically-derived endpoints.
+#   * the `cast_*` family -- truncation, sign loss and wraparound in index and
+#     coordinate arithmetic.  Found geom_kernel's BVH carrying an undocumented,
+#     unasserted 32-bit index-width assumption.  `cast_precision_loss` is the
+#     one member of the family deliberately LEFT OUT: every one of its 187
+#     sites is an integer mesh index or count widened to `f64`, and `f64`
+#     represents every integer up to 2^53 (~9.0e15) exactly -- nine orders of
+#     magnitude above the largest mesh this project handles (the 429,120-face
+#     treant corpus).  A lint that cannot fire on a reachable value is noise by
+#     the census's own standard.  The three members that CAN change a value in
+#     this domain are enabled.
+#   * `suspicious_operation_groupings` -- mis-grouped operands in a formula.
+#     All 10 census hits read out as false positives, but the class is cheap to
+#     carry and the failure it catches is silent.
+#
+# `debug_assert_with_mut_call` is kept for a different reason: a mutating call
+# inside `debug_assert!` silently vanishes in a release build, which is a
+# debug/release behaviour split rather than a style preference.
+#
+# Everything else the census read -- doc style, `mul_add`, `pub(crate)` in a
+# private module, function length, manual midpoint on mm-scale coordinates, and
+# the redundant clones / by-value arguments that were every one inside a test
+# module -- is style noise and is simply NOT ENABLED.  Do not re-add a group to
+# get it back.
+# ---------------------------------------------------------------------------
+[workspace.lints.clippy]
+float_cmp = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+suspicious_operation_groupings = "warn"
+debug_assert_with_mut_call = "warn"
 
 # Cheap-but-honest test gate: release SEMANTICS (debug-assertions off,
 # overflow-checks matching release) at a much cheaper compile cost.

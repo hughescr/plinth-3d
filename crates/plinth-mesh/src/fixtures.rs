@@ -389,6 +389,13 @@ fn append_box(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn append_down_cone(
     verts: &mut Vec<[f64; 3]>,
     tris: &mut Vec<[u32; 3]>,
@@ -791,6 +798,13 @@ pub fn make_dual_cavity_pawn() -> Result<Mesh, MeshError> {
 /// throat ring into a point. Both are new admitted domains, not loosened
 /// ones — FU-8b permits adding a bound and forbids only loosening or
 /// bypassing an existing one.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 pub fn make_dual_cavity_pawn_with_throat_radius(throat_radius_mm: f64) -> Result<Mesh, MeshError> {
     validate_positive("throat_radius_mm", throat_radius_mm)?;
     if !(DUAL_CAVITY_MIN_THROAT_R_MM..DUAL_CAVITY_UPPER_SPHERE_R_MM).contains(&throat_radius_mm) {
@@ -994,6 +1008,11 @@ fn push_lathe_ring(verts: &mut Vec<[f64; 3]>, r: f64, z: f64, slices: usize) {
 
 /// Snap a vertex onto the STL f32 wire: `v -> (v as f32) as f64`. See the
 /// "Mandatory f32 snap" section of [`make_dual_cavity_pawn_with_throat_radius`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "deliberate narrowing to the binary32 the printer file format stores. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn snap_vertex(point: [f64; 3]) -> [f64; 3] {
     [
         f64::from(point[0] as f32),

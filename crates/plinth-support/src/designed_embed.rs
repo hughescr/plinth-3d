@@ -2553,6 +2553,11 @@ mod tests {
     ///    same row, because a caller that hands `attest_members_batch` an
     ///    unusable member has a defect and nothing can be concluded from it.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn one_unusable_candidate_is_discarded_and_the_other_thirty_nine_still_attest() {
         const DEPTH: f64 = 0.3;
         const RADIUS: f64 = 0.2;
@@ -2849,6 +2854,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_tip_entirely_outside_the_solid_is_refused_as_unattached() {
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
         // Seated nowhere: the whole member sits clear of the cube in y.
@@ -2889,6 +2899,11 @@ mod tests {
     /// MAJOR-7 — PR-4 is no longer inert, and the FU-CONTACT-1 clamp clause is
     /// load-bearing rather than decorative.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_area_law_grades_the_attested_interface_and_the_clamp_suppresses_it() {
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
         let policy = attestation_policy();
@@ -3184,6 +3199,11 @@ mod tests {
     /// `with_sabotaged_interval` injection; the two together are what keep a
     /// per-row witness from letting a defective PLACED member through.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn one_ungradable_row_is_discarded_while_the_rest_of_the_batch_attests() {
         const DEPTH: f64 = 0.3;
         const RADIUS: f64 = 0.2;
@@ -3383,6 +3403,11 @@ mod tests {
     /// (0.1 mm diameter) it is nevertheless refused `NotAttached`, quarantined
     /// upstream, and its 0.05 mm² abandoned.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn an_edge_seat_refused_at_the_law_radius_attests_at_the_smallest_rung_that_reaches() {
         let surface = edge_seat_box();
         let seat_y = 2.0 + EDGE_OFFSET_MM;
@@ -3552,6 +3577,12 @@ mod tests {
     /// contact, at every depth. Nothing here is hand-typed: change the ray count
     /// and both the step and the bound follow it.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_refinement_scan_steps_by_the_rings_own_sample_spacing_and_is_bounded_at_three() {
         let rays = ENDPOINT_VALIDATION_OFFSET_RAYS as f64;
         let ratio = tip_refinement_radius_ratio();
@@ -3629,6 +3660,11 @@ mod tests {
     /// rung on the record. A remedy that cured this one would be inventing
     /// attachment.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_seat_no_legal_tip_can_reach_is_refused_with_the_whole_ladder_on_the_record() {
         let surface = edge_seat_box();
         let seat_y = 2.0 + 1.5;
@@ -3690,6 +3726,11 @@ mod tests {
     /// prints the over-bound scar the run would have built — radius and
     /// diameter — instead of a bare "expected None".
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn a_cure_that_would_exceed_the_grown_scar_maximum_is_refused_and_names_the_bound() {
         let surface = edge_seat_box();
         let bound_mm = registered_scar_bound_mm();
@@ -3769,6 +3810,11 @@ mod tests {
     /// the scar the bound is refusing, and its size is what makes the refusal
     /// worth having.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn without_the_scar_bound_the_same_seat_cures_at_an_over_bound_scar() {
         let surface = edge_seat_box();
         let bound_mm = registered_scar_bound_mm();
@@ -3825,6 +3871,11 @@ mod tests {
     /// would still be telling the operator the wrong thing about which rule
     /// refused their support.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn the_growth_ceiling_is_the_smaller_registered_limit_and_carries_its_name() {
         let bound_mm = registered_scar_bound_mm();
         let legacy_max_mm = registered_legacy_tip_max_mm();

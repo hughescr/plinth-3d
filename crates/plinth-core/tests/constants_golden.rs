@@ -357,6 +357,11 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn saturn4_ultra_profile_is_wired_from_the_typed_global_declarations() {
     let profile = m0_constants()
         .expect("M0 constants registry must construct")

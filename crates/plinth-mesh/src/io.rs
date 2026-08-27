@@ -186,6 +186,11 @@ fn decode_binary_stl(
     Mesh::new_unwelded(verts, tris).map_err(Into::into)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "deliberate narrowing to the binary32 the printer file format stores. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn encode_binary_stl(path: &Path, mesh: &Mesh) -> Result<Vec<u8>, MeshIoError> {
     let triangle_count = mesh.tris.len();
     let count = u32::try_from(triangle_count).map_err(|_| MeshIoError::TooManyTriangles {

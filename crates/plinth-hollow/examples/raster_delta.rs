@@ -87,6 +87,12 @@ fn round_ties_even(value: f64) -> f64 {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn grid_spec(mesh: &Mesh, pitch: f64) -> GridSpec {
     let mut low = [f64::INFINITY; 3];
     let mut high = [f64::NEG_INFINITY; 3];
@@ -157,6 +163,12 @@ fn raster_leaf(node: RasterNode, pitch: f64) -> bool {
         && !edge_too_long(node.c, node.a, max_edge)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn mark_vertex_old(point: [f64; 3], spec: GridSpec, occupancy: &mut [bool]) {
     let mut index = [0_usize; 3];
     for axis in 0..3 {
@@ -306,6 +318,12 @@ fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) 
     d <= r && d >= -r
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> [[isize; 2]; 3] {
     let mut axis_range = [[0_isize; 2]; 3];
     for axis in 0..3 {
@@ -452,6 +470,11 @@ impl ColumnPolygon {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn candidate_index_span(low: f64, high: f64, clamp: [isize; 2]) -> Option<[isize; 2]> {
     let slack = extent_slack(low.abs().max(high.abs()));
     let first = (low - 0.5 - slack).ceil();
@@ -471,6 +494,11 @@ fn candidate_axis_order(axis_range: [[isize; 2]; 3]) -> [usize; 3] {
     order
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn walk_triangle_candidates(
     tri: [[f64; 3]; 3],
     spec: GridSpec,
@@ -634,6 +662,13 @@ struct Measurement {
     approx_min_wall_mm: Option<f64>,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn measure(occupancy: Vec<bool>, spec: GridSpec, wall_mm: f64) -> Measurement {
     let mut occupancy = occupancy;
     fill_voxel_holes(&mut occupancy, spec.dims);

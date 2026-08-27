@@ -262,6 +262,13 @@ pub enum LayerUnionError {
 }
 
 #[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn quantize(value: f64) -> i64 {
     // Identical rounding to perception's `point_key`, which is what makes the
     // 1e-8 quantum lossless with respect to stitched vertices.

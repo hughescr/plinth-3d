@@ -1365,6 +1365,13 @@ struct Config {
 }
 
 impl Config {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn current() -> Result<Self, CcoError> {
         let constants = m0_constants().map_err(|error| CcoError::Constants(error.to_string()))?;
         let p = constants.placeholders();
@@ -1792,6 +1799,12 @@ impl CcoController {
     /// successful return no further initial terminal can be advanced, so a
     /// transcript cannot be replayed against a controller with hidden pending
     /// work.
+    #[allow(
+        clippy::suspicious_operation_groupings,
+        reason = "`build.load_digest()` and `loads.digest()` are the two sides \
+                  of the same comparison spelled by their own types; \
+                  `FinalizedContactLoads` exposes `digest`, not `load_digest`"
+    )]
     pub(crate) fn finalize_transcript(
         &mut self,
         build: &InitialContactBuild,
@@ -5555,6 +5568,14 @@ fn changed_forest_volume_delta(before: &Forest, after: &Forest) -> Result<f64, C
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn candidate_price(
     descriptor: &Descriptor,
     candidate: &Forest,
@@ -5675,6 +5696,11 @@ fn o10_uniform_radius_for_span(
         .get())
 }
 
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`r0 * r0 + r0 * r1 + r1 * r1` is the exact conical-frustum \
+              volume factor; the mixed term is meant to be `r0 * r1`"
+)]
 fn member_volume(member: &Member) -> Result<f64, CcoError> {
     let delta = sub(
         member.p1_mm().map(Finite::get),
@@ -7348,6 +7374,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn frozen_xia_vectors_sum_to_right_angle() {
         let equal = xia_angles(1.0, 1.0);
         assert!((equal.child_one_turn_deg - 45.0).abs() < 1e-12);
@@ -7361,6 +7392,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn brace_price_reads_the_single_o10_placeholder_authority() {
         let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
         let authority = compatibility.brace_free_span_mm();
@@ -7369,6 +7405,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn bounded_weiszfeld_matches_frozen_numeric_vector() {
         let result = weighted_fermat_point(
             &[
@@ -7698,6 +7739,11 @@ mod tests {
     /// digest walks: all three disposition variants and all three
     /// `NoWinnerEvidence` variants, with non-empty seat-refusal lists (the
     /// Θ(N·R) term the accumulator exists to collapse).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn scripted_disposition(index: usize, entry: &TerminalLedgerEntry) -> TerminalCadenceRecord {
         let seed = index as u64 + 1;
         let refusals = |count: usize| -> Vec<AnchorSeatRefusal> {
@@ -9281,6 +9327,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn rewire_batch_is_indexed_stably_uses_one_clearance_batch_and_never_commits() {
         let (forest, keys) = rewire_fixture();
         let before = forest.digest();
@@ -10255,6 +10306,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn candidate_source_ledger_vectors() {
         let (mut forest, request, _) = growth_fixture();
         let finite = |value| Finite::new(value).unwrap();
@@ -10542,6 +10598,12 @@ mod tests {
     /// cannot do this job: its top face is two 40 mm triangles, so every band
     /// that reaches the seat at all reaches both of them and the zone never
     /// moves with the radius.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn fine_seat_slab_parts(pitch_mm: f64) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         const HALF_MM: f64 = 4.0;
         const DEPTH_MM: f64 = 10.0;

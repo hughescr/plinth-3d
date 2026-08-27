@@ -169,6 +169,17 @@ impl CavityField {
     /// the model, and those two are always separated by at least the realized
     /// wall, which is several voxels thick.
     #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and every site in this function is range-checked \
+              before the cast or clamped into range after it (read site by site, 2026-08-26); \
+              integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     pub(crate) fn contains_point_neighbourhood(&self, point: [f64; 3]) -> bool {
         let pitch = self.pitch_mm.get();
         let base = [0, 1, 2].map(|axis| {
@@ -309,6 +320,11 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
     fn x_fastest_packing_preserves_the_h0_transform() {
         let mut mask = Array3::from_elem((2, 2, 3), false);
         mask[(1, 0, 2)] = true;

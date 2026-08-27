@@ -283,6 +283,11 @@ fn procedural_overhang_table_closes_its_coverage_and_emits() {
 ///
 /// This is the assertion that the gate is a *gate* and not a wall.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn procedural_toed_slab_passes_the_gates_and_still_emits() {
     let scratch = Scratch::new("toed-slab");
     let mesh = make_toed_slab().expect("procedural toed slab");
@@ -372,6 +377,11 @@ fn make_prehollowed_box() -> plinth_mesh::Mesh {
 /// hollow what is already hollow — so unlike `InvalidShellTopology` it will not
 /// evaporate when a geometry defect is fixed, and the branch keeps its gate.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
 fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
     let scratch = Scratch::new("prehollowed-hollow-refusal");
 
