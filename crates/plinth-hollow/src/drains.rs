@@ -296,6 +296,154 @@ impl Chambers {
     }
 }
 
+/// **The chambers a drilled model actually ships**, as the report path needs
+/// them: how many there are, how big each one is, and which one a hole's
+/// mouth opens into.
+///
+/// The same labelling [`Chambers`] carries, taken over the cavity field
+/// **after** drilling refilled every pocket it could not reach. It drops the
+/// planner's band measurements, which are about where to aim a drill and mean
+/// nothing once the holes are cut.
+///
+/// # Which notion of "chamber" this is, and why
+///
+/// This crate knows three partitions of one cavity, and they are not the same
+/// partition:
+///
+/// * the **6-connected regions of the selected field** — [`Chambers`] above,
+///   and the drilling stage's own drainability recount, which unions every
+///   retained cell with its six face neighbours;
+/// * the **resin-flow interiors** of [`crate::flow`], where two voids are
+///   separate unless the passage between them admits the registered drain
+///   bore;
+/// * the **deep lobes** of [`CavityField::deep_lobe_count`], the connected
+///   components of the members whose clearance clears a line the caller
+///   picks.
+///
+/// This is the first of the three, for three reasons in descending weight.
+///
+/// 1. **It is the partition the shipping decision was made under.** Drilling
+///    accepts an article only when every retained cell is drainable, and the
+///    recount that decides it partitions the cells exactly this way: a drain
+///    serves a cell when the two lie in one 6-connected region of the
+///    retained field. Numbering the report's chambers any other way would
+///    attribute drains under a partition no gate ever applied, and on a real
+///    model the report and the proof it was accepted under would disagree
+///    without either being wrong on its own terms.
+/// 2. **It is one record per closed cavity surface the shipped mesh
+///    carries.** Drilling recounts the retained field's 6-connected
+///    components and then refuses unless the pre-drill shell has exactly that
+///    many closed cavity surfaces besides its outer one. So `count` here is
+///    the number of separate voids a reader slicing the shipped model would
+///    find, which is what "a chamber this model ships" means to the reader
+///    the report is for.
+/// 3. **It puts no constant in charge of the answer.** The flow partition
+///    reads `HOLLOW_DRAIN_R_MM` from the registry, which is legitimate; the
+///    deep-lobe partition takes its clearance line from whoever calls it,
+///    which would hand a chosen number the power to decide how many chambers
+///    an artifact reports. This partition is pure cell adjacency and has
+///    nothing to tune.
+///
+/// **This is not a claim that the flow rule is wrong.** It is the truer
+/// physics: two chambers joined by a thread narrower than the bore are one
+/// region here and two vessels to resin, and resin in the far one cannot
+/// reach the near one's drain. But that is a claim about what drilling should
+/// *accept*, and it belongs in the drainability recount — where fixing it
+/// would move this report with it, because this reads the field that recount
+/// left behind. Putting it here instead would leave the report the only part
+/// of the engine holding a physics the gates do not.
+pub(crate) struct ShippedChambers {
+    /// One entry per grid cell: `0` for a non-member, otherwise `1..=count`.
+    labels: Vec<u32>,
+    pub(crate) count: usize,
+    /// Member cells per chamber, `0`-based: `voxels[id - 1]` counts the cells
+    /// of the chamber whose `cavity_id` is `id`.
+    pub(crate) voxels: Vec<usize>,
+}
+
+impl ShippedChambers {
+    /// The chamber a hole's mouth opens into, as a `1`-based `cavity_id`.
+    ///
+    /// **The 26-neighbour widening is not a tolerance.** It is the same
+    /// neighbourhood the drilling stage's drainability recount seeds a drain
+    /// over, matched deliberately: the cavity's surface is marching-cubes
+    /// over the member cell centres, so it sits about half a pitch outside
+    /// them, and a point genuinely in the void can round to a non-member
+    /// cell. Matching that radius exactly is what makes a `None` here mean
+    /// "this drain seeded no cell there either" instead of "this lookup was
+    /// stricter than the proof".
+    ///
+    /// Two chambers can pass within one cell of each other without being
+    /// 6-connected, so a mouth's neighbourhood can touch more than one of
+    /// them. A [`crate::DrainRecord`] carries one `cavity_id`, so the nearest
+    /// member centre wins and ties go to the lowest cell index — the chamber
+    /// the mouth is actually in, chosen without reference to scan order.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the \
+              integer bounds and maps NaN to 0, and the one site here is range-checked against the \
+              grid's own dimensions -- NaN first, so an unordered coordinate is out of bounds rather \
+              than a silent index 0 -- immediately before the cast. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    pub(crate) fn chamber_at(&self, field: &CavityField, point_mm: [Finite; 3]) -> Option<u32> {
+        let pitch = field.pitch_mm().get();
+        let origin = field.origin_mm().map(Finite::get);
+        let dims = field.dimensions();
+        let point = point_mm.map(Finite::get);
+        let base = [0, 1, 2].map(|axis| ((point[axis] - origin[axis]) / pitch).round_ties_even());
+        let mut nearest: Option<(f64, usize)> = None;
+        for dz in -1..=1_i8 {
+            for dy in -1..=1_i8 {
+                for dx in -1..=1_i8 {
+                    let mut index = [0_usize; 3];
+                    let mut in_bounds = true;
+                    for (axis, offset) in [dx, dy, dz].into_iter().enumerate() {
+                        let coordinate = base[axis] + f64::from(offset);
+                        // The NaN arm is not redundant, for the reason
+                        // `sampled_exit_distances` states: NaN fails `< 0.0`
+                        // and `>= dims` alike, and `NaN as usize` is a
+                        // defined, silent 0.
+                        if !coordinate.is_finite()
+                            || coordinate < 0.0
+                            || coordinate >= dims[axis] as f64
+                        {
+                            in_bounds = false;
+                            break;
+                        }
+                        index[axis] = coordinate as usize;
+                    }
+                    if !in_bounds {
+                        continue;
+                    }
+                    let flat = index[0] + index[1] * dims[0] + index[2] * dims[0] * dims[1];
+                    if self.labels[flat] == 0 {
+                        continue;
+                    }
+                    let centre = field.world_at_flat(flat);
+                    let distance = (0..3)
+                        .map(|axis| (centre[axis] - point[axis]).powi(2))
+                        .sum::<f64>();
+                    // `total_cmp` rather than `<`, so the tie-break is an
+                    // ordering decision and not an equality test on computed
+                    // coordinates.
+                    let closer = nearest.is_none_or(|(best_distance, best_flat)| {
+                        distance
+                            .total_cmp(&best_distance)
+                            .then(flat.cmp(&best_flat))
+                            .is_lt()
+                    });
+                    if closer {
+                        nearest = Some((distance, flat));
+                    }
+                }
+            }
+        }
+        nearest.map(|(_, flat)| self.labels[flat])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RayPath {
     inner_mm: f64,
@@ -1199,12 +1347,30 @@ fn hole(
     })
 }
 
-/// Label the cavity's chambers and measure each one's own extent.
+/// What one flood over a cavity field's members found: the 6-connected
+/// labelling itself, and what can be measured while the flood is running.
 ///
-/// One flood over the members labels them; one further pass counts how many
-/// members of each chamber sit in that chamber's own low band and in its own
-/// top band, which is what sizes the planner's buffers. Two passes over the
-/// field, not two per chamber.
+/// Shared by [`label_chambers`], which adds the planner's band counts, and
+/// [`shipped_chambers`], which needs the labelling alone. Neither re-walks the
+/// field to get it.
+struct ChamberFlood {
+    labels: Vec<u32>,
+    count: usize,
+    voxels: Vec<usize>,
+    low_z_mm: Vec<f64>,
+    high_z_mm: Vec<f64>,
+}
+
+/// The grid holds more cells than a `u32` cell index can name, so the flood
+/// stack cannot carry them.
+struct ChamberIndexOverflow;
+
+/// One flood over `field`'s members: label every 6-connected region, and count
+/// each region's cells and measure its own vertical extent on the way past.
+///
+/// The label array and the flood stack are one `u32` per cell each in the
+/// worst case. Callers that answer to a byte cap charge for both **before**
+/// calling this — see [`label_chambers`].
 #[expect(
     clippy::cast_possible_truncation,
     reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
@@ -1212,6 +1378,90 @@ fn hole(
           width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
+fn flood_chambers(field: &CavityField) -> Result<ChamberFlood, ChamberIndexOverflow> {
+    let cells = field.flat_count();
+    // Cell indices are carried as `u32` in the flood stack, four bytes each
+    // rather than eight, so this proves they fit before any of them is taken
+    // — the same admission `crate::flow` and `crate::well_composed` make for
+    // their own worksets.
+    u32::try_from(cells).map_err(|_| ChamberIndexOverflow)?;
+    let mut labels = vec![0_u32; cells];
+    let mut voxels: Vec<usize> = Vec::new();
+    let mut low_z_mm: Vec<f64> = Vec::new();
+    let mut high_z_mm: Vec<f64> = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut count = 0_usize;
+    for seed in field.member_flats() {
+        if labels[seed] != 0 {
+            continue;
+        }
+        count = count.checked_add(1).ok_or(ChamberIndexOverflow)?;
+        let label = u32::try_from(count).map_err(|_| ChamberIndexOverflow)?;
+        labels[seed] = label;
+        stack.clear();
+        stack.push(seed as u32);
+        let mut members = 0_usize;
+        let mut lowest = f64::INFINITY;
+        let mut highest = f64::NEG_INFINITY;
+        while let Some(current) = stack.pop() {
+            let current = current as usize;
+            members = members.checked_add(1).ok_or(ChamberIndexOverflow)?;
+            let z = field.world_at_flat(current)[2];
+            lowest = lowest.min(z);
+            highest = highest.max(z);
+            for neighbor in neighbors(field, current) {
+                if labels[neighbor] == 0 && field.contains_flat(neighbor) {
+                    labels[neighbor] = label;
+                    stack.push(neighbor as u32);
+                }
+            }
+        }
+        voxels.push(members);
+        low_z_mm.push(lowest);
+        high_z_mm.push(highest);
+    }
+    Ok(ChamberFlood {
+        labels,
+        count,
+        voxels,
+        low_z_mm,
+        high_z_mm,
+    })
+}
+
+/// The chambers a drilled model ships, read off the cavity field the drilling
+/// stage left behind. See [`ShippedChambers`] for which partition this is and
+/// why it is that one rather than one of the other two the crate knows.
+///
+/// **Infallible, and provably so.** The one failure [`flood_chambers`] has is
+/// a grid with more cells than a `u32` can index, and the only route to a
+/// caller of this function is a `HollowedAndDrilled`, which only
+/// `drilling::drill_planned_shell` builds, from a [`PlannedShell`], which only
+/// [`plan_drains`] builds — after [`label_chambers`] has already made that
+/// same admission on this same grid. Drilling refills cells and never adds
+/// any, so the grid this walks is the grid that was admitted.
+pub(crate) fn shipped_chambers(field: &CavityField) -> ShippedChambers {
+    let ChamberFlood {
+        labels,
+        count,
+        voxels,
+        ..
+    } = flood_chambers(field).unwrap_or_else(|ChamberIndexOverflow| {
+        unreachable!("drain planning admitted this grid's u32 cell indices before drilling ran")
+    });
+    ShippedChambers {
+        labels,
+        count,
+        voxels,
+    }
+}
+
+/// Label the cavity's chambers and measure each one's own extent.
+///
+/// One flood over the members labels them; one further pass counts how many
+/// members of each chamber sit in that chamber's own low band and in its own
+/// top band, which is what sizes the planner's buffers. Two passes over the
+/// field, not two per chamber.
 fn label_chambers(
     field: &CavityField,
     low_band_mm: f64,
@@ -1219,11 +1469,6 @@ fn label_chambers(
     cap: usize,
 ) -> Result<Chambers, DrainPlanningRefusal> {
     let cells = field.flat_count();
-    // Cell indices are carried as `u32` in the flood stack, four bytes each
-    // rather than eight, so this proves they fit before any of them is taken
-    // — the same admission `crate::flow` and `crate::well_composed` make for
-    // their own worksets.
-    u32::try_from(cells).map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
     // Count before charging before allocating: the label array and the flood
     // stack are both one `u32` per cell in the worst case, and both are named
     // here before either exists.
@@ -1236,44 +1481,22 @@ fn label_chambers(
             cap_bytes: cap,
         });
     }
-    let mut labels = vec![0_u32; cells];
-    let mut low_z_mm: Vec<f64> = Vec::new();
-    let mut high_z_mm: Vec<f64> = Vec::new();
-    let mut stack: Vec<u32> = Vec::new();
-    let mut count = 0_usize;
-    for seed in field.member_flats() {
-        if labels[seed] != 0 {
-            continue;
-        }
-        count = count
-            .checked_add(1)
-            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
-        let label =
-            u32::try_from(count).map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
-        labels[seed] = label;
-        stack.clear();
-        stack.push(seed as u32);
-        let mut lowest = f64::INFINITY;
-        let mut highest = f64::NEG_INFINITY;
-        while let Some(current) = stack.pop() {
-            let current = current as usize;
-            let z = field.world_at_flat(current)[2];
-            lowest = lowest.min(z);
-            highest = highest.max(z);
-            for neighbor in neighbors(field, current) {
-                if labels[neighbor] == 0 && field.contains_flat(neighbor) {
-                    labels[neighbor] = label;
-                    stack.push(neighbor as u32);
-                }
-            }
-        }
-        if !lowest.is_finite() || !highest.is_finite() {
-            return Err(DrainPlanningRefusal::NonFinite {
-                role: HoleRole::Drain,
-            });
-        }
-        low_z_mm.push(lowest);
-        high_z_mm.push(highest);
+    let ChamberFlood {
+        labels,
+        count,
+        voxels: _,
+        low_z_mm,
+        high_z_mm,
+    } = flood_chambers(field)
+        .map_err(|ChamberIndexOverflow| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    if low_z_mm
+        .iter()
+        .chain(&high_z_mm)
+        .any(|extent| !extent.is_finite())
+    {
+        return Err(DrainPlanningRefusal::NonFinite {
+            role: HoleRole::Drain,
+        });
     }
     if count == 0 {
         return Err(DrainPlanningRefusal::NoVentSite {
@@ -1890,6 +2113,63 @@ mod tests {
 
     fn field(mask: Array3<bool>) -> CavityField {
         CavityField::from_selected_mask(&mask, [0.0, 0.0, 0.0], 0.5).expect("finite field")
+    }
+
+    /// `shipped_chambers` on a field small enough to state cell by cell.
+    ///
+    /// Three chambers by hand, at a 0.5 mm pitch on a `[0, 0, 0]` origin, so
+    /// every expected value below is the fixture's own arithmetic rather than
+    /// anything the labelling computed:
+    ///
+    /// * `A` — the pair of cells at `x = 0` and `x = 1`, `y = z = 0`;
+    /// * `B` — the single cell at `x = 3`, `y = z = 0`, with `x = 2` left
+    ///   solid between it and `A`;
+    /// * `C` — the single cell at `(4, 1, 1)`, which touches `B` only at a
+    ///   corner. `C` proves the labelling is 6-connected and not 26-connected:
+    ///   a corner touch is not a passage resin can take, and two cells that
+    ///   share only a corner are two chambers.
+    #[test]
+    fn shipped_chambers_labels_face_connected_regions_and_places_a_mouth_in_one() {
+        let mut mask = Array3::from_elem((3, 3, 5), false);
+        mask[(0, 0, 0)] = true;
+        mask[(0, 0, 1)] = true;
+        mask[(0, 0, 3)] = true;
+        mask[(1, 1, 4)] = true;
+        let field = field(mask);
+        let chambers = shipped_chambers(&field);
+
+        assert_eq!(chambers.count, 3, "a corner touch is not a passage");
+        assert_eq!(chambers.voxels, vec![2, 1, 1]);
+        assert_eq!(
+            chambers.voxels.iter().sum::<usize>(),
+            field.member_count(),
+            "every member cell belongs to exactly one chamber"
+        );
+
+        let at = |point: [f64; 3]| {
+            chambers.chamber_at(
+                &field,
+                point.map(|value| Finite::new(value).expect("finite")),
+            )
+        };
+        // A mouth on a cell centre names that cell's chamber.
+        assert_eq!(at([0.5, 0.0, 0.0]), Some(1));
+        assert_eq!(at([1.5, 0.0, 0.0]), Some(2));
+        assert_eq!(at([2.0, 0.5, 0.5]), Some(3));
+        // Half a pitch past `B`'s centre rounds to the solid cell at `x = 4`,
+        // and the 26-neighbour widening still finds `B`. This is the case the
+        // widening exists for: the marched cavity surface sits about half a
+        // pitch outside the member centres.
+        assert_eq!(at([1.75, 0.0, 0.0]), Some(2));
+        // Between the two chambers, nearer wins: 0.4 mm to `B` against 0.6 mm
+        // to `A`, and `B` wins although `A` holds the lower cell index.
+        assert_eq!(at([1.1, 0.0, 0.0]), Some(2));
+        // Dead centre of the gap the two chambers are 0.5 mm either side of,
+        // the tie goes to the lowest cell index, which is `A`'s.
+        assert_eq!(at([1.0, 0.0, 0.0]), Some(1));
+        // No member cell within one cell in any direction is no chamber, and
+        // is reported as such rather than guessed at.
+        assert_eq!(at([1.0, 1.0, 1.0]), None);
     }
 
     fn cast_counts(mesh: &plinth_mesh::Mesh, rays: &[(V3, V3)]) -> Vec<usize> {

@@ -682,19 +682,22 @@ fn the_engine_keeps_the_two_chambers_apart_through_drilling() {
 /// **The diagnostic the shipped report owes a reader.** Two chambers, two
 /// drains, and a report that can say which drain serves which chamber.
 ///
-/// `drilling.rs`'s `into_hollowed_model` writes a literal `cavity_id: 1` onto
-/// every [`DrainRecord`] and emits exactly one [`CavityRecord`], also numbered
-/// `1`, carrying the whole model's cavity volume — regardless of how many
-/// chambers the engine actually kept apart (which the test above proves it
-/// does). So a downstream reader of a two-chamber model sees one chamber with
-/// two drains. It cannot tell that apart from a genuinely single-chamber model
-/// that happens to carry two drains — and it therefore cannot notice the case
-/// that matters, where both drains serve the same chamber and the other one
-/// ships sealed.
+/// Until 2026-08-27 `drilling.rs`'s `into_hollowed_model` wrote a literal
+/// `cavity_id: 1` onto every [`DrainRecord`] and emitted exactly one
+/// [`CavityRecord`], also numbered `1`, carrying the whole model's cavity
+/// volume — regardless of how many chambers the engine actually kept apart
+/// (which the test above proves it does). So a downstream reader of a
+/// two-chamber model saw one chamber with two drains. It could not tell that
+/// apart from a genuinely single-chamber model that happens to carry two
+/// drains — and it therefore could not notice the case that matters, where
+/// both drains serve the same chamber and the other one ships sealed.
+///
+/// The report now re-reads the chambers off the cavity field the drilling
+/// stage left behind (`drains::shipped_chambers`), which is the same
+/// 6-connected partition the drilling stage's own drainability proof used.
 ///
 /// [`CavityRecord`]: plinth_hollow::CavityRecord
 #[test]
-#[ignore = "fails until drilling.rs:418 stops collapsing every chamber to cavity_id: 1"]
 fn the_shipped_report_can_tell_the_two_chambers_apart() {
     let outcome = run_chain(two_chamber_bar()).expect("the two-chamber bar ships");
     assert_eq!(outcome.cavity_components, 2);

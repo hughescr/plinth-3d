@@ -16,7 +16,7 @@ use plinth_solid::{BooleanInputEstimate, BooleanLimits, ManifoldBackend, Mesh as
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::drains::{DrainPlan, HoleGeometry, HoleRole, PlannedShell};
+use crate::drains::{shipped_chambers, DrainPlan, HoleGeometry, HoleRole, PlannedShell};
 use crate::{
     bounds, from_solid, marching_cavity, orient_boolean_cavity, to_solid, CavityEvidence,
     CavityField, CavityRecord, DrainRecord, HollowDisposition, HollowHistory, HollowReport,
@@ -412,26 +412,77 @@ impl HollowedAndDrilled {
             drain_plan,
             evidence,
         } = self;
+        // **One record per chamber the model actually ships.**
+        //
+        // The engine keeps the chambers apart the whole way here — cavity
+        // selection counts them, the planner gives each its own drains and its
+        // own vent, and drilling refills the ones it could not reach. The
+        // report used to throw all of that away and emit a single record
+        // numbered `1` carrying the whole model's cavity volume, with every
+        // drain numbered `1` too. A reader of a two-chamber model then saw one
+        // chamber with two drains, indistinguishable from a one-chamber model
+        // that happens to carry two — so the case that matters, two drains
+        // into the same chamber and the other one shipped sealed, was exactly
+        // the case the report could not show.
+        //
+        // The chambers are re-read from the retained cavity field rather than
+        // carried down from the planner because this is the field the model
+        // ships with: `drill_planned_shell_with_limits` has already refilled
+        // it, so a chamber here is a chamber that survived drilling, which is
+        // what a downstream reader is asking about. The planner's own
+        // `lobe_id` is not the identity wanted either way: a lobe is one piece
+        // of one chamber's low band, so a chamber with two feet carries two of
+        // them, and an audit-added drain carries none at all.
+        let chambers = shipped_chambers(&cavity_field);
+        let pitch_mm = cavity_field.pitch_mm().get();
         let drains: Vec<DrainRecord> = evidence
             .holes
             .iter()
             .filter(|hole| hole.role == HoleRole::Drain)
             .map(|hole| DrainRecord {
-                cavity_id: 1,
+                // A drain whose mouth touches no retained cell would be a
+                // drain into solid material, which the drilling proof's own
+                // drainability recount rules out: a cell seeded by this hole
+                // is drainable by construction and so was never refilled.
+                // `0` names no chamber, and is emitted rather than guessed at
+                // so that a break in that proof shows up in the artifact
+                // instead of being papered over with a plausible id.
+                cavity_id: chambers
+                    .chamber_at(&cavity_field, hole.center_mm)
+                    .unwrap_or(0),
                 entrance_mm: hole.center_mm,
                 exit_mm: hole.exact_outer_exit_mm,
                 radius_mm: hole.radius_mm,
             })
             .collect();
-        let drain_ids = (0..drains.len()).collect();
+        let cavities: Vec<CavityRecord> = (1..=chambers.count)
+            .map(|chamber| {
+                // The flood assigns every label as a `u32`, so a chamber
+                // ordinal that did not fit one could not have been labelled.
+                let cavity_id =
+                    u32::try_from(chamber).expect("the chamber labelling assigns u32 labels");
+                CavityRecord {
+                    cavity_id,
+                    // Voxel volume, not the marched surface's volume, and it
+                    // sums exactly to what the single collapsed record used to
+                    // carry: `final_cavity_mm3` is the retained cell count
+                    // times the same cube of the same pitch.
+                    volume_ml: Finite::new(
+                        chambers.voxels[chamber - 1] as f64 * pitch_mm.powi(3) / 1000.0,
+                    )
+                    .expect("proved finite cavity volume"),
+                    drain_ids: drains
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, drain)| drain.cavity_id == cavity_id)
+                        .map(|(index, _)| index)
+                        .collect(),
+                }
+            })
+            .collect();
         let report = HollowReport {
             disposition: HollowDisposition::HollowedAndDrilled,
-            cavities: vec![CavityRecord {
-                cavity_id: 1,
-                volume_ml: Finite::new(evidence.final_cavity_mm3.get() / 1000.0)
-                    .expect("proved finite cavity volume"),
-                drain_ids,
-            }],
+            cavities,
             drains,
             drilling_evidence: Some(evidence),
             drain_plan: Some(drain_plan),
