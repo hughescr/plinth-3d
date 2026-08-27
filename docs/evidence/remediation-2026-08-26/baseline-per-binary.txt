@@ -1,0 +1,91 @@
+test binaries: 84  (per-binary timeout 180s)
+
+a4_noncoverage_gate_drift                                4s  ok                 pass=3     fail=0   ign=0
+a4_production_door                                       4s  ok                 pass=3     fail=0   ign=0
+a4_transactional_controller                             63s  ok                 pass=8     fail=0   ign=0
+allowed_face_projection_index_reuse                      0s  ok                 pass=1     fail=0   ign=0
+allowed_face_projection                                  0s  ok                 pass=12    fail=0   ign=0
+artifact_format_contracts                                0s  ok                 pass=2     fail=0   ign=0
+chitubox_io                                              0s  ok                 pass=0     fail=0   ign=0
+chord_contracts                                          0s  ok                 pass=11    fail=0   ign=0
+compile_fail                                             0s  FAILED 1           pass=0     fail=1   ign=0
+      test placeholder_cannot_reach_acceptance ... FAILED
+compile_fail                                             0s  FAILED 1           pass=0     fail=1   ign=0
+      test support_domain_invariants_cannot_be_fabricated_outside_the_crate ... FAILED
+constants_evidence                                       0s  ok                 pass=13    fail=0   ign=0
+constants_golden                                         0s  ok                 pass=3     fail=0   ign=0
+constants_ledger_consistency                             0s  ok                 pass=1     fail=0   ign=0
+constants_placeholders                                   0s  ok                 pass=10    fail=0   ign=0
+constants_registry                                       0s  ok                 pass=10    fail=0   ign=0
+contact_regression_gate                                  0s  ok                 pass=4     fail=0   ign=0
+core_contracts                                           0s  ok                 pass=23    fail=0   ign=0
+corpus_budgets                                          24s  ok                 pass=3     fail=0   ign=0
+coverage_defect_contracts                                0s  ok                 pass=1     fail=0   ign=0
+coverage_gate                                            9s  ok                 pass=4     fail=0   ign=0
+dual_cavity_real_pipeline                                3s  ok                 pass=5     fail=0   ign=0
+errors                                                   0s  ok                 pass=11    fail=0   ign=0
+execution_budget_refusal                                 1s  ok                 pass=4     fail=0   ign=0
+face_excluded_clearance                                  0s  ok                 pass=9     fail=0   ign=0
+first_artifact                                          47s  ok                 pass=6     fail=0   ign=0
+fixtures                                                 0s  ok                 pass=12    fail=0   ign=0
+format_gate                                              0s  ok                 pass=6     fail=0   ign=0
+front_descriptors                                        0s  ok                 pass=3     fail=0   ign=0
+frozen_baseline                                          0s  ok                 pass=2     fail=0   ign=0
+geom_kernel                                              0s  ok                 pass=24    fail=0   ign=0
+geometry                                                 0s  ok                 pass=13    fail=0   ign=0
+hollow_chain_end_to_end                                  1s  ok                 pass=5     fail=0   ign=3
+kn_degenerate_face                                       0s  ok                 pass=7     fail=0   ign=0
+kn_point_nearest_segment_batch                           0s  ok                 pass=6     fail=0   ign=0
+kn_segment_clearance_unmeasured                          0s  ok                 pass=6     fail=0   ign=0
+local_minis_repair                                       0s  ok                 pass=0     fail=0   ign=1
+native_api                                               0s  ok                 pass=33    fail=0   ign=0
+native_winding_oracle                                    0s  ok                 pass=6     fail=0   ign=0
+near_wall_thin_feature                                   0s  ok                 pass=2     fail=0   ign=0
+no_python_guard                                          0s  ok                 pass=1     fail=0   ign=0
+normalize                                                0s  ok                 pass=17    fail=0   ign=0
+orient_thread_sweep                                      0s  ok                 pass=2     fail=0   ign=0
+orientation_dense_sweep                                  0s  ok                 pass=9     fail=0   ign=0
+orientation_rederivation                                22s  ok                 pass=2     fail=0   ign=0
+orientation_scoring                                      0s  ok                 pass=4     fail=0   ign=0
+penetration_census_equivalence                           0s  ok                 pass=4     fail=0   ign=0
+plinth_cli                                               0s  ok                 pass=17    fail=0   ign=0
+plinth_core                                              0s  ok                 pass=0     fail=0   ign=0
+plinth_decimate                                          1s  ok                 pass=80    fail=0   ign=0
+plinth_emit                                              0s  ok                 pass=27    fail=0   ign=0
+plinth_hollow                                           12s  ok                 pass=123   fail=0   ign=3
+plinth_layers                                            0s  ok                 pass=0     fail=0   ign=0
+plinth_mesh                                              0s  ok                 pass=29    fail=0   ign=0
+plinth_orient                                            0s  ok                 pass=28    fail=0   ign=0
+plinth_pipeline                                         41s  ok                 pass=49    fail=0   ign=0
+plinth_solid                                             0s  ok                 pass=10    fail=0   ign=0
+plinth_support                                          61s  ok                 pass=616   fail=0   ign=0
+plinth_verify                                            0s  ok                 pass=6     fail=0   ign=0
+plinth                                                   0s  ok                 pass=0     fail=0   ign=0
+point_index                                              0s  ok                 pass=13    fail=0   ign=0
+prepare_folder                                          96s  ok                 pass=13    fail=0   ign=0
+preview_fallback                                         0s  ok                 pass=6     fail=0   ign=0
+printer_profile                                          0s  ok                 pass=8     fail=0   ign=0
+process                                                 29s  ok                 pass=7     fail=0   ign=0
+properties                                               0s  ok                 pass=4     fail=0   ign=0
+registry_pin                                             0s  ok                 pass=2     fail=0   ign=0
+regression_blockers                                      0s  ok                 pass=12    fail=0   ign=0
+repair_gate                                              0s  ok                 pass=6     fail=0   ign=0
+repair_prepass                                           0s  ok                 pass=4     fail=0   ign=0
+repair                                                   0s  ok                 pass=10    fail=0   ign=0
+resource_cap_policy                                      1s  ok                 pass=12    fail=0   ign=0
+retired_formula_guard                                    0s  ok                 pass=13    fail=0   ign=0
+roundtrip                                                0s  ok                 pass=2     fail=0   ign=0
+scar_area_cap_policy                                     0s  ok                 pass=2     fail=0   ign=0
+solid_spike                                              0s  ok                 pass=7     fail=0   ign=0
+stl_roundtrip                                            0s  ok                 pass=4     fail=0   ign=0
+strict_audit                                             0s  ok                 pass=10    fail=0   ign=0
+support_parity                                           0s  ok                 pass=5     fail=0   ign=0
+support_runner_integration                             180s  TIMEOUT after 180s pass=0     fail=0   ign=0
+synth_compare                                            0s  ok                 pass=2     fail=0   ign=0
+thread_sweep                                             3s  ok                 pass=2     fail=0   ign=0
+topology_triage                                          0s  ok                 pass=15    fail=0   ign=0
+transforms                                               0s  ok                 pass=7     fail=0   ign=0
+triage_admission                                         0s  ok                 pass=3     fail=0   ign=0
+
+=== BASELINE TOTALS ===
+binaries=84  passed=1465  failed=2  ignored=7  timed_out=1

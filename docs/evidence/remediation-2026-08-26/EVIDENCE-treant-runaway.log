@@ -1,0 +1,365 @@
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling libc v0.2.189
+   Compiling geom_kernel v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/rust/geom_kernel)
+   Compiling cfg-if v1.0.4
+   Compiling plinth-core v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-core)
+   Compiling chitubox_io v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/rust/chitubox_io)
+   Compiling cpufeatures v0.2.17
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling plinth-solid v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-solid)
+warning: function `build_attempt_count` is never used
+   --> rust/geom_kernel/src/bvh.rs:103:15
+    |
+103 | pub(crate) fn build_attempt_count() -> u64 {
+    |               ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `shares_geometry` is never used
+   --> rust/geom_kernel/src/mesh.rs:383:19
+    |
+ 57 | impl Mesh {
+    | --------- method in this implementation
+...
+383 |     pub(crate) fn shares_geometry(&self, other: &Self) -> bool {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `referenced_face_ids` is never used
+   --> rust/geom_kernel/src/parity.rs:563:19
+    |
+327 | impl AxisGrid {
+    | ------------- method in this implementation
+...
+563 |     pub(crate) fn referenced_face_ids(&self) -> impl Iterator<Item = u32> + '_ {
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: function `axis_build_attempt_count` is never used
+   --> rust/geom_kernel/src/parity.rs:635:15
+    |
+635 | pub(crate) fn axis_build_attempt_count() -> u64 {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `seg_surface_min` is never used
+    --> rust/geom_kernel/src/queries.rs:1793:19
+     |
+ 962 | impl NativeSurface {
+     | ------------------ method in this implementation
+...
+1793 |     pub(crate) fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3) {
+     |                   ^^^^^^^^^^^^^^^
+
+   Compiling plinth-layers v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-layers)
+warning: `geom_kernel` (lib) generated 5 warnings
+   Compiling plinth-mesh v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-mesh)
+   Compiling plinth-decimate v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-decimate)
+   Compiling plinth-orient v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-orient)
+   Compiling plinth-hollow v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-hollow)
+   Compiling plinth-support v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-support)
+   Compiling plinth-emit v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-emit)
+   Compiling plinth-verify v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-verify)
+   Compiling plinth-pipeline v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-pipeline)
+   Compiling plinth-cli v0.1.0 (/Users/craig/code/hughescr/dnd-campaigns/plinth-3d/crates/plinth-cli)
+    Finished `release` profile [optimized] target(s) in 3m 24s
+     Running `target/release/plinth prepare --input-models-dir /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/review/treant-in --output saturn4-ultra --out-dir /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/review/treant-out --orient 'pinned:corpus/baseline'`
+stage: model Weeping Treant v1.2 entering Load elapsed=0ms
+stage: model Weeping Treant v1.2 entering MeshRepair elapsed=9ms
+stage: model Weeping Treant v1.2 entering Decimation elapsed=1303ms
+stage: model Weeping Treant v1.2 entering Orientation elapsed=17409ms
+stage: model Weeping Treant v1.2 entering Hollow elapsed=0ms
+stage: model Weeping Treant v1.2 entering SealedSupportRun elapsed=0ms
+legalize: pass 1 entering no_goods=0 round=none
+stage: support entering Preparation elapsed=6ms
+stage: support entering Routing elapsed=11591ms
+stage: support entering Rewire elapsed=54103ms
+stage: support entering Brace elapsed=72578ms
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 distance=0 axis_transit=1 rows: slot755g0=axis-transit(distance_clearance=+0.322180mm)@r0.371854/0.371854mm
+brace: sealed terminals disturbed=1 measured refusals=[slot755g0=axis-transit(distance_clearance=+0.322180mm)@r0.371854/0.371854mm] class=[terminal 393 sealed=Routed stub=slot393g0 own_arms=slot755g0 cascade_carriers=none]
+legalize: provenance t393 sealed=Routed own_arms=[slot755g0=Contact(393)] carriers=[none] rootward=[slot393g0=Contact(393)(sealed-terminal) -> slot755g0=Contact(393)(sealed-terminal)]
+legalize: pass 1 ABANDONED in 85927 ms — condemned own_arm_terminals=393 cascade_victims=none learned=[t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9]
+legalize: pass 2 entering no_goods=1 round=none
+stage: support entering Preparation elapsed=85931ms
+stage: support entering Routing elapsed=97426ms
+legalize: steer t393 HIT live=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steer t393 MISS live=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+stage: support entering Rewire elapsed=130525ms
+stage: support entering Brace elapsed=148987ms
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 distance=0 axis_transit=1 rows: slot755g0=axis-transit(distance_clearance=+0.329603mm)@r0.377757/0.377757mm
+brace: sealed terminals disturbed=1 measured refusals=[slot755g0=axis-transit(distance_clearance=+0.329603mm)@r0.377757/0.377757mm] class=[terminal 393 sealed=Routed stub=slot393g0 own_arms=slot755g0 cascade_carriers=none]
+legalize: provenance t393 sealed=Routed own_arms=[slot755g0=Contact(393)] carriers=[none] rootward=[slot393g0=Contact(393)(sealed-terminal) -> slot755g0=Contact(393)(sealed-terminal)]
+legalize: pass 2 ABANDONED in 76439 ms — condemned own_arm_terminals=393 cascade_victims=none learned=[t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9]
+legalize: pass 3 entering no_goods=2 round=none
+stage: support entering Preparation elapsed=162371ms
+stage: support entering Routing elapsed=173771ms
+legalize: steer t393 HIT live=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steer t393 HIT live=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steering spent t393 — all 2 arms carry a no-good; opening a confirmation round instead of retiring
+legalize: pass 3 ABANDONED in 31193 ms — steering-spent terminal=393
+legalize: round OPEN t393 at rank 0 — re-measuring every arm under the frozen set, one per pass, in the tournament's own order; UNCAPPED
+legalize: pass 4 entering no_goods=2 round=t393@rank0
+stage: support entering Preparation elapsed=193565ms
+stage: support entering Routing elapsed=206082ms
+legalize: steer t393 MISS live=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steer t393 MISS live=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: round t393 takes arm rank 0 of 2 in tournament order
+stage: support entering Rewire elapsed=240680ms
+stage: support entering Brace elapsed=258959ms
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 distance=0 axis_transit=1 rows: slot755g0=axis-transit(distance_clearance=+0.322180mm)@r0.371854/0.371854mm
+brace: sealed terminals disturbed=1 measured refusals=[slot755g0=axis-transit(distance_clearance=+0.322180mm)@r0.371854/0.371854mm] class=[terminal 393 sealed=Routed stub=slot393g0 own_arms=slot755g0 cascade_carriers=none]
+legalize: provenance t393 sealed=Routed own_arms=[slot755g0=Contact(393)] carriers=[none] rootward=[slot393g0=Contact(393)(sealed-terminal) -> slot755g0=Contact(393)(sealed-terminal)]
+legalize: pass 4 ABANDONED in 78738 ms — condemned own_arm_terminals=393 cascade_victims=none learned=[t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9]
+legalize: round t393 measured rank0=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1(axis-transit) gap=-0.050000mm distance_clearance=0.322180mm r=0.371854/0.371854mm — advancing to rank 1
+legalize: pass 5 entering no_goods=2 round=t393@rank1
+stage: support entering Preparation elapsed=272303ms
+stage: support entering Routing elapsed=282765ms
+legalize: steer t393 MISS live=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steer t393 MISS live=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: round t393 takes arm rank 1 of 2 in tournament order
+stage: support entering Rewire elapsed=316977ms
+stage: support entering Brace elapsed=334526ms
+brace: final-pass refusals pass=3 refused_arms=1 pipeline_violations=0 distance=0 axis_transit=1 rows: slot755g0=axis-transit(distance_clearance=+0.329603mm)@r0.377757/0.377757mm
+brace: sealed terminals disturbed=1 measured refusals=[slot755g0=axis-transit(distance_clearance=+0.329603mm)@r0.377757/0.377757mm] class=[terminal 393 sealed=Routed stub=slot393g0 own_arms=slot755g0 cascade_carriers=none]
+legalize: provenance t393 sealed=Routed own_arms=[slot755g0=Contact(393)] carriers=[none] rootward=[slot393g0=Contact(393)(sealed-terminal) -> slot755g0=Contact(393)(sealed-terminal)]
+legalize: pass 5 ABANDONED in 75426 ms — condemned own_arm_terminals=393 cascade_victims=none learned=[t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9]
+legalize: round t393 measured rank1=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1(axis-transit) gap=-0.050000mm distance_clearance=0.329603mm r=0.377757/0.377757mm — advancing to rank 2
+legalize: pass 6 entering no_goods=2 round=t393@rank2
+stage: support entering Preparation elapsed=347730ms
+stage: support entering Routing elapsed=358094ms
+legalize: steer t393 MISS live=ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen95/price3f5eda3a798d8bdc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: steer t393 MISS live=ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1@plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9 sealed=t393:ModelAnchor/gen103/price3f5f666a4a4a97bc/rows1:plan=909caea8eae51675/loads=035d1d7445df2a7b/geom=3246ec7bfe4b3bdf/forest=f58b0415ea250e81/ctrl=3f3065d5717d45f9
+legalize: round t393 takes arm rank 2 of 2 in tournament order
+stage: support entering Rewire elapsed=392021ms
+stage: support entering Brace elapsed=409432ms
+stage: support entering Structure elapsed=424271ms
+stage: support entering Lowering elapsed=439517ms
+legalize: pass 6 LOWERED in 106148 ms — passes=6 no_goods=2 per_terminal=[t393=2] confirmation_rounds=1 voided_rounds=0 round_arms_measured=2
+legalize: passes=6 no_goods=2 per_terminal=[t393=2] confirmation_rounds=1 voided_rounds=0 round_arms_measured=2
+stage: support entering CoverageMeasurement elapsed=453874ms
+coverage-repair progress: trials=0 commits=0 remaining=10222 elapsed=0ms []
+coverage-repair progress: trials=1 commits=0 remaining=10221 elapsed=108000ms [no_improvement=1]
+coverage-repair progress: trials=2 commits=1 remaining=9596 elapsed=217261ms [no_improvement=1]
+coverage-repair progress: trials=3 commits=1 remaining=9595 elapsed=327012ms [no_improvement=2]
+coverage-repair progress: trials=4 commits=1 remaining=9594 elapsed=439281ms [no_improvement=3]
+coverage-repair progress: trials=5 commits=1 remaining=9593 elapsed=548416ms [no_improvement=4]
+coverage-repair progress: trials=6 commits=1 remaining=9592 elapsed=658826ms [no_improvement=5]
+coverage-repair progress: trials=7 commits=1 remaining=9591 elapsed=770191ms [no_improvement=6]
+coverage-repair progress: trials=8 commits=1 remaining=9590 elapsed=879709ms [no_improvement=7]
+coverage-repair progress: trials=9 commits=1 remaining=9589 elapsed=991606ms [no_improvement=8]
+coverage-repair progress: trials=10 commits=1 remaining=9588 elapsed=1111388ms [no_improvement=9]
+coverage-repair progress: trials=11 commits=1 remaining=9587 elapsed=1223366ms [no_improvement=10]
+coverage-repair progress: trials=12 commits=1 remaining=9586 elapsed=1346298ms [no_improvement=11]
+coverage-repair progress: trials=13 commits=1 remaining=9585 elapsed=1465492ms [no_improvement=12]
+coverage-repair progress: trials=14 commits=1 remaining=9584 elapsed=1587470ms [no_improvement=13]
+coverage-repair progress: trials=15 commits=1 remaining=9583 elapsed=1702926ms [no_improvement=14]
+coverage-repair progress: trials=16 commits=1 remaining=9582 elapsed=1816348ms [no_improvement=15]
+coverage-repair progress: trials=17 commits=1 remaining=9581 elapsed=1931933ms [no_improvement=16]
+coverage-repair progress: trials=18 commits=1 remaining=9580 elapsed=2046554ms [no_improvement=17]
+coverage-repair progress: trials=19 commits=1 remaining=9579 elapsed=2168586ms [no_improvement=18]
+coverage-repair progress: trials=20 commits=1 remaining=9578 elapsed=2283365ms [no_improvement=19]
+coverage-repair progress: trials=21 commits=1 remaining=9577 elapsed=2395849ms [no_improvement=20]
+coverage-repair progress: trials=22 commits=1 remaining=9576 elapsed=2511008ms [no_improvement=21]
+coverage-repair progress: trials=23 commits=1 remaining=9575 elapsed=2622040ms [no_improvement=22]
+coverage-repair progress: trials=24 commits=1 remaining=9574 elapsed=2742426ms [no_improvement=23]
+coverage-repair progress: trials=25 commits=1 remaining=9573 elapsed=2853678ms [no_improvement=24]
+coverage-repair progress: trials=26 commits=1 remaining=9572 elapsed=2969429ms [no_improvement=25]
+coverage-repair progress: trials=27 commits=1 remaining=9571 elapsed=3088240ms [no_improvement=26]
+coverage-repair progress: trials=28 commits=1 remaining=9570 elapsed=3205119ms [no_improvement=27]
+coverage-repair progress: trials=29 commits=1 remaining=9569 elapsed=3318095ms [no_improvement=28]
+coverage-repair progress: trials=30 commits=1 remaining=9568 elapsed=3436585ms [no_improvement=28 regression=1]
+coverage-repair progress: trials=31 commits=1 remaining=9567 elapsed=3554392ms [no_improvement=28 regression=2]
+coverage-repair progress: trials=32 commits=1 remaining=9566 elapsed=3663561ms [no_improvement=28 regression=3]
+coverage-repair progress: trials=33 commits=1 remaining=9565 elapsed=3775724ms [no_improvement=28 regression=4]
+coverage-repair progress: trials=34 commits=1 remaining=9564 elapsed=3886245ms [no_improvement=29 regression=4]
+coverage-repair progress: trials=35 commits=1 remaining=9563 elapsed=4021950ms [no_improvement=29 regression=5]
+coverage-repair progress: trials=36 commits=1 remaining=9562 elapsed=4138023ms [no_improvement=29 regression=6]
+coverage-repair progress: trials=37 commits=1 remaining=9561 elapsed=4250005ms [no_improvement=30 regression=6]
+coverage-repair progress: trials=38 commits=1 remaining=9560 elapsed=4363970ms [no_improvement=31 regression=6]
+coverage-repair progress: trials=39 commits=1 remaining=9559 elapsed=4477735ms [no_improvement=32 regression=6]
+coverage-repair progress: trials=40 commits=1 remaining=9558 elapsed=4589735ms [no_improvement=32 regression=7]
+coverage-repair progress: trials=41 commits=1 remaining=9557 elapsed=4701587ms [no_improvement=33 regression=7]
+coverage-repair progress: trials=42 commits=1 remaining=9556 elapsed=4811755ms [no_improvement=33 regression=8]
+coverage-repair progress: trials=43 commits=1 remaining=9555 elapsed=4922929ms [no_improvement=34 regression=8]
+coverage-repair progress: trials=44 commits=1 remaining=9554 elapsed=5033203ms [no_improvement=34 regression=9]
+coverage-repair progress: trials=45 commits=1 remaining=9553 elapsed=5141653ms [no_improvement=35 regression=9]
+coverage-repair progress: trials=46 commits=1 remaining=9552 elapsed=5251067ms [no_improvement=35 regression=10]
+coverage-repair progress: trials=47 commits=1 remaining=9551 elapsed=5362503ms [no_improvement=35 regression=11]
+coverage-repair progress: trials=48 commits=1 remaining=9550 elapsed=5473497ms [no_improvement=36 regression=11]
+coverage-repair progress: trials=49 commits=1 remaining=9549 elapsed=5583049ms [no_improvement=36 regression=12]
+coverage-repair progress: trials=50 commits=1 remaining=9548 elapsed=5690339ms [no_improvement=37 regression=12]
+coverage-repair progress: trials=51 commits=1 remaining=9547 elapsed=5801647ms [no_improvement=38 regression=12]
+coverage-repair progress: trials=52 commits=1 remaining=9546 elapsed=5912643ms [no_improvement=38 regression=13]
+coverage-repair progress: trials=53 commits=1 remaining=9545 elapsed=6022638ms [no_improvement=39 regression=13]
+coverage-repair progress: trials=54 commits=1 remaining=9544 elapsed=6131243ms [no_improvement=39 regression=14]
+coverage-repair progress: trials=55 commits=1 remaining=9543 elapsed=6237810ms [no_improvement=39 regression=15]
+coverage-repair progress: trials=56 commits=1 remaining=9542 elapsed=6345894ms [no_improvement=40 regression=15]
+coverage-repair progress: trials=57 commits=1 remaining=9541 elapsed=6456101ms [no_improvement=41 regression=15]
+coverage-repair progress: trials=58 commits=1 remaining=9540 elapsed=6571849ms [no_improvement=42 regression=15]
+coverage-repair progress: trials=59 commits=1 remaining=9539 elapsed=6679693ms [no_improvement=42 regression=16]
+coverage-repair progress: trials=60 commits=1 remaining=9538 elapsed=6788421ms [no_improvement=43 regression=16]
+coverage-repair progress: trials=61 commits=1 remaining=9537 elapsed=6901401ms [no_improvement=43 regression=17]
+coverage-repair progress: trials=62 commits=1 remaining=9536 elapsed=7013579ms [no_improvement=44 regression=17]
+coverage-repair progress: trials=63 commits=1 remaining=9535 elapsed=7125491ms [no_improvement=45 regression=17]
+coverage-repair progress: trials=64 commits=1 remaining=9534 elapsed=7235110ms [no_improvement=46 regression=17]
+coverage-repair progress: trials=65 commits=1 remaining=9533 elapsed=7346511ms [no_improvement=46 regression=18]
+coverage-repair progress: trials=66 commits=1 remaining=9532 elapsed=7455640ms [no_improvement=46 regression=19]
+coverage-repair progress: trials=67 commits=1 remaining=9531 elapsed=7564163ms [no_improvement=47 regression=19]
+coverage-repair progress: trials=68 commits=1 remaining=9530 elapsed=7674244ms [no_improvement=47 regression=20]
+coverage-repair progress: trials=69 commits=1 remaining=9529 elapsed=7783167ms [no_improvement=47 regression=21]
+coverage-repair progress: trials=70 commits=1 remaining=9528 elapsed=7895017ms [no_improvement=48 regression=21]
+coverage-repair progress: trials=71 commits=1 remaining=9527 elapsed=8007112ms [no_improvement=48 regression=22]
+coverage-repair progress: trials=72 commits=1 remaining=9526 elapsed=8116551ms [no_improvement=48 regression=23]
+coverage-repair progress: trials=73 commits=1 remaining=9525 elapsed=8226039ms [no_improvement=48 regression=24]
+coverage-repair progress: trials=74 commits=1 remaining=9524 elapsed=8334801ms [no_improvement=48 regression=25]
+coverage-repair progress: trials=75 commits=1 remaining=9523 elapsed=8442329ms [no_improvement=48 regression=26]
+coverage-repair progress: trials=76 commits=1 remaining=9522 elapsed=8548950ms [no_improvement=49 regression=26]
+coverage-repair progress: trials=77 commits=1 remaining=9521 elapsed=8657758ms [no_improvement=49 regression=27]
+coverage-repair progress: trials=78 commits=1 remaining=9520 elapsed=8764438ms [no_improvement=49 regression=28]
+coverage-repair progress: trials=79 commits=1 remaining=9519 elapsed=8874264ms [no_improvement=49 regression=29]
+coverage-repair progress: trials=80 commits=1 remaining=9518 elapsed=8981929ms [no_improvement=50 regression=29]
+coverage-repair progress: trials=81 commits=1 remaining=9517 elapsed=9088066ms [no_improvement=50 regression=30]
+coverage-repair progress: trials=82 commits=1 remaining=9516 elapsed=9195011ms [no_improvement=50 regression=31]
+coverage-repair progress: trials=83 commits=1 remaining=9515 elapsed=9303026ms [no_improvement=50 regression=32]
+coverage-repair progress: trials=84 commits=1 remaining=9514 elapsed=9408570ms [no_improvement=51 regression=32]
+coverage-repair progress: trials=85 commits=1 remaining=9513 elapsed=9516713ms [no_improvement=51 regression=33]
+coverage-repair progress: trials=86 commits=1 remaining=9512 elapsed=9626321ms [no_improvement=51 regression=34]
+coverage-repair progress: trials=87 commits=1 remaining=9511 elapsed=9734166ms [no_improvement=51 regression=35]
+coverage-repair progress: trials=88 commits=1 remaining=9510 elapsed=9841840ms [no_improvement=52 regression=35]
+coverage-repair progress: trials=89 commits=1 remaining=9509 elapsed=9952193ms [no_improvement=52 regression=36]
+coverage-repair progress: trials=90 commits=1 remaining=9508 elapsed=10057719ms [no_improvement=52 regression=37]
+coverage-repair progress: trials=91 commits=1 remaining=9507 elapsed=10164599ms [no_improvement=52 regression=38]
+coverage-repair progress: trials=92 commits=1 remaining=9506 elapsed=10273683ms [no_improvement=52 regression=39]
+coverage-repair progress: trials=93 commits=1 remaining=9505 elapsed=10381098ms [no_improvement=52 regression=40]
+coverage-repair progress: trials=94 commits=1 remaining=9504 elapsed=10489236ms [no_improvement=53 regression=40]
+coverage-repair progress: trials=95 commits=1 remaining=9503 elapsed=10596658ms [no_improvement=53 regression=41]
+coverage-repair progress: trials=96 commits=1 remaining=9502 elapsed=10708917ms [no_improvement=53 regression=42]
+coverage-repair progress: trials=97 commits=1 remaining=9501 elapsed=10817343ms [no_improvement=54 regression=42]
+coverage-repair progress: trials=98 commits=1 remaining=9500 elapsed=10924333ms [no_improvement=54 regression=43]
+coverage-repair progress: trials=99 commits=1 remaining=9499 elapsed=11034159ms [no_improvement=54 regression=44]
+coverage-repair progress: trials=100 commits=1 remaining=9498 elapsed=11143810ms [no_improvement=54 regression=45]
+coverage-repair progress: trials=101 commits=1 remaining=9497 elapsed=11250348ms [no_improvement=55 regression=45]
+coverage-repair progress: trials=102 commits=1 remaining=9496 elapsed=11358109ms [no_improvement=56 regression=45]
+coverage-repair progress: trials=103 commits=1 remaining=9495 elapsed=11464304ms [no_improvement=57 regression=45]
+coverage-repair progress: trials=104 commits=1 remaining=9494 elapsed=11571541ms [no_improvement=58 regression=45]
+coverage-repair progress: trials=105 commits=1 remaining=9493 elapsed=11680686ms [no_improvement=59 regression=45]
+coverage-repair progress: trials=106 commits=1 remaining=9492 elapsed=11789305ms [no_improvement=59 regression=46]
+coverage-repair progress: trials=107 commits=1 remaining=9491 elapsed=11897173ms [no_improvement=59 regression=47]
+coverage-repair progress: trials=108 commits=1 remaining=9490 elapsed=12004843ms [no_improvement=60 regression=47]
+coverage-repair progress: trials=109 commits=1 remaining=9489 elapsed=12114715ms [no_improvement=60 regression=48]
+coverage-repair progress: trials=110 commits=1 remaining=9488 elapsed=12225987ms [no_improvement=61 regression=48]
+coverage-repair progress: trials=111 commits=1 remaining=9487 elapsed=12334176ms [no_improvement=61 regression=49]
+coverage-repair progress: trials=112 commits=1 remaining=9486 elapsed=12441892ms [no_improvement=61 regression=50]
+coverage-repair progress: trials=113 commits=1 remaining=9485 elapsed=12550890ms [no_improvement=62 regression=50]
+coverage-repair progress: trials=114 commits=1 remaining=9484 elapsed=12660612ms [no_improvement=62 regression=51]
+coverage-repair progress: trials=115 commits=1 remaining=9483 elapsed=12771508ms [no_improvement=63 regression=51]
+coverage-repair progress: trials=116 commits=1 remaining=9482 elapsed=12880152ms [no_improvement=63 regression=52]
+coverage-repair progress: trials=117 commits=1 remaining=9481 elapsed=12986034ms [no_improvement=63 regression=53]
+coverage-repair progress: trials=118 commits=1 remaining=9480 elapsed=13093851ms [no_improvement=64 regression=53]
+coverage-repair progress: trials=119 commits=1 remaining=9479 elapsed=13202825ms [no_improvement=65 regression=53]
+coverage-repair progress: trials=120 commits=1 remaining=9478 elapsed=13310417ms [no_improvement=65 regression=54]
+coverage-repair progress: trials=121 commits=1 remaining=9477 elapsed=13420088ms [no_improvement=66 regression=54]
+coverage-repair progress: trials=122 commits=1 remaining=9476 elapsed=13528543ms [no_improvement=66 regression=55]
+coverage-repair progress: trials=123 commits=1 remaining=9475 elapsed=13635066ms [no_improvement=67 regression=55]
+coverage-repair progress: trials=124 commits=1 remaining=9474 elapsed=13742669ms [no_improvement=67 regression=56]
+coverage-repair progress: trials=125 commits=1 remaining=9473 elapsed=13851577ms [no_improvement=68 regression=56]
+coverage-repair progress: trials=126 commits=1 remaining=9472 elapsed=13958835ms [no_improvement=68 regression=57]
+coverage-repair progress: trials=127 commits=1 remaining=9471 elapsed=14067327ms [no_improvement=68 regression=58]
+coverage-repair progress: trials=128 commits=1 remaining=9470 elapsed=14175152ms [no_improvement=68 regression=59]
+coverage-repair progress: trials=129 commits=1 remaining=9469 elapsed=14283803ms [no_improvement=68 regression=60]
+coverage-repair progress: trials=130 commits=1 remaining=9468 elapsed=14390703ms [no_improvement=68 regression=61]
+coverage-repair progress: trials=131 commits=1 remaining=9467 elapsed=14499558ms [no_improvement=68 regression=62]
+coverage-repair progress: trials=132 commits=1 remaining=9466 elapsed=14604017ms [no_improvement=68 regression=63]
+coverage-repair progress: trials=133 commits=1 remaining=9465 elapsed=14711920ms [no_improvement=68 regression=64]
+coverage-repair progress: trials=134 commits=1 remaining=9464 elapsed=14820465ms [no_improvement=68 regression=65]
+coverage-repair progress: trials=135 commits=1 remaining=9463 elapsed=14931080ms [no_improvement=68 regression=66]
+coverage-repair progress: trials=136 commits=1 remaining=9462 elapsed=15039274ms [no_improvement=68 regression=67]
+coverage-repair progress: trials=137 commits=1 remaining=9461 elapsed=15147128ms [no_improvement=68 regression=68]
+coverage-repair progress: trials=138 commits=1 remaining=9460 elapsed=15254259ms [no_improvement=68 regression=69]
+coverage-repair progress: trials=139 commits=1 remaining=9459 elapsed=15360623ms [no_improvement=68 regression=70]
+coverage-repair progress: trials=140 commits=1 remaining=9458 elapsed=15464980ms [no_improvement=68 regression=71]
+coverage-repair progress: trials=141 commits=1 remaining=9457 elapsed=15570693ms [no_improvement=68 regression=72]
+coverage-repair progress: trials=142 commits=1 remaining=9456 elapsed=15673925ms [no_improvement=68 regression=73]
+coverage-repair progress: trials=143 commits=1 remaining=9455 elapsed=15779355ms [no_improvement=68 regression=74]
+coverage-repair progress: trials=144 commits=1 remaining=9454 elapsed=15883619ms [no_improvement=68 regression=75]
+coverage-repair progress: trials=145 commits=1 remaining=9453 elapsed=15990282ms [no_improvement=68 regression=76]
+coverage-repair progress: trials=146 commits=1 remaining=9452 elapsed=16094600ms [no_improvement=68 regression=77]
+coverage-repair progress: trials=147 commits=1 remaining=9451 elapsed=16197913ms [no_improvement=69 regression=77]
+coverage-repair progress: trials=148 commits=1 remaining=9450 elapsed=16302685ms [no_improvement=69 regression=78]
+coverage-repair progress: trials=149 commits=1 remaining=9449 elapsed=16404549ms [no_improvement=70 regression=78]
+coverage-repair progress: trials=150 commits=1 remaining=9448 elapsed=16511818ms [no_improvement=71 regression=78]
+coverage-repair progress: trials=151 commits=1 remaining=9447 elapsed=16618045ms [no_improvement=71 regression=79]
+coverage-repair progress: trials=152 commits=1 remaining=9446 elapsed=16725189ms [no_improvement=72 regression=79]
+coverage-repair progress: trials=153 commits=1 remaining=9445 elapsed=16830238ms [no_improvement=73 regression=79]
+coverage-repair progress: trials=154 commits=1 remaining=9444 elapsed=16933393ms [no_improvement=74 regression=79]
+coverage-repair progress: trials=155 commits=1 remaining=9443 elapsed=17043246ms [no_improvement=74 regression=80]
+coverage-repair progress: trials=156 commits=1 remaining=9442 elapsed=17150867ms [no_improvement=75 regression=80]
+coverage-repair progress: trials=157 commits=1 remaining=9441 elapsed=17258572ms [no_improvement=76 regression=80]
+coverage-repair progress: trials=158 commits=1 remaining=9440 elapsed=17361800ms [no_improvement=77 regression=80]
+coverage-repair progress: trials=159 commits=1 remaining=9439 elapsed=17467164ms [no_improvement=78 regression=80]
+coverage-repair progress: trials=160 commits=1 remaining=9438 elapsed=17571169ms [no_improvement=78 regression=81]
+coverage-repair progress: trials=161 commits=1 remaining=9437 elapsed=17679784ms [no_improvement=79 regression=81]
+coverage-repair progress: trials=162 commits=1 remaining=9436 elapsed=17782354ms [no_improvement=79 regression=82]
+coverage-repair progress: trials=163 commits=1 remaining=9435 elapsed=17888982ms [no_improvement=79 regression=83]
+coverage-repair progress: trials=164 commits=1 remaining=9434 elapsed=17994316ms [no_improvement=79 regression=84]
+coverage-repair progress: trials=165 commits=1 remaining=9433 elapsed=18100433ms [no_improvement=79 regression=85]
+coverage-repair progress: trials=166 commits=1 remaining=9432 elapsed=18206472ms [no_improvement=80 regression=85]
+coverage-repair progress: trials=167 commits=1 remaining=9431 elapsed=18312337ms [no_improvement=80 regression=86]
+coverage-repair progress: trials=168 commits=1 remaining=9430 elapsed=18416404ms [no_improvement=81 regression=86]
+coverage-repair progress: trials=169 commits=1 remaining=9429 elapsed=18522719ms [no_improvement=82 regression=86]
+coverage-repair progress: trials=170 commits=1 remaining=9428 elapsed=18627431ms [no_improvement=82 regression=87]
+coverage-repair progress: trials=171 commits=1 remaining=9427 elapsed=18733041ms [no_improvement=82 regression=88]
+coverage-repair progress: trials=172 commits=1 remaining=9426 elapsed=18838937ms [no_improvement=83 regression=88]
+coverage-repair progress: trials=173 commits=1 remaining=9425 elapsed=18944188ms [no_improvement=83 regression=89]
+coverage-repair progress: trials=174 commits=1 remaining=9424 elapsed=19049205ms [no_improvement=83 regression=90]
+coverage-repair progress: trials=175 commits=1 remaining=9423 elapsed=19156624ms [no_improvement=84 regression=90]
+coverage-repair progress: trials=176 commits=1 remaining=9422 elapsed=19259363ms [no_improvement=85 regression=90]
+coverage-repair progress: trials=177 commits=1 remaining=9421 elapsed=19366778ms [no_improvement=85 regression=91]
+coverage-repair progress: trials=178 commits=1 remaining=9420 elapsed=19469686ms [no_improvement=85 regression=92]
+coverage-repair progress: trials=179 commits=1 remaining=9419 elapsed=19572537ms [no_improvement=85 regression=93]
+coverage-repair progress: trials=180 commits=1 remaining=9418 elapsed=19677208ms [no_improvement=85 regression=94]
+coverage-repair progress: trials=181 commits=1 remaining=9417 elapsed=19781590ms [no_improvement=85 regression=95]
+coverage-repair progress: trials=182 commits=1 remaining=9416 elapsed=19888799ms [no_improvement=85 regression=96]
+coverage-repair progress: trials=183 commits=1 remaining=9415 elapsed=19992178ms [no_improvement=86 regression=96]
+coverage-repair progress: trials=184 commits=1 remaining=9414 elapsed=20098739ms [no_improvement=86 regression=97]
+coverage-repair progress: trials=185 commits=1 remaining=9413 elapsed=20203496ms [no_improvement=87 regression=97]
+coverage-repair progress: trials=186 commits=1 remaining=9412 elapsed=20307790ms [no_improvement=88 regression=97]
+coverage-repair progress: trials=187 commits=1 remaining=9411 elapsed=20412001ms [no_improvement=89 regression=97]
+coverage-repair progress: trials=188 commits=1 remaining=9410 elapsed=20516922ms [no_improvement=90 regression=97]
+coverage-repair progress: trials=189 commits=1 remaining=9409 elapsed=20620056ms [no_improvement=91 regression=97]
+coverage-repair progress: trials=190 commits=1 remaining=9408 elapsed=20726085ms [no_improvement=91 regression=98]
+coverage-repair progress: trials=191 commits=1 remaining=9407 elapsed=20828469ms [no_improvement=91 regression=99]
+coverage-repair progress: trials=192 commits=1 remaining=9406 elapsed=20930640ms [no_improvement=91 regression=100]
+coverage-repair progress: trials=193 commits=1 remaining=9405 elapsed=21033300ms [no_improvement=92 regression=100]
+coverage-repair progress: trials=194 commits=1 remaining=9404 elapsed=21137194ms [no_improvement=93 regression=100]
+coverage-repair progress: trials=195 commits=1 remaining=9403 elapsed=21242088ms [no_improvement=94 regression=100]
+coverage-repair progress: trials=196 commits=1 remaining=9402 elapsed=21348061ms [no_improvement=95 regression=100]
+coverage-repair progress: trials=197 commits=1 remaining=9401 elapsed=21453136ms [no_improvement=96 regression=100]
+coverage-repair progress: trials=198 commits=1 remaining=9400 elapsed=21561126ms [no_improvement=96 regression=101]
+coverage-repair progress: trials=199 commits=1 remaining=9399 elapsed=21667030ms [no_improvement=97 regression=101]
+coverage-repair progress: trials=200 commits=1 remaining=9398 elapsed=21771922ms [no_improvement=98 regression=101]
+coverage-repair progress: trials=201 commits=1 remaining=9397 elapsed=21877340ms [no_improvement=98 regression=102]
+coverage-repair progress: trials=202 commits=1 remaining=9396 elapsed=21979033ms [no_improvement=99 regression=102]
+coverage-repair progress: trials=203 commits=1 remaining=9395 elapsed=22081048ms [no_improvement=99 regression=103]
+coverage-repair progress: trials=204 commits=1 remaining=9394 elapsed=22187376ms [no_improvement=99 regression=104]
+coverage-repair progress: trials=205 commits=1 remaining=9393 elapsed=22291551ms [no_improvement=99 regression=105]
+coverage-repair progress: trials=206 commits=1 remaining=9392 elapsed=22397811ms [no_improvement=99 regression=106]
+coverage-repair progress: trials=207 commits=1 remaining=9391 elapsed=22500774ms [no_improvement=99 regression=107]
+coverage-repair progress: trials=208 commits=1 remaining=9390 elapsed=22604497ms [no_improvement=99 regression=108]
+coverage-repair progress: trials=209 commits=1 remaining=9389 elapsed=22711322ms [no_improvement=100 regression=108]
+coverage-repair progress: trials=210 commits=1 remaining=9388 elapsed=22814678ms [no_improvement=100 regression=109]
+coverage-repair progress: trials=211 commits=1 remaining=9387 elapsed=22921263ms [no_improvement=100 regression=110]
+coverage-repair progress: trials=212 commits=1 remaining=9386 elapsed=23028641ms [no_improvement=101 regression=110]
+coverage-repair progress: trials=213 commits=1 remaining=9385 elapsed=23131728ms [no_improvement=101 regression=111]
+coverage-repair progress: trials=214 commits=1 remaining=9384 elapsed=23234474ms [no_improvement=102 regression=111]
+coverage-repair progress: trials=215 commits=1 remaining=9383 elapsed=23340693ms [no_improvement=103 regression=111]
+coverage-repair progress: trials=216 commits=1 remaining=9382 elapsed=23444008ms [no_improvement=103 regression=112]
+coverage-repair progress: trials=217 commits=1 remaining=9381 elapsed=23548529ms [no_improvement=103 regression=113]
+coverage-repair progress: trials=218 commits=1 remaining=9380 elapsed=23651996ms [no_improvement=103 regression=114]
+coverage-repair progress: trials=219 commits=1 remaining=9379 elapsed=23755881ms [no_improvement=103 regression=115]
+coverage-repair progress: trials=220 commits=1 remaining=9378 elapsed=23859618ms [no_improvement=103 regression=116]
+coverage-repair progress: trials=221 commits=1 remaining=9377 elapsed=23965062ms [no_improvement=104 regression=116]
+coverage-repair progress: trials=222 commits=1 remaining=9376 elapsed=24071169ms [no_improvement=104 regression=117]
+coverage-repair progress: trials=223 commits=1 remaining=9375 elapsed=24176118ms [no_improvement=104 regression=118]
+coverage-repair progress: trials=224 commits=1 remaining=9374 elapsed=24279530ms [no_improvement=104 regression=119]
