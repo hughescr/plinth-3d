@@ -191,3 +191,46 @@ briefs and identical file lists in one checkout.
 RULE: **never SendMessage an agent that belongs to a running workflow.** A reply resumes it.
 If a workflow lane asks a question, either let the workflow's own gate handle it, or stop the
 workflow before answering. Answering is not free.
+
+---
+
+## 7. TWO FROZEN DIGESTS NEED AN ARGUED REFRESH — and why they were missed
+
+**State:** `develop` at `cbc9711` has two failing tests, both pinning the same value:
+`crates/plinth-support/tests/support_runner_integration.rs:346` and `:765`.
+
+```
+make_toed_slab's counts must not move: it takes zero repair rounds
+  left:  (64, 170, 13198418135389558006)   <- actual now
+  right: (64, 170, 12136443226163403608)   <- frozen
+```
+
+**The counts are identical.** Only the digest moved, so the plan has the same number of
+contacts and members with different content.
+
+**Cause, traced:** commit `ad335d9` (the durability lane) made raft pad-versus-bridge
+dispatch explicit — `segment_kind == RaftPad` / `RaftBridge` — replacing a dispatch that
+was correct only incidentally, because one producer happened to pass the same endpoint
+twice and exact `f64` equality therefore selected pad geometry. A zero-length bridge is now
+a genuine `InvalidPrimitive` rather than a silent fallback to pad geometry. That legitimately
+reclassifies raft primitives, so the digest legitimately moves.
+
+**This is the fix working.** The old digest encoded a classification made by accidental float
+equality. Under OD-8 the refresh is therefore ALLOWED — but it must be recorded with that
+argument, not silently re-recorded as "whatever the code now emits".
+
+**WHY IT WAS MISSED, which is the more important half.** The lane DID notice the change moved
+goldens: `15e4a6f` refreshed `crates/plinth-verify/tests/coverage_gate_toed_slab.json`. It
+found one of the three places that pin this fixture and missed two. It missed them because
+they live in `support_runner_integration`, and that binary **times out before reporting
+anything** — the uncapped coverage-repair search (REVIEW.md short-list 12) makes it
+un-runnable, so its tests never report pass or fail.
+
+So the slow binary is not merely slow. **It has been silently unable to guard anything it
+contains**, and a real behaviour change walked past it. Every finding about the uncapped
+search now has a second cost attached: it disables a test binary's ability to catch
+regressions, invisibly.
+
+**Do:** refresh both digests in one commit whose message carries the raft-dispatch argument
+above, and state in it that these were found only because the binary was run with a timeout
+that let its early tests report before the kill.
