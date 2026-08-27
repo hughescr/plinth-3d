@@ -619,6 +619,19 @@ impl Project {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
+        // The rename above can return `Ok` while the directory entry it just
+        // repointed is still only in the filesystem's in-memory page cache:
+        // on a filesystem that requires an explicit directory `fsync` for a
+        // rename to survive a crash, a power loss right after this point
+        // could leave `path` absent or still pointing at whatever occupied
+        // it before, even though `rename` itself succeeded. `sync_all` above
+        // established that the BYTES are durable; this establishes that the
+        // NAME pointing at them is durable. `path` has already been renamed
+        // into place by this point, so a failure here is reported rather
+        // than swallowed, but it does not undo the rename: the correct
+        // bytes are genuinely on disk at the new name, and removing them
+        // would trade an open durability question for a certain data loss.
+        std::fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
 

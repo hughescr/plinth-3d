@@ -738,9 +738,9 @@ mod tests {
                 .map(|primitive| primitive.segment_kind)
                 .collect::<Vec<_>>(),
             vec![
-                SupportSegmentKind::RaftPadOrBridge,
-                SupportSegmentKind::RaftPadOrBridge,
-                SupportSegmentKind::RaftPadOrBridge,
+                SupportSegmentKind::RaftBridge,
+                SupportSegmentKind::RaftPad,
+                SupportSegmentKind::RaftPad,
             ],
             "one bridge followed by two pads"
         );
@@ -860,7 +860,8 @@ mod tests {
         assert_eq!(primitives[1].segment_kind, SupportSegmentKind::RootFlare);
         assert_eq!(
             primitives.last().unwrap().segment_kind,
-            SupportSegmentKind::RaftPadOrBridge
+            SupportSegmentKind::RaftPad,
+            "a single root has no bridge, only its own pad"
         );
     }
 

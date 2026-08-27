@@ -6527,14 +6527,19 @@ fn validate_lowered_output(
     if primitives[..member_count].iter().any(|primitive| {
         matches!(
             primitive.segment_kind,
-            crate::SupportSegmentKind::JointSphere | crate::SupportSegmentKind::RaftPadOrBridge
+            crate::SupportSegmentKind::JointSphere
+                | crate::SupportSegmentKind::RaftPad
+                | crate::SupportSegmentKind::RaftBridge
         )
     }) || primitives[member_count..support_count]
         .iter()
         .any(|primitive| primitive.segment_kind != crate::SupportSegmentKind::JointSphere)
-        || primitives[support_count..]
-            .iter()
-            .any(|primitive| primitive.segment_kind != crate::SupportSegmentKind::RaftPadOrBridge)
+        || primitives[support_count..].iter().any(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                crate::SupportSegmentKind::RaftPad | crate::SupportSegmentKind::RaftBridge
+            )
+        })
     {
         return Err(SupportLoweringError::PrimitiveOrderMismatch);
     }

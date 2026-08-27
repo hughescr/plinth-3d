@@ -130,6 +130,25 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
 /// members, still zero trials and zero commits. A controller that had touched a
 /// sealing model's plan would move those, and it did not. See
 /// `docs/evidence/emission-canary.md`.
+///
+/// **Re-frozen 2026-08-27 by the salvage-durable-rename lane.**
+/// `12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006` closes
+/// `docs/evidence/remediation-2026-08-26/REVIEW.md`'s
+/// `crates/plinth-emit/src/lib.rs:588` finding: `SupportSegmentKind::RaftPadOrBridge`
+/// (one variant, dispatched downstream by comparing endpoints) is split into
+/// explicit `RaftPad` and `RaftBridge` variants, so a bridge is a bridge because
+/// its producer said so, never because its endpoints happen to differ. The toed
+/// slab's plan has bridges (it has more than one plate root), and
+/// `RaftPad`/`RaftBridge`'s new discriminants (5 and 6, where the removed
+/// `RaftPadOrBridge` was also 5) feed `lower.rs`'s and `raft.rs`'s own
+/// `segment_kind as u8` digest terms — legitimately moving every digest that
+/// folds one in, this one included. **The COUNTS are still the load-bearing
+/// half and they did not move** — still 64 routed identities and 170 final
+/// live members, still zero trials and zero commits: this lane touched no
+/// controller behaviour. The emitted wire bytes did not move either
+/// (`SegmentType::PAD_OR_BRIDGE` and the trailing `is_bridge` flag are
+/// unchanged for every primitive raft.rs can build today), so
+/// `docs/evidence/emission-canary.md` needed no new row.
 #[test]
 fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
     let authority = run(
@@ -168,7 +187,7 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 12_136_443_226_163_403_608_u64),
+        (64_usize, 170_usize, 13_198_418_135_389_558_006_u64),
         "the toed slab's sealed digest is the batch controller's, unmoved: a model that never \
          transacts cannot have its plan changed by a controller that only changes plans through \
          transactions"

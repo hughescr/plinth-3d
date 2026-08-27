@@ -330,7 +330,12 @@ finiteness, duplicates, name validity, overflow — before mutating anything;
 on error the `Project` is unchanged (no partial mutation). All size/offset
 arithmetic is checked (`checked_add`/`checked_mul`); nothing converts to
 `usize`/`u32` unchecked. `save()` writes to a same-directory temp file,
-fsyncs, then renames over the target; the temp file is removed on error.
+fsyncs the file, renames over the target, then fsyncs the directory so the
+rename itself survives a crash; the temp file is removed on error up to and
+including the rename. This is name durability for `path` alone: a caller
+that renames the result again (as `plinth-emit::write` does, onto its own
+final target) gets a fresh directory entry that needs its own fsync, which
+`save()` cannot perform on the caller's behalf.
 
 ---
 
