@@ -194,23 +194,32 @@ impl SupportPreparationLimits {
     pub fn production() -> Result<Self, SupportPreparationLimitsError> {
         let pitch = PositiveFinite::new(1.0)
             .map_err(|error| SupportPreparationLimitsError::Pitch(error.to_string()))?;
-        let caps = plinth_core::m0_constants()
-            .map_err(|error| {
-                SupportPreparationLimitsError::RegisteredConstantsUnavailable(error.to_string())
-            })?
-            .support_resource_cap_policy();
-        // `diagnostic()` on the floors is the sanctioned Placeholder read: a
+        let constants = plinth_core::m0_constants().map_err(|error| {
+            SupportPreparationLimitsError::RegisteredConstantsUnavailable(error.to_string())
+        })?;
+        let caps = constants.support_resource_cap_policy();
+        // Every cap this function states has exactly one registered owner, and
+        // this is the read of it. Before this change the four scaled caps below
+        // were read here and the remaining twenty-two were restated as literals
+        // whose own registry notes named this very function -- two numeric
+        // owners for one number, free to drift apart silently. They now have
+        // one owner each, and it is not this function.
+        //
+        // `diagnostic()` on a `Placeholder` cap is the sanctioned read: a
         // resource cap admits or refuses, it never contributes to an accepted
         // result, so it is not on the accept path the wrapper guards.
+        let registered = constants.placeholders();
         let knn_max_work_floor = cap_usize(caps.knn_max_work_floor().diagnostic().get())?;
         let knn_max_work_per_face = cap_usize(*caps.knn_max_work_per_face().value())?;
         let grid_bytes_floor = cap_usize(caps.parity_grid_max_bytes_floor().diagnostic().get())?;
         let grid_bytes_per_face = cap_usize(*caps.parity_grid_max_bytes_per_face().value())?;
         let knn = KnnBatchLimits {
-            max_source_points: 20_000_000,
-            max_query_points: 20_000_000,
-            max_neighbors: 1,
-            max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+            max_source_points: registered_cap(registered.support_knn_max_source_points())?,
+            max_query_points: registered_cap(registered.support_knn_max_query_points())?,
+            max_neighbors: registered_cap(registered.support_knn_max_neighbors())?,
+            max_logical_peak_bytes: registered_cap(
+                registered.support_knn_max_logical_peak_bytes(),
+            )?,
             max_work: knn_max_work_floor,
         };
         Ok(Self {
@@ -219,6 +228,10 @@ impl SupportPreparationLimits {
             max_grid_bytes: grid_bytes_floor,
             grid_bytes_per_face,
             knn_max_work_per_face,
+            // The five dyadic candidate-payload numbers below are the one group
+            // in this function with no registry owner to read: no constant in
+            // the M0 publication declares them. They are left stated here, and
+            // that gap is the finding, not this call.
             candidate_config: CandidatePayloadConfig::current(
                 8,
                 1_000_000,
@@ -228,32 +241,53 @@ impl SupportPreparationLimits {
             )
             .map_err(|error| SupportPreparationLimitsError::Candidate(error.to_string()))?,
             perception_limits: GenericPerceptionLimits::production(knn),
-            coverage_samples_max_virtual_cells: 2_000_000,
-            coverage_score_matrix_max_entries: 65_536,
+            coverage_samples_max_virtual_cells: registered_cap(
+                registered.support_preparation_coverage_samples_max_virtual_cells(),
+            )?,
+            coverage_score_matrix_max_entries: registered_cap(
+                registered.support_preparation_coverage_score_matrix_max_entries(),
+            )?,
             specialized_limits: SpecializedLimits::production(
                 knn,
                 SpecializedBatchWork::registered()
                     .map_err(|error| SupportPreparationLimitsError::BatchWork(error.to_string()))?,
             ),
             construction_limits: ContactConstructionLimits::new(
-                1_000_000,
-                10_000_000,
-                4_000_000,
-                512 * 1024 * 1024,
+                registered_cap(registered.support_construction_max_contacts())?,
+                registered_cap(registered.support_construction_max_load_rows())?,
+                registered_cap(registered.support_construction_max_work_items())?,
+                registered_cap(registered.support_construction_max_scratch_bytes())?,
             )
             .ok_or(SupportPreparationLimitsError::Construction)?,
             brace_penetration_limits: PenetrationBatchLimits {
-                max_rows: 100_000,
-                max_total_work: 1_000_000_000,
-                max_total_hits: 1_000_000_000,
-                max_total_samples: 10_000_000_000,
-                max_total_intervals: 1_000_000_000,
-                max_scratch_bytes: 100_000_000_000,
+                max_rows: registered_cap(registered.support_brace_penetration_max_rows())?,
+                max_total_work: registered_cap(
+                    registered.support_brace_penetration_max_total_work(),
+                )?,
+                max_total_hits: registered_cap(
+                    registered.support_brace_penetration_max_total_hits(),
+                )?,
+                max_total_samples: registered_cap(
+                    registered.support_brace_penetration_max_total_samples(),
+                )?,
+                max_total_intervals: registered_cap(
+                    registered.support_brace_penetration_max_total_intervals(),
+                )?,
+                max_scratch_bytes: registered_cap(
+                    registered.support_brace_penetration_max_scratch_bytes(),
+                )?,
             },
-            raft_limits: RaftLimits::try_new(100_000, 100_000, 200_000, 128 * 1024 * 1024)
-                .ok_or(SupportPreparationLimitsError::Raft)?,
-            max_primitives: 200_000,
-            max_primitive_bytes: 128 * 1024 * 1024,
+            raft_limits: RaftLimits::try_new(
+                registered_cap(registered.support_raft_max_candidates())?,
+                registered_cap(registered.support_raft_max_roots())?,
+                registered_cap(registered.support_raft_max_primitives())?,
+                registered_cap(registered.support_raft_max_bytes())?,
+            )
+            .ok_or(SupportPreparationLimitsError::Raft)?,
+            max_primitives: registered_cap(registered.support_preparation_max_primitives())?,
+            max_primitive_bytes: registered_cap(
+                registered.support_preparation_max_primitive_bytes(),
+            )?,
         })
     }
 
@@ -418,6 +452,20 @@ impl SupportPreparationInput<'_> {
 /// Narrows one registered `u64` cap constant to this platform's `usize`.
 fn cap_usize(value: u64) -> Result<usize, SupportPreparationLimitsError> {
     usize::try_from(value).map_err(|_| SupportPreparationLimitsError::CapUnrepresentable { value })
+}
+
+/// Reads one registered non-zero resource cap out of the M0 publication.
+///
+/// `diagnostic()` is the sanctioned `Placeholder` read for this family: a
+/// resource cap admits or refuses a batch and never contributes a number to an
+/// accepted result, so it is not on the accept path the wrapper guards. The
+/// registry declares each of these as `NonZeroU64`, so the zero a
+/// `ContactConstructionLimits::new` or `RaftLimits::try_new` would reject
+/// cannot arrive from here.
+fn registered_cap(
+    cap: &plinth_core::Placeholder<std::num::NonZeroU64>,
+) -> Result<usize, SupportPreparationLimitsError> {
+    cap_usize(cap.diagnostic().get())
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -11444,6 +11492,103 @@ mod tests {
             )
         });
         assert!(caps.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    /// Every production support resource cap that the M0 registry owns is
+    /// **read** from the registry, never restated here.
+    ///
+    /// The defect this pins is two owners for one number. Before the fix,
+    /// `production()` read four caps from `SupportResourceCapPolicy` and wrote
+    /// the other twenty-two as literals -- literals whose own registry notes
+    /// name `SupportPreparationLimits::production` as the site they describe
+    /// (`SUPPORT_RAFT_MAX_BYTES`, `SUPPORT_CONSTRUCTION_MAX_CONTACTS`, the six
+    /// `SUPPORT_BRACE_PENETRATION_*`, and the rest). Nothing held the two
+    /// copies together, and each of these caps can end a run as a refusal.
+    ///
+    /// This test compares the shipped authority field-for-field against the
+    /// registry, so a literal that drifts from its registered owner -- in
+    /// either direction -- is a failure rather than a silent divergence.
+    #[test]
+    fn every_registered_production_resource_cap_is_read_from_the_registry() {
+        let limits = SupportPreparationLimits::production().expect("production limits");
+        let constants = plinth_core::m0_constants().expect("registered M0 constants");
+        let registered = constants.placeholders();
+        let cap = |value: &plinth_core::Placeholder<std::num::NonZeroU64>| {
+            usize::try_from(value.diagnostic().get()).expect("a registered cap fits usize")
+        };
+
+        // The kNN batch shape. `max_work` is the registered floor of the
+        // measured per-face rule and is asserted through the scaled-cap
+        // policy, not here.
+        let knn = limits.perception_limits.minima_knn;
+        assert_eq!(
+            (
+                knn.max_source_points,
+                knn.max_query_points,
+                knn.max_neighbors,
+                knn.max_logical_peak_bytes,
+            ),
+            (
+                cap(registered.support_knn_max_source_points()),
+                cap(registered.support_knn_max_query_points()),
+                cap(registered.support_knn_max_neighbors()),
+                cap(registered.support_knn_max_logical_peak_bytes()),
+            ),
+            "the production kNN batch shape is the registered one",
+        );
+
+        assert_eq!(
+            (
+                limits.coverage_samples_max_virtual_cells,
+                limits.coverage_score_matrix_max_entries,
+                limits.max_primitives,
+                limits.max_primitive_bytes,
+            ),
+            (
+                cap(registered.support_preparation_coverage_samples_max_virtual_cells()),
+                cap(registered.support_preparation_coverage_score_matrix_max_entries()),
+                cap(registered.support_preparation_max_primitives()),
+                cap(registered.support_preparation_max_primitive_bytes()),
+            ),
+            "the coverage-sample and emitted-primitive caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.construction_limits,
+            ContactConstructionLimits::new(
+                cap(registered.support_construction_max_contacts()),
+                cap(registered.support_construction_max_load_rows()),
+                cap(registered.support_construction_max_work_items()),
+                cap(registered.support_construction_max_scratch_bytes()),
+            )
+            .expect("registered construction caps are nonzero"),
+            "the initial-contact construction caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.brace_penetration_limits,
+            PenetrationBatchLimits {
+                max_rows: cap(registered.support_brace_penetration_max_rows()),
+                max_total_work: cap(registered.support_brace_penetration_max_total_work()),
+                max_total_hits: cap(registered.support_brace_penetration_max_total_hits()),
+                max_total_samples: cap(registered.support_brace_penetration_max_total_samples()),
+                max_total_intervals: cap(registered.support_brace_penetration_max_total_intervals()),
+                max_scratch_bytes: cap(registered.support_brace_penetration_max_scratch_bytes()),
+            },
+            "the brace penetration-batch caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.raft_limits,
+            RaftLimits::try_new(
+                cap(registered.support_raft_max_candidates()),
+                cap(registered.support_raft_max_roots()),
+                cap(registered.support_raft_max_primitives()),
+                cap(registered.support_raft_max_bytes()),
+            )
+            .expect("registered raft caps are nonzero"),
+            "the raft-plate caps are the registered ones",
+        );
     }
 
     #[test]
