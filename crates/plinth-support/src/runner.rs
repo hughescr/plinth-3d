@@ -33,6 +33,15 @@ struct MeasurementCallCounts {
     /// sidecar, so one controller pass over it is one validation; anything
     /// above that is the same proof re-run per routed contact.
     named_island_validations: usize,
+    /// Slice elements the coverage preflight examines while answering its
+    /// per-route-key questions -- how many route entries carry a key, how many
+    /// memberships carry it, how many coverage samples query it.
+    ///
+    /// This counts the *shape* of that work, not its wall clock. The sealed
+    /// per-route rescans it replaced examined `O(M^2 + K(M + S))` elements for
+    /// `M` route entries, `K` distinct route keys and `S` coverage samples;
+    /// one gathered sorted pass examines `O(M + S)`.
+    preflight_route_key_scans: usize,
 }
 
 #[cfg(test)]
@@ -44,6 +53,7 @@ thread_local! {
             coverage_route_queries: 0,
             coverage_assessment_traversals: 0,
             named_island_validations: 0,
+            preflight_route_key_scans: 0,
         })
     };
 }
@@ -3423,8 +3433,37 @@ impl<'a> SupportVerificationSnapshot<'a> {
         let mut route_plan_count = 0usize;
         let mut max_knn_peak = 0usize;
         let mut max_query_count = 0usize;
-        for (membership_index, membership) in self.routed_route_memberships.iter().enumerate() {
-            for (route_index, route) in membership.logical_routes.iter().enumerate() {
+
+        // Batch-first (D-37).  Refuse the route-entry total against its own
+        // ceiling before reserving any scratch for it, so the cap still
+        // refuses ahead of the allocation exactly as the per-route counter
+        // below does.
+        let total_routes = self
+            .routed_route_memberships
+            .iter()
+            .try_fold(0usize, |total, membership| {
+                total.checked_add(membership.logical_routes.len())
+            })
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "route memberships",
+            })?;
+        if total_routes > limits.max_route_memberships() {
+            return Err(CoverageMeasurementError::ResourceLimit {
+                resource: "route memberships",
+            });
+        }
+        // One sorted column per input set, gathered once.  Every per-key
+        // question below is then a pair of binary searches into a column,
+        // where it used to be a fresh scan of every membership or every
+        // coverage sample, repeated for each distinct key, on top of an
+        // `O(M²)` sealed-slice prefix scan for the first-occurrence test.
+        let route_key_rows =
+            sorted_routed_route_key_rows(&self.routed_route_memberships, total_routes)?;
+        let sample_keys = sorted_sample_route_keys(self.coverage_samples)?;
+        let mut seen_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
+
+        for membership in &self.routed_route_memberships {
+            for route in &membership.logical_routes {
                 memberships = memberships.checked_add(1).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "route memberships",
@@ -3436,47 +3475,32 @@ impl<'a> SupportVerificationSnapshot<'a> {
                     });
                 }
 
-                // Process a route key only once.  Canonical per-contact routes do
-                // not make transcript-wide equal keys adjacent, hence the bounded
-                // sealed-slice scan instead of retained deduplication state.
-                if self
-                    .routed_route_memberships
-                    .iter()
-                    .enumerate()
-                    .take(membership_index + 1)
-                    .any(|(prior_membership_index, prior_membership)| {
-                        prior_membership.logical_routes.iter().enumerate().any(
-                            |(prior_route_index, prior)| {
-                                (prior_membership_index < membership_index
-                                    || prior_route_index < route_index)
-                                    && prior.island_id == route.island_id
-                                    && prior.component_id == route.component_id
-                            },
-                        )
-                    })
-                {
+                // Process a route key only once, on its first occurrence in
+                // this same iteration order.  Canonical per-contact routes do
+                // not make transcript-wide equal keys adjacent, so the order
+                // is the transcript's and the retained set is what makes one
+                // pass enough.
+                let key = (route.island_id, route.component_id);
+                if !seen_keys.insert(key) {
                     continue;
                 }
-                let route_memberships = self
-                    .routed_route_memberships
-                    .iter()
-                    .flat_map(|membership| membership.logical_routes.iter())
-                    .filter(|candidate| {
-                        candidate.island_id == route.island_id
-                            && candidate.component_id == route.component_id
-                    })
-                    .count();
+                let key_rows =
+                    &route_key_rows[sorted_key_range(&route_key_rows, &key, |row| (row.0, row.1))];
+                #[cfg(test)]
+                record_measurement_call(|counts| {
+                    counts.preflight_route_key_scans += key_rows.len();
+                });
+                // The run's length is every route entry carrying this key; the
+                // number of distinct membership indices inside it is every
+                // membership carrying it, and the rows are sorted by that
+                // index within the run.
+                let route_memberships = key_rows.len();
                 sequential_membership_peak = sequential_membership_peak.max(route_memberships);
-                let source_count = self
-                    .routed_route_memberships
-                    .iter()
-                    .filter(|membership| {
-                        membership.logical_routes.iter().any(|candidate| {
-                            candidate.island_id == route.island_id
-                                && candidate.component_id == route.component_id
-                        })
-                    })
-                    .count();
+                let source_count = usize::from(!key_rows.is_empty())
+                    + key_rows
+                        .windows(2)
+                        .filter(|pair| pair[0].2 != pair[1].2)
+                        .count();
                 indexed_points = indexed_points.checked_add(source_count).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "indexed points",
@@ -3492,14 +3516,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                         operation: "route keys",
                     },
                 )?;
-                let queries = self
-                    .coverage_samples
-                    .iter()
-                    .filter(|sample| {
-                        sample.island_id == route.island_id
-                            && sample.component_id == route.component_id
-                    })
-                    .count();
+                let queries = sorted_key_range(&sample_keys, &key, |row| *row).len();
                 let work = source_count.checked_mul(queries).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "distance work",
@@ -3550,10 +3567,11 @@ impl<'a> SupportVerificationSnapshot<'a> {
         // linear `Vec::contains` over that island's faces.  On a flagship model
         // (~4e5 samples) that is ~1e10-1e11 comparisons on every production
         // emission, because the pre-write gate now runs this preflight per
-        // artifact.  Both are now one gathered pass: a single sort/dedup for
-        // the distinct route keys, and a single sorted island index answering
-        // every sample by two binary searches.
-        let query_route_count = distinct_sample_route_keys(self.coverage_samples)?;
+        // artifact.  Both are now one gathered pass: the distinct route keys
+        // are run starts in the sample key column already sorted above, and a
+        // single sorted island index answers every sample by two binary
+        // searches.
+        let query_route_count = distinct_sorted_keys(&sample_keys);
         let island_row_count = self
             .coverage_samples
             .iter()
@@ -7663,16 +7681,20 @@ fn named_islands_digest(islands: &[SupportIsland]) -> u64 {
     hash.finish()
 }
 
-/// The number of distinct `(island_id, component_id)` route keys the coverage
-/// samples query, in one gathered sort/dedup pass.
+/// The `(island_id, component_id)` route key of every coverage sample, sorted
+/// but not deduplicated, in one gathered pass.
+///
+/// Sorted, it answers both questions the preflight asks of the sample set --
+/// how many distinct keys the samples query, and how many samples query one
+/// given key -- without a second pass over the samples for either.
 ///
 /// Batch-first (D-37): the per-sample rescan of the sample prefix this
 /// replaces was `O(samples²)`, which the pre-write gate turned into a
 /// per-emission cost. The scratch is one `(u32, u32)` per sample and is
 /// released before any measurement allocation is charged.
-fn distinct_sample_route_keys(
+fn sorted_sample_route_keys(
     samples: &[CoverageSample],
-) -> Result<usize, CoverageMeasurementError> {
+) -> Result<Vec<(u32, u32)>, CoverageMeasurementError> {
     let mut keys: Vec<(u32, u32)> = Vec::new();
     keys.try_reserve_exact(samples.len())
         .map_err(|_| CoverageMeasurementError::ResourceLimit {
@@ -7684,8 +7706,66 @@ fn distinct_sample_route_keys(
             .map(|sample| (sample.island_id, sample.component_id)),
     );
     keys.sort_unstable();
-    keys.dedup();
-    Ok(keys.len())
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.preflight_route_key_scans += keys.len());
+    Ok(keys)
+}
+
+/// The number of distinct route keys in an already-sorted key column.
+///
+/// Counting run starts is one pass and no allocation; `dedup` would be a
+/// second write over the same column to learn the same number.
+fn distinct_sorted_keys<T: PartialEq>(sorted: &[T]) -> usize {
+    usize::from(!sorted.is_empty()) + sorted.windows(2).filter(|pair| pair[0] != pair[1]).count()
+}
+
+/// The half-open index range of an already-sorted key column that carries
+/// `key`, found by two binary searches rather than a scan.
+fn sorted_key_range<T, K: Ord>(
+    sorted: &[T],
+    key: &K,
+    project: impl Fn(&T) -> K,
+) -> std::ops::Range<usize> {
+    let start = sorted.partition_point(|row| project(row) < *key);
+    let end = sorted.partition_point(|row| project(row) <= *key);
+    start..end
+}
+
+/// One `(island_id, component_id, membership_index)` row per logical route,
+/// sorted.
+///
+/// Batch-first (D-37). Sorted, one run of this column answers the two
+/// per-key questions the preflight used to answer by rescanning every
+/// membership: the run's length is the number of route entries carrying the
+/// key, and the number of distinct membership indices inside the run is the
+/// number of memberships carrying it. Both were `O(M)` scans repeated for
+/// every one of the `K` distinct keys, on top of an `O(M²)` sealed-slice
+/// prefix scan that decided which routes were first occurrences.
+///
+/// The caller has already refused a route-entry total above its own
+/// `max_route_memberships` ceiling, so this scratch is bounded by an admitted
+/// cap before it is reserved.
+fn sorted_routed_route_key_rows(
+    memberships: &[RoutedRouteMembership<'_>],
+    total_routes: usize,
+) -> Result<Vec<(u32, u32, usize)>, CoverageMeasurementError> {
+    let mut rows: Vec<(u32, u32, usize)> = Vec::new();
+    rows.try_reserve_exact(total_routes)
+        .map_err(|_| CoverageMeasurementError::ResourceLimit {
+            resource: "routed projection key rows",
+        })?;
+    for (membership_index, membership) in memberships.iter().enumerate() {
+        rows.extend(
+            membership
+                .logical_routes
+                .iter()
+                .map(|route| (route.island_id, route.component_id, membership_index)),
+        );
+    }
+    rows.sort_unstable();
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.preflight_route_key_scans += rows.len());
+    Ok(rows)
 }
 
 /// One sorted island-id → ascending-face-ids membership index over the named
@@ -8136,7 +8216,7 @@ mod tests {
         // `ISLANDS` and `COMPONENTS` are coprime, so the index walks every
         // pair: the distinct route keys are the whole product.
         assert_eq!(
-            distinct_sample_route_keys(&samples).expect("sample route keys"),
+            distinct_sorted_keys(&sorted_sample_route_keys(&samples).expect("sample route keys")),
             (ISLANDS * COMPONENTS) as usize,
         );
 
@@ -10883,6 +10963,78 @@ mod tests {
                 measurement_call_counts().named_island_validations,
                 1,
                 "the sidecar is proved once per snapshot, not once per routed contact",
+            );
+        });
+    }
+
+    /// The coverage preflight's per-route-key work stays linear in its own
+    /// inputs.
+    ///
+    /// The defect this pins is asymptotic, so the assertion is a bound rather
+    /// than a pinned number. For `M` route entries, `K` distinct route keys
+    /// and `S` coverage samples, the preflight used to run an `O(M^2)`
+    /// sealed-slice prefix scan to decide first occurrences, then, per
+    /// distinct key, a fresh scan of every membership *twice* and of every
+    /// coverage sample once -- `O(M^2 + K(M + S))`, on every production
+    /// emission, because the pre-write gate runs this preflight per artifact.
+    /// One sorted column per input set answers all of it in `O(M + S)` element
+    /// examinations plus binary searches.
+    ///
+    /// The bound below is deliberately generous -- four times the input size --
+    /// so it fails only on a return to superlinear scanning, not on an honest
+    /// change of constant factor.
+    #[test]
+    fn the_coverage_preflight_key_work_stays_linear_in_its_inputs() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let route_entries = snapshot
+                .routed_route_memberships
+                .iter()
+                .map(|membership| membership.logical_routes.len())
+                .sum::<usize>();
+            let samples = snapshot.coverage_samples.len();
+            assert!(
+                route_entries > 1 && samples > 1,
+                "the fixture must carry routes and samples for this bound to bite",
+            );
+            let unlimited = CoverageMeasurementLimits::new(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            )
+            .expect("nonzero limits");
+            let island_index =
+                IslandFaceIndex::build(snapshot.named_islands).expect("well-formed fixture");
+            reset_measurement_call_counts();
+            snapshot
+                .measurement_preflight(
+                    unlimited,
+                    KnnBatchLimits {
+                        max_source_points: usize::MAX,
+                        max_query_points: usize::MAX,
+                        max_neighbors: 1,
+                        max_logical_peak_bytes: usize::MAX,
+                        max_work: usize::MAX,
+                    },
+                    &island_index,
+                )
+                .expect("fixture preflight");
+            let scans = measurement_call_counts().preflight_route_key_scans;
+            let bound = 4 * (route_entries + samples);
+            assert!(
+                scans <= bound,
+                "the preflight examined {scans} elements for {route_entries} route entries \
+                 and {samples} coverage samples; the linear bound is {bound}",
             );
         });
     }
