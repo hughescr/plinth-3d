@@ -2542,6 +2542,91 @@ mod tests {
         std::fs::remove_file(target).unwrap();
     }
 
+    /// THIS TEST DOES NOT CALL [`write`], AND DOES NOT COVER ITS ERROR ARM.
+    ///
+    /// It reproduces the two steps `write` performs after `write_staged`
+    /// returns -- rename, then [`sync_dir`] -- and shows that when the sync
+    /// fails, the artifact the rename put in place survives. That is a fact
+    /// about the filesystem sequence, not about `write`'s handling of it.
+    ///
+    /// The distinction is load-bearing and was measured: inserting
+    /// `let _ = std::fs::remove_file(&request.target_path);` into `write`'s
+    /// `DurabilitySyncFailed` arm -- the exact regression that would trade a
+    /// confirmed-good artifact for certain data loss -- leaves this test, and
+    /// the whole `plinth-emit` suite, fully green. **`write`'s error arm has
+    /// no test.** Covering it needs a fault-injection seam that does not
+    /// exist yet: the directory cannot be restricted from outside `write`
+    /// at the one point between its rename and its sync, because
+    /// `write_staged`'s own internal fsync runs first and fails earlier.
+    ///
+    /// What this test does earn: it pins the platform behaviour the design
+    /// rests on, and it fails if that behaviour changes.
+    ///
+    /// A directory with `--wx` permission (write + search, no read) still
+    /// permits the rename onto `target_path` -- POSIX only requires search
+    /// and write on the containing directory for a rename, confirmed
+    /// against this platform directly (a plain `mv` under `--wx` succeeds
+    /// here) -- but `File::open` on the directory itself, which `sync_dir`
+    /// requires, fails with `EACCES` (confirmed the same way: `ls` on a
+    /// `--wx` directory is refused).  That gives a deterministic way to make
+    /// the rename succeed and the durability sync fail, without touching
+    /// real crash behaviour.
+    ///
+    /// The restriction is applied only *after* [`write_staged`] returns:
+    /// `write_staged` calls `chitubox_io::Project::save`, which performs its
+    /// *own* directory fsync (on its own internal rename onto `staging`,
+    /// before this test ever runs) using the identical `open`-then-`sync_all`
+    /// idiom -- restricting the directory any earlier would fail that
+    /// earlier sync instead and never reach the rename this test targets.
+    /// This test therefore drives the same two steps `write` performs after
+    /// `write_staged` succeeds (rename, then [`sync_dir`]) directly, so the
+    /// directory can be restricted at exactly the point between them.
+    #[cfg(unix)]
+    #[test]
+    fn the_rename_then_sync_sequence_write_repeats_keeps_the_artifact_when_the_sync_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fixture_path("dir-sync-write-dir");
+        std::fs::create_dir_all(&dir).expect("create isolated test directory");
+        let target = dir.join("artifact.chitubox");
+        let staging = staging_path(&target);
+        let model = fixture_model(Vec::new(), 3.0);
+        let request = EmitRequest {
+            target_path: target.clone(),
+            printer: printer(),
+        };
+
+        write_staged(&model, &request, &staging).expect("staging save succeeds beforehand");
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict directory to write+search, no read");
+
+        let rename_result = std::fs::rename(&staging, &target);
+        let sync_result = sync_dir(&target);
+
+        // Restore permissions before any assertion can panic and skip cleanup.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
+        let artifact_survived = target.exists();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            rename_result.is_ok(),
+            "a rename needs only write+search on its directory, and must still \
+             succeed under --wx"
+        );
+        assert!(
+            sync_result.is_err(),
+            "sync_dir must fail to confirm durability when the directory cannot be \
+             opened for read"
+        );
+        assert!(
+            artifact_survived,
+            "the successfully-renamed artifact must remain at target_path even though \
+             its directory's durability could not be confirmed -- write()'s caller sees \
+             this as EmitError::DurabilitySyncFailed without target_path being deleted"
+        );
+    }
+
     #[test]
     fn disk_audit_rejects_a_reopened_lift_or_plate_frame_mismatch() {
         let model = fixture_model(Vec::new(), 3.0);
