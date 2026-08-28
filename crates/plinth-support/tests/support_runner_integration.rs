@@ -343,13 +343,31 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
         assert!(identities.insert(contact.physical_contact_id()));
         seats.insert(contact.position_mm().map(f64::to_bits));
     }
+    // Re-derived 2026-08-28 for the RAFT PAD/BRIDGE DISPATCH SPLIT (`ad335d9`):
+    // 12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006.  The counts do
+    // NOT move — 64 contacts, 170 members, before and after — only the
+    // classification of raft primitives inside them.  Before `ad335d9`, pad and
+    // bridge were told apart by comparing a segment's two endpoints for exact
+    // `f64` equality; that read the right answer only because one producer
+    // happened to pass the same point twice, so a zero-length bridge silently
+    // fell through to pad geometry.  The producer now states `RaftPad` or
+    // `RaftBridge` and a zero-length bridge is an error.  The digest moves
+    // because the plan now records the kind that was chosen instead of one
+    // re-inferred from coordinates.
+    //
+    // This pair went unrefreshed when `ad335d9` landed, while its sibling
+    // golden (`coverage_gate_toed_slab.json`, `15e4a6f`) was refreshed.  They
+    // were found only because this binary was run under `gtimeout`, letting its
+    // early tests report before the unbounded coverage-repair search was killed:
+    // under a plain `cargo test` this binary never finishes, so nothing in it
+    // reports and it has been unable to guard anything it contains.
     assert_eq!(
         (
             identities.len(),
             snapshot.final_live_members().count(),
             snapshot.digest(),
         ),
-        (64_usize, 170_usize, 12_136_443_226_163_403_608_u64),
+        (64_usize, 170_usize, 13_198_418_135_389_558_006_u64),
         "make_toed_slab's counts must not move: it takes zero repair rounds"
     );
     // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
@@ -762,7 +780,11 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
     // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
     // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
     // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
-    assert_eq!(snapshot.digest(), 12_136_443_226_163_403_608);
+    //
+    // Re-derived 2026-08-28 for the raft pad/bridge dispatch split (`ad335d9`):
+    // 12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006.  Same value and
+    // same reason as the closure test above, where the argument is written out.
+    assert_eq!(snapshot.digest(), 13_198_418_135_389_558_006);
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
     assert_eq!(
