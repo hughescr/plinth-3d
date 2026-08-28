@@ -1396,7 +1396,12 @@ pub struct RepairTrialTrail {
 /// reading a summary can find the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepairTrailDisclosure {
-    pub path: PathBuf,
+    /// The file, rendered rather than carried as a `PathBuf`. A `PathBuf` that
+    /// is not UTF-8 refuses to serialize, and this value is embedded in the
+    /// sealed ledger and the refusal sidecar — so a path nobody can encode
+    /// would take a whole model's evidence file down with it. The path here is
+    /// for a human to find the file with; `Display` is what a human reads.
+    pub path: String,
     /// Rows that reached the file. Equal to the trial count on a healthy run;
     /// a shortfall names a write that failed rather than hiding it.
     pub rows: usize,
@@ -1469,7 +1474,7 @@ impl RepairTrialTrail {
     #[must_use]
     pub fn disclosure(&self) -> RepairTrailDisclosure {
         RepairTrailDisclosure {
-            path: self.path.clone(),
+            path: self.path.display().to_string(),
             rows: self.rows,
             write_error: self.write_error.clone(),
         }
@@ -1725,7 +1730,7 @@ impl RepairRunReport {
             .write_error
             .as_ref()
             .map_or_else(String::new, |error| format!(" trail_error={error}"));
-        format!(" trail={} rows={}{error}", trail.path.display(), trail.rows)
+        format!(" trail={} rows={}{error}", trail.path, trail.rows)
     }
 }
 
