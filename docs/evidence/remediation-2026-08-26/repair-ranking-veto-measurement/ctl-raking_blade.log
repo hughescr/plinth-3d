@@ -1,0 +1,28 @@
+fixture=raking_blade faces=24
+legalize: pass 1 entering no_goods=0 round=none
+stage: support entering Preparation elapsed=0ms
+stage: support entering Routing elapsed=18ms
+stage: support entering Rewire elapsed=75ms
+stage: support entering Brace elapsed=294ms
+stage: support entering Structure elapsed=320ms
+stage: support entering Lowering elapsed=349ms
+legalize: pass 1 LOWERED in 372 ms — passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+legalize: passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+stage: support entering CoverageMeasurement elapsed=373ms
+coverage-repair progress: trials=0 commits=0 remaining=45 elapsed=0ms []
+coverage-repair progress: trials=30 commits=0 remaining=15 elapsed=12851ms [no_improvement=30]
+coverage-repair: trials=45 commits=0 remaining=0 wall_total=19290ms wall/trial min=424ms med=428ms max=435ms diversity_demotions=44 of_which_tried=44 [no_improvement=45] gate_rises[quarantined=8 unrouted_no_winner=37] of_measured=45 own_contact_condemned=45
+whole_run_ms=19774
+verdict=refused
+coverage-repair: trials=45 commits=0 remaining=0 wall_total=19290ms wall/trial min=424ms med=428ms max=435ms diversity_demotions=44 of_which_tried=44 [no_improvement=45] gate_rises[quarantined=8 unrouted_no_winner=37] of_measured=45 own_contact_condemned=45
+last_trial=45 measured=45 never_measured=0
+last_commit_trial=none trials_after_last_commit=45
+clause1_improved_then_thrown_away=0
+clause2_veto_components: unrouted_no_winner=0 quarantined=0 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+clause2_veto_own_contact_condemned=0
+latent_hardgate_rise_trials=45 of_measured=45
+latent_hardgate_components: unrouted_no_winner=37 quarantined=8 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+own_contact_condemned_trials=45
+steps_written=/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/ctl/raking_blade.steps.json
+plan_digest=refusal:3153703192024778472 attempts=0 islands=1
+refusal_reason=NoImprovingRepair { candidates_tried: 45, best_remaining_score_mm2: 0.0 }

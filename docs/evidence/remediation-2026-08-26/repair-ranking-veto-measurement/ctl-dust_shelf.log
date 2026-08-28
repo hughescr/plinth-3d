@@ -1,0 +1,36 @@
+fixture=dust_shelf faces=72
+legalize: pass 1 entering no_goods=0 round=none
+stage: support entering Preparation elapsed=0ms
+stage: support entering Routing elapsed=43ms
+stage: support entering Rewire elapsed=614ms
+stage: support entering Brace elapsed=1958ms
+stage: support entering Structure elapsed=2022ms
+stage: support entering Lowering elapsed=2086ms
+legalize: pass 1 LOWERED in 2147 ms — passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+legalize: passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+stage: support entering CoverageMeasurement elapsed=2147ms
+coverage-repair progress: trials=0 commits=0 remaining=1034 elapsed=0ms []
+coverage-repair progress: trials=29 commits=0 remaining=1005 elapsed=60269ms [no_improvement=29]
+coverage-repair progress: trials=59 commits=3 remaining=981 elapsed=122184ms [no_improvement=56]
+coverage-repair progress: trials=88 commits=3 remaining=952 elapsed=183621ms [no_improvement=85]
+coverage-repair progress: trials=117 commits=3 remaining=923 elapsed=245513ms [no_improvement=114]
+coverage-repair progress: trials=144 commits=3 remaining=896 elapsed=306845ms [no_improvement=141]
+coverage-repair progress: trials=174 commits=3 remaining=866 elapsed=366732ms [no_improvement=171]
+coverage-repair progress: trials=204 commits=3 remaining=836 elapsed=425917ms [no_improvement=201]
+coverage-repair progress: trials=229 commits=3 remaining=811 elapsed=487862ms [no_improvement=226]
+coverage-repair progress: trials=259 commits=3 remaining=781 elapsed=548856ms [no_improvement=256]
+coverage-repair: trials=274 commits=3 remaining=766 wall_total=578341ms wall/trial min=1903ms med=1988ms max=6476ms diversity_demotions=699 of_which_tried=265 [no_improvement=271] gate_rises[quarantined=75 unrouted_no_winner=55] of_measured=271 own_contact_condemned=176
+whole_run_ms=580836
+verdict=refused
+coverage-repair: trials=274 commits=3 remaining=766 wall_total=578341ms wall/trial min=1903ms med=1988ms max=6476ms diversity_demotions=699 of_which_tried=265 [no_improvement=271] gate_rises[quarantined=75 unrouted_no_winner=55] of_measured=271 own_contact_condemned=176
+last_trial=274 measured=274 never_measured=0
+last_commit_trial=55 trials_after_last_commit=219
+clause1_improved_then_thrown_away=0
+clause2_veto_components: unrouted_no_winner=0 quarantined=0 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+clause2_veto_own_contact_condemned=0
+latent_hardgate_rise_trials=130 of_measured=274
+latent_hardgate_components: unrouted_no_winner=55 quarantined=75 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+own_contact_condemned_trials=176
+steps_written=/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/ctl/dust_shelf.steps.json
+plan_digest=refusal:6678279176435689841 attempts=3 islands=1
+refusal_reason=NoImprovingRepair { candidates_tried: 274, best_remaining_score_mm2: 0.0 }

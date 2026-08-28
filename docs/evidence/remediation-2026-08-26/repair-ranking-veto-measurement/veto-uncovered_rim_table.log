@@ -1,0 +1,26 @@
+fixture=uncovered_rim_table faces=60
+legalize: pass 1 entering no_goods=0 round=none
+stage: support entering Preparation elapsed=0ms
+stage: support entering Routing elapsed=17ms
+stage: support entering Rewire elapsed=155ms
+stage: support entering Brace elapsed=973ms
+stage: support entering Structure elapsed=999ms
+stage: support entering Lowering elapsed=1024ms
+legalize: pass 1 LOWERED in 1049 ms — passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+legalize: passes=1 no_goods=0 per_terminal=[none] confirmation_rounds=0 voided_rounds=0 round_arms_measured=0
+stage: support entering CoverageMeasurement elapsed=1049ms
+coverage-repair progress: trials=0 commits=0 remaining=540 elapsed=0ms []
+coverage-repair: trials=2 commits=1 remaining=539 wall_total=2248ms wall/trial min=1104ms med=1144ms max=1144ms diversity_demotions=95 of_which_tried=1 [no_improvement=1] gate_rises[unrouted_no_winner=1] of_measured=1 own_contact_condemned=1
+whole_run_ms=3382
+verdict=sealed
+coverage-repair: trials=2 commits=1 remaining=539 wall_total=2248ms wall/trial min=1104ms med=1144ms max=1144ms diversity_demotions=95 of_which_tried=1 [no_improvement=1] gate_rises[unrouted_no_winner=1] of_measured=1 own_contact_condemned=1
+last_trial=2 measured=2 never_measured=0
+last_commit_trial=2 trials_after_last_commit=0
+clause1_improved_then_thrown_away=0
+clause2_veto_components: unrouted_no_winner=0 quarantined=0 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+clause2_veto_own_contact_condemned=0
+latent_hardgate_rise_trials=1 of_measured=2
+latent_hardgate_components: unrouted_no_winner=1 quarantined=0 unrouted_specialized=0 load_violations=0 unsupported_specialized=0
+own_contact_condemned_trials=1
+steps_written=/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/310c4c58-ad81-435c-8000-7c11d508a02a/scratchpad/veto/uncovered_rim_table.steps.json
+plan_digest=10727171327057596482 routed_identities=40 final_live_members=92 commits=1
