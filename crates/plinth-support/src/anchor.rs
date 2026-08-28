@@ -28,11 +28,21 @@ use crate::{
 const BELOW_LEVEL_EPS_MM: f64 = 1e-6;
 const LEAN_EPS_DEG: f64 = 1e-9;
 const RAY_T_MAX: f64 = 1.0;
-// Frozen kernel cone defaults from SPEC-RUST-KERNEL. These shape the thickness
-// probe; result-changing foot radius/epsilon come from M0 below.
-#[cfg_attr(not(test), allow(dead_code))]
+// The cone that samples the foot-ball breach predicate: half-angle, then ray
+// count. BOTH ARE RESULT-CHANGING, exactly as the foot radius and the breach
+// epsilon are. `NativeSurface::sphere_breach` reports the thinnest wall any
+// cone ray reaches, so widening the angle or adding rays can only find thinner
+// walls; the same foot ball reads CLEAR under one pair and BREACHED under
+// another, and that verdict is what admits or refuses the model anchor. The
+// witness is `the_breach_cone_pair_decides_the_foot_verdict`, which flips the
+// verdict on one fixture by moving each of the two alone.
+//
+// They are UNREGISTERED, inherited from SPEC-RUST-KERNEL's frozen defaults with
+// no measurement of record. Under the physics-first constants doctrine a value
+// with authority belongs in the plinth-core registry; these two decide an
+// outcome and are therefore owed a derivation and a registry home. Recorded
+// here rather than moved because registering them is a plinth-core change.
 pub(crate) const FOOT_BREACH_HALF_DEG: f64 = 25.0;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const FOOT_BREACH_CONE_RAYS: usize = 8;
 
 /// One deterministic exterior-surface pool row.
@@ -2638,6 +2648,87 @@ mod tests {
         assert_eq!(
             result.refusals()[0].reason,
             AnchorSeatRefusalReason::NearerNonExteriorObstruction
+        );
+    }
+
+    /// The cone pair at the top of this file is RESULT-CHANGING, which is what
+    /// its comment now says and what its comment used to deny.
+    ///
+    /// One narrow rib, `1 mm` across in X and `10 mm` in Y, with a foot ball
+    /// seated on its top face. Nothing within the ball's reach lies straight
+    /// down or along Y; the rib's own side walls sit `1.183 mm` along the two
+    /// `+/-X` cone rays. So the verdict is decided entirely by whether the cone
+    /// is wide enough to leave the axis and dense enough to look along X:
+    /// the frozen pair breaches, and moving EITHER member alone clears it.
+    #[test]
+    fn the_breach_cone_pair_decides_the_foot_verdict() {
+        let vertices = vec![
+            [-0.5, -5.0, -2.0],
+            [0.5, -5.0, -2.0],
+            [0.5, 5.0, -2.0],
+            [-0.5, 5.0, -2.0],
+            [-0.5, -5.0, 0.0],
+            [0.5, -5.0, 0.0],
+            [0.5, 5.0, 0.0],
+            [-0.5, 5.0, 0.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let (_, _, surface) = parts(vertices, faces);
+        let centers = vec![[0.0, 1.0, 0.0]];
+        let radii = vec![1.5];
+        let eps_mm = 0.05;
+
+        let (frozen, thickness, _) = surface
+            .sphere_breach(
+                &centers,
+                &radii,
+                eps_mm,
+                FOOT_BREACH_HALF_DEG,
+                FOOT_BREACH_CONE_RAYS,
+            )
+            .unwrap();
+        assert!(
+            frozen[0],
+            "the frozen cone reaches the rib's side wall and reports a breach"
+        );
+        assert!(
+            thickness[0] < radii[0] - eps_mm,
+            "the breach is the measured wall, not a threshold accident: {} vs {}",
+            thickness[0],
+            radii[0] - eps_mm
+        );
+
+        // Half-angle alone: collapse the cone onto its axis and the same ball
+        // on the same geometry reads CLEAR.
+        let (axis_only, _, _) = surface
+            .sphere_breach(&centers, &radii, eps_mm, 0.0, FOOT_BREACH_CONE_RAYS)
+            .unwrap();
+        assert!(
+            !axis_only[0],
+            "half-angle is result-changing: 0 deg must clear what 25 deg breaches"
+        );
+
+        // Ray count alone: keep the 25 deg opening but sample only the two
+        // azimuths that look along Y, and the same ball reads CLEAR again.
+        let (two_rays, _, _) = surface
+            .sphere_breach(&centers, &radii, eps_mm, FOOT_BREACH_HALF_DEG, 2)
+            .unwrap();
+        assert!(
+            !two_rays[0],
+            "ray count is result-changing: 2 rays must clear what 8 rays breach"
         );
     }
 
