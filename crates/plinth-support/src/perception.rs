@@ -2119,6 +2119,38 @@ fn solid_contains(solid: &SliceSolid, point: [f64; 2]) -> bool {
             .any(|hole| point_in_polygon(point, hole.points_xy_mm()))
 }
 
+/// Every closed boundary of one solid: its outer contour first, then each hole
+/// it owns.
+///
+/// A solid's material is `outer` MINUS `holes`, so any predicate that asks
+/// where the material is has to see both. Reading the loops through one
+/// iterator is what stops a new predicate from quietly forgetting the holes the
+/// way [`solids_overlap`] did.
+fn solid_loops(solid: &SliceSolid) -> impl Iterator<Item = &SliceLoop> + Clone {
+    std::iter::once(&solid.outer).chain(solid.holes.iter())
+}
+
+/// `[xmin, xmax, ymin, ymax]` of one closed loop.
+fn loop_bbox(points: &[[f64; 2]]) -> [f64; 4] {
+    let mut bbox = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for point in points {
+        bbox[0] = bbox[0].min(point[0]);
+        bbox[1] = bbox[1].max(point[0]);
+        bbox[2] = bbox[2].min(point[1]);
+        bbox[3] = bbox[3].max(point[1]);
+    }
+    bbox
+}
+
+const fn bboxes_disjoint(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[1] < b[0] || b[1] < a[0] || a[3] < b[2] || b[3] < a[2]
+}
+
 struct OverlapOperationBudget {
     vertex_tests: usize,
     edge_tests: usize,
@@ -2175,6 +2207,35 @@ fn solid_bbox(solid: &SliceSolid) -> [f64; 4] {
     bbox
 }
 
+/// Do the MATERIAL regions of two slice solids intersect?
+///
+/// Material is `outer` minus `holes`, and this predicate is what [`find_births`]
+/// uses to decide whether a solid on this layer is standing on anything at all.
+/// Two properties it must have, and the frozen shape it replaces had neither.
+///
+/// HOLE AWARENESS. Sampling only the `outer` contours makes a hollowed prior
+/// layer read as a filled disc, so a solid appearing INSIDE the cavity — a
+/// ceiling boss, a drain-hole bridge, anything born over a void — read as
+/// overlapping the layer below and no birth was recorded. That silently deleted
+/// an unconditional support demand. The containment test is now
+/// [`solid_contains`], the same hole-aware predicate the reach criterion already
+/// used, and the edge pass walks hole boundaries as well as outers.
+///
+/// DENSITY INDEPENDENCE. The old passes decimated each contour to roughly 40
+/// sampled vertices and 60 sampled CHORDS, and a chord spanned `step` vertices
+/// rather than one, so it cut across every feature between its endpoints. The
+/// verdict therefore moved with tessellation density: the same two shapes,
+/// re-tessellated, could swap between overlapping and not. Both passes are now
+/// exhaustive, so the answer is a function of the geometry.
+///
+/// Cost. The vertex pass is the common case and exits on the first contained
+/// vertex, which for two stacked layers of the same wall is usually the first
+/// one tested. The exhaustive edge pass is only reached when no vertex of either
+/// solid lies in the other's material — that is, at a birth or a crossing — and
+/// bounding boxes reject whole loop pairs before it runs. The operation budget
+/// still counts one unit per candidate vertex and per candidate chord, ahead of
+/// the box tests, so a cap continues to bound the loop trip count and not merely
+/// the arithmetic inside it.
 fn solids_overlap(
     a: &SliceSolid,
     b: &SliceSolid,
@@ -2182,32 +2243,54 @@ fn solids_overlap(
 ) -> Result<bool, GenericPerceptionError> {
     let aa = solid_bbox(a);
     let bb = solid_bbox(b);
-    if aa[1] < bb[0] || bb[1] < aa[0] || aa[3] < bb[2] || bb[3] < aa[2] {
+    if bboxes_disjoint(aa, bb) {
         return Ok(false);
     }
-    for (source, target) in [(&a.outer, &b.outer), (&b.outer, &a.outer)] {
-        let step = (source.points_xy_mm.len() / 40).max(1);
-        for index in (0..source.points_xy_mm.len()).step_by(step) {
-            budget.vertex()?;
-            if point_in_polygon(source.points_xy_mm[index], target.points_xy_mm()) {
-                return Ok(true);
+    // A boundary vertex of one solid lying strictly in the other's material is
+    // an overlap: the boundary carries material on one side of that point, and
+    // the target's material is open around it.
+    for ((source, target), target_bbox) in [((a, b), bb), ((b, a), aa)] {
+        for loop_ in solid_loops(source) {
+            for point in loop_.points_xy_mm() {
+                budget.vertex()?;
+                if point[0] < target_bbox[0]
+                    || point[0] > target_bbox[1]
+                    || point[1] < target_bbox[2]
+                    || point[1] > target_bbox[3]
+                {
+                    continue;
+                }
+                if solid_contains(target, *point) {
+                    return Ok(true);
+                }
             }
         }
     }
-    let left = &a.outer;
-    let right = &b.outer;
-    let left_step = (left.points_xy_mm.len() / 60).max(1);
-    let right_step = (right.points_xy_mm.len() / 60).max(1);
-    for i in (0..left.points_xy_mm.len()).step_by(left_step) {
-        for j in (0..right.points_xy_mm.len()).step_by(right_step) {
-            budget.edge()?;
-            if segments_intersect(
-                left.points_xy_mm[i],
-                left.points_xy_mm[(i + left_step) % left.points_xy_mm.len()],
-                right.points_xy_mm[j],
-                right.points_xy_mm[(j + right_step) % right.points_xy_mm.len()],
-            ) {
-                return Ok(true);
+    // No vertex of either lies in the other, so the only remaining overlap is a
+    // boundary crossing — including one solid's outer crossing the other's HOLE
+    // boundary, which is exactly the case the outer-only pass missed.
+    for left in solid_loops(a) {
+        let left_points = left.points_xy_mm();
+        let left_bbox = loop_bbox(left_points);
+        for right in solid_loops(b) {
+            let right_points = right.points_xy_mm();
+            if bboxes_disjoint(left_bbox, loop_bbox(right_points)) {
+                continue;
+            }
+            for i in 0..left_points.len() {
+                let left_a = left_points[i];
+                let left_b = left_points[(i + 1) % left_points.len()];
+                for j in 0..right_points.len() {
+                    budget.edge()?;
+                    if segments_intersect(
+                        left_a,
+                        left_b,
+                        right_points[j],
+                        right_points[(j + 1) % right_points.len()],
+                    ) {
+                        return Ok(true);
+                    }
+                }
             }
         }
     }
@@ -2362,12 +2445,31 @@ fn find_local_minima(
     let is_birth = minima
         .iter()
         .map(|minimum| {
-            let z_tolerance = layer_tolerance(layers, minimum.position_mm[2], birth_match_layers);
+            // One window, isotropic. The match window in Z is
+            // `minima_birth_match_layers` layers of THIS plan, read from the
+            // registry above; the window in XY is the same distance, so the
+            // pair describes a cone at 45 degrees around the minimum rather
+            // than a Z window from the registry beside a bare millimetre
+            // literal in XY. The literal was 0.2 mm — four registered layers,
+            // twice the Z window it sat next to, and nothing said why.
+            //
+            // Why this distance is the right one: over a Z offset `dz` the
+            // sliced contour of a surface at angle `theta` from horizontal
+            // moves `dz / tan(theta)` in XY, so no single XY slack is exact for
+            // every slope. 45 degrees is the neutral choice and it errs the
+            // safe way where it matters: the narrow downward tips whose
+            // footprints are small, and therefore whose matches are decided by
+            // this slack, are steep, and a steep surface moves LESS than the
+            // allowance. A shallow surface moves more, but a shallow downward
+            // face is a wide overhang whose footprint already contains the
+            // region points outright.
+            let match_reach_mm =
+                layer_tolerance(layers, minimum.position_mm[2], birth_match_layers);
             births.iter().any(|birth| {
-                (birth.z_mm - minimum.position_mm[2]).abs() <= z_tolerance
-                    && sampled_region_points(minimum)
-                        .iter()
-                        .any(|point| birth_xy_ok(&birth.footprint, [point[0], point[1]], 0.2))
+                (birth.z_mm - minimum.position_mm[2]).abs() <= match_reach_mm
+                    && sampled_region_points(minimum).iter().any(|point| {
+                        birth_xy_ok(&birth.footprint, [point[0], point[1]], match_reach_mm)
+                    })
             })
         })
         .collect::<Vec<_>>();
@@ -8104,13 +8206,31 @@ mod tests {
         LayerPlan::new(zmin, vec![0.05; count]).unwrap()
     }
 
+    /// RE-PINNED. The pin it replaces asserted the DEFECT, so it is recorded
+    /// here rather than merely deleted.
+    ///
+    /// This test used to be
+    /// `frozen_birth_overlap_ignores_retained_negative_winding_holes_like_python`
+    /// and its central assertion was that a solid lying inside the prior
+    /// layer's retained hole is NOT a birth — "overlapping in the live Python
+    /// predicate, even when it lies in a retained hole". That is the behaviour
+    /// [`solids_overlap`] documents as wrong: nothing is under a solid that
+    /// appears inside the layer below's cavity, and a birth is an
+    /// UNCONDITIONAL support demand, so the old pin was deleting a demand for
+    /// a solid standing over a void. It is the same physical fact
+    /// `a_low_point_over_a_cavity_reaches_to_the_cavity_wall` records one
+    /// screen down; the two filters were disagreeing about it.
+    ///
+    /// `births.len()` therefore moves 2 -> 3 and the in-cavity solid is now
+    /// asserted PRESENT. The three centroids are still the old boundary-vertex
+    /// means, so this commit moves exactly one thing: the overlap verdict.
     #[test]
     #[expect(
         clippy::float_cmp,
         reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    fn frozen_birth_overlap_ignores_retained_negative_winding_holes_like_python() {
+    fn a_solid_born_inside_the_prior_layers_cavity_is_a_birth() {
         let square =
             |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
         let outer = SliceLoop {
@@ -8162,17 +8282,159 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(births.len(), 2);
-        assert_eq!(births[0].centroid_xy_mm, [2.0, 2.0]);
-        assert!(
-            !births
-                .iter()
-                .any(|birth| birth.centroid_xy_mm == [1.5, 1.325]),
-            "a current outer inside the prior outer is overlapping in the live Python predicate, even when it lies in a retained hole"
+        assert_eq!(
+            births.len(),
+            3,
+            "the annulus, the solid born inside its cavity, and the disjoint solid"
         );
-        // Boundary-point mean, matching frozen Path2D.discrete behavior;
-        // deliberately asymmetric so an area centroid cannot pass.
-        assert_eq!(births[1].centroid_xy_mm, [5.5, 1.325]);
+        assert_eq!(
+            (
+                births[0].layer_index,
+                births[1].layer_index,
+                births[2].layer_index
+            ),
+            (0, 1, 1)
+        );
+        // Still the boundary-vertex means: this commit changes the overlap
+        // verdict and nothing else. `footprint_seed_xy_mm` moves them next.
+        assert_eq!(births[0].centroid_xy_mm, [2.0, 2.0]);
+        assert_eq!(
+            births[1].centroid_xy_mm,
+            [1.5, 1.325],
+            "the solid lying in the prior layer's retained hole stands over a void, so it \
+             is a birth and carries an unconditional support demand"
+        );
+        assert_eq!(births[2].centroid_xy_mm, [5.5, 1.325]);
+    }
+
+    /// The overlap predicate must see a HOLE boundary crossing, not only an
+    /// outer one.
+    ///
+    /// The fixture is built so that no vertex of either solid lies in the
+    /// other's material and neither outer contour crosses the other: the bar
+    /// lies wholly inside the plate's outer square, and every one of its four
+    /// corners sits in the plate's U-shaped cavity. The only witness that the
+    /// two share material is the bar's edges crossing the two upright walls of
+    /// the U. Sampling outers alone therefore reports "no overlap" and invents
+    /// a birth for a solid that is sitting squarely on the plate's tongue.
+    #[test]
+    fn overlap_sees_a_crossing_of_a_hole_boundary_with_no_outer_crossing() {
+        let plate = SliceSolid {
+            outer: SliceLoop {
+                points_xy_mm: vec![[0.0, 0.0], [6.0, 0.0], [6.0, 6.0], [0.0, 6.0]],
+                signed_area_mm2: 36.0,
+                hole: false,
+            },
+            // A U opening upward. Its material tongue is x in [2, 4],
+            // y in [2, 5].
+            holes: vec![SliceLoop {
+                points_xy_mm: vec![
+                    [1.0, 1.0],
+                    [5.0, 1.0],
+                    [5.0, 5.0],
+                    [4.0, 5.0],
+                    [4.0, 2.0],
+                    [2.0, 2.0],
+                    [2.0, 5.0],
+                    [1.0, 5.0],
+                ],
+                signed_area_mm2: -10.0,
+                hole: true,
+            }],
+        };
+        let bar = test_slice_solid(vec![[1.5, 3.0], [4.5, 3.0], [4.5, 3.5], [1.5, 3.5]]);
+        // Precondition 1: every bar corner is in the plate's cavity, so the
+        // vertex pass cannot answer this.
+        for corner in bar.outer().points_xy_mm() {
+            assert!(!solid_contains(&plate, *corner), "corner {corner:?}");
+        }
+        // Precondition 2: no plate vertex, outer or hole, is inside the bar.
+        for loop_ in solid_loops(&plate) {
+            for point in loop_.points_xy_mm() {
+                assert!(!solid_contains(&bar, *point), "plate point {point:?}");
+            }
+        }
+        // Precondition 3: the outers do not cross — the bar is well inside the
+        // plate's 6 x 6 square.
+        for i in 0..4 {
+            for j in 0..4 {
+                let outer = plate.outer().points_xy_mm();
+                let inner = bar.outer().points_xy_mm();
+                assert!(!segments_intersect(
+                    outer[i],
+                    outer[(i + 1) % 4],
+                    inner[j],
+                    inner[(j + 1) % 4],
+                ));
+            }
+        }
+        let mut budget =
+            OverlapOperationBudget::new(GenericPerceptionLimits::production(TEST_KNN_LIMITS));
+        assert!(
+            solids_overlap(&bar, &plate, &mut budget).unwrap(),
+            "the bar crosses both upright walls of the U and rests on the tongue"
+        );
+        let mut mirrored =
+            OverlapOperationBudget::new(GenericPerceptionLimits::production(TEST_KNN_LIMITS));
+        assert!(solids_overlap(&plate, &bar, &mut mirrored).unwrap());
+    }
+
+    /// The overlap verdict must not depend on how finely a contour is
+    /// tessellated.
+    ///
+    /// Both contours carry 200 vertices, which is what puts them past the
+    /// decimation thresholds the predicate used to apply: one vertex in five
+    /// was tested, and one chord in three, with each chord spanning three
+    /// vertices instead of one. The notch is placed at vertex 7 — divisible by
+    /// neither five nor three — so the sampled vertices step over it and the
+    /// chord from vertex 6 to vertex 9 flies straight across its mouth. The two
+    /// solids genuinely share material and the decimated passes could not see
+    /// it, so a support-bearing solid was recorded as a birth in mid-air.
+    #[test]
+    fn overlap_verdict_does_not_depend_on_contour_tessellation() {
+        // A 10 x 10 mm square resampled to 200 boundary points.
+        let plate = test_slice_solid(
+            (0..200)
+                .map(|index| {
+                    let t = f64::from(index) * 40.0 / 200.0;
+                    match index / 50 {
+                        0 => [t, 0.0],
+                        1 => [10.0, t - 10.0],
+                        2 => [30.0 - t, 10.0],
+                        _ => [0.0, 40.0 - t],
+                    }
+                })
+                .collect(),
+        );
+        assert_eq!(plate.outer().points_xy_mm().len(), 200);
+        // A slab well clear of the plate at y >= 12, except for one notch at
+        // vertex 7 that dips to y = 9 and so bites into the plate.
+        let mut slab_points = (0..200)
+            .map(|index| {
+                if index < 100 {
+                    [f64::from(index) * 10.0 / 99.0, 12.0]
+                } else {
+                    [f64::from(199 - index) * 10.0 / 99.0, 20.0]
+                }
+            })
+            .collect::<Vec<[f64; 2]>>();
+        slab_points[7][1] = 9.0;
+        let notch = slab_points[7];
+        assert!(
+            solid_contains(&plate, notch),
+            "the notch tip {notch:?} is inside the plate"
+        );
+        let slab = test_slice_solid(slab_points);
+        // The old sampling looked at vertices 0, 5, 10, ... and at chords
+        // (0, 3), (3, 6), (6, 9), ... Neither reaches vertex 7.
+        assert_ne!(7 % 5, 0);
+        assert_ne!(7 % 3, 0);
+        let mut budget =
+            OverlapOperationBudget::new(GenericPerceptionLimits::production(TEST_KNN_LIMITS));
+        assert!(
+            solids_overlap(&slab, &plate, &mut budget).unwrap(),
+            "one notched vertex is enough: the two solids share material"
+        );
     }
 
     /// The reach criterion reverses the old area predicate over a cavity, and
