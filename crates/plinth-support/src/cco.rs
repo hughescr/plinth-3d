@@ -1206,6 +1206,20 @@ struct EvaluatedCandidate {
     family: CandidateFamily,
     generation_index: usize,
     price_ml: f64,
+    /// `changed_forest_volume_delta(snapshot, &self.forest)` — the whole-forest
+    /// volume this candidate adds, in mL, RETAINED from the one place it is
+    /// computed ([`evaluate`], which needs it to price the candidate at all).
+    ///
+    /// It is here because rewire ranks by this delta rather than by the family
+    /// price, and used to get it by calling [`changed_forest_volume_delta`] a
+    /// SECOND time on the same two forests, once per candidate — a whole-forest
+    /// walk over the union of both member sets, repeated to re-derive a number
+    /// the evaluation already held. The function is pure and both operands are
+    /// the same values, so the retained number is bit-identical to the
+    /// recomputed one; for the bifurcation family it is additionally the value
+    /// `price_ml` already carries, because `candidate_price` returns the delta
+    /// unchanged there.
+    changed_delta_ml: f64,
     rows: Vec<ClearanceRow>,
     anchor: Option<(usize, PositiveFinite)>,
 }
@@ -2202,8 +2216,15 @@ impl CcoController {
                 // insertion-only plate/anchor heuristic. The prepared base is
                 // common to the whole batch, so its exact volume delta is the
                 // stable equivalent ranking value.
-                candidate.price_ml =
-                    changed_forest_volume_delta(&binding.snapshot, &candidate.forest)?;
+                //
+                // TAKEN, not recomputed: `evaluate` already walked both forests
+                // for this exact pair to price the candidate, and kept the
+                // answer. Calling `changed_forest_volume_delta` a second time
+                // here re-walked the union of both member sets, once per
+                // candidate, to land on the same bits — and for the bifurcation
+                // family on the bits `price_ml` was already holding, since
+                // `candidate_price` returns the delta unchanged for that family.
+                candidate.price_ml = candidate.changed_delta_ml;
                 feasible.push(candidate);
             } else {
                 refusals.push(RewireCandidateRefusal {
@@ -4386,7 +4407,11 @@ impl RewireCandidateBatch {
         if has_rewire_degenerate_new_member(&binding.snapshot, &replayed.forest) {
             return Err(CcoError::RewireCandidateEvidenceMismatch);
         }
-        replayed.price_ml = changed_forest_volume_delta(&binding.snapshot, &replayed.forest)?;
+        // The replay's OWN `evaluate` above walked both forests and kept the
+        // delta; this is that number, not a third walk over the same pair. The
+        // comparison below is still between two independently computed values —
+        // the batch's and this replay's.
+        replayed.price_ml = replayed.changed_delta_ml;
         let replayed_digest = replayed.forest.digest();
         if replayed_digest != candidate.evaluated_digest
             || replayed.family != candidate.evidence.family
@@ -4663,6 +4688,7 @@ fn evaluate(
         family: descriptor.family(),
         generation_index,
         price_ml,
+        changed_delta_ml,
         rows,
         anchor,
     }))
@@ -8446,6 +8472,80 @@ mod tests {
         (forest, request, surface)
     }
 
+    /// The substitution licence for [`EvaluatedCandidate::changed_delta_ml`]:
+    /// the retained number and a fresh whole-forest walk over the same two
+    /// forests agree BIT FOR BIT, for every family. The rewire batch and the
+    /// rewire replay both stopped re-walking and now read this field, so this is
+    /// the invariant that keeps that honest.
+    #[test]
+    fn an_evaluated_candidate_retains_the_volume_delta_a_fresh_walk_reproduces() {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let (mut forest, request, _surface) = growth_fixture();
+        // A trunk leaning at 45 degrees past the stub end, so
+        // `Descriptor::Bifurcate` has a host it can actually seat a junction
+        // on: the stub end `(0, 0, 12.5)` projects onto this axis at
+        // `(3, 0, 9.5)`, which is below the stub end (`junction_feasible`
+        // demands that), a comfortable 2.83 mm from either endpoint, and every
+        // one of the three arms it makes leans at exactly 45 degrees — inside
+        // the 60 degree branch cone. Without a reachable host this test would
+        // only ever see a plate descent.
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(5.0), finite(0.0), finite(11.5)],
+            p1_mm: [finite(1.0), finite(0.0), finite(7.5)],
+            r0_mm: TerminalEndRadius::new(positive(0.4)),
+            r1_mm: RootwardEndRadius::new(positive(0.8)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "host".to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: None,
+            carried_mm2: finite(1.0),
+        }));
+        forest.validate().unwrap();
+        let config = Config::current().unwrap();
+        let descriptors = [
+            Descriptor::Plate {
+                xy: [0.0, 0.0],
+                top_z: 12.5,
+            },
+            Descriptor::Bifurcate { host },
+        ];
+        let mut families = BTreeSet::new();
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let Some(candidate) = evaluate(&forest, &request, descriptor, index, &config).unwrap()
+            else {
+                continue;
+            };
+            families.insert(candidate.family);
+            assert_eq!(
+                candidate.changed_delta_ml.to_bits(),
+                changed_forest_volume_delta(&forest, &candidate.forest)
+                    .unwrap()
+                    .to_bits(),
+                "the retained delta for {:?} generation {index} is not the delta a fresh \
+                 walk over the same two forests produces",
+                candidate.family
+            );
+            if candidate.family == CandidateFamily::Bifurcation {
+                assert_eq!(
+                    candidate.price_ml.to_bits(),
+                    candidate.changed_delta_ml.to_bits(),
+                    "`candidate_price` returns the delta unchanged for a bifurcation, so \
+                     rewire's overwrite of `price_ml` is a no-op for this family"
+                );
+            }
+        }
+        assert_eq!(
+            families,
+            [CandidateFamily::PlateDescent, CandidateFamily::Bifurcation]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "both families this fixture can produce must have been exercised"
+        );
+    }
+
     /// A slab whose top face is the plane `z = 0`, wide enough in `xy` that the
     /// nearest surface point to anything above the origin is that face. The
     /// outward normal there is `+z`, so a seat at the origin seats along `-z`.
@@ -8564,6 +8664,12 @@ mod tests {
                 family: CandidateFamily::ModelAnchor,
                 generation_index: 0,
                 price_ml: 1.0,
+                // The honest delta for this fixture's own pair of forests, so
+                // the helper cannot publish a candidate whose retained delta
+                // disagrees with its geometry. Nothing downstream of this
+                // fixture reads it; `price_ml` stays the stated placeholder.
+                changed_delta_ml: changed_forest_volume_delta(&snapshot, &forest)
+                    .expect("the fixture's forests are volume-measurable"),
                 rows,
                 anchor: None,
             },
@@ -8779,6 +8885,10 @@ mod tests {
             family: CandidateFamily::ModelAnchor,
             generation_index: 0,
             price_ml: 1.0,
+            // As in `model_anchor_candidate`: the honest delta for this
+            // fixture's own pair of forests.
+            changed_delta_ml: changed_forest_volume_delta(&snapshot, &forest)
+                .expect("the fixture's forests are volume-measurable"),
             rows,
             anchor: None,
         }

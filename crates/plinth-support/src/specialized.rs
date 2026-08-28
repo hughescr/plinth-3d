@@ -2406,6 +2406,23 @@ pub(crate) fn authority_consistent_empty_plan_for_initial_test(
     Ok(plan)
 }
 
+/// Replay the caller's regular-contact set and refuse a stale one.
+///
+/// **The replay must use the selector that produced the value.** Production
+/// builds `regular` from [`crate::select_contacts_baseline`]
+/// (`runner::prepare_support_context`), which is the frozen placement without
+/// the legacy pre-routing coverage-repair loop; coverage closure is reached
+/// afterwards, over ROUTED contacts, by [`crate::coverage_closure`]. Replaying
+/// through the repair-enabled `crate::select_contacts` compared two different
+/// definitions of "the regular contact set": on any model whose baseline
+/// layout leaves one failing coverage sample the repair-enabled selector pushes
+/// an extra contact (or exhausts its attempts and returns
+/// [`ContactSelectionError::UnsatisfiedCoverage`]), and the honest, current
+/// value was refused as [`SpecializedError::StaleRegularContacts`] -- an error
+/// that misstates the cause, on a pre-routing coverage verdict the production
+/// design deliberately does not use.
+/// `synthetic_selection_is_baseline_only_not_the_legacy_repair_adapter` and
+/// `regular_replay_uses_the_selector_that_produced_the_value` pin both halves.
 fn validate_regular(
     mesh: &Mesh,
     generic: &GenericContactPlan,
@@ -2421,7 +2438,8 @@ fn validate_regular(
         }
         return Ok(());
     }
-    let replay = crate::select_contacts(mesh, generic.candidates(), generic.islands(), config)?;
+    let replay =
+        crate::select_contacts_baseline(mesh, generic.candidates(), generic.islands(), config)?;
     if replay.digest() != regular.digest() || replay != *regular {
         return Err(SpecializedError::StaleRegularContacts);
     }
@@ -3913,12 +3931,6 @@ fn check_load_scratch(usage: LoadScratchUsage, limit: usize) -> Result<usize, Sp
     Ok(required)
 }
 
-#[derive(Default)]
-struct GatePreflightTelemetry {
-    payload_allocations: usize,
-    payload_operations: usize,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn gate_header_preflight(
     contact_count: usize,
@@ -3929,7 +3941,6 @@ fn gate_header_preflight(
     island_count: usize,
     reservation_count: usize,
     limits: SpecializedLimits,
-    _telemetry: &mut GatePreflightTelemetry,
 ) -> Result<(), SpecializedError> {
     // The batch's own materialized gate cap: the header preflight and every
     // check below in this batch use the one bound stated for this batch shape.
@@ -4492,7 +4503,6 @@ fn evaluate_gate_batch(
     retained_load: &mut Option<RetainedLoadTranspose>,
     acceptance: GateBatchAcceptance,
 ) -> Result<GateBatchOutcome, SpecializedError> {
-    let mut preflight_telemetry = GatePreflightTelemetry::default();
     gate_header_preflight(
         contacts.len(),
         proposals.len(),
@@ -4502,10 +4512,7 @@ fn evaluate_gate_batch(
         islands.len(),
         reservations.len(),
         limits,
-        &mut preflight_telemetry,
     )?;
-    debug_assert_eq!(preflight_telemetry.payload_allocations, 0);
-    debug_assert_eq!(preflight_telemetry.payload_operations, 0);
     // One distinct-face buffer for the whole gate batch: every face gather
     // below reuses this allocation instead of building a set per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
@@ -8349,47 +8356,159 @@ fn bound_authority_base(
         }
         None => hash.u8(0),
     }
-    hash.usize(limits.max_synthetic_neighbor_pairs);
-    hash.usize(limits.max_synthetic_neighbor_bytes);
-    hash.usize(limits.max_satisfaction_tests);
-    hash.usize(limits.max_satisfaction_neighbor_pairs);
-    hash.usize(limits.max_satisfaction_neighbor_bytes);
-    hash.usize(limits.max_merge_pairs);
-    hash.usize(limits.max_merge_proposals);
-    hash.usize(limits.max_merge_total_proposals);
-    hash.usize(limits.max_merge_iterations);
-    hash.usize(limits.max_merge_commit_bytes);
-    hash.usize(limits.max_gate_variants);
-    hash.usize(limits.max_gate_vector_bytes);
-    hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations_floor);
-    hash.usize(limits.max_gate_window_variants);
+    hash_limit_bindings(&mut hash, limits, LimitBinding::Semantic);
     hash
 }
 
+/// Which digests bind one [`SpecializedLimits`] cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LimitBinding {
+    /// Bound by the semantic authority digest, and so by every digest built on
+    /// it: this cap can change the plan the engine produces, not only whether
+    /// the engine refuses.
+    Semantic,
+    /// Bound by the full source-authority digest and by the plan digest, and
+    /// deliberately left out of the semantic one: pure refusal authority.
+    Execution,
+    /// **Bound by NO digest, and that is a known defect, not a decision.**
+    ///
+    /// A cap in this class can change what the engine refuses while every
+    /// published digest stays identical, so two authorities that behave
+    /// differently are indistinguishable in the evidence. See
+    /// [`specialized_limit_bindings`] for which caps are here and why they have
+    /// not been moved to [`Self::Execution`] yet.
+    UnboundPendingRuling,
+}
+
+/// The complete `SpecializedLimits` digest contract, derived FROM THE TYPE.
+///
+/// The body **destructures** `SpecializedLimits`, so a field added to that
+/// struct is a compile error here until its author states which digests bind
+/// it, and the three digest builders read this one classification instead of
+/// restating it.
+///
+/// **Why this exists.** The classification used to live in three
+/// hand-maintained lists (`bound_authority_base`, `bound_authority_digest` and
+/// `hash_specialized_limits`) with nothing tying them to the type, and they had
+/// already drifted: neither `gate_work_per_batch_unit` nor
+/// `load_work_per_batch_unit` appeared in ANY of them. This table replaces all
+/// three, and the destructure makes that drift impossible to repeat.
+///
+/// **The two drifted caps are recorded here as
+/// [`LimitBinding::UnboundPendingRuling`], NOT quietly bound.** They are the
+/// batch-product coefficients that
+/// [`SpecializedLimits::gate_operation_limit`] and
+/// [`SpecializedLimits::load_operation_limit`] materialize their caps from, so
+/// two limit sets that refuse differently publish the same plan digest and the
+/// same source-authority digest today. That is a real defect and
+/// `the_batch_work_coefficients_are_unbound_from_every_digest` asserts it
+/// rather than letting it hide.
+///
+/// Binding them is a ONE-LINE change here -- move both rows to
+/// [`LimitBinding::Execution`] -- but it moves the plan digest, and the plan
+/// digest feeds `verification_snapshot_digest`, which is the value frozen at
+/// `a4_transactional_controller.rs:184` and in the two
+/// `support_runner_integration` fingerprints that are ALREADY under an
+/// unresolved owner ruling. Moving a disputed value while it is being ruled on
+/// would pre-empt that ruling, so the binding waits for it.
+/// `binding_the_unbound_caps_would_move_the_plan_digest` measures exactly what
+/// that ruling is choosing between.
+///
+/// **The rows are in DECLARATION order, and that is load-bearing.** Filtering
+/// this one list by class reproduces each old hand-written list exactly: the
+/// `Semantic` rows in this order are `bound_authority_base`'s fifteen fields in
+/// its order, and the `Execution` rows are `bound_authority_digest`'s seven in
+/// its order. So every digest is byte-identical across the introduction of this
+/// table. Grouping the rows by class instead would have moved the plan digest
+/// by reordering alone, for no reason anyone could argue.
+///
+/// The `Semantic`/`Execution` split itself is inherited field-for-field and is
+/// not tidy -- `max_gate_operations_floor` is `Semantic` while
+/// `gate_work_per_batch_unit`, the coefficient that scales the very same cap,
+/// is not even bound. Reclassifying is a digest move for the same ruling.
+///
+/// `coverage_route_knn` is the one cap bound by no digest at all. That is the
+/// field's own documented decision -- it is `KnnBatchLimits`, not a cap this
+/// hash could encode as a `usize`, and it is execution-only -- so it is named
+/// here rather than left to a wildcard, to keep the exclusion deliberate.
+fn specialized_limit_bindings(limits: SpecializedLimits) -> [(LimitBinding, usize); 24] {
+    let SpecializedLimits {
+        // Excluded from every digest by the field's own doc comment.
+        coverage_route_knn: _excluded_execution_only,
+        max_synthetic_neighbor_pairs,
+        max_synthetic_neighbor_bytes,
+        max_satisfaction_tests,
+        max_satisfaction_neighbor_pairs,
+        max_satisfaction_neighbor_bytes,
+        max_merge_pairs,
+        max_merge_proposals,
+        max_merge_proposal_bytes,
+        max_merge_descriptor_operations,
+        max_merge_total_proposals,
+        max_merge_iterations,
+        max_merge_commit_bytes,
+        max_gate_variants,
+        max_gate_vector_bytes,
+        max_gate_contact_matrix_bytes,
+        max_gate_operations_floor,
+        max_gate_window_variants,
+        max_coverage_scratch_bytes,
+        max_coverage_operations,
+        max_load_scratch_bytes,
+        max_load_operations_floor,
+        max_gate_peak_bytes,
+        gate_work_per_batch_unit,
+        load_work_per_batch_unit,
+    } = limits;
+    [
+        (LimitBinding::Semantic, max_synthetic_neighbor_pairs),
+        (LimitBinding::Semantic, max_synthetic_neighbor_bytes),
+        (LimitBinding::Semantic, max_satisfaction_tests),
+        (LimitBinding::Semantic, max_satisfaction_neighbor_pairs),
+        (LimitBinding::Semantic, max_satisfaction_neighbor_bytes),
+        (LimitBinding::Semantic, max_merge_pairs),
+        (LimitBinding::Semantic, max_merge_proposals),
+        (LimitBinding::Execution, max_merge_proposal_bytes),
+        (LimitBinding::Execution, max_merge_descriptor_operations),
+        (LimitBinding::Semantic, max_merge_total_proposals),
+        (LimitBinding::Semantic, max_merge_iterations),
+        (LimitBinding::Semantic, max_merge_commit_bytes),
+        (LimitBinding::Semantic, max_gate_variants),
+        (LimitBinding::Semantic, max_gate_vector_bytes),
+        (LimitBinding::Semantic, max_gate_contact_matrix_bytes),
+        (LimitBinding::Semantic, max_gate_operations_floor),
+        (LimitBinding::Semantic, max_gate_window_variants),
+        (LimitBinding::Execution, max_coverage_scratch_bytes),
+        (LimitBinding::Execution, max_coverage_operations),
+        (LimitBinding::Execution, max_load_scratch_bytes),
+        (LimitBinding::Execution, max_load_operations_floor),
+        (LimitBinding::Execution, max_gate_peak_bytes),
+        (LimitBinding::UnboundPendingRuling, gate_work_per_batch_unit),
+        (LimitBinding::UnboundPendingRuling, load_work_per_batch_unit),
+    ]
+}
+
+/// Hash exactly the caps carried by `binding`, in the classifier's order.
+fn hash_limit_bindings(hash: &mut Fnv, limits: SpecializedLimits, binding: LimitBinding) {
+    for (field_binding, value) in specialized_limit_bindings(limits) {
+        if field_binding == binding {
+            hash.usize(value);
+        }
+    }
+}
+
+/// The plan digest binds every cap the classifier says is bound -- both
+/// `Semantic` and `Execution` -- in declaration order.
+///
+/// It does NOT bind [`LimitBinding::UnboundPendingRuling`], which is the
+/// recorded defect rather than a design choice; see
+/// [`specialized_limit_bindings`].
 fn hash_specialized_limits(hash: &mut Fnv, limits: SpecializedLimits) {
-    hash.usize(limits.max_synthetic_neighbor_pairs);
-    hash.usize(limits.max_synthetic_neighbor_bytes);
-    hash.usize(limits.max_satisfaction_tests);
-    hash.usize(limits.max_satisfaction_neighbor_pairs);
-    hash.usize(limits.max_satisfaction_neighbor_bytes);
-    hash.usize(limits.max_merge_pairs);
-    hash.usize(limits.max_merge_proposals);
-    hash.usize(limits.max_merge_proposal_bytes);
-    hash.usize(limits.max_merge_descriptor_operations);
-    hash.usize(limits.max_merge_total_proposals);
-    hash.usize(limits.max_merge_iterations);
-    hash.usize(limits.max_merge_commit_bytes);
-    hash.usize(limits.max_gate_variants);
-    hash.usize(limits.max_gate_vector_bytes);
-    hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations_floor);
-    hash.usize(limits.max_gate_window_variants);
-    hash.usize(limits.max_coverage_scratch_bytes);
-    hash.usize(limits.max_coverage_operations);
-    hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations_floor);
-    hash.usize(limits.max_gate_peak_bytes);
+    for (binding, value) in specialized_limit_bindings(limits) {
+        if binding != LimitBinding::UnboundPendingRuling {
+            hash.usize(value);
+        }
+    }
 }
 
 /// The pool is rooted in the complete generic observation plan, including the
@@ -8418,13 +8537,7 @@ fn bound_authority_digest(
     limits: SpecializedLimits,
 ) -> u64 {
     let mut hash = bound_authority_base(generic, regular, config, limits);
-    hash.usize(limits.max_merge_proposal_bytes);
-    hash.usize(limits.max_merge_descriptor_operations);
-    hash.usize(limits.max_coverage_scratch_bytes);
-    hash.usize(limits.max_coverage_operations);
-    hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations_floor);
-    hash.usize(limits.max_gate_peak_bytes);
+    hash_limit_bindings(&mut hash, limits, LimitBinding::Execution);
     hash.finish()
 }
 
@@ -11176,6 +11289,298 @@ mod tests {
         assert_ne!(selected, legacy);
     }
 
+    /// Sentinel caps, one distinct value per field. Written as a STRUCT
+    /// LITERAL on purpose: the compiler refuses a literal that misses a field,
+    /// so a cap added to `SpecializedLimits` cannot reach the digests untested.
+    fn sentinel_limits() -> SpecializedLimits {
+        SpecializedLimits {
+            coverage_route_knn: TEST_KNN_LIMITS,
+            max_synthetic_neighbor_pairs: 1,
+            max_synthetic_neighbor_bytes: 2,
+            max_satisfaction_tests: 3,
+            max_satisfaction_neighbor_pairs: 4,
+            max_satisfaction_neighbor_bytes: 5,
+            max_merge_pairs: 6,
+            max_merge_proposals: 7,
+            max_merge_proposal_bytes: 8,
+            max_merge_descriptor_operations: 9,
+            max_merge_total_proposals: 10,
+            max_merge_iterations: 11,
+            max_merge_commit_bytes: 12,
+            max_gate_variants: 13,
+            max_gate_vector_bytes: 14,
+            max_gate_contact_matrix_bytes: 15,
+            max_gate_operations_floor: 16,
+            max_gate_window_variants: 17,
+            max_coverage_scratch_bytes: 18,
+            max_coverage_operations: 19,
+            max_load_scratch_bytes: 20,
+            max_load_operations_floor: 21,
+            max_gate_peak_bytes: 22,
+            gate_work_per_batch_unit: 23,
+            load_work_per_batch_unit: 24,
+        }
+    }
+
+    /// The classifier must carry every `SpecializedLimits` cap, exactly once.
+    ///
+    /// The sentinels above are distinct, so the multiset of values the
+    /// classifier emits identifies the fields it read. Before this table
+    /// existed, three hand-maintained lists stood in for it and two caps --
+    /// `gate_work_per_batch_unit` and `load_work_per_batch_unit` -- were in
+    /// none of them; this assertion is short 23 and 24 against that code.
+    #[test]
+    fn no_specialized_limit_cap_is_left_out_of_the_digest_table() {
+        let bound = specialized_limit_bindings(sentinel_limits())
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let mut sorted = bound.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (1..=24).collect::<Vec<_>>(),
+            "every cap exactly once, and none invented"
+        );
+        assert_eq!(bound.len(), 24, "no cap listed twice");
+    }
+
+    /// **This test asserts a KNOWN DEFECT, deliberately.**
+    ///
+    /// `gate_work_per_batch_unit` and `load_work_per_batch_unit` are the
+    /// batch-product coefficients that `gate_operation_limit` and
+    /// `load_operation_limit` materialize their caps from, so they decide what
+    /// the engine refuses. Neither is bound by any digest. Two limit sets that
+    /// refuse different plans therefore publish identical evidence.
+    ///
+    /// The fix is one line -- reclassify both rows as `Execution` -- and it is
+    /// held only because it moves a frozen value that is already under an
+    /// unresolved owner ruling (see [`specialized_limit_bindings`]). This
+    /// assertion exists so the defect is visible in the test output rather than
+    /// silently absent, and so that whoever lands the ruling has to come here
+    /// and delete it on purpose.
+    #[test]
+    fn the_batch_work_coefficients_are_unbound_from_every_digest() {
+        let unbound = specialized_limit_bindings(sentinel_limits())
+            .into_iter()
+            .filter(|(binding, _)| *binding == LimitBinding::UnboundPendingRuling)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unbound,
+            vec![23, 24],
+            "exactly gate_work_per_batch_unit and load_work_per_batch_unit are \
+             unbound; if this list changed, the digest contract changed with it",
+        );
+    }
+
+    /// The classifier's rows are in DECLARATION order, which is what keeps the
+    /// semantic digest byte-identical across this change and confines the other
+    /// two digest moves to the two caps that were unbound.
+    ///
+    /// Filtering by class must reproduce the two hand-written lists this
+    /// replaced, field for field and in order. The sentinel values name the
+    /// fields, so this is an exact statement about which caps each digest binds
+    /// and in what sequence -- not a re-freeze of a hash.
+    #[test]
+    fn the_binding_classes_reproduce_the_lists_they_replaced() {
+        let bindings = specialized_limit_bindings(sentinel_limits());
+        let of = |wanted: LimitBinding| {
+            bindings
+                .into_iter()
+                .filter(|(binding, _)| *binding == wanted)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>()
+        };
+        // `bound_authority_base`'s fifteen fields, in its order.
+        assert_eq!(
+            of(LimitBinding::Semantic),
+            vec![1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17],
+        );
+        // `bound_authority_digest`'s seven, in its order.
+        assert_eq!(of(LimitBinding::Execution), vec![8, 9, 18, 19, 20, 21, 22]);
+        // And the plan digest's list is the old twenty-two, in the old order.
+        assert_eq!(
+            bindings
+                .into_iter()
+                .filter(|(binding, _)| *binding != LimitBinding::UnboundPendingRuling)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+            (1..=22).collect::<Vec<_>>(),
+        );
+    }
+
+    /// What the held ruling is choosing between, measured rather than
+    /// described.
+    ///
+    /// The first half is the DEFECT as it stands: change a batch-work
+    /// coefficient -- which changes the operation cap the engine refuses at --
+    /// and every published digest is byte-identical. Evidence that cannot tell
+    /// two authorities apart is not evidence.
+    ///
+    /// The second half is the FIX and its exact cost: binding those two caps
+    /// (classifying them `Execution`) does distinguish them, and moves the plan
+    /// digest. That move is what the owner ruling on the frozen
+    /// `make_toed_slab` fingerprints has to accept, and this test states its
+    /// size and its cause so the ruling is made on arithmetic rather than on a
+    /// description.
+    #[test]
+    fn binding_the_unbound_caps_would_move_the_plan_digest() {
+        let base =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
+        let mut moved = base;
+        moved.gate_work_per_batch_unit += 1;
+        assert_ne!(base, moved, "the fixture must actually differ");
+        // The batch shape must be large enough that the coefficient term beats
+        // the floor -- every corpus model sits AT the floor, where the
+        // coefficient is inert, so a corpus-sized shape would prove nothing
+        // here.
+        let (rows, columns) = (1_000_000, 1_000_000);
+        assert!(
+            base.gate_operation_limit(rows, columns) > base.max_gate_operations_floor,
+            "the probe shape must be past the floor for the coefficient to bind",
+        );
+        assert_ne!(
+            base.gate_operation_limit(rows, columns),
+            moved.gate_operation_limit(rows, columns),
+            "the coefficient must actually change what the engine refuses at",
+        );
+
+        let plan_hash = |limits| {
+            let mut hash = Fnv::new();
+            hash_specialized_limits(&mut hash, limits);
+            hash.finish()
+        };
+        // THE DEFECT: two authorities that refuse differently, same digest.
+        assert_eq!(
+            plan_hash(base),
+            plan_hash(moved),
+            "today the coefficient is unbound, so the digests cannot tell these \
+             two limit sets apart -- this equality IS the defect",
+        );
+
+        // THE FIX, and its cost. Hash the same two limit sets with the
+        // coefficients included, as `Execution` classification would.
+        let bound_hash = |limits| {
+            let mut hash = Fnv::new();
+            for (_, value) in specialized_limit_bindings(limits) {
+                hash.usize(value);
+            }
+            hash.finish()
+        };
+        assert_ne!(
+            bound_hash(base),
+            bound_hash(moved),
+            "binding the coefficients distinguishes them, which is the point",
+        );
+        assert_ne!(
+            plan_hash(base),
+            bound_hash(base),
+            "and binding them moves the plan digest for UNCHANGED production \
+             limits -- this inequality is the cost the owner ruling must accept",
+        );
+    }
+
+    /// `runner::prepare_support_context` builds `regular` with
+    /// `select_contacts_baseline`, so `validate_regular` must replay with the
+    /// SAME selector. It used to replay with the repair-ENABLED
+    /// `crate::select_contacts`, which is a different definition of "the
+    /// regular contact set": whenever the baseline layout leaves one failing
+    /// pre-routing coverage sample the two answers separate, and the honest,
+    /// current value was refused as `StaleRegularContacts`.
+    ///
+    /// Everything here is registered production policy -- the coverage radius,
+    /// the censor, the seat minimum and the repair-attempt bound are all
+    /// `ContactSelectionConfig::current_defaults`. Only the GEOMETRY is chosen:
+    /// `plinth_mesh::make_uncovered_rim_table` is the fixture whose baseline
+    /// layout genuinely leaves a blocking coverage patch, which is exactly the
+    /// condition that separates the two selectors. The first assertion refuses
+    /// to let this test pass vacuously by proving they really do disagree here.
+    /// `runner::prepare_support_context` builds `regular` with
+    /// `select_contacts_baseline`, so `validate_regular` must replay with the
+    /// SAME selector. It used to replay with the repair-ENABLED
+    /// `crate::select_contacts`, which is a different definition of "the
+    /// regular contact set": whenever the baseline layout leaves a failing
+    /// pre-routing coverage sample the two answers separate, and the honest,
+    /// current value was refused as `StaleRegularContacts`.
+    ///
+    /// **The fixture, and what had to be tuned to reach the condition.** Every
+    /// policy value here is `ContactSelectionConfig::current_defaults` EXCEPT
+    /// `coverage_radius_factor`, which is halved. That is not decoration: at
+    /// the registered radius the two selectors agree on every corpus fixture
+    /// (measured -- uncovered rim table, overhang table, toed slab, raking
+    /// blade and dual-cavity pawn all give byte-identical answers), because
+    /// baseline placement already closes pre-routing coverage on all of them.
+    /// Halving the radius is how this test reaches the divergence condition at
+    /// all. So the defect fixed here is LATENT on today's corpus, not observed
+    /// on it -- see the commit message.
+    ///
+    /// The seat counts are pinned so the fixture cannot go stale silently: the
+    /// baseline places 28 contacts and the repair-enabled adapter pushes a
+    /// 29th to close the sample the baseline left open. That single extra
+    /// contact is exactly the divergence, and the first assertion proves it
+    /// exists before anything else is tested.
+    #[test]
+    fn regular_replay_uses_the_selector_that_produced_the_value() {
+        let mesh = plinth_mesh::make_raking_blade().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
+        let perception = perception_config(&delicacy);
+        let candidate = candidate_config();
+        let generic = crate::perception::prepare_generic_contacts(
+            &mesh,
+            &perception,
+            frame(),
+            &layers,
+            &candidate,
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        assert!(!generic.islands().is_empty());
+
+        let mut selection =
+            ContactSelectionConfig::current_defaults(Some(&delicacy), perception.max_grid_bytes)
+                .unwrap();
+        selection.coverage_radius_factor =
+            PositiveFinite::new(selection.coverage_radius_factor.get() * 0.5).unwrap();
+
+        let baseline = crate::select_contacts_baseline(
+            &mesh,
+            generic.candidates(),
+            generic.islands(),
+            &selection,
+        )
+        .expect("baseline selection");
+        let legacy =
+            crate::select_contacts(&mesh, generic.candidates(), generic.islands(), &selection)
+                .expect("the repair adapter closes this fixture rather than exhausting attempts");
+
+        // Anti-vacuity: the two selectors must genuinely disagree here, or
+        // nothing below distinguishes them.
+        assert_eq!(baseline.contacts().len(), 28);
+        assert_eq!(
+            legacy.contacts().len(),
+            29,
+            "the repair-enabled adapter must push exactly the extra contact \
+             that separates it from the baseline"
+        );
+        assert_ne!(legacy, baseline);
+
+        // The value the runner actually hands to `prepare_specialized_contacts`
+        // is accepted. Replaying it through `crate::select_contacts` -- what
+        // this function used to do -- refuses it as stale.
+        assert_eq!(
+            validate_regular(&mesh, &generic, &baseline, &selection),
+            Ok(())
+        );
+        // And the other selector's answer is the stale one, not the live one.
+        assert_eq!(
+            validate_regular(&mesh, &generic, &legacy, &selection),
+            Err(SpecializedError::StaleRegularContacts)
+        );
+    }
+
     #[test]
     #[expect(
         clippy::float_cmp,
@@ -11692,9 +12097,18 @@ mod tests {
         assert_eq!(merged.normal, primary.normal);
     }
 
+    /// **Renamed and re-armed.** This was
+    /// `zero_gate_caps_refuse_without_payload_allocation_or_work`, and the
+    /// "without payload allocation or work" half of that name was carried by
+    /// four `assert_eq!(telemetry.*, 0)` lines over a `GatePreflightTelemetry`
+    /// nothing ever wrote -- 0 against 0, on both the refusal and the accept
+    /// path. The counters are gone (see [`gate_header_preflight`]) and the
+    /// vacuous assertions with them. What replaces them is a control arm: the
+    /// SAME batch shape, under the production caps, must be ACCEPTED -- so a
+    /// preflight that refused regardless of its caps could no longer pass this
+    /// test by way of its two refusal assertions.
     #[test]
-    fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
-        let mut telemetry = GatePreflightTelemetry::default();
+    fn zero_gate_caps_refuse_in_the_header_preflight() {
         let mut operation_limits =
             SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         // Re-pinned 2026-08-06 (FU-8b batch-product caps): the gate operation cap
@@ -11714,15 +12128,12 @@ mod tests {
                 5,
                 6,
                 operation_limits,
-                &mut telemetry,
             ),
             Err(SpecializedError::GateOperationLimit {
                 required: 1,
                 limit: 0,
             })
         );
-        assert_eq!(telemetry.payload_allocations, 0);
-        assert_eq!(telemetry.payload_operations, 0);
 
         let mut peak_limits =
             SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
@@ -11739,15 +12150,32 @@ mod tests {
                 5,
                 6,
                 peak_limits,
-                &mut telemetry,
             ),
             Err(SpecializedError::GatePeakByteLimit {
                 required: expected,
                 limit: 0,
             })
         );
-        assert_eq!(telemetry.payload_allocations, 0);
-        assert_eq!(telemetry.payload_operations, 0);
+
+        // The control arm. Same shape, production caps: this batch header is
+        // ACCEPTED, so both refusals above are attributable to the cap that was
+        // zeroed and not to a preflight that refuses whatever it is handed.
+        assert_eq!(
+            gate_header_preflight(
+                2,
+                1,
+                std::mem::size_of::<MergeProposal>(),
+                3,
+                4,
+                5,
+                6,
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work()
+                ),
+            ),
+            Ok(())
+        );
     }
 
     #[test]

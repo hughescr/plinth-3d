@@ -29,6 +29,19 @@ struct MeasurementCallCounts {
     coverage_route_planner_allocations: usize,
     coverage_route_queries: usize,
     coverage_assessment_traversals: usize,
+    /// Full validations of the named-island sidecar. One snapshot has one
+    /// sidecar, so one controller pass over it is one validation; anything
+    /// above that is the same proof re-run per routed contact.
+    named_island_validations: usize,
+    /// Slice elements the coverage preflight examines while answering its
+    /// per-route-key questions -- how many route entries carry a key, how many
+    /// memberships carry it, how many coverage samples query it.
+    ///
+    /// This counts the *shape* of that work, not its wall clock. The sealed
+    /// per-route rescans it replaced examined `O(M^2 + K(M + S))` elements for
+    /// `M` route entries, `K` distinct route keys and `S` coverage samples;
+    /// one gathered sorted pass examines `O(M + S)`.
+    preflight_route_key_scans: usize,
 }
 
 #[cfg(test)]
@@ -39,6 +52,8 @@ thread_local! {
             coverage_route_planner_allocations: 0,
             coverage_route_queries: 0,
             coverage_assessment_traversals: 0,
+            named_island_validations: 0,
+            preflight_route_key_scans: 0,
         })
     };
 }
@@ -194,23 +209,32 @@ impl SupportPreparationLimits {
     pub fn production() -> Result<Self, SupportPreparationLimitsError> {
         let pitch = PositiveFinite::new(1.0)
             .map_err(|error| SupportPreparationLimitsError::Pitch(error.to_string()))?;
-        let caps = plinth_core::m0_constants()
-            .map_err(|error| {
-                SupportPreparationLimitsError::RegisteredConstantsUnavailable(error.to_string())
-            })?
-            .support_resource_cap_policy();
-        // `diagnostic()` on the floors is the sanctioned Placeholder read: a
+        let constants = plinth_core::m0_constants().map_err(|error| {
+            SupportPreparationLimitsError::RegisteredConstantsUnavailable(error.to_string())
+        })?;
+        let caps = constants.support_resource_cap_policy();
+        // Every cap this function states has exactly one registered owner, and
+        // this is the read of it. Before this change the four scaled caps below
+        // were read here and the remaining twenty-two were restated as literals
+        // whose own registry notes named this very function -- two numeric
+        // owners for one number, free to drift apart silently. They now have
+        // one owner each, and it is not this function.
+        //
+        // `diagnostic()` on a `Placeholder` cap is the sanctioned read: a
         // resource cap admits or refuses, it never contributes to an accepted
         // result, so it is not on the accept path the wrapper guards.
+        let registered = constants.placeholders();
         let knn_max_work_floor = cap_usize(caps.knn_max_work_floor().diagnostic().get())?;
         let knn_max_work_per_face = cap_usize(*caps.knn_max_work_per_face().value())?;
         let grid_bytes_floor = cap_usize(caps.parity_grid_max_bytes_floor().diagnostic().get())?;
         let grid_bytes_per_face = cap_usize(*caps.parity_grid_max_bytes_per_face().value())?;
         let knn = KnnBatchLimits {
-            max_source_points: 20_000_000,
-            max_query_points: 20_000_000,
-            max_neighbors: 1,
-            max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+            max_source_points: registered_cap(registered.support_knn_max_source_points())?,
+            max_query_points: registered_cap(registered.support_knn_max_query_points())?,
+            max_neighbors: registered_cap(registered.support_knn_max_neighbors())?,
+            max_logical_peak_bytes: registered_cap(
+                registered.support_knn_max_logical_peak_bytes(),
+            )?,
             max_work: knn_max_work_floor,
         };
         Ok(Self {
@@ -219,6 +243,10 @@ impl SupportPreparationLimits {
             max_grid_bytes: grid_bytes_floor,
             grid_bytes_per_face,
             knn_max_work_per_face,
+            // The five dyadic candidate-payload numbers below are the one group
+            // in this function with no registry owner to read: no constant in
+            // the M0 publication declares them. They are left stated here, and
+            // that gap is the finding, not this call.
             candidate_config: CandidatePayloadConfig::current(
                 8,
                 1_000_000,
@@ -228,32 +256,53 @@ impl SupportPreparationLimits {
             )
             .map_err(|error| SupportPreparationLimitsError::Candidate(error.to_string()))?,
             perception_limits: GenericPerceptionLimits::production(knn),
-            coverage_samples_max_virtual_cells: 2_000_000,
-            coverage_score_matrix_max_entries: 65_536,
+            coverage_samples_max_virtual_cells: registered_cap(
+                registered.support_preparation_coverage_samples_max_virtual_cells(),
+            )?,
+            coverage_score_matrix_max_entries: registered_cap(
+                registered.support_preparation_coverage_score_matrix_max_entries(),
+            )?,
             specialized_limits: SpecializedLimits::production(
                 knn,
                 SpecializedBatchWork::registered()
                     .map_err(|error| SupportPreparationLimitsError::BatchWork(error.to_string()))?,
             ),
             construction_limits: ContactConstructionLimits::new(
-                1_000_000,
-                10_000_000,
-                4_000_000,
-                512 * 1024 * 1024,
+                registered_cap(registered.support_construction_max_contacts())?,
+                registered_cap(registered.support_construction_max_load_rows())?,
+                registered_cap(registered.support_construction_max_work_items())?,
+                registered_cap(registered.support_construction_max_scratch_bytes())?,
             )
             .ok_or(SupportPreparationLimitsError::Construction)?,
             brace_penetration_limits: PenetrationBatchLimits {
-                max_rows: 100_000,
-                max_total_work: 1_000_000_000,
-                max_total_hits: 1_000_000_000,
-                max_total_samples: 10_000_000_000,
-                max_total_intervals: 1_000_000_000,
-                max_scratch_bytes: 100_000_000_000,
+                max_rows: registered_cap(registered.support_brace_penetration_max_rows())?,
+                max_total_work: registered_cap(
+                    registered.support_brace_penetration_max_total_work(),
+                )?,
+                max_total_hits: registered_cap(
+                    registered.support_brace_penetration_max_total_hits(),
+                )?,
+                max_total_samples: registered_cap(
+                    registered.support_brace_penetration_max_total_samples(),
+                )?,
+                max_total_intervals: registered_cap(
+                    registered.support_brace_penetration_max_total_intervals(),
+                )?,
+                max_scratch_bytes: registered_cap(
+                    registered.support_brace_penetration_max_scratch_bytes(),
+                )?,
             },
-            raft_limits: RaftLimits::try_new(100_000, 100_000, 200_000, 128 * 1024 * 1024)
-                .ok_or(SupportPreparationLimitsError::Raft)?,
-            max_primitives: 200_000,
-            max_primitive_bytes: 128 * 1024 * 1024,
+            raft_limits: RaftLimits::try_new(
+                registered_cap(registered.support_raft_max_candidates())?,
+                registered_cap(registered.support_raft_max_roots())?,
+                registered_cap(registered.support_raft_max_primitives())?,
+                registered_cap(registered.support_raft_max_bytes())?,
+            )
+            .ok_or(SupportPreparationLimitsError::Raft)?,
+            max_primitives: registered_cap(registered.support_preparation_max_primitives())?,
+            max_primitive_bytes: registered_cap(
+                registered.support_preparation_max_primitive_bytes(),
+            )?,
         })
     }
 
@@ -418,6 +467,20 @@ impl SupportPreparationInput<'_> {
 /// Narrows one registered `u64` cap constant to this platform's `usize`.
 fn cap_usize(value: u64) -> Result<usize, SupportPreparationLimitsError> {
     usize::try_from(value).map_err(|_| SupportPreparationLimitsError::CapUnrepresentable { value })
+}
+
+/// Reads one registered non-zero resource cap out of the M0 publication.
+///
+/// `diagnostic()` is the sanctioned `Placeholder` read for this family: a
+/// resource cap admits or refuses a batch and never contributes a number to an
+/// accepted result, so it is not on the accept path the wrapper guards. The
+/// registry declares each of these as `NonZeroU64`, so the zero a
+/// `ContactConstructionLimits::new` or `RaftLimits::try_new` would reject
+/// cannot arrive from here.
+fn registered_cap(
+    cap: &plinth_core::Placeholder<std::num::NonZeroU64>,
+) -> Result<usize, SupportPreparationLimitsError> {
+    cap_usize(cap.diagnostic().get())
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -3370,8 +3433,37 @@ impl<'a> SupportVerificationSnapshot<'a> {
         let mut route_plan_count = 0usize;
         let mut max_knn_peak = 0usize;
         let mut max_query_count = 0usize;
-        for (membership_index, membership) in self.routed_route_memberships.iter().enumerate() {
-            for (route_index, route) in membership.logical_routes.iter().enumerate() {
+
+        // Batch-first (D-37).  Refuse the route-entry total against its own
+        // ceiling before reserving any scratch for it, so the cap still
+        // refuses ahead of the allocation exactly as the per-route counter
+        // below does.
+        let total_routes = self
+            .routed_route_memberships
+            .iter()
+            .try_fold(0usize, |total, membership| {
+                total.checked_add(membership.logical_routes.len())
+            })
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "route memberships",
+            })?;
+        if total_routes > limits.max_route_memberships() {
+            return Err(CoverageMeasurementError::ResourceLimit {
+                resource: "route memberships",
+            });
+        }
+        // One sorted column per input set, gathered once.  Every per-key
+        // question below is then a pair of binary searches into a column,
+        // where it used to be a fresh scan of every membership or every
+        // coverage sample, repeated for each distinct key, on top of an
+        // `O(M²)` sealed-slice prefix scan for the first-occurrence test.
+        let route_key_rows =
+            sorted_routed_route_key_rows(&self.routed_route_memberships, total_routes)?;
+        let sample_keys = sorted_sample_route_keys(self.coverage_samples)?;
+        let mut seen_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
+
+        for membership in &self.routed_route_memberships {
+            for route in &membership.logical_routes {
                 memberships = memberships.checked_add(1).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "route memberships",
@@ -3383,47 +3475,32 @@ impl<'a> SupportVerificationSnapshot<'a> {
                     });
                 }
 
-                // Process a route key only once.  Canonical per-contact routes do
-                // not make transcript-wide equal keys adjacent, hence the bounded
-                // sealed-slice scan instead of retained deduplication state.
-                if self
-                    .routed_route_memberships
-                    .iter()
-                    .enumerate()
-                    .take(membership_index + 1)
-                    .any(|(prior_membership_index, prior_membership)| {
-                        prior_membership.logical_routes.iter().enumerate().any(
-                            |(prior_route_index, prior)| {
-                                (prior_membership_index < membership_index
-                                    || prior_route_index < route_index)
-                                    && prior.island_id == route.island_id
-                                    && prior.component_id == route.component_id
-                            },
-                        )
-                    })
-                {
+                // Process a route key only once, on its first occurrence in
+                // this same iteration order.  Canonical per-contact routes do
+                // not make transcript-wide equal keys adjacent, so the order
+                // is the transcript's and the retained set is what makes one
+                // pass enough.
+                let key = (route.island_id, route.component_id);
+                if !seen_keys.insert(key) {
                     continue;
                 }
-                let route_memberships = self
-                    .routed_route_memberships
-                    .iter()
-                    .flat_map(|membership| membership.logical_routes.iter())
-                    .filter(|candidate| {
-                        candidate.island_id == route.island_id
-                            && candidate.component_id == route.component_id
-                    })
-                    .count();
+                let key_rows =
+                    &route_key_rows[sorted_key_range(&route_key_rows, &key, |row| (row.0, row.1))];
+                #[cfg(test)]
+                record_measurement_call(|counts| {
+                    counts.preflight_route_key_scans += key_rows.len();
+                });
+                // The run's length is every route entry carrying this key; the
+                // number of distinct membership indices inside it is every
+                // membership carrying it, and the rows are sorted by that
+                // index within the run.
+                let route_memberships = key_rows.len();
                 sequential_membership_peak = sequential_membership_peak.max(route_memberships);
-                let source_count = self
-                    .routed_route_memberships
-                    .iter()
-                    .filter(|membership| {
-                        membership.logical_routes.iter().any(|candidate| {
-                            candidate.island_id == route.island_id
-                                && candidate.component_id == route.component_id
-                        })
-                    })
-                    .count();
+                let source_count = usize::from(!key_rows.is_empty())
+                    + key_rows
+                        .windows(2)
+                        .filter(|pair| pair[0].2 != pair[1].2)
+                        .count();
                 indexed_points = indexed_points.checked_add(source_count).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "indexed points",
@@ -3439,14 +3516,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                         operation: "route keys",
                     },
                 )?;
-                let queries = self
-                    .coverage_samples
-                    .iter()
-                    .filter(|sample| {
-                        sample.island_id == route.island_id
-                            && sample.component_id == route.component_id
-                    })
-                    .count();
+                let queries = sorted_key_range(&sample_keys, &key, |row| *row).len();
                 let work = source_count.checked_mul(queries).ok_or(
                     CoverageMeasurementError::ArithmeticOverflow {
                         operation: "distance work",
@@ -3497,10 +3567,11 @@ impl<'a> SupportVerificationSnapshot<'a> {
         // linear `Vec::contains` over that island's faces.  On a flagship model
         // (~4e5 samples) that is ~1e10-1e11 comparisons on every production
         // emission, because the pre-write gate now runs this preflight per
-        // artifact.  Both are now one gathered pass: a single sort/dedup for
-        // the distinct route keys, and a single sorted island index answering
-        // every sample by two binary searches.
-        let query_route_count = distinct_sample_route_keys(self.coverage_samples)?;
+        // artifact.  Both are now one gathered pass: the distinct route keys
+        // are run starts in the sample key column already sorted above, and a
+        // single sorted island index answers every sample by two binary
+        // searches.
+        let query_route_count = distinct_sorted_keys(&sample_keys);
         let island_row_count = self
             .coverage_samples
             .iter()
@@ -3920,8 +3991,17 @@ impl<'a> SupportVerificationSnapshot<'a> {
             || plinth_mesh::validate_face_topology(self.topology).is_err()
             || coverage_samples_digest(self.coverage_samples) != self.coverage_digest
             || named_islands_digest(self.named_islands) != self.named_islands_digest
-            || !validate_named_islands(self.named_islands, self.topology)
-            || self.routed_contacts.len() != self.routed_route_memberships.len()
+        {
+            return Err(SupportVerificationError::SnapshotDigestMismatch);
+        }
+        // The sidecar is proved well-formed and indexed exactly once per
+        // snapshot, then threaded through every membership check below. It was
+        // re-proved per routed contact inside `routed_logical_routes`, and each
+        // of those re-proofs was followed by a linear membership walk of the
+        // same sidecar.
+        let island_index = IslandFaceIndex::build_named(self.named_islands, self.topology)
+            .map_err(|_| SupportVerificationError::SnapshotDigestMismatch)?;
+        if self.routed_contacts.len() != self.routed_route_memberships.len()
             || self.routed_contacts.iter().any(|contact| {
                 !self
                     .routed_route_memberships
@@ -3930,7 +4010,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             })
             || !validate_routed_memberships(
                 &self.routed_route_memberships,
-                self.named_islands,
+                &island_index,
                 self.topology,
             )
             || routed_projection_digest(&self.routed_route_memberships)
@@ -6362,6 +6442,10 @@ impl<'a> LoweredSupportRun<'a> {
         let mut routed_contacts = Vec::new();
         let mut routed_route_memberships = Vec::new();
         let mut routed_ids = BTreeSet::new();
+        // One proof and one index for the whole projection, not one per routed
+        // contact: the sidecar is the same slice for every row below.
+        let island_index = IslandFaceIndex::build_named(plan.islands(), &context.topology)
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
         for row in transcript.rows() {
             if row.kind() != FinalizedDispositionKind::Routed {
                 continue;
@@ -6385,7 +6469,7 @@ impl<'a> LoweredSupportRun<'a> {
             {
                 return Err(SupportVerificationError::AuthorityMismatch.into());
             }
-            let logical_routes = routed_logical_routes(contact, plan.islands(), &context.topology)
+            let logical_routes = routed_logical_routes(contact, &island_index, &context.topology)
                 .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
             let evidence = RoutedPhysicalContactEvidence { contact };
             routed_contacts.push(evidence);
@@ -7597,16 +7681,20 @@ fn named_islands_digest(islands: &[SupportIsland]) -> u64 {
     hash.finish()
 }
 
-/// The number of distinct `(island_id, component_id)` route keys the coverage
-/// samples query, in one gathered sort/dedup pass.
+/// The `(island_id, component_id)` route key of every coverage sample, sorted
+/// but not deduplicated, in one gathered pass.
+///
+/// Sorted, it answers both questions the preflight asks of the sample set --
+/// how many distinct keys the samples query, and how many samples query one
+/// given key -- without a second pass over the samples for either.
 ///
 /// Batch-first (D-37): the per-sample rescan of the sample prefix this
 /// replaces was `O(samples²)`, which the pre-write gate turned into a
 /// per-emission cost. The scratch is one `(u32, u32)` per sample and is
 /// released before any measurement allocation is charged.
-fn distinct_sample_route_keys(
+fn sorted_sample_route_keys(
     samples: &[CoverageSample],
-) -> Result<usize, CoverageMeasurementError> {
+) -> Result<Vec<(u32, u32)>, CoverageMeasurementError> {
     let mut keys: Vec<(u32, u32)> = Vec::new();
     keys.try_reserve_exact(samples.len())
         .map_err(|_| CoverageMeasurementError::ResourceLimit {
@@ -7618,8 +7706,66 @@ fn distinct_sample_route_keys(
             .map(|sample| (sample.island_id, sample.component_id)),
     );
     keys.sort_unstable();
-    keys.dedup();
-    Ok(keys.len())
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.preflight_route_key_scans += keys.len());
+    Ok(keys)
+}
+
+/// The number of distinct route keys in an already-sorted key column.
+///
+/// Counting run starts is one pass and no allocation; `dedup` would be a
+/// second write over the same column to learn the same number.
+fn distinct_sorted_keys<T: PartialEq>(sorted: &[T]) -> usize {
+    usize::from(!sorted.is_empty()) + sorted.windows(2).filter(|pair| pair[0] != pair[1]).count()
+}
+
+/// The half-open index range of an already-sorted key column that carries
+/// `key`, found by two binary searches rather than a scan.
+fn sorted_key_range<T, K: Ord>(
+    sorted: &[T],
+    key: &K,
+    project: impl Fn(&T) -> K,
+) -> std::ops::Range<usize> {
+    let start = sorted.partition_point(|row| project(row) < *key);
+    let end = sorted.partition_point(|row| project(row) <= *key);
+    start..end
+}
+
+/// One `(island_id, component_id, membership_index)` row per logical route,
+/// sorted.
+///
+/// Batch-first (D-37). Sorted, one run of this column answers the two
+/// per-key questions the preflight used to answer by rescanning every
+/// membership: the run's length is the number of route entries carrying the
+/// key, and the number of distinct membership indices inside the run is the
+/// number of memberships carrying it. Both were `O(M)` scans repeated for
+/// every one of the `K` distinct keys, on top of an `O(M²)` sealed-slice
+/// prefix scan that decided which routes were first occurrences.
+///
+/// The caller has already refused a route-entry total above its own
+/// `max_route_memberships` ceiling, so this scratch is bounded by an admitted
+/// cap before it is reserved.
+fn sorted_routed_route_key_rows(
+    memberships: &[RoutedRouteMembership<'_>],
+    total_routes: usize,
+) -> Result<Vec<(u32, u32, usize)>, CoverageMeasurementError> {
+    let mut rows: Vec<(u32, u32, usize)> = Vec::new();
+    rows.try_reserve_exact(total_routes)
+        .map_err(|_| CoverageMeasurementError::ResourceLimit {
+            resource: "routed projection key rows",
+        })?;
+    for (membership_index, membership) in memberships.iter().enumerate() {
+        rows.extend(
+            membership
+                .logical_routes
+                .iter()
+                .map(|route| (route.island_id, route.component_id, membership_index)),
+        );
+    }
+    rows.sort_unstable();
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.preflight_route_key_scans += rows.len());
+    Ok(rows)
 }
 
 /// One sorted island-id → ascending-face-ids membership index over the named
@@ -7665,6 +7811,32 @@ impl<'a> IslandFaceIndex<'a> {
         Ok(Self { islands: rows })
     }
 
+    /// Validates the named-island sidecar against the topology **once** and
+    /// indexes it, producing the value every later membership question is
+    /// asked of.
+    ///
+    /// The sidecar is one per snapshot and does not change while a snapshot is
+    /// being checked, so proving it well-formed is a once-per-snapshot job.
+    /// Before this constructor existed, `routed_logical_routes` re-proved it
+    /// per routed contact and then answered membership with a linear island
+    /// walk ending in a linear `Vec::contains`, so one `validate_integrity`
+    /// over `N` routed contacts walked the whole sidecar `2N + 1` times.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupportVerificationError::AuthorityMismatch`] if the sidecar
+    /// is not a valid named-island set for this topology, or if it does not
+    /// satisfy the two invariants the binary searches rest on.
+    fn build_named(
+        islands: &'a [SupportIsland],
+        topology: &FaceTopology,
+    ) -> Result<Self, SupportVerificationError> {
+        if !validate_named_islands(islands, topology) {
+            return Err(SupportVerificationError::AuthorityMismatch);
+        }
+        Self::build(islands).map_err(|_| SupportVerificationError::AuthorityMismatch)
+    }
+
     fn contains(&self, island_id: u32, face_id: u32) -> bool {
         self.islands
             .binary_search_by_key(&island_id, |(id, _)| *id)
@@ -7673,6 +7845,8 @@ impl<'a> IslandFaceIndex<'a> {
 }
 
 fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) -> bool {
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.named_island_validations += 1);
     let face_count = topology.component_ids().len();
     let mut ids = BTreeSet::new();
     islands.iter().all(|island| {
@@ -7686,14 +7860,18 @@ fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) ->
     })
 }
 
+/// The logical routes one routed contact projects onto, checked against the
+/// already-validated named-island index.
+///
+/// `islands` carries the proof that the sidecar is a well-formed named-island
+/// set for `topology` ([`IslandFaceIndex::build_named`]), so this function
+/// neither re-proves it nor walks it: each route's membership is two binary
+/// searches.
 fn routed_logical_routes(
     contact: &crate::specialized::SpecializedPhysicalContact,
-    islands: &[SupportIsland],
+    islands: &IslandFaceIndex<'_>,
     topology: &FaceTopology,
 ) -> Result<Vec<RoutedLogicalRoute>, SupportVerificationError> {
-    if !validate_named_islands(islands, topology) {
-        return Err(SupportVerificationError::AuthorityMismatch);
-    }
     let mut routes = BTreeSet::new();
     for route in contact.regular_routes() {
         routes.insert(RoutedLogicalRoute {
@@ -7731,10 +7909,7 @@ fn routed_logical_routes(
     let routes = routes.into_iter().collect::<Vec<_>>();
     if routes.iter().any(|route| {
         topology.component_ids().get(route.face_id as usize) != Some(&route.component_id)
-            || !islands.iter().any(|island| {
-                island.id == route.island_id
-                    && island.face_ids.binary_search(&route.face_id).is_ok()
-            })
+            || !islands.contains(route.island_id, route.face_id)
     }) {
         return Err(SupportVerificationError::AuthorityMismatch);
     }
@@ -7743,7 +7918,7 @@ fn routed_logical_routes(
 
 fn validate_routed_memberships(
     memberships: &[RoutedRouteMembership<'_>],
-    islands: &[SupportIsland],
+    islands: &IslandFaceIndex<'_>,
     topology: &FaceTopology,
 ) -> bool {
     let mut contact_ids = BTreeSet::new();
@@ -8041,7 +8216,7 @@ mod tests {
         // `ISLANDS` and `COMPONENTS` are coprime, so the index walks every
         // pair: the distinct route keys are the whole product.
         assert_eq!(
-            distinct_sample_route_keys(&samples).expect("sample route keys"),
+            distinct_sorted_keys(&sorted_sample_route_keys(&samples).expect("sample route keys")),
             (ISLANDS * COMPONENTS) as usize,
         );
 
@@ -10351,7 +10526,8 @@ mod tests {
             );
             assert!(validate_routed_memberships(
                 &snapshot.routed_route_memberships,
-                snapshot.named_islands,
+                &IslandFaceIndex::build_named(snapshot.named_islands, snapshot.topology)
+                    .expect("the fixture snapshot's named-island sidecar is well-formed"),
                 snapshot.topology,
             ));
             let expected_members = lowered
@@ -10754,6 +10930,115 @@ mod tests {
         });
     }
 
+    /// One snapshot has one named-island sidecar, so one integrity pass proves
+    /// it well-formed exactly once.
+    ///
+    /// The defect this pins: `routed_logical_routes` re-proved the sidecar for
+    /// every routed contact and then answered each route's membership with a
+    /// linear island walk ending in a linear `Vec::contains`, so a single
+    /// `validate_integrity` over `N` routed contacts walked the whole sidecar
+    /// `2N + 1` times -- and the pre-write coverage gate runs it on every
+    /// production emission. Reverting the fix puts the count back to
+    /// `1 + N` validations here, which this equality refuses.
+    #[test]
+    fn snapshot_integrity_proves_the_island_sidecar_exactly_once() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            assert!(
+                snapshot.routed_route_memberships.len() > 1,
+                "the fixture must route more than one contact for this count to bite",
+            );
+            reset_measurement_call_counts();
+            snapshot
+                .validate_integrity()
+                .expect("the fixture snapshot is intact");
+            assert_eq!(
+                measurement_call_counts().named_island_validations,
+                1,
+                "the sidecar is proved once per snapshot, not once per routed contact",
+            );
+        });
+    }
+
+    /// The coverage preflight's per-route-key work stays linear in its own
+    /// inputs.
+    ///
+    /// The defect this pins is asymptotic, so the assertion is a bound rather
+    /// than a pinned number. For `M` route entries, `K` distinct route keys
+    /// and `S` coverage samples, the preflight used to run an `O(M^2)`
+    /// sealed-slice prefix scan to decide first occurrences, then, per
+    /// distinct key, a fresh scan of every membership *twice* and of every
+    /// coverage sample once -- `O(M^2 + K(M + S))`, on every production
+    /// emission, because the pre-write gate runs this preflight per artifact.
+    /// One sorted column per input set answers all of it in `O(M + S)` element
+    /// examinations plus binary searches.
+    ///
+    /// The bound below is deliberately generous -- four times the input size --
+    /// so it fails only on a return to superlinear scanning, not on an honest
+    /// change of constant factor.
+    #[test]
+    fn the_coverage_preflight_key_work_stays_linear_in_its_inputs() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let route_entries = snapshot
+                .routed_route_memberships
+                .iter()
+                .map(|membership| membership.logical_routes.len())
+                .sum::<usize>();
+            let samples = snapshot.coverage_samples.len();
+            assert!(
+                route_entries > 1 && samples > 1,
+                "the fixture must carry routes and samples for this bound to bite",
+            );
+            let unlimited = CoverageMeasurementLimits::new(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            )
+            .expect("nonzero limits");
+            let island_index =
+                IslandFaceIndex::build(snapshot.named_islands).expect("well-formed fixture");
+            reset_measurement_call_counts();
+            snapshot
+                .measurement_preflight(
+                    unlimited,
+                    KnnBatchLimits {
+                        max_source_points: usize::MAX,
+                        max_query_points: usize::MAX,
+                        max_neighbors: 1,
+                        max_logical_peak_bytes: usize::MAX,
+                        max_work: usize::MAX,
+                    },
+                    &island_index,
+                )
+                .expect("fixture preflight");
+            let scans = measurement_call_counts().preflight_route_key_scans;
+            let bound = 4 * (route_entries + samples);
+            assert!(
+                scans <= bound,
+                "the preflight examined {scans} elements for {route_entries} route entries \
+                 and {samples} coverage samples; the linear bound is {bound}",
+            );
+        });
+    }
+
     #[test]
     fn coverage_every_cap_preflights_before_all_measurement_allocations() {
         with_braced_table(|braced| {
@@ -10899,7 +11184,29 @@ mod tests {
                     ),
                     Err(CoverageMeasurementError::ResourceLimit { resource })
                 );
-                assert_eq!(measurement_call_counts(), MeasurementCallCounts::default());
+                // This test is about MEASUREMENT work: no cap may be reached
+                // after the measurement has already reserved or queried
+                // anything. It names those four counters rather than comparing
+                // the whole struct, so that adding a counter for a different
+                // kind of quantity cannot silently widen what it claims.
+                let counts = measurement_call_counts();
+                assert_eq!(
+                    (
+                        counts.normalized_route_projection_reserves,
+                        counts.coverage_route_planner_allocations,
+                        counts.coverage_route_queries,
+                        counts.coverage_assessment_traversals,
+                    ),
+                    (0, 0, 0, 0),
+                    "the capped request must refuse before any measurement work",
+                );
+                // The snapshot's own integrity proof is NOT measurement work:
+                // `measure_coverage` runs it before it looks at a single cap,
+                // and it costs one pass over the named-island sidecar. Pinned
+                // at exactly one here for the same reason
+                // `snapshot_integrity_proves_the_island_sidecar_exactly_once`
+                // pins it: it used to run once per routed contact as well.
+                assert_eq!(counts.named_island_validations, 1);
             }
         });
     }
@@ -11444,6 +11751,103 @@ mod tests {
             )
         });
         assert!(caps.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    /// Every production support resource cap that the M0 registry owns is
+    /// **read** from the registry, never restated here.
+    ///
+    /// The defect this pins is two owners for one number. Before the fix,
+    /// `production()` read four caps from `SupportResourceCapPolicy` and wrote
+    /// the other twenty-two as literals -- literals whose own registry notes
+    /// name `SupportPreparationLimits::production` as the site they describe
+    /// (`SUPPORT_RAFT_MAX_BYTES`, `SUPPORT_CONSTRUCTION_MAX_CONTACTS`, the six
+    /// `SUPPORT_BRACE_PENETRATION_*`, and the rest). Nothing held the two
+    /// copies together, and each of these caps can end a run as a refusal.
+    ///
+    /// This test compares the shipped authority field-for-field against the
+    /// registry, so a literal that drifts from its registered owner -- in
+    /// either direction -- is a failure rather than a silent divergence.
+    #[test]
+    fn every_registered_production_resource_cap_is_read_from_the_registry() {
+        let limits = SupportPreparationLimits::production().expect("production limits");
+        let constants = plinth_core::m0_constants().expect("registered M0 constants");
+        let registered = constants.placeholders();
+        let cap = |value: &plinth_core::Placeholder<std::num::NonZeroU64>| {
+            usize::try_from(value.diagnostic().get()).expect("a registered cap fits usize")
+        };
+
+        // The kNN batch shape. `max_work` is the registered floor of the
+        // measured per-face rule and is asserted through the scaled-cap
+        // policy, not here.
+        let knn = limits.perception_limits.minima_knn;
+        assert_eq!(
+            (
+                knn.max_source_points,
+                knn.max_query_points,
+                knn.max_neighbors,
+                knn.max_logical_peak_bytes,
+            ),
+            (
+                cap(registered.support_knn_max_source_points()),
+                cap(registered.support_knn_max_query_points()),
+                cap(registered.support_knn_max_neighbors()),
+                cap(registered.support_knn_max_logical_peak_bytes()),
+            ),
+            "the production kNN batch shape is the registered one",
+        );
+
+        assert_eq!(
+            (
+                limits.coverage_samples_max_virtual_cells,
+                limits.coverage_score_matrix_max_entries,
+                limits.max_primitives,
+                limits.max_primitive_bytes,
+            ),
+            (
+                cap(registered.support_preparation_coverage_samples_max_virtual_cells()),
+                cap(registered.support_preparation_coverage_score_matrix_max_entries()),
+                cap(registered.support_preparation_max_primitives()),
+                cap(registered.support_preparation_max_primitive_bytes()),
+            ),
+            "the coverage-sample and emitted-primitive caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.construction_limits,
+            ContactConstructionLimits::new(
+                cap(registered.support_construction_max_contacts()),
+                cap(registered.support_construction_max_load_rows()),
+                cap(registered.support_construction_max_work_items()),
+                cap(registered.support_construction_max_scratch_bytes()),
+            )
+            .expect("registered construction caps are nonzero"),
+            "the initial-contact construction caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.brace_penetration_limits,
+            PenetrationBatchLimits {
+                max_rows: cap(registered.support_brace_penetration_max_rows()),
+                max_total_work: cap(registered.support_brace_penetration_max_total_work()),
+                max_total_hits: cap(registered.support_brace_penetration_max_total_hits()),
+                max_total_samples: cap(registered.support_brace_penetration_max_total_samples()),
+                max_total_intervals: cap(registered.support_brace_penetration_max_total_intervals()),
+                max_scratch_bytes: cap(registered.support_brace_penetration_max_scratch_bytes()),
+            },
+            "the brace penetration-batch caps are the registered ones",
+        );
+
+        assert_eq!(
+            limits.raft_limits,
+            RaftLimits::try_new(
+                cap(registered.support_raft_max_candidates()),
+                cap(registered.support_raft_max_roots()),
+                cap(registered.support_raft_max_primitives()),
+                cap(registered.support_raft_max_bytes()),
+            )
+            .expect("registered raft caps are nonzero"),
+            "the raft-plate caps are the registered ones",
+        );
     }
 
     #[test]

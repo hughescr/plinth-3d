@@ -1,11 +1,30 @@
 //! The coverage-closure controller: FU-56.
 //!
-//! Production support planning used to return from `select_contacts_baseline`
-//! one line before the legacy pre-routing repair loop
-//! (`select_contacts_with_mode`, `lib.rs`), so `COVERAGE_REPAIR_MAX_ATTEMPTS`
-//! had no production reader and the immutable [`crate::specialized::RepairPool`]
-//! — built, lineage-validated, contact-validated and hashed — sat unused. This
-//! module is the controller the pool was built for.
+//! Production support planning returns from `select_contacts_baseline` one
+//! line before the legacy pre-routing repair loop (`select_contacts_with_mode`
+//! with `legacy_pre_routing_repair = true`, reached through the `lib.rs`
+//! `select_contacts` adapter), and the immutable
+//! [`crate::specialized::RepairPool`] — built, lineage-validated,
+//! contact-validated and hashed — used to sit unused behind it. This module is
+//! the controller the pool was built for, and
+//! [`crate::runner::run_support`]'s closure loop is the one production reader
+//! of `COVERAGE_REPAIR_MAX_ATTEMPTS`: it bounds COMMITTED closure steps over
+//! ROUTED contacts.
+//!
+//! **Corrected. The paragraph above used to end "so
+//! `COVERAGE_REPAIR_MAX_ATTEMPTS` had no production reader", and that sentence
+//! was false in a way that hid a live refusal.** The legacy pre-routing loop
+//! did have a production reader: `specialized::validate_regular` replayed the
+//! caller's regular-contact set through `crate::select_contacts` — the
+//! repair-ENABLED adapter — while the runner had built that same set with
+//! `select_contacts_baseline`. Two definitions of "the regular contact set"
+//! were being compared, so on any model whose baseline layout leaves one
+//! failing coverage sample the replay diverged and the honest value was refused
+//! as `SpecializedError::StaleRegularContacts` — a stale-input error raised on
+//! a pre-routing coverage verdict this design deliberately does not use.
+//! `validate_regular` now replays through `select_contacts_baseline`, the
+//! selector that produced the value. Do not restate the "no production reader"
+//! claim: state which selector each path calls.
 //!
 //! **What closes, and what never moves.** Closure is achieved ONLY by adding
 //! immutable repair-pool contacts to the plan, never by relaxing a gate: the
