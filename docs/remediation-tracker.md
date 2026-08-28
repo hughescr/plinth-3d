@@ -2,6 +2,8 @@
 
 This is the status of every one of the 189 findings extracted from the 2026-08-26 plinth-3d code review (the review verified 207, 203 survived verification, and systematic extraction yields these 189 deduplicated rows). Each row carries one status, graded on **2026-08-27** against the tree at `develop` and the 34 commits in the range `041ba6d..develop`.
 
+The first grading pass lost its adversarial lane and three of its twelve grading lanes to an external quota limit, which left the rows claimed closed unchallenged and 45 rows with a single grader. Both gaps were filled on **2026-08-27**: three lanes attacked all 41 `FIXED` rows and three more re-graded the 45 single-graded rows from the current tree, without reading the existing status first. **Three gradings changed, all in the same direction — `FIXED` to `OPEN`** (T1.4, T3.5-35, T3.8-9), each a commit that closed the anchored line while a sibling site or the untested half of the same finding survived. Every one is recorded under *Partially addressed, and graded OPEN anyway*. The re-graded 45 came back unchanged, 45 for 45. So the counts below are 3 rows less optimistic than the first pass reported, and no row moved the other way.
+
 Rows are organized by the remediation plan's phases (0-7) plus the standing backlog. Three rows are pointers rather than findings and carry `n/a`.
 
 **File:Line** is current as of 2026-08-27 for rows that are still OPEN. For closed rows it is left at the `041ba6d` value the extraction recorded, and has drifted.
@@ -21,30 +23,33 @@ Rows are organized by the remediation plan's phases (0-7) plus the standing back
 
 | Status | Rows |
 |---|---|
-| OPEN | 124 |
-| FIXED | 41 |
+| OPEN | 127 |
+| FIXED | 38 |
 | SUPERSEDED | 12 |
 | DUPLICATE | 7 |
 | DEFERRED | 5 |
 | UNCERTAIN | 0 |
 | **Total** | **189** |
 
-The seven duplicates are T3.8-1 (of SL-0.3), T3.6-13 (of T3.6-16), T3.10-16 (of T1.4), T3.11-8 (of T3.11-1), T3.12-8 (of T3.5-25), T3.12-10 (of T3.2-18) and T3.12-11 (of T3.2-19). Counting distinct findings rather than rows, the backlog is 124 open out of 182.
+The seven duplicates are T3.8-1 (of SL-0.3), T3.6-13 (of T3.6-16), T3.10-16 (of T1.4), T3.11-8 (of T3.11-1), T3.12-8 (of T3.5-25), T3.12-10 (of T3.2-18) and T3.12-11 (of T3.2-19). Counting distinct findings rather than rows, the backlog is 127 open out of 182.
 
 ### UNCERTAIN rows
 
-There are none. Every row's claim turned out to be concrete enough to check by reading the named symbol in the current tree and the 34 commit messages, so no row needed the status. The cases where judgement, rather than evidence, decided the answer are listed next rather than hidden inside a status word.
+There are none. Every row's claim turned out to be concrete enough to check by reading the named symbol in the current tree and the 34 commit messages, so no row needed the status. The 2026-08-27 re-check of the 41 `FIXED` rows and the 45 single-graded rows added none either: all 86 were settled by reading the current source, and the three rows it moved went to a definite `OPEN`, not to `UNCERTAIN`. The cases where judgement, rather than evidence, decided the answer are listed next rather than hidden inside a status word.
 
 ### Partially addressed, and graded OPEN anyway
 
-Six rows had part of their claim closed by a commit while the defect the row exists to stop is still in the tree. They are OPEN, because a row is not closed until its own claim stops holding — but the partial credit is real and is recorded here so it is not lost.
+Nine rows had part of their claim closed by a commit while the defect the row exists to stop is still in the tree. They are OPEN, because a row is not closed until its own claim stops holding — but the partial credit is real and is recorded here so it is not lost. The last three arrived on 2026-08-27, when the re-check of the FIXED rows moved them out of FIXED.
 
 | Row | What landed | What still holds |
 |---|---|---|
 | SL-11 | `NEAR_WALL_SKIP` retired and documented (`92a1be1`); `cone_thickness` now decides by normal orientation. | `ZDEDUP = 5e-3` still decides parity crossing-cluster dedup at `consts.rs:22`, still citing a `geometry_exact.py` that exists nowhere in the repo. |
+| T1.4 | `pub mod vec3` and `pub mod par` are public (`dc2e0d0`), so the barrier the row names is gone. | Nothing outside `geom_kernel` imports either module; the only mention anywhere in the workspace is a prose comment at `plinth-layers/src/lib.rs:286`. Every private copy survives — `sub`/`scale`/`dot`/`norm` again at `cco.rs:5808`, `anchor.rs:1997`, `brace.rs:3125`, `joints.rs:1563` and `rewire.rs:1422`, and more of the same set at `delicacy_eval.rs:401`, `drilling.rs:1928`, `drains.rs:2089`, `plinth-emit/src/lib.rs:1013` and `triage.rs:1226`. That duplication is the whole of what T3.10-16 reports, and T3.10-16 is a DUPLICATE of this row, so closing this row would drop the finding out of the backlog entirely. `dc2e0d0` says as much itself: "Contents are untouched; later stages delete the duplicates." No later commit in `041ba6d..develop` deletes them. |
 | T3.3-11 | The typed `SegmentClearance` / `UnmeasuredSegment` API landed (`2333009`) and the one caller the review named now refuses an unmeasured row via `clears_or(false)` (`242587e`). | The float shim still returns `INFINITY` in band, and `242587e` states twelve sibling call sites (brace.rs ×5, contact.rs ×2, cco.rs ×5) still read it as a pass. |
+| T3.5-35 | `sampled_step` no longer clones: one `SimplifyRequest` is built at `plinth-decimate/src/lib.rs:1762` and reused by every bisection round and every final verification (`cdb61bd`). | `run_adaptive_diagnostics`, called unconditionally at `lib.rs:1996`, still builds `vertex_locks: protected.to_vec()` inside its `while … < policy.bisections` loop at `lib.rs:2510` — the same order of magnitude of clones the fix removed, in the same file. `cdb61bd` scopes itself to the bisection and final-candidate loops and never claims this one. |
 | T3.7-3 | `signed_area`'s doc no longer asserts an identity nothing enforces (`cdb61bd`). | Two independent `signed_area` implementations remain; that commit says consolidating them is not done here. |
 | T3.7-4 | `down_limit`'s cross-reference now names the function instead of a drifted line (`cdb61bd`). | The same value is still computed by two separate expressions in two crates. |
+| T3.8-9 | The dead `added` parameter and the assertion that exercised it are gone (`cdb61bd`), and `qualifies_audit_drain`'s doc now names the cap that really binds. | That cap still has no boundary test, and `drilling.rs:1057` says so verbatim: "No test drives this loop past `audit_max_drains` qualifying components to pin the boundary directly." `audit_max_drains` reaches no test — its only occurrence under `#[cfg(test)]` is the comment at `drilling.rs:2822` explaining that the test below it exercises the predicate instead. The finding of record (`REVIEW.md:587`) names the untested cap as the second half of the defect. |
 | T3.11-5 | The traversal-cost doc at the cited line corrected 13 → 12 (`cdb61bd`). | The public accessor doc 1,200 lines later still says **thirteen** and `13p − 12`, so the two public numbers still disagree. |
 | T3.12-12 | `try_run` / `PoolBuildError` added as a fallible sibling for callers outside the kernel (`e8caa67`). | `PLINTH_THREADS` still has no validation (garbage silently becomes all-cores) and `pool_for` still `.expect(...)`s inside `run`. |
 
@@ -73,7 +78,7 @@ No behavior changes; restore reachability signal and fix direct defects.
 | SL-2 | critical | Correctness | `rust/geom_kernel/src/queries.rs:1827, :2142` | A BVH global face id used as a slot index — panics on sparse subset or exempts wrong faces from clearance check | trivial | FIXED (a929cea) |
 | SL-1-disc | critical | Safety | `crates/plinth-pipeline/src/gates.rs:303-313` | The pre-write gate runs only one of twelve checks; disclosure of `pending_gates` is dropped before run report (short-list 1, disclosure half) | trivial | FIXED (c9a9e4d) |
 | SL-10 | high | Constants | `crates/plinth-support/src/legacy_compat.rs:38-42, :77-81, :157-161` | Three methods carry false `#[allow(dead_code)]` saying consumers have not landed, but `run_support` path calls all three | trivial | FIXED (fb4fe23) |
-| T1.4 | high | Architecture | `rust/geom_kernel/src/lib.rs:25` | `mod vec3` and `mod par` are private so every crate above re-implements them — make public in Phase 1 | trivial | FIXED (dc2e0d0) |
+| T1.4 | high | Architecture | `rust/geom_kernel/src/lib.rs:35; crates/plinth-support/src/cco.rs:5808` | `mod vec3` and `mod par` are private so every crate above re-implements them — make public in Phase 1 | trivial | OPEN |
 | T3.2-1 | medium | Constants | `crates/plinth-support/src/cco.rs:4527` | An unnamed `+ 1.0` mm decides which spiral plate-descent candidates exist at all | trivial | FIXED (2d41082) |
 | T3.2-2 | medium | Constants | `crates/plinth-support/src/brace.rs:3008` | `rungs_that_fit` removes requested cross-braces using an unexplained universal `- 1.0` mm | trivial | FIXED (2d41082) |
 | T3.3-1 | high | Correctness | `crates/plinth-support/src/anchor.rs:1169-1320` | Anchor qualification not re-run after ray snaps to nearer face; min-length prune and `max_delicacy` screen never applied to seated face | contained | OPEN |
@@ -223,7 +228,7 @@ All items in this phase; hollowing pair depends on Phase 0.3.
 | T3.8-6 | medium | Tests | `rust/geom_kernel/tests/native_api.rs:981-995` | Sample-budget test recomputes production `min(cap*sub, 3*sub + ceil(seg/step))` instead of pinning reviewed expected value | contained | OPEN |
 | T3.8-7 | low | Tests | `crates/plinth-support/src/cco.rs:7822-7834` | Digest-equivalence helper's second assertion is tautology given first; failure message promises check not performed | trivial | OPEN |
 | T3.8-8 | low | Tests | `crates/plinth-support/src/rewire.rs:1509` | Five assertions restate constraints constructor already refuses | trivial | FIXED (242587e) |
-| T3.8-9 | low | Tests | `crates/plinth-hollow/src/drilling.rs:1121` | `qualifies_audit_drain`'s `added` parameter always 0 in production; "three drain cap" test covers dead limb | trivial | FIXED (cdb61bd) |
+| T3.8-9 | low | Tests | `crates/plinth-hollow/src/drilling.rs:1052-1060` | `qualifies_audit_drain`'s `added` parameter always 0 in production; "three drain cap" test covers dead limb | trivial | OPEN |
 | T3.8-10 | low | Tests | `crates/plinth-pipeline/src/lib.rs:1241` | Test named for thread settings discards `[1, 4, 16]` with `|_|` and asserts three identical constructions equal | trivial | OPEN |
 | T3.8-11 | low | Tests | `crates/plinth-layers/tests/registry_pin.rs:30` | Test pinning slice quantum to stitch key pins to literal; kernel constant it should compare is public dependency | trivial | FIXED (cdb61bd) |
 | T3.9-1 | medium | Errors | `crates/plinth-emit/src/lib.rs:43-56, :202` | Staging save, rename, reopen and metadata failures collapse into `TargetUnavailable` with no `#[source]` | contained | OPEN |
@@ -274,7 +279,7 @@ All items in this phase; hollowing pair depends on Phase 0.3.
 | T3.5-32 | low | Efficiency | `crates/plinth-support/src/seat_zone.rs:494-496` | Only rayon global-pool site, on per-terminal handful of tiny flood fills; defeats `PLINTH_THREADS` sweep convention | trivial | OPEN |
 | T3.5-33 | low | Efficiency | `crates/plinth-pipeline/src/prepare.rs:1830` | Every model pays full mesh copy (~12 MB on 496k-face shell) held through peak-allocation; served only on refusal SVG | substantial | OPEN |
 | T3.5-34 | low | Efficiency | `crates/plinth-pipeline/src/prepare.rs:859` | Folder loop is strictly serial; crate has no rayon — real trade-off, not free win | contained | OPEN |
-| T3.5-35 | low | Efficiency | `crates/plinth-decimate/src/lib.rs:2351` | `SimplifyRequest` owns lock vector; unchanged `protected` slice cloned per search candidate | trivial | FIXED (cdb61bd) |
+| T3.5-35 | low | Efficiency | `crates/plinth-decimate/src/lib.rs:2510` | `SimplifyRequest` owns lock vector; unchanged `protected` slice cloned per search candidate | trivial | OPEN |
 | T3.5-36 | low | Efficiency | `crates/plinth-orient/src/score.rs:728` | Fresh thread pool per scoring tier, three per model — same root cause as CCO pool churn | contained | FIXED (e8caa67) |
 | T3.5-37 | low | Efficiency | `rust/geom_kernel/src/queries.rs:3300` | `cone_thickness` allocates hit vector and direction vector per cone ray; allocation-free traversal six lines away | trivial | OPEN |
 | T3.9-7 | low | Errors | `crates/plinth-pipeline/src/coverage_evidence.rs:365` | Serialization failures become empty recovered patches or omitted report fields | contained | OPEN |
