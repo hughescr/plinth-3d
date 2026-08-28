@@ -2177,7 +2177,24 @@ pub fn create_shell_recording_repair(
     sealed.map_err(|error| HollowStageFailure::after_cavity_repair(error, repair_evidence))
 }
 
-const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
+/// Reads the registered printer's build volume, in project X/Y/Z axis order,
+/// as the per-axis printable extent [`validate_printable_bounds`] gates on.
+///
+/// **This used to be one flat 300 mm figure applied to all three axes.** The
+/// registered Saturn 4 Ultra build volume is 211.68 x 118.37 x 220 mm
+/// (`M0Constants::saturn4_ultra`) — narrower than 300 mm on every axis and by
+/// very different margins on X/Y versus Z — so a model that cleared the flat
+/// bound could still not fit the machine on the axis that actually
+/// constrains it. There is exactly one printer profile this pipeline builds
+/// for ([`run`] refuses any [`HollowRequest`] whose profile does not match
+/// it), so reading it here rather than threading it through every caller of
+/// [`validate_printable_bounds`] cannot admit a mismatched profile by
+/// accident.
+fn registered_printable_extent_mm() -> Result<[f64; 3], HollowError> {
+    let constants = m0_constants().map_err(HollowError::Constants)?;
+    let build_volume = constants.saturn4_ultra().build_volume_mm().value();
+    Ok([build_volume.x(), build_volume.y(), build_volume.z()])
+}
 
 /// **The closed-solid gate**, exactly as every hollow-stage caller runs it.
 ///
@@ -2249,6 +2266,19 @@ fn triage_exact_with_measured_limits(mesh: &Mesh) -> Result<TriagedMesh, HollowE
         .map_err(HollowError::Triage)
 }
 
+/// Relative floating-point-noise floor for "is this accumulated
+/// tetrahedron-sum volume actually zero", inside [`validate_shell_topology`].
+///
+/// **Not a tolerance on any accept/reject decision.** The decision is still
+/// `negative != expected_cavity_components` and the component-count bound,
+/// both unchanged; this only tells the degenerate-component test where the
+/// noise floor sits, so it can refuse honestly instead of taking a
+/// component's cavity-or-body classification from the sign of summation
+/// noise. Same role and same magnitude as [`CANDIDATE_EXTENT_SLACK`]: one
+/// part in a billion is far above the noise a volume sum can accumulate and
+/// far below any feature this stage's own tests construct.
+const DEGENERATE_VOLUME_REL_TOL: f64 = 1e-9;
+
 /// Check the shell the Boolean produced against the cavity that was cut.
 ///
 /// `expected_cavity_components` is how many closed cavity surfaces the caller
@@ -2283,16 +2313,34 @@ fn validate_shell_topology(
         .iter()
         .filter(|component| component.signed_volume_mm3() < 0.0)
         .count();
+    // An accumulated tetrahedron-volume sum is a sum of floating-point
+    // products over every face, so a genuinely degenerate (near-zero)
+    // component almost never lands on exactly `0.0` -- it lands on whatever
+    // summation noise the pass happened to leave, and an exact-equality
+    // test against `0.0` therefore essentially never fires. Worse, that
+    // noise has a sign: a degenerate component's classification as a
+    // cavity (negative, counted above) or a body (positive) is then decided
+    // by the sign of the noise rather than by the geometry.
+    // `DEGENERATE_VOLUME_REL_TOL` scales the "is this actually zero"
+    // question to this model's own magnitude, the same way
+    // `CANDIDATE_EXTENT_SLACK` scales index-space slack to grid magnitude a
+    // few hundred lines below -- several orders above plausible summation
+    // noise (bounded by roughly face-count times `f64::EPSILON` times the
+    // largest partial sum) and many orders below any real feature this
+    // stage's callers construct (the smallest authored extra body exercised
+    // in this file's own tests is an 8 mm^3 box).
+    let degenerate_tolerance_mm3 = DEGENERATE_VOLUME_REL_TOL * source_volume_mm3.abs().max(1.0);
     // The negative components ARE the cavities, so their count is pinned
     // exactly. The positive components are the outer body plus any authored
     // extra bodies the source carried in, which this stage neither creates nor
     // removes, so the total is bounded from below and not from above.
     if negative != expected_cavity_components
         || certificate.components().len() < expected_cavity_components + 1
+        || !degenerate_tolerance_mm3.is_finite()
         || certificate
             .components()
             .iter()
-            .any(|component| component.signed_volume_mm3() == 0.0)
+            .any(|component| component.signed_volume_mm3().abs() <= degenerate_tolerance_mm3)
     {
         return Err(HollowError::InvalidShellTopology);
     }
@@ -2736,9 +2784,10 @@ fn dilated_index_aabb(tri: [[f64; 3]; 3], spec: GridSpec) -> Result<[[isize; 2];
 /// a flat fan-base triangle, before the slack existed.
 ///
 /// Relative, not absolute: index-space coordinates run to a few hundred on an
-/// admitted grid (300 mm printable extent over a 0.5 mm pitch), where an f64
-/// ulp is ~1e-13. One part in 1e9 is four orders above the rounding those
-/// intersections can produce and nine orders below one voxel.
+/// admitted grid (the registered printer's tallest build-volume axis is
+/// 220 mm, over a 0.5 mm pitch), where an f64 ulp is ~1e-13. One part in 1e9
+/// is four orders above the rounding those intersections can produce and
+/// nine orders below one voxel.
 const CANDIDATE_EXTENT_SLACK: f64 = 1e-9;
 
 /// [`CANDIDATE_EXTENT_SLACK`] at the magnitude a value actually sits at,
@@ -3724,6 +3773,7 @@ pub(crate) fn bounds(mesh: &Mesh) -> Result<([f64; 3], [f64; 3]), HollowError> {
 }
 
 fn validate_printable_bounds(mesh: &Mesh) -> Result<(), HollowError> {
+    let max_extent_mm = registered_printable_extent_mm()?;
     let mut low = [f64::INFINITY; 3];
     let mut high = [f64::NEG_INFINITY; 3];
     for point in mesh.verts() {
@@ -3737,7 +3787,7 @@ fn validate_printable_bounds(mesh: &Mesh) -> Result<(), HollowError> {
         if !extent.is_finite() {
             return Err(HollowError::InvalidArithmetic);
         }
-        if extent > PRINTABLE_MAX_EXTENT_MM {
+        if extent > max_extent_mm[axis] {
             return Err(HollowError::OutsidePrintableEnvelope { axis });
         }
     }
@@ -3804,7 +3854,7 @@ pub enum HollowError {
     TopologyValidation(TopologyValidationError),
     #[error("input is not one closed, consistently oriented solid")]
     NotClosedOrOriented,
-    #[error("geometry exceeds H0's printable 300mm extent on axis {axis}")]
+    #[error("geometry exceeds the registered printer's build volume on axis {axis}")]
     OutsidePrintableEnvelope { axis: usize },
     #[error("non-finite or unrepresentable H0 arithmetic")]
     InvalidArithmetic,
@@ -5629,7 +5679,30 @@ mod tests {
     }
 
     #[test]
-    fn voxel_admission_has_exact_boundary_and_refuses_300mm_before_voxelization() {
+    fn shell_topology_refuses_a_component_within_the_degenerate_volume_noise_floor() {
+        // Same disjoint placement the test above uses for a legitimate 2 mm
+        // authored detail (8 mm^3), shrunk to a 0.01 mm cube (1e-6 mm^3):
+        // comfortably nonzero -- nowhere near the exact `0.0` the old
+        // degenerate-shell gate tested for -- and comfortably under
+        // `DEGENERATE_VOLUME_REL_TOL` times the sphere's ~10,083 mm^3
+        // source volume (~1.0e-5 mm^3). It stands in for the near-zero
+        // residual a genuinely degenerate shell fragment leaves on an
+        // accumulated tetrahedron-volume sum, and it must be refused rather
+        // than silently retained as though it were a real extra body.
+        let main = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let sliver =
+            make_box([0.01, 0.01, 0.01], [14.0, 0.0, 1.0]).expect("sub-noise-floor sliver");
+        assert!(
+            matches!(
+                create_shell(join(&main, &sliver), registered_settings()),
+                Err(HollowError::InvalidShellTopology)
+            ),
+            "a component within the degenerate-volume noise floor must be refused"
+        );
+    }
+
+    #[test]
+    fn voxel_admission_has_exact_boundary_and_refuses_an_oversized_grid_before_voxelization() {
         assert!(matches!(
             H0AdmissionLimits::new(
                 TriageTopologyLimits::new(1, 1, 1, 3, 3, 32),
@@ -5643,13 +5716,23 @@ mod tests {
             ),
             Err(HollowError::InvalidAdmissionLimits)
         ));
-        let huge = make_box([300.0, 300.0, 300.0], [0.0, 0.0, 0.0]).expect("300mm box");
+        // 300 mm on every axis used to be the fixture here, back when
+        // `validate_printable_bounds` gated all three axes on one flat
+        // 300 mm figure. Per-axis against the registered Saturn 4 Ultra
+        // build volume (211.68 x 118.37 x 220 mm), 300 mm no longer reaches
+        // this gate at all -- it is refused earlier, by
+        // `OutsidePrintableEnvelope`, which has its own coverage below. This
+        // fixture instead stays inside all three registered axes
+        // (200 x 100 x 210 mm, each with real margin) so it exercises what
+        // the test is actually named for: the voxel-cell admission
+        // boundary, at a grid size {401, 201, 421} = 33,933,021 cells.
+        let huge = make_box([200.0, 100.0, 210.0], [0.0, 0.0, 0.0]).expect("oversized-grid box");
         let error = create_shell(huge, registered_settings())
-            .expect_err("300mm at 0.5mm must preflight-refuse");
+            .expect_err("33.9M cells at 0.5mm must preflight-refuse");
         assert!(matches!(
             error,
             HollowError::VoxelCellLimitExceeded { cells, max_cells }
-                if cells == 601_usize.pow(3) && max_cells == DEFAULT_MAX_VOXEL_CELLS
+                if cells == 401_usize * 201 * 421 && max_cells == DEFAULT_MAX_VOXEL_CELLS
         ));
 
         let input = frozen_mesh("Sphere.prepped.oriented-solid.stl");
@@ -5676,6 +5759,35 @@ mod tests {
             grid_spec(&source, f64::MIN_POSITIVE),
             Err(HollowError::VoxelGridTooLarge)
         ));
+    }
+
+    /// The printable envelope is gated per axis against the registered
+    /// Saturn 4 Ultra build volume (211.68 x 118.37 x 220 mm), not against
+    /// one flat figure applied to all three. This box is 50 x 120 x 50 mm --
+    /// comfortably inside a flat 300 mm gate on every axis, so the defect
+    /// this guards (a single `PRINTABLE_MAX_EXTENT_MM = 300.0` applied
+    /// uniformly) would have silently admitted it -- and it breaches only Y,
+    /// at 120 mm against the registered 118.37 mm.
+    #[test]
+    fn printable_envelope_is_gated_per_axis_against_the_registered_printer() {
+        let too_deep_on_y =
+            make_box([50.0, 120.0, 50.0], [0.0, 0.0, 0.0]).expect("too-deep-on-Y box");
+        assert!(
+            matches!(
+                create_shell(too_deep_on_y, registered_settings()),
+                Err(HollowError::OutsidePrintableEnvelope { axis: 1 })
+            ),
+            "120 mm on Y exceeds the registered 118.37 mm build-volume axis"
+        );
+
+        // The identical box narrowed back under 118.37 mm on Y alone builds
+        // cleanly, proving the refusal above is about that one axis and not
+        // some other property of the fixture.
+        let fits = make_box([50.0, 100.0, 50.0], [0.0, 0.0, 0.0]).expect("fits box");
+        assert!(
+            create_shell(fits, registered_settings()).is_ok(),
+            "100 mm on Y is within the registered 118.37 mm build-volume axis"
+        );
     }
 
     /// FU-54: `max_cavity_repair_passes` is validated exactly like its
