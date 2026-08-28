@@ -1228,29 +1228,28 @@ pub(crate) fn choose_winner(
         served.get(&row.key) != Some(&current)
     };
 
-    let best_served =
-        live()
-            .filter(|(_, row)| in_serve_set(row))
-            .min_by(|&(left_index, left), &(right_index, right)| {
-                // Ties on score and disc count break on LARGER route uncovered
-                // area, then lower pool row — the guarantee serves the biggest
-                // unserved hole first. Reachable because `route_rank_key`
-                // deliberately omits `order` and `key`.
-                let area = |row: &RankedRepairRow| {
-                    OrderedScore(
-                        candidates
-                            .route_uncovered_mm2
-                            .get(&row.key)
-                            .copied()
-                            .unwrap_or(0.0),
-                    )
-                };
-                route_rank_key(left_index, left)
-                    .cmp(&route_rank_key(right_index, right))
-                    .then_with(|| area(left).cmp(&area(right)))
-                    .then_with(|| left.order.cmp(&right.order))
-                    .then_with(|| left.key.cmp(&right.key))
-            });
+    let best_served = live().filter(|(_, row)| in_serve_set(row)).min_by(
+        |&(left_index, left), &(right_index, right)| {
+            // Ties on score and disc count break on LARGER route uncovered
+            // area, then lower pool row — the guarantee serves the biggest
+            // unserved hole first. Reachable because `route_rank_key`
+            // deliberately omits `order` and `key`.
+            let area = |row: &RankedRepairRow| {
+                OrderedScore(
+                    candidates
+                        .route_uncovered_mm2
+                        .get(&row.key)
+                        .copied()
+                        .unwrap_or(0.0),
+                )
+            };
+            route_rank_key(left_index, left)
+                .cmp(&route_rank_key(right_index, right))
+                .then_with(|| area(left).cmp(&area(right)))
+                .then_with(|| left.order.cmp(&right.order))
+                .then_with(|| left.key.cmp(&right.key))
+        },
+    );
     if let Some((index, row)) = best_served {
         return Some(ChosenCandidate {
             index,
@@ -1821,8 +1820,8 @@ mod tests {
             "the neighbour inside the disc must be the row this rejection demoted"
         );
 
-        let next =
-            choose_winner(&pool, &ledgered, &served, censor, &[]).expect("two live candidates remain");
+        let next = choose_winner(&pool, &ledgered, &served, censor, &[])
+            .expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, outside.id,
             "the next winner must be OUTSIDE the rejected seat's own coverage disc, even though \
@@ -2177,8 +2176,8 @@ mod tests {
 
         let mut served = BTreeMap::new();
         served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
-        let next =
-            choose_winner(&pool, &ledgered, &served, censor, &[]).expect("two live candidates remain");
+        let next = choose_winner(&pool, &ledgered, &served, censor, &[])
+            .expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, neighbour.id,
             "a demoted 11.288 mm² seat still beats a 0.00 mm² seat: the disc count is a \
@@ -2193,6 +2192,108 @@ mod tests {
             (best_live_score_mm2(&pool, &ledgered) - 11.288).abs() < 1e-12,
             "§B.3's guard reads the best LIVE score, which is what stops the loop giving up on \
              a candidate that can physically help"
+        );
+    }
+
+    /// One seat's veto memory as the ranking reads it: `n` rejections nearby,
+    /// all of them measured, all of them with the trial's own contact
+    /// condemned. That is the column the 2026-08-28 baseline singled out.
+    fn condemned_counts(n: usize) -> crate::coverage_repair::RepairVetoCounts {
+        let mut counts = crate::coverage_repair::RepairVetoCounts::default();
+        counts.total = n;
+        counts.gates_measured = n;
+        counts.own_contact_condemned = n;
+        counts
+    }
+
+    /// The veto slice `choose_winner` takes, aligned with `pool.ranked`, with
+    /// `loaded` vetoes charged against exactly one row.
+    fn veto_slice(
+        pool: &RankedRepairCandidates,
+        id: RepairRowId,
+        loaded: usize,
+    ) -> Vec<crate::coverage_repair::RepairVetoCounts> {
+        pool.ranked
+            .iter()
+            .map(|row| {
+                if row.id == id {
+                    condemned_counts(loaded)
+                } else {
+                    crate::coverage_repair::RepairVetoCounts::default()
+                }
+            })
+            .collect()
+    }
+
+    /// **The same measured harm, aimed at the NEW term.** The disc-first rule
+    /// was reverted because a count ahead of score put a seat covering nothing
+    /// in front of a live 13.68 mm² seat. The veto memory is a count too, so
+    /// the revert proof has to be re-run against it: load the 11.288 mm²
+    /// neighbour with nine condemned vetoes and give the 0.00 mm² row none.
+    /// The neighbour must still win, because the two are 70 censor-widths
+    /// apart in score and the veto term only reorders inside one width.
+    #[test]
+    fn a_loaded_veto_memory_still_never_lifts_a_seat_that_covers_nothing() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        let good = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 13.678);
+        let neighbour = ranked_row(5, 0, 2, [0.5, 0.0, 0.0], 11.288);
+        let covers_nothing = ranked_row(5, 0, 3, [80.0, 0.0, 0.0], 0.0);
+        let pool = candidates(vec![good.clone(), neighbour.clone(), covers_nothing]);
+
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(good.id);
+        let mut served = BTreeMap::new();
+        served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
+
+        let vetoes = veto_slice(&pool, neighbour.id, 9);
+        let next = choose_winner(&pool, &ledgered, &served, censor, &vetoes)
+            .expect("two live candidates remain");
+        assert_eq!(
+            pool.ranked[next.index].id, neighbour.id,
+            "nine condemned vetoes against an 11.288 mm² seat must not lift a 0.00 mm² seat: \
+             the score tier decides first, and the two seats are not in the same tier"
+        );
+    }
+
+    /// **And the term is not inert.** Two seats inside ONE censor-width of each
+    /// other are the case the memory exists for: coverage cannot tell them
+    /// apart (SPEC §4 — a sub-censor difference cannot change the censored
+    /// objective on its own), and the measured evidence can. The seat with
+    /// condemned vetoes against it goes second.
+    #[test]
+    fn inside_one_censor_width_the_measured_vetoes_decide_which_seat_goes_first() {
+        let censor = registered_coverage_censor_area_mm2().expect("registered censor");
+        // Same tier by construction: both are in [2 × censor, 3 × censor).
+        let richer = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], censor.mul_add(2.0, censor * 0.9));
+        let poorer = ranked_row(5, 0, 2, [40.0, 0.0, 0.0], censor.mul_add(2.0, censor * 0.1));
+        let pool = candidates(vec![richer.clone(), poorer.clone()]);
+        let mut served = BTreeMap::new();
+        served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
+
+        // With no memory, the richer seat wins on score, as it always did.
+        let cold =
+            choose_winner(&pool, &BTreeSet::new(), &served, censor, &[]).expect("a live candidate");
+        assert_eq!(pool.ranked[cold.index].id, richer.id);
+
+        // With three condemned rejections already recorded at the richer
+        // seat's own neighbourhood, the untried one goes first instead.
+        let vetoes = veto_slice(&pool, richer.id, 3);
+        let warm = choose_winner(&pool, &BTreeSet::new(), &served, censor, &vetoes)
+            .expect("a live candidate");
+        assert_eq!(
+            pool.ranked[warm.index].id, poorer.id,
+            "inside one censor-width the ranking must prefer the seat the search has NOT already \
+             been told about"
+        );
+
+        // And nothing was removed: the demoted seat is still reachable.
+        let mut ledgered = BTreeSet::new();
+        ledgered.insert(poorer.id);
+        let after = choose_winner(&pool, &ledgered, &served, censor, &vetoes)
+            .expect("the demoted seat is still live");
+        assert_eq!(
+            pool.ranked[after.index].id, richer.id,
+            "re-ordering is not filtering: every candidate reachable before is reachable now"
         );
     }
 
@@ -2301,8 +2402,8 @@ mod tests {
         pool.route_uncovered_mm2.insert((3, 0), 0.21);
         pool.route_uncovered_mm2.insert((74, 0), 13.041);
 
-        let chosen =
-            choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor, &[]).expect("a candidate");
+        let chosen = choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor, &[])
+            .expect("a candidate");
         assert!(chosen.by_first_trial_guarantee);
         assert_eq!(
             pool.ranked[chosen.index].id, big.id,
