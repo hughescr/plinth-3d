@@ -29,6 +29,10 @@ struct MeasurementCallCounts {
     coverage_route_planner_allocations: usize,
     coverage_route_queries: usize,
     coverage_assessment_traversals: usize,
+    /// Full validations of the named-island sidecar. One snapshot has one
+    /// sidecar, so one controller pass over it is one validation; anything
+    /// above that is the same proof re-run per routed contact.
+    named_island_validations: usize,
 }
 
 #[cfg(test)]
@@ -39,6 +43,7 @@ thread_local! {
             coverage_route_planner_allocations: 0,
             coverage_route_queries: 0,
             coverage_assessment_traversals: 0,
+            named_island_validations: 0,
         })
     };
 }
@@ -3968,8 +3973,17 @@ impl<'a> SupportVerificationSnapshot<'a> {
             || plinth_mesh::validate_face_topology(self.topology).is_err()
             || coverage_samples_digest(self.coverage_samples) != self.coverage_digest
             || named_islands_digest(self.named_islands) != self.named_islands_digest
-            || !validate_named_islands(self.named_islands, self.topology)
-            || self.routed_contacts.len() != self.routed_route_memberships.len()
+        {
+            return Err(SupportVerificationError::SnapshotDigestMismatch);
+        }
+        // The sidecar is proved well-formed and indexed exactly once per
+        // snapshot, then threaded through every membership check below. It was
+        // re-proved per routed contact inside `routed_logical_routes`, and each
+        // of those re-proofs was followed by a linear membership walk of the
+        // same sidecar.
+        let island_index = IslandFaceIndex::build_named(self.named_islands, self.topology)
+            .map_err(|_| SupportVerificationError::SnapshotDigestMismatch)?;
+        if self.routed_contacts.len() != self.routed_route_memberships.len()
             || self.routed_contacts.iter().any(|contact| {
                 !self
                     .routed_route_memberships
@@ -3978,7 +3992,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             })
             || !validate_routed_memberships(
                 &self.routed_route_memberships,
-                self.named_islands,
+                &island_index,
                 self.topology,
             )
             || routed_projection_digest(&self.routed_route_memberships)
@@ -6410,6 +6424,10 @@ impl<'a> LoweredSupportRun<'a> {
         let mut routed_contacts = Vec::new();
         let mut routed_route_memberships = Vec::new();
         let mut routed_ids = BTreeSet::new();
+        // One proof and one index for the whole projection, not one per routed
+        // contact: the sidecar is the same slice for every row below.
+        let island_index = IslandFaceIndex::build_named(plan.islands(), &context.topology)
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
         for row in transcript.rows() {
             if row.kind() != FinalizedDispositionKind::Routed {
                 continue;
@@ -6433,7 +6451,7 @@ impl<'a> LoweredSupportRun<'a> {
             {
                 return Err(SupportVerificationError::AuthorityMismatch.into());
             }
-            let logical_routes = routed_logical_routes(contact, plan.islands(), &context.topology)
+            let logical_routes = routed_logical_routes(contact, &island_index, &context.topology)
                 .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
             let evidence = RoutedPhysicalContactEvidence { contact };
             routed_contacts.push(evidence);
@@ -7713,6 +7731,32 @@ impl<'a> IslandFaceIndex<'a> {
         Ok(Self { islands: rows })
     }
 
+    /// Validates the named-island sidecar against the topology **once** and
+    /// indexes it, producing the value every later membership question is
+    /// asked of.
+    ///
+    /// The sidecar is one per snapshot and does not change while a snapshot is
+    /// being checked, so proving it well-formed is a once-per-snapshot job.
+    /// Before this constructor existed, `routed_logical_routes` re-proved it
+    /// per routed contact and then answered membership with a linear island
+    /// walk ending in a linear `Vec::contains`, so one `validate_integrity`
+    /// over `N` routed contacts walked the whole sidecar `2N + 1` times.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupportVerificationError::AuthorityMismatch`] if the sidecar
+    /// is not a valid named-island set for this topology, or if it does not
+    /// satisfy the two invariants the binary searches rest on.
+    fn build_named(
+        islands: &'a [SupportIsland],
+        topology: &FaceTopology,
+    ) -> Result<Self, SupportVerificationError> {
+        if !validate_named_islands(islands, topology) {
+            return Err(SupportVerificationError::AuthorityMismatch);
+        }
+        Self::build(islands).map_err(|_| SupportVerificationError::AuthorityMismatch)
+    }
+
     fn contains(&self, island_id: u32, face_id: u32) -> bool {
         self.islands
             .binary_search_by_key(&island_id, |(id, _)| *id)
@@ -7721,6 +7765,8 @@ impl<'a> IslandFaceIndex<'a> {
 }
 
 fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) -> bool {
+    #[cfg(test)]
+    record_measurement_call(|counts| counts.named_island_validations += 1);
     let face_count = topology.component_ids().len();
     let mut ids = BTreeSet::new();
     islands.iter().all(|island| {
@@ -7734,14 +7780,18 @@ fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) ->
     })
 }
 
+/// The logical routes one routed contact projects onto, checked against the
+/// already-validated named-island index.
+///
+/// `islands` carries the proof that the sidecar is a well-formed named-island
+/// set for `topology` ([`IslandFaceIndex::build_named`]), so this function
+/// neither re-proves it nor walks it: each route's membership is two binary
+/// searches.
 fn routed_logical_routes(
     contact: &crate::specialized::SpecializedPhysicalContact,
-    islands: &[SupportIsland],
+    islands: &IslandFaceIndex<'_>,
     topology: &FaceTopology,
 ) -> Result<Vec<RoutedLogicalRoute>, SupportVerificationError> {
-    if !validate_named_islands(islands, topology) {
-        return Err(SupportVerificationError::AuthorityMismatch);
-    }
     let mut routes = BTreeSet::new();
     for route in contact.regular_routes() {
         routes.insert(RoutedLogicalRoute {
@@ -7779,10 +7829,7 @@ fn routed_logical_routes(
     let routes = routes.into_iter().collect::<Vec<_>>();
     if routes.iter().any(|route| {
         topology.component_ids().get(route.face_id as usize) != Some(&route.component_id)
-            || !islands.iter().any(|island| {
-                island.id == route.island_id
-                    && island.face_ids.binary_search(&route.face_id).is_ok()
-            })
+            || !islands.contains(route.island_id, route.face_id)
     }) {
         return Err(SupportVerificationError::AuthorityMismatch);
     }
@@ -7791,7 +7838,7 @@ fn routed_logical_routes(
 
 fn validate_routed_memberships(
     memberships: &[RoutedRouteMembership<'_>],
-    islands: &[SupportIsland],
+    islands: &IslandFaceIndex<'_>,
     topology: &FaceTopology,
 ) -> bool {
     let mut contact_ids = BTreeSet::new();
@@ -10399,7 +10446,8 @@ mod tests {
             );
             assert!(validate_routed_memberships(
                 &snapshot.routed_route_memberships,
-                snapshot.named_islands,
+                &IslandFaceIndex::build_named(snapshot.named_islands, snapshot.topology)
+                    .expect("the fixture snapshot's named-island sidecar is well-formed"),
                 snapshot.topology,
             ));
             let expected_members = lowered
@@ -10802,6 +10850,43 @@ mod tests {
         });
     }
 
+    /// One snapshot has one named-island sidecar, so one integrity pass proves
+    /// it well-formed exactly once.
+    ///
+    /// The defect this pins: `routed_logical_routes` re-proved the sidecar for
+    /// every routed contact and then answered each route's membership with a
+    /// linear island walk ending in a linear `Vec::contains`, so a single
+    /// `validate_integrity` over `N` routed contacts walked the whole sidecar
+    /// `2N + 1` times -- and the pre-write coverage gate runs it on every
+    /// production emission. Reverting the fix puts the count back to
+    /// `1 + N` validations here, which this equality refuses.
+    #[test]
+    fn snapshot_integrity_proves_the_island_sidecar_exactly_once() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            assert!(
+                snapshot.routed_route_memberships.len() > 1,
+                "the fixture must route more than one contact for this count to bite",
+            );
+            reset_measurement_call_counts();
+            snapshot
+                .validate_integrity()
+                .expect("the fixture snapshot is intact");
+            assert_eq!(
+                measurement_call_counts().named_island_validations,
+                1,
+                "the sidecar is proved once per snapshot, not once per routed contact",
+            );
+        });
+    }
+
     #[test]
     fn coverage_every_cap_preflights_before_all_measurement_allocations() {
         with_braced_table(|braced| {
@@ -10947,7 +11032,29 @@ mod tests {
                     ),
                     Err(CoverageMeasurementError::ResourceLimit { resource })
                 );
-                assert_eq!(measurement_call_counts(), MeasurementCallCounts::default());
+                // This test is about MEASUREMENT work: no cap may be reached
+                // after the measurement has already reserved or queried
+                // anything. It names those four counters rather than comparing
+                // the whole struct, so that adding a counter for a different
+                // kind of quantity cannot silently widen what it claims.
+                let counts = measurement_call_counts();
+                assert_eq!(
+                    (
+                        counts.normalized_route_projection_reserves,
+                        counts.coverage_route_planner_allocations,
+                        counts.coverage_route_queries,
+                        counts.coverage_assessment_traversals,
+                    ),
+                    (0, 0, 0, 0),
+                    "the capped request must refuse before any measurement work",
+                );
+                // The snapshot's own integrity proof is NOT measurement work:
+                // `measure_coverage` runs it before it looks at a single cap,
+                // and it costs one pass over the named-island sidecar. Pinned
+                // at exactly one here for the same reason
+                // `snapshot_integrity_proves_the_island_sidecar_exactly_once`
+                // pins it: it used to run once per routed contact as well.
+                assert_eq!(counts.named_island_validations, 1);
             }
         });
     }
