@@ -1146,14 +1146,46 @@ pub(crate) fn choose_winner(
     ledgered: &BTreeSet<RepairRowId>,
     served: &BTreeMap<(u32, u32), u64>,
     censor_area_mm2: f64,
+    veto_counts: &[crate::coverage_repair::RepairVetoCounts],
 ) -> Option<ChosenCandidate> {
-    // Score first — it is the physical quantity — then rule N4's disc count as
-    // the FIRST tie-break, then pool order. See [`DiversityDiscs`] for why the
-    // disc count may not lead: §A.4 states the rule both ways, and with the
-    // count ahead of score a seat covering nothing outranks a live 13.68 mm²
-    // seat (measured on `make_overhang_table`, 905 of 1,011 rows at 0.00 mm²).
-    let rank_key = |row: &RankedRepairRow| {
+    // Score TIER first — it is the physical quantity, quantized by the
+    // registered A3 censor this function already takes — then the measured
+    // veto evidence against the seat, then the raw score, then rule N4's disc
+    // count, then pool order.
+    //
+    // **Why the veto term may not lead, and why this is not the reverted
+    // disc-first rule.** Disc-first was measured harmful on
+    // `make_overhang_table`: with the count ahead of score, a seat covering
+    // nothing outranked a live 13.68 mm² seat (905 of 1,011 rows sat at
+    // 0.00 mm²). The veto term here can only reorder rows that are ALREADY
+    // within one censor-width of each other on score, so the 0.00 mm² row and
+    // the 13.68 mm² row are 85 tiers apart and the veto count never gets to
+    // compare them. The censor is the boundary because SPEC §4 already says a
+    // quantity below it cannot change the censored objective on its own —
+    // which is the same sentence the first-trial guarantee's serve set is
+    // built on, two paragraphs up. No new registered number is introduced.
+    //
+    // **Why `own_contact_condemned` and not the veto total.** The 2026-08-28
+    // baseline measured which recorded quantity discriminates: across 1,062
+    // trials the clause-2 veto class fired ZERO times, and the only instrument
+    // that moved was whether the trial's own appended contact was condemned —
+    // 222 condemned trials on the dust fixture, 222 of them rejected, against
+    // 4 commits none of which was condemned. `total` would count the commits'
+    // own neighbourhoods too; it is `RepairVeto::from_step` returning `None`
+    // for a COMMIT that keeps this memory clean, and this term reads the one
+    // column the measurement singled out.
+    let tier = tier_of_score(censor_area_mm2);
+    let counts = |index: usize| {
+        veto_counts
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .own_contact_condemned
+    };
+    let rank_key = |index: usize, row: &RankedRepairRow| {
         (
+            tier(row.marginal_area_mm2),
+            counts(index),
             OrderedScore(row.marginal_area_mm2),
             row.diversity_discs,
             row.order,
@@ -1164,8 +1196,14 @@ pub(crate) fn choose_winner(
     // own tie-break has something left to decide. `order` and `key` are unique
     // per row, so folding them into the key the routes are compared on is what
     // made §A.4 N3's "larger route uncovered area" arm unreachable.
-    let route_rank_key =
-        |row: &RankedRepairRow| (OrderedScore(row.marginal_area_mm2), row.diversity_discs);
+    let route_rank_key = |index: usize, row: &RankedRepairRow| {
+        (
+            tier(row.marginal_area_mm2),
+            counts(index),
+            OrderedScore(row.marginal_area_mm2),
+            row.diversity_discs,
+        )
+    };
 
     let live = || {
         candidates
@@ -1193,7 +1231,7 @@ pub(crate) fn choose_winner(
     let best_served =
         live()
             .filter(|(_, row)| in_serve_set(row))
-            .min_by(|(_, left), (_, right)| {
+            .min_by(|&(left_index, left), &(right_index, right)| {
                 // Ties on score and disc count break on LARGER route uncovered
                 // area, then lower pool row — the guarantee serves the biggest
                 // unserved hole first. Reachable because `route_rank_key`
@@ -1207,8 +1245,8 @@ pub(crate) fn choose_winner(
                             .unwrap_or(0.0),
                     )
                 };
-                route_rank_key(left)
-                    .cmp(&route_rank_key(right))
+                route_rank_key(left_index, left)
+                    .cmp(&route_rank_key(right_index, right))
                     .then_with(|| area(left).cmp(&area(right)))
                     .then_with(|| left.order.cmp(&right.order))
                     .then_with(|| left.key.cmp(&right.key))
@@ -1221,8 +1259,9 @@ pub(crate) fn choose_winner(
         });
     }
 
-    let (index, row) =
-        live().min_by(|(_, left), (_, right)| rank_key(left).cmp(&rank_key(right)))?;
+    let (index, row) = live().min_by(|&(left_index, left), &(right_index, right)| {
+        rank_key(left_index, left).cmp(&rank_key(right_index, right))
+    })?;
     Some(ChosenCandidate {
         index,
         by_first_trial_guarantee: false,
@@ -1251,6 +1290,38 @@ pub(crate) fn best_live_score_mm2(
         .filter(|row| !ledgered.contains(&row.id))
         .map(|row| row.marginal_area_mm2)
         .fold(0.0_f64, f64::max)
+}
+
+/// **How many whole censor-widths of marginal area a candidate carries**,
+/// ordered largest-first — the coarse band inside which the veto memory is
+/// allowed to reorder, and outside which score still decides alone.
+///
+/// The censor is not a new number: it is the registered A3 censor
+/// [`choose_winner`] already takes for the first-trial guarantee, and SPEC §4's
+/// reading of it — a quantity below the censor cannot change the censored
+/// objective on its own — is exactly what makes a sub-censor score difference
+/// the right thing to let a measured veto outrank.
+///
+/// Returns a constant `0` for every row when the censor is not a usable width
+/// (zero, negative, or non-finite). That is deliberate and it is the safe
+/// direction: a constant tier makes the tier term inert, so the key falls back
+/// to score-first, and it can never make the veto term lead.
+fn tier_of_score(censor_area_mm2: f64) -> impl Fn(f64) -> std::cmp::Reverse<u64> {
+    let usable = censor_area_mm2.is_finite() && censor_area_mm2 > 0.0;
+    move |area_mm2: f64| {
+        if !usable || !area_mm2.is_finite() || area_mm2 <= 0.0 {
+            return std::cmp::Reverse(0);
+        }
+        // `as` on a non-finite or out-of-range f64 saturates in Rust, and the
+        // guards above already exclude NaN and the negative half, so this is a
+        // total map onto u64 with no panic and no wrap.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "saturating float-to-int cast, guarded above to the finite positive half"
+        )]
+        std::cmp::Reverse((area_mm2 / censor_area_mm2).floor() as u64)
+    }
 }
 
 /// A descending-by-area ordering key that is total over every `f64` the score
@@ -1737,7 +1808,7 @@ mod tests {
 
         // Lowest pool order wins the tie first, exactly as production ranks.
         let first =
-            choose_winner(&pool, &BTreeSet::new(), &served, censor).expect("a live candidate");
+            choose_winner(&pool, &BTreeSet::new(), &served, censor, &[]).expect("a live candidate");
         assert_eq!(pool.ranked[first.index].id, rejected.id);
 
         // Reject it: ledger the row AND charge its coverage disc onto the
@@ -1751,7 +1822,7 @@ mod tests {
         );
 
         let next =
-            choose_winner(&pool, &ledgered, &served, censor).expect("two live candidates remain");
+            choose_winner(&pool, &ledgered, &served, censor, &[]).expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, outside.id,
             "the next winner must be OUTSIDE the rejected seat's own coverage disc, even though \
@@ -1766,7 +1837,7 @@ mod tests {
         // says it was demoted when it was.
         ledgered.insert(outside.id);
         discs.reject(outside.seat_mm, &mut pool);
-        let last = choose_winner(&pool, &ledgered, &served, censor)
+        let last = choose_winner(&pool, &ledgered, &served, censor, &[])
             .expect("deprioritization is not exclusion");
         assert_eq!(pool.ranked[last.index].id, inside.id);
         assert_eq!(
@@ -1794,7 +1865,7 @@ mod tests {
         let mut ledgered = BTreeSet::new();
         ledgered.insert(rejected.id);
 
-        let next = choose_winner(&pool, &ledgered, &BTreeMap::new(), censor)
+        let next = choose_winner(&pool, &ledgered, &BTreeMap::new(), censor, &[])
             .expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, inside.id,
@@ -1833,7 +1904,7 @@ mod tests {
 
         // Every trial is rejected — the worst case — so the loop ends only at
         // pool exhaustion, which is precisely what R10 says bounds it.
-        while let Some(chosen) = choose_winner(&pool, &ledgered, &BTreeMap::new(), censor) {
+        while let Some(chosen) = choose_winner(&pool, &ledgered, &BTreeMap::new(), censor, &[]) {
             let row = pool.ranked[chosen.index].clone();
             if chosen.diversity_discs_containing_seat > 0 {
                 demoted_and_tried += 1;
@@ -1865,7 +1936,7 @@ mod tests {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
 
         // Nothing served yet: the biggest unserved route goes first.
-        let first = choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor)
+        let first = choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor, &[])
             .expect("a live candidate");
         assert_eq!(pool.ranked[first.index].id, big_first.id);
         assert!(first.by_first_trial_guarantee);
@@ -1878,7 +1949,7 @@ mod tests {
             pool.route_uncovered_mm2[&(74, 0)].to_bits(),
         );
         let second =
-            choose_winner(&pool, &BTreeSet::new(), &served, censor).expect("a live candidate");
+            choose_winner(&pool, &BTreeSet::new(), &served, censor, &[]).expect("a live candidate");
         assert_eq!(
             pool.ranked[second.index].id, small.id,
             "the guarantee must reach a route whose whole area is 1.6% of the big one's"
@@ -1905,7 +1976,7 @@ mod tests {
         // so the serve set is EMPTY and the winner comes from the global
         // ranking instead — with the flag saying the guarantee did not choose it.
         let chosen =
-            choose_winner(&pool, &BTreeSet::new(), &served, censor).expect("a live candidate");
+            choose_winner(&pool, &BTreeSet::new(), &served, censor, &[]).expect("a live candidate");
         assert_eq!(pool.ranked[chosen.index].id, real.id);
         assert!(!chosen.by_first_trial_guarantee);
     }
@@ -1926,7 +1997,7 @@ mod tests {
         let censor = registered_coverage_censor_area_mm2().expect("registered censor");
         let nothing = ranked_row(5, 0, 1, [0.0, 0.0, 0.0], 0.0);
         let pool = candidates(vec![nothing.clone()]);
-        let chosen = choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor)
+        let chosen = choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor, &[])
             .expect("the row is eligible, so it is ranked");
         assert_eq!(pool.ranked[chosen.index].marginal_area_mm2, 0.0);
         assert!(
@@ -2107,7 +2178,7 @@ mod tests {
         let mut served = BTreeMap::new();
         served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
         let next =
-            choose_winner(&pool, &ledgered, &served, censor).expect("two live candidates remain");
+            choose_winner(&pool, &ledgered, &served, censor, &[]).expect("two live candidates remain");
         assert_eq!(
             pool.ranked[next.index].id, neighbour.id,
             "a demoted 11.288 mm² seat still beats a 0.00 mm² seat: the disc count is a \
@@ -2168,7 +2239,7 @@ mod tests {
         served.insert((5_u32, 0_u32), pool.route_uncovered_mm2[&(5, 0)].to_bits());
 
         let mut covering_winners = 0_usize;
-        while let Some(chosen) = choose_winner(&pool, &ledgered, &served, censor) {
+        while let Some(chosen) = choose_winner(&pool, &ledgered, &served, censor, &[]) {
             let winner = pool.ranked[chosen.index].clone();
             let best_live = best_live_score_mm2(&pool, &ledgered);
             if best_live > 0.0 {
@@ -2231,7 +2302,7 @@ mod tests {
         pool.route_uncovered_mm2.insert((74, 0), 13.041);
 
         let chosen =
-            choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor).expect("a candidate");
+            choose_winner(&pool, &BTreeSet::new(), &BTreeMap::new(), censor, &[]).expect("a candidate");
         assert!(chosen.by_first_trial_guarantee);
         assert_eq!(
             pool.ranked[chosen.index].id, big.id,

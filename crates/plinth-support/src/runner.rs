@@ -2279,6 +2279,8 @@ pub fn run_support<'a>(
     // statement about a loop that has been entered, and it is the one an
     // operator needs when a model appears to hang at Routing.
     let loop_started = std::time::Instant::now();
+    // Reused across every trial — see [`RepairLedger::veto_counts_for`].
+    let mut veto_counts: Vec<crate::coverage_repair::RepairVetoCounts> = Vec::new();
     let mut pacer = crate::coverage_repair::ProgressPacer::started_at(loop_started);
     crate::coverage_repair::emit_run_line(
         &ledger
@@ -2306,11 +2308,16 @@ pub fn run_support<'a>(
         // that covers 13.68 mm² is still on the ranking.
         let best_live_mm2 =
             crate::coverage_closure::best_live_score_mm2(&candidates, &ledger.ledgered);
+        // The memory, read where the ranking lives. ONE batch call per trial
+        // into a buffer owned by the loop, so the comparator reads a `usize`
+        // by index: no allocation inside the sort, and no per-candidate query.
+        ledger.veto_counts_for(&candidates, &mut veto_counts);
         let chosen = crate::coverage_closure::choose_winner(
             &candidates,
             &ledger.ledgered,
             &served,
             censor_area_mm2,
+            &veto_counts,
         );
         let Some(chosen) = chosen else {
             // Every candidate on the ranking has been ledgered. Under ruling
@@ -2639,10 +2646,9 @@ struct RepairLedger {
     /// reason as well, in the shape
     /// [`crate::coverage_repair::RepairVetoIndex`] documents.
     ///
-    /// **Nothing reads it to decide anything.** It is folded on every
-    /// rejection and disclosed at the end; no branch in this controller
-    /// consults it, and the search this ledger records is the search it
-    /// recorded before the field existed.
+    /// **The ranking reads it**, through [`Self::veto_counts_for`], which is
+    /// the one place the memory reaches a decision. It is folded on every
+    /// rejection and disclosed at the end.
     vetoes: crate::coverage_repair::RepairVetoIndex,
     steps: Vec<crate::coverage_repair::CoverageRepairStep>,
     /// The same step rows, appended to disk as they land — see
@@ -2787,6 +2793,21 @@ impl RepairLedger {
     /// `candidates_remaining` by calling THIS, and the progress line prints
     /// what THIS returns, so `remaining=` mid-run and `remaining=` at the end
     /// are the same expression over the same two collections.
+    /// **One batch query of the veto memory, aligned with `candidates.ranked`.**
+    ///
+    /// One call per trial, not one per candidate: the index is asked for every
+    /// seat at once and answers into the caller's reused buffer, so the
+    /// comparator reads a `usize` by index and never touches the index, and no
+    /// allocation lands inside the sort.
+    fn veto_counts_for(
+        &self,
+        candidates: &crate::coverage_closure::RankedRepairCandidates,
+        out: &mut Vec<crate::coverage_repair::RepairVetoCounts>,
+    ) {
+        self.vetoes
+            .counts_near_batch(candidates.ranked.iter().map(|row| row.seat_mm), out);
+    }
+
     fn remaining(&self, candidates: &crate::coverage_closure::RankedRepairCandidates) -> usize {
         candidates
             .ranked
