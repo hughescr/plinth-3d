@@ -1947,6 +1947,50 @@ fn candidate_revalidation(
         .collect())
 }
 
+/// How many majority-vote samples the kernel may take per crossing subsegment
+/// in the transit screen (`ns = cap.min(...)` in
+/// `NativeSurface::pen_intervals_one`).
+///
+/// **This value is stated, not derived, and it is UNDER-SIZED. That is a
+/// recorded finding, not an endorsement.** A subsegment longer than
+/// `cap * majority_step_mm` is sampled COARSER than `majority_step_mm`, which
+/// is exactly the resolution loss the step size exists to prevent. At today's
+/// step of `0.12 mm` this cap covers only `80 * 0.12 = 9.6 mm`, while this
+/// crate's own widest reachable cross-link span is
+/// `brace_neighbor_max_xy_mm * brace_reach_max_factor_x = 15.0 * 1.5 = 22.5 mm`
+/// -- so any crossing longer than 9.6 mm is already being sampled below the
+/// demanded resolution.
+///
+/// Sizing it to the reachable span would give `22.5 / 0.12 = 188`, and that
+/// CHANGES TRANSIT VERDICTS on spans over 9.6 mm. It is therefore left at the
+/// inherited `80` here: raising it is a behaviour change with no test and no
+/// measurement of record, and it belongs to an owner ruling with a corpus run
+/// behind it, not to a de-literalising commit.
+const TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP: usize = 80;
+
+/// The transit screen's native sampling parameters.
+///
+/// Two of the three numbers this screen hands the kernel have an owner
+/// elsewhere in the engine and are now read from it rather than restated:
+///
+/// * `n_offset_rays` is `designed_embed::ENDPOINT_VALIDATION_OFFSET_RAYS` --
+///   the same rim-ray count every other native seat witness in this crate uses
+///   -- rather than an unlabelled twin of it. `8` today.
+/// * `majority_step_mm` is one fifth of `STANDOFF_MM`, the clearance scale
+///   this screen is enforcing, so the majority vote can resolve an intrusion
+///   smaller than the demanded gap it exists to catch. `0.6 / 5 == 0.12 mm`
+///   today.
+///
+/// Both are byte-identical to the literals they replace, so no transit verdict
+/// moves. The third parameter is [`TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP`], which
+/// is NOT neutral and is deliberately left stated -- see its doc.
+fn transit_screen_sample_params(config: &BraceConfig) -> (usize, f64) {
+    (
+        designed_embed::ENDPOINT_VALIDATION_OFFSET_RAYS,
+        config.standoff_mm / 5.0,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn axis_illegal_rows(
     surface: &NativeSurface,
@@ -1960,11 +2004,22 @@ fn axis_illegal_rows(
     config: &BraceConfig,
     penetration_limits: PenetrationBatchLimits,
 ) -> Result<BTreeSet<usize>, BraceError> {
+    // The bare `0.1` this used to be selected which rods trust the cheap
+    // midpoint-only screen and which always pay for the exact penetration
+    // query, with no stated relationship to any other number in the engine.
+    // Anchor it to the registered `min_illegal_len_mm` instead: that is the
+    // shortest penetration this screen is EVER asked to notice
+    // (`config.min_illegal_len_mm` below), so trusting the coarse midpoint
+    // proxy requires the reported clearance to clear it with a full doubling
+    // of margin. `2.0 * 0.05 mm == 0.1 mm` today, so this changes no existing
+    // verdict; it stops the threshold from being able to drift away from the
+    // length it is standing in for.
+    let midpoint_trusted_clearance_mm = 2.0 * config.min_illegal_len_mm;
     let midpoint_rows = p0
         .iter()
         .zip(p1)
         .enumerate()
-        .filter(|(index, _)| clearances[*index] >= 0.1)
+        .filter(|(index, _)| clearances[*index] >= midpoint_trusted_clearance_mm)
         .map(|(index, (start, end))| {
             (
                 index,
@@ -1986,12 +2041,14 @@ fn axis_illegal_rows(
     let interval_indices = (0..p0.len())
         .filter(|index| {
             clearances[*index] >= 0.0
-                && (clearances[*index] < 0.1 || inside_by_rod.get(index).copied().unwrap_or(false))
+                && (clearances[*index] < midpoint_trusted_clearance_mm
+                    || inside_by_rod.get(index).copied().unwrap_or(false))
         })
         .collect::<Vec<_>>();
     if interval_indices.is_empty() {
         return Ok(BTreeSet::new());
     }
+    let (n_offset_rays, majority_step_mm) = transit_screen_sample_params(config);
     let intervals = surface.penetration_intervals_batch_bounded(
         &interval_indices
             .iter()
@@ -2009,9 +2066,9 @@ fn axis_illegal_rows(
             .iter()
             .map(|index| r1[*index])
             .collect::<Vec<_>>(),
-        8,
-        0.12,
-        80,
+        n_offset_rays,
+        majority_step_mm,
+        TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP,
         config.min_illegal_len_mm,
         false,
         penetration_limits,
@@ -3377,6 +3434,49 @@ mod tests {
     /// each of them, at the stage that owns it — the failure mode the two-tier
     /// split invites is a hand-typed 0.3 somewhere, which would go stale the
     /// day a coupon measurement supersedes the owner decision.
+    /// The two transit-screen parameters that were derived from their owners
+    /// still equal the literals they replaced, and the midpoint-trust
+    /// threshold still equals its own.
+    ///
+    /// This is the neutrality claim stated as an assertion rather than as a
+    /// sentence in a commit message: if a registry value moves, this test says
+    /// so instead of a transit verdict changing silently.
+    ///
+    /// It also pins the ONE parameter that is NOT derived. The majority-sample
+    /// cap covers `80 * 0.12 = 9.6 mm`, while the widest reachable cross-link
+    /// span is `15.0 * 1.5 = 22.5 mm` -- so the cap is under-sized and long
+    /// crossings are sampled coarser than the step demands. That gap is
+    /// asserted here so it stays visible and measured until an owner rules on
+    /// it; sizing the cap to the span would change transit verdicts.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact neutrality pins against registered values, not derived arithmetic. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn the_transit_screen_parameters_equal_the_literals_they_replaced() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let (rays, step_mm) = transit_screen_sample_params(&config);
+        assert_eq!(rays, 8, "the rim-ray count is unchanged at 8");
+        assert_eq!(step_mm, 0.12, "STANDOFF_MM / 5 is unchanged at 0.12 mm");
+        assert_eq!(
+            2.0 * config.min_illegal_len_mm,
+            0.1,
+            "2 x min_illegal_len_mm is unchanged at 0.1 mm",
+        );
+
+        // The under-sizing, measured rather than described.
+        let covered_mm = step_mm * TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP as f64;
+        let reachable_span_mm = config.neighbor_max_xy_mm * config.reach_max_factor;
+        assert_eq!(covered_mm, 9.6);
+        assert_eq!(reachable_span_mm, 22.5);
+        assert!(
+            covered_mm < reachable_span_mm,
+            "the sample cap still covers less than the widest reachable span; \
+             if this ever stops holding, the cap doc must be rewritten",
+        );
+    }
+
     #[test]
     #[expect(
         clippy::float_cmp,
