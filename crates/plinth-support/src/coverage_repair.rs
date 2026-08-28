@@ -1231,18 +1231,26 @@ impl RepairVetoIndex {
     /// One call answers a whole ranking, filling `out` with one
     /// [`RepairVetoCounts`] per seat, in the seats' own order. A ranking that
     /// asked seat by seat would be the per-item hot-path call this codebase
-    /// treats as a defect; `out` is reused across re-sorts so the answer costs
-    /// no allocation at all after the first.
-    pub fn counts_near_batch(&self, seats: &[[f64; 3]], out: &mut Vec<RepairVetoCounts>) {
+    /// treats as a defect.
+    ///
+    /// It takes an ITERATOR of seats rather than a slice so the caller's rows
+    /// can be read where they already live — `rows.iter().map(|row|
+    /// row.seat_mm)` — with no seat vector built per re-sort; and `out` is a
+    /// buffer the caller keeps, so after the first call the answer costs no
+    /// allocation at all.
+    pub fn counts_near_batch(
+        &self,
+        seats: impl IntoIterator<Item = [f64; 3]>,
+        out: &mut Vec<RepairVetoCounts>,
+    ) {
         out.clear();
-        out.reserve(seats.len());
+        let seats = seats.into_iter();
+        out.reserve(seats.size_hint().0);
         if self.vetoes.is_empty() {
-            out.resize(seats.len(), RepairVetoCounts::default());
+            out.extend(seats.map(|_| RepairVetoCounts::default()));
             return;
         }
-        for &seat in seats {
-            out.push(self.counts_near(seat));
-        }
+        out.extend(seats.map(|seat| self.counts_near(seat)));
     }
 
     /// One seat's fold — the convenience form of [`Self::counts_near_batch`],
@@ -2839,7 +2847,7 @@ mod tests {
         // exactly what the single-seat form answers, in order.
         let seats = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [-500.0, 0.0, 0.0]];
         let mut out = Vec::new();
-        index.counts_near_batch(&seats, &mut out);
+        index.counts_near_batch(seats.iter().copied(), &mut out);
         assert_eq!(out.len(), seats.len());
         for (answer, seat) in out.iter().zip(seats) {
             assert_eq!(*answer, index.counts_near(seat));
@@ -2850,7 +2858,7 @@ mod tests {
         // An empty memory answers every seat, not none of them: `out` is
         // filled by position, so a caller can zip it against its rows.
         let empty = RepairVetoIndex::new(6.0);
-        empty.counts_near_batch(&seats, &mut out);
+        empty.counts_near_batch(seats.iter().copied(), &mut out);
         assert_eq!(out, vec![RepairVetoCounts::default(); seats.len()]);
     }
 
@@ -2905,7 +2913,7 @@ mod tests {
             })
             .collect();
         let mut fast = Vec::new();
-        index.counts_near_batch(&seats, &mut fast);
+        index.counts_near_batch(seats.iter().copied(), &mut fast);
 
         for (seat, answer) in seats.iter().zip(&fast) {
             let mut slow = RepairVetoCounts::default();
