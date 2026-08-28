@@ -2630,7 +2630,25 @@ struct RepairLedger {
     /// Counting demotions instead of candidates would inflate the instrument
     /// that is supposed to say whether ruling R13 did any work.
     demoted: BTreeSet<RepairRowId>,
+    /// **Why each rejection happened, searchable by seat.**
+    ///
+    /// The disc beside it remembers WHERE a rejection happened and nothing
+    /// else, so every rejection class deprioritizes a neighbourhood
+    /// identically — a clause-1 rejection, a clause-2 veto and a stage refusal
+    /// are indistinguishable to every later decision. This remembers the
+    /// reason as well, in the shape
+    /// [`crate::coverage_repair::RepairVetoIndex`] documents.
+    ///
+    /// **Nothing reads it to decide anything.** It is folded on every
+    /// rejection and disclosed at the end; no branch in this controller
+    /// consults it, and the search this ledger records is the search it
+    /// recorded before the field existed.
+    vetoes: crate::coverage_repair::RepairVetoIndex,
     steps: Vec<crate::coverage_repair::CoverageRepairStep>,
+    /// The same step rows, appended to disk as they land — see
+    /// [`crate::coverage_repair::RepairTrialTrail`]. `None` unless
+    /// [`crate::coverage_repair::TRIAL_TRAIL_DIR_ENV`] asked for one.
+    trail: Option<crate::coverage_repair::RepairTrialTrail>,
     per_trial_ms: Vec<u64>,
 }
 
@@ -2651,7 +2669,12 @@ impl RepairLedger {
             ledgered: BTreeSet::new(),
             discs: crate::coverage_closure::DiversityDiscs::new(radius_mm),
             demoted: BTreeSet::new(),
+            // The SAME radius the discs are built with, so "near" means one
+            // thing across both memories rather than two things that agree
+            // today.
+            vetoes: crate::coverage_repair::RepairVetoIndex::new(radius_mm),
             steps: Vec::new(),
+            trail: crate::coverage_repair::RepairTrialTrail::from_env(),
             per_trial_ms: Vec::new(),
         }
     }
@@ -2690,6 +2713,33 @@ impl RepairLedger {
                 .into_iter()
                 .filter(|id| !self.ledgered.contains(id)),
         );
+        // WHY, beside where. `from_step` reads the step this rejection already
+        // filled — the outcome class, clause 2's named component when clause 2
+        // is what fired, every hard-gate component that rose whichever clause
+        // fired, and whether the trial's own contact was condemned. Nothing is
+        // re-measured, and `None` is impossible here because a committed step
+        // never reaches this function; the `if let` states that rather than
+        // asserting it.
+        if let Some(veto) = crate::coverage_repair::RepairVeto::from_step(&step) {
+            self.vetoes.record(veto);
+        }
+        self.record_trial(step, started);
+    }
+
+    /// The two things every finished trial does, committed or not: join the
+    /// in-memory stream, and reach the live trail on disk.
+    ///
+    /// One place, so a trial can never be in the ledger and missing from the
+    /// trail — which would make the trail a second, quieter tally of the same
+    /// thing rather than the same rows written sooner.
+    fn record_trial(
+        &mut self,
+        step: crate::coverage_repair::CoverageRepairStep,
+        started: std::time::Instant,
+    ) {
+        if let Some(trail) = self.trail.as_mut() {
+            trail.append(&step);
+        }
         self.steps.push(step);
         self.per_trial_ms.push(elapsed_ms(started));
     }
@@ -2703,8 +2753,7 @@ impl RepairLedger {
         started: std::time::Instant,
     ) {
         self.report.commits += 1;
-        self.steps.push(step);
-        self.per_trial_ms.push(elapsed_ms(started));
+        self.record_trial(step, started);
     }
 
     /// The whole trial stream, projected onto SPEC-A4 §D.2's wire form.
@@ -2763,6 +2812,13 @@ impl RepairLedger {
             self.report.candidates_remaining = self.remaining(candidates);
         }
         self.report.diversity_demotions = self.demoted.len();
+        // Both disclosures are folds of state kept incrementally, so this is a
+        // projection at the end and not a pass over the trials.
+        self.report.vetoes = self.vetoes.disclosure();
+        self.report.trail = self
+            .trail
+            .as_ref()
+            .map(crate::coverage_repair::RepairTrialTrail::disclosure);
         let per_trial = std::mem::take(&mut self.per_trial_ms);
         self.report.record_trial_times(per_trial);
     }
@@ -13521,5 +13577,210 @@ mod tests {
             (3, 3),
             "and every clearance-refused trial still counts, exactly as before the disclosure"
         );
+    }
+
+    fn ledger_row(order: usize, seat_mm: [f64; 3]) -> crate::coverage_closure::RankedRepairRow {
+        crate::coverage_closure::RankedRepairRow {
+            id: crate::specialized::RepairRowId::for_search_rule_test(3, 0, order as u64),
+            key: (3, 0),
+            seat_mm,
+            order,
+            marginal_area_mm2: 0.46,
+            scored_from: Vec::new(),
+            diversity_discs: 0,
+        }
+    }
+
+    fn ledger_step(
+        trial: usize,
+        row: &crate::coverage_closure::RankedRepairRow,
+        outcome: crate::coverage_repair::RepairStepOutcome,
+        gates_after: Option<crate::coverage_repair::NoncoverageVector>,
+        own_contact_condemned: Option<bool>,
+    ) -> crate::coverage_repair::CoverageRepairStep {
+        let objective = crate::CoverageObjective {
+            failing_uncovered_area_mm2: 0.46,
+            max_patch_area_mm2: 0.36,
+            failing_patch_count: 2,
+            worst_gap_mm: 4.0,
+        };
+        crate::coverage_repair::CoverageRepairStep {
+            trial,
+            commit: None,
+            row_id: row.id,
+            seat_mm: row.seat_mm,
+            source_island_id: row.key.0,
+            source_component_id: row.key.1,
+            scored_from: Vec::new(),
+            marginal_area_mm2: row.marginal_area_mm2,
+            chosen_by_first_trial_guarantee: false,
+            diversity_discs_containing_seat: 0,
+            objective_before: objective,
+            objective_after: Some(objective),
+            uncensored_before_mm2: 0.46,
+            uncensored_after_mm2: Some(0.46),
+            gates_before: crate::coverage_repair::NoncoverageVector {
+                unrouted_no_winner: 7,
+                quarantined: 2,
+                unrouted_specialized: 1,
+                load_violations: 3,
+                unsupported_specialized: 4,
+            },
+            gates_after,
+            ownerless_faces_before: 0,
+            ownerless_faces_after: Some(0),
+            own_contact_quarantined: Some(false),
+            own_contact_condemned,
+            own_contact_no_winner: None,
+            route_deltas: Vec::new(),
+            outcome,
+        }
+    }
+
+    /// **The ledger keeps WHY, beside the two things it already kept.**
+    ///
+    /// Before this, `reject` did the same two things for every rejection class
+    /// — spend the row, drop a disc at its seat — so a clause-1 rejection, a
+    /// clause-2 veto and a stage refusal were indistinguishable to everything
+    /// downstream. The outcome class went to the step stream, which no branch
+    /// reads and which only reaches disk when the search stops.
+    ///
+    /// What this pins:
+    ///
+    /// * the OLD bookkeeping is untouched — the row is still ledgered, the
+    ///   disc is still charged to the whole ranking, and the §A.8 histogram
+    ///   still counts by class;
+    /// * the NEW memory holds the class, the hard-gate component that rose
+    ///   underneath a clause-1 rejection (the measured majority case: 176 of
+    ///   321 trials on the 2026-08-28 baseline), and the condemned own
+    ///   contact;
+    /// * a COMMIT teaches it nothing, which is what keeps the memory from
+    ///   learning to avoid the seats that work.
+    ///
+    /// The revert this guards is the cheap one: fold the veto in
+    /// `RepairLedger::finish` from the step stream instead of at the rejection,
+    /// and a run that never terminates records nothing again.
+    #[test]
+    fn the_repair_ledger_records_why_a_trial_was_rejected_not_only_that_it_was() {
+        let rejected = ledger_row(0, [0.0, 0.0, 0.0]);
+        let neighbour = ledger_row(1, [1.0, 0.0, 0.0]);
+        let distant = ledger_row(2, [100.0, 0.0, 0.0]);
+        let mut candidates = crate::coverage_closure::RankedRepairCandidates {
+            ranked: vec![rejected.clone(), neighbour.clone(), distant.clone()],
+            ..Default::default()
+        };
+        let mut ledger = RepairLedger::new(
+            6.0,
+            crate::coverage_repair::LegalizationDisclosure::default(),
+        );
+
+        // Clause 1 rejected it, and `unrouted_no_winner` rose underneath.
+        ledger.report.trials += 1;
+        let step = ledger_step(
+            1,
+            &rejected,
+            crate::coverage_repair::RepairStepOutcome::NoImprovement {
+                before: crate::CoverageObjective {
+                    failing_uncovered_area_mm2: 0.46,
+                    max_patch_area_mm2: 0.36,
+                    failing_patch_count: 2,
+                    worst_gap_mm: 4.0,
+                },
+                after: crate::CoverageObjective {
+                    failing_uncovered_area_mm2: 0.46,
+                    max_patch_area_mm2: 0.36,
+                    failing_patch_count: 2,
+                    worst_gap_mm: 4.0,
+                },
+            },
+            Some(crate::coverage_repair::NoncoverageVector {
+                unrouted_no_winner: 8,
+                quarantined: 2,
+                unrouted_specialized: 1,
+                load_violations: 3,
+                unsupported_specialized: 4,
+            }),
+            Some(true),
+        );
+        ledger.reject(&mut candidates, step, &rejected, std::time::Instant::now());
+
+        // OLD bookkeeping, unchanged.
+        assert!(ledger.ledgered.contains(&rejected.id), "the row is spent");
+        assert_eq!(
+            candidates
+                .ranked
+                .iter()
+                .map(|row| row.diversity_discs)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 0],
+            "the disc is still charged to every row inside it, and to nothing outside it"
+        );
+        assert_eq!(ledger.report.rejections_by_class["no_improvement"], 1);
+
+        // NEW memory: the class, the component that moved, and the seat it
+        // moved at.
+        assert_eq!(ledger.vetoes.len(), 1);
+        let near = ledger.vetoes.counts_near(rejected.seat_mm);
+        assert_eq!(near.total, 1);
+        assert_eq!(
+            near.class(crate::coverage_repair::RepairVetoClass::NoImprovement),
+            1
+        );
+        assert_eq!(
+            near.gate_rise(crate::coverage_repair::NoncoverageComponent::UnroutedNoWinner),
+            1,
+            "the rise clause 1 hid is what the ledger could not say before"
+        );
+        assert_eq!(near.own_contact_condemned, 1);
+        assert_eq!(
+            ledger.vetoes.counts_near(distant.seat_mm).total,
+            0,
+            "and it is asked by seat, at the disc's own radius"
+        );
+
+        // A COMMIT is not a veto.
+        ledger.report.trials += 1;
+        let mut committed = ledger_step(
+            2,
+            &neighbour,
+            crate::coverage_repair::RepairStepOutcome::Committed,
+            Some(crate::coverage_repair::NoncoverageVector {
+                unrouted_no_winner: 7,
+                quarantined: 2,
+                unrouted_specialized: 1,
+                load_violations: 3,
+                unsupported_specialized: 4,
+            }),
+            Some(false),
+        );
+        committed.commit = Some(1);
+        ledger.commit(committed, std::time::Instant::now());
+        assert_eq!(
+            ledger.vetoes.len(),
+            1,
+            "a commit teaches the memory nothing"
+        );
+
+        // And what it learned reaches the report an operator reads.
+        ledger.finish(Some(&candidates));
+        let disclosure = &ledger.report.vetoes;
+        assert_eq!(disclosure.total, 1);
+        assert_eq!(disclosure.by_class["no_improvement"], 1);
+        assert_eq!(disclosure.gate_rises_by_component["unrouted_no_winner"], 1);
+        assert!(
+            !disclosure
+                .gate_rises_by_component
+                .contains_key("quarantined"),
+            "a component that never moved is absent, not zero: {disclosure:?}"
+        );
+        assert_eq!(disclosure.own_contact_condemned, 1);
+        assert_eq!(
+            ledger.report.trail, None,
+            "no trail directory was asked for, so no file was opened"
+        );
+        assert!(ledger
+            .report
+            .summary_line()
+            .contains("gate_rises[unrouted_no_winner=1]"));
     }
 }

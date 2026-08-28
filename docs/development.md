@@ -203,6 +203,29 @@ established them. What they mean:
 Run the census whenever you touch anything the support path can see, including code you
 believe is inert.
 
+## Reading a repair search that has not finished
+
+The coverage-repair controller writes its trial stream — `steps` in
+`<model>.coverage.repair.json` — only when the search reaches a seal or a refusal. A run
+that is killed, or that is still going, therefore leaves no stream at all, which is the
+one run you most want to read.
+
+Point `PLINTH_REPAIR_TRIAL_TRAIL_DIR` at a directory and each support run appends its
+trials there as they land, one JSON row per line, flushed:
+
+```sh
+PLINTH_REPAIR_TRIAL_TRAIL_DIR=/tmp/trail cargo run --release -- prepare …
+jq -s '.' /tmp/trail/repair-trial-trail.v1.*.jsonl        # the same array as `steps`
+```
+
+Each line is one `CoverageRepairStepWire`, so a `jq` written against a finished run's
+sidecar reads a killed run's trail unchanged. One file per support run, named for the
+process and the run within it, so concurrent models never interleave.
+
+With the variable unset no file is opened and nothing is written — the trail is
+instrumentation, and it changes no verdict either way. The run summary names the file and
+the row count when one is open.
+
 ## Corpus provisioning
 
 The test models are inputs, not source, and are not stored in git — the largest is over
