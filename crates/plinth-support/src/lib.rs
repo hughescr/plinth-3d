@@ -160,8 +160,10 @@ pub use coverage_measurement::{
 pub use coverage_repair::{
     repair_step_outcome, ConfirmationRoundDisclosure, ConfirmationRoundOutcome, CoverageRepairStep,
     CoverageRepairStepWire, LegalizationDisclosure, LegalizationDisturbance, NoncoverageComponent,
-    NoncoverageVector, OwnContactNoWinnerEvidence, OwnContactNoWinnerStage, RepairGateVector,
-    RepairRunReport, RepairStepOutcome, RouteDelta, StageClock,
+    NoncoverageComponentSet, NoncoverageVector, OwnContactNoWinnerEvidence,
+    OwnContactNoWinnerStage, RepairGateVector, RepairRunReport, RepairStepOutcome,
+    RepairTrailDisclosure, RepairTrialTrail, RepairVeto, RepairVetoClass, RepairVetoCounts,
+    RepairVetoDisclosure, RepairVetoIndex, RouteDelta, StageClock, TRIAL_TRAIL_DIR_ENV,
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{

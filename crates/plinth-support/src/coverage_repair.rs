@@ -37,6 +37,7 @@
 //! coverage by definition. The metric and the goal are the same thing.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +125,78 @@ impl NoncoverageComponent {
             Self::UnsupportedSpecialized => "unsupported_specialized",
         }
     }
+
+    /// This component's position in [`Self::ALL`], which is also its bit in
+    /// [`NoncoverageComponentSet`] and its slot in
+    /// [`RepairVetoCounts::gate_rise`]. One numbering, defined once.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::UnroutedNoWinner => 0,
+            Self::Quarantined => 1,
+            Self::UnroutedSpecialized => 2,
+            Self::LoadViolations => 3,
+            Self::UnsupportedSpecialized => 4,
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        1_u8 << self.index()
+    }
+}
+
+/// **A set of [`NoncoverageComponent`]s, as five bits.**
+///
+/// [`NoncoverageVector::first_regression`] names the ONE component clause 2
+/// vetoes on. This is the set behind it, and the difference is the whole
+/// reason it exists: **the clause-2 veto is not where the hard gates actually
+/// move.** MEASURED 2026-08-28 over the four fixtures that enter the repair
+/// loop (`docs/evidence/remediation-2026-08-26/repair-search-baseline.md`),
+/// across 1,062 trials the clause-2 veto fired **zero** times, while a
+/// hard-gate count ROSE on **176 of the 321** trials that left a step stream —
+/// always by exactly +1, and only ever `unrouted_no_winner` (93) or
+/// `quarantined` (83); the other three components never moved once. Clause 1
+/// rejected every one of those 176 first, so the rise was measured and thrown
+/// away unnamed.
+///
+/// **Five bits and not a `BTreeSet`** because the ranking reads this per
+/// candidate row: a set that allocates would put a heap call where a
+/// comparator goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoncoverageComponentSet(u8);
+
+impl NoncoverageComponentSet {
+    /// No component moved. The value a trial that never reached a measurement
+    /// carries, which is why [`RepairVeto::gates_measured`] exists beside it.
+    pub const EMPTY: Self = Self(0);
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[must_use]
+    pub const fn contains(self, component: NoncoverageComponent) -> bool {
+        self.0 & component.bit() != 0
+    }
+
+    pub const fn insert(&mut self, component: NoncoverageComponent) {
+        self.0 |= component.bit();
+    }
+
+    /// How many components are in the set. Named `count` rather than `len`
+    /// because this is a bit population, not a container length.
+    #[must_use]
+    pub const fn count(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// The members, in [`NoncoverageComponent::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = NoncoverageComponent> {
+        NoncoverageComponent::ALL
+            .into_iter()
+            .filter(move |&component| self.contains(component))
+    }
 }
 
 impl NoncoverageVector {
@@ -148,6 +221,31 @@ impl NoncoverageVector {
         NoncoverageComponent::ALL
             .into_iter()
             .find(|&component| self.component(component) > before.component(component))
+    }
+
+    /// **Every component that rose, not just the first — the same comparison,
+    /// unfolded.**
+    ///
+    /// [`Self::first_regression`] answers clause 2's question ("may this step
+    /// be kept?"), so it stops at the first `>`. This answers the ledger's
+    /// question ("what did this trial do to the hard gates?"), which is asked
+    /// on trials clause 1 has ALREADY rejected — where clause 2 never runs and
+    /// the rise is real all the same. See [`NoncoverageComponentSet`] for the
+    /// measurement that makes the distinction load-bearing.
+    ///
+    /// The two are the same predicate over the same order: the set is empty
+    /// exactly when `first_regression` is `None`, and `first_regression` is
+    /// always the set's first member. A test beside this pins both directions,
+    /// so the day a component is added the two cannot drift apart.
+    #[must_use]
+    pub fn risen_components(&self, before: &Self) -> NoncoverageComponentSet {
+        let mut risen = NoncoverageComponentSet::EMPTY;
+        for component in NoncoverageComponent::ALL {
+            if self.component(component) > before.component(component) {
+                risen.insert(component);
+            }
+        }
+        risen
     }
 
     /// The plan-frozen half of the vector, read off the **accepted** plan.
@@ -245,16 +343,31 @@ pub enum RepairStepOutcome {
 
 impl RepairStepOutcome {
     /// The rejection-histogram bucket, for §A.8's loud per-run report.
+    ///
+    /// Every bucket but `committed` is read off [`RepairVetoClass::name`]
+    /// rather than spelled again here, so the histogram in the report and the
+    /// tally in the veto memory cannot end up with two vocabularies for one
+    /// set of outcomes.
     #[must_use]
     pub const fn class(&self) -> &'static str {
+        match self.veto_class() {
+            Some(class) => class.name(),
+            None => "committed",
+        }
+    }
+
+    /// Which veto class this outcome is, or `None` for a COMMIT — which is not
+    /// a veto and must never be folded into the veto memory as one.
+    #[must_use]
+    pub const fn veto_class(&self) -> Option<RepairVetoClass> {
         match self {
-            Self::Committed => "committed",
-            Self::NoImprovement { .. } => "no_improvement",
-            Self::NoAreaCovered { .. } => "no_area_covered",
-            Self::Regression { .. } => "regression",
-            Self::StageRefusal { .. } => "stage_refusal",
-            Self::AppendRefused { .. } => "append_refused",
-            Self::MeasurementRefused { .. } => "measurement_refused",
+            Self::Committed => None,
+            Self::NoImprovement { .. } => Some(RepairVetoClass::NoImprovement),
+            Self::NoAreaCovered { .. } => Some(RepairVetoClass::NoAreaCovered),
+            Self::Regression { .. } => Some(RepairVetoClass::Regression),
+            Self::StageRefusal { .. } => Some(RepairVetoClass::StageRefusal),
+            Self::AppendRefused { .. } => Some(RepairVetoClass::AppendRefused),
+            Self::MeasurementRefused { .. } => Some(RepairVetoClass::MeasurementRefused),
         }
     }
 }
@@ -791,6 +904,611 @@ pub struct RouteDelta {
     pub worst_gap_after: Option<CoverageClosureGap>,
 }
 
+// ---------------------------------------------------------------------------
+// THE VETO MEMORY — what a rejection LEARNED, kept in a shape a later decision
+// can read.
+// ---------------------------------------------------------------------------
+
+/// **Which class of veto ended a trial**, as one small `Copy` value.
+///
+/// [`RepairStepOutcome`] carries the class AND the measurement that produced
+/// it — two `CoverageObjective`s, or a `String` of stage detail. That is the
+/// right shape for a ledger row and the wrong shape for a memory that is
+/// consulted per candidate: this is the discriminant alone, so a tally can
+/// index it and a comparator can compare it without touching a heap.
+///
+/// The variants are [`RepairStepOutcome`]'s minus `Committed`, which is not a
+/// veto. [`RepairStepOutcome::veto_class`] is the only conversion, and
+/// [`RepairStepOutcome::class`] now reads its name from [`Self::name`], so the
+/// §A.8 histogram and this tally are one vocabulary by construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairVetoClass {
+    NoImprovement,
+    NoAreaCovered,
+    Regression,
+    StageRefusal,
+    AppendRefused,
+    MeasurementRefused,
+}
+
+impl RepairVetoClass {
+    /// Every class, exhaustively. The match in [`Self::index`] has no wildcard
+    /// arm, so a class added without a slot in [`RepairVetoCounts`] is a
+    /// compile error rather than a silently uncounted rejection.
+    pub const ALL: [Self; 6] = [
+        Self::NoImprovement,
+        Self::NoAreaCovered,
+        Self::Regression,
+        Self::StageRefusal,
+        Self::AppendRefused,
+        Self::MeasurementRefused,
+    ];
+
+    /// How many classes there are — the width of [`RepairVetoCounts`]'s
+    /// per-class array, taken from `ALL` so the two cannot disagree.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// This class's slot in [`RepairVetoCounts`], and its position in
+    /// [`Self::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::NoImprovement => 0,
+            Self::NoAreaCovered => 1,
+            Self::Regression => 2,
+            Self::StageRefusal => 3,
+            Self::AppendRefused => 4,
+            Self::MeasurementRefused => 5,
+        }
+    }
+
+    /// The name the §A.8 histogram already prints for this class.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NoImprovement => "no_improvement",
+            Self::NoAreaCovered => "no_area_covered",
+            Self::Regression => "regression",
+            Self::StageRefusal => "stage_refusal",
+            Self::AppendRefused => "append_refused",
+            Self::MeasurementRefused => "measurement_refused",
+        }
+    }
+}
+
+/// **One rejection, reduced to what it TAUGHT.**
+///
+/// Before this type, `RepairLedger::reject` did the same two things for every
+/// rejection class — ledger the row so it is never retried, and drop a
+/// diversity disc at its seat — and the outcome class, the component that
+/// regressed and the measured before/after went to the step stream, which no
+/// branch reads. A search that vetoed 119 strict improvements on one model
+/// could not answer "and on what?" without re-reading a file it only writes
+/// when it stops.
+///
+/// **This is a RECORD, not a rule.** Nothing in the controller reads it to
+/// choose a candidate or to accept a trial, and that inertness is the point of
+/// landing it on its own: the ranking change that will consult it is a
+/// separate, measurable step, and it must be able to assume the memory beneath
+/// it did not move the search. The physics-first doctrine's line applies
+/// unchanged — a number that steers is a cap, a number that is recorded is
+/// evidence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RepairVeto {
+    /// The trial that produced it, from 1 — the same number
+    /// [`CoverageRepairStep::trial`] carries, so a veto and its step row are
+    /// the same event under two shapes.
+    pub trial: usize,
+    /// Where the rejected candidate sat. This is the key the memory is
+    /// searched by, and it is the same seat the diversity disc is centred on.
+    pub seat_mm: [f64; 3],
+    pub class: RepairVetoClass,
+    /// The component clause 2 named. `Some` exactly when `class` is
+    /// [`RepairVetoClass::Regression`] — clause 2 is the only clause that
+    /// names one.
+    pub clause_two_component: Option<NoncoverageComponent>,
+    /// **Every hard-gate component that ROSE across this trial**, whichever
+    /// clause did the vetoing. On a clause-1 rejection this is the rise the
+    /// old ledger threw away: see [`NoncoverageComponentSet`] for the
+    /// measurement (176 of 321 trials, always +1, never more than one
+    /// component, and never one of the other three).
+    pub gates_risen: NoncoverageComponentSet,
+    /// Whether the gates were measured on both sides at all. `false` means the
+    /// trial never reached a routed measurement, so `gates_risen` is EMPTY
+    /// because nothing was compared — not because nothing rose. Those two must
+    /// not look alike.
+    pub gates_measured: bool,
+    /// Whether the trial's own appended contact was condemned — quarantined,
+    /// or retired with no winner — so no arm was ever built at that seat.
+    /// `None` when the trial never reached a routed measurement.
+    ///
+    /// The baseline's cross-tab is why this travels on the veto and not only
+    /// on the step: on the dust fixture, all 274 trials fall into two of four
+    /// cells — no trial ever raised a gate without its own contact condemned,
+    /// and no condemned trial ever committed (222 condemned, 222 rejected,
+    /// against 4 commits none of which were condemned).
+    pub own_contact_condemned: Option<bool>,
+}
+
+impl RepairVeto {
+    /// **Read one rejected step for what it learned. The ONLY conversion.**
+    ///
+    /// `None` for a COMMIT: a committed step is not a veto, and folding one in
+    /// would poison the memory with the seats that WORK — which is precisely
+    /// how the reverted disc-first ranking rule went wrong (see
+    /// [`CoverageRepairStep::own_contact_condemned`], "MEASURED HARMFUL").
+    ///
+    /// Every field is READ off the step the runner already filled. Nothing
+    /// here re-measures a gate, re-runs a clause or infers a count.
+    #[must_use]
+    pub fn from_step(step: &CoverageRepairStep) -> Option<Self> {
+        let class = step.outcome.veto_class()?;
+        let clause_two_component = match &step.outcome {
+            RepairStepOutcome::Regression { component, .. } => Some(*component),
+            _ => None,
+        };
+        let (gates_risen, gates_measured) = match step.gates_after {
+            Some(after) => (after.risen_components(&step.gates_before), true),
+            None => (NoncoverageComponentSet::EMPTY, false),
+        };
+        Some(Self {
+            trial: step.trial,
+            seat_mm: step.seat_mm,
+            class,
+            clause_two_component,
+            gates_risen,
+            gates_measured,
+            own_contact_condemned: step.own_contact_condemned,
+        })
+    }
+}
+
+/// **A fold of vetoes, as fixed-width counters** — the answer shape for "has a
+/// candidate like this one already been vetoed, and on what?".
+///
+/// `Copy`, heap-free and fixed-size on purpose: this is what a ranking rule
+/// gets back per candidate row, and a `BTreeMap` per row per re-sort would put
+/// an allocation inside the comparator. [`RepairVetoDisclosure`] is the named,
+/// serialized shape, built ONCE per run for the report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RepairVetoCounts {
+    /// How many vetoes are folded in here.
+    pub total: usize,
+    by_class: [usize; RepairVetoClass::COUNT],
+    gate_rises: [usize; NoncoverageComponent::ALL.len()],
+    /// Of `total`, how many reached a routed measurement, so a reader can tell
+    /// "no gate rose" from "no gate was measured".
+    pub gates_measured: usize,
+    /// Of `total`, how many had their own appended contact condemned.
+    pub own_contact_condemned: usize,
+}
+
+impl RepairVetoCounts {
+    /// Fold one veto in. O(1), no branch on the seat: the caller decides which
+    /// vetoes are near enough to count.
+    pub fn fold(&mut self, veto: &RepairVeto) {
+        self.total += 1;
+        self.by_class[veto.class.index()] += 1;
+        for component in veto.gates_risen.iter() {
+            self.gate_rises[component.index()] += 1;
+        }
+        if veto.gates_measured {
+            self.gates_measured += 1;
+        }
+        if veto.own_contact_condemned == Some(true) {
+            self.own_contact_condemned += 1;
+        }
+    }
+
+    /// How many of these vetoes ended in `class`.
+    #[must_use]
+    pub const fn class(&self, class: RepairVetoClass) -> usize {
+        self.by_class[class.index()]
+    }
+
+    /// How many of these vetoes raised `component`. A trial can raise more
+    /// than one, so these do not sum to `total`.
+    #[must_use]
+    pub const fn gate_rise(&self, component: NoncoverageComponent) -> usize {
+        self.gate_rises[component.index()]
+    }
+}
+
+/// [`RepairVetoCounts`] under its names, for the report and the sidecar.
+///
+/// Zero entries are omitted, the same way `rejections_by_class` omits classes
+/// that never fired: a map that prints five zeros says less than one that
+/// prints the two components that moved.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairVetoDisclosure {
+    pub total: usize,
+    /// Veto count by [`RepairVetoClass::name`] — the same keys
+    /// `rejections_by_class` uses, minus `committed`, which is not a veto.
+    pub by_class: BTreeMap<String, usize>,
+    /// **The instrument the 2026-08-28 baseline had to derive by hand from a
+    /// step stream, printed by the run itself**: how many rejected trials
+    /// raised each hard-gate component, whichever clause vetoed them.
+    pub gate_rises_by_component: BTreeMap<String, usize>,
+    pub gates_measured: usize,
+    pub own_contact_condemned: usize,
+}
+
+/// **Every rejection this search has made, searchable by seat.**
+///
+/// The question a later ranking rule asks is "has a candidate LIKE this one
+/// already been vetoed, and on what?", and "like this one" means "seated near
+/// it" — the same relation, at the same registered coverage radius, that the
+/// diversity disc already uses. What the disc keeps is a COUNT; what this
+/// keeps is the reason.
+///
+/// **The index is a uniform grid of one radius per cell**, so a query touches
+/// 27 cells instead of every veto ever made: on the censored 741-trial fixture
+/// a linear memory would cost 3,415 rows × 741 vetoes per re-sort, which is
+/// the per-item hot path this design exists to avoid. Recording is O(log n)
+/// for the cell lookup and nothing else.
+///
+/// **It decides nothing today.** No branch in the controller reads it. It is
+/// built, folded and disclosed so that the ranking change which will read it
+/// can be measured against a search this did not move.
+#[derive(Clone, Debug)]
+pub struct RepairVetoIndex {
+    /// The disc's own containment test, squared once.
+    radius_sq: f64,
+    /// One cell per radius, so every veto within `radius` of a seat lies in
+    /// the seat's own cell or one of its 26 neighbours.
+    cell_mm: f64,
+    vetoes: Vec<RepairVeto>,
+    by_cell: BTreeMap<[i64; 3], Vec<usize>>,
+    totals: RepairVetoCounts,
+}
+
+/// The grid axis is clamped before it is cast, so a seat at any coordinate a
+/// mesh can hold lands in a cell rather than in undefined behaviour. Model
+/// coordinates are millimetres in the tens; these bounds are ten orders of
+/// magnitude past anything a plate can hold and exist only to make the cast
+/// total.
+const CELL_INDEX_MIN: f64 = -1.0e15;
+const CELL_INDEX_MAX: f64 = 1.0e15;
+
+impl RepairVetoIndex {
+    /// `radius_mm` is the registered coverage radius the diversity discs are
+    /// built with, so "near" means the same thing in both memories.
+    ///
+    /// A radius that is not positive and finite would make the grid meaningless,
+    /// so the cell edge falls back to 1 mm and the containment test keeps the
+    /// radius it was given: the index then degrades to an honest linear scan
+    /// over one cell rather than inventing a neighbourhood.
+    #[must_use]
+    pub fn new(radius_mm: f64) -> Self {
+        let cell_mm = if radius_mm.is_finite() && radius_mm > 0.0 {
+            radius_mm
+        } else {
+            1.0
+        };
+        Self {
+            radius_sq: radius_mm * radius_mm,
+            cell_mm,
+            vetoes: Vec::new(),
+            by_cell: BTreeMap::new(),
+            totals: RepairVetoCounts::default(),
+        }
+    }
+
+    /// Remember one rejection.
+    pub fn record(&mut self, veto: RepairVeto) {
+        self.totals.fold(&veto);
+        let cell = self.cell_of(veto.seat_mm);
+        let index = self.vetoes.len();
+        self.vetoes.push(veto);
+        self.by_cell.entry(cell).or_default().push(index);
+    }
+
+    /// Every veto recorded, in trial order.
+    #[must_use]
+    pub fn vetoes(&self) -> &[RepairVeto] {
+        &self.vetoes
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.vetoes.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vetoes.is_empty()
+    }
+
+    /// The whole run's fold, maintained incrementally as vetoes arrive.
+    #[must_use]
+    pub const fn totals(&self) -> RepairVetoCounts {
+        self.totals
+    }
+
+    /// **The batch query, which is the real one.**
+    ///
+    /// One call answers a whole ranking, filling `out` with one
+    /// [`RepairVetoCounts`] per seat, in the seats' own order. A ranking that
+    /// asked seat by seat would be the per-item hot-path call this codebase
+    /// treats as a defect.
+    ///
+    /// It takes an ITERATOR of seats rather than a slice so the caller's rows
+    /// can be read where they already live — `rows.iter().map(|row|
+    /// row.seat_mm)` — with no seat vector built per re-sort; and `out` is a
+    /// buffer the caller keeps, so after the first call the answer costs no
+    /// allocation at all.
+    pub fn counts_near_batch(
+        &self,
+        seats: impl IntoIterator<Item = [f64; 3]>,
+        out: &mut Vec<RepairVetoCounts>,
+    ) {
+        out.clear();
+        let seats = seats.into_iter();
+        out.reserve(seats.size_hint().0);
+        if self.vetoes.is_empty() {
+            out.extend(seats.map(|_| RepairVetoCounts::default()));
+            return;
+        }
+        out.extend(seats.map(|seat| self.counts_near(seat)));
+    }
+
+    /// One seat's fold — the convenience form of [`Self::counts_near_batch`],
+    /// for a test or a single lookup. A ranking uses the batch.
+    #[must_use]
+    pub fn counts_near(&self, seat_mm: [f64; 3]) -> RepairVetoCounts {
+        let mut counts = RepairVetoCounts::default();
+        let [cell_x, cell_y, cell_z] = self.cell_of(seat_mm);
+        for x in -1..=1_i64 {
+            for y in -1..=1_i64 {
+                for z in -1..=1_i64 {
+                    let Some(bucket) = self.by_cell.get(&[
+                        cell_x.saturating_add(x),
+                        cell_y.saturating_add(y),
+                        cell_z.saturating_add(z),
+                    ]) else {
+                        continue;
+                    };
+                    for &index in bucket {
+                        let veto = &self.vetoes[index];
+                        if seat_distance_sq(seat_mm, veto.seat_mm) <= self.radius_sq {
+                            counts.fold(veto);
+                        }
+                    }
+                }
+            }
+        }
+        counts
+    }
+
+    /// The run's fold under its names, for [`RepairRunReport`].
+    #[must_use]
+    pub fn disclosure(&self) -> RepairVetoDisclosure {
+        let mut by_class = BTreeMap::new();
+        for class in RepairVetoClass::ALL {
+            let count = self.totals.class(class);
+            if count > 0 {
+                by_class.insert(class.name().to_owned(), count);
+            }
+        }
+        let mut gate_rises_by_component = BTreeMap::new();
+        for component in NoncoverageComponent::ALL {
+            let count = self.totals.gate_rise(component);
+            if count > 0 {
+                gate_rises_by_component.insert(component.name().to_owned(), count);
+            }
+        }
+        RepairVetoDisclosure {
+            total: self.totals.total,
+            by_class,
+            gate_rises_by_component,
+            gates_measured: self.totals.gates_measured,
+            own_contact_condemned: self.totals.own_contact_condemned,
+        }
+    }
+
+    fn cell_of(&self, point: [f64; 3]) -> [i64; 3] {
+        [
+            self.cell_axis(point[0]),
+            self.cell_axis(point[1]),
+            self.cell_axis(point[2]),
+        ]
+    }
+
+    /// A non-finite coordinate lands in cell 0 and is then rejected by the
+    /// distance test, which is `false` on every NaN comparison. It cannot
+    /// match, and it cannot make a finite seat match either.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the value is clamped to ±1e15 on the line above, which is inside i64"
+    )]
+    fn cell_axis(&self, value: f64) -> i64 {
+        let quotient = value / self.cell_mm;
+        if !quotient.is_finite() {
+            return 0;
+        }
+        quotient.floor().clamp(CELL_INDEX_MIN, CELL_INDEX_MAX) as i64
+    }
+}
+
+/// The diversity disc's own containment arithmetic, to the term order — the
+/// two memories must agree on what "near" means, and a second formula would be
+/// a second definition.
+fn seat_distance_sq(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    let dz = left[2] - right[2];
+    dx.mul_add(dx, dy.mul_add(dy, dz * dz))
+}
+
+// ---------------------------------------------------------------------------
+// THE TRIAL TRAIL — the step stream, on disk WHILE the search is still running.
+// ---------------------------------------------------------------------------
+
+/// **Where the live trial trail is written, if anywhere.** Names a DIRECTORY;
+/// each support run in the process opens its own file inside it.
+pub const TRIAL_TRAIL_DIR_ENV: &str = "PLINTH_REPAIR_TRIAL_TRAIL_DIR";
+
+/// The schema, in the file NAME, so every line of the file can be one step row
+/// and `jq -s` over the file is the same array shape a `.coverage.repair.json`
+/// carries under `steps`.
+const TRIAL_TRAIL_SCHEMA: &str = "repair-trial-trail.v1";
+
+/// **The trial stream, appended as it happens.**
+///
+/// `RepairLedger::steps` reaches disk only at a terminal state — a seal or a
+/// refusal — so the run that most needs reading is the one that writes
+/// nothing. That is not hypothetical: the 2026-08-28 baseline could tabulate
+/// the per-component hard-gate rise for every fixture that finished, and for
+/// the 741-trial fixture that was killed at 2,068 s it could only record "per
+/// component figures are NOT available: a killed process writes no step
+/// stream".
+///
+/// This closes that hole and nothing else. One JSON row per trial, one line
+/// each, written and flushed as the trial lands — so a killed run, a runaway
+/// run and a wedged run all leave the same readable trail a finished run does,
+/// in the same [`CoverageRepairStepWire`] shape, so the same `jq` reads it.
+///
+/// **Off unless asked for.** With [`TRIAL_TRAIL_DIR_ENV`] unset there is no
+/// file, no formatting and no syscall; a production run is byte-for-byte the
+/// run it was.
+///
+/// **Cost, per trial: one serialization of ONE row and one `write_all`.** The
+/// whole ledger is never re-serialized — that would be quadratic in the trial
+/// count, on a loop whose whole problem is that it runs too many trials.
+/// Against a measured median trial of 437 ms to 1,981 ms, a row of a few
+/// kilobytes is not on the hot path.
+///
+/// **A write failure is data, not control flow** — the rule
+/// `SealedRepairLedger` already follows. The first failure is recorded, said
+/// once on the run log, and the file is dropped; the search continues
+/// unchanged, because evidence that cannot be written is not a reason to
+/// refuse a model.
+#[derive(Debug)]
+pub struct RepairTrialTrail {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    rows: usize,
+    write_error: Option<String>,
+}
+
+/// What the trail did, for the report — including where it is, so an operator
+/// reading a summary can find the file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairTrailDisclosure {
+    /// The file, rendered rather than carried as a `PathBuf`. A `PathBuf` that
+    /// is not UTF-8 refuses to serialize, and this value is embedded in the
+    /// sealed ledger and the refusal sidecar — so a path nobody can encode
+    /// would take a whole model's evidence file down with it. The path here is
+    /// for a human to find the file with; `Display` is what a human reads.
+    pub path: String,
+    /// Rows that reached the file. Equal to the trial count on a healthy run;
+    /// a shortfall names a write that failed rather than hiding it.
+    pub rows: usize,
+    pub write_error: Option<String>,
+}
+
+impl RepairTrialTrail {
+    /// Open a trail if [`TRIAL_TRAIL_DIR_ENV`] names a directory, else `None`.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let directory = std::env::var_os(TRIAL_TRAIL_DIR_ENV)?;
+        if directory.is_empty() {
+            return None;
+        }
+        Some(Self::open_in(Path::new(&directory)))
+    }
+
+    /// Open this run's own trail file inside `directory`.
+    ///
+    /// The name carries the process id and a per-process sequence number, so
+    /// several support runs — including several running at once — never
+    /// interleave their trials into one file, and a reader never has to guess
+    /// which model a `trial=3` row belongs to.
+    #[must_use]
+    pub fn open_in(directory: &Path) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_TRAIL: AtomicUsize = AtomicUsize::new(0);
+
+        let sequence = NEXT_TRAIL.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "{TRIAL_TRAIL_SCHEMA}.{}.{sequence}.jsonl",
+            std::process::id()
+        ));
+        let opened = std::fs::create_dir_all(directory).and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        });
+        let mut trail = Self {
+            path,
+            file: None,
+            rows: 0,
+            write_error: None,
+        };
+        match opened {
+            Ok(file) => {
+                trail.file = Some(file);
+                emit_run_line(&format!(
+                    "coverage-repair trail: writing one row per trial to {}",
+                    trail.path.display()
+                ));
+            }
+            Err(error) => trail.fail(format!("could not be opened: {error}")),
+        }
+        trail
+    }
+
+    /// Append ONE finished trial. Called once per trial, committed or not.
+    pub fn append(&mut self, step: &CoverageRepairStep) {
+        if self.file.is_none() {
+            return;
+        }
+        match self.write_row(step) {
+            Ok(()) => self.rows += 1,
+            Err(message) => self.fail(message),
+        }
+    }
+
+    #[must_use]
+    pub fn disclosure(&self) -> RepairTrailDisclosure {
+        RepairTrailDisclosure {
+            path: self.path.display().to_string(),
+            rows: self.rows,
+            write_error: self.write_error.clone(),
+        }
+    }
+
+    fn write_row(&mut self, step: &CoverageRepairStep) -> Result<(), String> {
+        use std::io::Write as _;
+
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let mut line = serde_json::to_vec(&step.to_wire())
+            .map_err(|error| format!("trial {} could not be serialized: {error}", step.trial))?;
+        line.push(b'\n');
+        // One write of one whole line, then a flush: a line that is still in a
+        // buffer when the process is killed is a line that was never written,
+        // and this file exists FOR the process that is killed.
+        file.write_all(&line)
+            .and_then(|()| file.flush())
+            .map_err(|error| format!("trial {} could not be written: {error}", step.trial))
+    }
+
+    /// Record the FIRST failure, say it once, and stop writing.
+    fn fail(&mut self, message: String) {
+        self.file = None;
+        if self.write_error.is_some() {
+            return;
+        }
+        let message = format!("{}: {message}", self.path.display());
+        emit_run_line(&format!("coverage-repair trail: {message}"));
+        self.write_error = Some(message);
+    }
+}
+
 /// **SPEC-A4 §A.8 — the loud per-run report, which is the price of having no
 /// failed-tries cap (Craig's ruling R10).**
 ///
@@ -842,6 +1560,24 @@ pub struct RepairRunReport {
     /// makes about the embedded report.
     #[serde(default)]
     pub legalization: LegalizationDisclosure,
+    /// **What the rejections LEARNED, folded over the whole run.**
+    ///
+    /// `rejections_by_class` says how many trials were thrown away. This says
+    /// what they were thrown away ON: the same classes, plus the hard-gate
+    /// component each rejected trial actually raised, which no earlier report
+    /// could state without a step stream and a hand-written `jq` pass —
+    /// and which a killed run therefore could not state at all.
+    ///
+    /// A counter, like every other field here: no branch reads it.
+    /// `#[serde(default)]` so a sidecar written before this field still
+    /// deserializes, and it deserializes to "no vetoes recorded".
+    #[serde(default)]
+    pub vetoes: RepairVetoDisclosure,
+    /// Where the live trial trail was written, and whether every row reached
+    /// it. `None` when [`TRIAL_TRAIL_DIR_ENV`] was unset, which is the
+    /// production default and means no file was opened.
+    #[serde(default)]
+    pub trail: Option<RepairTrailDisclosure>,
 }
 
 impl RepairRunReport {
@@ -873,8 +1609,9 @@ impl RepairRunReport {
     /// [`crate::CoverageClosureRefusal::repair`] / the sealed authority's own
     /// copy for the sidecar. `plinth-support` has no logging dependency (its
     /// whole dependency list is `geom_kernel, plinth-core, plinth-hollow,
-    /// plinth-layers, plinth-mesh, rayon, serde, thiserror`), so this goes to
-    /// stderr rather than to a logger. The run report's per-model line is a
+    /// plinth-layers, plinth-mesh, rayon, serde, serde_json, thiserror` —
+    /// `serde_json` joined it for [`RepairTrialTrail`], and it is a serializer,
+    /// not a logger), so this goes to stderr rather than to a logger. The run report's per-model line is a
     /// `plinth-pipeline` wiring step and travels with §G.1's stage 4.
     pub fn log_summary(&self) {
         emit_run_line(&self.summary_line());
@@ -944,7 +1681,7 @@ impl RepairRunReport {
         format!(
             "coverage-repair: trials={} commits={} remaining={} \
              wall_total={}ms wall/trial min={}ms med={}ms max={}ms \
-             diversity_demotions={} of_which_tried={} [{histogram}]",
+             diversity_demotions={} of_which_tried={} [{histogram}]{}{}",
             self.trials,
             self.commits,
             self.candidates_remaining,
@@ -954,7 +1691,46 @@ impl RepairRunReport {
             self.wall_time_per_trial_max_ms,
             self.diversity_demotions,
             self.diversity_demotions_tried,
+            self.gate_rise_text(),
+            self.trail_text(),
         )
+    }
+
+    /// **The hard-gate rise, on the one line an operator always sees.**
+    ///
+    /// Empty when nothing rose, so a run that vetoed cleanly prints the line
+    /// it always printed. When something did rise, the components are named
+    /// here rather than left to be recovered from a sidecar — the 2026-08-28
+    /// baseline had to derive exactly this from a step stream, and the run
+    /// that most needed it never wrote one.
+    fn gate_rise_text(&self) -> String {
+        if self.vetoes.gate_rises_by_component.is_empty() {
+            return String::new();
+        }
+        let components = self
+            .vetoes
+            .gate_rises_by_component
+            .iter()
+            .map(|(component, count)| format!("{component}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            " gate_rises[{components}] of_measured={} own_contact_condemned={}",
+            self.vetoes.gates_measured, self.vetoes.own_contact_condemned,
+        )
+    }
+
+    /// Where the live trail went, when there was one, so the operator reading
+    /// the summary knows the file exists and whether it is complete.
+    fn trail_text(&self) -> String {
+        let Some(trail) = self.trail.as_ref() else {
+            return String::new();
+        };
+        let error = trail
+            .write_error
+            .as_ref()
+            .map_or_else(String::new, |error| format!(" trail_error={error}"));
+        format!(" trail={} rows={}{error}", trail.path, trail.rows)
     }
 }
 
@@ -1802,5 +2578,533 @@ mod tests {
         emit_run_line("after the guard dropped");
         let capture = capture::RunLogCapture::install();
         assert!(capture.lines().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // THE VETO MEMORY
+    // -----------------------------------------------------------------------
+
+    fn gates(
+        unrouted_no_winner: u32,
+        quarantined: u32,
+        unrouted_specialized: u32,
+        load_violations: u32,
+        unsupported_specialized: u32,
+    ) -> NoncoverageVector {
+        NoncoverageVector {
+            unrouted_no_winner,
+            quarantined,
+            unrouted_specialized,
+            load_violations,
+            unsupported_specialized,
+        }
+    }
+
+    /// **Clause 2's question and the ledger's question are the same predicate,
+    /// asked for different reasons — so they must never disagree.**
+    ///
+    /// `first_regression` stops at the first `>` because clause 2 only needs to
+    /// know THAT the step may not be kept. `risen_components` keeps going
+    /// because the ledger needs to know WHAT moved, on trials clause 1 already
+    /// rejected and clause 2 therefore never saw.
+    ///
+    /// The revert this guards: reimplementing either one against a different
+    /// component order, or letting a FALL count as a rise. Both directions are
+    /// asserted for every component, so adding a sixth component without
+    /// deciding what it means here fails rather than passes quietly.
+    #[test]
+    fn every_component_that_rose_is_named_and_the_first_of_them_is_clause_twos() {
+        let before = gates(7, 2, 1, 3, 4);
+
+        assert_eq!(
+            before.risen_components(&before),
+            NoncoverageComponentSet::EMPTY
+        );
+        assert!(before.risen_components(&before).is_empty());
+        assert_eq!(before.first_regression(&before), None);
+
+        // One component at a time, in both instruments.
+        for component in NoncoverageComponent::ALL {
+            let mut after = before;
+            match component {
+                NoncoverageComponent::UnroutedNoWinner => after.unrouted_no_winner += 1,
+                NoncoverageComponent::Quarantined => after.quarantined += 1,
+                NoncoverageComponent::UnroutedSpecialized => after.unrouted_specialized += 1,
+                NoncoverageComponent::LoadViolations => after.load_violations += 1,
+                NoncoverageComponent::UnsupportedSpecialized => {
+                    after.unsupported_specialized += 1;
+                }
+            }
+            let risen = after.risen_components(&before);
+            assert_eq!(risen.count(), 1, "{component:?}");
+            assert!(risen.contains(component), "{component:?}");
+            assert_eq!(
+                risen.iter().collect::<Vec<_>>(),
+                vec![component],
+                "the set iterates in ALL order"
+            );
+            assert_eq!(
+                after.first_regression(&before),
+                Some(component),
+                "clause 2 must name the one component that moved"
+            );
+        }
+
+        // Several at once: the set holds all of them, and clause 2 names the
+        // first in `ALL` order — which is the ONLY thing clause 2 can say.
+        let after = gates(8, 2, 1, 4, 4);
+        let risen = after.risen_components(&before);
+        assert_eq!(risen.count(), 2);
+        assert!(risen.contains(NoncoverageComponent::UnroutedNoWinner));
+        assert!(risen.contains(NoncoverageComponent::LoadViolations));
+        assert_eq!(
+            after.first_regression(&before),
+            Some(NoncoverageComponent::UnroutedNoWinner)
+        );
+        assert_eq!(
+            risen.iter().next(),
+            after.first_regression(&before),
+            "clause 2's component is the set's first member, always"
+        );
+
+        // A component that FELL is not a rise, and it does not mask one.
+        let after = gates(6, 3, 1, 3, 4);
+        let risen = after.risen_components(&before);
+        assert_eq!(
+            risen.iter().collect::<Vec<_>>(),
+            vec![NoncoverageComponent::Quarantined]
+        );
+    }
+
+    /// **One vocabulary for the outcome classes, by construction.**
+    ///
+    /// The §A.8 histogram keys and the veto tally's keys are the same strings
+    /// because `RepairStepOutcome::class` reads `RepairVetoClass::name`. This
+    /// pins that, and pins that `committed` has no veto class: a commit folded
+    /// into the veto memory would teach the search to avoid the seats that
+    /// WORK, which is the failure mode the reverted disc-first rule was
+    /// measured to have.
+    #[test]
+    fn the_histogram_and_the_veto_tally_name_the_same_classes() {
+        let sample = |class: RepairVetoClass| -> RepairStepOutcome {
+            match class {
+                RepairVetoClass::NoImprovement => RepairStepOutcome::NoImprovement {
+                    before: objective(0.46, 0.36, 2, 4.0),
+                    after: objective(0.46, 0.36, 2, 4.0),
+                },
+                RepairVetoClass::NoAreaCovered => RepairStepOutcome::NoAreaCovered {
+                    before_mm2: 0.46,
+                    after_mm2: 0.46,
+                },
+                RepairVetoClass::Regression => RepairStepOutcome::Regression {
+                    component: NoncoverageComponent::Quarantined,
+                    before: 2,
+                    after: 3,
+                },
+                RepairVetoClass::StageRefusal => RepairStepOutcome::StageRefusal {
+                    phase: crate::SupportRunPhase::Routing,
+                    detail: "refused".to_owned(),
+                },
+                RepairVetoClass::AppendRefused => RepairStepOutcome::AppendRefused {
+                    detail: "occupied".to_owned(),
+                },
+                RepairVetoClass::MeasurementRefused => RepairStepOutcome::MeasurementRefused {
+                    detail: "refused".to_owned(),
+                },
+            }
+        };
+
+        for (slot, class) in RepairVetoClass::ALL.into_iter().enumerate() {
+            assert_eq!(class.index(), slot, "ALL order is the slot order");
+            let outcome = sample(class);
+            assert_eq!(outcome.veto_class(), Some(class));
+            assert_eq!(outcome.class(), class.name());
+        }
+        assert_eq!(RepairVetoClass::COUNT, RepairVetoClass::ALL.len());
+        assert_eq!(RepairStepOutcome::Committed.veto_class(), None);
+        assert_eq!(RepairStepOutcome::Committed.class(), "committed");
+    }
+
+    /// **A rejected step is read for what it LEARNED, and a commit teaches
+    /// nothing.**
+    ///
+    /// The clause-1 case is the one the 2026-08-28 baseline says is the whole
+    /// distribution: 1,062 trials, zero clause-2 vetoes, and a hard-gate rise
+    /// on 176 of the 321 trials that left a step stream. The old ledger saw
+    /// that rise and kept none of it. This is where it is kept.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the seat is CARRIED, not computed: the assertion is that the veto holds the \
+                  step's own coordinates bit for bit. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_rejection_keeps_its_class_its_component_and_the_gate_that_moved() {
+        // Clause 1 rejected it, and a gate rose underneath — the measured
+        // majority case.
+        let mut step = populated_step();
+        step.commit = None;
+        step.outcome = RepairStepOutcome::NoImprovement {
+            before: objective(0.46, 0.36, 2, 4.0),
+            after: objective(0.46, 0.36, 2, 4.0),
+        };
+        step.gates_before = gates(7, 2, 1, 3, 4);
+        step.gates_after = Some(gates(8, 2, 1, 3, 4));
+        step.own_contact_condemned = Some(true);
+
+        let veto = RepairVeto::from_step(&step).expect("a rejected step is a veto");
+        assert_eq!(veto.trial, step.trial);
+        assert_eq!(veto.seat_mm, step.seat_mm);
+        assert_eq!(veto.class, RepairVetoClass::NoImprovement);
+        assert_eq!(
+            veto.clause_two_component, None,
+            "clause 2 never ran, so it named nothing — and the memory must not invent a name"
+        );
+        assert!(veto.gates_measured);
+        assert_eq!(
+            veto.gates_risen.iter().collect::<Vec<_>>(),
+            vec![NoncoverageComponent::UnroutedNoWinner],
+            "the rise clause 1 hid is what this memory is for"
+        );
+        assert_eq!(veto.own_contact_condemned, Some(true));
+
+        // Clause 2's own case names its component.
+        step.outcome = RepairStepOutcome::Regression {
+            component: NoncoverageComponent::UnroutedNoWinner,
+            before: 7,
+            after: 8,
+        };
+        let veto = RepairVeto::from_step(&step).expect("a rejected step is a veto");
+        assert_eq!(veto.class, RepairVetoClass::Regression);
+        assert_eq!(
+            veto.clause_two_component,
+            Some(NoncoverageComponent::UnroutedNoWinner)
+        );
+
+        // A trial that never reached a measurement says so, rather than
+        // reporting "no gate rose".
+        step.outcome = RepairStepOutcome::AppendRefused {
+            detail: "occupied".to_owned(),
+        };
+        step.gates_after = None;
+        step.own_contact_condemned = None;
+        let veto = RepairVeto::from_step(&step).expect("a rejected step is a veto");
+        assert!(!veto.gates_measured, "nothing was compared");
+        assert!(veto.gates_risen.is_empty());
+        assert_eq!(veto.own_contact_condemned, None);
+
+        // And a COMMIT is not a veto at all.
+        let mut committed = populated_step();
+        committed.outcome = RepairStepOutcome::Committed;
+        assert_eq!(RepairVeto::from_step(&committed), None);
+    }
+
+    fn veto_at(seat_mm: [f64; 3], class: RepairVetoClass) -> RepairVeto {
+        let mut risen = NoncoverageComponentSet::EMPTY;
+        risen.insert(NoncoverageComponent::Quarantined);
+        RepairVeto {
+            trial: 1,
+            seat_mm,
+            class,
+            clause_two_component: None,
+            gates_risen: risen,
+            gates_measured: true,
+            own_contact_condemned: Some(true),
+        }
+    }
+
+    /// **"Has a candidate like this one already been vetoed, and on what?" —
+    /// answered by seat, at the disc's own radius.**
+    ///
+    /// The seats are placed against a 6 mm radius: one on top of the query,
+    /// one just inside, one just outside, and one far away. The pair either
+    /// side of the boundary is the point — a memory that answered "yes"
+    /// everywhere would be as useless as one that answered "no".
+    #[test]
+    fn the_veto_memory_answers_by_seat_and_names_the_reason() {
+        let mut index = RepairVetoIndex::new(6.0);
+        assert!(index.is_empty());
+        assert_eq!(index.counts_near([0.0, 0.0, 0.0]).total, 0);
+
+        index.record(veto_at([0.0, 0.0, 0.0], RepairVetoClass::NoImprovement));
+        index.record(veto_at([5.9, 0.0, 0.0], RepairVetoClass::NoImprovement));
+        index.record(veto_at([6.1, 0.0, 0.0], RepairVetoClass::Regression));
+        index.record(veto_at([100.0, 0.0, 0.0], RepairVetoClass::StageRefusal));
+
+        assert_eq!(index.len(), 4);
+        assert_eq!(index.vetoes().len(), 4);
+
+        let near = index.counts_near([0.0, 0.0, 0.0]);
+        assert_eq!(near.total, 2, "the row at 6.1 mm is outside the radius");
+        assert_eq!(near.class(RepairVetoClass::NoImprovement), 2);
+        assert_eq!(near.class(RepairVetoClass::Regression), 0);
+        assert_eq!(near.gate_rise(NoncoverageComponent::Quarantined), 2);
+        assert_eq!(near.gate_rise(NoncoverageComponent::UnroutedNoWinner), 0);
+        assert_eq!(near.gates_measured, 2);
+        assert_eq!(near.own_contact_condemned, 2);
+
+        // The whole-run fold is every veto, wherever it sits.
+        let totals = index.totals();
+        assert_eq!(totals.total, 4);
+        assert_eq!(totals.class(RepairVetoClass::StageRefusal), 1);
+
+        // The batch form is the one a ranking calls, and it must answer
+        // exactly what the single-seat form answers, in order.
+        let seats = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [-500.0, 0.0, 0.0]];
+        let mut out = Vec::new();
+        index.counts_near_batch(seats.iter().copied(), &mut out);
+        assert_eq!(out.len(), seats.len());
+        for (answer, seat) in out.iter().zip(seats) {
+            assert_eq!(*answer, index.counts_near(seat));
+        }
+        assert_eq!(out[1].total, 1);
+        assert_eq!(out[2].total, 0, "a seat with no veto near it says zero");
+
+        // An empty memory answers every seat, not none of them: `out` is
+        // filled by position, so a caller can zip it against its rows.
+        let empty = RepairVetoIndex::new(6.0);
+        empty.counts_near_batch(seats.iter().copied(), &mut out);
+        assert_eq!(out, vec![RepairVetoCounts::default(); seats.len()]);
+    }
+
+    /// **The grid must find exactly what a linear scan finds.**
+    ///
+    /// The index exists to make the query cheap, and a cheap query that misses
+    /// a veto is worse than the linear scan it replaced — it would answer "no
+    /// candidate like this has been vetoed" about a neighbourhood the search
+    /// has already spent itself on. So the fast answer is checked against the
+    /// slow one over 400 seats and 200 vetoes drawn from a fixed generator,
+    /// including seats far outside every occupied cell.
+    ///
+    /// The revert this guards is the cell arithmetic: a neighbourhood of 1
+    /// cell instead of 27, a cell edge smaller than the radius, or a `floor`
+    /// that truncates toward zero and folds the two cells either side of the
+    /// origin into one. Each of those passes the test above and fails this.
+    #[test]
+    fn the_grid_finds_exactly_what_a_linear_scan_finds() {
+        // A plain LCG: deterministic, no dependency, and the same sequence on
+        // every machine.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "test-local coordinate spread; the value is a seat position, not a count"
+            )]
+            let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+            unit.mul_add(40.0, -20.0)
+        };
+
+        let radius_mm = 6.0;
+        let mut index = RepairVetoIndex::new(radius_mm);
+        let mut recorded: Vec<RepairVeto> = Vec::new();
+        for trial in 0..200 {
+            let mut veto = veto_at([next(), next(), next()], RepairVetoClass::NoImprovement);
+            veto.trial = trial;
+            recorded.push(veto);
+            index.record(veto);
+        }
+
+        let seats: Vec<[f64; 3]> = (0..400)
+            .map(|seat| {
+                if seat % 40 == 0 {
+                    // Deliberately outside every occupied cell.
+                    [next() + 1_000.0, next(), next()]
+                } else {
+                    [next(), next(), next()]
+                }
+            })
+            .collect();
+        let mut fast = Vec::new();
+        index.counts_near_batch(seats.iter().copied(), &mut fast);
+
+        for (seat, answer) in seats.iter().zip(&fast) {
+            let mut slow = RepairVetoCounts::default();
+            for veto in &recorded {
+                if seat_distance_sq(*seat, veto.seat_mm) <= radius_mm * radius_mm {
+                    slow.fold(veto);
+                }
+            }
+            assert_eq!(*answer, slow, "the grid and the scan disagree at {seat:?}");
+        }
+        // …and the fixture is not vacuous: some seats really do have vetoes
+        // near them, and some really do not.
+        assert!(fast.iter().any(|counts| counts.total > 0));
+        assert!(fast.iter().any(|counts| counts.total == 0));
+    }
+
+    /// The disclosure names what MOVED and stays quiet about what did not —
+    /// the same rule `rejections_by_class` follows, so five zeros never crowd
+    /// out the two components that actually rose.
+    #[test]
+    fn the_disclosure_names_only_the_classes_and_components_that_moved() {
+        let mut index = RepairVetoIndex::new(6.0);
+        assert_eq!(index.disclosure(), RepairVetoDisclosure::default());
+
+        let mut first = veto_at([0.0, 0.0, 0.0], RepairVetoClass::NoImprovement);
+        first.gates_risen = NoncoverageComponentSet::EMPTY;
+        first
+            .gates_risen
+            .insert(NoncoverageComponent::UnroutedNoWinner);
+        index.record(first);
+        index.record(veto_at([50.0, 0.0, 0.0], RepairVetoClass::NoImprovement));
+        let mut never_measured = veto_at([80.0, 0.0, 0.0], RepairVetoClass::AppendRefused);
+        never_measured.gates_risen = NoncoverageComponentSet::EMPTY;
+        never_measured.gates_measured = false;
+        never_measured.own_contact_condemned = None;
+        index.record(never_measured);
+
+        let disclosure = index.disclosure();
+        assert_eq!(disclosure.total, 3);
+        assert_eq!(
+            disclosure.by_class,
+            BTreeMap::from([
+                ("no_improvement".to_owned(), 2),
+                ("append_refused".to_owned(), 1),
+            ])
+        );
+        assert_eq!(
+            disclosure.gate_rises_by_component,
+            BTreeMap::from([
+                ("unrouted_no_winner".to_owned(), 1),
+                ("quarantined".to_owned(), 1),
+            ]),
+            "the three components that never moved are absent, not zero"
+        );
+        assert_eq!(disclosure.gates_measured, 2);
+        assert_eq!(disclosure.own_contact_condemned, 2);
+
+        // And it reaches the operator's one line, where a rise is otherwise
+        // invisible until a sidecar is read.
+        let report = RepairRunReport {
+            trials: 3,
+            vetoes: disclosure,
+            ..RepairRunReport::default()
+        };
+        let summary = report.summary_line();
+        assert!(
+            summary.contains("gate_rises[quarantined=1 unrouted_no_winner=1]"),
+            "{summary}"
+        );
+        assert!(summary.contains("of_measured=2"), "{summary}");
+        assert!(summary.contains("own_contact_condemned=2"), "{summary}");
+        // A run where nothing rose prints the line it always printed.
+        assert!(!RepairRunReport::default()
+            .summary_line()
+            .contains("gate_rises"));
+    }
+
+    // -----------------------------------------------------------------------
+    // THE TRIAL TRAIL
+    // -----------------------------------------------------------------------
+
+    /// A directory of this test's own, under the system temp dir, removed on
+    /// drop so a passing run leaves nothing behind and a failing one leaves
+    /// the file to look at.
+    struct TrailDir(PathBuf);
+
+    impl TrailDir {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "plinth-trail-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for TrailDir {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    /// **The trail is readable BEFORE the search ends — that is the whole
+    /// point of it.**
+    ///
+    /// Nothing here calls a terminal path: two trials are appended and the
+    /// file is read while the "search" is still notionally running, because
+    /// the run this exists for is the one that never reaches a terminal
+    /// path. The 741-trial fixture was killed at 2,068 s and its per-component
+    /// figures are simply missing from the 2026-08-28 baseline for exactly
+    /// this reason.
+    ///
+    /// The rows are asserted to be the SAME rows the sidecar would carry —
+    /// `CoverageRepairStepWire`, one per line — so the `jq` written against a
+    /// finished run reads a killed one unchanged.
+    #[test]
+    fn the_trail_is_on_disk_and_complete_before_the_search_stops() {
+        let directory = TrailDir::new("live");
+        let mut trail = RepairTrialTrail::open_in(&directory.0);
+        assert_eq!(trail.disclosure().write_error, None);
+
+        let first = populated_step();
+        let mut second = populated_step();
+        second.trial = 8;
+        second.commit = None;
+        second.outcome = RepairStepOutcome::NoImprovement {
+            before: objective(0.46, 0.36, 2, 4.0),
+            after: objective(0.46, 0.36, 2, 4.0),
+        };
+        trail.append(&first);
+        trail.append(&second);
+
+        let disclosure = trail.disclosure();
+        assert_eq!(disclosure.rows, 2);
+        assert_eq!(disclosure.write_error, None);
+
+        let text = std::fs::read_to_string(&disclosure.path).expect("the trail is on disk");
+        let rows: Vec<CoverageRepairStepWire> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every line is one wire step"))
+            .collect();
+        assert_eq!(rows, vec![first.to_wire(), second.to_wire()]);
+
+        // One file per run, named for the process and the run within it, so
+        // two searches in one process never interleave their trials.
+        let other = RepairTrialTrail::open_in(&directory.0);
+        assert_ne!(other.disclosure().path, disclosure.path);
+    }
+
+    /// **A trail that cannot be written is data, not control flow.**
+    ///
+    /// The directory here is a path under an existing FILE, so it cannot be
+    /// created. Nothing panics, the error is kept and disclosed, and every
+    /// later append is a silent no-op — because evidence that cannot be
+    /// written is not a reason to refuse a model.
+    #[test]
+    fn a_trail_that_cannot_be_opened_is_recorded_and_never_refuses() {
+        let directory = TrailDir::new("blocked");
+        std::fs::create_dir_all(&directory.0).expect("the parent exists");
+        let blocker = directory.0.join("not-a-directory");
+        std::fs::write(&blocker, b"file").expect("the blocker is written");
+
+        let mut trail = RepairTrialTrail::open_in(&blocker.join("inside"));
+        let opened = trail.disclosure();
+        assert!(opened.write_error.is_some(), "{opened:?}");
+        assert_eq!(opened.rows, 0);
+
+        trail.append(&populated_step());
+        let after = trail.disclosure();
+        assert_eq!(after.rows, 0, "an append with no file writes nothing");
+        assert_eq!(
+            after.write_error, opened.write_error,
+            "the FIRST failure is the one that is reported"
+        );
+
+        // And the report says so on the one line an operator always sees.
+        let report = RepairRunReport {
+            trail: Some(after),
+            ..RepairRunReport::default()
+        };
+        assert!(report.summary_line().contains("trail_error="));
     }
 }
