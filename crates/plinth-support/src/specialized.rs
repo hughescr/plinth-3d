@@ -2406,6 +2406,23 @@ pub(crate) fn authority_consistent_empty_plan_for_initial_test(
     Ok(plan)
 }
 
+/// Replay the caller's regular-contact set and refuse a stale one.
+///
+/// **The replay must use the selector that produced the value.** Production
+/// builds `regular` from [`crate::select_contacts_baseline`]
+/// (`runner::prepare_support_context`), which is the frozen placement without
+/// the legacy pre-routing coverage-repair loop; coverage closure is reached
+/// afterwards, over ROUTED contacts, by [`crate::coverage_closure`]. Replaying
+/// through the repair-enabled `crate::select_contacts` compared two different
+/// definitions of "the regular contact set": on any model whose baseline
+/// layout leaves one failing coverage sample the repair-enabled selector pushes
+/// an extra contact (or exhausts its attempts and returns
+/// [`ContactSelectionError::UnsatisfiedCoverage`]), and the honest, current
+/// value was refused as [`SpecializedError::StaleRegularContacts`] -- an error
+/// that misstates the cause, on a pre-routing coverage verdict the production
+/// design deliberately does not use.
+/// `synthetic_selection_is_baseline_only_not_the_legacy_repair_adapter` and
+/// `regular_replay_uses_the_selector_that_produced_the_value` pin both halves.
 fn validate_regular(
     mesh: &Mesh,
     generic: &GenericContactPlan,
@@ -2421,7 +2438,8 @@ fn validate_regular(
         }
         return Ok(());
     }
-    let replay = crate::select_contacts(mesh, generic.candidates(), generic.islands(), config)?;
+    let replay =
+        crate::select_contacts_baseline(mesh, generic.candidates(), generic.islands(), config)?;
     if replay.digest() != regular.digest() || replay != *regular {
         return Err(SpecializedError::StaleRegularContacts);
     }
@@ -11163,6 +11181,106 @@ mod tests {
             .expect("synthetic baseline selection");
         assert_eq!(selected, baseline);
         assert_ne!(selected, legacy);
+    }
+
+    /// `runner::prepare_support_context` builds `regular` with
+    /// `select_contacts_baseline`, so `validate_regular` must replay with the
+    /// SAME selector. It used to replay with the repair-ENABLED
+    /// `crate::select_contacts`, which is a different definition of "the
+    /// regular contact set": whenever the baseline layout leaves one failing
+    /// pre-routing coverage sample the two answers separate, and the honest,
+    /// current value was refused as `StaleRegularContacts`.
+    ///
+    /// Everything here is registered production policy -- the coverage radius,
+    /// the censor, the seat minimum and the repair-attempt bound are all
+    /// `ContactSelectionConfig::current_defaults`. Only the GEOMETRY is chosen:
+    /// `plinth_mesh::make_uncovered_rim_table` is the fixture whose baseline
+    /// layout genuinely leaves a blocking coverage patch, which is exactly the
+    /// condition that separates the two selectors. The first assertion refuses
+    /// to let this test pass vacuously by proving they really do disagree here.
+    /// `runner::prepare_support_context` builds `regular` with
+    /// `select_contacts_baseline`, so `validate_regular` must replay with the
+    /// SAME selector. It used to replay with the repair-ENABLED
+    /// `crate::select_contacts`, which is a different definition of "the
+    /// regular contact set": whenever the baseline layout leaves a failing
+    /// pre-routing coverage sample the two answers separate, and the honest,
+    /// current value was refused as `StaleRegularContacts`.
+    ///
+    /// **The fixture, and what had to be tuned to reach the condition.** Every
+    /// policy value here is `ContactSelectionConfig::current_defaults` EXCEPT
+    /// `coverage_radius_factor`, which is halved. That is not decoration: at
+    /// the registered radius the two selectors agree on every corpus fixture
+    /// (measured -- uncovered rim table, overhang table, toed slab, raking
+    /// blade and dual-cavity pawn all give byte-identical answers), because
+    /// baseline placement already closes pre-routing coverage on all of them.
+    /// Halving the radius is how this test reaches the divergence condition at
+    /// all. So the defect fixed here is LATENT on today's corpus, not observed
+    /// on it -- see the commit message.
+    ///
+    /// The seat counts are pinned so the fixture cannot go stale silently: the
+    /// baseline places 28 contacts and the repair-enabled adapter pushes a
+    /// 29th to close the sample the baseline left open. That single extra
+    /// contact is exactly the divergence, and the first assertion proves it
+    /// exists before anything else is tested.
+    #[test]
+    fn regular_replay_uses_the_selector_that_produced_the_value() {
+        let mesh = plinth_mesh::make_raking_blade().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
+        let perception = perception_config(&delicacy);
+        let candidate = candidate_config();
+        let generic = crate::perception::prepare_generic_contacts(
+            &mesh,
+            &perception,
+            frame(),
+            &layers,
+            &candidate,
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        assert!(!generic.islands().is_empty());
+
+        let mut selection =
+            ContactSelectionConfig::current_defaults(Some(&delicacy), perception.max_grid_bytes)
+                .unwrap();
+        selection.coverage_radius_factor =
+            PositiveFinite::new(selection.coverage_radius_factor.get() * 0.5).unwrap();
+
+        let baseline = crate::select_contacts_baseline(
+            &mesh,
+            generic.candidates(),
+            generic.islands(),
+            &selection,
+        )
+        .expect("baseline selection");
+        let legacy =
+            crate::select_contacts(&mesh, generic.candidates(), generic.islands(), &selection)
+                .expect("the repair adapter closes this fixture rather than exhausting attempts");
+
+        // Anti-vacuity: the two selectors must genuinely disagree here, or
+        // nothing below distinguishes them.
+        assert_eq!(baseline.contacts().len(), 28);
+        assert_eq!(
+            legacy.contacts().len(),
+            29,
+            "the repair-enabled adapter must push exactly the extra contact \
+             that separates it from the baseline"
+        );
+        assert_ne!(legacy, baseline);
+
+        // The value the runner actually hands to `prepare_specialized_contacts`
+        // is accepted. Replaying it through `crate::select_contacts` -- what
+        // this function used to do -- refuses it as stale.
+        assert_eq!(
+            validate_regular(&mesh, &generic, &baseline, &selection),
+            Ok(())
+        );
+        // And the other selector's answer is the stale one, not the live one.
+        assert_eq!(
+            validate_regular(&mesh, &generic, &legacy, &selection),
+            Err(SpecializedError::StaleRegularContacts)
+        );
     }
 
     #[test]
