@@ -1206,23 +1206,23 @@ fn discover_anchor_seats_bound(
             let delta = sub(sample.point_mm, stub_end);
             let length = norm(delta);
             let lean = lean_deg(delta, length);
-            if sample.point_mm[2] > stub_end[2] + BELOW_LEVEL_EPS_MM {
-                Some(AnchorSeatRefusalReason::AboveContact)
-            } else if length < config.min_length_mm.get() {
-                Some(AnchorSeatRefusalReason::TooShort)
-            } else if length > config.max_length_mm.get() {
-                Some(AnchorSeatRefusalReason::TooLong)
-            } else if sample.delicacy > config.max_delicacy {
-                Some(AnchorSeatRefusalReason::TooDelicate)
-            } else if lean > config.max_lean_deg.get() + LEAN_EPS_DEG {
-                Some(AnchorSeatRefusalReason::TooLean)
-            } else {
-                qualified.push(QualifiedSample {
-                    sample_index,
-                    sample,
-                    length,
-                });
-                None
+            match seat_qualification_refusal(
+                stub_end,
+                sample.point_mm,
+                sample.delicacy,
+                length,
+                lean,
+                config,
+            ) {
+                Some(reason) => Some(reason),
+                None => {
+                    qualified.push(QualifiedSample {
+                        sample_index,
+                        sample,
+                        length,
+                    });
+                    None
+                }
             }
         };
         if let Some(reason) = refusal {
@@ -1299,31 +1299,66 @@ fn discover_anchor_seats_bound(
                         } else {
                             let lean = lean_deg(sub(point, stub_end), length);
                             let face = face as usize;
-                            seats.push(QualifiedAnchorSeat {
-                                provenance: AnchorCandidateProvenance {
-                                    regular_identity: provenance_regular_identity,
-                                    physical_contact_id: provenance_physical_contact_id,
-                                    sample_index: candidate.sample_index,
-                                    source_sample_face_id: candidate.sample.source_face_id,
-                                },
-                                contact: contact_fingerprint,
-                                subject: subject_fingerprint,
-                                geometry: geometry.fingerprint.clone(),
-                                config: config_fingerprint,
-                                pool_digest,
-                                snapped_point_mm: finite3(point, "snapped anchor point")?,
-                                snapped_normal: finite3(
-                                    geometry.surface.geometry().normals()[face],
-                                    "snapped face normal",
-                                )?,
-                                snapped_face_id: face as u32,
-                                delicacy: finite(candidate.sample.delicacy, "anchor delicacy")?,
-                                length_mm: positive(length, "snapped anchor length")?,
-                                lean_deg: nonnegative(lean, "snapped anchor lean")?,
-                                first_hit_t,
-                                rootward_clearance_inset_mm: config.rootward_clearance_inset_mm,
-                            });
-                            None
+                            // The snap moved the seat onto a DIFFERENT FACE, so
+                            // the delicacy that was screened is not the
+                            // delicacy of the face being seated on. Re-screen
+                            // against the seated face, and record ITS value.
+                            //
+                            // Only delicacy is re-screened here, and the
+                            // omission of the others is deliberate:
+                            //
+                            //  - `AboveContact`, `TooLong` and `TooLean` CANNOT
+                            //    newly fire. The snapped point is on the same
+                            //    ray at `t` in `(0, RAY_T_MAX]`, so the
+                            //    direction and therefore the lean are
+                            //    unchanged, and the length can only shrink.
+                            //  - `TooShort` CAN newly fire, and must NOT be
+                            //    re-applied. `strut_model_anchor_min_len_mm` is
+                            //    registered as a "Model-anchor candidate length
+                            //    floor": it prunes which pool samples are worth
+                            //    casting a ray toward, not how long the seated
+                            //    arm may be. Every model anchor that has ever
+                            //    won on the corpus has an arm of 0.054-0.596 mm
+                            //    (see `a_model_anchor_nub_is_refused_because_it
+                            //    _cannot_emerge` in `cco.rs`), an order of
+                            //    magnitude under this 5.0 mm floor, so
+                            //    re-applying it to the snapped arm would refuse
+                            //    the entire model-anchor family. Short seated
+                            //    arms are screened later and BY NAME, by PR-3's
+                            //    `SeatGrazingIncidence` mask-emergence test.
+                            //    Whether the seated arm is owed a minimum of
+                            //    its own is an open question for the owner, not
+                            //    something to settle by reusing a prune.
+                            let seated_delicacy = sidecar[face];
+                            if seated_delicacy > config.max_delicacy {
+                                Some(AnchorSeatRefusalReason::TooDelicate)
+                            } else {
+                                seats.push(QualifiedAnchorSeat {
+                                    provenance: AnchorCandidateProvenance {
+                                        regular_identity: provenance_regular_identity,
+                                        physical_contact_id: provenance_physical_contact_id,
+                                        sample_index: candidate.sample_index,
+                                        source_sample_face_id: candidate.sample.source_face_id,
+                                    },
+                                    contact: contact_fingerprint,
+                                    subject: subject_fingerprint,
+                                    geometry: geometry.fingerprint.clone(),
+                                    config: config_fingerprint,
+                                    pool_digest,
+                                    snapped_point_mm: finite3(point, "snapped anchor point")?,
+                                    snapped_normal: finite3(
+                                        geometry.surface.geometry().normals()[face],
+                                        "snapped face normal",
+                                    )?,
+                                    snapped_face_id: face as u32,
+                                    delicacy: finite(seated_delicacy, "anchor delicacy")?,
+                                    length_mm: positive(length, "snapped anchor length")?,
+                                    lean_deg: nonnegative(lean, "snapped anchor lean")?,
+                                    first_hit_t,
+                                    rootward_clearance_inset_mm: config.rootward_clearance_inset_mm,
+                                });
+                                None
+                            }
                         }
                     }
                 }
@@ -1352,6 +1387,40 @@ fn discover_anchor_seats_bound(
             seat_evaluations: samples.len(),
         },
     })
+}
+
+/// The candidate screens, applied to ONE exterior pool sample.
+///
+/// These prune the POOL: which samples are worth casting a first-hit ray
+/// toward. They are not statements about the seat that ray eventually lands on
+/// -- `min_length_mm` in particular is registered as a "Model-anchor candidate
+/// length floor" and is an order of magnitude above every model-anchor arm the
+/// corpus has ever accepted.
+///
+/// Extracted from the loop body so the screen list has one home and the
+/// post-snap re-screen at the seat site can say precisely which of these it
+/// repeats and why. See that site for the argument.
+fn seat_qualification_refusal(
+    stub_end: [f64; 3],
+    point_mm: [f64; 3],
+    delicacy: f64,
+    length: f64,
+    lean: f64,
+    config: AnchorSearchConfig,
+) -> Option<AnchorSeatRefusalReason> {
+    if point_mm[2] > stub_end[2] + BELOW_LEVEL_EPS_MM {
+        Some(AnchorSeatRefusalReason::AboveContact)
+    } else if length < config.min_length_mm.get() {
+        Some(AnchorSeatRefusalReason::TooShort)
+    } else if length > config.max_length_mm.get() {
+        Some(AnchorSeatRefusalReason::TooLong)
+    } else if delicacy > config.max_delicacy {
+        Some(AnchorSeatRefusalReason::TooDelicate)
+    } else if lean > config.max_lean_deg.get() + LEAN_EPS_DEG {
+        Some(AnchorSeatRefusalReason::TooLean)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2648,6 +2717,174 @@ mod tests {
         assert_eq!(
             result.refusals()[0].reason,
             AnchorSeatRefusalReason::NearerNonExteriorObstruction
+        );
+    }
+
+    /// Two closed shells, one above the other, both triangulated exactly as
+    /// [`box_parts`]. Faces 0..=11 are the lower slab (z in `[0, 2]`) and faces
+    /// 12..=23 are the upper slab, so face 2 and face 14 are the two `+Z` top
+    /// triangles that contain `(5, 3)`. A ray dropped from above onto the LOWER
+    /// slab's top face must therefore snap to the UPPER slab's top face.
+    fn stacked_shells_parts(upper_lo: f64, upper_hi: f64) -> (Mesh, FaceTopology, NativeSurface) {
+        fn shell(z_lo: f64, z_hi: f64, base: u32) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+            let vertices = vec![
+                [0.0, 0.0, z_lo],
+                [10.0, 0.0, z_lo],
+                [10.0, 10.0, z_lo],
+                [0.0, 10.0, z_lo],
+                [0.0, 0.0, z_hi],
+                [10.0, 0.0, z_hi],
+                [10.0, 10.0, z_hi],
+                [0.0, 10.0, z_hi],
+            ];
+            let faces = [
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ]
+            .into_iter()
+            .map(|face: [u32; 3]| face.map(|index| index + base))
+            .collect();
+            (vertices, faces)
+        }
+        let (mut vertices, mut faces) = shell(0.0, 2.0, 0);
+        let (upper_vertices, upper_faces) = shell(upper_lo, upper_hi, 8);
+        vertices.extend(upper_vertices);
+        faces.extend(upper_faces);
+        parts(vertices, faces)
+    }
+
+    /// The sample offered to the stacked fixture: the LOWER slab's top face,
+    /// at a point off the top face's diagonal so the first hit is unambiguous.
+    fn stacked_sample(delicacy: f64) -> SurfaceAnchorSample {
+        SurfaceAnchorSample {
+            source_face_id: 2,
+            point_mm: [5.0, 3.0, 2.0],
+            delicacy,
+        }
+    }
+
+    fn stacked_terminal() -> AnchorTerminalBinding {
+        let (_, base, _) = bindings();
+        AnchorTerminalBinding::new(base.terminal_id(), base.stub(), [f(5.0), f(3.0), f(12.5)])
+    }
+
+    /// Snapping changes WHICH FACE the seat lands on, so every screen that
+    /// reads the face must run again on the face landed on -- and the seat must
+    /// record THAT face's delicacy, not the pool sample's.
+    ///
+    /// The fixture is one delicacy boundary crossed by the snap: the sample is
+    /// a comfortable 0.25 on the lower slab, the face the ray actually reaches
+    /// is over `strut_model_anchor_max_delicacy`. Screening only the sample
+    /// seated a support on a face too delicate to carry it and then filed
+    /// `0.25` under the snapped face's id, so the record disagreed with the
+    /// geometry.
+    #[test]
+    fn a_snapped_seat_is_screened_and_recorded_against_the_face_it_lands_on() {
+        let (mesh, topology, surface) = stacked_shells_parts(4.0, 6.0);
+        // Preconditions the two arms below both rest on: the snapped face is a
+        // real exterior face, so `NearerNonExteriorObstruction` is NOT what is
+        // being measured here.
+        assert!(surface.exterior_face_mask()[14]);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = AnchorSearchConfig::current().unwrap();
+        assert!(config.max_delicacy < 0.500_000_1);
+
+        // (1) The face the ray reaches is too delicate. The sample's own 0.25
+        // is not the delicacy that matters, and the seat must refuse.
+        let mut sidecar = vec![0.25; surface.nfaces()];
+        sidecar[14] = 0.500_000_1;
+        sidecar[15] = 0.500_000_1;
+        let refused = discover_anchor_seats(
+            &contact(10.0),
+            stacked_terminal(),
+            &[stacked_sample(0.25)],
+            Some(&sidecar),
+            config,
+            &geometry,
+        )
+        .unwrap();
+        assert!(
+            refused.seats().is_empty(),
+            "a seat landing on a face over max_delicacy must not qualify"
+        );
+        assert_eq!(refused.refusals().len(), 1);
+        assert_eq!(
+            refused.refusals()[0].reason,
+            AnchorSeatRefusalReason::TooDelicate
+        );
+
+        // (2) The same snap, onto a face that DOES qualify: the seat is taken,
+        // and the delicacy it carries is the snapped face's 0.4 -- not the
+        // sample's 0.25, which is what the seat used to record.
+        let mut sidecar = vec![0.25; surface.nfaces()];
+        sidecar[14] = 0.4;
+        sidecar[15] = 0.4;
+        let seats = discover_anchor_seats(
+            &contact(10.0),
+            stacked_terminal(),
+            &[stacked_sample(0.25)],
+            Some(&sidecar),
+            config,
+            &geometry,
+        )
+        .unwrap()
+        .into_seats();
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].snapped_face_id(), 14);
+        assert_eq!(seats[0].provenance().source_sample_face_id(), 2);
+        assert_eq!(
+            seats[0].delicacy().get().to_bits(),
+            0.4f64.to_bits(),
+            "the seat must record the delicacy of the face it seats on"
+        );
+    }
+
+    /// The counterpart to the test above, pinning what the re-screen must NOT
+    /// do: a snap that lands well inside `strut_model_anchor_min_len_mm` is
+    /// still a seat.
+    ///
+    /// The sample is 10.5 mm away and passes the candidate length prune; the
+    /// ray stops 3.5 mm out on a nearer face, which is under the registered
+    /// 5.0 mm floor. That floor is a CANDIDATE prune -- it decides which pool
+    /// samples are worth a ray -- and every model anchor the corpus has ever
+    /// accepted has an arm of 0.054-0.596 mm, so re-applying it to the seated
+    /// arm would refuse the whole family. This test fails if someone extends
+    /// the delicacy re-screen into a general re-qualification.
+    #[test]
+    fn a_snap_inside_the_candidate_length_floor_is_still_a_seat() {
+        let (mesh, topology, surface) = stacked_shells_parts(8.0, 9.0);
+        assert!(surface.exterior_face_mask()[14]);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = AnchorSearchConfig::current().unwrap();
+        // The sample clears the candidate floor and the snapped arm does not.
+        assert!(10.5 >= config.min_length_mm.get());
+        assert!(3.5 < config.min_length_mm.get());
+        let sidecar = vec![0.25; surface.nfaces()];
+        let seats = discover_anchor_seats(
+            &contact(10.0),
+            stacked_terminal(),
+            &[stacked_sample(0.25)],
+            Some(&sidecar),
+            config,
+            &geometry,
+        )
+        .unwrap()
+        .into_seats();
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].snapped_face_id(), 14);
+        assert!(
+            seats[0].length_mm().get() < config.min_length_mm.get(),
+            "the fixture must actually seat inside the candidate floor",
         );
     }
 
