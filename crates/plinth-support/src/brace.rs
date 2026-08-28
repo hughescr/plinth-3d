@@ -343,6 +343,23 @@ pub(crate) enum BraceError {
          terminals, but no sealed-routed terminal's own chosen arm is among them — {0}"
     )]
     SealedSweepLearnedNothing(Box<SealedCondemnationClass>),
+    /// `slender_rungs` tried every count in `0..=rungs_tried` and the
+    /// deflection predicate never passed. Distinct from a real answer of
+    /// `rungs_tried` rungs -- which this search would have returned early,
+    /// the same way it returns any other satisfying count -- so a caller can
+    /// no longer mistake "gave up" for "solved".
+    #[error(
+        "no rung count in 0..={rungs_tried} keeps the deflection radius at or under the \
+         allowed {max_unbraced_radius_mm} mm on a {length_mm} mm span at {lean_deg} degree \
+         lean: the best achieved, at {rungs_tried} rungs, is {best_radius_mm} mm"
+    )]
+    SlenderRungsUnsatisfied {
+        length_mm: f64,
+        lean_deg: f64,
+        rungs_tried: usize,
+        max_unbraced_radius_mm: f64,
+        best_radius_mm: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -3022,19 +3039,44 @@ fn exact_clearance_rows(
     )
 }
 
+/// The most rungs this search will ever try before giving up. A search bound,
+/// not a physics constant: see [`BraceError::SlenderRungsUnsatisfied`], which
+/// is what the search reports when even this many rungs cannot bring the
+/// deflection radius down to `max_unbraced_radius_mm`.
+const MAX_SLENDER_RUNGS_TRIED: usize = 50;
+
 fn slender_rungs(
     length_mm: f64,
     lean: f64,
     config: &BraceConfig,
     compatibility: &LegacyCompatibility,
 ) -> Result<usize, BraceError> {
-    for count in 0..=50 {
+    let mut best_radius_mm = f64::NAN;
+    for count in 0..=MAX_SLENDER_RUNGS_TRIED {
         let radius = deflection_radius(length_mm / (count + 1) as f64, lean, compatibility)?;
         if radius <= config.max_unbraced_radius_mm {
             return Ok(count);
         }
+        best_radius_mm = radius;
     }
-    Ok(50)
+    // Every count up to and including `MAX_SLENDER_RUNGS_TRIED` was tried and
+    // the deflection predicate never passed. Returning `Ok` here (the retired
+    // behaviour) made an unsatisfied search indistinguishable from a genuine
+    // solution of `MAX_SLENDER_RUNGS_TRIED` rungs, and the caller sized a
+    // brace on a rung count that satisfies nothing. Report what was tried and
+    // what was needed instead.
+    //
+    // `best_radius_mm` is the radius at the LAST count tried, which is the
+    // best of them: the deflection radius falls monotonically as the span is
+    // subdivided further, so the closest this search ever came is its final
+    // iteration.
+    Err(BraceError::SlenderRungsUnsatisfied {
+        length_mm,
+        lean_deg: lean,
+        rungs_tried: MAX_SLENDER_RUNGS_TRIED,
+        max_unbraced_radius_mm: config.max_unbraced_radius_mm,
+        best_radius_mm,
+    })
 }
 
 fn transient_radius(
@@ -3434,6 +3476,63 @@ mod tests {
     /// each of them, at the stage that owns it — the failure mode the two-tier
     /// split invites is a hand-typed 0.3 somewhere, which would go stale the
     /// day a coupon measurement supersedes the owner decision.
+    /// An unsatisfiable rung search REFUSES; it does not answer
+    /// `MAX_SLENDER_RUNGS_TRIED` and let the caller size a brace on it.
+    ///
+    /// The defect: after trying every count in `0..=50` without the deflection
+    /// radius ever falling to `max_unbraced_radius_mm`, the search returned
+    /// `Ok(50)`. That is byte-identical to what it returns for a span that
+    /// genuinely IS solved by 50 rungs, so the caller could not tell a solution
+    /// from a surrender and went on to size a brace on a rung count that
+    /// satisfies nothing.
+    ///
+    /// Both arms are asserted, because a refusal test alone would also pass on
+    /// a search that refused everything.
+    #[test]
+    fn an_unsatisfiable_rung_search_refuses_instead_of_answering_its_own_bound() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
+
+        // The SOLVED arm. A short span needs no rungs at all, which proves the
+        // search returns real answers and is not simply refusing.
+        let solved = slender_rungs(0.5, 0.0, &config, &compatibility).unwrap();
+        assert_eq!(solved, 0);
+
+        // The UNSATISFIED arm. Find a span long enough that even 51 subdivisions
+        // leave the deflection radius over the allowance.
+        let mut span_mm = 10.0;
+        while deflection_radius(
+            span_mm / (MAX_SLENDER_RUNGS_TRIED + 1) as f64,
+            0.0,
+            &compatibility,
+        )
+        .unwrap()
+            <= config.max_unbraced_radius_mm
+        {
+            span_mm *= 4.0;
+            assert!(span_mm.is_finite(), "no unsatisfiable span exists");
+        }
+
+        match slender_rungs(span_mm, 0.0, &config, &compatibility) {
+            Err(BraceError::SlenderRungsUnsatisfied {
+                length_mm,
+                rungs_tried,
+                max_unbraced_radius_mm,
+                best_radius_mm,
+                ..
+            }) => {
+                assert_eq!(rungs_tried, MAX_SLENDER_RUNGS_TRIED);
+                assert!((length_mm - span_mm).abs() <= f64::EPSILON * span_mm);
+                assert!(
+                    best_radius_mm > max_unbraced_radius_mm,
+                    "the reported best must be the reason it refused: {best_radius_mm} vs \
+                     {max_unbraced_radius_mm}",
+                );
+            }
+            other => panic!("an unsatisfiable span must refuse, got {other:?}"),
+        }
+    }
+
     /// The two transit-screen parameters that were derived from their owners
     /// still equal the literals they replaced, and the midpoint-trust
     /// threshold still equals its own.
