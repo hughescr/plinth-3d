@@ -775,3 +775,245 @@ that absence is itself the largest gap. What this amendment did **not** check:
 
 `.git/salvage-l1-held-2026-08-28/` and `.git/salvage-hollow-rescue/` still exist on one machine
 only (§9 D4, §4.5). Two empty challenges did not change that either.
+
+---
+
+# 11. AMENDMENT — the third cross-family attempt: it happened, and it moved the verdict
+
+## 11.1 The challenge happened. First time in this remediation.
+
+Attempts 1 and 2 came back empty and were ruled an infrastructure failure (§0, §10.1). Attempt 3
+returned a real challenger artifact: a `gpt-sol` reader, scoped to `feature/salvage-support-consumers`
+at `2576a86`, with build/lint/test reruns forbidden, reporting one disagreement, one missed finding,
+five confirmations, a `MERGE_AFTER_FIXES` verdict, and a filled-in `coverage` field. So the route
+works. §10.1's "prove it returns anything at all before spending a third branch review on it" is
+answered: it does.
+
+What it found, in one line each:
+
+| | Claim | My ruling |
+|---|---|---|
+| Disagreement 1 | B3's *deferral* is justified, but the production code that stays does not record the defect it leaves behind | **Upheld on the facts, scope corrected.** Track as **T11**, not a gate — the omission is on `develop`, not made by this branch |
+| Missed 1 | Commit `5154a05` narrows a support-verdict window with no derived bound and no witness | **Upheld, and it is a gate.** Revert that one commit before merge |
+| Confirmed ×5 | cap/digest/anchor deferrals honest; no registry argument swap; the sabotage proof is causal | **Agreed.** Two spot-checked below |
+
+The outside reader was right twice. Neither finding is a defect the branch *introduces* in its own
+new code — but the second one is a behaviour change the branch carries, and it is the weakest thing
+on the branch. Two same-family verifiers read that commit and neither of them stopped at it.
+
+## 11.2 Disagreement 1 — the B3 residual. **Challenger is right. Scope corrected. Not a gate.**
+
+The claim: `model_rung_anchor_centroids` gathers a model-rung seat candidate only when a face's
+*centroid* falls inside the rung Z band, so a triangle that crosses the rung plane with its centroid
+outside the band is dropped; and unlike the B1 cap next door, nothing in the source says so.
+
+**Checked, and true on every part.**
+
+- `brace.rs:2241-2266` on the branch filters `geometry().centroids()` by
+  `(point[2] - z).abs() <= config.model_rung_z_tolerance_mm + HEIGHT_TOLERANCE_MM`. There is no
+  triangle/plane test anywhere in the function, and a search for `slice_z_batch` or `PlaneSliceLimits`
+  in `brace.rs` returns nothing — the held B3 patch is genuinely absent, as reported.
+- The module header at `brace.rs:1-7` does say the planner "gathers every cross-link and model-rung
+  candidate". Against a centroid-only gather, that sentence is not true.
+- The contrast the challenger draws is exact. `TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP` at
+  `brace.rs:1968-1986` states in bold that the value is under-sized, gives `80 × 0.12 = 9.6 mm`
+  against a `15.0 × 1.5 = 22.5 mm` reachable span, names the derived `188`, and says raising it
+  changes verdicts. Twenty lines of self-accusation for B1; not one word for B3.
+
+**One thing the challenger did not establish, which I checked, and it makes the note more worth
+writing rather than less.** A missing candidate does not fail loudly. At `brace.rs:1355-1574` an
+empty candidate list for a site falls through `let Some(..) = winner else { continue; }`, and at
+`:570-573` the need lands in `rungs_unplaceable` — a counter on the pass plan, not a refusal. So the
+residual is a *quiet* under-bracing gap: a member the planner could have braced against the model,
+recorded as unplaceable, with no error and nothing downstream looking.
+
+**Scope correction, and this is why it is not a gate.** `develop`'s copy of this function is
+byte-identical to the branch's, and the branch's diff against `develop` does not touch `brace.rs`
+anywhere near it. The gap is `develop`'s, inherited. This branch neither made it nor worsened it, so
+it cannot block this branch's merge.
+
+**What the finding actually indicts is this report, not the code.** §8's B3 row says "Justified" and
+the Claude verifier agreed. Both were answering "was holding the patch justified?" — and both were
+right about that; the patch guesses its native-query limits and an over-run of `max_intersections`
+returns `NativeQuery` and hard-fails the whole brace pass, so landing it could turn a missing
+candidate into a dead run. Neither reader went on to ask §7's *other* column: does the code that
+stays record what was held? For B1 the answer is a proud yes. For B3 it is no, and the module header
+says the opposite. That is the §3.1/M1 failure mode the report names elsewhere, found in the report's
+own tables by an outside reader. Recorded as **T11**.
+
+## 11.3 The missed finding — commit `5154a05`. **Challenger is right. This is the gate.**
+
+`5154a05` replaces the literal `0.2` XY slack in the island-birth match with
+`layer_tolerance(layers, z, birth_match_layers)` — the same quantity already used for the Z window.
+`MINIMA_BIRTH_MATCH_LAYERS` is `2`, so at the default `0.05 mm` layer the XY window goes from
+`0.2 mm` to `0.1 mm`.
+
+**The truth table is one-directional, and the direction is the unsafe one.** Narrowing the window can
+only turn `is_birth` from `true` to `false`. `minimum_demands_support(is_birth, adequate)` is
+`is_birth || !adequate` (`perception.rs:2596-2598`). So:
+
+- `is_birth` `true → false` with `adequate == false`: still demands support. No change.
+- `is_birth` `true → false` with `adequate == true`: **the minimum is dropped.**
+
+There is no third case. This commit cannot add a support demand. It can only delete one. Every
+behaviour it changes at all, it changes by removing a support from a low point that used to get one.
+
+**Read as a slope threshold, the change is a real narrowing and it lands in the overhang band.** Over
+a Z offset `dz`, the sliced contour of a surface at `theta` from horizontal moves `dz / tan(theta)`
+in XY — the commit's own derivation. The Z gate admits `dz` up to the same `0.1 mm`, so at the worst
+admitted offset the old `0.2 mm` window covered surfaces down to `atan(0.1/0.2) = 26.6°` and the new
+one covers only down to `atan(0.1/0.1) = 45°`. At a typical one-layer offset it is `14.0°` before and
+`26.6°` after. The coverage given up is exactly the shallow band — the angles at which a resin
+overhang is in trouble in the first place.
+
+**The commit's justification is a two-case partition with a missing third case.** It argues: the
+minima whose verdict this slack decides are narrow tips, narrow tips are steep, and steep surfaces
+move less than the allowance; shallow surfaces move more, but a shallow downward face is a wide
+overhang whose footprint contains the region points outright. That covers steep-and-narrow and
+shallow-and-wide. It does not cover **shallow-and-narrow** — a spike, a whisker, a wing spar, a blade
+tip carried near horizontal. Those are narrow, so their footprints do not contain anything outright,
+and they are shallow, so their contours move further than the allowance. On a mini they are not
+exotic geometry; they are the geometry. Nothing in the code enforces that the third case is empty.
+This is the framing-optimism pattern already on the record for this project: the arithmetic is right
+and the case split is one step toward the favourable reading.
+
+**Two structural mitigations the challenger did not name, which I checked. They lower the odds; they
+do not close the hole.**
+
+1. `sampled_region_points` (`perception.rs:2715`) offers up to 65 points, and the flood that builds
+   `region_points_mm` (`:2380-2391`) uses `MINIMA_CONNECT_LAYERS`, which is also `2` — the same band
+   as the match window. On a well-tessellated slanted spike a region vertex normally sits at the
+   birth plane and the slack never decides. The failure needs a **coarse** mesh whose next vertex ring
+   is more than two layers up, so the region degenerates to the tip vertex alone.
+2. `point_reach_mm` (`:2643`) returns `INFINITY` when there is no solid one layer down, documented as
+   "a low point over nothing always demands a support". A birth genuinely hanging over nothing is
+   still caught by the adequacy arm. The deletion additionally needs `region_reach_mm`'s **disclosed**
+   KNOWN GAP 2 of 2 (`:2620-2626`: no connectivity requirement, the nearest solid may be a
+   neighbouring limb or another model on the plate) to score a short reach across a path that carries
+   no load.
+
+So the failure needs three things at once: a shallow narrow tip, a coarse local mesh, and unrelated
+material within the reach allowance one layer down. Each is ordinary on a crowded plate of minis. I
+did not build the mesh, and neither did anyone else.
+
+**The ruling: revert `5154a05` before merge.** The decision is asymmetric and the asymmetry settles it.
+
+- Reverting costs nothing and risks nothing. The commit fixes no defect. `0.2` was an unowned literal —
+  untidy, not wrong. Nothing was broken before it and nothing is broken by putting it back. The commit
+  itself says it was landed alone "for exactly that reason: it can be reverted alone if a corpus run
+  disagrees with it." Take it up on that.
+- Landing it buys nothing today and risks a silently missing support at an island birth. A spurious
+  support is a scar to clean up. A missing one is a cured island floating in the vat.
+- **The branch itself sets the standard this commit fails.** `2099bdb`, four commits later, makes a
+  behaviour change of the same class — it can turn a green run red. It is landable because it fails
+  *loud* (a named `SlenderRungsUnsatisfied` carrying span, lean, count, allowance and best radius), it
+  is argued from a monotonicity property rather than an assumption, and its witness asserts **both**
+  arms so it cannot pass on a search that refuses everything. `5154a05` fails quiet, argues from an
+  unenforced assumption, and has no witness at all — the commit says so itself: "no test in this
+  repository has a minimum sitting in the 0.1 mm to 0.2 mm band". Byte-identical test output across
+  the change measures that nothing observed moves; it does not measure that nothing moves.
+
+If someone wants the de-literalising, the landable form is the one the physics already names: the
+window is anisotropic, `reach_xy = dz / tan(theta)` with `theta` taken from the minimum's own normal —
+which `LocalZMinimum` already carries (`perception.rs:2419-2427`) and which this call site ignores —
+plus a fixture in the disagreement band asserting both arms. That is a real commit. It is not this one.
+
+**Precision note on the challenger's citation.** It cites `perception.rs:2448-2472` and `:2590-2597`.
+On the branch blob the closure is `2445-2474` and `minimum_demands_support` is `2596-2598`. Off by a
+few lines, right in every substantive particular. I read the blob rather than trusting the numbers.
+
+## 11.4 The five confirmations — spot-checked, and agreed
+
+I did not re-derive all five. Two were re-read because they are the ones a wrong "confirmed" would
+cost most:
+
+- **The B1 cap tells the truth.** Verified verbatim at `brace.rs:1968-1986`. Every number the
+  challenger quotes is in the source, including the derived `188` and the explicit statement that
+  verdicts above `9.6 mm` can change. Agreed, and it is the standard B3 should be held to.
+- **No registry argument swap.** Already run to completion in-family at §10.2 attack 2, position by
+  position across all 22 substitutions, with the residual recorded there (`RaftLimits`'
+  `max_candidates` and `max_roots` are both `100_000`, so a swap between those two slots is invisible
+  to the compiler, to the guard test and to a by-value audit — reading is the only check). The
+  challenger reached the same conclusion independently from the constructor signatures. Two families,
+  same answer, same residual. This one is as settled as it is going to get.
+
+The anchor post-snap, batch-work-coefficient and sabotage-proof confirmations match §10.2 and the
+Claude verifier and are accepted without re-derivation.
+
+## 11.5 Is `feature/salvage-support-consumers` still MERGE?
+
+**Yes — but for the first time in this remediation the verdict has a gate on it.**
+
+| | §10.3's position | After this amendment |
+|---|---|---|
+| Verdict | **MERGE**, first in order, **no gate** | **MERGE**, first in order, **with gate G1** |
+| Verification family | Claude only, after two failed cross-family attempts | **Claude and one outside family.** The challenge finally ran |
+| Known blockers | none | **one**, and it is one commit, not the branch |
+| Track-after items | T1–T5, T10 | T1–T5, T10, **plus T11** |
+
+**G1 — revert `5154a05` before merging.** Revert it on the branch, or drop it from the merge. It is a
+self-contained 20-line change to one closure in `perception.rs` and nothing else on the branch depends
+on it: the other perception commit `5c89ab8` is upstream of it in the LAYER 1 merge and reads island
+births from the material, which is untouched by the XY window. Reverting restores `develop`'s
+behaviour exactly. The rest of the branch is unaffected and merges as §1 ordered it.
+
+Nothing else moved. The registry wiring, the deferred cap and digest decisions, the anchor delicacy
+re-screen and its control arm, and the sabotage proofs all survive an outside reading — which is a
+stronger result for those parts than they had this morning, because the reader that cleared them was
+looking for a reason to fail them and found one somewhere else.
+
+Add to §7:
+
+| # | Where | Item | Is a defect live in production? | Does the code say so? |
+|---|---|---|---|---|
+| **T11** | `plinth-support::brace` (**inherited from `develop`**, not made by #1) | `model_rung_anchor_centroids` (`brace.rs:2241`) selects a model-rung seat candidate only when a face *centroid* lies in the rung Z band. A triangle crossing the rung plane with its centroid outside the band is dropped, so a reachable seat can be missed. It fails quietly: the need falls through to `rungs_unplaceable` (`brace.rs:570`), a counter, not a refusal. | **Yes**, and unmeasured — nobody has counted how often a rung plane finds zero centroids on the corpus. | **No — and the module header says the opposite** (`brace.rs:1-7`: "gathers every cross-link and model-rung candidate"). The fix is a comment, not code: say what the centroid filter does and does not find, the way `TRANSIT_SCREEN_MAJORITY_SAMPLE_CAP` does eighteen lines away. |
+
+**§9 D8 is amended again, and this time it is settled.** D8 asked: merge on same-family verification,
+or hold for a genuine outside reader? §10.3 recommended merging and noted that holding for an outside
+reader was holding for something not shown to be obtainable. It is now shown to be obtainable, it was
+obtained, and it paid: it found a gate two same-family readers walked past. **D8's answer is no longer
+"merge, the outside reader is unavailable" — it is "the outside reader ran, here is what it said, merge
+after G1."** The general lesson stands on its own: on this branch the cross-family reader's one
+merge-blocking find was in a commit both Claude readers had already read and approved.
+
+## 11.6 What remains unchecked. Named plainly.
+
+Carried forward verbatim from the challenger's own `coverage` field:
+
+1. **It ran no build, no lint and no test suite** — it was instructed not to, so all mechanical
+   numbers in §1's appendix are still the Claude verifier's alone, unreplicated across families.
+2. **It did not line-review the roughly 2,011 inserted lines.** It read the commit arguments, the four
+   unrecovered items at their call sites, all 22 registry slots, one sabotage trace, and a selected set
+   of landed logic.
+3. **It ran no corpus.**
+4. **It built no mesh fixture for the 0.1–0.2 mm birth-match band.** Its finding is derived from the
+   changed predicate and the downstream truth table — which is also, by the commit's own admission, the
+   witness the commit does not have.
+
+And what **this amendment** did not check:
+
+5. **I ran nothing either.** No build, no clippy, no test, no corpus, no sabotage. Every claim in §11
+   is from reading git blobs at `2576a86` and `develop`. Two of three families have now cleared this
+   branch by reading only.
+6. **I did not build the counterexample mesh for G1 either.** The failure chain in §11.3 is derived
+   from the code, not observed. G1 is a gate on an *unwitnessed risk that only ever deletes supports*,
+   not on a demonstrated failure. If an owner would rather land `5154a05` and take the risk, the thing
+   that would settle it is the fixture, not another reading.
+7. **T11's live cost is unmeasured.** Nobody has counted how many corpus rung planes find zero
+   centroids, so "a reachable seat can be missed" is a proof of possibility, not a rate.
+8. **The three sabotage proofs were never re-executed by anyone but the Claude verifier.** §10.2 ruled
+   one from the record; the challenger traced the same one from instrumentation to assertion. Neither
+   re-ran it, and sabotages 2 and 3 remain single-family, single-execution.
+9. **`support_runner_integration` is still unrun since the verifier's 700 s run.** The three-red trap
+   in §2 is unretested.
+10. **`feature/salvage-emit` and `feature/salvage-hollow` have still never been read by an outside
+    family.** All three attempts were scoped to the support branch. §3 and §4 remain unchallenged, and
+    now that the route is proved to work, that is a gap someone chose rather than a gap someone was
+    handed.
+11. **The 20 non-positional registry reads are still unchecked as *semantic* matches.** Both families
+    checked them as value-preserving substitutions. Neither asked whether each registered owner is the
+    right owner for the quantity it now bounds. Unchanged from §10.4.
+12. **`.git/salvage-l1-held-2026-08-28/` and `.git/salvage-hollow-rescue/` still exist on one machine
+    only** (§9 D4, §4.5). Three challenges did not change that.
+
+Nothing was merged, pushed, built, run or sabotaged for this amendment.
