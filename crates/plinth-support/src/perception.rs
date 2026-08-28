@@ -2445,12 +2445,31 @@ fn find_local_minima(
     let is_birth = minima
         .iter()
         .map(|minimum| {
-            let z_tolerance = layer_tolerance(layers, minimum.position_mm[2], birth_match_layers);
+            // One window, isotropic. The match window in Z is
+            // `minima_birth_match_layers` layers of THIS plan, read from the
+            // registry above; the window in XY is the same distance, so the
+            // pair describes a cone at 45 degrees around the minimum rather
+            // than a Z window from the registry beside a bare millimetre
+            // literal in XY. The literal was 0.2 mm — four registered layers,
+            // twice the Z window it sat next to, and nothing said why.
+            //
+            // Why this distance is the right one: over a Z offset `dz` the
+            // sliced contour of a surface at angle `theta` from horizontal
+            // moves `dz / tan(theta)` in XY, so no single XY slack is exact for
+            // every slope. 45 degrees is the neutral choice and it errs the
+            // safe way where it matters: the narrow downward tips whose
+            // footprints are small, and therefore whose matches are decided by
+            // this slack, are steep, and a steep surface moves LESS than the
+            // allowance. A shallow surface moves more, but a shallow downward
+            // face is a wide overhang whose footprint already contains the
+            // region points outright.
+            let match_reach_mm =
+                layer_tolerance(layers, minimum.position_mm[2], birth_match_layers);
             births.iter().any(|birth| {
-                (birth.z_mm - minimum.position_mm[2]).abs() <= z_tolerance
-                    && sampled_region_points(minimum)
-                        .iter()
-                        .any(|point| birth_xy_ok(&birth.footprint, [point[0], point[1]], 0.2))
+                (birth.z_mm - minimum.position_mm[2]).abs() <= match_reach_mm
+                    && sampled_region_points(minimum).iter().any(|point| {
+                        birth_xy_ok(&birth.footprint, [point[0], point[1]], match_reach_mm)
+                    })
             })
         })
         .collect::<Vec<_>>();
