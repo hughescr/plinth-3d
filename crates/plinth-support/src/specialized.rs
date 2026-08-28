@@ -3913,12 +3913,6 @@ fn check_load_scratch(usage: LoadScratchUsage, limit: usize) -> Result<usize, Sp
     Ok(required)
 }
 
-#[derive(Default)]
-struct GatePreflightTelemetry {
-    payload_allocations: usize,
-    payload_operations: usize,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn gate_header_preflight(
     contact_count: usize,
@@ -3929,7 +3923,6 @@ fn gate_header_preflight(
     island_count: usize,
     reservation_count: usize,
     limits: SpecializedLimits,
-    _telemetry: &mut GatePreflightTelemetry,
 ) -> Result<(), SpecializedError> {
     // The batch's own materialized gate cap: the header preflight and every
     // check below in this batch use the one bound stated for this batch shape.
@@ -4492,7 +4485,6 @@ fn evaluate_gate_batch(
     retained_load: &mut Option<RetainedLoadTranspose>,
     acceptance: GateBatchAcceptance,
 ) -> Result<GateBatchOutcome, SpecializedError> {
-    let mut preflight_telemetry = GatePreflightTelemetry::default();
     gate_header_preflight(
         contacts.len(),
         proposals.len(),
@@ -4502,10 +4494,7 @@ fn evaluate_gate_batch(
         islands.len(),
         reservations.len(),
         limits,
-        &mut preflight_telemetry,
     )?;
-    debug_assert_eq!(preflight_telemetry.payload_allocations, 0);
-    debug_assert_eq!(preflight_telemetry.payload_operations, 0);
     // One distinct-face buffer for the whole gate batch: every face gather
     // below reuses this allocation instead of building a set per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
@@ -11692,9 +11681,18 @@ mod tests {
         assert_eq!(merged.normal, primary.normal);
     }
 
+    /// **Renamed and re-armed.** This was
+    /// `zero_gate_caps_refuse_without_payload_allocation_or_work`, and the
+    /// "without payload allocation or work" half of that name was carried by
+    /// four `assert_eq!(telemetry.*, 0)` lines over a `GatePreflightTelemetry`
+    /// nothing ever wrote -- 0 against 0, on both the refusal and the accept
+    /// path. The counters are gone (see [`gate_header_preflight`]) and the
+    /// vacuous assertions with them. What replaces them is a control arm: the
+    /// SAME batch shape, under the production caps, must be ACCEPTED -- so a
+    /// preflight that refused regardless of its caps could no longer pass this
+    /// test by way of its two refusal assertions.
     #[test]
-    fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
-        let mut telemetry = GatePreflightTelemetry::default();
+    fn zero_gate_caps_refuse_in_the_header_preflight() {
         let mut operation_limits =
             SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         // Re-pinned 2026-08-06 (FU-8b batch-product caps): the gate operation cap
@@ -11714,15 +11712,12 @@ mod tests {
                 5,
                 6,
                 operation_limits,
-                &mut telemetry,
             ),
             Err(SpecializedError::GateOperationLimit {
                 required: 1,
                 limit: 0,
             })
         );
-        assert_eq!(telemetry.payload_allocations, 0);
-        assert_eq!(telemetry.payload_operations, 0);
 
         let mut peak_limits =
             SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
@@ -11739,15 +11734,32 @@ mod tests {
                 5,
                 6,
                 peak_limits,
-                &mut telemetry,
             ),
             Err(SpecializedError::GatePeakByteLimit {
                 required: expected,
                 limit: 0,
             })
         );
-        assert_eq!(telemetry.payload_allocations, 0);
-        assert_eq!(telemetry.payload_operations, 0);
+
+        // The control arm. Same shape, production caps: this batch header is
+        // ACCEPTED, so both refusals above are attributable to the cap that was
+        // zeroed and not to a preflight that refuses whatever it is handed.
+        assert_eq!(
+            gate_header_preflight(
+                2,
+                1,
+                std::mem::size_of::<MergeProposal>(),
+                3,
+                4,
+                5,
+                6,
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work()
+                ),
+            ),
+            Ok(())
+        );
     }
 
     #[test]
