@@ -11,6 +11,10 @@ and are corrected here; its other findings held up and are carried forward with 
 
 ## 0. The cross-family challenge did not happen. Read this before anything else.
 
+> **Amended 2026-08-28 — see §10.** A second, narrower cross-family attempt was made after this
+> section was written, scoped to one branch and one challenger. It also came back empty. The gap
+> is still open and §10 rules on what that means.
+
 This phase existed for one reason: Claude models wrote these branches, Claude models graded
 them, and a same-family proposer and reviewer share blind spots. OpenAI models were to
 challenge both gradings.
@@ -553,3 +557,221 @@ Build, clippy and test results for `feature/salvage-support-consumers` and
 `feature/salvage-emit` are the Claude verifiers' own, re-used deliberately rather than re-run;
 the checks performed here on those two branches were the structural ones the verdicts rest on
 (`git diff --stat` for the frozen-expectation question, and reading the disputed emit test).
+
+---
+
+# 10. AMENDMENT — the second cross-family attempt, ruled
+
+Written 2026-08-28, later the same day, against this document at `24d7628`. This section amends
+§0 and §9 D8. Nothing above it is retracted.
+
+## 10.1 The challenge did not happen. Again. Second attempt, narrower scope, same empty result.
+
+**Headline: the cross-family gap is STILL OPEN.** No OpenAI challenge exists for
+`feature/salvage-support-consumers`. Not "a challenge that agreed" — no challenge.
+
+§0 recorded the first empty result. A second attempt was then made, and it was not a rerun of
+the first: it was deliberately rationed to make a return as easy as possible.
+
+| | Attempt 1 (recorded in §0) | Attempt 2 (this section) |
+|---|---|---|
+| Scope | both graded branches | `feature/salvage-support-consumers` only |
+| Challengers | the full cross-family set | one, `gpt-sol-high` |
+| Task | open review | four named attacks, ordered, with "empty findings is a legitimate outcome" stated in the brief |
+| Mechanical checks | expected | **explicitly forbidden**, to spend the whole budget on judgement |
+| Result | **empty** | **empty** |
+
+Two facts about attempt 2 were checked here rather than assumed:
+
+- `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` — the cross-family proxy **is** configured in this
+  session, so this is not the documented "route unavailable because the variable is unset" case.
+- No challenger output file was ever written. The review directory holds
+  `claude-verdict-support.json` and `claude-verdict-emit.json` and no third-family artifact of
+  any kind.
+
+**Ruling: this is an infrastructure failure, not a review outcome, and it must not be recorded
+as one.** Two attempts, the second narrowed to one branch, one agent, four questions and no
+mechanical work, both returning nothing, is evidence about the route — quota, or a silent
+failure between the proxy and the workflow — and evidence about nothing else. Every "no defect
+found" in this document still carries the same-family qualifier §0 attached to it.
+
+**A third attempt should not be made without first proving the route returns anything at all.**
+Send one trivial prompt through `gpt-sol-high` and confirm a non-empty structured result before
+spending another branch review on it. Two consecutive empties is enough to stop treating the
+route as working and start treating it as the thing under test.
+
+## 10.2 Disagreements to rule on: none exist, so four attacks were run here instead
+
+This section was commissioned to rule on disagreements. There are none, because there is no
+second position. Reporting that and stopping would leave the four questions the challenge was
+scoped to ask unanswered by anyone, so they were answered here — in-family, which is stated
+plainly, and which is exactly the limitation that makes them worth less than an outside answer.
+
+Two of the four were run to completion. Two were ruled from the existing record.
+
+### Attack 2 — argument-order swaps in the 22 registry reads. **RUN HERE IN FULL. No swap.**
+
+This was the challenge's highest-value item: an argument-order swap between two parameters of
+the same type compiles, changes engine behaviour, and no test with the same author sees it. The
+Claude verifier claimed to have checked "22 values and two constructors". That claim is
+**correct, and it is now checked independently rather than accepted.**
+
+All 22 registered reads, compared position-by-position against develop's literals:
+
+| Site | Form | Registered values | develop's literals | Same? |
+|---|---|---|---|---|
+| `KnnBatchLimits` × 4 | named fields | 20 000 000 / 20 000 000 / 1 / 2 147 483 648 | 20 000 000 / 20 000 000 / 1 / `2*1024*1024*1024` | yes |
+| coverage cells, score-matrix entries | named fields | 2 000 000 / 65 536 | 2 000 000 / 65 536 | yes |
+| `ContactConstructionLimits::new` × 4 | **positional** | 1 000 000 / 10 000 000 / 4 000 000 / 536 870 912 | 1 000 000 / 10 000 000 / 4 000 000 / `512*1024*1024` | yes |
+| `PenetrationBatchLimits` × 6 | named fields | 100 000 / 1e9 / 1e9 / 1e10 / 1e9 / 1e11 | identical | yes |
+| `RaftLimits::try_new` × 4 | **positional** | 100 000 / 100 000 / 200 000 / 134 217 728 | 100 000 / 100 000 / 200 000 / `128*1024*1024` | yes |
+| `max_primitives`, `max_primitive_bytes` | named fields | 200 000 / 134 217 728 | 200 000 / `128*1024*1024` | yes |
+
+Only two of the 22 are positional, and both were read against their own signatures rather than
+against the call site's argument names:
+
+- `ContactConstructionLimits::new(max_contacts, max_load_rows, max_work_items, max_scratch_bytes)`
+  — `crates/plinth-support/src/initial.rs:45`. The call passes contacts, load rows, work items,
+  scratch bytes, in that order. Correct.
+- `RaftLimits::try_new(max_candidates, max_roots, max_primitives, max_bytes)` —
+  `crates/plinth-support/src/raft.rs:38`. The call passes candidates, roots, primitives, bytes,
+  in that order. Correct.
+
+Registry values read from `crates/plinth-core/src/constants/placeholders.rs:1409-1480`, which
+`git diff --stat develop...feature/salvage-support-consumers -- crates/plinth-core` confirms the
+branch does not touch at all.
+
+**Ruling: no swap. The 22 substitutions are value-preserving.**
+
+### Attack 2, continued — one residual the verifier did not name. **NEW**
+
+The guard test `every_registered_production_resource_cap_is_read_from_the_registry`
+(`runner.rs:11771`) builds its expected value by calling **the same two positional constructors
+in the same order** as production. For the construction caps that is still a real check, because
+its four values are all distinct — a production-side swap would not match the test's
+independently written order. For the raft caps it is not: `max_candidates` and `max_roots` are
+**both 100 000**, so a swap between those two slots is invisible to the compiler, invisible to
+the test, and invisible to a by-value audit. The same is true of `max_source_points` and
+`max_query_points` at 20 000 000 each, though those are named fields and carry no positional
+risk.
+
+**Ruling: not a defect, and not merge-blocking — the order is correct, and it has now been read
+against the signature and recorded here, which is the only check that can distinguish those two
+slots.** Track it: if either raft number ever moves independently of the other, the pair stops
+being value-equal and the test starts covering the slot. Until then, this line of the record
+*is* the coverage.
+
+### Attack 3 — the sabotage proofs. **RULED FROM THE RECORD. The teeth are real.**
+
+The challenge's objection was the right one: a sabotage caught for an incidental reason — it
+perturbed a fixture, or moved a value the assertion also reads — proves nothing. Applied to the
+least direct of the three, the delicacy re-screen:
+
+The sabotage reverts `let seated_delicacy = sidecar[face]` to `candidate.sample.delicacy`
+(`anchor.rs:1332`), and
+`a_snapped_seat_is_screened_and_recorded_against_the_face_it_lands_on` (`anchor.rs:2792`) fails.
+Incidental-breakage is ruled out by the control arm, which is already in the record and was
+verified to exist here: `a_snap_inside_the_candidate_length_floor_is_still_a_seat`
+(`anchor.rs:2864`) **passes under the same sabotage**. A sabotage that merely broke the fixture
+would take both siblings down. One bites and one does not, which is what a real screen looks
+like. Both tests exist at the lines claimed, and the guarded code at `anchor.rs:1332-1335` reads
+as reported.
+
+**Ruling: the teeth claim survives the objection.** Not re-executed here — the two long test
+binaries were deliberately not re-run (§10.4).
+
+### Attack 1 — do the four unrecovered items leave live defects, honestly described?
+
+Already ruled in §2 and tabled in §7 T1–T5, and this section does not disturb those rulings. The
+challenge's sharper framing — *a defect deferred with an honest note is fine; a defect deferred
+with a note that understates it is not* — was applied to each and changes nothing: T1 names its
+own under-sizing in the constant's own name and doc and asserts both numbers in a test; T2 has
+two tests asserting the defect by name; T5's five declinations each carry their reason in a
+commit message. **No note understates its defect.**
+
+### Attack 4 — find a correctness defect nobody looked at. **One finding, and it is not one. NEW**
+
+The four production cap literals the branch removes from `runner.rs` are **still hard-coded a
+second time**, in `ContactConstructionLimits::production()` at `initial.rs:62-70`
+(1 000 000 / 10 000 000 / 4 000 000 / `512*1024*1024`). That is the exact "two numeric owners for
+one number" defect the branch's own comment says it closes.
+
+Checked before reporting it, because an outside reader can be wrong and so can this one:
+`ContactConstructionLimits::production()` is `pub(crate)` and **every** call site is inside a
+`#[cfg(test)]` module — `cco.rs:6009` (module starts 5850), `runner.rs:8486` and `:10371`
+(module starts 8160), and the `initial.rs` sites (module starts 1766). It is not on any
+production path.
+
+**Ruling: NOT a correctness defect, and not merge-blocking.** It is a two-part truth defect
+worth tracking, and it is new:
+
+1. **A test-fidelity drift hazard.** If a registered cap moves, `runner.rs` follows it and
+   `initial.rs::production()` does not, and roughly twenty tests then exercise cap values that
+   are no longer production's. The new guard test does not cover `production()`.
+2. **A registry note that is now stale in the branch's favour.** `SUPPORT_CONSTRUCTION_MAX_*`
+   at `placeholders.rs:1421-1428` still says "the same four numbers are hard-coded at both
+   sites (`ContactConstructionLimits::new/::production` ... and `SupportPreparationLimits::production`'s
+   `construction_limits`, `crates/plinth-support/src/runner.rs`)". After this branch that
+   sentence is **wrong about the runner.rs half** — it is a registry read now — and still right
+   about the `initial.rs` half. The branch fixed one of the two sites the note names and left
+   the note describing both.
+
+The fix is cheap and belongs with whoever merges: point `production()` at the registry too, or
+edit the four registry notes to say which half was closed. Do not merge this and then let the
+note retire the question — that is the §3.1/M1 failure mode in a different file.
+
+## 10.3 Is `feature/salvage-support-consumers` still MERGE? **Yes. Nothing changed it.**
+
+| | §1's position | After this amendment |
+|---|---|---|
+| Verdict | **MERGE**, first in order, no gate | **MERGE**, first in order, no gate |
+| Verification family | Claude only | Claude only, now after **two** failed cross-family attempts |
+| Known blockers | none | none |
+| Track-after items | T1–T5 | T1–T5, **plus T10** below |
+
+Nothing found here blocks. The one new finding (§10.2, attack 4) is test-only and doc-only. The
+one item that could have blocked — a silent argument-order swap in the 22 substitutions — was
+the specific thing looked for hardest, and it is not there.
+
+Add to §7:
+
+| # | Where | Item | Is a defect live in production? | Does the code say so? |
+|---|---|---|---|---|
+| **T10** | `plinth-support` (merged with #1) | The four construction caps are still hard-coded a second time in `ContactConstructionLimits::production()` (`initial.rs:62`), test-only; and the `SUPPORT_CONSTRUCTION_MAX_*` registry notes still describe `runner.rs` as a hard-coded site after it stopped being one. | **No.** Test-path only. | **No — and it now says the opposite.** The registry note asserts a duplication at a site where the branch removed it. This is the one item on the tables where the code's own description is stale *because of* the change being merged. |
+
+**§9 D8 is amended.** Its question was "merge on same-family verification plus this
+reconciliation, or hold for a genuine outside reader?" The recommendation was merge. It stands,
+and the case for it is stronger, not weaker: a second reader ran the challenge's own highest-
+value attack to completion and the branch survived it. But the honest form of the amendment is
+that D8 has now been *tried twice and failed twice on infrastructure*, so "hold for an outside
+reader" is holding for something that has not been shown to be obtainable. **Recommendation:
+merge, and prove the cross-family route works before scheduling it against anything else.**
+
+## 10.4 What remains unchecked. Named plainly.
+
+The challenger had a required `coverage` field precisely so its gaps would be known rather than
+assumed closed. There is no challenger, so there is no `coverage` field to carry forward, and
+that absence is itself the largest gap. What this amendment did **not** check:
+
+1. **Anything outside one model family.** Two attempts, both empty. Unchanged from §0.
+2. **Build, clippy and the test suite on `feature/salvage-support-consumers`.** Not re-run here.
+   Still the Claude verifier's numbers, as §1's appendix already states. Deliberate: the
+   challenge brief itself forbade re-running them, and re-running here would not have added a
+   family.
+3. **The two long test binaries.** `support_runner_integration` was not run for this amendment.
+   The three-red trap in §2 is unretested since the verifier's 700 s run.
+4. **The other 20 non-positional registry reads as *semantic* matches.** They were checked as
+   value-preserving substitutions. Nobody has asked whether each registered owner is the *right*
+   owner for the quantity it now bounds — that is a different and larger question than the one
+   the challenge posed.
+5. **`feature/salvage-emit` and `feature/salvage-hollow`.** Attempt 2 was scoped to the support
+   branch alone. Neither has ever been seen by a cross-family reader, and §3 and §4's rulings
+   are unamended and unchallenged.
+6. **Sabotages 2 and 3 were not re-derived.** Only the least-direct of the three was ruled, and
+   from the record plus a read of the code, not from a re-execution.
+7. **Whether `ContactConstructionLimits::production()` drifting would actually be caught by
+   anything.** The conclusion that ~20 tests would silently use stale caps follows from reading
+   the call sites; no drift was induced to prove it.
+
+`.git/salvage-l1-held-2026-08-28/` and `.git/salvage-hollow-rescue/` still exist on one machine
+only (§9 D4, §4.5). Two empty challenges did not change that either.
