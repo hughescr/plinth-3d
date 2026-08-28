@@ -22,6 +22,12 @@ plinth-layers = { path = "../plinth-layers" }
 plinth-mesh = { path = "../plinth-mesh" }
 rayon = { workspace = true }
 serde = { workspace = true }
+# The live trial trail (coverage_repair::RepairTrialTrail) writes one JSON step
+# row per trial as the repair search runs, in the same wire shape the sealed
+# sidecar carries, so a killed run leaves a stream the same `jq` can read.
+# Every other crate in this workspace already depends on it, so this adds no
+# external crate to the build graph.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
