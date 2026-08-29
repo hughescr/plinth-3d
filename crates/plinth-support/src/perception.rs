@@ -17,6 +17,7 @@ use plinth_core::{m0_constants, LayerPlan, M0PlaceholderConstants, PositiveFinit
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView};
 use thiserror::Error;
 
+use crate::digest_seal::SealedDigest;
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::{
     perceive_contacts_on_surface, validate_perception_input, BuildFrame, ContactCandidate,
@@ -813,6 +814,97 @@ impl LocalZMinimum {
     }
 }
 
+/// The generic-plan fingerprint walk.
+///
+/// A free function on the pieces rather than a method, so that the SEALED-INPUT
+/// RULE's "seal at birth" obligation ([`crate::digest_seal`]) can be met: the
+/// word is folded from the very values being placed into the
+/// [`GenericContactPlan`] literal, before the plan exists.
+fn generic_contact_plan_digest(
+    authority: &AuthorityFingerprint,
+    candidates: &ContactCandidatePool,
+    islands: &[SupportIsland],
+    island_births: &[IslandBirth],
+    local_z_minima: &[LocalZMinimum],
+    slice_layers: &[Vec<SliceSolid>],
+    load_eligibility: &[LoadEligibility],
+) -> u64 {
+    let mut hash = Fnv::new();
+    hash.bytes(authority.mesh.as_bytes());
+    hash.u64(authority.native);
+    hash.u64(authority.config);
+    hash.u64(authority.frame);
+    hash.u64(authority.layers);
+    hash.u64(authority.specialized);
+    hash.u64(candidates.digest());
+    for island in islands {
+        hash.u32(island.id);
+        for &face in &island.face_ids {
+            hash.u32(face);
+        }
+    }
+    for birth in island_births {
+        hash.usize(birth.layer_index);
+        hash.f64(birth.z_mm);
+        hash.f64(birth.area_mm2);
+        for point in birth.footprint.outer.points_xy_mm() {
+            hash.f64(point[0]);
+            hash.f64(point[1]);
+        }
+        for hole in &birth.footprint.holes {
+            for point in hole.points_xy_mm() {
+                hash.f64(point[0]);
+                hash.f64(point[1]);
+            }
+        }
+    }
+    for minimum in local_z_minima {
+        for value in minimum.position_mm.iter().chain(minimum.normal.iter()) {
+            hash.f64(*value);
+        }
+        for point in &minimum.region_points_mm {
+            for value in point {
+                hash.f64(*value);
+            }
+        }
+    }
+    for layer in slice_layers {
+        for solid in layer {
+            hash.f64(solid.area_mm2());
+            for point in solid.outer.points_xy_mm() {
+                hash.f64(point[0]);
+                hash.f64(point[1]);
+            }
+            for hole in &solid.holes {
+                for point in hole.points_xy_mm() {
+                    hash.f64(point[0]);
+                    hash.f64(point[1]);
+                }
+            }
+        }
+    }
+    for row in load_eligibility {
+        hash.u32(row.face_id);
+        for value in row.centroid_mm {
+            hash.f64(value);
+        }
+        hash.f64(row.area_mm2);
+        for owner in &row.eligible_owners {
+            match owner {
+                LoadOwner::Specialized(id) => {
+                    hash.u8(0);
+                    hash.u32(*id);
+                }
+                LoadOwner::GenericIsland(id) => {
+                    hash.u8(1);
+                    hash.u32(*id);
+                }
+            }
+        }
+    }
+    hash.finish()
+}
+
 /// Opaque generic-perception authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenericContactPlan {
@@ -826,6 +918,13 @@ pub struct GenericContactPlan {
     load_limits: LoadFinalizeLimits,
     slice_effective_threads: usize,
     slice_participating_threads: usize,
+    /// The plan's own fingerprint, sealed at birth under the SEALED-INPUT RULE
+    /// ([`crate::digest_seal`]).  Every field above is private, this type has
+    /// no `&mut self` method, and the whole plan is REPLACED rather than edited
+    /// when perception re-runs — so the walk that produced this word can never
+    /// have a different answer for this value.  `Clone` carries it because a
+    /// clone carries every field it folds.
+    digest: SealedDigest,
 }
 
 impl GenericContactPlan {
@@ -856,84 +955,33 @@ impl GenericContactPlan {
             self.slice_participating_threads,
         )
     }
+    /// The plan's stable FNV-1a fingerprint.
+    ///
+    /// Served from the seal taken at construction; see [`crate::digest_seal`]
+    /// for why that is bit-identical to walking the fields again, and
+    /// [`Self::digest_full_walk`] for the walk itself, which the unit tests
+    /// cross-check against this value.
     #[must_use]
     pub fn digest(&self) -> u64 {
-        let mut hash = Fnv::new();
-        hash.bytes(self.authority.mesh.as_bytes());
-        hash.u64(self.authority.native);
-        hash.u64(self.authority.config);
-        hash.u64(self.authority.frame);
-        hash.u64(self.authority.layers);
-        hash.u64(self.authority.specialized);
-        hash.u64(self.candidates.digest());
-        for island in &self.islands {
-            hash.u32(island.id);
-            for &face in &island.face_ids {
-                hash.u32(face);
-            }
-        }
-        for birth in &self.island_births {
-            hash.usize(birth.layer_index);
-            hash.f64(birth.z_mm);
-            hash.f64(birth.area_mm2);
-            for point in birth.footprint.outer.points_xy_mm() {
-                hash.f64(point[0]);
-                hash.f64(point[1]);
-            }
-            for hole in &birth.footprint.holes {
-                for point in hole.points_xy_mm() {
-                    hash.f64(point[0]);
-                    hash.f64(point[1]);
-                }
-            }
-        }
-        for minimum in &self.local_z_minima {
-            for value in minimum.position_mm.iter().chain(minimum.normal.iter()) {
-                hash.f64(*value);
-            }
-            for point in &minimum.region_points_mm {
-                for value in point {
-                    hash.f64(*value);
-                }
-            }
-        }
-        for layer in &self.slice_layers {
-            for solid in layer {
-                hash.f64(solid.area_mm2());
-                for point in solid.outer.points_xy_mm() {
-                    hash.f64(point[0]);
-                    hash.f64(point[1]);
-                }
-                for hole in &solid.holes {
-                    for point in hole.points_xy_mm() {
-                        hash.f64(point[0]);
-                        hash.f64(point[1]);
-                    }
-                }
-            }
-        }
-        for row in &self.load_eligibility {
-            hash.u32(row.face_id);
-            for value in row.centroid_mm {
-                hash.f64(value);
-            }
-            hash.f64(row.area_mm2);
-            for owner in &row.eligible_owners {
-                match owner {
-                    LoadOwner::Specialized(id) => {
-                        hash.u8(0);
-                        hash.u32(*id);
-                    }
-                    LoadOwner::GenericIsland(id) => {
-                        hash.u8(1);
-                        hash.u32(*id);
-                    }
-                }
-            }
-        }
-        hash.finish()
+        self.digest.get()
     }
 
+    /// The unmemoized fingerprint walk, retained verbatim as the oracle for
+    /// the seal.  Test-only: production code has no reason to pay for it,
+    /// because nothing can make the seal disagree with it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn digest_full_walk(&self) -> u64 {
+        generic_contact_plan_digest(
+            &self.authority,
+            &self.candidates,
+            &self.islands,
+            &self.island_births,
+            &self.local_z_minima,
+            &self.slice_layers,
+            &self.load_eligibility,
+        )
+    }
     /// Reject replay against any different geometry, native setup, frame,
     /// result-changing configuration or layer schedule.
     #[allow(
@@ -1146,6 +1194,18 @@ pub fn prepare_generic_contacts(
         specialized,
         limits,
     )?;
+    // SEALED-INPUT RULE, obligation 1 (seal at birth): the fingerprint is
+    // folded here, from the very values this literal is about to take
+    // ownership of, so the plan is never observable without a true seal.
+    let digest = SealedDigest::seal(generic_contact_plan_digest(
+        &authority,
+        &candidates,
+        &islands,
+        &island_births,
+        &local_z_minima,
+        &slice_layers,
+        &load_eligibility,
+    ));
     Ok(GenericContactPlan {
         authority,
         islands,
@@ -1154,6 +1214,7 @@ pub fn prepare_generic_contacts(
         island_births,
         local_z_minima,
         load_eligibility,
+        digest,
         load_limits: LoadFinalizeLimits {
             max_scratch_bytes: limits.max_overlap_bytes,
             // The generic perception plan carries its own flat overlap budget,
@@ -9961,6 +10022,30 @@ mod tests {
             SliceStitchSite::AdequacyProbe(9).open_seam(),
             GenericPerceptionError::OpenAdequacyProbeSeam { probe_row: 9 }
         );
+    }
+
+    /// SEALED-INPUT RULE oracle ([`crate::digest_seal`]).  The seal taken at
+    /// construction must equal the full fingerprint walk, and must survive a
+    /// `Clone` — a clone carries every field the walk folds, so it carries the
+    /// seal truthfully.
+    #[test]
+    fn generic_plan_seal_equals_the_full_walk() {
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &perception_config(&delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        assert_eq!(plan.digest(), plan.digest_full_walk());
+        let cloned = plan.clone();
+        assert_eq!(cloned.digest(), cloned.digest_full_walk());
+        assert_eq!(cloned.digest(), plan.digest());
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub mod coverage_repair;
     reason = "crate-private designed embed masks await the gated verifier wiring in brace/cco/rewire"
 )]
 pub(crate) mod designed_embed;
+/// The SEALED-INPUT RULE: the one place the digest-memo policy for this crate
+/// is written, and the only constructor for a sealed fingerprint.  Read it
+/// before adding, moving, or trusting any cached digest.
+pub(crate) mod digest_seal;
 pub mod dyadic;
 pub mod forest;
 #[allow(
