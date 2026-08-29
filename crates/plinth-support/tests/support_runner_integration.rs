@@ -1541,3 +1541,150 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
         }
     }
 }
+
+// =============================================================================
+// THE THREE-KIND TESTING DOCTRINE (docs/development.md) -- INVARIANT AND
+// DETERMINISM REPLACEMENTS
+//
+// The checks below assert properties the file's frozen-fingerprint and
+// hand-counted-golden tests above were also, incidentally, standing in for.
+// They are ADDITIONS: nothing above is removed, weakened, or reordered. Each
+// one is written to keep telling the truth about the property it names
+// whether or not a placement improvement has moved a sibling fingerprint that
+// nobody has re-pinned yet.
+// =============================================================================
+
+/// **INVARIANT, independent of placement and of the fingerprint above it.**
+///
+/// `public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load`
+/// asserts this same fixture's routed seats are pairwise distinct and that no
+/// grown tip exceeds the registered scar ceiling -- but both assertions sit
+/// AFTER that test's `snapshot.digest()` equality, and `assert_eq!` aborts a
+/// test function on its first mismatch. Under the adopted doctrine a moved
+/// digest is an EXPECTED, non-blocking consequence of a placement
+/// improvement, not a defect -- but until someone re-pins it, every assertion
+/// written after it in that function, including these two structural
+/// guarantees, silently stops running.
+///
+/// This test re-derives the same toed-slab plan and checks ONLY these two
+/// properties, with no digest, no contact-ID literal, and no member count in
+/// sight, so they keep running -- and keep failing loudly on a real
+/// violation -- across a placement change whether or not the sibling test's
+/// fingerprint has been re-pinned yet.
+#[test]
+fn toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest() {
+    let hollowed = hollowed_corpus_model(
+        make_toed_slab().expect("procedural toed slab"),
+        "make_toed_slab",
+    );
+    let delicacy = real_delicacy(&hollowed);
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let authority = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        support_input(&delicacy, &layers),
+    )
+    .expect("make_toed_slab must close coverage on its first closure attempt");
+    let snapshot = authority
+        .verification_snapshot()
+        .expect("borrow sealed verification snapshot");
+    snapshot.validate_integrity().expect("snapshot integrity");
+
+    // No two routed contacts may occupy the identical physical seat, on ANY
+    // accepted plan, regardless of where placement put them.
+    let mut identities = BTreeSet::new();
+    let mut seats = BTreeSet::new();
+    for contact in snapshot.routed_contacts() {
+        assert!(identities.insert(contact.physical_contact_id()));
+        seats.insert(contact.position_mm().map(f64::to_bits));
+    }
+    assert_eq!(
+        seats.len(),
+        identities.len(),
+        "two distinct routed contact identities must never share one physical seat position"
+    );
+
+    // No growth rung offered during a rescue may exceed the registered
+    // TIP_RADIUS_MAX_GROWN_SCAR_MM ceiling, and every refusal must quote that
+    // same registered limit by name -- on ANY plan, regardless of which
+    // contacts a placement change happens to abandon.
+    for contact in authority.abandoned_contacts() {
+        assert_eq!(
+            contact.growth_ceiling_constant(),
+            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
+            "every abandoned contact must quote the SAME registered scar ceiling; got {contact:?}"
+        );
+        assert!(
+            contact
+                .growth_rungs()
+                .iter()
+                .all(|rung| rung.radius_mm() <= contact.growth_ceiling_radius_mm()),
+            "no growth rung may propose a tip above the registered ceiling; got {contact:?}"
+        );
+    }
+}
+
+/// **DETERMINISM, not a frozen literal.**
+///
+/// `closure_repairs_censored_dust_because_that_repair_closes_a_real_hole` pins
+/// the cross-route stub hole's measured area at exactly 0.36 mm² with the
+/// comment "if it moved, the mesh moved" -- a hand-verified constant that
+/// stands in for a claim about REPRODUCIBILITY: build the same procedural
+/// fixture and measure it twice, and the answer must not depend on which of
+/// the two runs you happen to be looking at. That claim is worth checking
+/// directly, without hard-coding the number it happens to be today, so a
+/// legitimate change to a fixture generator or to the area law never has to
+/// touch a test that only wants to know "is this reproducible".
+///
+/// **This uses `make_uncovered_rim_table`, not the cross-route stub, so the
+/// check runs in about a second rather than the ~190-trial repair search the
+/// stub needs to reach its own known defect.** The property under test --
+/// measuring the same procedural fixture twice gives the bit-identical
+/// blocking area both times -- does not depend on which corpus fixture
+/// demonstrates it, and `make_uncovered_rim_table` measures a real blocking
+/// patch (`attempt 0`, island 8) on only its first commit.
+#[test]
+fn uncovered_rim_tables_attempt_zero_route_area_is_the_same_on_a_second_independent_run() {
+    fn attempt_zero_blocking_route_area_mm2() -> f64 {
+        let hollowed = hollowed_corpus_model(
+            make_uncovered_rim_table().expect("procedural uncovered-rim table"),
+            "make_uncovered_rim_table",
+        );
+        let delicacy = real_delicacy(&hollowed);
+        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+        let authority = run_support(
+            hollowed,
+            SupportRequest {
+                lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+            },
+            support_input(&delicacy, &layers),
+        )
+        .expect("make_uncovered_rim_table closes coverage from its own repair pool");
+        let steps = authority.repair_steps();
+        let first = steps
+            .iter()
+            .find(|step| step.commit.is_some())
+            .expect("at least one committed step");
+        assert!(
+            first.objective_before.failing_patch_count > 0,
+            "attempt 0 must show the blocking patch that put this model into repair: {steps:?}"
+        );
+        first
+            .route_deltas
+            .iter()
+            .find(|delta| delta.failing_area_before_mm2 > 0.0)
+            .expect("attempt 0's blocking patch must show up as a per-route area too")
+            .failing_area_before_mm2
+    }
+
+    let first = attempt_zero_blocking_route_area_mm2();
+    let second = attempt_zero_blocking_route_area_mm2();
+    assert_eq!(
+        first.to_bits(),
+        second.to_bits(),
+        "measuring the same procedurally-generated fixture twice in one process must give the \
+         bit-identical blocking route area both times: {first} vs {second}"
+    );
+}
