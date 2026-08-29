@@ -61,11 +61,12 @@
 //!   a fixed position (`GenericContactPlan::digest`, `SelectedContacts::digest`).
 //!   Nothing about the parent's byte order changes; the same eight bytes arrive.
 //!
-//! * **A sealed prefix.**  The accumulator state reached after a leading run of
-//!   the stream whose bytes are all sealed, with the mutable remainder refolded
-//!   on every call (`SpecializedContactPlan`'s head resume — see
-//!   `SpecializedContactPlan::digest`).  The cached state is literally the
-//!   state those same bytes produce.
+//! * **A sealed span.**  A contiguous run in the middle of a stream whose bytes
+//!   are all sealed, skipped by remembering the accumulator on BOTH sides of it
+//!   ([`SealedSpan`]).  Everything before the span is refolded on every call
+//!   and must arrive at the state the seal was taken at, or the span is folded
+//!   the long way; everything after it is refolded unconditionally.  See
+//!   `SpecializedContactPlan::digest`.
 //!
 //! Neither shape reorders a byte, adds one, or drops one.  A moved digest is
 //! therefore proof of a bug in the seal, never a value to refresh.
@@ -76,7 +77,7 @@
 //! |---|---|---|---|
 //! | [`crate::perception::GenericContactPlan`] | `perceive_generic_contacts` | value | fields are private, the type has no `&mut self` method, and it is replaced (never edited) when perception re-runs |
 //! | [`crate::SelectedContacts`] | `select_contacts` | value | the immutable S1 hand-off: private fields, no mutator, replaced when selection re-runs |
-//! | [`crate::specialized::SpecializedContactPlan`] head | both plan literals in `specialized` | prefix | the head fields are written once per literal and the module has no code that assigns or mutably borrows any of them afterwards; a repair edit produces a NEW plan through `derive_child_from` |
+//! | [`crate::specialized::SpecializedContactPlan`] frozen bulk | both plan literals in `specialized` | span | the repair pool, the islands and the coverage samples are written once per literal and the module has no code that assigns or mutably borrows any of them afterwards; a repair edit produces a NEW plan through `derive_child_from` |
 //!
 //! Anything not in that table is refolded in full on every call, on purpose:
 //! `Forest::digest` (slot recycling can splice a new member into the middle of
@@ -109,5 +110,50 @@ impl SealedDigest {
     /// The sealed word.
     pub(crate) const fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// A sealed SPAN of an FNV-1a stream: the accumulator on both sides of a
+/// contiguous run of bytes that the SEALED-INPUT RULE says cannot change.
+///
+/// # THE INVALIDATION RULE, in code
+///
+/// [`Self::resume`] is the whole rule.  A caller refolds the stream up to the
+/// span the long way, hands the arriving accumulator here, and is allowed to
+/// skip the span ONLY if that accumulator is bit-for-bit the one the seal was
+/// taken at.  Any difference at all — in any byte, anywhere before the span —
+/// and the caller is told to fold the span itself.
+///
+/// So the span is skipped only when everything ahead of it is provably
+/// unchanged, and the cheap check is not a summary of the prefix: it IS the
+/// prefix, folded.  The one thing this cannot see is a change INSIDE the span,
+/// which is why a span may only be declared over fields the rule's obligation 1
+/// covers, and why obligation 3 requires a checking site that folds the span in
+/// full at every stage boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SealedSpan {
+    entry: SealedDigest,
+    exit: SealedDigest,
+}
+
+impl SealedSpan {
+    /// Seal a span: `entry` is the accumulator arriving at its first byte,
+    /// `exit` the accumulator leaving its last.  Both must be observed on the
+    /// same walk, at construction of the value that owns the span's bytes.
+    pub(crate) const fn seal(entry: u64, exit: u64) -> Self {
+        Self {
+            entry: SealedDigest::seal(entry),
+            exit: SealedDigest::seal(exit),
+        }
+    }
+
+    /// The accumulator on the far side of the span, but only for a walk that
+    /// arrived exactly where the sealed walk arrived.
+    ///
+    /// `None` means "fold the span yourself" — never "the value is wrong".
+    /// Answering `None` is always safe; answering `Some` is safe exactly
+    /// because the entry states matched.
+    pub(crate) fn resume(self, arriving: u64) -> Option<u64> {
+        (arriving == self.entry.get()).then(|| self.exit.get())
     }
 }
