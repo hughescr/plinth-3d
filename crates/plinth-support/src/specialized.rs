@@ -1135,9 +1135,9 @@ impl SpecializedContactPlan {
         // The hot borrow gate: about eighty calls per repair trial, so it is
         // judged on the memo-served digest.  That still refolds the whole
         // MUTABLE tail — contacts, load rows, gate evidence — which is the
-        // half a load edit can move.  The head half is proved against a fresh
-        // walk by `validate_sealed_digests`, which every stage boundary runs
-        // (SEALED-INPUT RULE obligation 3, `crate::digest_seal`).
+        // half a load edit can move.  The frozen-bulk half is proved against a
+        // fresh walk by `validate_sealed_digests`, which every stage boundary
+        // runs (SEALED-INPUT RULE obligation 3, `crate::digest_seal`).
         if self.finalized_load_plan_digest != self.digest() {
             return Err(SpecializedError::StaleFinalizedLoadArtifact);
         }
@@ -1250,7 +1250,7 @@ impl SpecializedContactPlan {
     /// it.
     ///
     /// Deliberately taken through [`Self::digest`], the memo-served path: if
-    /// the head seal were ever wrong, this word would be wrong with it, and
+    /// the span seal were ever wrong, this word would be wrong with it, and
     /// the next `validate_binding`/`validate_edit_binding` — which walk the
     /// full stream — would refuse the plan.  Sealing through the full walk
     /// instead would hide that class of bug rather than catch it.
