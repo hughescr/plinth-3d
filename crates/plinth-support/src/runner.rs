@@ -7422,10 +7422,7 @@ pub(crate) fn prepare_support_context<'a>(
         authority.perception_limits,
     )?;
     let regular = if generic.islands().is_empty() {
-        SelectedContacts {
-            contacts: Vec::new(),
-            coverage_samples: Vec::new(),
-        }
+        SelectedContacts::new(Vec::new(), Vec::new())
     } else {
         select_contacts_baseline(
             &mesh,
