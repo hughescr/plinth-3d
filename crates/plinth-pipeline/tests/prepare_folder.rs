@@ -379,12 +379,12 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
 
     // Disclosure half of the pre-write gate's #1 finding, through the real
     // folder executor rather than a constructed fixture: this artifact was
-    // authorized on `UncoveredIslands` alone, and the run report must name
-    // the other eleven named gates as not yet run rather than staying silent
-    // about them.
+    // authorized on the gates that reach a verdict, and the run report must
+    // name every other gate as not yet run rather than staying silent about it.
+    let ported = [PreWriteGate::UncoveredIslands, PreWriteGate::Load];
     let expected_pending: Vec<PreWriteGate> = PreWriteGate::ALL
         .into_iter()
-        .filter(|gate| *gate != PreWriteGate::UncoveredIslands)
+        .filter(|gate| !ported.contains(gate))
         .collect();
     assert_eq!(
         pending_gates, &expected_pending,

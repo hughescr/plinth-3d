@@ -310,21 +310,41 @@ fn procedural_toed_slab_passes_the_gates_and_still_emits() {
         "make_toed_slab's artifact is made of something else now"
     );
 
-    // Eleven of the twelve gates in `docs/engineering-journal/04-migration-plan.md`
+    // Most of the twelve gates in `docs/engineering-journal/04-migration-plan.md`
     // §"The defect class this milestone exists to make impossible" have no ported
     // implementation yet. That is carried out to the caller rather than
     // described in a comment, and pinned here so it cannot silently grow.
+    //
+    // The pin is by NAME rather than by count. A count says nothing about which
+    // gate moved, so porting one and losing another would read as no change at
+    // all; naming them makes either direction a failure that says what happened.
     assert_eq!(
-        outcome.pending_gates.len(),
-        11,
-        "the ported-gate count moved: {:?}",
-        outcome.pending_gates
+        outcome.pending_gates,
+        vec![
+            plinth_pipeline::PreWriteGate::Clearance,
+            plinth_pipeline::PreWriteGate::UnsupportedMinima,
+            plinth_pipeline::PreWriteGate::IslandBirths,
+            plinth_pipeline::PreWriteGate::RegularContactInvariants,
+            plinth_pipeline::PreWriteGate::UnroutedSpecializedContacts,
+            plinth_pipeline::PreWriteGate::Connectivity,
+            plinth_pipeline::PreWriteGate::Printability,
+            plinth_pipeline::PreWriteGate::Murray,
+            plinth_pipeline::PreWriteGate::BallBreach,
+            plinth_pipeline::PreWriteGate::PhysicalContactInvariant,
+        ],
+        "the set of gates that reach a verdict moved"
     );
     assert!(
         !outcome
             .pending_gates
             .contains(&plinth_pipeline::PreWriteGate::UncoveredIslands),
         "the coverage gate is ported and must not be listed as pending"
+    );
+    assert!(
+        !outcome
+            .pending_gates
+            .contains(&plinth_pipeline::PreWriteGate::Load),
+        "the area-law gate is ported and must not be listed as pending"
     );
 }
 

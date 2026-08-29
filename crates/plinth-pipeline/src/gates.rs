@@ -590,6 +590,24 @@ pub fn judge_emitted_load_law(
     }
 }
 
+/// Relative slack on the area-law comparison.
+///
+/// **Arithmetic hygiene, not a physics allowance.** The producer sizes a tip by
+/// taking a square root of the same ratio this gate squares back up, and that
+/// round trip is not exact in binary floating point: a tip sized to sit exactly
+/// ON the law lands a few units in the last place under it when the gate
+/// recomputes `pi * r^2`. Refusing that would vanish a support that satisfies
+/// the law — the failure `plinth_support`'s own delegation note warns about,
+/// that "a strict reimplementation would refuse a contact one ULP low".
+///
+/// Eight ULP is about 1.8e-15 relative, and it cannot mask a defect: the
+/// smallest genuinely under-sized contact this gate has been measured to refuse
+/// was 59% over the law, thirteen orders of magnitude above this. It is also far
+/// tighter than the engine's own `1.0e-6` tolerance on the realized safety
+/// factor, so the gate does not inherit the producer's slack — a contact this
+/// clears is one the producer's own predicate clears too.
+const AREA_LAW_ARITHMETIC_SLACK: f64 = 8.0 * f64::EPSILON;
+
 /// The area law on ONE recorded row: `Some` when the row does not satisfy it.
 ///
 /// The comparison is written in the law's own terms — `pi * r^2` against
@@ -621,14 +639,14 @@ fn load_law_violation(
     if !tip_radius_mm.is_finite() || tip_radius_mm <= 0.0 {
         return Some(row(LoadLawFault::TipRadiusUnusable, Some(required)));
     }
-    (std::f64::consts::PI * tip_radius_mm * tip_radius_mm < carried_area_mm2 / x_allowed).then(
-        || {
-            row(
-                LoadLawFault::TipSmallerThanTheAreaLawDemands,
-                Some(required),
-            )
-        },
-    )
+    let shipped_section_mm2 = std::f64::consts::PI * tip_radius_mm * tip_radius_mm;
+    let demanded_section_mm2 = carried_area_mm2 / x_allowed;
+    (shipped_section_mm2 < demanded_section_mm2 * (1.0 - AREA_LAW_ARITHMETIC_SLACK)).then(|| {
+        row(
+            LoadLawFault::TipSmallerThanTheAreaLawDemands,
+            Some(required),
+        )
+    })
 }
 
 /// Judge one gate against the sealed snapshot.
@@ -985,5 +1003,188 @@ mod tests {
                 .coverage_measurement_limits()
                 .expect("registered ceilings")
         );
+    }
+
+    // ---- PreWriteGate::Load -------------------------------------------
+
+    /// The registered allowance, read exactly as the gate reads it.
+    fn x_allowed() -> f64 {
+        *m0_constants()
+            .expect("registered constants")
+            .evidence()
+            .x_allowed()
+            .value()
+    }
+
+    /// The smallest tip radius the area law admits for `carried_area_mm2`.
+    fn required_radius_mm(carried_area_mm2: f64) -> f64 {
+        (carried_area_mm2 / (std::f64::consts::PI * x_allowed())).sqrt()
+    }
+
+    /// One recorded row, fully described.
+    fn described(
+        contact_id: u64,
+        carried_area_mm2: f64,
+        tip_radius_mm: f64,
+    ) -> EmittedContactDisclosure {
+        EmittedContactDisclosure {
+            contact_id,
+            position_mm: Some([1.5, -2.5, 3.5]),
+            carried_area_mm2: Some(carried_area_mm2),
+            tip_radius_mm: Some(tip_radius_mm),
+            tip_diameter_mm: Some(tip_radius_mm * 2.0),
+        }
+    }
+
+    #[test]
+    fn the_registered_allowance_is_the_measured_anchor_the_law_names() {
+        // The gate's threshold is not a hand-typed twin: it is X_ALLOWED, whose
+        // own registry note states this law verbatim.
+        assert!(
+            (x_allowed() - 12.0).abs() < 1.0e-12,
+            "X_ALLOWED moved; the area law's anchor changed and that is a finding, not a value \
+             to refresh here"
+        );
+    }
+
+    #[test]
+    fn a_tip_exactly_at_the_area_law_clears_and_one_hair_under_it_refuses() {
+        let carried = 6.0_f64;
+        let exact = required_radius_mm(carried);
+
+        // AT the law: `pi*r^2 >= A/X` holds with equality, so the row clears.
+        judge_emitted_load_law(&[described(1, carried, exact)], 1)
+            .expect("a tip sized exactly to the law satisfies the law");
+
+        // One hair UNDER it: the same row, refused. This is the boundary the
+        // whole gate turns on, so it is pinned from both sides.
+        let refusal = judge_emitted_load_law(&[described(1, carried, exact * 0.999)], 1)
+            .expect_err("a tip below the law's demand must refuse emission");
+        let violations = refusal
+            .load_law_violations()
+            .expect("a load refusal carries its rows");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].contact_id, 1);
+        assert_eq!(
+            violations[0].fault,
+            LoadLawFault::TipSmallerThanTheAreaLawDemands
+        );
+        assert_eq!(refusal.gate(), Some(PreWriteGate::Load));
+    }
+
+    #[test]
+    fn the_refusal_names_the_contact_the_seat_the_load_and_both_radii() {
+        // The bar is that someone who has never read this code can act on the
+        // message, so the message itself is asserted, not merely the verdict.
+        let carried = 12.0_f64;
+        let refusal = judge_emitted_load_law(
+            &[described(0, 0.5, 0.2), described(4_242, carried, 0.05)],
+            2,
+        )
+        .expect_err("an under-sized tip must refuse");
+        let text = refusal.to_string();
+        assert!(text.contains("contact 4242"), "{text}");
+        assert!(text.contains("(1.500, -2.500, 3.500) mm"), "{text}");
+        assert!(text.contains("12.0000 mm^2"), "{text}");
+        assert!(text.contains("0.0500 mm"), "{text}");
+        assert!(
+            text.contains(&format!("{:.4} mm", required_radius_mm(carried))),
+            "the demanded radius must appear: {text}"
+        );
+        assert!(text.contains("X_ALLOWED = 12"), "{text}");
+        assert!(
+            text.contains("1 of 2 emitted contact(s)"),
+            "the refused rows must be readable against the set they came from: {text}"
+        );
+        assert!(
+            !text.contains("contact 0"),
+            "a compliant contact must not be named as a violation: {text}"
+        );
+    }
+
+    #[test]
+    fn a_routed_contact_the_run_could_not_describe_is_refused_not_papered_over() {
+        // `EmittedContactDisclosure` says `None` means "could not be
+        // described". Reading either operand as `0.0` would clear the row on
+        // the arithmetic, which is exactly the silence the disclosure refuses
+        // to write and the gate refuses to read.
+        let mut no_area = described(7, 3.0, 0.5);
+        no_area.carried_area_mm2 = None;
+        let refusal = judge_emitted_load_law(&[no_area], 1).expect_err("an unstated load refuses");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::CarriedAreaNotDescribed
+        );
+
+        let mut no_tip = described(8, 3.0, 0.5);
+        no_tip.tip_radius_mm = None;
+        let refusal = judge_emitted_load_law(&[no_tip], 1).expect_err("an unstated tip refuses");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::TipRadiusNotDescribed
+        );
+    }
+
+    #[test]
+    fn a_zero_or_nonfinite_operand_refuses_rather_than_clearing_on_arithmetic() {
+        // A zero radius carrying zero area satisfies `0 >= 0`. That is the
+        // arithmetic clearing a contact with no tip at all, so the record check
+        // runs first and refuses it.
+        let refusal = judge_emitted_load_law(&[described(9, 0.0, 0.0)], 1)
+            .expect_err("a tip of no cross-section carries nothing through nothing");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::TipRadiusUnusable
+        );
+
+        let refusal = judge_emitted_load_law(&[described(10, -1.0, 0.5)], 1)
+            .expect_err("a negative area is not an area");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::CarriedAreaUnusable
+        );
+
+        let refusal = judge_emitted_load_law(&[described(11, f64::NAN, 0.5)], 1)
+            .expect_err("NaN must never compare its way past the law");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::CarriedAreaUnusable
+        );
+
+        let refusal = judge_emitted_load_law(&[described(12, 3.0, f64::INFINITY)], 1)
+            .expect_err("an infinite radius is not a measurement");
+        assert_eq!(
+            refusal.load_law_violations().expect("rows")[0].fault,
+            LoadLawFault::TipRadiusUnusable
+        );
+    }
+
+    #[test]
+    fn a_record_that_does_not_cover_every_routed_contact_refuses() {
+        // The way a record-reading gate goes silently vacuous: judge the rows
+        // that are there and say nothing about the ones that are not.
+        let refusal = judge_emitted_load_law(&[described(1, 0.1, 0.5)], 4)
+            .expect_err("a partial record cannot clear the run that produced it");
+        assert!(matches!(
+            refusal,
+            GateRefusal::LoadRecordIncomplete {
+                routed: 4,
+                described: 1
+            }
+        ));
+        assert_eq!(refusal.gate(), Some(PreWriteGate::Load));
+
+        // Including the fully vacuous case: no rows at all for a run that
+        // routed contacts.
+        assert!(matches!(
+            judge_emitted_load_law(&[], 3).expect_err("an empty record cannot clear a routed run"),
+            GateRefusal::LoadRecordIncomplete {
+                routed: 3,
+                described: 0
+            }
+        ));
+
+        // A run that genuinely routed nothing has nothing to judge and clears.
+        judge_emitted_load_law(&[], 0).expect("no routed contacts, no load to check");
     }
 }
