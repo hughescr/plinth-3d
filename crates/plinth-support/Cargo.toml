@@ -38,6 +38,11 @@ geom_kernel = { path = "../../rust/geom_kernel", features = ["testkit"] }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
 serde_json = { workspace = true }
+# The ratchet harness (tests/ratchet_harness.rs) keys every recorded metric
+# row to the corpus STL's own digest, so a retessellated mesh forces a
+# re-baseline instead of a silently wrong comparison. Same version every
+# other corpus-hashing crate in this workspace already pins.
+sha2 = "0.10"
 trybuild = "1"
 
 [[example]]
