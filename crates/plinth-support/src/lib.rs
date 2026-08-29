@@ -1095,39 +1095,37 @@ fn selected_contacts_digest(
     contacts: &[SelectedContact],
     coverage_samples: &[CoverageSample],
 ) -> u64 {
-    {
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let mut state = OFFSET;
-        let mut add = |bytes: &[u8]| {
-            for &byte in bytes {
-                state ^= u64::from(byte);
-                state = state.wrapping_mul(PRIME);
-            }
-        };
-        for contact in contacts {
-            add(&contact.island_id.to_le_bytes());
-            add(&contact.candidate_id.0.to_le_bytes());
-            add(&contact.served_face_id.to_le_bytes());
-            for value in contact
-                .point_mm
-                .iter()
-                .chain(contact.normal.iter())
-                .chain([contact.delicacy, contact.supported_area_mm2].iter())
-            {
-                add(&value.to_bits().to_le_bytes());
-            }
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut state = OFFSET;
+    let mut add = |bytes: &[u8]| {
+        for &byte in bytes {
+            state ^= u64::from(byte);
+            state = state.wrapping_mul(PRIME);
         }
-        for sample in coverage_samples {
-            add(&sample.island_id.to_le_bytes());
-            add(&sample.face_id.to_le_bytes());
-            add(&sample.component_id.to_le_bytes());
-            for value in sample.point_mm.iter().chain([sample.area_mm2].iter()) {
-                add(&value.to_bits().to_le_bytes());
-            }
+    };
+    for contact in contacts {
+        add(&contact.island_id.to_le_bytes());
+        add(&contact.candidate_id.0.to_le_bytes());
+        add(&contact.served_face_id.to_le_bytes());
+        for value in contact
+            .point_mm
+            .iter()
+            .chain(contact.normal.iter())
+            .chain([contact.delicacy, contact.supported_area_mm2].iter())
+        {
+            add(&value.to_bits().to_le_bytes());
         }
-        state
     }
+    for sample in coverage_samples {
+        add(&sample.island_id.to_le_bytes());
+        add(&sample.face_id.to_le_bytes());
+        add(&sample.component_id.to_le_bytes());
+        for value in sample.point_mm.iter().chain([sample.area_mm2].iter()) {
+            add(&value.to_bits().to_le_bytes());
+        }
+    }
+    state
 }
 
 /// Current placement policy.  Resource limits remain request fields because
