@@ -982,6 +982,7 @@ impl GenericContactPlan {
             &self.load_eligibility,
         )
     }
+
     /// Reject replay against any different geometry, native setup, frame,
     /// result-changing configuration or layer schedule.
     #[allow(
