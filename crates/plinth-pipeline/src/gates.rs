@@ -38,8 +38,8 @@
 use plinth_core::{m0_constants, ArtifactId, ModelId};
 use plinth_emit::{write as emit_write, EmitReport, EmitRequest};
 use plinth_support::{
-    CoverageMeasurementError, CoverageMeasurementRequest, FinalSupportAuthority,
-    SupportVerificationError, SupportVerificationSnapshot,
+    CoverageMeasurementError, CoverageMeasurementRequest, EmittedContactDisclosure,
+    FinalSupportAuthority, SupportVerificationError, SupportVerificationSnapshot,
 };
 use plinth_verify::{verify_coverage, CoverageReport, CoverageVerificationError};
 use serde::{Deserialize, Serialize};
@@ -50,12 +50,15 @@ use crate::PipelineError;
 /// The twelve gates a candidate must pass before emission.
 ///
 /// The list is `docs/engineering-journal/04-migration-plan.md` §"The defect class this
-/// milestone exists to make impossible" verbatim and in its stated order. Exactly one of them —
-/// [`Self::UncoveredIslands`] — has a ported implementation today; the other
-/// eleven are named here rather than left implicit, so that "which gates does
+/// milestone exists to make impossible" verbatim and in its stated order.
+/// [`Self::UncoveredIslands`] and [`Self::Load`] have ported implementations;
+/// the rest are named here rather than left implicit, so that "which gates does
 /// emission actually consult?" has one answer in the type system instead of
-/// eleven silent omissions. [`judge`] matches this enum exhaustively and takes
-/// no `_` arm, so a thirteenth gate is a compile error, not a gap.
+/// silent omissions. No production comment states the ported set as a count:
+/// [`PreWriteGateReport::pending`] is filled from the arm [`judge`] actually
+/// took, so a reader is told what ran rather than what a doc claims ran.
+/// [`judge`] matches this enum exhaustively and takes no `_` arm, so a
+/// thirteenth gate is a compile error, not a gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreWriteGate {
@@ -96,6 +99,15 @@ impl PreWriteGate {
 enum GateVerdict {
     /// The gate ran against this snapshot and found nothing blocking.
     Passed(Box<CoverageReport>),
+    /// The gate ran against the run's own recorded evidence and found nothing
+    /// blocking.
+    ///
+    /// It carries no [`CoverageReport`] because it measures no coverage: it
+    /// reads the scalars the run already wrote down and checks that the record
+    /// satisfies the invariant that gate owns. A gate that reached this verdict
+    /// is absent from [`PreWriteGateReport::pending`] exactly as a
+    /// [`Self::Passed`] one is.
+    Cleared,
     /// The gate is named and wired into the refusal path, but its verifier has
     /// not been ported yet. It cannot pass or fail a model; it is reported so
     /// that a caller can see the gate set is incomplete.
@@ -104,9 +116,9 @@ enum GateVerdict {
 
 /// The gate set's verdict on one sealed run.
 ///
-/// `pending` is not decoration: it is the honest statement that emission is
-/// authorized on one gate out of twelve today, carried out to the caller
-/// rather than described in a comment.
+/// `pending` is not decoration: it is the honest statement of how much of the
+/// named gate set actually reaches a verdict, carried out to the caller rather
+/// than described in a comment. A gate absent from it ran.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreWriteGateReport {
     coverage: CoverageReport,
@@ -126,6 +138,132 @@ impl PreWriteGateReport {
     pub fn pending(&self) -> &[PreWriteGate] {
         &self.pending
     }
+}
+
+/// Why one emitted contact's own record does not satisfy the registered
+/// support area law.
+///
+/// One fault is arithmetic and four are record integrity. The record-integrity
+/// faults refuse for the same reason the arithmetic one does:
+/// [`EmittedContactDisclosure`]'s own documentation says a `None` field means
+/// the run "could not be described", and an emitted contact whose load or whose
+/// tip the run cannot state is not an emitted contact this gate can clear.
+/// Reading a missing operand as a legal-looking `0.0` would turn "unknown" into
+/// "passes" — the exact substitution that disclosure refuses to make when it is
+/// written, and this gate will not make when it is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadLawFault {
+    /// Both operands were read and the law is not satisfied: the emitted tip's
+    /// cross-section is smaller than the carried area divided by `X_ALLOWED`.
+    /// This is the under-sized support arm the law exists to catch.
+    TipSmallerThanTheAreaLawDemands,
+    /// The run routed this contact and its own record states no carried area
+    /// for it, so there is no load to size the tip against.
+    CarriedAreaNotDescribed,
+    /// The run routed this contact and its own record states no emitted tip
+    /// radius for it, so there is no tip to judge.
+    TipRadiusNotDescribed,
+    /// The carried area was stated and is not an area: negative, or not finite.
+    CarriedAreaUnusable,
+    /// The tip radius was stated and is not a radius a load can pass through:
+    /// zero, negative, or not finite. Zero is refused rather than divided by —
+    /// a contact carrying anything through a tip of no cross-section carries it
+    /// through nothing, and `0 >= 0` would clear such a row on the arithmetic.
+    TipRadiusUnusable,
+}
+
+/// One emitted contact the [`PreWriteGate::Load`] gate refuses, carrying
+/// everything the run's own record said about it.
+///
+/// Every field is read, never derived, except [`Self::required_tip_radius_mm`],
+/// which is the area law solved for the radius it demands — the one number an
+/// operator needs in order to see how far under-sized the arm is.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoadLawViolation {
+    /// The physical contact id, which is also its terminal id.
+    pub contact_id: u64,
+    /// Where the contact sits on the model, mm, as the record stated it.
+    pub position_mm: Option<[f64; 3]>,
+    /// The model area this contact is charged to carry after every SPEC-A3-A4
+    /// §6 removal and repartition, mm², as the record stated it.
+    pub carried_area_mm2: Option<f64>,
+    /// The RADIUS of the member end that touches the model in the final live
+    /// forest, mm, as the record stated it. This is the tip the run shipped:
+    /// after PR-8 grow-to-attest, after rewire, bracing and lowering.
+    pub emitted_tip_radius_mm: Option<f64>,
+    /// `sqrt(carried_area_mm2 / (pi * X_ALLOWED))` — the smallest tip radius
+    /// the area law admits for this contact's carried area. `None` when the
+    /// carried area was not usable, in which case no radius can be demanded.
+    pub required_tip_radius_mm: Option<f64>,
+    /// Which of the five ways this row fails.
+    pub fault: LoadLawFault,
+}
+
+impl std::fmt::Display for LoadLawViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "contact {} {}: ", self.contact_id, self.seat())?;
+        match self.fault {
+            LoadLawFault::TipSmallerThanTheAreaLawDemands => {
+                let area = self.carried_area_mm2.unwrap_or(f64::NAN);
+                let emitted = self.emitted_tip_radius_mm.unwrap_or(f64::NAN);
+                let required = self.required_tip_radius_mm.unwrap_or(f64::NAN);
+                write!(
+                    f,
+                    "carries {area:.4} mm^2 through an emitted tip of radius {emitted:.4} mm \
+                     (cross-section {:.6} mm^2), but the area law demands a tip radius of at \
+                     least {required:.4} mm (cross-section {:.6} mm^2). The emitted tip is \
+                     {:.2}x too small in radius",
+                    std::f64::consts::PI * emitted * emitted,
+                    std::f64::consts::PI * required * required,
+                    required / emitted,
+                )
+            }
+            LoadLawFault::CarriedAreaNotDescribed => write!(
+                f,
+                "the run routed this contact and then could not state the model area it carries, \
+                 so the area law has no load to size its tip against. An emitted contact the run \
+                 cannot describe is not an emitted contact this gate can clear"
+            ),
+            LoadLawFault::TipRadiusNotDescribed => write!(
+                f,
+                "the run routed this contact and then could not state the radius of the tip it \
+                 shipped, so the area law has no tip to judge. An emitted contact the run cannot \
+                 describe is not an emitted contact this gate can clear"
+            ),
+            LoadLawFault::CarriedAreaUnusable => write!(
+                f,
+                "the record states a carried area of {:?} mm^2, which is not an area",
+                self.carried_area_mm2
+            ),
+            LoadLawFault::TipRadiusUnusable => write!(
+                f,
+                "the record states an emitted tip radius of {:?} mm, which is not a radius a load \
+                 can pass through",
+                self.emitted_tip_radius_mm
+            ),
+        }
+    }
+}
+
+impl LoadLawViolation {
+    /// The seat, rendered for an operator who has to find this arm on the
+    /// model. Says so plainly when the record did not state one.
+    fn seat(&self) -> String {
+        self.position_mm.map_or_else(
+            || "at a seat the record does not state".to_owned(),
+            |[x, y, z]| format!("at ({x:.3}, {y:.3}, {z:.3}) mm"),
+        )
+    }
+}
+
+/// One refused row per line, indented, in the order the record held them.
+fn render_load_law_violations(violations: &[LoadLawViolation]) -> String {
+    violations
+        .iter()
+        .map(|violation| format!("  {violation}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Why emission was refused. Every variant maps to
@@ -172,6 +310,53 @@ pub enum GateRefusal {
         gate: PreWriteGate,
         report: Box<CoverageReport>,
     },
+    /// [`PreWriteGate::Load`] refused: one or more contacts this run actually
+    /// emitted do not satisfy the registered support area law at the tip they
+    /// actually shipped.
+    ///
+    /// Every refused row is named, with the numbers the record itself held, so
+    /// a reader who has never opened this file can see which arm is under-sized
+    /// and by how much.
+    #[error(
+        "gate Load refused emission: {} of {judged} emitted contact(s) do not satisfy the \
+         registered support area law pi * tip_radius_mm^2 >= carried_area_mm2 / X_ALLOWED, \
+         evaluated per contact on the final numbers with the registered X_ALLOWED = {x_allowed}:\n{}",
+        violations.len(),
+        render_load_law_violations(violations)
+    )]
+    LoadLawViolated {
+        /// How many emitted contacts were judged, so the refused rows can be
+        /// read against the size of the set they came from.
+        judged: usize,
+        /// The registered allowance the law was evaluated at, named in the
+        /// refusal so a reader never has to guess which anchor was used.
+        x_allowed: f64,
+        /// Every refused row, in the order the record held them.
+        violations: Vec<LoadLawViolation>,
+    },
+    /// [`PreWriteGate::Load`] refused: the run's emitted-contact record does not
+    /// describe every contact the run routed.
+    ///
+    /// Fail-closed against the way a record-reading gate goes silently vacuous.
+    /// The two counts come from two independent walks of the same finalized
+    /// transcript — the sealed snapshot's routed-contact projection and the
+    /// authority's own emitted-contact disclosure — so they must agree exactly.
+    /// If they do not, some contact shipped without a row to judge, and a gate
+    /// that judged the remaining rows would report a safety it did not check.
+    #[error(
+        "gate Load refused emission: the sealed run routed {routed} contact(s) but its own \
+         emitted-contact record describes {described}; the area law cannot clear a record that \
+         does not cover every contact the run shipped"
+    )]
+    LoadRecordIncomplete { routed: usize, described: usize },
+    /// The registry published an allowance the area law cannot be evaluated
+    /// against. Fail-closed for the same reason every other unmeasurable gate
+    /// is: a law with no usable threshold has not been checked.
+    #[error(
+        "the registered {constant} is {value}, which is not a usable allowance; the support area \
+         law cannot be evaluated and emission is refused"
+    )]
+    UnusableRegisteredAllowance { constant: &'static str, value: f64 },
 }
 
 impl GateRefusal {
@@ -180,6 +365,9 @@ impl GateRefusal {
     pub const fn gate(&self) -> Option<PreWriteGate> {
         match self {
             Self::Unmeasurable { gate, .. } | Self::Refused { gate, .. } => Some(*gate),
+            Self::LoadLawViolated { .. }
+            | Self::LoadRecordIncomplete { .. }
+            | Self::UnusableRegisteredAllowance { .. } => Some(PreWriteGate::Load),
             Self::EmissionAuthorizationNotEnabled
             | Self::ConstantsUnavailable
             | Self::ResourcePolicyUnavailable(_)
@@ -207,6 +395,9 @@ impl GateRefusal {
             } => Some(source.to_string()),
             Self::Unmeasurable { .. }
             | Self::Refused { .. }
+            | Self::LoadLawViolated { .. }
+            | Self::LoadRecordIncomplete { .. }
+            | Self::UnusableRegisteredAllowance { .. }
             | Self::EmissionAuthorizationNotEnabled
             | Self::ConstantsUnavailable
             | Self::ResourcePolicyUnavailable(_)
@@ -225,6 +416,32 @@ impl GateRefusal {
             | Self::ResourcePolicyUnavailable(_)
             | Self::InvalidCoverageRequest(_)
             | Self::SnapshotIntegrity(_)
+            | Self::LoadLawViolated { .. }
+            | Self::LoadRecordIncomplete { .. }
+            | Self::UnusableRegisteredAllowance { .. }
+            | Self::Unmeasurable { .. } => None,
+        }
+    }
+
+    /// Every emitted contact [`PreWriteGate::Load`] refused, when that is what
+    /// this refusal is.
+    ///
+    /// The evidence half of the load refusal, in the same shape FU-57 keeps
+    /// evidence on a coverage refusal: the message is the reading, and this is
+    /// the rows behind it, so a caller can persist or re-render them without
+    /// parsing prose.
+    #[must_use]
+    pub fn load_law_violations(&self) -> Option<&[LoadLawViolation]> {
+        match self {
+            Self::LoadLawViolated { violations, .. } => Some(violations),
+            Self::EmissionAuthorizationNotEnabled
+            | Self::ConstantsUnavailable
+            | Self::ResourcePolicyUnavailable(_)
+            | Self::InvalidCoverageRequest(_)
+            | Self::SnapshotIntegrity(_)
+            | Self::LoadRecordIncomplete { .. }
+            | Self::UnusableRegisteredAllowance { .. }
+            | Self::Refused { .. }
             | Self::Unmeasurable { .. } => None,
         }
     }
@@ -270,15 +487,167 @@ pub fn registered_coverage_request() -> Result<CoverageMeasurementRequest, GateR
     })
 }
 
+/// **[`PreWriteGate::Load`] — the whole of it.**
+///
+/// # The invariant
+///
+/// Every contact the run actually emitted satisfies the registered area law at
+/// the tip it actually shipped:
+///
+/// ```text
+/// pi * tip_radius_mm^2  >=  carried_area_mm2 / X_ALLOWED
+/// ```
+///
+/// evaluated per contact on the FINAL numbers — after SPEC-A3-A4 §6 removal and
+/// repartition, after PR-8 grow-to-attest, after rewire, bracing and lowering.
+/// `X_ALLOWED` is the registered `Derived<f64>` of 12, whose own registry note
+/// states this law verbatim ("pi\*r^2 >= carried\_area/X with X = X\_ALLOWED =
+/// 12"), derived as `floor(lower(X_STAR_CONE)/2)` from the measured
+/// arm-capacity plate.
+///
+/// # What establishes it
+///
+/// [`FinalSupportAuthority::emitted_contacts`] — one row per `Routed` finalized
+/// transcript row, each carrying the contact id, the seat, the carried area
+/// read off the ACCEPTED plan (post-repartition) and the tip radius read off
+/// the FINAL live forest member. Both operands are scalars the run already
+/// wrote down, and the join between them was already performed by the producer.
+/// This gate performs one multiply, one divide and one compare per row. It
+/// touches no mesh, no surface, no spatial index, no kernel query and no
+/// planning stage; it re-derives no geometry and re-runs nothing.
+///
+/// That independence is the point. The producer sizes tips from
+/// `FrozenTipLoadPolicy`'s legacy stress form, built from four placeholders the
+/// registry itself labels a legacy diagnostic that is potentially about four
+/// times low; this gate judges the tip that came out of that against the
+/// measured `X_ALLOWED` anchor instead. It is the restoration of the deleted
+/// auditor's only support hard bound — `max_x = A / (pi * r_tip^2)`, pinned at
+/// `max_x <= 12` by `04-migration-plan.md`'s acceptance gate — which had no
+/// replacement after that crate was deleted.
+///
+/// # Why it takes no threshold
+///
+/// `judge_pre_write_gates` is private because a caller-supplied coverage radius
+/// would be an override in all but name. This function has no such seam: it
+/// takes no allowance, reads `X_ALLOWED` from the ratified registry itself, and
+/// its only other argument is a count it cross-checks rather than obeys. There
+/// is nothing here to pass a lenient value to, which is why it can be public
+/// where the gate runner cannot.
+///
+/// # Fail-closed on the record as well as on the arithmetic
+///
+/// A `Routed` row whose carried area or tip radius is `None` is itself a
+/// refusal — see [`LoadLawFault`]. So is a record that describes fewer contacts
+/// than the snapshot says the run routed, which is how a record-reading gate
+/// would otherwise go quietly vacuous.
+///
+/// An empty record clears only when the run routed nothing; `routed_contacts`
+/// is what makes that statement checkable rather than assumed.
+///
+/// # Errors
+///
+/// - [`GateRefusal::LoadRecordIncomplete`] when the record does not describe
+///   every routed contact.
+/// - [`GateRefusal::ConstantsUnavailable`] /
+///   [`GateRefusal::UnusableRegisteredAllowance`] when the registry cannot
+///   supply an allowance the law can be evaluated at.
+/// - [`GateRefusal::LoadLawViolated`], naming every refused contact, when a
+///   shipped tip is smaller than the area law demands or a shipped contact
+///   cannot be described.
+pub fn judge_emitted_load_law(
+    emitted_contacts: &[EmittedContactDisclosure],
+    routed_contacts: usize,
+) -> Result<(), GateRefusal> {
+    if emitted_contacts.len() != routed_contacts {
+        return Err(GateRefusal::LoadRecordIncomplete {
+            routed: routed_contacts,
+            described: emitted_contacts.len(),
+        });
+    }
+    let x_allowed = *m0_constants()
+        .map_err(|_| GateRefusal::ConstantsUnavailable)?
+        .evidence()
+        .x_allowed()
+        .value();
+    if !x_allowed.is_finite() || x_allowed <= 0.0 {
+        return Err(GateRefusal::UnusableRegisteredAllowance {
+            constant: "X_ALLOWED",
+            value: x_allowed,
+        });
+    }
+    let violations: Vec<LoadLawViolation> = emitted_contacts
+        .iter()
+        .filter_map(|contact| load_law_violation(contact, x_allowed))
+        .collect();
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(GateRefusal::LoadLawViolated {
+            judged: emitted_contacts.len(),
+            x_allowed,
+            violations,
+        })
+    }
+}
+
+/// The area law on ONE recorded row: `Some` when the row does not satisfy it.
+///
+/// The comparison is written in the law's own terms — `pi * r^2` against
+/// `A / X` — rather than as `r` against the solved radius, so the code and the
+/// registered note read the same. The solved radius is carried alongside it
+/// purely so the refusal can say how far under-sized the arm is.
+fn load_law_violation(
+    contact: &EmittedContactDisclosure,
+    x_allowed: f64,
+) -> Option<LoadLawViolation> {
+    let row = |fault, required_tip_radius_mm| LoadLawViolation {
+        contact_id: contact.contact_id,
+        position_mm: contact.position_mm,
+        carried_area_mm2: contact.carried_area_mm2,
+        emitted_tip_radius_mm: contact.tip_radius_mm,
+        required_tip_radius_mm,
+        fault,
+    };
+    let Some(carried_area_mm2) = contact.carried_area_mm2 else {
+        return Some(row(LoadLawFault::CarriedAreaNotDescribed, None));
+    };
+    if !carried_area_mm2.is_finite() || carried_area_mm2 < 0.0 {
+        return Some(row(LoadLawFault::CarriedAreaUnusable, None));
+    }
+    let required = (carried_area_mm2 / (std::f64::consts::PI * x_allowed)).sqrt();
+    let Some(tip_radius_mm) = contact.tip_radius_mm else {
+        return Some(row(LoadLawFault::TipRadiusNotDescribed, Some(required)));
+    };
+    if !tip_radius_mm.is_finite() || tip_radius_mm <= 0.0 {
+        return Some(row(LoadLawFault::TipRadiusUnusable, Some(required)));
+    }
+    (std::f64::consts::PI * tip_radius_mm * tip_radius_mm < carried_area_mm2 / x_allowed).then(
+        || {
+            row(
+                LoadLawFault::TipSmallerThanTheAreaLawDemands,
+                Some(required),
+            )
+        },
+    )
+}
+
 /// Judge one gate against the sealed snapshot.
 ///
 /// Matched exhaustively and deliberately without a `_` arm: adding a gate to
 /// [`PreWriteGate`] without deciding what it does here is a compile error.
+///
+/// `authority` is the run's own RECORDED EVIDENCE, and that is the only thing a
+/// gate may take from it here. It is passed by shared reference, so nothing in
+/// this function can consume it into a scene or re-run a stage against it; the
+/// borrow admits exactly the disclosure lists the run already wrote down and
+/// the sealed snapshot, which is passed separately because the coverage gate
+/// measures against it.
 fn judge(
     gate: PreWriteGate,
     artifact: &ArtifactId,
     snapshot: &SupportVerificationSnapshot<'_>,
     request: CoverageMeasurementRequest,
+    authority: &FinalSupportAuthority<'_>,
 ) -> Result<GateVerdict, GateRefusal> {
     match gate {
         PreWriteGate::UncoveredIslands => {
@@ -293,6 +662,17 @@ fn judge(
                 })
             }
         }
+        // The area law on the run's own emitted-contact record. No measurement
+        // is taken here and no stage is re-run: `judge_emitted_load_law` reads
+        // scalars the sealing attempt already wrote down. The routed count is
+        // read off the sealed snapshot, which walks the same finalized
+        // transcript independently, so the two must agree or the record is
+        // refused rather than judged in part.
+        PreWriteGate::Load => judge_emitted_load_law(
+            authority.emitted_contacts(),
+            snapshot.routed_contacts().count(),
+        )
+        .map(|()| GateVerdict::Cleared),
         // TODO(gate-port): each of these is a live gate in the frozen current
         // verifier and is listed as binding by `docs/engineering-journal/04-migration-plan.md`
         // §"The defect class this milestone exists to make impossible". None
@@ -301,7 +681,6 @@ fn judge(
         // reported value rather than an omission — see
         // `PreWriteGateReport::pending`.
         PreWriteGate::Clearance
-        | PreWriteGate::Load
         | PreWriteGate::UnsupportedMinima
         | PreWriteGate::IslandBirths
         | PreWriteGate::RegularContactInvariants
@@ -334,6 +713,7 @@ fn judge_pre_write_gates(
     artifact: &ArtifactId,
     snapshot: &SupportVerificationSnapshot<'_>,
     request: CoverageMeasurementRequest,
+    authority: &FinalSupportAuthority<'_>,
 ) -> Result<PreWriteGateReport, GateRefusal> {
     // The sole read of EMIT_REQUIRE_PASSED_GATES_DEFAULT. It is not an
     // override: `true` runs the gates, and anything else refuses outright.
@@ -353,8 +733,9 @@ fn judge_pre_write_gates(
     let mut coverage = None;
     let mut pending = Vec::new();
     for gate in PreWriteGate::ALL {
-        match judge(gate, artifact, snapshot, request)? {
+        match judge(gate, artifact, snapshot, request, authority)? {
             GateVerdict::Passed(report) => coverage = Some(*report),
+            GateVerdict::Cleared => {}
             GateVerdict::NotYetPorted => pending.push(gate),
         }
     }
@@ -480,12 +861,12 @@ fn judged_emission(
                     model: model.clone(),
                     source: GateRefusal::SnapshotIntegrity(source),
                 })?;
-        let gates = judge_pre_write_gates(&artifact, &snapshot, coverage).map_err(|source| {
-            PipelineError::Gates {
+        let gates = judge_pre_write_gates(&artifact, &snapshot, coverage, &authority).map_err(
+            |source| PipelineError::Gates {
                 model: model.clone(),
                 source,
-            }
-        })?;
+            },
+        )?;
         (
             gates,
             snapshot.routed_contacts().count(),

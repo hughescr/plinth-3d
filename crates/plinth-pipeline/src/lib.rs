@@ -50,9 +50,13 @@ pub use prepare::{
 // `judge_pre_write_gates` is deliberately absent: it takes a caller-supplied
 // coverage request, which is an override in all but name, so `judge_then_emit`
 // is the only public way to reach the gate set.
+// `judge_emitted_load_law` IS exported, for the opposite reason: it takes no
+// threshold at all. It reads `X_ALLOWED` from the ratified registry itself, and
+// its only other argument is a routed-contact count it cross-checks rather than
+// obeys, so there is no lenient value a caller could pass it.
 pub use gates::{
-    judge_then_emit, registered_coverage_request, GateRefusal, GatedEmission, PreWriteGate,
-    PreWriteGateReport,
+    judge_emitted_load_law, judge_then_emit, registered_coverage_request, GateRefusal,
+    GatedEmission, LoadLawFault, LoadLawViolation, PreWriteGate, PreWriteGateReport,
 };
 
 use plinth_core::{m0_constants, Finite, ModelId, PrinterProfile};
