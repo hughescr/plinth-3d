@@ -5958,10 +5958,7 @@ mod tests {
             ContactSelectionConfig::current_defaults(Some(&delicacy), config.max_grid_bytes)
                 .unwrap();
         let regular = if generic.islands().is_empty() {
-            crate::SelectedContacts {
-                contacts: Vec::new(),
-                coverage_samples: Vec::new(),
-            }
+            crate::SelectedContacts::new(Vec::new(), Vec::new())
         } else {
             select_contacts(&mesh, generic.candidates(), generic.islands(), &selection).unwrap()
         };

@@ -16,6 +16,7 @@ use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
 use thiserror::Error;
 
+use crate::digest_seal::SealedSpan;
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
@@ -1031,6 +1032,15 @@ pub struct SpecializedContactPlan {
     // complete plan authority which produced it.
     finalized_load_plan_digest: u64,
     gate_evidence: SpecializedGateEvidence,
+    /// The FNV-1a accumulator on both sides of the frozen bulk of
+    /// [`Self::digest`]'s byte stream — the repair pool, the islands and the
+    /// coverage samples.  See [`hash_specialized_plan_frozen_bulk`] for the
+    /// span and [`crate::digest_seal`] for the rule.
+    ///
+    /// Sealed at birth in each of the two literals that build a plan, and
+    /// never copied from another plan: `derive_child_from` re-seals, because
+    /// `next_contact_id` is folded ahead of the span and a child's differs.
+    frozen_bulk: SealedSpan,
 }
 
 /// A checked, immutable edit session for a specialized plan.
@@ -1122,6 +1132,12 @@ impl SpecializedContactPlan {
         self.finalized_loads
             .validate_binding(&self.load_partition, &contact_ids)
             .map_err(SpecializedError::Generic)?;
+        // The hot borrow gate: about eighty calls per repair trial, so it is
+        // judged on the memo-served digest.  That still refolds the whole
+        // MUTABLE tail — contacts, load rows, gate evidence — which is the
+        // half a load edit can move.  The frozen-bulk half is proved against a
+        // fresh walk by `validate_sealed_digests`, which every stage boundary
+        // runs (SEALED-INPUT RULE obligation 3, `crate::digest_seal`).
         if self.finalized_load_plan_digest != self.digest() {
             return Err(SpecializedError::StaleFinalizedLoadArtifact);
         }
@@ -1207,9 +1223,7 @@ impl SpecializedContactPlan {
             .validate_lineage(repair_pool_lineage_root(generic))?;
         self.repair_pool.validate_contacts(&self.contacts)?;
         self.finalized_loads()?;
-        if self.finalized_load_plan_digest != self.digest() {
-            return Err(SpecializedError::StaleFinalizedLoadArtifact);
-        }
+        self.validate_sealed_digests()?;
         if bound_authority_digest(generic, regular, selection_config, limits)
             != self.source_authority_digest
         {
@@ -1228,119 +1242,127 @@ impl SpecializedContactPlan {
             .validate_lineage(repair_pool_lineage_root(&self.generic_authority))?;
         self.repair_pool.validate_contacts(&self.contacts)?;
         self.finalized_loads()?;
-        if self.finalized_load_plan_digest != self.digest() {
-            return Err(SpecializedError::StaleFinalizedLoadArtifact);
-        }
+        self.validate_sealed_digests()?;
         Ok(())
     }
 
+    /// Seal the finalized load artifact to the plan authority that produced
+    /// it.
+    ///
+    /// Deliberately taken through [`Self::digest`], the memo-served path: if
+    /// the span seal were ever wrong, this word would be wrong with it, and
+    /// the next `validate_binding`/`validate_edit_binding` — which walk the
+    /// full stream — would refuse the plan.  Sealing through the full walk
+    /// instead would hide that class of bug rather than catch it.
     fn seal_finalized_load_digest(mut self) -> Self {
         self.finalized_load_plan_digest = self.digest();
         self
     }
+
+    /// The plan's stable FNV-1a fingerprint.
+    ///
+    /// The stream is folded in three pieces — authority prefix, frozen bulk,
+    /// mutable tail — and only the middle one is ever skipped, only when the
+    /// accumulator arriving at it is bit-for-bit the one the seal was taken
+    /// at.  That is the whole invalidation rule; it lives in
+    /// [`crate::digest_seal::SealedSpan::resume`].
+    ///
+    /// So a change to any authority field moves this value on the very next
+    /// call, with no stage boundary needed, exactly as the single walk did.
+    /// The only change this can miss is one INSIDE the frozen bulk, and
+    /// [`Self::validate_sealed_digests`] refuses that at every stage boundary.
     #[must_use]
     pub fn digest(&self) -> u64 {
+        self.fold(SpanPolicy::ResumeIfSealed)
+    }
+
+    /// The fingerprint with the sealed span BYPASSED — every byte refolded
+    /// from the live fields.
+    ///
+    /// SEALED-INPUT RULE obligation 3 ("keep the check honest"): the sites
+    /// that *check* a digest rather than report one must not be served a memo,
+    /// or the comparison becomes a tautology and the staleness check silently
+    /// retires.  Its only caller is [`Self::validate_sealed_digests`], which
+    /// both binding checks run — about four calls per repair trial against
+    /// about eighty reporting reads.
+    #[must_use]
+    fn digest_full_walk(&self) -> u64 {
+        self.fold(SpanPolicy::AlwaysFold)
+    }
+
+    /// The one fingerprint walk.  `policy` decides only whether the frozen
+    /// bulk may be skipped; both settings fold the same bytes in the same
+    /// order, which is why they must agree.
+    fn fold(&self, policy: SpanPolicy) -> u64 {
         let mut hash = Fnv::new();
-        hash.u64(self.semantic_authority_digest);
-        // Bind the complete frozen child-finalization input bundle. The
-        // original source authority remains auditable above, while this plan
-        // digest changes whenever a child-relevant input changes.
-        hash.u64(self.generic_authority.digest());
-        hash.bytes(self.mesh_authority_fingerprint.as_bytes());
-        for reservation in &self.reservations_authority {
-            hash.u32(reservation.owner_id);
-            hash.u32(reservation.face_id);
+        hash_specialized_plan_authority(
+            &mut hash,
+            self.semantic_authority_digest,
+            &self.generic_authority,
+            &self.mesh_authority_fingerprint,
+            &self.reservations_authority,
+            self.limits_authority,
+            self.surface_config_authority,
+            self.next_contact_id,
+        );
+        match policy {
+            SpanPolicy::ResumeIfSealed => match self.frozen_bulk.resume(hash.state()) {
+                Some(exit) => hash = Fnv::resume(exit),
+                None => hash_specialized_plan_frozen_bulk(
+                    &mut hash,
+                    &self.repair_pool,
+                    &self.islands,
+                    &self.coverage_samples,
+                ),
+            },
+            SpanPolicy::AlwaysFold => hash_specialized_plan_frozen_bulk(
+                &mut hash,
+                &self.repair_pool,
+                &self.islands,
+                &self.coverage_samples,
+            ),
         }
-        hash_specialized_limits(&mut hash, self.limits_authority);
-        hash.f64(self.surface_config_authority.grid_pitch_mm);
-        hash.usize(self.surface_config_authority.max_grid_bytes);
-        match self.next_contact_id {
-            Some(next) => {
-                hash.u8(1);
-                hash.u64(next);
-            }
-            None => hash.u8(0),
-        }
-        self.repair_pool.hash_into(&mut hash);
-        for island in &self.islands {
-            hash.u32(island.id);
-            for &face in &island.face_ids {
-                hash.u32(face);
-            }
-        }
-        for sample in &self.coverage_samples {
-            hash.u32(sample.island_id);
-            hash.u32(sample.face_id);
-            hash.u32(sample.component_id);
-            hash.point3(sample.point_mm);
-            hash.f64(sample.area_mm2);
-        }
-        for contact in &self.contacts {
-            hash.u64(contact.contact_id);
-            hash.point3(contact.position_mm);
-            hash.point3(contact.normal);
-            hash_physical_seat_provenance(&mut hash, contact.seat_provenance);
-            hash.f64(contact.carried_area_mm2);
-            if let Some(primary) = contact.primary_regular {
-                hash.u8(1);
-                hash.u64(primary.route.candidate_id);
-                hash.u32(primary.route.owner_island_id);
-                hash.u32(primary.route.coverage_face_id);
-                hash.u32(primary.route.component_id);
-                hash_repair_row_source_kind(&mut hash, primary.route.source_kind);
-                hash.point3(primary.position_mm);
-                hash.point3(primary.normal);
-            } else {
-                hash.u8(0);
-            }
-            for route in &contact.regular_routes {
-                hash.u64(route.candidate_id);
-                hash.u32(route.owner_island_id);
-                hash.u32(route.coverage_face_id);
-                hash.u32(route.component_id);
-                hash_repair_row_source_kind(&mut hash, route.source_kind);
-            }
-            for demand in &contact.demands {
-                hash.u8(match demand.kind {
-                    SpecializedDemandKind::Minimum => 0,
-                    SpecializedDemandKind::IslandBirth => 1,
-                });
-                hash.u32(demand.owner_island_id);
-                hash.u32(demand.coverage_face_id);
-                hash.u32(demand.coverage_component_id);
-                hash.point3(demand.nominated_position_mm);
-                hash.point3(demand.nominated_normal);
-            }
-        }
-        for row in self.load_partition.rows() {
-            hash.u32(row.face_id);
-            hash.u64(row.contact_id);
-            match row.owner {
-                LoadOwner::Specialized(owner) => {
-                    hash.u8(0);
-                    hash.u32(owner);
-                }
-                LoadOwner::GenericIsland(owner) => {
-                    hash.u8(1);
-                    hash.u32(owner);
-                }
-            }
-            hash.f64(row.carried_area_mm2);
-        }
-        for vector in [self.gate_evidence.baseline, self.gate_evidence.accepted] {
-            hash.f64(vector.failing_uncovered_area_mm2);
-            hash.f64(vector.max_patch_area_mm2);
-            hash.usize(vector.failing_patch_count);
-            hash.f64(vector.worst_gap_mm);
-            hash.usize(vector.load_violation_count);
-            hash.usize(vector.unsupported_specialized_count);
-        }
-        hash.usize(self.gate_evidence.gathered_pair_count);
-        hash.usize(self.gate_evidence.accepted_pair_count);
-        hash.usize(self.gate_evidence.deep_clone_count);
-        hash.usize(self.gate_evidence.max_commit_bytes);
+        hash_specialized_plan_tail(
+            &mut hash,
+            &self.contacts,
+            &self.load_partition,
+            self.gate_evidence,
+        );
         hash.finish()
     }
+
+    /// The one staleness comparison both binding checks share.
+    ///
+    /// Two independent refusals, in this order:
+    ///
+    /// 1. The memo-served fingerprint must equal the full walk.  Nothing but a
+    ///    mutation inside the frozen bulk can separate them, so this is the
+    ///    refusal that makes the seal load-bearing rather than assumed, and it
+    ///    runs at every stage boundary in release builds.
+    /// 2. The finalized load artifact must still be sealed to the plan, judged
+    ///    on the FULL walk so the memo cannot answer for itself.
+    fn validate_sealed_digests(&self) -> Result<(), SpecializedError> {
+        let full = self.digest_full_walk();
+        if self.digest() != full {
+            return Err(SpecializedError::StaleFrozenBulkSeal);
+        }
+        if self.finalized_load_plan_digest != full {
+            return Err(SpecializedError::StaleFinalizedLoadArtifact);
+        }
+        Ok(())
+    }
+}
+
+/// Whether a fingerprint walk may skip the sealed span.  See
+/// [`SpecializedContactPlan::fold`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpanPolicy {
+    /// Reporting readers: skip the frozen bulk when the accumulator arriving
+    /// at it matches the seal.
+    ResumeIfSealed,
+    /// Checking readers: fold every byte, so the comparison cannot be answered
+    /// by the thing it is checking.
+    AlwaysFold,
 }
 
 impl<'a> SpecializedContactPlanEdit<'a> {
@@ -1599,6 +1621,25 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             .collect::<Vec<_>>();
         let finalized_loads =
             FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
+        // SEALED-INPUT RULE, obligations 1 and 2 ([`crate::digest_seal`]): the
+        // child seals its OWN span here.  It must not inherit the parent's,
+        // because `next_contact_id` is folded ahead of the span and this
+        // child's differs, so the parent's entry state would never match.
+        // Every field inside the span is cloned from the parent verbatim, so
+        // this is one bulk walk per derived plan — one per repair trial — in
+        // place of the ~80 the stage chain used to pay.
+        let frozen_bulk = seal_specialized_plan_frozen_bulk(
+            self.plan.semantic_authority_digest,
+            &self.plan.generic_authority,
+            &self.plan.mesh_authority_fingerprint,
+            &self.plan.reservations_authority,
+            self.plan.limits_authority,
+            self.plan.surface_config_authority,
+            next_contact_id,
+            &self.plan.repair_pool,
+            &self.plan.islands,
+            &self.plan.coverage_samples,
+        );
         Ok(SpecializedContactPlan {
             source_authority_digest: self.plan.source_authority_digest,
             semantic_authority_digest: self.plan.semantic_authority_digest,
@@ -1618,6 +1659,7 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             finalized_loads,
             finalized_load_plan_digest: 0,
             gate_evidence: self.plan.gate_evidence,
+            frozen_bulk,
         }
         .seal_finalized_load_digest())
     }
@@ -1991,6 +2033,15 @@ pub enum SpecializedError {
     FrozenMeshAuthorityMismatch,
     #[error("specialized finalized load artifact is stale or belongs to another child plan")]
     StaleFinalizedLoadArtifact,
+    /// The memo-served fingerprint disagrees with the full walk, which only a
+    /// mutation inside the sealed span — the repair pool, the islands or the
+    /// coverage samples — can cause.  Under the SEALED-INPUT RULE
+    /// ([`crate::digest_seal`]) that cannot happen: those fields are written
+    /// once and never touched again.  This variant is what proves the seal is
+    /// load-bearing rather than assumed.  Raised by
+    /// `SpecializedContactPlan::validate_sealed_digests`.
+    #[error("specialized plan's sealed digest span no longer matches its frozen bulk")]
+    StaleFrozenBulkSeal,
     #[error("registered specialized constants are unavailable: {0}")]
     RegisteredConstantsUnavailable(String),
 }
@@ -2302,22 +2353,36 @@ pub fn prepare_specialized_contacts(
         .collect::<Vec<_>>();
     let finalized_loads =
         FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
+    let semantic_authority_digest =
+        bound_semantic_authority_digest(generic, regular, selection_config, limits);
+    let mesh_authority_fingerprint = topology.mesh_fingerprint().to_owned();
+    let reservations_authority = reservations.to_vec();
+    // SEALED-INPUT RULE, obligation 1 ([`crate::digest_seal`]): fold the span
+    // from the very values this literal is about to take ownership of, so the
+    // plan is never observable without a true seal.
+    let frozen_bulk = seal_specialized_plan_frozen_bulk(
+        semantic_authority_digest,
+        generic,
+        &mesh_authority_fingerprint,
+        &reservations_authority,
+        limits,
+        surface_config_authority,
+        next_contact_id,
+        &repair_pool,
+        &islands,
+        &coverage_samples,
+    );
     Ok(SpecializedContactPlan {
         source_authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
-        semantic_authority_digest: bound_semantic_authority_digest(
-            generic,
-            regular,
-            selection_config,
-            limits,
-        ),
+        semantic_authority_digest,
         generic_slice_thread_evidence: generic.slice_thread_evidence(),
         islands,
         coverage_samples,
         repair_pool,
         generic_authority: generic.clone(),
         mesh_authority: mesh.clone(),
-        mesh_authority_fingerprint: topology.mesh_fingerprint().to_owned(),
-        reservations_authority: reservations.to_vec(),
+        mesh_authority_fingerprint,
+        reservations_authority,
         limits_authority: limits,
         surface_config_authority,
         contacts,
@@ -2326,6 +2391,7 @@ pub fn prepare_specialized_contacts(
         finalized_loads,
         finalized_load_plan_digest: 0,
         gate_evidence,
+        frozen_bulk,
     }
     .seal_finalized_load_digest())
 }
@@ -8543,6 +8609,210 @@ fn bound_authority_digest(
 
 struct Fnv(u64);
 
+/// The AUTHORITY PREFIX of the specialized plan's fingerprint stream: the
+/// semantic authority word, the nested generic-plan digest, the frozen mesh
+/// fingerprint, the owner reservations, the limits, the surface grid config
+/// and `next_contact_id` — in the declared order, ending exactly where
+/// [`hash_specialized_plan_frozen_bulk`] begins.
+///
+/// A few dozen bytes.  It is refolded on EVERY `digest()` call, memo or no
+/// memo, and its arriving accumulator is what unlocks the sealed span: see
+/// [`crate::digest_seal::SealedSpan::resume`].  Tampering with any field here
+/// therefore moves the reported digest immediately, with no stage boundary
+/// required.
+///
+/// `next_contact_id` is folded here, ahead of the bulk, because that is where
+/// the stream has always put it.  Moving it would move every digest.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the prefix deliberately restates every authority input it folds, \
+              one parameter each, so that a reviewer can check the argument \
+              list against the struct literal that seals it"
+)]
+fn hash_specialized_plan_authority(
+    hash: &mut Fnv,
+    semantic_authority_digest: u64,
+    generic_authority: &GenericContactPlan,
+    mesh_authority_fingerprint: &str,
+    reservations_authority: &[SpecializedOwnerReservation],
+    limits_authority: SpecializedLimits,
+    surface_config_authority: NativeSurfaceConfig,
+    next_contact_id: Option<u64>,
+) {
+    hash.u64(semantic_authority_digest);
+    // Bind the complete frozen child-finalization input bundle. The
+    // original source authority remains auditable above, while this plan
+    // digest changes whenever a child-relevant input changes.
+    hash.u64(generic_authority.digest());
+    hash.bytes(mesh_authority_fingerprint.as_bytes());
+    for reservation in reservations_authority {
+        hash.u32(reservation.owner_id);
+        hash.u32(reservation.face_id);
+    }
+    hash_specialized_limits(hash, limits_authority);
+    hash.f64(surface_config_authority.grid_pitch_mm);
+    hash.usize(surface_config_authority.max_grid_bytes);
+    match next_contact_id {
+        Some(next) => {
+            hash.u8(1);
+            hash.u64(next);
+        }
+        None => hash.u8(0),
+    }
+}
+
+/// The FROZEN BULK of the specialized plan's fingerprint stream: the repair
+/// pool, the islands and the coverage samples, in the declared order.
+///
+/// This is the sealed span ([`crate::digest_seal`]).  It is by far the largest
+/// stretch of the stream — on `raking_blade` the coverage samples alone are
+/// 16,640 records of 44 bytes — and not one of its three sources can change
+/// within the life of one plan: they are moved into a `SpecializedContactPlan`
+/// literal at construction and the module never assigns to them, pushes to
+/// them, or borrows them mutably again.  A repair edit does not touch them
+/// either; it builds a NEW plan through `derive_child_from`, which clones them
+/// and re-seals.
+fn hash_specialized_plan_frozen_bulk(
+    hash: &mut Fnv,
+    repair_pool: &RepairPool,
+    islands: &[SupportIsland],
+    coverage_samples: &[CoverageSample],
+) {
+    repair_pool.hash_into(hash);
+    for island in islands {
+        hash.u32(island.id);
+        for &face in &island.face_ids {
+            hash.u32(face);
+        }
+    }
+    for sample in coverage_samples {
+        hash.u32(sample.island_id);
+        hash.u32(sample.face_id);
+        hash.u32(sample.component_id);
+        hash.point3(sample.point_mm);
+        hash.f64(sample.area_mm2);
+    }
+}
+
+/// Fold the authority prefix and the frozen bulk, and seal the span between
+/// them: the accumulator arriving at the bulk's first byte, and the one
+/// leaving its last.
+///
+/// A free function on the pieces so that it can fold the values on their way
+/// INTO a `SpecializedContactPlan` literal, before the plan exists — the
+/// SEALED-INPUT RULE's "seal at birth" obligation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the seal deliberately restates every input it folds, one parameter \
+              each, so that a reviewer can check the argument list against the \
+              struct literal that seals it"
+)]
+fn seal_specialized_plan_frozen_bulk(
+    semantic_authority_digest: u64,
+    generic_authority: &GenericContactPlan,
+    mesh_authority_fingerprint: &str,
+    reservations_authority: &[SpecializedOwnerReservation],
+    limits_authority: SpecializedLimits,
+    surface_config_authority: NativeSurfaceConfig,
+    next_contact_id: Option<u64>,
+    repair_pool: &RepairPool,
+    islands: &[SupportIsland],
+    coverage_samples: &[CoverageSample],
+) -> SealedSpan {
+    let mut hash = Fnv::new();
+    hash_specialized_plan_authority(
+        &mut hash,
+        semantic_authority_digest,
+        generic_authority,
+        mesh_authority_fingerprint,
+        reservations_authority,
+        limits_authority,
+        surface_config_authority,
+        next_contact_id,
+    );
+    let entry = hash.state();
+    hash_specialized_plan_frozen_bulk(&mut hash, repair_pool, islands, coverage_samples);
+    SealedSpan::seal(entry, hash.state())
+}
+
+/// The MUTABLE TAIL of the specialized plan's fingerprint stream: the contact
+/// set, the finalized load partition and the gate evidence, folded onto a
+/// running accumulator that already carries the head.
+///
+/// These are exactly the fields a repair trial changes, so nothing here is
+/// ever cached; the tail is refolded on every `digest()` call.
+fn hash_specialized_plan_tail(
+    hash: &mut Fnv,
+    contacts: &[SpecializedPhysicalContact],
+    load_partition: &FinalizedLoadPartition,
+    gate_evidence: SpecializedGateEvidence,
+) {
+    for contact in contacts {
+        hash.u64(contact.contact_id);
+        hash.point3(contact.position_mm);
+        hash.point3(contact.normal);
+        hash_physical_seat_provenance(hash, contact.seat_provenance);
+        hash.f64(contact.carried_area_mm2);
+        if let Some(primary) = contact.primary_regular {
+            hash.u8(1);
+            hash.u64(primary.route.candidate_id);
+            hash.u32(primary.route.owner_island_id);
+            hash.u32(primary.route.coverage_face_id);
+            hash.u32(primary.route.component_id);
+            hash_repair_row_source_kind(hash, primary.route.source_kind);
+            hash.point3(primary.position_mm);
+            hash.point3(primary.normal);
+        } else {
+            hash.u8(0);
+        }
+        for route in &contact.regular_routes {
+            hash.u64(route.candidate_id);
+            hash.u32(route.owner_island_id);
+            hash.u32(route.coverage_face_id);
+            hash.u32(route.component_id);
+            hash_repair_row_source_kind(hash, route.source_kind);
+        }
+        for demand in &contact.demands {
+            hash.u8(match demand.kind {
+                SpecializedDemandKind::Minimum => 0,
+                SpecializedDemandKind::IslandBirth => 1,
+            });
+            hash.u32(demand.owner_island_id);
+            hash.u32(demand.coverage_face_id);
+            hash.u32(demand.coverage_component_id);
+            hash.point3(demand.nominated_position_mm);
+            hash.point3(demand.nominated_normal);
+        }
+    }
+    for row in load_partition.rows() {
+        hash.u32(row.face_id);
+        hash.u64(row.contact_id);
+        match row.owner {
+            LoadOwner::Specialized(owner) => {
+                hash.u8(0);
+                hash.u32(owner);
+            }
+            LoadOwner::GenericIsland(owner) => {
+                hash.u8(1);
+                hash.u32(owner);
+            }
+        }
+        hash.f64(row.carried_area_mm2);
+    }
+    for vector in [gate_evidence.baseline, gate_evidence.accepted] {
+        hash.f64(vector.failing_uncovered_area_mm2);
+        hash.f64(vector.max_patch_area_mm2);
+        hash.usize(vector.failing_patch_count);
+        hash.f64(vector.worst_gap_mm);
+        hash.usize(vector.load_violation_count);
+        hash.usize(vector.unsupported_specialized_count);
+    }
+    hash.usize(gate_evidence.gathered_pair_count);
+    hash.usize(gate_evidence.accepted_pair_count);
+    hash.usize(gate_evidence.deep_clone_count);
+    hash.usize(gate_evidence.max_commit_bytes);
+}
+
 fn hash_physical_seat_provenance(hash: &mut Fnv, provenance: PhysicalSeatProvenance) {
     match provenance {
         PhysicalSeatProvenance::Regular(primary) => {
@@ -8581,6 +8851,25 @@ fn hash_repair_row_source_kind(hash: &mut Fnv, source_kind: RepairRowSourceKind)
 impl Fnv {
     const fn new() -> Self {
         Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    /// Resume a fold from a state reached earlier over the same byte stream.
+    ///
+    /// FNV-1a is `state = (state ^ byte) * PRIME` in one chain, so it does not
+    /// compose across pieces — but its accumulator IS a valid resume point:
+    /// feeding bytes `k+1..n` in the same order onto the state after byte `k`
+    /// yields exactly the word the whole stream produces.  That property, and
+    /// nothing more, is what [`crate::digest_seal`]'s sealed-prefix shape
+    /// rests on.
+    const fn resume(state: u64) -> Self {
+        Self(state)
+    }
+
+    /// The running accumulator, mid-stream.  Read only to seal a
+    /// [`crate::digest_seal::SealedSpan`]'s two boundaries, and to offer the
+    /// arriving state to [`crate::digest_seal::SealedSpan::resume`].
+    const fn state(&self) -> u64 {
+        self.0
     }
     fn bytes(&mut self, bytes: &[u8]) {
         for &byte in bytes {
@@ -13368,10 +13657,7 @@ mod tests {
         )
         .map_err(|error| format!("required {name} selection config failed: {error}"))?;
         let regular = if generic.islands().is_empty() {
-            SelectedContacts {
-                contacts: Vec::new(),
-                coverage_samples: Vec::new(),
-            }
+            SelectedContacts::new(Vec::new(), Vec::new())
         } else {
             crate::select_contacts(
                 &mesh,
@@ -13421,10 +13707,7 @@ mod tests {
         )
         .map_err(|error| format!("required {name} selection config failed: {error}"))?;
         let regular = if generic.islands().is_empty() {
-            SelectedContacts {
-                contacts: Vec::new(),
-                coverage_samples: Vec::new(),
-            }
+            SelectedContacts::new(Vec::new(), Vec::new())
         } else {
             crate::select_contacts(
                 &mesh,
@@ -14277,6 +14560,114 @@ mod tests {
         );
     }
 
+    /// SEALED-INPUT RULE sabotage test ([`crate::digest_seal`]).
+    ///
+    /// The sealed span covers the repair pool, the islands and the coverage
+    /// samples.  A mutation inside it is the ONE thing the memo-served
+    /// [`SpecializedContactPlan::digest`] cannot see, which is exactly why
+    /// obligation 3 exists: the full walk sees it, and every binding check
+    /// runs the full walk and refuses.  If this test ever goes green by the
+    /// first assertion changing rather than the third, the memo has stopped
+    /// being load-bearing.
+    #[test]
+    fn tampering_inside_the_sealed_span_is_refused_by_the_binding_check() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "span sabotage")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(plan.begin_regular_edit().is_ok());
+
+        let mut tampered = plan.clone();
+        let sample = tampered
+            .coverage_samples
+            .first_mut()
+            .expect("required sabotage fixture has coverage samples");
+        sample.area_mm2 += 1.0;
+
+        // 1. The memo answers with the pre-tamper span, by construction.
+        assert_eq!(
+            tampered.digest(),
+            plan.digest(),
+            "a sealed span is skipped whenever the authority prefix arrives unchanged; if this \
+             ever differs, the span is not being resumed and the measurement is void"
+        );
+        // 2. The full walk sees the tamper.
+        assert_ne!(
+            tampered.digest_full_walk(),
+            plan.digest_full_walk(),
+            "the full walk must fold the tampered sample"
+        );
+        // 3. Which is what the binding check judges on, so the plan is refused.
+        assert_eq!(
+            tampered.validate_sealed_digests(),
+            Err(SpecializedError::StaleFrozenBulkSeal)
+        );
+        assert!(matches!(
+            tampered.begin_regular_edit(),
+            Err(SpecializedError::StaleFrozenBulkSeal)
+        ));
+    }
+
+    /// The seal must never be INHERITED: a derived child folds its own span.
+    ///
+    /// An append bumps `next_contact_id`, which is folded AHEAD of the span,
+    /// so the child's entry state must differ from the parent's — proof the
+    /// child computed a seal rather than copying one.  A copied seal on a
+    /// changed plan is the one way this memo could forge a digest.
+    ///
+    /// A removal leaves `next_contact_id` alone and clones every span field
+    /// verbatim, so its child's seal is EQUAL to the parent's.  That is
+    /// correct, and it is equal by recomputation, not by inheritance: the same
+    /// bytes give the same word.  Both children must agree with their own full
+    /// walk, which is the claim that actually matters.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "identity, not proximity: an unoccupied repair row is one whose \
+                  frozen candidate point no contact was COPIED from, so the scan \
+                  compares stored coordinates against stored coordinates"
+    )]
+    fn a_derived_child_seals_its_own_span() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "child seal")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let removable = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.demands().is_empty() && contact.primary_regular().is_some())
+            .expect("required child-seal fixture has a demand-free regular contact")
+            .contact_id();
+        let removed = plan
+            .begin_regular_edit()
+            .unwrap()
+            .remove_demand_free_regular(removable)
+            .unwrap();
+        assert_eq!(removed.digest(), removed.digest_full_walk());
+        assert!(removed.validate_sealed_digests().is_ok());
+
+        let row = removed
+            .all_repair_rows()
+            .iter()
+            .find(|row| {
+                removed
+                    .contacts()
+                    .iter()
+                    .all(|contact| contact.position_mm() != row.candidate().point_mm)
+            })
+            .expect("required child-seal fixture has an unoccupied repair row")
+            .id();
+        let appended = removed
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_row(row)
+            .unwrap();
+        assert_ne!(appended.next_contact_id, removed.next_contact_id);
+        assert_ne!(
+            appended.frozen_bulk, removed.frozen_bulk,
+            "an appended child must fold its own span: its `next_contact_id` sits ahead of the \
+             span, so an inherited seal would never unlock"
+        );
+        assert_eq!(appended.digest(), appended.digest_full_walk());
+        assert!(appended.validate_sealed_digests().is_ok());
+    }
+
     #[test]
     fn demanded_child_edit_is_a_typed_hard_failure() {
         let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "demanded edit")
@@ -15057,8 +15448,9 @@ mod tests {
             Ok(())
         );
 
-        let mut tampered_regular = regular.clone();
-        tampered_regular.contacts[0].point_mm[0] += 0.01;
+        let tampered_regular = regular
+            .clone()
+            .forged_with_stale_seal(|contacts| contacts[0].point_mm[0] += 0.01);
         assert_eq!(
             plan.validate_binding(
                 &mesh,

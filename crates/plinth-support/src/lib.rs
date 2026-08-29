@@ -82,6 +82,10 @@ pub mod coverage_repair;
     reason = "crate-private designed embed masks await the gated verifier wiring in brace/cco/rewire"
 )]
 pub(crate) mod designed_embed;
+/// The SEALED-INPUT RULE: the one place the digest-memo policy for this crate
+/// is written, and the only constructor for a sealed fingerprint.  Read it
+/// before adding, moving, or trusting any cached digest.
+pub(crate) mod digest_seal;
 pub mod dyadic;
 pub mod forest;
 #[allow(
@@ -1017,60 +1021,8 @@ pub struct SelectedContact {
     pub supported_area_mm2: f64,
 }
 
-/// Immutable S1 hand-off.  This is a placement plan, not a scene or a run API.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SelectedContacts {
-    contacts: Vec<SelectedContact>,
-    coverage_samples: Vec<CoverageSample>,
-}
-
-impl SelectedContacts {
-    #[must_use]
-    pub fn contacts(&self) -> &[SelectedContact] {
-        &self.contacts
-    }
-
-    #[must_use]
-    pub fn coverage_samples(&self) -> &[CoverageSample] {
-        &self.coverage_samples
-    }
-
-    /// Stable FNV-1a digest; selection itself makes no new native query.
-    #[must_use]
-    pub fn digest(&self) -> u64 {
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let mut state = OFFSET;
-        let mut add = |bytes: &[u8]| {
-            for &byte in bytes {
-                state ^= u64::from(byte);
-                state = state.wrapping_mul(PRIME);
-            }
-        };
-        for contact in &self.contacts {
-            add(&contact.island_id.to_le_bytes());
-            add(&contact.candidate_id.0.to_le_bytes());
-            add(&contact.served_face_id.to_le_bytes());
-            for value in contact
-                .point_mm
-                .iter()
-                .chain(contact.normal.iter())
-                .chain([contact.delicacy, contact.supported_area_mm2].iter())
-            {
-                add(&value.to_bits().to_le_bytes());
-            }
-        }
-        for sample in &self.coverage_samples {
-            add(&sample.island_id.to_le_bytes());
-            add(&sample.face_id.to_le_bytes());
-            add(&sample.component_id.to_le_bytes());
-            for value in sample.point_mm.iter().chain([sample.area_mm2].iter()) {
-                add(&value.to_bits().to_le_bytes());
-            }
-        }
-        state
-    }
-}
+mod selected_contacts;
+pub use selected_contacts::SelectedContacts;
 
 /// Current placement policy.  Resource limits remain request fields because
 /// M0 records them as non-authoritative guards rather than global constants.
@@ -1394,13 +1346,7 @@ fn select_contacts_with_mode(
         coverage_index.insert(contact, &topology, &mut work);
     }
     if !legacy_pre_routing_repair {
-        return Ok((
-            SelectedContacts {
-                contacts: selected,
-                coverage_samples: samples,
-            },
-            work,
-        ));
+        return Ok((SelectedContacts::new(selected, samples), work));
     }
     for attempt in 0..=config.coverage_repair_max_attempts {
         let failing = failing_coverage_samples(
@@ -1418,13 +1364,7 @@ fn select_contacts_with_mode(
             &mut work,
         )?;
         if failing.is_empty() {
-            return Ok((
-                SelectedContacts {
-                    contacts: selected,
-                    coverage_samples: samples,
-                },
-                work,
-            ));
+            return Ok((SelectedContacts::new(selected, samples), work));
         }
         if attempt == config.coverage_repair_max_attempts {
             return Err(ContactSelectionError::UnsatisfiedCoverage {
@@ -3805,6 +3745,27 @@ mod tests {
             .min()
             .unwrap();
         assert_eq!(selected.contacts()[0].candidate_id, expected);
+    }
+
+    /// SEALED-INPUT RULE oracle ([`crate::digest_seal`]).  The seal taken in
+    /// `SelectedContacts::new` must equal the full fingerprint walk, and must
+    /// survive a `Clone` — a clone carries both vectors the walk folds, so it
+    /// carries the seal truthfully.
+    #[test]
+    fn selected_contacts_seal_equals_the_full_walk() {
+        let mesh = small_closed_tetra();
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let pool = perceive_fixture(&mesh);
+        let islands = pool_islands(&pool);
+        let selected = select_contacts(&mesh, &pool, &islands, &selection_config(&delicacy))
+            .expect("seal-oracle fixture selects");
+        assert_eq!(selected.digest(), selected.digest_full_walk());
+        let cloned = selected.clone();
+        assert_eq!(cloned.digest(), cloned.digest_full_walk());
+        assert_eq!(cloned.digest(), selected.digest());
+
+        let empty = SelectedContacts::new(Vec::new(), Vec::new());
+        assert_eq!(empty.digest(), empty.digest_full_walk());
     }
 
     #[test]
