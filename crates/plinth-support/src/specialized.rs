@@ -13657,10 +13657,7 @@ mod tests {
         )
         .map_err(|error| format!("required {name} selection config failed: {error}"))?;
         let regular = if generic.islands().is_empty() {
-            SelectedContacts {
-                contacts: Vec::new(),
-                coverage_samples: Vec::new(),
-            }
+            SelectedContacts::new(Vec::new(), Vec::new())
         } else {
             crate::select_contacts(
                 &mesh,
@@ -13710,10 +13707,7 @@ mod tests {
         )
         .map_err(|error| format!("required {name} selection config failed: {error}"))?;
         let regular = if generic.islands().is_empty() {
-            SelectedContacts {
-                contacts: Vec::new(),
-                coverage_samples: Vec::new(),
-            }
+            SelectedContacts::new(Vec::new(), Vec::new())
         } else {
             crate::select_contacts(
                 &mesh,

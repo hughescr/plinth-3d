@@ -40,13 +40,13 @@
 //!    readers *check* it: they recompute a digest and compare it against a word
 //!    sealed earlier, precisely to catch an authority that no longer matches
 //!    its seal.  Serving a memo to a checker would make the comparison a
-//!    tautology and silently retire the check.  So the checking sites — see
-//!    `SpecializedContactPlan::validate_binding` and
-//!    `::validate_edit_binding` — call the FULL WALK with the memo bypassed,
-//!    and additionally assert that the memo equals that fresh walk.  Those
-//!    sites run about four times per repair trial against about eighty
-//!    reporting reads, so the check keeps every bit of its old strength while
-//!    the memo still removes the great majority of the work.
+//!    tautology and silently retire the check.  So the checking site —
+//!    `SpecializedContactPlan::validate_sealed_digests`, which both
+//!    `validate_binding` and `validate_edit_binding` run — calls the FULL WALK
+//!    with the memo bypassed, and first asserts that the memo equals that
+//!    fresh walk.  It runs about four times per repair trial against about
+//!    eighty reporting reads, so the check keeps every bit of its old strength
+//!    while the memo still removes the great majority of the work.
 //!
 //! ## Why this is bit-identical, not merely equivalent
 //!
@@ -75,8 +75,8 @@
 //!
 //! | Owner | Sealed at | Shape | Why its inputs cannot change |
 //! |---|---|---|---|
-//! | [`crate::perception::GenericContactPlan`] | `perceive_generic_contacts` | value | fields are private, the type has no `&mut self` method, and it is replaced (never edited) when perception re-runs |
-//! | [`crate::SelectedContacts`] | `select_contacts` | value | the immutable S1 hand-off: private fields, no mutator, replaced when selection re-runs |
+//! | [`crate::perception::GenericContactPlan`] | `prepare_generic_contacts` | value | fields are private, the type has no `&mut self` method, and it is replaced (never edited) when perception re-runs |
+//! | [`crate::SelectedContacts`] | `SelectedContacts::new` | value | the immutable S1 hand-off: private fields, no mutator, replaced when selection re-runs |
 //! | [`crate::specialized::SpecializedContactPlan`] frozen bulk | both plan literals in `specialized` | span | the repair pool, the islands and the coverage samples are written once per literal and the module has no code that assigns or mutably borrows any of them afterwards; a repair edit produces a NEW plan through `derive_child_from` |
 //!
 //! Anything not in that table is refolded in full on every call, on purpose:
