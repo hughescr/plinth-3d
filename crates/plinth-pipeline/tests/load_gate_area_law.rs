@@ -30,6 +30,26 @@
 //! sizing one — 900 of this model's 967.7 mm² of carried area landed on two
 //! contacts while fifty-eight others were charged exactly zero.
 //!
+//! # Where it comes from, and it is already written down
+//!
+//! `plinth_support::perception`'s `finalize_load_rows` charges its partition
+//! under `CarriableMaximum::SingleCarrier` — one carrier per face whatever its
+//! area — and its own block comment says why: the merge tournament's retained
+//! load delta indexes rows POSITIONALLY and cannot express a face carried by
+//! several contacts, so splitting there without rebuilding that machine would
+//! produce a delta that disagrees with the finalize it is checked against. That
+//! comment names the escalation as **task #68**.
+//!
+//! So the machinery to split an over-maximum face already exists and is already
+//! reachable — `carriable_share_count(450.0, AreaLaw(37.70))` answers 12 — it is
+//! just not what the production path runs. It is not a model-specific accident
+//! either: the corpus model `mini` refuses with the same two areas, 450.000 mm²
+//! and 60.000 mm², because they are whole faces of a 30 x 30 mm form.
+//!
+//! **This gate is the first thing in the codebase that refuses the result.**
+//! Until task #68 lands, any model with a downfacing face above 37.70 mm² is
+//! refused at the pre-write door instead of shipped.
+//!
 //! **This file therefore pins a defect, not an approval.** When the load
 //! partition is fixed, the assertions below fail and this file is rewritten to
 //! assert emission. Do not weaken the gate to make them pass, and do not delete
