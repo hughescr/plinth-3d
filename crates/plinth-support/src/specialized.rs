@@ -15448,8 +15448,9 @@ mod tests {
             Ok(())
         );
 
-        let mut tampered_regular = regular.clone();
-        tampered_regular.contacts[0].point_mm[0] += 0.01;
+        let tampered_regular = regular
+            .clone()
+            .forged_with_stale_seal(|contacts| contacts[0].point_mm[0] += 0.01);
         assert_eq!(
             plan.validate_binding(
                 &mesh,

@@ -42,11 +42,36 @@
 //!    its seal.  Serving a memo to a checker would make the comparison a
 //!    tautology and silently retire the check.  So the checking site —
 //!    `SpecializedContactPlan::validate_sealed_digests`, which both
-//!    `validate_binding` and `validate_edit_binding` run — calls the FULL WALK
-//!    with the memo bypassed, and first asserts that the memo equals that
-//!    fresh walk.  It runs about four times per repair trial against about
-//!    eighty reporting reads, so the check keeps every bit of its old strength
-//!    while the memo still removes the great majority of the work.
+//!    `validate_binding` and `validate_edit_binding` run — bypasses the SPAN
+//!    memo and folds those bytes the long way, and first asserts that the memo
+//!    equals that fresh walk.  It runs about four times per repair trial
+//!    against about eighty reporting reads.
+//!
+//!    **What that check does NOT cover, stated exactly, because an earlier
+//!    draft of this paragraph overstated it.**  `digest_full_walk` bypasses the
+//!    span; it is not a walk of every byte.  Where it reaches a nested SEALED
+//!    VALUE it folds that value's memo, so the nested seal is checked by its
+//!    own owner or not at all.  Four sites therefore compare a memo against a
+//!    stamp derived from the same memo, and are tautologies today:
+//!
+//!    * `hash_specialized_plan_authority` (`specialized.rs`) folds
+//!      `generic_authority.digest()`, a memo, inside the "full" walk.
+//!    * `validate_brace_preflight` (`runner.rs`) tests
+//!      `self.generic.digest() != self.digests.generic`.
+//!    * `validate_rewire_preflight` (`runner.rs`) tests the same pair.
+//!    * `validate_accepted_contact_set` (`runner.rs`) judges
+//!      `accepted.digest() != state.accepted_digest`.
+//!
+//!    These lost strength when the value seals landed.  They are recorded here
+//!    rather than in a commit message because a reader asking "is this check
+//!    real?" looks at the doctrine, not at history.  Closing them needs a
+//!    release-available full walk at the value-seal checking sites; the
+//!    `digest_full_walk` methods on `GenericContactPlan` and `SelectedContacts`
+//!    are `#[cfg(test)]` today, so in a release build nothing re-derives either
+//!    value seal from its fields.
+//!
+//!    The fifth exception is deliberate and predates the memo: the hot-borrow
+//!    gate in `finalized_loads()`.
 //!
 //! ## Why this is bit-identical, not merely equivalent
 //!
@@ -76,7 +101,7 @@
 //! | Owner | Sealed at | Shape | Why its inputs cannot change |
 //! |---|---|---|---|
 //! | [`crate::perception::GenericContactPlan`] | `prepare_generic_contacts` | value | fields are private, the type has no `&mut self` method, and it is replaced (never edited) when perception re-runs |
-//! | [`crate::SelectedContacts`] | `SelectedContacts::new` | value | the immutable S1 hand-off: private fields, no mutator, replaced when selection re-runs |
+//! | [`crate::SelectedContacts`] | `SelectedContacts::new` | value | the immutable S1 hand-off: fields private TO ITS OWN MODULE (`selected_contacts`), no mutator, replaced when selection re-runs.  The module boundary is the enforcement: while this type lived in the crate root its "private" fields were reachable from every module in the crate, so the seal rested on convention |
 //! | [`crate::specialized::SpecializedContactPlan`] frozen bulk | both plan literals in `specialized` | span | the repair pool, the islands and the coverage samples are written once per literal and the module has no code that assigns or mutably borrows any of them afterwards; a repair edit produces a NEW plan through `derive_child_from` |
 //!
 //! Anything not in that table is refolded in full on every call, on purpose:
