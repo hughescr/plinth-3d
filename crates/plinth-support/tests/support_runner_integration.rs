@@ -337,11 +337,16 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
         .verification_snapshot()
         .expect("borrow sealed verification snapshot");
     snapshot.validate_integrity().expect("snapshot integrity");
+    // Physical-contact-identity uniqueness feeds the frozen count below.
+    // Pairwise-distinct SEAT positions -- "no two routed contacts occupy the
+    // identical physical point" -- is checked independently and
+    // placement-agnostically by
+    // `toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest`
+    // below, so it is not repeated here gated behind this function's own
+    // digest assertion.
     let mut identities = BTreeSet::new();
-    let mut seats = BTreeSet::new();
     for contact in snapshot.routed_contacts() {
         assert!(identities.insert(contact.physical_contact_id()));
-        seats.insert(contact.position_mm().map(f64::to_bits));
     }
     // Re-derived 2026-08-28 for the RAFT PAD/BRIDGE DISPATCH SPLIT (`ad335d9`):
     // 12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006.  The counts do
@@ -451,7 +456,7 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     // are identical but their lines are not.  No rootward radius (`r1`)
     // moved anywhere, all 64 routed contact positions are bit-identical,
     // and member count, kinds and connectivity are unchanged.
-    assert_eq!(seats.len(), identities.len());
+    //
     // **THE ABANDONED LOAD, ASSERTED — not left in prose.**
     //
     // Accepting 65 -> 64 routed contacts turns entirely on the claim above that
@@ -513,21 +518,14 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
         "a buried seat must be recorded as never having entered the ladder, and only the \
          ladder-walked refusal may read as the bound's doing"
     );
-    for contact in abandoned {
-        assert_eq!(
-            contact.growth_ceiling_constant(),
-            "TIP_RADIUS_MAX_GROWN_SCAR_MM",
-            "both paths must quote the SAME registered limit, so the number never changes \
-             meaning between lines; got {contact:?}"
-        );
-        assert!(
-            contact
-                .growth_rungs()
-                .iter()
-                .all(|rung| rung.radius_mm() <= contact.growth_ceiling_radius_mm()),
-            "no rung may propose a tip above the ceiling; got {contact:?}"
-        );
-    }
+    // That every abandoned contact quotes the SAME registered
+    // `TIP_RADIUS_MAX_GROWN_SCAR_MM` ceiling, and that no growth rung it
+    // offered exceeds that ceiling, is checked independently and
+    // placement-agnostically -- on whichever contacts a placement change
+    // happens to abandon, not just contacts 25 and 64 -- by
+    // `toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest`
+    // below, so it is not repeated here gated behind this function's own
+    // digest assertion.
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");
