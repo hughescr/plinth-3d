@@ -31,6 +31,14 @@
 //! still seal and emit. Do not "fix" this by relaxing the gate — the gate has
 //! no override, by design (`03-physics-and-constants.md`, the retirement of
 //! `PERF_GATE_EMIT_ON_VERIFY`). The uncovered islands are the finding.
+//!
+//! **A model can also emit with a WARNED gate, and the `GATES` line says so
+//! separately from `passed`.** Under the 2026-08-29 owner ruling
+//! `PreWriteGate::Load` records an area-law violation instead of refusing it,
+//! so an emitted artifact can carry live violations. Those rows are printed
+//! under `GATE-WARNING` / `GATE-WARNING-ROW`. An artifact that emitted with a
+//! warned gate is NOT the same artifact as one that emitted clean, and this
+//! driver's whole job is to say which one the owner is about to open.
 
 #[path = "shared/first_artifact_chain.rs"]
 mod chain;
@@ -153,14 +161,39 @@ fn run_one(model: &str, exports: &Path) -> Result<(), String> {
     );
     // The gates that RAN are derived from the ones that did not, so this line
     // cannot claim a gate ran that the run never reached a verdict on.
-    let ran: Vec<plinth_pipeline::PreWriteGate> = plinth_pipeline::PreWriteGate::ALL
+    //
+    // **A WARNED gate is not a PASSED gate.** This line used to call every
+    // non-pending gate "passed", and `Load` is non-pending when it returns
+    // `Warned` — so a model that emitted with live area-law violations printed
+    // `Load` under "passed" and the violations appeared nowhere at all. This
+    // driver exists to show the owner what emission accepted; describing a
+    // gate that found violations as passing is the one thing it must not do.
+    // A warned gate is therefore named on its own line, with its evidence
+    // printed row by row, exactly as `plinth prepare` prints it.
+    let warned: Vec<plinth_pipeline::PreWriteGate> = outcome
+        .load_warnings
+        .iter()
+        .map(|_| plinth_pipeline::PreWriteGate::Load)
+        .collect();
+    let passed: Vec<plinth_pipeline::PreWriteGate> = plinth_pipeline::PreWriteGate::ALL
         .into_iter()
-        .filter(|gate| !outcome.pending_gates.contains(gate))
+        .filter(|gate| !outcome.pending_gates.contains(gate) && !warned.contains(gate))
         .collect();
     println!(
-        "GATES\tpassed={:?}\tnot_yet_ported={:?}",
-        ran, outcome.pending_gates,
+        "GATES\tpassed={:?}\twarned={:?}\tnot_yet_ported={:?}",
+        passed, warned, outcome.pending_gates,
     );
+    if let Some(warnings) = outcome.load_warnings.as_ref() {
+        println!(
+            "GATE-WARNING\tLoad\tviolations={}\tjudged={}\tx_allowed={}",
+            warnings.violations.len(),
+            warnings.judged,
+            warnings.x_allowed,
+        );
+        for violation in &warnings.violations {
+            println!("GATE-WARNING-ROW\t{violation}");
+        }
+    }
     println!(
         "EMIT\trecords={}\tbytes={}",
         outcome.emit.support_record_count, outcome.emit.artifact_bytes,
