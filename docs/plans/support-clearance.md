@@ -60,5 +60,5 @@ score radius), and reverted.
 
 Full derivation, the reproduced Giant Bat measurement, and the reproduction recipe are
 preserved in the archived design record this plan was absorbed from
-(`.git/candidacy-exact-evidence/`, `.git/chal36-challenge-evidence/` — probe logs, out of
+(`../plinth-evidence/candidacy-exact-evidence/`, `../plinth-evidence/chal36-challenge-evidence/` — probe logs, out of
 tree by size). No cap, gate, threshold, or registered constant moved to produce this finding.

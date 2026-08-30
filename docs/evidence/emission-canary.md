@@ -73,7 +73,7 @@ unchanged at 104 hunks. The merge landed Craig's 2026-08-25 crevice-acceptance r
 [`docs/physics.md`](../physics.md) §6 for the ruling itself and its consequences. No emission
 verdict is claimed for any model at this commit; the last measured emission evidence for the
 seal-semantics class remains the 2026-08-24 census above, and the last measured evidence for
-the footprint-search closure (Rule Z's rejection) is `.git/rule-z-2026-08-25/`.
+the footprint-search closure (Rule Z's rejection) is `../plinth-evidence/rule-z-2026-08-25/`.
 
 ## 2026-08-25 corpus re-baseline @ 5d546cb
 

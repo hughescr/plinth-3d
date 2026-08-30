@@ -339,7 +339,7 @@ code anywhere says it out loud.
 
 ### 4.5 Recovery copies
 
-The commit message states that recovery copies live at `.git/salvage-hollow-rescue/`. Note that
+The commit message states that recovery copies live at `../plinth-evidence/salvage-hollow-rescue/`. Note that
 `.git/` is not carried by a clone. Now that `e97743a` exists on a branch, the commit is the
 durable copy and the `.git/` copies are redundant — but nothing else that lives only under
 `.git/` is safe, including the three held LAYER 1 patches (§9 D4).
@@ -493,7 +493,7 @@ first reading and says so in its commit message. This is a physics question, not
 question.
 
 **D4. Three fixes are written but held, waiting on you.**
-They are saved as patches under `.git/salvage-l1-held-2026-08-28/` — P2 (`footprint_seed_xy_mm`),
+They are saved as patches under `../plinth-evidence/salvage-l1-held-2026-08-28/` — P2 (`footprint_seed_xy_mm`),
 P3 (incident-face exterior filter), C2 (`nearest_hosts`). Each changes a rule about what the
 software accepts, which the lane that wrote them was not authorised to decide. **P2 should be
 ruled on first: it unblocks a corpus model that is currently refused.** Note that `.git/` is not
@@ -773,7 +773,7 @@ that absence is itself the largest gap. What this amendment did **not** check:
    anything.** The conclusion that ~20 tests would silently use stale caps follows from reading
    the call sites; no drift was induced to prove it.
 
-`.git/salvage-l1-held-2026-08-28/` and `.git/salvage-hollow-rescue/` still exist on one machine
+`../plinth-evidence/salvage-l1-held-2026-08-28/` and `../plinth-evidence/salvage-hollow-rescue/` still exist on one machine
 only (§9 D4, §4.5). Two empty challenges did not change that either.
 
 ---
@@ -1013,7 +1013,7 @@ And what **this amendment** did not check:
 11. **The 20 non-positional registry reads are still unchecked as *semantic* matches.** Both families
     checked them as value-preserving substitutions. Neither asked whether each registered owner is the
     right owner for the quantity it now bounds. Unchanged from §10.4.
-12. **`.git/salvage-l1-held-2026-08-28/` and `.git/salvage-hollow-rescue/` still exist on one machine
+12. **`../plinth-evidence/salvage-l1-held-2026-08-28/` and `../plinth-evidence/salvage-hollow-rescue/` still exist on one machine
     only** (§9 D4, §4.5). Three challenges did not change that.
 
 Nothing was merged, pushed, built, run or sabotaged for this amendment.

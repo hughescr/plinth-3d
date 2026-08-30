@@ -259,7 +259,7 @@ bands — all fail on the same fixtures the connected-component rule passes.
 
 The strongest remaining candidate, **Rule Z** — exempt a point only when *every* nearest
 boundary point of the live support solid is buried inside the model — was built, measured, and
-**rejected**, 2026-08-25 (evidence: `.git/rule-z-2026-08-25/`, worktree checkout
+**rejected**, 2026-08-25 (evidence: `../plinth-evidence/rule-z-2026-08-25/`, worktree checkout
 `feature/rule-z-experiment @ 8803ff8`, kept unmerged as reference):
 
 - On a plain wide slab it **false-refuses in 104 of 108 swept cells** (96 of those
