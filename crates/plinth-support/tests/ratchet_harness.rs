@@ -40,8 +40,21 @@
 //! | 4 | residual uncovered area at seal | mm² | [`residual_uncovered_area_mm2`] |
 //! | 5 | worst uncovered gap | mm | [`worst_uncovered_gap_mm`] |
 //! | 6 | ownerless model area | mm² | [`ownerless_model_area_mm2`] |
+//! | 7 | abandoned routed load | mm² | [`abandoned_load_mm2`] |
 //!
-//! All six are lower-is-better, computed entirely from evidence the public
+//! **Metric 7 arrived 2026-08-29 with the placement-pin retirement.**
+//! `support_runner_integration.rs` asserted `abandoned_mm2 == 0.0` on the
+//! toed slab as a bare literal, sitting after that test's own snapshot-digest
+//! equality — so it stopped running whenever the digest moved, which is every
+//! time placement changes. The quantity itself is worth keeping: a refused
+//! contact is quarantined, nothing is grown to replace it, and the coverage
+//! measurement's censor radius cannot see the hole one claw tip leaves, so
+//! the area really is abandoned. That makes it a lower-is-better physical
+//! number about plan quality, which is a ratchet, not a fingerprint. Recorded
+//! per model here, it now tracks EVERY corpus model rather than one fixture,
+//! and it can no longer be silenced by an unrelated re-pin lag.
+//!
+//! All seven are lower-is-better, computed entirely from evidence the public
 //! `plinth_support` API already discloses (`EmittedContactDisclosure`,
 //! `FinalLiveMemberEvidence`, `CoverageMeasurement`,
 //! `OwnerlessIslandDisclosure`) — no new field was added to any disclosure
@@ -91,8 +104,9 @@ use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::forest::{RootwardEndRadius, TerminalEndRadius};
 use plinth_support::member_sizing::{frustum_volume_ml, MemberSpan};
 use plinth_support::{
-    registered_coverage_request, run_support, CoverageGap, CoverageMeasurement,
-    EmittedContactDisclosure, OwnerlessIslandDisclosure, SupportPreparationLimits, SupportRequest,
+    registered_coverage_request, run_support, AbandonedContactDisclosure, CoverageGap,
+    CoverageMeasurement, EmittedContactDisclosure, OwnerlessIslandDisclosure,
+    SupportPreparationLimits, SupportRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -165,6 +179,12 @@ struct RatchetMetrics {
     residual_uncovered_area_mm2: f64,
     worst_uncovered_gap_mm: f64,
     ownerless_model_area_mm2: f64,
+    /// Metric 7. `#[serde(default)]` so a recorded file written before this
+    /// metric existed still loads, reading 0.0 — the tightest possible
+    /// baseline, so an unrecorded model cannot silently acquire abandoned
+    /// load. Every row in the committed file carries a measured value.
+    #[serde(default)]
+    abandoned_load_mm2: f64,
 }
 
 impl RatchetMetrics {
@@ -172,7 +192,7 @@ impl RatchetMetrics {
     /// table order from the module doc. One place this list is written, so a
     /// metric added here automatically joins recording, comparison and the
     /// failure report.
-    fn fields(&self) -> [(&'static str, &'static str, f64); 6] {
+    fn fields(&self) -> [(&'static str, &'static str, f64); 7] {
         [
             (
                 "worst_tip_area_ratio",
@@ -196,6 +216,7 @@ impl RatchetMetrics {
                 "mm^2",
                 self.ownerless_model_area_mm2,
             ),
+            ("abandoned_load_mm2", "mm^2", self.abandoned_load_mm2),
         ]
     }
 
@@ -288,6 +309,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 struct RunEvidence {
     emitted_contacts: Vec<EmittedContactDisclosure>,
     ownerless_islands: Vec<OwnerlessIslandDisclosure>,
+    abandoned_contacts: Vec<AbandonedContactDisclosure>,
     member_volumes_ml: Vec<f64>,
     coverage: CoverageMeasurement,
 }
@@ -366,6 +388,7 @@ fn run_model(root: &Path, name: &str) -> Result<RunEvidence, String> {
 
     let emitted_contacts = authority.emitted_contacts().to_vec();
     let ownerless_islands = authority.ownerless_islands().to_vec();
+    let abandoned_contacts = authority.abandoned_contacts().to_vec();
 
     let snapshot = authority
         .verification_snapshot()
@@ -398,6 +421,7 @@ fn run_model(root: &Path, name: &str) -> Result<RunEvidence, String> {
     Ok(RunEvidence {
         emitted_contacts,
         ownerless_islands,
+        abandoned_contacts,
         member_volumes_ml,
         coverage,
     })
@@ -530,6 +554,27 @@ fn ownerless_model_area_mm2(disclosures: &[OwnerlessIslandDisclosure]) -> f64 {
         .sum()
 }
 
+/// Metric 7 — **sum** of the routed load every refused contact abandons.
+///
+/// **Sum, not max, and not a count.** The count of refusals is the textbook
+/// bad ratchet this file's module doc warns about: it improves by refusing
+/// one contact that carried 400 mm² instead of two that carried nothing. The
+/// AREA is the physical quantity — load the plan gave up on and told no
+/// neighbour about — and summing it says how much of the model is being held
+/// by nothing at all.
+///
+/// Zero is the good answer and every corpus model that seals reaches it
+/// today. A model whose refusals start costing real area regresses this
+/// metric and has to argue for it, which is exactly what the bare
+/// `abandoned_mm2 == 0.0` literal in `support_runner_integration.rs` was
+/// trying to say before it was stranded behind a digest equality.
+fn abandoned_load_mm2(disclosures: &[AbandonedContactDisclosure]) -> f64 {
+    disclosures
+        .iter()
+        .map(AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum()
+}
+
 /// `-0.0` is numerically identical to `0.0` for every comparison this file
 /// makes, but it is an ugly, confusing thing to see in a file a human reads
 /// to decide whether a change is a regression. A sum over zero or
@@ -558,6 +603,7 @@ fn metrics_from_evidence(model: &str, evidence: &RunEvidence) -> RatchetMetrics 
         ownerless_model_area_mm2: normalize_zero(ownerless_model_area_mm2(
             &evidence.ownerless_islands,
         )),
+        abandoned_load_mm2: normalize_zero(abandoned_load_mm2(&evidence.abandoned_contacts)),
     }
 }
 

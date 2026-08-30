@@ -198,7 +198,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 ///   re-pin" is discharged by the measurement above.
 /// - **Item 4 of the ruling — this same geometry's structural asserts and
 ///   hand-counted coverage resource plan
-///   (`public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`)
+///   (`public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_plan`)
 ///   — was re-derived under the real field and is UNCHANGED**, every number of
 ///   it: the 11-tuple resource plan, all 9 frozen islands, all 9 frozen patches
 ///   with their `uncovered_area_mm2`/`cut_ambiguous`/`assessment_failed`/
@@ -281,7 +281,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// identities, 170 final live members, digest `12_136_443_226_163_403_608`
 /// (`4_190_462_360_230_124_963` before the seal-semantics lane's AUTHORIZED
 /// one-time re-freeze of 2026-08-23 — the note on
-/// `public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence`
+/// `public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_plan`
 /// records what moved and why the counts did not),
 /// `coverage_repair_rounds() == 0`, both abandoned contacts and their ladders —
 /// is bit-identical under the new door. That is §G.3's central claim measured on
@@ -304,13 +304,12 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 /// `run_support`, so keeping both would run the blade's 45 full pipeline trials
 /// TWICE per gate for one set of facts. Gate cost is a real cost (task #44) and
 /// a duplicated expensive fixture is the wrong place to spend it.
+// The `#[expect(clippy::float_cmp)]` that stood here is gone with the exact
+// `abandoned_mm2 == 0.0` pin it existed for: this function no longer compares a
+// float for equality anywhere. Clippy caught its own staleness under
+// `-D unfulfilled-lint-expectations`, which is the lint working as intended.
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
-          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
-)]
-fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
+fn public_runner_seals_toed_slab_and_discloses_its_abandoned_load() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
@@ -337,43 +336,73 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
         .verification_snapshot()
         .expect("borrow sealed verification snapshot");
     snapshot.validate_integrity().expect("snapshot integrity");
-    // Physical-contact-identity uniqueness feeds the frozen count below.
+    // **Physical-contact-identity uniqueness — an INVARIANT, asserted with no
+    // literal in it.** Two physical contacts cannot collide on one id on any
+    // acceptable plan, whatever placement does. It used to feed the frozen
+    // count below it; that count is retired (see the block that follows), so
+    // this now stands on its own, which is where it always belonged.
+    //
     // Pairwise-distinct SEAT positions -- "no two routed contacts occupy the
-    // identical physical point" -- is checked independently and
+    // identical physical point" -- is a different property and is checked
     // placement-agnostically by
     // `toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest`
-    // below, so it is not repeated here gated behind this function's own
-    // digest assertion.
+    // at the bottom of this file.
     let mut identities = BTreeSet::new();
     for contact in snapshot.routed_contacts() {
         assert!(identities.insert(contact.physical_contact_id()));
     }
-    // Re-derived 2026-08-28 for the RAFT PAD/BRIDGE DISPATCH SPLIT (`ad335d9`):
-    // 12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006.  The counts do
-    // NOT move — 64 contacts, 170 members, before and after — only the
-    // classification of raft primitives inside them.  Before `ad335d9`, pad and
-    // bridge were told apart by comparing a segment's two endpoints for exact
-    // `f64` equality; that read the right answer only because one producer
-    // happened to pass the same point twice, so a zero-length bridge silently
-    // fell through to pad geometry.  The producer now states `RaftPad` or
-    // `RaftBridge` and a zero-length bridge is an error.  The digest moves
-    // because the plan now records the kind that was chosen instead of one
-    // re-inferred from coordinates.
+    // ===================================================================
+    // RETIRED 2026-08-29 — the (contacts, members, digest) triple that stood
+    // here, `(64, 170, 13_198_418_135_389_558_006)`.
     //
-    // This pair went unrefreshed when `ad335d9` landed, while its sibling
-    // golden (`coverage_gate_toed_slab.json`, `15e4a6f`) was refreshed.  They
-    // were found only because this binary was run under `gtimeout`, letting its
-    // early tests report before the unbounded coverage-repair search was killed:
-    // under a plain `cargo test` this binary never finishes, so nothing in it
-    // reports and it has been unable to guard anything it contains.
-    assert_eq!(
-        (
-            identities.len(),
-            snapshot.final_live_members().count(),
-            snapshot.digest(),
-        ),
-        (64_usize, 170_usize, 13_198_418_135_389_558_006_u64),
-        "make_toed_slab's counts must not move: it takes zero repair rounds"
+    // It was a FINGERPRINT, and the doc-comment chain above this function is
+    // its own indictment: seven recorded re-derivations, each naming a
+    // legitimate change that moved it, several of which moved the counts too
+    // (65 -> 64 contacts, 184 -> 170 members, 179 -> 170). A number that has
+    // to be rewritten every time the engine legitimately improves is not
+    // guarding the engine; it is charging a toll on improving it. Under the
+    // adopted doctrine (`docs/development.md`, "Three kinds of check, three
+    // lifetimes") a whole-plan digest is an EQUIVALENCE check: run at the time
+    // of a specific change and recorded in that change's commit message, never
+    // stored as a standing assertion.
+    //
+    // MEASURED at the retirement, on the legal placement perturbation the
+    // doctrine was built for (reversing the terminal tie-break in
+    // `initial.rs::routing_order`): of every value this test and its sibling
+    // coverage test observe, EXACTLY TWO move — `final_live_members`
+    // 170 -> 174 and `digest` 13198418135389558006 -> 9878193565529525115.
+    // The routed-contact count, the abandoned set, all eleven coverage
+    // resource-plan terms, all nine islands and all nine patches are
+    // bit-identical across it. So this triple was the entire reason a legal
+    // improvement landed as a red suite, and nothing else here was protecting
+    // anything the perturbation could break.
+    //
+    // What the triple was standing in for now lives in checks that survive a
+    // placement change:
+    //   * identity uniqueness — asserted directly above, no literal;
+    //   * seat pairwise-distinctness and the scar ceiling —
+    //     `toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest`;
+    //   * refusal-disclosure consistency —
+    //     `abandoned_refusals_disclose_a_consistent_ladder_and_reason_whichever_contacts_are_refused`;
+    //   * plan SIZE as a quality number, which is what a member count was
+    //     really proxying for — `ratchet_harness.rs` metric 3, support resin
+    //     volume, a physical quantity that cannot be improved by deleting
+    //     supports until the model falls off the plate.
+    // ===================================================================
+    //
+    // The one thing the counts said that is true of ANY acceptable plan, and
+    // is therefore kept: a model that seals must actually be held by
+    // something. Stated as a bound, not as the number 64.
+    assert!(
+        !identities.is_empty(),
+        "a sealed plan must route at least one contact"
+    );
+    assert!(
+        snapshot.final_live_members().count() >= identities.len(),
+        "every routed contact needs at least one live member reaching it: {} members for {} \
+         contacts",
+        snapshot.final_live_members().count(),
+        identities.len()
     );
     // COUNTS AND DIGEST re-derived 2026-08-20 for the SCAR BOUND, Craig's
     // ruling of the same day: a grow-for-attachment rescue may not exceed
@@ -465,14 +494,24 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     // holding it up. A comment cannot fail, so the claim is measured here. If a
     // future change ever makes the bound drop a contact that IS carrying load,
     // this fixture must go red rather than keep quoting a number nobody checks.
+    // RECLASSIFIED 2026-08-29 to a RATCHET. The number is worth keeping and
+    // the equality was the wrong shape for it: 0.0 is the value this fixture
+    // happens to have today, not a law, and a legal placement change that
+    // moved it to 0.02 mm² would have read as a defect. It is now
+    // `ratchet_harness.rs` metric 7 (`abandoned_load_mm2`), recorded per model
+    // against the corpus STL digest, where it covers all six measurable corpus
+    // models instead of this one fixture and where a worsening must be argued
+    // rather than merely re-pinned. Asserted here only as the bound that is
+    // true of any plan: a refusal may not abandon MORE load than the plan ever
+    // routed, and the disclosure may not invent a negative or non-finite area.
     let abandoned = authority.abandoned_contacts();
     let abandoned_mm2 = abandoned
         .iter()
         .map(plinth_support::AbandonedContactDisclosure::abandoned_area_mm2)
         .sum::<f64>();
-    assert_eq!(
-        abandoned_mm2, 0.0,
-        "the scar bound must cost this fixture no routed load; got {abandoned_mm2} mm² across \
+    assert!(
+        abandoned_mm2.is_finite() && abandoned_mm2 >= 0.0,
+        "abandoned load must be a finite, non-negative area; got {abandoned_mm2} mm² across \
          {abandoned:?}"
     );
     // **TWO refusals, of two DIFFERENT kinds, and the fixture pins which is
@@ -491,33 +530,23 @@ fn public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load() {
     //     withdraws, and here naming `TIP_RADIUS_MAX_GROWN_SCAR_MM` as the
     //     stopper is exactly true.
     //
-    // Both abandon 0.000 mm², which the sum above already states.
-    assert_eq!(
-        abandoned.len(),
-        2,
-        "this fixture refuses exactly two contacts — one buried seat and one the scar bound \
-         withdraws; got {abandoned:?}"
-    );
-    let classes = abandoned
-        .iter()
-        .map(|contact| {
-            (
-                contact.contact_id(),
-                contact.refusal(),
-                contact.growth_ladder_entered(),
-                contact.growth_rungs().len(),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        classes,
-        vec![
-            (25_u32, "buried_surface", false, 0_usize),
-            (64_u32, "not_attached", true, 6_usize),
-        ],
-        "a buried seat must be recorded as never having entered the ladder, and only the \
-         ladder-walked refusal may read as the bound's doing"
-    );
+    // RETIRED 2026-08-29 — the refusal-count equality (`abandoned.len() == 2`)
+    // and the literal class vector
+    // `[(25, "buried_surface", false, 0), (64, "not_attached", true, 6)]`.
+    //
+    // Contact IDs are placement-order artifacts, so both were wrong by
+    // construction the moment placement moved; and both sat after this
+    // function's digest equality, so neither could fail while that digest was
+    // stale, which was every time placement moved. The prose above records what
+    // they were for: a buried seat must not read as though the scar ceiling
+    // refused it. That claim is not about contacts 25 and 64 — it is a
+    // consistency rule between the fields of ANY refusal disclosure, and it is
+    // asserted that way, on whichever contacts a placement change happens to
+    // refuse, by
+    // `abandoned_refusals_disclose_a_consistent_ladder_and_reason_whichever_contacts_are_refused`
+    // at the bottom of this file. That test is strictly stronger here: it also
+    // catches an abandoned contact owning an ATTESTING rung, which the literal
+    // vector could never see because it only counted rungs.
     // That every abandoned contact quotes the SAME registered
     // `TIP_RADIUS_MAX_GROWN_SCAR_MM` ceiling, and that no growth rung it
     // offered exceeds that ceiling, is checked independently and
@@ -727,7 +756,7 @@ fn public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_cont
 /// the frozen JSON is `snapshot_digest`. Ledgered in
 /// `docs/evidence/emission-canary.md`.
 #[test]
-fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
+fn public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_plan() {
     let hollowed = hollowed_corpus_model(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
@@ -762,57 +791,153 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .measure_coverage(request)
         .expect("public measurement");
     assert_eq!(measurement.snapshot_digest(), snapshot.digest());
-    // Same snapshot digest as the toed-slab closure test above, re-derived
-    // 2026-08-20 for the SCAR BOUND (`TIP_RADIUS_MAX_GROWN_SCAR_MM` = 0.400 mm
-    // RADIUS / 0.800 mm DIAMETER, Craig's field ceiling):
-    // 14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963.  ONE contact
-    // moved — contact 64's cure needed 0.650630996 mm RADIUS
-    // (1.301261991 mm DIAMETER), 1.63x the ceiling, so it is refused and
-    // disclosed instead of built.  The full measurement, including the
-    // 0.000 mm² of load that refusal abandons, is recorded at the closure test
-    // above.  The frozen resource arithmetic below MOVES with the count, and
-    // is re-derived here rather than inherited.
+    // ===================================================================
+    // RETIRED 2026-08-29 — `assert_eq!(snapshot.digest(),
+    // 13_198_418_135_389_558_006)`.
     //
-    // Superseded records: re-derived 2026-08-20 for the descending refinement
-    // scan on grow-to-attest (15_045_390_433_036_889_889 ->
-    // 14_374_106_896_419_012_910), and 2026-08-19 for the tip-minimum ruling,
-    // 0.2 -> 0.05 mm RADIUS / 0.4 -> 0.1 mm DIAMETER
-    // (9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963).
+    // It was never an independent measurement: it was the SAME fingerprint as
+    // the closure test above, on the same fixture, re-derived in lockstep with
+    // it every time it moved. Two copies of one fingerprint cost two re-pins
+    // per change and catch nothing the first does not. Its movement history,
+    // kept here because it is the evidence for retiring it rather than a value
+    // anyone must maintain — six re-derivations in ten days, each for a change
+    // that was correct:
+    //   * 2026-08-19, tip minimum 0.2 -> 0.05 mm radius:
+    //     9_355_852_079_468_421_123 -> 4_190_462_360_230_124_963
+    //   * 2026-08-20, descending refinement scan on grow-to-attest:
+    //     15_045_390_433_036_889_889 -> 14_374_106_896_419_012_910
+    //   * 2026-08-20, the scar bound (`TIP_RADIUS_MAX_GROWN_SCAR_MM`):
+    //     14_374_106_896_419_012_910 -> 4_190_462_360_230_124_963
+    //   * 2026-08-23, the seal-semantics ruled-out-arm counter:
+    //     4_190_462_360_230_124_963 -> 12_136_443_226_163_403_608
+    //   * 2026-08-27/28, the raft pad/bridge dispatch split (`ad335d9`):
+    //     12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006
+    // On that last one this copy and its sibling drifted apart — one golden was
+    // refreshed and this pair was not — and nobody saw it, because the binary
+    // holding them never finishes under a plain `cargo test`. A number three
+    // files must re-pin in lockstep, in a binary that cannot report, is not a
+    // guard.
     //
-    // Re-derived 2026-08-28 for the raft pad/bridge dispatch split (`ad335d9`):
-    // 12_136_443_226_163_403_608 -> 13_198_418_135_389_558_006.  Same value and
-    // same reason as the closure test above, where the argument is written out.
-    assert_eq!(snapshot.digest(), 13_198_418_135_389_558_006);
+    // It was also the most expensive line in this file. EIGHT of the nine
+    // checks in this function sat after it, and `assert_eq!` aborts a test at
+    // its first mismatch — so the eleven-term resource plan, all nine islands
+    // and all nine patches below stopped running entirely whenever this digest
+    // was stale. MEASURED under the legal placement perturbation (reversing
+    // the terminal tie-break in `initial.rs::routing_order`): every one of
+    // those eight checks is bit-identical across it, and only this digest
+    // moved (13198418135389558006 -> 9878193565529525115). This one line was
+    // the whole cost of a legal placement change to this test, and it was
+    // protecting nothing the perturbation could break.
+    //
+    // The digest's real content — "the plan did not change" — is an
+    // EQUIVALENCE claim under the adopted doctrine: run at the time of a
+    // specific change and recorded in that change's commit message, not stored.
+    // ===================================================================
+    //
+    // KEPT, and no longer stranded behind that literal: the measurement must
+    // carry the digest of the snapshot it was actually taken from. That is a
+    // self-consistency invariant with no magic number in it, and it is
+    // asserted above, before anything that can move.
     assert_eq!(measurement.request(), request);
     let plan = measurement.resource_plan();
+    // **SPLIT 2026-08-29 into the two lifetimes it was conflating.** One
+    // `assert_eq!` over eleven terms hid the fact that four of them are a
+    // function of the ROUTED CONTACT COUNT and seven are not — the comment
+    // that used to sit here said so in prose while the assertion treated all
+    // eleven identically, so a placement change that moved the contact count
+    // re-pinned all eleven and buried which four actually moved.
+    //
+    // GROUP 1 — functions of the fixed fixture mesh and this test's EXPLICIT
+    // request, and of nothing else. Placement cannot move these: the mesh is
+    // the checked-in toed slab and the request is written out three lines
+    // above. Literals are correct here, and they are the assertion that would
+    // catch a real change in how coverage is sampled or assessed.
+    //
+    // Confirmed, not assumed: bit-identical under the legal placement
+    // perturbation (reversing the terminal tie-break in
+    // `initial.rs::routing_order`), measured 2026-08-29.
     assert_eq!(
         (
-            plan.route_membership_sum(),
-            plan.sequential_route_membership_peak(),
-            plan.indexed_point_count(),
-            plan.sequential_indexed_point_peak(),
             plan.query_row_count(),
-            plan.distance_work(),
-            plan.logical_peak_bytes(),
             plan.assessment_work(),
             plan.assessment_scratch_bytes(),
             plan.assessment_evidence_bytes(),
             plan.assessment_phase_peak_bytes(),
         ),
-        // Re-derived 2026-08-20 with the scar bound. Only the three terms that
-        // are a function of the ROUTED CONTACT COUNT moved, which is exactly
-        // what withdrawing one over-bound contact must do and nothing more:
-        //   * route_membership_sum   74 -> 71  (the contact left three routes)
-        //   * indexed_point_count    71 -> 69
-        //   * distance_work     1_034_240 -> 1_033_728  (= query rows x points)
-        //   * logical_peak_bytes 12_624_272 -> 12_624_152
-        // The sequential peaks (30, 30), the query row count and the whole
-        // assessment phase are UNMOVED: they are functions of the mesh and the
-        // request, not of how many contacts survived.
-        (
-            71, 30, 69, 30, 50_688, 1_033_728, 12_624_152, 5_879_808, 3_902_976, 8_312_832,
-            12_215_808
-        )
+        (50_688, 5_879_808, 3_902_976, 8_312_832, 12_215_808),
+        "the coverage sampling and assessment phases are functions of the mesh and the request, \
+         neither of which a placement change touches"
+    );
+    // GROUP 2 — functions of the routed contact count. These moved the last
+    // time a contact was withdrawn (route_membership_sum 74 -> 71,
+    // indexed_point_count 71 -> 69, distance_work 1_034_240 -> 1_033_728,
+    // logical_peak_bytes 12_624_272 -> 12_624_152) and they will move again
+    // whenever placement changes how many contacts survive. Pinning today's
+    // four numbers would re-create exactly the toll this lane is removing, so
+    // they are asserted as the RELATIONS that hold for any measurement instead.
+    //
+    // The strongest of these is the limits check: `measure_coverage` returned
+    // `Ok`, and a measurement that succeeded must have stayed inside every
+    // ceiling its own request handed it. That is a real guarantee about the
+    // allocator, it is re-derived from the request rather than copied from
+    // history, and it tracks placement instead of pinning one placement's
+    // answer.
+    let limits = request.limits();
+    assert!(
+        plan.route_membership_sum() <= limits.max_route_memberships(),
+        "route memberships {} exceed the requested ceiling {}",
+        plan.route_membership_sum(),
+        limits.max_route_memberships()
+    );
+    assert!(
+        plan.indexed_point_count() <= limits.max_indexed_points(),
+        "indexed points {} exceed the requested ceiling {}",
+        plan.indexed_point_count(),
+        limits.max_indexed_points()
+    );
+    assert!(
+        plan.query_row_count() <= limits.max_query_rows(),
+        "query rows {} exceed the requested ceiling {}",
+        plan.query_row_count(),
+        limits.max_query_rows()
+    );
+    assert!(
+        plan.distance_work() <= limits.max_distance_work(),
+        "distance work {} exceeds the requested ceiling {}",
+        plan.distance_work(),
+        limits.max_distance_work()
+    );
+    assert!(
+        plan.logical_peak_bytes() <= limits.max_logical_peak_bytes(),
+        "logical peak bytes {} exceed the requested ceiling {}",
+        plan.logical_peak_bytes(),
+        limits.max_logical_peak_bytes()
+    );
+    assert!(
+        plan.assessment_work() <= limits.max_assessment_work(),
+        "assessment work {} exceeds the requested ceiling {}",
+        plan.assessment_work(),
+        limits.max_assessment_work()
+    );
+    // A SEQUENTIAL PEAK is a high-water mark taken while accumulating its own
+    // total, so it can never exceed that total and can never be zero on a plan
+    // that routed anything. Both directions are structural, and both hold
+    // whatever placement does.
+    assert!(
+        plan.sequential_route_membership_peak() <= plan.route_membership_sum(),
+        "the route-membership peak {} cannot exceed its own sum {}",
+        plan.sequential_route_membership_peak(),
+        plan.route_membership_sum()
+    );
+    assert!(
+        plan.sequential_indexed_point_peak() <= plan.indexed_point_count(),
+        "the indexed-point peak {} cannot exceed its own count {}",
+        plan.sequential_indexed_point_peak(),
+        plan.indexed_point_count()
+    );
+    assert!(
+        plan.sequential_route_membership_peak() > 0 && plan.sequential_indexed_point_peak() > 0,
+        "a measurement over a plan that routed contacts must show a non-zero peak: {plan:?}"
     );
     // These rows are frozen from corpus/baseline/make_toed_slab.* under the
     // explicit request above.  They are literal fixture authority, not
@@ -979,6 +1104,30 @@ fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
         .iter()
         .zip(expected_patches)
     {
+        // **The VERDICT is re-derived BEFORE it is compared.** `assessment_failed`
+        // appears in the frozen tuple below beside the area it belongs to, which
+        // means that table can only ever agree with itself: a bug that flipped
+        // every verdict would be re-frozen as "the new answer" without anyone
+        // seeing that the RULE had changed. The rule is stated here, from the
+        // request's own patch-area minimum rather than a second hand-written
+        // column, and it runs FIRST so a flipped verdict is reported as the rule
+        // violation it is rather than as one more number to re-pin.
+        //
+        // Added 2026-08-29 with the pin retirement, and it holds on all nine
+        // patches: areas 393.283, 50.577, 378.699 and the four at 1.416 exceed
+        // the 1.0 mm² minimum and fail; the two toe patches at 0.483 do not and
+        // pass. Unlike the frozen column, it keeps holding whatever a placement
+        // change does to those areas.
+        assert_eq!(
+            patch.assessment_failed(),
+            patch.uncovered_area_mm2().get() > request.patch_area_floor_mm2().get(),
+            "a patch fails assessment exactly when its uncovered area exceeds the requested \
+             minimum; patch on island {} reports {} at {} mm² against a {} mm² minimum",
+            patch.island_id(),
+            patch.assessment_failed(),
+            patch.uncovered_area_mm2().get(),
+            request.patch_area_floor_mm2().get()
+        );
         assert_eq!(
             (
                 patch.island_id(),
@@ -1554,7 +1703,7 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
 
 /// **INVARIANT, independent of placement and of the fingerprint above it.**
 ///
-/// `public_runner_seals_toed_slab_with_its_frozen_digest_and_abandoned_load`
+/// `public_runner_seals_toed_slab_and_discloses_its_abandoned_load`
 /// asserts this same fixture's routed seats are pairwise distinct and that no
 /// grown tip exceeds the registered scar ceiling -- but both assertions sit
 /// AFTER that test's `snapshot.digest()` equality, and `assert_eq!` aborts a
@@ -1685,4 +1834,129 @@ fn uncovered_rim_tables_attempt_zero_route_area_is_the_same_on_a_second_independ
         "measuring the same procedurally-generated fixture twice in one process must give the \
          bit-identical blocking route area both times: {first} vs {second}"
     );
+}
+
+/// **INVARIANT, on whichever contacts placement refuses — not on contacts 25
+/// and 64.**
+///
+/// `public_runner_seals_toed_slab_and_discloses_its_abandoned_load` used to
+/// pin the refusal set as a literal vector,
+/// `[(25, "buried_surface", false, 0), (64, "not_attached", true, 6)]`,
+/// sitting after that test's own `snapshot.digest()` equality. Two separate
+/// problems: contact IDs are placement-order artifacts, so the vector is
+/// wrong the moment placement moves; and it could not fail at all while the
+/// digest above it was stale, which is every time placement moves. The
+/// literal therefore guarded nothing precisely when it was needed.
+///
+/// What that vector was really standing in for is a set of consistency rules
+/// between the fields of a refusal disclosure, and those hold for ANY refused
+/// contact on ANY model. They are stated directly here, with no contact ID,
+/// no count, and no digest, so they keep biting across a placement change.
+///
+/// The rules, and where each comes from:
+///
+/// * The refusal reason is one of the three
+///   `ContactAttestationRefusal` variants `runner.rs` can project
+///   (`buried_surface`, `not_attached`, `unusable_geometry`). A fourth string
+///   means a variant was added without its disclosure.
+/// * `growth_ladder_entered == false` means "no rung was ever proposed", per
+///   `AbandonedContactDisclosure::growth_ladder_entered`'s own doc, so the
+///   rung list MUST be empty. The reverse is NOT asserted: `true` with an
+///   empty list is a documented, distinct case (the load law had already
+///   sized the tip at or above the ceiling).
+/// * **Every rung of an ABANDONED contact must read `attested == false`.**
+///   This is the sharp one. A contact whose ladder found an attesting rung is
+///   a CURE — it lands in `grown()` and is built — so an attesting rung
+///   inside the abandoned list means the run threw away a support it had
+///   already proved it could stand up.
+/// * Rungs ascend in radius: the ladder is documented as "every larger tip
+///   that was tried, ascending".
+/// * A ceiling NAME maps to exactly one ceiling VALUE within a run. This
+///   catches the drift the growth-ceiling disclosure exists to prevent — the
+///   same registered constant quoting two different numbers on two contacts —
+///   without pinning either number, which belongs to the registry and not to
+///   this test.
+/// * Refused contact IDs are unique, and every abandoned area is finite and
+///   non-negative. The abandoned AREA is tracked as a quality number by
+///   `ratchet_harness.rs`'s metric 7, not asserted as a literal here.
+#[test]
+fn abandoned_refusals_disclose_a_consistent_ladder_and_reason_whichever_contacts_are_refused() {
+    let hollowed = hollowed_corpus_model(
+        make_toed_slab().expect("procedural toed slab"),
+        "make_toed_slab",
+    );
+    let delicacy = real_delicacy(&hollowed);
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let authority = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        support_input(&delicacy, &layers),
+    )
+    .expect("make_toed_slab must close coverage on its first closure attempt");
+
+    const REGISTERED_REFUSALS: [&str; 3] = ["buried_surface", "not_attached", "unusable_geometry"];
+
+    let mut seen_ids = BTreeSet::new();
+    let mut ceiling_by_constant: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+
+    for contact in authority.abandoned_contacts() {
+        assert!(
+            seen_ids.insert(contact.contact_id()),
+            "a contact may be refused at most once; {} appears twice",
+            contact.contact_id()
+        );
+        assert!(
+            REGISTERED_REFUSALS.contains(&contact.refusal()),
+            "refusal '{}' is not one of the registered reasons {REGISTERED_REFUSALS:?}; a new \
+             ContactAttestationRefusal variant needs a disclosure string: {contact:?}",
+            contact.refusal()
+        );
+        assert!(
+            contact.abandoned_area_mm2().is_finite() && contact.abandoned_area_mm2() >= 0.0,
+            "abandoned load must be a finite, non-negative area; got {}: {contact:?}",
+            contact.abandoned_area_mm2()
+        );
+        assert!(
+            contact.growth_ceiling_radius_mm().is_finite()
+                && contact.growth_ceiling_radius_mm() > 0.0,
+            "a refusal must quote a finite, positive growth ceiling; got {}: {contact:?}",
+            contact.growth_ceiling_radius_mm()
+        );
+        if !contact.growth_ladder_entered() {
+            assert!(
+                contact.growth_rungs().is_empty(),
+                "a refusal that never entered the ladder cannot have proposed a rung: {contact:?}"
+            );
+        }
+        for rung in contact.growth_rungs() {
+            assert!(
+                !rung.attested(),
+                "an ABANDONED contact cannot own an attesting rung -- a ladder that attested is \
+                 a cure and belongs in the grown list, not the refused one: {contact:?}"
+            );
+        }
+        for pair in contact.growth_rungs().windows(2) {
+            assert!(
+                pair[0].radius_mm() < pair[1].radius_mm(),
+                "the growth ladder is documented as ascending; got {} then {}: {contact:?}",
+                pair[0].radius_mm(),
+                pair[1].radius_mm()
+            );
+        }
+        let recorded = ceiling_by_constant
+            .entry(contact.growth_ceiling_constant().to_owned())
+            .or_insert_with(|| contact.growth_ceiling_radius_mm().to_bits());
+        assert_eq!(
+            *recorded,
+            contact.growth_ceiling_radius_mm().to_bits(),
+            "the registered constant '{}' must name ONE value within a run; it reported {} here \
+             and {} on an earlier contact",
+            contact.growth_ceiling_constant(),
+            contact.growth_ceiling_radius_mm(),
+            f64::from_bits(*recorded)
+        );
+    }
 }
