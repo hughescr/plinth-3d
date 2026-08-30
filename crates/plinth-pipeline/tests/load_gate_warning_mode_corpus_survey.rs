@@ -76,7 +76,8 @@ enum Measured {
     Warned { judged: usize, violations: usize },
     /// The chain stopped before or instead of a `Load` verdict (a different
     /// gate, a coverage-closure refusal, a hard-mode Load refusal such as
-    /// `LoadRecordIncomplete`, or a setup failure). Named, not swallowed.
+    /// `LoadRecordMismatch` or a record the run could not describe, or a setup
+    /// failure). Named, not swallowed.
     Stopped(String),
 }
 
@@ -99,9 +100,9 @@ fn measure(name: &'static str) -> (String, Option<Measured>) {
                 // a clean verdict -- see `GateVerdict::Warned`'s own doc.
                 // `routed_contacts` is the sealed snapshot's own independent
                 // count of what the run routed, which `judge_emitted_load_law`
-                // requires the emitted-contact record to match exactly
-                // (`GateRefusal::LoadRecordIncomplete` otherwise) -- so on a
-                // clean verdict it is exactly what was judged.
+                // requires the emitted-contact record to identify exactly,
+                // once each (`GateRefusal::LoadRecordMismatch` otherwise) --
+                // so on a clean verdict it is exactly what was judged.
                 None => Measured::Clean {
                     judged: routed_contacts,
                 },

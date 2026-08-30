@@ -52,11 +52,19 @@ pub use prepare::{
 // is the only public way to reach the gate set.
 // `judge_emitted_load_law` IS exported, for the opposite reason: it takes no
 // threshold at all. It reads `X_ALLOWED` from the ratified registry itself, and
-// its only other argument is a routed-contact count it cross-checks rather than
-// obeys, so there is no lenient value a caller could pass it.
+// its only other argument is the routed-contact identity list it cross-checks
+// rather than obeys, so there is no lenient value a caller could pass it.
+// `judge_load_gate` is exported for the same reason and one more: it is the
+// WHOLE of `PreWriteGate::Load`'s disposition, WARNING MODE included, and the
+// private dispatch in `gates::judge` calls only it. Exported, every branch of
+// the warn-or-refuse decision is reachable from a test that does not have to
+// build a `FinalSupportAuthority`; unexported, the branch that downgrades a
+// refusal to a warning was reachable only through a real sealed run, which is
+// how it shipped downgrading faults that must never be downgraded.
 pub use gates::{
-    judge_emitted_load_law, judge_then_emit, registered_coverage_request, GateRefusal,
-    GatedEmission, LoadLawFault, LoadLawViolation, LoadWarnings, PreWriteGate, PreWriteGateReport,
+    judge_emitted_load_law, judge_load_gate, judge_then_emit, registered_coverage_request,
+    GateRefusal, GatedEmission, LoadGateDisposition, LoadLawFault, LoadLawFaultClass,
+    LoadLawViolation, LoadRecordIdMismatch, LoadWarnings, PreWriteGate, PreWriteGateReport,
 };
 
 use plinth_core::{m0_constants, Finite, ModelId, PrinterProfile};
