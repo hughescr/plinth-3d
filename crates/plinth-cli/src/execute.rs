@@ -231,6 +231,7 @@ fn print_model(model: &ModelPreparationReport) {
             ownerless_islands,
             contacts,
             pending_gates,
+            load_warnings,
             ..
         } => {
             println!(
@@ -263,6 +264,26 @@ fn print_model(model: &ModelPreparationReport) {
                         .join(", ")
                 );
             }
+            // WARNING MODE (owner ruling, 2026-08-29): `PreWriteGate::Load`
+            // no longer refuses a contact that violates the registered
+            // support area law, so an emitted model can still carry one.
+            // Printed unconditionally when there is evidence to print, right
+            // under the safety-checks line, in the same words a hard refusal
+            // would have used -- an operator reading this must not have to
+            // wonder whether "emitted" means "the area law held".
+            if let Some(warnings) = load_warnings {
+                println!(
+                    "  LOAD LAW WARNING (not blocking)  {} of {} emitted contact(s) violate the \
+                     registered support area law pi * tip_radius_mm^2 >= carried_area_mm2 / \
+                     X_ALLOWED, X_ALLOWED = {}:",
+                    warnings.violations.len(),
+                    warnings.judged,
+                    warnings.x_allowed
+                );
+                for violation in &warnings.violations {
+                    println!("    {violation}");
+                }
+            }
             // What is actually in the file. Two of the four geometries are
             // substitutions -- the chain planned a drilled shell, could not
             // seal or could not hollow it, and carried the oriented solid
@@ -288,7 +309,10 @@ fn print_model(model: &ModelPreparationReport) {
             // when it took nothing, because a line of zeros on every simple
             // model would train the reader to skip it -- and this is the line
             // that says a shell's saving is smaller than its wall implies.
-            if let Some(repair) = cavity_repair.filter(|repair| repair.repaired_voxels > 0) {
+            if let Some(repair) = cavity_repair
+                .as_ref()
+                .filter(|repair| repair.repaired_voxels > 0)
+            {
                 println!(
                     "  cavity repair  {} critical cells, {} voxels returned to material \
                      ({} cell visits, {} whole-grid passes)",

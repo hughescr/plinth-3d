@@ -329,6 +329,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         repair_report,
         repair_ledger,
         pending_gates,
+        load_warnings,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -336,6 +337,26 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             outcome(&report, "mini")
         );
     };
+    // WARNING MODE (owner ruling, 2026-08-29): `PreWriteGate::Load` no longer
+    // refuses this run for it, but "mini" (`make_toed_slab.prepped.stl`, this
+    // config's own decimated fixture — a different candidate set from the
+    // in-repo procedural generator `load_gate_area_law.rs` pins) genuinely
+    // ships two contacts that do not satisfy the registered area law. This
+    // pins a measured defect, not an approval: when the load partition (task
+    // #68) is fixed, this assertion fails and belongs rewritten to `None`.
+    let warnings = load_warnings
+        .as_ref()
+        .expect("this fixture's real emitted-contact record has two area-law violations");
+    assert_eq!(warnings.judged, 18);
+    assert_eq!(warnings.violations.len(), 2);
+    for violation in &warnings.violations {
+        assert_eq!(
+            violation.fault,
+            plinth_pipeline::LoadLawFault::TipSmallerThanTheAreaLawDemands
+        );
+        assert_eq!(violation.carried_area_mm2, Some(59.999_999_192_329_6));
+        assert_eq!(violation.emitted_tip_radius_mm, Some(1.0));
+    }
     assert_eq!(emit.artifact_path, artifact);
     // SPEC-A4 §G.1 stage 4. The folder executor's own door reaches the
     // one-winner controller, so every artifact it produces states what the
@@ -379,12 +400,12 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
 
     // Disclosure half of the pre-write gate's #1 finding, through the real
     // folder executor rather than a constructed fixture: this artifact was
-    // authorized on `UncoveredIslands` alone, and the run report must name
-    // the other eleven named gates as not yet run rather than staying silent
-    // about them.
+    // authorized on the gates that reach a verdict, and the run report must
+    // name every other gate as not yet run rather than staying silent about it.
+    let ported = [PreWriteGate::UncoveredIslands, PreWriteGate::Load];
     let expected_pending: Vec<PreWriteGate> = PreWriteGate::ALL
         .into_iter()
-        .filter(|gate| *gate != PreWriteGate::UncoveredIslands)
+        .filter(|gate| !ported.contains(gate))
         .collect();
     assert_eq!(
         pending_gates, &expected_pending,

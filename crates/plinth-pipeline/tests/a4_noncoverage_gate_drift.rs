@@ -4,10 +4,12 @@
 //! docs/specs/coverage-repair.md §6 clause 2 says a committed repair step is accepted
 //! only when "every noncoverage hard-gate count is componentwise no worse".
 //! `plinth_support::NoncoverageVector` is what compares them — and it can only
-//! compare counts that exist. Of the twelve pre-write gates, **exactly one is
-//! ported**; the other eleven return `NotYetPorted` and produce no count to
-//! compare. So clause 2 is satisfied **in part, by proxy** today, and this file
-//! is the alarm that fires the day that changes.
+//! compare counts that exist. Most of the twelve pre-write gates return
+//! `NotYetPorted` and produce no count to compare, and no ported gate produces
+//! one either: a pre-write gate REFUSES a sealed run, it does not hand the A4
+//! controller a per-trial count. So clause 2 is satisfied **in part, by proxy**
+//! today, and this file is the alarm that fires the day a gate moves off
+//! `NotYetPorted` without somewhere for its quantity to go.
 //!
 //! **Why here and not in `plinth-support`.** `PreWriteGate` is defined in
 //! `plinth-pipeline`, and `plinth-pipeline` depends on `plinth-support`, not
@@ -145,7 +147,8 @@ fn a_ported_gate_must_have_an_a4_component() {
 ///
 /// **Seven of the eleven clause-2 gates have no component at all.** Of the four
 /// that have anything, three are matched by a HOUSE count rather than by the
-/// gate's own — the gates are not ported and produce none — and the fourth,
+/// gate's own — a pre-write gate refuses a sealed run and hands the A4
+/// controller no per-trial count, whether it is ported or not — and the fourth,
 /// `Clearance`, is covered only indirectly, by the trial's stage refusing. If
 /// this count moves DOWN, someone closed part of #42 and should say so here; if
 /// it moves UP, a component was deleted.
