@@ -77,17 +77,17 @@ in behaviour, whichever direction it moved.
 - `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`: **0**
   warnings. Held by the named-lints rule above; re-measured 2026-08-27 on
   `feature/remediation-kernel`.
-- `cargo fmt --all -- --check`: **exactly 104 hunks** (re-confirmed directly, 2026-08-25,
-  at the current tip `7eb5f30`). This is standing fmt debt in already-committed code, not a
-  target — it must not be edited down opportunistically inside an unrelated change (that
-  produces an unreviewable diff), and it must never **grow**. A change that adds a 105th
-  hunk is not gate-clean.
-  - **This number is stale and the drift is not attributed.** Measured 2026-08-27 against a
-    clean `git archive` of `feature/remediation-kernel`'s tip, the count is **120**, so 16
-    hunks arrived between `7eb5f30` and here without being named. Left as found rather than
-    re-pinned: moving the number to 120 would be exactly the re-freeze this section forbids,
-    and the 16 belong to whichever change introduced them. What the lint-reconciliation
-    change asserts is only that it added none of them — it leaves the count at 120.
+- `cargo fmt --all -- --check`: **7 diff locations, in 2 files** (measured first-hand,
+  2026-08-29, on `develop@d1f53ea`, a clean worktree). Earlier records here said "104
+  hunks," then "120 hunks" — both numbers were real counts at the time, but "hunk" was
+  never the right word: `rustfmt --check` prints one `Diff in <file>:<line>:` block per
+  differing location, with no `@@` hunk markers at all, so counting those blocks is
+  counting locations, not diff hunks. All 7 are pre-existing drift, 6 in
+  `crates/plinth-hollow/examples/wall_distribution.rs` and 1 in
+  `crates/plinth-hollow/tests/repair_gate.rs`. This is standing debt in already-committed
+  code, not a target: do not edit it down opportunistically inside an unrelated change
+  (that produces an unreviewable diff), and do not let the count **grow** — a change that
+  adds an 8th location is not gate-clean.
 
 A change that moves any of these numbers without explaining why is not done; attribute the
 movement in the commit, the way every re-pin below has to.
@@ -144,17 +144,19 @@ re-pointed at `make_raking_blade`, which still refuses; and
 claims are all made by `procedural_raking_blade_is_refused_before_any_file_exists` on a
 fixture that still refuses. No assertion was weakened and no expected value was re-frozen.
 
-### The golden re-pin rule, with `from → to` attribution
+### Registered constants and format contracts
 
-Some tests pin an exact expectation against real geometry — a support digest, or (in
-`crates/plinth-pipeline/src/lib.rs`,
-`the_zero_field_divergence_is_measured_per_committed_fixture`) a per-fixture **verdict**
-about whether two support runs diverge. When a legitimate behaviour change moves what the
-pinned run produces, the fix is never to quietly edit the expectation in place:
+Some tests pin an exact expectation that is not a claim about where a support is placed at
+all — a registered physical constant, a serialization format's exact byte layout, or a
+per-fixture **verdict** about whether two specific runs of the algorithm agree with each
+other (as opposed to a claim about how good either run's plan is). These are meant to stay
+pinned indefinitely, the same way a public API signature is meant to stay pinned. When one
+legitimately needs to change, the fix is never to quietly edit the expectation in place:
 
 1. **Append, don't rewrite.** The prior record stays, verbatim, as a dated comment block; a
    new one is appended on top of it. `the_zero_field_divergence_is_measured_per_committed_fixture`
-   is on its **eighth** such re-record — none of the first seven was deleted or edited.
+   (`crates/plinth-pipeline/src/lib.rs`) is on its **eighth** such re-record — none of the
+   first seven was deleted or edited.
 2. **State the attribution as `from → to`.** Name the old value, the new value, and the
    commit that legitimately caused the move. The eighth re-record: the Sphere fixture's
    verdict moved `true → false`, attributed to `a4f5f3f` (`feat(support): re-size a seated
@@ -163,19 +165,250 @@ pinned run produces, the fix is never to quietly edit the expectation in place:
 3. **Measure both ends**, in the same process, same settings, before changing the
    expectation — not argue from the mechanism alone.
 
-A digest or verdict that moved without an attributed `from → to` re-pin is exactly how a
-regression becomes the new expected value; the census below states the same rule for the
-support-forest fingerprints.
+**This discipline does not apply to a support plan's own fingerprint** — the digest the
+census tool below prints for a corpus model. Under this doctrine a placement-outcome digest
+is not a value to maintain and individually re-pin forever; see
+[Testing doctrine: three kinds of check](#testing-doctrine-three-kinds-of-check), which also
+explains why the older regime that did pin it that way is being retired.
 
-## Determinism: the census check
+## Testing doctrine: three kinds of check
 
-The engine's central promise is that the same model produces the same output, so it is
-checked directly rather than assumed.
+This section states the owner's 2026-08-29 ruling on how a check on this codebase should
+work, and what a contributor does under it. It replaces the older regime of pinning a
+support plan's digest as a permanent expectation, described further down.
+
+A **fingerprint** — a single digest number, printed by the census tool below, that
+summarizes an entire computed support plan — tells you *that* the output changed. It tells
+you nothing about *whether it got better*. Those are different questions, and a check that
+cannot tell them apart fails a genuine improvement and a silent regression identically. Since
+almost every real improvement to how supports get placed changes the output on purpose, a
+check built only around "did this change" ends up blocking exactly the work this project
+most needs to do.
+
+Every check in this codebase is one of three kinds. Each kind has its own lifetime — how
+long it should stand unchanged, and what it takes to change it — and mixing them up is the
+mistake to avoid: do not argue about a moved hash until you know which of the three you are
+looking at.
+
+### 1. Invariants — permanent, never refreshed
+
+An invariant is a property true of **any** acceptable support plan, no matter where its
+supports are placed. Some exist today; others are named here because they should exist and
+do not yet. Examples:
+
+- Every emitted contact (a support tip actually touching the model) satisfies the measured
+  area law: `pi * r^2 >= carried_area / X_ALLOWED`, where `r` is the tip's radius,
+  `carried_area` is the model area it is holding up, and `X_ALLOWED` (currently `12`, a
+  registered constant) is the safety allowance under the field-measured failure ratio of
+  about 25 (`docs/physics.md`).
+- No demand-bearing contact — one actually carrying model area — is left unrouted.
+- Every overhang island (a contiguous patch of the model's surface that needs support under
+  it while the resin cures) is supported by something.
+- Every unit of the model's load lands on exactly one support: never zero, never
+  double-counted.
+- No support intersects the model except at its own seat (the point where it touches).
+- There is a closed load path from every support down to the build plate or to a model
+  surface — never a support ending in mid-air.
+
+**A broken invariant is always a bug.** No argument reinstates a failing invariant, and no
+change may narrow, loosen, or delete one to make its own output pass — that turns a real
+defect into an accepted one. An invariant only ever changes as part of a physics-model
+change carrying the owner's ruling, exactly as changing `X_ALLOWED` itself would.
+
+### 2. Quality ratchets — a recorded number that may only improve
+
+A ratchet is a single measured number, recorded per corpus model (the fixed test meshes
+under `corpus/models/`, identified by their SHA-256 digest — see below), that says how
+**good** a support plan is, not merely whether it changed. A change may improve a ratchet
+freely and silently — that is the iteration loop this project exists to run. Making one
+worse requires a recorded argument in the same commit, because "the number changed" and "the
+number changed for a stated, accepted reason" are different facts, and only the second is
+allowed to ship. Improving a ratchet updates the recorded value in the same commit that earns
+it; leaving the old, looser number on record would understate what the code now does.
+
+**Implementation.** The comparison and the tolerance rule below are computed entirely from
+evidence the public `plinth_support` API already discloses — `EmittedContactDisclosure`,
+`FinalLiveMemberEvidence`, `CoverageMeasurement`, `OwnerlessIslandDisclosure` — with no new
+field added to any production type. The harness lives in
+`crates/plinth-support/tests/ratchet_harness.rs`; recorded values live beside it in
+`crates/plinth-support/tests/fixtures/support_ratchets.json`, keyed to each corpus model's
+own STL SHA-256 digest. To record an improvement, re-run with `PLINTH_RATCHET_UPDATE=1`; to
+record a worsening that the "physics change" row below actually permits, re-run with
+`PLINTH_RATCHET_ACCEPT_REGRESSION=1`. Either way the new value and the reason land in the
+same commit — never a separate follow-up.
+
+**The six adopted ratchets.** For each: what it measures, why a print cares, where the
+underlying data comes from, how it can be gamed, and what stops the gaming.
+
+1. **Worst tip area ratio** (mm² carried ÷ mm² tip cross-section; lower is better; take the
+   **maximum** across all contacts, never the mean). This is the area law from "Invariants"
+   above, turned into a number a plan can be graded on: a tip carrying more area than its
+   cross-section can hold
+   snaps under peel, and the print fails at its single narrowest section — an average would
+   hide the one tip that snaps. Folded from per-contact data in
+   `EmittedContactDisclosure` (`crates/plinth-support/src/runner.rs`).
+   *Gameable by:* fattening every tip (ratchet 2 rises to catch it)
+   or dropping the worst-loaded contact (blocked by the "no demand-bearing contact left
+   unrouted" invariant, plus a zero-abandoned-load invariant).
+2. **Total model-facing scar area** (mm²; lower is better; sum over all contacts). Every tip
+   leaves a mark that has to be cut and sanded off by hand; on a face-sized miniature that is
+   the difference between usable and ruined. Folded from the same source data as ratchet 1
+   (`tip_radius_mm`). *Gameable by:* shrinking every tip
+   (ratchet 1 rises) or placing fewer contacts (coverage ratchets 4–5 rise).
+3. **Support resin volume** (mL; lower is better; sum of every live member's frustum
+   volume). Resin spent on scaffolding is resin not in the model, plus print time and
+   cleanup, and the saving multiplies across a multi-plate run. Folded from the per-member
+   `frustum_volume_ml` (`crates/plinth-support/src/member_sizing.rs`), reached through
+   `SupportRunSnapshot::final_live_members()` (`runner.rs`).
+   *Gameable by:* thinning or shortening the scaffold until it cannot carry the model — the
+   area-law invariant and the closed-load-path invariant both catch a tree that saves volume
+   by failing to carry its load or never reaching the plate.
+4. **Residual uncovered area at seal** (mm²; lower is better; sum over remaining patches). A
+   "seal" is a plan the coverage-repair controller has accepted as finished; the small
+   allowance it may still leave uncovered is bounded by a registered "censor" area, judged
+   too small to sag or drag on the print film. Folded from the coverage report's
+   `CoverageMeasurementPatchEvidence::uncovered_area_mm2`
+   (`crates/plinth-support/src/coverage_measurement.rs`).
+   *Gameable by:* loosening the censor so patches stop being counted — blocked because the
+   sealed model is always re-measured against the *registered* censor independently of what
+   the run under test claims (an existing invariant), so a censor change shows up as a
+   deliberate re-baseline of that invariant, never as a ratchet improvement.
+5. **Worst uncovered gap** (mm; lower is better; maximum over remaining patches). Sag scales
+   with unsupported *span*, not unsupported *area*: one long thin uncovered strip and a
+   scatter of dots can share the same total area and behave completely differently. Folded
+   from `CoverageMeasurementPatchEvidence::worst_gap` (same file), recorded per patch.
+   *Gameable by:* splitting one long strip into shorter ones with a
+   single added contact — ratchet 4's total is unchanged by the split, and ratchets 2–3
+   charge for the added contact, so the pair together says whether coverage actually improved.
+6. **Ownerless model area** (mm²; lower is better; sum over disclosed islands). Model area
+   the load repartition left with no support officially responsible for it — the area most
+   likely to be found unsupported when a print fails. Folded from the per-island
+   `OwnerlessIslandDisclosure::ownerless_face_area_mm2`, reachable through
+   `SupportRunAuthority::ownerless_islands()` (`runner.rs`).
+   *Gameable by:* declining to disclose a stranded island at all — blocked by two existing
+   invariants: every ownerless island must be disclosed with finite, positive numbers, and
+   the coverage measurement must always be allowed to run and rule rather than being
+   pre-empted by an ownership tally.
+
+**Rejected candidates**, kept here so they are not proposed again:
+
+- *Support or contact count* — improves by deleting supports until the model falls off the
+  plate, and it is seeded from per-vertex local surface minima, so it moves under a mesh
+  re-tessellation with no change in plan quality.
+- *Snapshot digest* — has no direction; a digest is only equal or not, which is exactly why
+  it is an equivalence check (below) rather than a ratchet.
+- *Coverage repair round count* — a compute-cost proxy, not a plate fact; whatever a repair
+  round added is already charged to ratchets 2 and 3.
+- *Abandoned contact count* — a count of refusals has no direction; refusing a contact that
+  carries no load is free and correct. The quantity that matters, abandoned *carried area*,
+  is already pinned at zero by an invariant.
+- *Resource ceilings* (route memberships, indexed points, distance-work budget, peak
+  memory) — real, but a budget fact rather than a print-quality fact; performance-lane
+  territory.
+- *Mean tip area ratio* — an average hides the one tip that snaps; the failure mode is the
+  narrowest section, so the metric must be the maximum (ratchet 1).
+- *Member count or total member length* — proxies for resin volume that move with how the
+  support tree branches without any resin actually changing; ratchet 3 measures the real
+  quantity directly.
+
+**Tolerance rule.** An improvement of any size passes. A worsening fails unless it fits the
+"physics change" row of the table below, and then only with the new value and the argument
+recorded in the same commit.
+
+- Integer-valued ratchets (none of the six above, but a future one might be) tolerate no
+  drift at all — there is no floating-point wobble in a count.
+- The six floating-point ratchets above fail if a value worsens by more than
+  `max(1e-12 × recorded_value, 1e-9 in the metric's own unit)`.
+  - The **relative** term, `1e-12`, is a naive-summation error bound: summing `n` terms in a
+    fixed order accumulates worst-case relative error of about `n × eps`, with `f64`'s own
+    precision `eps = 2.220446e-16`. The largest fold in the corpus runs over the Weeping
+    Treant's contact and member sets, on the order of 10³ items; taking `4096` as headroom
+    gives `4096 × 2.220446e-16 ≈ 9.1e-13`, rounded up to `1e-12`. A change larger than that
+    is not summation noise, it is a real movement. Ratchets 1 and 5 are maximums rather than
+    sums, so `1e-12` is generously loose for them.
+  - The **absolute** term, `1e-9` (in mm², mL, or mm, matching the metric), exists because a
+    relative tolerance means nothing near zero, and ratchets 4 and 6 are legitimately zero on
+    a good plan. `1e-9 mm²` sits six orders of magnitude below the printer's own resolvable
+    area (one 34.4 µm pixel is about `1.2e-3 mm²`), so a movement that small cannot
+    correspond to anything that happens on the plate.
+  - Both terms assume a **fixed summation order**, which the run already guarantees: the
+    existing thread-sweep determinism check proves byte-identical output at 1, 4, and 16
+    threads. That check must keep running for this tolerance rule to mean anything.
+- **Ratchets are keyed to the corpus model's SHA-256 digest**, the same digests already
+  pinned in `crates/plinth-decimate/tests/corpus_budgets.rs`. Contact candidates are seeded
+  from per-vertex local surface minima, so a re-tessellated mesh yields a different candidate
+  set and a plan of equal quality that scores differently — a corpus STL that changes
+  re-baselines every ratchet recorded against it, and comparing a ratchet across two
+  different meshes compares nothing.
+
+### 3. Equivalence checks — a claim about one specific change
+
+**A fingerprint is a claim about a specific change, not a permanent property of the
+system.** Use one when the claim is "this change did not alter what supports get placed" —
+a speed-up, a refactor, a caching change — and prove it by running the real pipeline before
+and after and comparing the output.
+
+The worked example is the 2026-08-28 incremental-digest change
+(`docs/evidence/remediation-2026-08-26/incremental-integrity.md`): six fixtures run through
+both the old and the new code, in the same process and the same settings; every digest,
+refusal outcome, trial count, and commit count compared; the full before/after table recorded
+in the ruling that makes the claim, including which fixture did **not** finish and was
+therefore "untested, not unchanged" rather than silently counted as a pass. That is the shape
+to imitate: control against change, every fixture named, the result recorded where the claim
+is made.
+
+An equivalence check is run **at the time of the change it is proving**, not carried forward
+as a standing assertion every later commit must keep satisfying — the next placement
+improvement is expected to move the same digest, and that is a different claim, not a
+failure of this one. What stays permanent is the mechanism it is built on: the
+same-input-same-output determinism guarantee (below), plus the invariants and ratchets that
+keep policing plan quality regardless of what any one equivalence check once proved.
+
+### Classify the change, then the regime follows
+
+A contributor classifies what the change claims; the test regime follows from the row, not
+from an argument about whether a particular hash "should" have moved.
+
+| Change | Fingerprints | Ratchets | Invariants |
+|---|---|---|---|
+| Better placement | expected to move — no argument needed | must not worsen without a recorded argument | must hold |
+| Performance / refactor (no placement change claimed) | must **not** move — proved by a before/after equivalence run made at the time | unchanged | must hold |
+| Physics change (the load model or a physical constant changes, by owner ruling) | expected to move | may move, argued, by owner ruling | may change, only by owner ruling |
+
+### Why a pinned support-plan digest is not an invariant
+
+Earlier in this project, a corpus model's support-plan digest was pinned as a permanent
+`assert_eq!`, expected to stay byte-identical forever; any change that moved it had to be
+individually re-argued and re-pinned (the append-only `from → to` convention above) before
+the test would go green again. That made every placement improvement expensive in direct
+proportion to how many fixtures it touched, with no way to say "this moved and that is fine"
+short of editing a test file. **A pinned digest found in history or on a stale branch is not
+a model to copy.** Existing pins of that shape are being retired under this doctrine, not
+extended to new fixtures — a fingerprint should answer only the narrow question one specific
+commit is asking, while plan quality is judged by the ratchets and invariants instead.
+
+### What none of this proves
+
+Ratchets and invariants are cheap and run on every commit; a print is not. None of the
+numbers above is a claim that a plan actually works in resin — a ratchet can improve and
+every invariant can hold while a plan still fails on the plate for a reason nobody has
+measured yet. What this doctrine buys is cheap regression detection, so the owner's limited
+printer time answers the question only a real print can answer, instead of re-discovering a
+defect this suite already knows how to catch.
+
+## The census tool: determinism and equivalence checks
+
+The engine's central promise is that the same model produces the same output, checked
+directly rather than assumed. This is the permanent, standing half of the machinery above: a
+**determinism** check compares the same code against itself (same input, different thread
+counts, or instrumented against plain); an **equivalence** check (above) compares two
+versions of the code against each other. Both use the same tool.
 
 The census harness runs the real support-preparation path over the whole test corpus and
-prints, per model, a **snapshot digest** of the sealed support forest along with its routed
-contact and live member counts. It lives behind a non-default cargo feature, so census
-instrumentation can never reach a production build:
+prints, per model, a **snapshot digest** — a single number folded from every routed contact,
+seat, and live support member in the sealed plan — along with its routed contact and live
+member counts. It lives behind a non-default cargo feature, so census instrumentation can
+never reach a production build:
 
 ```sh
 cargo build --offline --example embed_incidence_census -p plinth-support \
@@ -184,24 +417,15 @@ PLINTH_CENSUS=1 ./target/dev-opt/examples/embed_incidence_census
 ```
 
 Without `PLINTH_CENSUS=1` the identical binary produces an un-instrumented baseline run, so
-an instrumented run can be diffed against it and the instrumentation proven result-inert.
+an instrumented run can be diffed against it, proving the instrumentation itself
+result-inert — a determinism check that is always current and never a stored constant.
 
-**The frozen fingerprints.** Corpus models each have a digest that is expected to be
-**byte-identical on every run, forever**, and those values are recorded with the run that
-established them. What they mean:
-
-- A digest that has **not** moved is evidence your change is behaviour-neutral on real
-  geometry — which is exactly what a refactor, an optimization or a batching fix is supposed
-  to be.
-- A digest that **has** moved means the geometry the engine produces has changed. That is
-  not automatically wrong, but it is never something to accept quietly. Attribute the
-  movement — which models, which member, why — decide deliberately whether the new geometry
-  is more correct than the old, and only then re-freeze, the same `from → to` way described
-  above.
-- Re-freezing without an attribution is how a regression becomes the new expected value.
-
-Run the census whenever you touch anything the support path can see, including code you
-believe is inert.
+**Using it to prove an equivalence claim:** run it at the tip of `develop` (or whatever the
+control revision is), run it again on your branch, and diff every digest, count, and refusal
+outcome per fixture. A digest that moves on a branch that claims no placement change is the
+claim failing, not a test to fix. Run the census whenever you touch anything the support path
+can see, including code you believe is inert — that belief is exactly the claim an
+equivalence check exists to test.
 
 ## Reading a repair search that has not finished
 
@@ -270,10 +494,10 @@ casually and never as a side effect of another change.
   of a particular build; they are not committed.
 - **Records are append-only.** Design records and measurement notes are kept as a growing
   engineering journal: findings are recorded when they are made, and a later correction is
-  added as a **dated addendum beside** the original rather than an edit to it (the golden
-  re-pin rule above is the same discipline applied to a pinned test). Rewriting a record to
-  match what turned out to be true destroys the only evidence of what was believed at the
-  time, and with it the ability to audit a decision.
+  added as a **dated addendum beside** the original rather than an edit to it (the
+  registered-value append-only discipline above is the same idea applied to a pinned test).
+  Rewriting a record to match what turned out to be true destroys the only evidence of what
+  was believed at the time, and with it the ability to audit a decision.
 - **Branching is git flow.** `develop` is the integration base and every change starts as a
   `feature/*` branch cut from it, merging back with `--no-ff` so the shape of the work
   survives in history. `main` is release-only. Nothing is pushed without the maintainer's
