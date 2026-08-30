@@ -361,8 +361,8 @@ fn public_runner_seals_toed_slab_and_discloses_its_abandoned_load() {
     // (65 -> 64 contacts, 184 -> 170 members, 179 -> 170). A number that has
     // to be rewritten every time the engine legitimately improves is not
     // guarding the engine; it is charging a toll on improving it. Under the
-    // adopted doctrine (`docs/development.md`, "Three kinds of check, three
-    // lifetimes") a whole-plan digest is an EQUIVALENCE check: run at the time
+    // adopted doctrine (`docs/development.md`, "Testing doctrine: three kinds
+    // of check") a whole-plan digest is an EQUIVALENCE check: run at the time
     // of a specific change and recorded in that change's commit message, never
     // stored as a standing assertion.
     //

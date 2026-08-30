@@ -21,7 +21,7 @@
 //! 3. **Equivalence checks** — a before/after comparison run at the time of a
 //!    specific change. Not this file's job either.
 //!
-//! **Why these six and not a support/contact count.** Support count is the
+//! **Why these seven and not a support/contact count.** Support count is the
 //! textbook bad ratchet: it improves by deleting supports until the model
 //! falls off the plate, and it is seeded from per-vertex local z minima, so
 //! it moves under retessellation with no change in plan quality. Every metric
@@ -30,7 +30,7 @@
 //! off, a scar the operator sands by hand, a strip that sags because nothing
 //! is under it.
 //!
-//! ## The six metrics
+//! ## The seven metrics
 //!
 //! | # | metric | unit | source |
 //! |---|---|---|---|
