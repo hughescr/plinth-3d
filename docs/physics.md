@@ -41,6 +41,13 @@ and [`plate-06-results.md`](engineering-journal/reference/plate-06-results.md) (
 plate 6 calibration results, code-pinned and never moved); plate 6's review memos are in
 `docs/evidence/` (`plate-06-verification-protocol.md`, `plate-06-verification-physicist.md`).
 
+Two earlier plates were also printed and are recorded in the same directory, but **neither
+carries this law**: `plate-01-results.md` bounds peel pressure from one side only (nothing
+on it failed), and `plate-04-results.md` bracketed a critical overhang length but produced
+no usable quantitative figure — its factors were assigned by formula rather than
+counterbalanced, so the result is real and unidentified. They are cited here so their
+absence from the law above reads as a decision rather than an omission.
+
 | | |
 | --- | --- |
 | Design | Three cap areas (3.1, 19.6, 122.7 mm²) crossed against tip diameters spanning 0.100–2.500 mm, in two independent rows |
