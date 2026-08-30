@@ -769,6 +769,16 @@ pub struct ChainOutcome {
     /// Carried out rather than described: the artifact below was authorized by
     /// one gate out of twelve, and this is the list of the other eleven.
     pub pending_gates: Vec<PreWriteGate>,
+    /// [`PreWriteGate::Load`]'s WARNING MODE evidence (owner ruling,
+    /// 2026-08-29), when it found a contact whose shipped tip does not
+    /// satisfy the registered support area law. `None` means the gate found
+    /// nothing to report -- it is never `None` because the gate did not run;
+    /// while `Load` is ported it always reaches a verdict. Carried out here
+    /// for the same reason `pending_gates` is: an artifact that emitted with
+    /// live area-law violations recorded against it is a different artifact
+    /// from one that emitted clean, and nothing else in the report would say
+    /// so.
+    pub load_warnings: Option<crate::gates::LoadWarnings>,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
@@ -2046,6 +2056,7 @@ pub fn seal_and_emit(
         final_live_members: gated.final_live_members,
         snapshot_digest: gated.snapshot_digest,
         pending_gates: gated.gates.pending().to_vec(),
+        load_warnings: gated.gates.load_warnings().cloned(),
         primitive_count: gated.primitive_count,
         lift_mm: gated.lift_mm,
         plate_z_mm: gated.plate_z_mm,
@@ -2066,7 +2077,7 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         emit: outcome.emit,
         geometry: outcome.supported_geometry,
         hollow_disposition: outcome.hollow_disposition,
-        cavity_repair: outcome.cavity_repair,
+        cavity_repair: outcome.cavity_repair.map(Box::new),
         // FU-37 / FU-55: the wall the run asked for and the wall it got, so
         // the report on disk can tell two otherwise identical runs apart.
         wall_mm: outcome.wall,
@@ -2095,6 +2106,11 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // was authorized on the gates that ran, not on all twelve, and this
         // is the list of the ones that did not.
         pending_gates: outcome.pending_gates,
+        // WARNING MODE (owner ruling, 2026-08-29): the artifact emitted, and
+        // this is the area-law evidence `PreWriteGate::Load` recorded rather
+        // than refused on. `None` means no violation was found. Boxed on the
+        // way into the run report's own enum -- see that field's doc.
+        load_warnings: outcome.load_warnings.map(Box::new),
     }
 }
 
@@ -2738,6 +2754,22 @@ mod tests {
                 PreWriteGate::Load,
                 PreWriteGate::BallBreach,
             ],
+            // WARNING MODE. Non-`None` and non-default on purpose, for the
+            // same reason `pending_gates` above is: an empty/`None` value
+            // here could not tell "the gate's evidence survived the hop"
+            // apart from "the field was dropped and defaulted away".
+            load_warnings: Some(crate::gates::LoadWarnings {
+                judged: 90,
+                x_allowed: 12.0,
+                violations: vec![crate::gates::LoadLawViolation {
+                    contact_id: 19,
+                    position_mm: Some([-15.0, -5.625, 15.938]),
+                    carried_area_mm2: Some(450.0),
+                    emitted_tip_radius_mm: Some(0.05),
+                    required_tip_radius_mm: Some(3.454_942_539_921_643_5),
+                    fault: crate::gates::LoadLawFault::TipSmallerThanTheAreaLawDemands,
+                }],
+            }),
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -2753,11 +2785,31 @@ mod tests {
             contacts,
             repair_report,
             pending_gates,
+            load_warnings,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // WARNING MODE (owner ruling, 2026-08-29): the Load gate's evidence
+        // must reach the report unchanged, not get dropped on this hop and
+        // silently read back as "the gate found nothing".
+        assert_eq!(
+            load_warnings,
+            Some(Box::new(crate::gates::LoadWarnings {
+                judged: 90,
+                x_allowed: 12.0,
+                violations: vec![crate::gates::LoadLawViolation {
+                    contact_id: 19,
+                    position_mm: Some([-15.0, -5.625, 15.938]),
+                    carried_area_mm2: Some(450.0),
+                    emitted_tip_radius_mm: Some(0.05),
+                    required_tip_radius_mm: Some(3.454_942_539_921_643_5),
+                    fault: crate::gates::LoadLawFault::TipSmallerThanTheAreaLawDemands,
+                }],
+            })),
+            "the Load gate's warning-mode evidence must reach the run report unchanged"
+        );
         // The disclosure this guard exists to protect: the pending-gate list
         // must reach the report unchanged, not get dropped on this hop and
         // silently read back as "every gate ran".

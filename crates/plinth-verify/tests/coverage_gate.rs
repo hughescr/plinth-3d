@@ -409,9 +409,71 @@ fn public_coverage_report_is_frozen_without_evidence_loss() {
         return;
     }
     let json = report_json();
-    assert_eq!(json, FROZEN_REPORT_JSON.trim_end());
+    // TESTING DOCTRINE, owner ruling 2026-08-29 (`docs/development.md`,
+    // "Testing doctrine: three kinds of check"). Everything in this report
+    // EXCEPT `snapshot_digest` is coverage EVIDENCE -- the request bounds, the
+    // eleven resource counters, the nine islands with their face ids, the nine
+    // patches with their areas and gaps, and the seven defects. Losing any of
+    // it silently is what this freeze exists to catch, so all of it stays
+    // frozen byte for byte, through the redaction below.
+    //
+    // `snapshot_digest` is not evidence. It is a placement-outcome
+    // fingerprint: it answers "did the support plan change" and can never
+    // answer "did it get better". Freezing it made every legal placement
+    // change fail here for a reason that says nothing about coverage; the
+    // twelve recorded re-pins above are that regime's own record. Under the
+    // doctrine that pin is RETIRED: the digest is checked for SHAPE (present,
+    // an unsigned integer) and excluded from the frozen comparison. A claim
+    // that one specific commit did not move it is an equivalence check, run
+    // and recorded in that commit, never a constant this file carries forever.
+    //
+    // MEASURED at the retirement, on the legal placement perturbation the
+    // doctrine was built for (reversing the terminal tie-break in
+    // `plinth_support::initial::routing_order`): the produced report and the
+    // golden differ in EXACTLY ONE of their 169 scalar leaves,
+    // `snapshot_digest` 13198418135389558006 -> 9878193565529525115. Every
+    // request bound, all 11 resource counters, all 9 islands, all 9 patches
+    // and all 7 defects were byte-identical across it. So this assertion was
+    // the entire cost of a legal placement change to this crate, and it was
+    // protecting no coverage evidence the perturbation could move.
+    assert_eq!(
+        redact_snapshot_digest(&json),
+        redact_snapshot_digest(FROZEN_REPORT_JSON.trim_end())
+    );
     assert!(json.contains("\"islands\""));
     assert!(json.contains("\"patches\""));
+}
+
+/// Replaces the `snapshot_digest` value with a fixed placeholder, leaving every
+/// other byte of the report untouched.
+///
+/// Deliberately textual rather than a `serde_json::Value` round trip: parsing
+/// both sides into `Value` and comparing would also stop catching key order,
+/// number formatting and any leaf whose JSON type changed, which would weaken
+/// the freeze on the evidence this test exists to protect. Panics if the field
+/// is missing or is not a bare unsigned integer -- a digest that stopped being
+/// emitted, or stopped being a number, is a real regression in the report's
+/// shape, not something to redact away.
+fn redact_snapshot_digest(json: &str) -> String {
+    const KEY: &str = "\"snapshot_digest\":";
+    let key_at = json
+        .find(KEY)
+        .expect("coverage report carries a snapshot_digest field");
+    let value_at = key_at + KEY.len();
+    let value_end = value_at
+        + json[value_at..]
+            .find(',')
+            .expect("snapshot_digest is followed by a further field");
+    let digits = &json[value_at..value_end];
+    assert!(
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
+        "snapshot_digest must still be an unsigned integer, found {digits:?}"
+    );
+    format!(
+        "{}<placement-outcome digest, not frozen>{}",
+        &json[..value_at],
+        &json[value_end..]
+    )
 }
 
 #[test]

@@ -3223,10 +3223,31 @@ pub struct RoutedPhysicalContactEvidence<'a> {
 /// off the written file and compares them to these radii scaled by the
 /// registered factor.
 ///
-/// **This is evidence and it decides nothing.** Nothing in production compares
-/// a field here to anything; it exists so a byte movement can be attributed
-/// instead of argued about. The gate that guards it is a test, which is where
-/// a check on evidence belongs.
+/// **This is evidence, and the pre-write `Load` gate READS IT.**
+/// `plinth_pipeline::judge_emitted_load_law` reads `carried_area_mm2` and
+/// `tip_radius_mm` off every row here and judges
+/// `pi * tip_radius_mm^2 >= carried_area_mm2 / X_ALLOWED` on each.
+///
+/// **The area-law verdict is a WARNING, not a refusal** (owner ruling,
+/// 2026-08-29): a violating contact is recorded with its evidence and the
+/// model still emits, so the gate can measure the corpus while the load model
+/// is redesigned. It flips to hard refusal once the plans are fixed. What the
+/// gate still REFUSES on is a record it cannot read at all -- a `Routed` row
+/// with either field missing, or a row count that disagrees with the sealed
+/// snapshot. Two consequences a future editor must carry:
+///
+/// * `None` is load-bearing. The gate refuses a `Routed` row it cannot
+///   describe, so filling either field with a legal-looking `0.0` to make a
+///   join succeed would convert a refusal into a pass -- and, under warning
+///   mode, into a silent pass. The paragraph on `carried_area_mm2` explains
+///   why zero is legal to READ and illegal to INVENT; the gate is now what
+///   enforces it.
+/// * The row count is load-bearing. The gate cross-checks it against the sealed
+///   snapshot's own routed-contact projection, so dropping an undescribable row
+///   instead of emitting a `None` one would be caught, not absorbed.
+///
+/// It still carries `tip_diameter_mm` and the seat for the older reason: so a
+/// byte movement can be attributed instead of argued about.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmittedContactDisclosure {

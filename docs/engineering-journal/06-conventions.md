@@ -437,7 +437,43 @@ objective metrics on both and requires Rust to be **as-good-or-better on every
 metric**. Never byte-diff the two sides, and **never bridge via PyO3 to compare** —
 a bridge lets one shared bug hide on both sides. The one place byte-level identity
 is a real contract is the `.chitubox` record structure, gated by the existing corpus
-round-trip tests (05-chitubox-and-corpus.md).
+round-trip tests (05-chitubox-and-corpus.md). This is the earliest instance of the
+general discipline below: compare by a metric that has a direction, require
+as-good-or-better rather than byte-identical, and reserve byte identity for an
+actual format contract.
+
+**Three kinds of check, three lifetimes.** Within any of the layers above, a specific
+assertion is one of three kinds, and the kind decides how long it should stand
+unchanged and what it takes to change it. The full doctrine — the adopted ratchet
+metrics and the tolerance rule — is in
+[`../development.md`](../development.md#testing-doctrine-three-kinds-of-check); the
+short form:
+
+- **Invariants** are properties true of any acceptable output, regardless of what
+  specific values a given run produced. The cache-disabled equality rule below is
+  one: cache on or off, the report must be byte-identical, on any model, always. An
+  invariant is never refreshed — a failure here is always a bug in the code, never a
+  reason to loosen the check.
+- **Quality ratchets** are a recorded number, per corpus model, that says how good a
+  result is, not merely whether it changed. A ratchet may improve freely and
+  silently; making one worse needs a recorded argument in the same commit, and only
+  a change classified as a physics change may do that without a matching
+  improvement elsewhere.
+- **Equivalence checks** are a claim about one specific change — "this refactor did
+  not alter the output" — proved by running both versions and comparing, at the
+  time the claim is made, and recorded in the commit or ruling that makes it. It is
+  not a standing assertion every later commit must keep satisfying: a later,
+  unrelated change is free to move the same output on purpose.
+
+A fingerprint (a single digest summarizing a computed result) can only ever answer
+"did this change," never "did this get better." Classify what the change claims
+before arguing about whether a moved fingerprint is a problem:
+
+| Change claims | Fingerprints | Ratchets | Invariants |
+|---|---|---|---|
+| Better placement | expected to move | must not worsen — argue if it does | must hold |
+| Performance / refactor | must not move — proved at the time | unchanged | must hold |
+| Physics change (owner ruling) | expected to move | may move, argued | may change, by owner ruling only |
 
 The exact full baseline corpus is, in order: `Sphere`, `Cylinder`, `make_box`,
 `make_overhang_table`, `make_toed_slab`, `make_raking_blade`, `make_thin_fin`,

@@ -178,9 +178,23 @@ pub struct RetainedLoadCensus {
     /// sum of an admissible-worst-case number, not a measurement of work
     /// actually done, and is printed beside `executed_operations` — the sum
     /// of what each round's `GateLoadState::executed_operations` actually
-    /// was — precisely so the two are never conflated. `executed_operations
-    /// <= charged_operations` holds term by term (asserted in
-    /// `build_gate_load_state`) and therefore in the sum.
+    /// was — precisely so the two are never conflated.
+    ///
+    /// **`executed_operations <= charged_operations` does NOT hold, and the
+    /// claim that it did was the Cylinder accounting defect** (corrected
+    /// 2026-08-29, `fix/cylinder-load-accounting`). `charged_operations` sums
+    /// the PREFLIGHT, `specialized_load_resource_plan`, which by its own
+    /// documented contract carries no cells-shaped term; a retained round's
+    /// metered spend is mostly that term. The two count different populations
+    /// of work, so neither the per-round comparison nor the sum was ever an
+    /// invariant. What `build_gate_load_state` asserts instead — per round,
+    /// and again at the call site in `evaluate_gate_batch` — is
+    /// `executed_operations <= GateLoadState::full_build_operations`, the
+    /// preflight with that cells term restored. These two sums stay side by
+    /// side as they are: a run whose executed total exceeds its charged total
+    /// is reporting how far the preflight under-states the load stage, which
+    /// is a measurement worth having (3.47x on the Cylinder), not a
+    /// violation.
     pub charged_operations: u128,
     pub executed_operations: u128,
 }

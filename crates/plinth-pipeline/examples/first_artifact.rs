@@ -151,9 +151,15 @@ fn run_one(model: &str, exports: &Path) -> Result<(), String> {
         outcome.lift_mm,
         outcome.plate_z_mm,
     );
+    // The gates that RAN are derived from the ones that did not, so this line
+    // cannot claim a gate ran that the run never reached a verdict on.
+    let ran: Vec<plinth_pipeline::PreWriteGate> = plinth_pipeline::PreWriteGate::ALL
+        .into_iter()
+        .filter(|gate| !outcome.pending_gates.contains(gate))
+        .collect();
     println!(
-        "GATES\tpassed=uncovered_islands\tnot_yet_ported={:?}",
-        outcome.pending_gates,
+        "GATES\tpassed={:?}\tnot_yet_ported={:?}",
+        ran, outcome.pending_gates,
     );
     println!(
         "EMIT\trecords={}\tbytes={}",
