@@ -427,41 +427,103 @@ fn run_model(root: &Path, name: &str) -> Result<RunEvidence, String> {
     })
 }
 
-/// Runs [`run_model`] on its own thread and gives up after
-/// [`PER_MODEL_MEASUREMENT_BUDGET`] rather than blocking the whole harness on
-/// a search that may never finish. **The worker thread is not cancelled on
-/// timeout** — Rust has no safe preemptive thread cancellation, and this
-/// binary's own process lifetime (it exits once every `#[test]` in it has
-/// returned) is what eventually reclaims it, the same way `gtimeout` reclaims
-/// a killed subprocess elsewhere in this project's test conventions. A
-/// timeout is reported exactly like any other measurement failure: named,
-/// with the budget stated, never silently retried or silently waited past.
+/// Runs `work` on its own thread and gives up after `budget` rather than
+/// blocking the caller on a search that may never finish.
+///
+/// **Not preemptive cancellation.** Rust has no safe way to stop a running
+/// thread, so a `work` closure that outlives its budget keeps its CPU and
+/// memory live in the background after this function returns its timeout
+/// `Err`. What this function DOES guarantee, and what it did not guarantee
+/// before this fix: `previous_worker`, if it is still holding the
+/// [`thread::JoinHandle`] of an earlier call's straggler, is joined --
+/// unconditionally blocked on until that straggler actually finishes --
+/// before this call's own worker thread is spawned. That is what stops two
+/// workers from ever running at once: not by killing the slow one, but by
+/// never starting the next one until the slow one is provably done. This
+/// call's own handle is stashed back into `previous_worker` on a timeout (for
+/// the NEXT call to join) or joined immediately once it reports (there is
+/// nothing left to wait for).
+///
+/// **Residual risk this does not remove.** A `work` closure that never
+/// returns at all blocks every later call sharing the same `previous_worker`
+/// slot forever, at its own join point. That trades an unattributable
+/// resource-contention flake (the old defect: two heavy searches overlapping,
+/// possibly starving a THIRD, unrelated model into a false budget breach) for
+/// a loud, attributable hang on the very next call -- the best containment
+/// available without unsafe preemption, not a guarantee that the harness
+/// always finishes in bounded time.
+fn run_with_budget<T, F>(
+    name: &str,
+    budget: Duration,
+    previous_worker: &mut Option<thread::JoinHandle<()>>,
+    work: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    if let Some(handle) = previous_worker.take() {
+        // Block until the prior timeout's worker is actually finished before
+        // this call's clock -- or its CPU and memory footprint -- starts.
+        let _ = handle.join();
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            // The receiver may already be gone (this call timed out and
+            // returned) -- `send` failing in that case is expected, not an
+            // error to report.
+            let _ = sender.send(work());
+        })
+        .unwrap_or_else(|error| panic!("spawn worker thread '{name}': {error}"));
+    match receiver.recv_timeout(budget) {
+        Ok(result) => {
+            // The thread already sent its result, so it is finished or about
+            // to be -- reclaim it now rather than carrying it forward.
+            let _ = handle.join();
+            Ok(result)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            *previous_worker = Some(handle);
+            Err(format!(
+                "exceeded the {budget:?} budget (still running when the caller gave up). Its \
+                 thread is retained and will be joined -- blocked on until it actually finishes \
+                 -- before the next worker sharing this budget slot starts, so it cannot overlap \
+                 that worker's measurement window."
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            Err(format!(
+                "worker thread '{name}' ended without reporting a result (panicked?)"
+            ))
+        }
+    }
+}
+
+/// Runs [`run_model`] under [`run_with_budget`], naming
+/// [`PER_MODEL_MEASUREMENT_BUDGET`] in the timeout message the way the prior
+/// version of this function did.
 fn run_model_with_budget(
     root: &Path,
     name: &'static str,
     budget: Duration,
+    previous_worker: &mut Option<thread::JoinHandle<()>>,
 ) -> Result<RunEvidence, String> {
     let root = root.to_path_buf();
-    let (sender, receiver) = mpsc::channel();
-    thread::Builder::new()
-        .name(format!("ratchet-{name}"))
-        .spawn(move || {
-            // The receiver may already be gone (this function timed out and
-            // returned) -- `send` failing in that case is expected, not an
-            // error to report.
-            let _ = sender.send(run_model(&root, name));
-        })
-        .unwrap_or_else(|error| panic!("spawn ratchet worker thread for '{name}': {error}"));
-    match receiver.recv_timeout(budget) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "exceeded the {budget:?} per-model measurement budget (still running when the \
-             harness gave up -- see PER_MODEL_MEASUREMENT_BUDGET's doc comment)"
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("worker thread ended without reporting a result (panicked?)".to_owned())
-        }
-    }
+    run_with_budget(
+        &format!("ratchet-{name}"),
+        budget,
+        previous_worker,
+        move || run_model(&root, name),
+    )
+    .unwrap_or_else(|timeout_or_panic_message| {
+        Err(format!(
+            "{timeout_or_panic_message} (see PER_MODEL_MEASUREMENT_BUDGET's doc comment)"
+        ))
+    })
 }
 
 fn to_finite3(point_mm: [f64; 3]) -> Result<[Finite; 3], plinth_core::FiniteError> {
@@ -699,11 +761,21 @@ fn support_ratchets_do_not_regress() {
     // failure.
     let mut never_reachable: Vec<String> = Vec::new();
     let mut reachability_regressions: Vec<String> = Vec::new();
+    // Carries a timed-out model's worker handle forward so the NEXT model's
+    // call joins it -- blocks until it is actually finished -- before
+    // spawning its own worker. See `run_with_budget`'s doc comment for why
+    // this is what actually prevents two models' searches from overlapping.
+    let mut previous_worker: Option<thread::JoinHandle<()>> = None;
 
     for &name in &CORPUS_MODELS {
         let stl_path = root.join("corpus/models").join(format!("{name}.stl"));
         let sha256 = corpus_sha256(&stl_path);
-        match run_model_with_budget(&root, name, PER_MODEL_MEASUREMENT_BUDGET) {
+        match run_model_with_budget(
+            &root,
+            name,
+            PER_MODEL_MEASUREMENT_BUDGET,
+            &mut previous_worker,
+        ) {
             Ok(evidence) => {
                 let metrics = metrics_from_evidence(name, &evidence);
                 let field_values = metrics.fields();
@@ -726,6 +798,12 @@ fn support_ratchets_do_not_regress() {
                 }
             }
         }
+    }
+    // The last model in the corpus may have left a straggler behind too --
+    // join it here so the same no-overlap guarantee holds at the tail of the
+    // run, not only between consecutive models.
+    if let Some(handle) = previous_worker.take() {
+        let _ = handle.join();
     }
 
     assert!(
@@ -817,13 +895,113 @@ fn support_ratchets_do_not_regress() {
     }
 }
 
-/// Rewrites the recorded file from a fresh measurement. Every metric that
-/// improved (or a brand-new model) is written unconditionally -- an
-/// unratcheted improvement would leave the check looser than the code
-/// deserves. Any metric that would get WORSE is refused unless
-/// `PLINTH_RATCHET_ACCEPT_REGRESSION=1` is also set, and refusal reports
-/// every model/metric pair that blocked the write without touching the file
-/// at all, so a partial, silently-mixed rewrite can never happen.
+/// One metric's write-time resolution against its previously recorded value.
+/// See [`update_recorded_file`]'s doc comment for the three cases this
+/// implements. `accept_regression` only ever matters for case 3 (a genuine,
+/// beyond-tolerance regression); by the time this runs, `update_recorded_file`
+/// has already panicked if such a case exists and `accept_regression` is
+/// false, so reaching that branch with `accept_regression` false would be a
+/// logic error in the caller, not a case this function silently mishandles.
+fn resolve_metric_value(old_value: f64, new_value: f64, accept_regression: bool) -> f64 {
+    if new_value < old_value {
+        // Case 1: genuine improvement, however small. Always take it.
+        new_value
+    } else if is_worse_beyond_tolerance(old_value, new_value) {
+        // Case 3: a genuine regression. Only reachable here with
+        // `accept_regression` true -- `update_recorded_file`'s `blocking`
+        // check already refused the write otherwise.
+        debug_assert!(
+            accept_regression,
+            "resolve_metric_value reached a beyond-tolerance regression without \
+             accept_regression=true; update_recorded_file's blocking check should have panicked \
+             before this ran"
+        );
+        new_value
+    } else {
+        // Case 2: unchanged within tolerance -- floating-point noise, not a
+        // fact about the plan. Keep the recorded value so it can never be
+        // walked backward by noise alone.
+        old_value
+    }
+}
+
+/// Applies [`resolve_metric_value`] to every field, field by field. Written
+/// out by name (mirroring [`RatchetMetrics::fields`]'s own listing) rather
+/// than generically, because [`RatchetMetrics`] is a concrete struct with no
+/// reflective field-by-name setter.
+fn resolve_metrics(
+    previous: &RatchetMetrics,
+    measured: &RatchetMetrics,
+    accept_regression: bool,
+) -> RatchetMetrics {
+    RatchetMetrics {
+        worst_tip_area_ratio: resolve_metric_value(
+            previous.worst_tip_area_ratio,
+            measured.worst_tip_area_ratio,
+            accept_regression,
+        ),
+        total_scar_area_mm2: resolve_metric_value(
+            previous.total_scar_area_mm2,
+            measured.total_scar_area_mm2,
+            accept_regression,
+        ),
+        support_resin_volume_ml: resolve_metric_value(
+            previous.support_resin_volume_ml,
+            measured.support_resin_volume_ml,
+            accept_regression,
+        ),
+        residual_uncovered_area_mm2: resolve_metric_value(
+            previous.residual_uncovered_area_mm2,
+            measured.residual_uncovered_area_mm2,
+            accept_regression,
+        ),
+        worst_uncovered_gap_mm: resolve_metric_value(
+            previous.worst_uncovered_gap_mm,
+            measured.worst_uncovered_gap_mm,
+            accept_regression,
+        ),
+        ownerless_model_area_mm2: resolve_metric_value(
+            previous.ownerless_model_area_mm2,
+            measured.ownerless_model_area_mm2,
+            accept_regression,
+        ),
+        abandoned_load_mm2: resolve_metric_value(
+            previous.abandoned_load_mm2,
+            measured.abandoned_load_mm2,
+            accept_regression,
+        ),
+    }
+}
+
+/// **What `tolerance_for` is FOR, and the one rule this function enforces
+/// because of it.** The tolerance exists so that floating-point summation
+/// noise -- a metric that is unchanged in every physical sense but lands a
+/// few ULPs off from run to run -- does not fail a run that did not really
+/// change. It is arithmetic hygiene, not a licence to worsen. So for a single
+/// metric on a model with a comparable recorded baseline (same corpus
+/// `sha256`), exactly one of three things happens:
+///
+/// 1. **Genuine improvement** (`new < old`, by any amount, even far below
+///    tolerance): recorded freely and silently. A tighter number can never
+///    make the ratchet unsound, so nothing gates this case.
+/// 2. **Unchanged within tolerance** (`new >= old` but not worse by more than
+///    `tolerance_for(old)`): the RECORDED value is kept, not overwritten.
+///    This is the fix for the defect this function used to carry -- it used
+///    to write `measured` unconditionally once no metric was a `blocking`
+///    violation, so a metric nudging worse by less than tolerance was stored
+///    as the new baseline, and repeated `PLINTH_RATCHET_UPDATE=1` runs could
+///    walk it backward in tolerated increments forever with no
+///    `PLINTH_RATCHET_ACCEPT_REGRESSION=1` ever required. Keeping the old
+///    value instead means noise can never accumulate into a regression no
+///    matter how many times the harness is re-run.
+/// 3. **Genuine regression** (worse by more than tolerance): refused unless
+///    `PLINTH_RATCHET_ACCEPT_REGRESSION=1` is also set (checked by the
+///    `blocking` panic below, before any of this rewriting happens); when
+///    accepted, the new, worse value is recorded, exactly as before.
+///
+/// A brand-new model, or one whose corpus STL changed (a re-baseline,
+/// already reported separately), has no comparable recorded value at all --
+/// its fresh measurement is taken whole, same as always.
 fn update_recorded_file(
     path: &Path,
     recorded: &RecordedRatchetFile,
@@ -872,11 +1050,28 @@ fn update_recorded_file(
     updated.schema = SCHEMA.to_owned();
     let mut changed_models: Vec<String> = Vec::new();
     for (name, measured) in measured_rows {
-        let previously_recorded = updated.models.get(name);
-        if previously_recorded != Some(measured) {
+        let existing = recorded.models.get(name);
+        let resolved_row = match existing {
+            Some(previous) if previous.corpus_sha256 == measured.corpus_sha256 => {
+                RecordedModelRow {
+                    corpus_sha256: measured.corpus_sha256.clone(),
+                    metrics: resolve_metrics(
+                        &previous.metrics,
+                        &measured.metrics,
+                        accept_regression,
+                    ),
+                }
+            }
+            // No recorded baseline yet, or the corpus STL changed underneath
+            // it (a re-baseline, already reported by `rebaseline_needed` in
+            // the comparison path): nothing recorded is comparable, so the
+            // fresh measurement is taken whole.
+            _ => measured.clone(),
+        };
+        if existing != Some(&resolved_row) {
             changed_models.push(name.clone());
         }
-        updated.models.insert(name.clone(), measured.clone());
+        updated.models.insert(name.clone(), resolved_row);
     }
     write_recorded(path, &updated);
     if changed_models.is_empty() {
@@ -922,4 +1117,365 @@ fn tolerance_boundary_is_exact() {
     // meaningless.
     assert!(!is_worse_beyond_tolerance(0.0, 1e-10));
     assert!(is_worse_beyond_tolerance(0.0, 1e-8));
+}
+
+// ---------------------------------------------------------------------------
+// Defect 3 proof: the ratchet update path must be one-way.
+// ---------------------------------------------------------------------------
+
+/// Builds a `RatchetMetrics` with every field set to the same value, so a
+/// test can nudge exactly one field without having to name the other six.
+fn uniform_metrics(value: f64) -> RatchetMetrics {
+    RatchetMetrics {
+        worst_tip_area_ratio: value,
+        total_scar_area_mm2: value,
+        support_resin_volume_ml: value,
+        residual_uncovered_area_mm2: value,
+        worst_uncovered_gap_mm: value,
+        ownerless_model_area_mm2: value,
+        abandoned_load_mm2: value,
+    }
+}
+
+const TEST_SHA: &str = "sha256:0000000000000000000000000000000000000000000000000000000000aa";
+
+fn single_model_file(name: &str, sha256: &str, metrics: RatchetMetrics) -> RecordedRatchetFile {
+    let mut models = BTreeMap::new();
+    models.insert(
+        name.to_owned(),
+        RecordedModelRow {
+            corpus_sha256: sha256.to_owned(),
+            metrics,
+        },
+    );
+    RecordedRatchetFile {
+        schema: SCHEMA.to_owned(),
+        models,
+    }
+}
+
+/// A private, per-test scratch path under the crate's own `target/` dir --
+/// never `tests/fixtures/support_ratchets.json`, the real committed baseline
+/// these tests must never touch.
+fn scratch_ratchet_path(test_name: &str) -> PathBuf {
+    let dir = workspace_root()
+        .join("target")
+        .join("ratchet_harness_test_scratch");
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    dir.join(format!(
+        "{test_name}-{}-{:?}.json",
+        std::process::id(),
+        thread::current().id()
+    ))
+}
+
+/// **Proof for defect 3, unit level.** [`resolve_metric_value`] directly:
+/// an improvement is always taken, a worsening within tolerance keeps the
+/// OLD value (this is the fix -- the pre-fix code did not have this
+/// function at all and simply took `measured` unconditionally), and an
+/// accepted beyond-tolerance regression takes the new value.
+// `float_cmp` is the workspace's real-defects lint for exact equality on
+// INDEPENDENTLY COMPUTED geometry (see `Cargo.toml`'s lint table). Every
+// comparison below instead checks that `resolve_metric_value` returns one of
+// its own inputs UNCHANGED, bit for bit -- there is no independent
+// computation on either side to have drifted, so exact equality is exactly
+// the property under test, not a code smell.
+#[allow(clippy::float_cmp)]
+#[test]
+fn resolve_metric_value_implements_the_three_cases() {
+    let old = 10.0_f64;
+    let tolerance = tolerance_for(old);
+
+    // Case 1: improvement, however small -- always taken.
+    assert_eq!(resolve_metric_value(old, old - 1e-15, false), old - 1e-15);
+    assert_eq!(resolve_metric_value(old, 0.0, false), 0.0);
+
+    // Case 2: worse, but within tolerance -- THE FIX. The old value survives.
+    let worse_within_tolerance = old + tolerance * 0.5;
+    assert_eq!(
+        resolve_metric_value(old, worse_within_tolerance, false),
+        old,
+        "a metric worsened by half the tolerance must not move the recorded baseline"
+    );
+    // Exactly unchanged is the same case and must also keep `old` (trivially
+    // true either way, asserted for completeness).
+    assert_eq!(resolve_metric_value(old, old, false), old);
+
+    // Case 3: a genuine, beyond-tolerance regression, accepted explicitly.
+    let worse_beyond_tolerance = old + tolerance * 2.0;
+    assert_eq!(
+        resolve_metric_value(old, worse_beyond_tolerance, true),
+        worse_beyond_tolerance
+    );
+}
+
+/// **Proof for defect 3, end-to-end.** This is the scenario named in the
+/// brief: a metric worsened by half the tolerance, the update path taken
+/// with `accept_regression=false` (exactly what running with only
+/// `PLINTH_RATCHET_UPDATE=1` selects -- see `support_ratchets_do_not_regress`
+/// for how that env var maps to this flag), and the recorded baseline must
+/// NOT move.
+///
+/// Confirmed red against the pre-fix code before this commit: the old
+/// `update_recorded_file` copied `measured.clone()` into the file
+/// unconditionally whenever `blocking` was empty, and a worsening within
+/// tolerance is never `blocking` (that is exactly what "within tolerance"
+/// means) -- so it wrote `worse_within_tolerance`, not `old`, and this
+/// assertion failed. It is green now that the write path resolves
+/// metric-by-metric through [`resolve_metric_value`].
+// See `resolve_metric_value_implements_the_three_cases`'s `float_cmp` note --
+// the values compared here round-trip through JSON unchanged, they are not
+// independently computed.
+#[allow(clippy::float_cmp)]
+#[test]
+fn update_with_plain_update_flag_does_not_move_baseline_within_tolerance() {
+    let old = 10.0_f64;
+    let tolerance = tolerance_for(old);
+    let worse_within_tolerance = old + tolerance * 0.5;
+    assert!(
+        !is_worse_beyond_tolerance(old, worse_within_tolerance),
+        "test setup: this nudge must be inside the tolerance band"
+    );
+
+    let recorded = single_model_file("TestModel", TEST_SHA, uniform_metrics(old));
+    let mut measured_rows = BTreeMap::new();
+    let mut measured_metrics = uniform_metrics(old);
+    measured_metrics.total_scar_area_mm2 = worse_within_tolerance;
+    measured_rows.insert(
+        "TestModel".to_owned(),
+        RecordedModelRow {
+            corpus_sha256: TEST_SHA.to_owned(),
+            metrics: measured_metrics,
+        },
+    );
+
+    let path = scratch_ratchet_path("baseline-does-not-move");
+    // `accept_regression: false` -- this is the plain `PLINTH_RATCHET_UPDATE=1`
+    // case named in the brief, with no `PLINTH_RATCHET_ACCEPT_REGRESSION=1`.
+    update_recorded_file(&path, &recorded, &measured_rows, false);
+
+    let written = load_recorded(&path);
+    let row = written.models.get("TestModel").expect("row written");
+    assert_eq!(
+        row.metrics.total_scar_area_mm2, old,
+        "a metric worsened by less than tolerance must not move the recorded baseline, even \
+         after PLINTH_RATCHET_UPDATE=1 alone"
+    );
+    // Every other metric was untouched, so they must round-trip unchanged
+    // too -- this is not a coincidental pass on the one field being watched.
+    assert_eq!(row.metrics.worst_tip_area_ratio, old);
+    assert_eq!(row.metrics.support_resin_volume_ml, old);
+
+    fs::remove_file(&path).ok();
+}
+
+/// A genuine improvement is still recorded freely and silently by
+/// `PLINTH_RATCHET_UPDATE=1` alone -- the doctrine's easy case must stay easy.
+// See `resolve_metric_value_implements_the_three_cases`'s `float_cmp` note.
+#[allow(clippy::float_cmp)]
+#[test]
+fn update_with_plain_update_flag_records_genuine_improvement() {
+    let old = 10.0_f64;
+    let improved = 7.5_f64;
+    let recorded = single_model_file("TestModel", TEST_SHA, uniform_metrics(old));
+    let mut measured_rows = BTreeMap::new();
+    let mut measured_metrics = uniform_metrics(old);
+    measured_metrics.total_scar_area_mm2 = improved;
+    measured_rows.insert(
+        "TestModel".to_owned(),
+        RecordedModelRow {
+            corpus_sha256: TEST_SHA.to_owned(),
+            metrics: measured_metrics,
+        },
+    );
+
+    let path = scratch_ratchet_path("records-improvement");
+    update_recorded_file(&path, &recorded, &measured_rows, false);
+
+    let written = load_recorded(&path);
+    let row = written.models.get("TestModel").expect("row written");
+    assert_eq!(
+        row.metrics.total_scar_area_mm2, improved,
+        "a genuine improvement must be recorded by PLINTH_RATCHET_UPDATE=1 alone"
+    );
+
+    fs::remove_file(&path).ok();
+}
+
+/// A genuine, beyond-tolerance regression is refused by
+/// `PLINTH_RATCHET_UPDATE=1` alone -- `update_recorded_file` panics and, per
+/// its own contract, writes nothing at all.
+#[test]
+fn update_with_plain_update_flag_refuses_genuine_regression() {
+    let old = 10.0_f64;
+    let tolerance = tolerance_for(old);
+    let worse_beyond_tolerance = old + tolerance * 2.0;
+    let recorded = single_model_file("TestModel", TEST_SHA, uniform_metrics(old));
+    let mut measured_rows = BTreeMap::new();
+    let mut measured_metrics = uniform_metrics(old);
+    measured_metrics.total_scar_area_mm2 = worse_beyond_tolerance;
+    measured_rows.insert(
+        "TestModel".to_owned(),
+        RecordedModelRow {
+            corpus_sha256: TEST_SHA.to_owned(),
+            metrics: measured_metrics,
+        },
+    );
+
+    let path = scratch_ratchet_path("refuses-regression");
+    fs::remove_file(&path).ok();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        update_recorded_file(&path, &recorded, &measured_rows, false);
+    }));
+    assert!(
+        result.is_err(),
+        "a beyond-tolerance regression must panic without PLINTH_RATCHET_ACCEPT_REGRESSION=1"
+    );
+    assert!(
+        !path.exists(),
+        "a refused update must write nothing at all, not a partial file"
+    );
+}
+
+/// The same regression IS recorded once
+/// `PLINTH_RATCHET_ACCEPT_REGRESSION=1` (`accept_regression: true`) is also
+/// set, exactly as the doctrine requires for a deliberate, argued change.
+// See `resolve_metric_value_implements_the_three_cases`'s `float_cmp` note.
+#[allow(clippy::float_cmp)]
+#[test]
+fn update_with_accept_regression_flag_records_genuine_regression() {
+    let old = 10.0_f64;
+    let tolerance = tolerance_for(old);
+    let worse_beyond_tolerance = old + tolerance * 2.0;
+    let recorded = single_model_file("TestModel", TEST_SHA, uniform_metrics(old));
+    let mut measured_rows = BTreeMap::new();
+    let mut measured_metrics = uniform_metrics(old);
+    measured_metrics.total_scar_area_mm2 = worse_beyond_tolerance;
+    measured_rows.insert(
+        "TestModel".to_owned(),
+        RecordedModelRow {
+            corpus_sha256: TEST_SHA.to_owned(),
+            metrics: measured_metrics,
+        },
+    );
+
+    let path = scratch_ratchet_path("accepts-regression");
+    update_recorded_file(&path, &recorded, &measured_rows, true);
+
+    let written = load_recorded(&path);
+    let row = written.models.get("TestModel").expect("row written");
+    assert_eq!(
+        row.metrics.total_scar_area_mm2, worse_beyond_tolerance,
+        "an explicitly accepted regression must be recorded"
+    );
+
+    fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Defect 4 proof: a timed-out worker must not overlap the next one.
+// ---------------------------------------------------------------------------
+
+/// **Proof for defect 4.** Two synthetic "models" run through
+/// [`run_with_budget`] sharing one `previous_worker` slot, the same way
+/// `support_ratchets_do_not_regress` shares one slot across the whole corpus
+/// loop. The first closure blows its budget and, once released, records the
+/// wall-clock instant it finished into a shared `Mutex`. The second closure
+/// records the instant it STARTED. If the fix works, the join at the top of
+/// `run_with_budget` forces "first finished" to happen-before "second
+/// started" -- proving no overlap, not merely asserting it.
+///
+/// Confirmed red against the pre-fix code: the old function discarded the
+/// spawn's `JoinHandle` and never joined it, so the second closure's start
+/// time could and did land before the first closure's (artificially delayed)
+/// finish time.
+#[test]
+fn timed_out_worker_does_not_overlap_the_next_one() {
+    use std::sync::{Arc, Mutex};
+
+    let first_finished_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    let second_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+
+    let mut previous_worker: Option<thread::JoinHandle<()>> = None;
+
+    // First "model": deliberately outlasts its tiny budget, then -- well
+    // after the caller has given up and moved on -- records when it actually
+    // finished.
+    let first_finished_at_clone = Arc::clone(&first_finished_at);
+    let first_result = run_with_budget(
+        "test-first",
+        Duration::from_millis(20),
+        &mut previous_worker,
+        move || {
+            thread::sleep(Duration::from_millis(200));
+            *first_finished_at_clone.lock().expect("lock") = Some(std::time::Instant::now());
+        },
+    );
+    assert!(
+        first_result.is_err(),
+        "test setup: the first closure must exceed its budget and time out"
+    );
+    assert!(
+        previous_worker.is_some(),
+        "a timed-out worker's handle must be retained for the next call to join"
+    );
+
+    // Second "model": starts immediately after. Its very first action is to
+    // record its own start time, before doing any work of its own.
+    let second_started_at_clone = Arc::clone(&second_started_at);
+    let second_result = run_with_budget(
+        "test-second",
+        Duration::from_secs(5),
+        &mut previous_worker,
+        move || {
+            *second_started_at_clone.lock().expect("lock") = Some(std::time::Instant::now());
+        },
+    );
+    assert!(
+        second_result.is_ok(),
+        "the second closure should complete well within its budget"
+    );
+    assert!(
+        previous_worker.is_none(),
+        "the second call's own handle must have been reclaimed immediately since it reported \
+         within budget"
+    );
+
+    let finished = first_finished_at
+        .lock()
+        .expect("lock")
+        .expect("first closure ran to completion");
+    let started = second_started_at
+        .lock()
+        .expect("lock")
+        .expect("second closure ran");
+    assert!(
+        started >= finished,
+        "the second worker started at {started:?}, before the first (timed-out) worker actually \
+         finished at {finished:?} -- their work overlapped"
+    );
+}
+
+/// Sanity check that two calls through [`run_with_budget`] that both
+/// complete within budget behave exactly as before: no artificial join
+/// delay is introduced when there is no straggler to wait for.
+#[test]
+fn run_with_budget_has_no_overlap_penalty_when_nothing_times_out() {
+    let mut previous_worker: Option<thread::JoinHandle<()>> = None;
+    let first = run_with_budget(
+        "fast-first",
+        Duration::from_secs(5),
+        &mut previous_worker,
+        || 41,
+    );
+    assert_eq!(first, Ok(41));
+    assert!(previous_worker.is_none());
+    let second = run_with_budget(
+        "fast-second",
+        Duration::from_secs(5),
+        &mut previous_worker,
+        || 1,
+    );
+    assert_eq!(second, Ok(1));
+    assert!(previous_worker.is_none());
 }
