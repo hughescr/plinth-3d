@@ -112,6 +112,63 @@ enum GateVerdict {
     /// not been ported yet. It cannot pass or fail a model; it is reported so
     /// that a caller can see the gate set is incomplete.
     NotYetPorted,
+    /// [`PreWriteGate::Load`] ran, read the run's own emitted-contact record,
+    /// and found one or more contacts that do not satisfy the registered
+    /// support area law — and, per the 2026-08-29 owner ruling putting the
+    /// gate in WARNING MODE while the load-model redesign is underway, did
+    /// NOT refuse emission for it.
+    ///
+    /// Carries exactly the evidence a hard refusal would have carried
+    /// ([`GateRefusal::LoadLawViolated`]'s own `judged`, `x_allowed` and
+    /// `violations`), unweakened: the arithmetic that decides a row is a
+    /// violation is the same arithmetic [`judge_emitted_load_law`] always
+    /// ran, and this verdict changes only what happens to that answer, never
+    /// how it is computed. A gate that reached this verdict is absent from
+    /// [`PreWriteGateReport::pending`] exactly as a [`Self::Passed`] one is —
+    /// it ran, and it found something to report.
+    Warned(LoadWarnings),
+}
+
+/// The full evidence [`PreWriteGate::Load`] found while in WARNING MODE,
+/// carried out to the caller rather than swallowed by a `Cleared` verdict
+/// that would otherwise say nothing happened.
+///
+/// **This is the measuring instrument for the load-model redesign** (owner
+/// ruling, 2026-08-29): the gate lands recording every violation instead of
+/// refusing on it, so the corpus can be watched while the load-partition
+/// defect (task #68) is fixed, and the gate can be flipped back to hard
+/// refusal once it is. Every field here is exactly what
+/// [`GateRefusal::LoadLawViolated`] would have carried on the hard-refusal
+/// path — nothing is summarized or rounded on the way into warning mode.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoadWarnings {
+    /// How many emitted contacts the gate judged.
+    pub judged: usize,
+    /// The registered allowance the law was evaluated at.
+    pub x_allowed: f64,
+    /// Every contact whose shipped tip does not satisfy the area law, in the
+    /// order the record held them. Empty is not a value this verdict is
+    /// constructed with — an empty violation set is [`GateVerdict::Cleared`],
+    /// never [`GateVerdict::Warned`] — so a caller that sees
+    /// [`PreWriteGateReport::load_warnings`] return `Some` knows the vector
+    /// inside it is non-empty without re-checking its length.
+    pub violations: Vec<LoadLawViolation>,
+}
+
+impl std::fmt::Display for LoadWarnings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "gate Load found {} of {} emitted contact(s) that do not satisfy the registered \
+             support area law pi * tip_radius_mm^2 >= carried_area_mm2 / X_ALLOWED, evaluated \
+             per contact on the final numbers with the registered X_ALLOWED = {} (WARNING MODE: \
+             recorded, emission not refused):\n{}",
+            self.violations.len(),
+            self.judged,
+            self.x_allowed,
+            render_load_law_violations(&self.violations)
+        )
+    }
 }
 
 /// The gate set's verdict on one sealed run.
@@ -123,6 +180,7 @@ enum GateVerdict {
 pub struct PreWriteGateReport {
     coverage: CoverageReport,
     pending: Vec<PreWriteGate>,
+    load_warnings: Option<LoadWarnings>,
 }
 
 impl PreWriteGateReport {
@@ -137,6 +195,16 @@ impl PreWriteGateReport {
     #[must_use]
     pub fn pending(&self) -> &[PreWriteGate] {
         &self.pending
+    }
+
+    /// [`PreWriteGate::Load`]'s WARNING MODE evidence, when it found anything
+    /// to report. `None` means either the gate found no violation, or (while
+    /// `Load` remains in [`PreWriteGateReport::pending`]) that it has not
+    /// been ported — carried the same way [`Self::pending`] tells the two
+    /// apart, by checking membership there first.
+    #[must_use]
+    pub const fn load_warnings(&self) -> Option<&LoadWarnings> {
+        self.load_warnings.as_ref()
     }
 }
 
@@ -686,11 +754,38 @@ fn judge(
         // read off the sealed snapshot, which walks the same finalized
         // transcript independently, so the two must agree or the record is
         // refused rather than judged in part.
-        PreWriteGate::Load => judge_emitted_load_law(
+        //
+        // WARNING MODE (owner ruling, 2026-08-29): `judge_emitted_load_law`
+        // always runs the same arithmetic it always ran, unweakened -- the
+        // arm law is still `pi*r^2 >= carried_area/X_ALLOWED`, still read off
+        // the final numbers, still evaluated per contact. What changed is
+        // only what this dispatch does with a `LoadLawViolated` answer: it
+        // downgrades it from a refusal to `GateVerdict::Warned`, carrying
+        // every violation the hard-refusal path would have carried. Every
+        // OTHER `Load` refusal -- `LoadRecordIncomplete` (the record does not
+        // describe every routed contact) and `UnusableRegisteredAllowance`
+        // (the registry cannot state a threshold to judge against) -- is
+        // still a hard refusal: both are "this run cannot show it is safe",
+        // not "this run shows it is unsafe", and warning mode is scoped to
+        // the second reading only. The gate stays fail-closed on a record it
+        // cannot read at all; it only stops blocking on a record that reads
+        // clearly and reports a genuine area-law violation.
+        PreWriteGate::Load => match judge_emitted_load_law(
             authority.emitted_contacts(),
             snapshot.routed_contacts().count(),
-        )
-        .map(|()| GateVerdict::Cleared),
+        ) {
+            Ok(()) => Ok(GateVerdict::Cleared),
+            Err(GateRefusal::LoadLawViolated {
+                judged,
+                x_allowed,
+                violations,
+            }) => Ok(GateVerdict::Warned(LoadWarnings {
+                judged,
+                x_allowed,
+                violations,
+            })),
+            Err(other) => Err(other),
+        },
         // TODO(gate-port): each of these is a live gate in the frozen current
         // verifier and is listed as binding by `docs/engineering-journal/04-migration-plan.md`
         // §"The defect class this milestone exists to make impossible". None
@@ -750,18 +845,24 @@ fn judge_pre_write_gates(
 
     let mut coverage = None;
     let mut pending = Vec::new();
+    let mut load_warnings = None;
     for gate in PreWriteGate::ALL {
         match judge(gate, artifact, snapshot, request, authority)? {
             GateVerdict::Passed(report) => coverage = Some(*report),
             GateVerdict::Cleared => {}
             GateVerdict::NotYetPorted => pending.push(gate),
+            GateVerdict::Warned(warnings) => load_warnings = Some(warnings),
         }
     }
     let coverage = coverage.ok_or(GateRefusal::Unmeasurable {
         gate: PreWriteGate::UncoveredIslands,
         source: CoverageVerificationError::SnapshotBinding,
     })?;
-    Ok(PreWriteGateReport { coverage, pending })
+    Ok(PreWriteGateReport {
+        coverage,
+        pending,
+        load_warnings,
+    })
 }
 
 /// Everything one gated emission produced, measured rather than assumed.

@@ -56,7 +56,7 @@ pub use prepare::{
 // obeys, so there is no lenient value a caller could pass it.
 pub use gates::{
     judge_emitted_load_law, judge_then_emit, registered_coverage_request, GateRefusal,
-    GatedEmission, LoadLawFault, LoadLawViolation, PreWriteGate, PreWriteGateReport,
+    GatedEmission, LoadLawFault, LoadLawViolation, LoadWarnings, PreWriteGate, PreWriteGateReport,
 };
 
 use plinth_core::{m0_constants, Finite, ModelId, PrinterProfile};
@@ -482,8 +482,14 @@ pub enum ModelPreparationOutcome {
         emit: EmitReport,
         geometry: prepare::SupportedGeometry,
         hollow_disposition: HollowDisposition,
+        // Boxed (clippy::large_enum_variant): this variant carries several
+        // fields that only IT carries, and `Copy`-ing a 32-byte evidence
+        // struct into every OTHER variant's stack slot is exactly the weight
+        // `contacts`, `repair_report` and `repair_ledger` below are already
+        // boxed to avoid. Semantics are unchanged -- `None` still means "no
+        // repair result was recorded", per this field's own doc above.
         #[serde(default)]
-        cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+        cavity_repair: Option<Box<plinth_hollow::CavityRepairEvidence>>,
         #[serde(default)]
         wall_mm: Option<Finite>,
         #[serde(default)]
@@ -571,6 +577,30 @@ pub enum ModelPreparationOutcome {
         /// production artifact; a fresh run always carries the true list.
         #[serde(default)]
         pending_gates: Vec<PreWriteGate>,
+        /// **WARNING MODE (owner ruling, 2026-08-29).** [`PreWriteGate::Load`]
+        /// no longer refuses a contact that violates the registered support
+        /// area law; it records the violation here and lets emission proceed,
+        /// so the corpus can be measured while the load-model redesign (task
+        /// #68) is underway. `None` means the gate found nothing to report.
+        ///
+        /// Carries the SAME evidence a hard refusal would have carried —
+        /// see [`LoadWarnings`] — so a reader can act on this exactly as they
+        /// would have acted on a [`GateRefusal::LoadLawViolated`] before this
+        /// ruling, the only difference being that the model reached disk.
+        ///
+        /// `#[serde(default)]` for the same reason every other field added
+        /// here is: a report frozen before this field existed keeps
+        /// deserializing, reading as `None` — which understates an old run's
+        /// evidence rather than fabricating it. A fresh run always carries
+        /// the true value.
+        ///
+        /// Boxed for the same reason `contacts` is: a violation list inline
+        /// is weight every OTHER variant of this enum has to be moved with,
+        /// and only `Artifact` (and, on the `Refused` path, only when the
+        /// gate in question is `Load` and it hard-refused instead — see
+        /// `GateRefusal::load_law_violations`) ever carries one.
+        #[serde(default)]
+        load_warnings: Option<Box<LoadWarnings>>,
     },
     Stopped {
         after: StageStop,
@@ -1562,6 +1592,7 @@ mod tests {
                         repair_report: None,
                         repair_ledger: None,
                         pending_gates: Vec::new(),
+                        load_warnings: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1655,6 +1686,7 @@ mod tests {
                         repair_report: None,
                         repair_ledger: None,
                         pending_gates: Vec::new(),
+                        load_warnings: None,
                     },
                 ),
                 model("refused", refused),

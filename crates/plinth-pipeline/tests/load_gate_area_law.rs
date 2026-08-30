@@ -9,8 +9,8 @@
 //! # READ THIS BEFORE CHANGING ANYTHING HERE
 //!
 //! **`make_toed_slab` does not satisfy the registered support area law, and the
-//! ported gate refuses it.** Three of its sixty-four emitted contacts ship tips
-//! smaller than `pi * r^2 >= carried_area / X_ALLOWED` demands:
+//! ported gate finds exactly that.** Three of its sixty-four emitted contacts
+//! ship tips smaller than `pi * r^2 >= carried_area / X_ALLOWED` demands:
 //!
 //! | contact | carried area | shipped tip radius | realized X |
 //! |---------|--------------|--------------------|------------|
@@ -43,26 +43,36 @@
 //! So the machinery to split an over-maximum face already exists and is already
 //! reachable — `carriable_share_count(450.0, AreaLaw(37.70))` answers 12 — it is
 //! just not what the production path runs. It is not a model-specific accident
-//! either: the corpus model `mini` refuses with the same two areas, 450.000 mm²
-//! and 60.000 mm², because they are whole faces of a 30 x 30 mm form.
+//! either: the corpus model `mini` finds the same two areas, 450.000 mm² and
+//! 60.000 mm², because they are whole faces of a 30 x 30 mm form.
 //!
-//! **This gate is the first thing in the codebase that refuses the result.**
-//! Until task #68 lands, any model with a downfacing face above 37.70 mm² is
-//! refused at the pre-write door instead of shipped.
+//! **WARNING MODE (owner ruling, 2026-08-29).** The gate used to refuse this
+//! result outright. It no longer does: it now records every violation with its
+//! full evidence and lets emission proceed, so the corpus can be measured while
+//! task #68 (the load-partition defect above) is fixed, and flips back to hard
+//! refusal once it is. Until task #68 lands, any model with a downfacing face
+//! above 37.70 mm² still SHIPS with a documented, non-blocking WARNING attached
+//! rather than being silently accepted.
 //!
 //! **This file therefore pins a defect, not an approval.** When the load
-//! partition is fixed, the assertions below fail and this file is rewritten to
-//! assert emission. Do not weaken the gate to make them pass, and do not delete
-//! the pin to make the suite quiet.
+//! partition is fixed, the assertion that `load_warnings` is non-empty fails
+//! and this file is rewritten to assert `None`. Do not weaken the gate to make
+//! it pass, and do not delete the pin to make the suite quiet.
 //!
 //! # What is demonstrated, both directions
 //!
-//! * The gate REFUSES, end to end, inside the production door, before any file
-//!   exists — the run stops at `PreWriteGate::Load` and writes no artifact.
+//! * The gate WARNS, end to end, inside the production door, and the model
+//!   still reaches a written file — WARNING MODE's whole point is that
+//!   emission is not refused for this.
+//! * [`judge_emitted_load_law`] itself is UNCHANGED and still hard-refuses on
+//!   these same rows when called directly (it is what warning mode's dispatch
+//!   downgrades, not what it weakens) — see `crates/plinth-pipeline/src/gates.rs`'s
+//!   `judge` function. This file calls it directly on the run's own recorded
+//!   evidence to demonstrate that.
 //! * The gate CLEARS the same record once exactly those three rows are given
-//!   the tip the law demands, so the refusal is those three rows and nothing
-//!   else. Without this the refusal would be consistent with a gate that
-//!   refuses everything, which is decoration of a different kind.
+//!   the tip the law demands, so the finding is those three rows and nothing
+//!   else. Without this the finding would be consistent with a gate that
+//!   flags everything, which is decoration of a different kind.
 //! * The gate REFUSES again when one repaired row is put back under the law.
 //!
 //! **No engine is re-run and no geometry is re-derived below.** Every mutation
@@ -134,33 +144,34 @@ fn max_carriable_area_mm2() -> f64 {
 }
 
 #[test]
-fn the_load_gate_refuses_the_toed_slabs_own_record_and_clears_it_once_repaired() {
+fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired() {
     let scratch = Scratch::new("toed-slab");
     let mesh = plinth_mesh::make_toed_slab().expect("procedural toed slab");
-    let stop = chain::run_procedural_model("make_toed_slab", mesh, scratch.path()).expect_err(
-        "make_toed_slab ships three contacts that violate the registered area law, so the \
-             ported Load gate must refuse it. If this model now emits, the load partition was \
-             fixed and this whole file needs rewriting to assert emission -- see the module doc.",
+    let outcome = chain::run_procedural_model("make_toed_slab", mesh, scratch.path()).expect(
+        "WARNING MODE (owner ruling, 2026-08-29): make_toed_slab ships three contacts that \
+             violate the registered area law, but the Load gate no longer refuses emission for \
+             it -- it records the violation and lets the model reach disk. If this expectation \
+             now fails, either the load partition was fixed (rewrite this file to assert no \
+             warning) or warning mode itself regressed back to a hard refusal -- see the module \
+             doc.",
     );
 
-    // ---- DIRECTION 1: the gate REFUSES, end to end, before any file ------
-    assert!(stop.is_gates(), "the run must stop at a gate: {stop:?}");
-    assert_eq!(
-        stop.gate(),
-        Some(PreWriteGate::Load),
-        "the Load gate must be the gate that refused: {stop:?}"
-    );
+    // ---- DIRECTION 1: the gate WARNS, end to end, and still emits --------
     assert!(
-        !scratch.path().exists(),
-        "a gate-refused model must leave no artifact at its target"
+        scratch.path().exists(),
+        "WARNING MODE must still write the artifact -- a warning is not a refusal"
+    );
+    let warnings = outcome.load_warnings.as_ref().expect(
+        "the run's real record has three area-law violations; WARNING MODE must report them",
     );
 
     // ---- The record the run left on disk ---------------------------------
     //
-    // The ledger is written one frame before the gate speaks, so a refused run
-    // still leaves the record the gate refused.
+    // Independent corroboration: the sealed ledger holds the same record the
+    // gate judged, so the warning evidence is not something this test invented
+    // by calling the gate a second time on different input.
     let body: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(scratch.ledger()).expect("the sealed ledger must exist even on a refusal"),
+        &std::fs::read(scratch.ledger()).expect("the sealed ledger must exist on an emitted run"),
     )
     .expect("the sealed ledger must be valid JSON");
     let recorded: Vec<EmittedContactDisclosure> = serde_json::from_value(body["contacts"].clone())
@@ -170,11 +181,17 @@ fn the_load_gate_refuses_the_toed_slabs_own_record_and_clears_it_once_repaired()
         "the run described no emitted contacts, so nothing below is a test of anything"
     );
 
-    // The gate reached its arithmetic at all, which means its record-integrity
-    // check already passed: the record describes every contact the sealed
-    // snapshot's own independent transcript walk counted as routed.
-    let refusal = judge_emitted_load_law(&recorded, recorded.len())
-        .expect_err("the record the run wrote must refuse for the same reason the run did");
+    // `judge_emitted_load_law` ITSELF is unchanged and still hard-refuses on
+    // these rows when called directly -- warning mode downgrades what the
+    // dispatch in `gates::judge` does with an `Err`, it does not touch this
+    // function's own arithmetic or its own `Result`. Demonstrated here so a
+    // future edit that quietly softens the arithmetic (rather than only the
+    // dispatch) is caught by this file, not just by the unit tests beside the
+    // gate.
+    let refusal = judge_emitted_load_law(&recorded, recorded.len()).expect_err(
+        "judge_emitted_load_law must still refuse on these rows directly -- warning mode is a \
+         dispatch decision, not a weakened predicate",
+    );
     let violations = refusal
         .load_law_violations()
         .expect("a load refusal carries the rows it refused")
@@ -182,6 +199,15 @@ fn the_load_gate_refuses_the_toed_slabs_own_record_and_clears_it_once_repaired()
     for violation in &violations {
         println!("LOAD-VIOLATION\t{violation}");
     }
+    // And the pipeline's own WARNING MODE evidence must name exactly the same
+    // rows the direct call does -- the dispatch is a relabelling, not a
+    // resummarizing.
+    assert_eq!(
+        warnings.violations, violations,
+        "the run report's warning evidence must be exactly what a hard refusal would have \
+         carried, unweakened"
+    );
+    assert_eq!(warnings.judged, recorded.len());
 
     // ---- The finding, pinned -------------------------------------------
     assert_eq!(
