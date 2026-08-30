@@ -150,7 +150,7 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
 /// unchanged for every primitive raft.rs can build today), so
 /// `docs/evidence/emission-canary.md` needed no new row.
 #[test]
-fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
+fn toed_slab_seals_with_zero_trials_so_the_controller_never_touches_its_plan() {
     let authority = run(
         make_toed_slab().expect("procedural toed slab"),
         "make_toed_slab",
@@ -181,16 +181,55 @@ fn toed_slab_seals_with_zero_trials_and_the_frozen_digest_does_not_move() {
         .routed_contacts()
         .map(|contact| contact.physical_contact_id())
         .collect::<std::collections::BTreeSet<_>>();
+    // ===================================================================
+    // RETIRED 2026-08-29 — `(identities.len(), final_live_members().count(),
+    // digest) == (64, 170, 13_198_418_135_389_558_006)`.
+    //
+    // This was the THIRD live copy of one fingerprint. The same triple, on the
+    // same fixture, stood in `support_runner_integration.rs` twice more, and
+    // all three were re-derived in lockstep on every change that moved it —
+    // three re-pins per change, for one fact. The doc comment above this
+    // function records that lockstep happening twice (2026-08-23, 2026-08-27),
+    // and the sibling file records the failure mode it invites: on `ad335d9`
+    // one copy went unrefreshed while another was refreshed, and the drift went
+    // unnoticed because the binary holding it never finishes under a plain
+    // `cargo test`.
+    //
+    // **The claim this test makes does not need the digest.** It is "a model
+    // that never transacts cannot have its plan changed by a controller that
+    // only changes plans through transactions" — and the load-bearing half is
+    // the ANTECEDENT, which is asserted directly above with no literal in it:
+    // zero repair rounds, zero trials, zero commits, and an empty trial stream.
+    // The digest added only "and the plan is byte-for-byte the one it was on
+    // 2026-08-27", which is an equivalence claim about a specific past change,
+    // not a property of the controller.
+    //
+    // MEASURED under the legal placement perturbation (reversing the terminal
+    // tie-break in `initial.rs::routing_order`, 2026-08-29): the trials and
+    // commits stay zero — the controller is untouched, exactly as this test
+    // claims — while the member count and digest move (170 -> 174,
+    // 13198418135389558006 -> 9878193565529525115). The fingerprint would have
+    // failed this test for a change that left its subject provably unaffected.
+    // ===================================================================
+    //
+    // KEPT as bounds, true of any sealed plan and free of any literal count:
+    assert!(
+        !identities.is_empty(),
+        "a sealed plan must route at least one contact"
+    );
     assert_eq!(
-        (
-            identities.len(),
-            snapshot.final_live_members().count(),
-            snapshot.digest(),
-        ),
-        (64_usize, 170_usize, 13_198_418_135_389_558_006_u64),
-        "the toed slab's sealed digest is the batch controller's, unmoved: a model that never \
-         transacts cannot have its plan changed by a controller that only changes plans through \
-         transactions"
+        identities.len(),
+        snapshot.routed_contacts().count(),
+        "physical contact identities must be unique: {} distinct ids across {} routed contacts",
+        identities.len(),
+        snapshot.routed_contacts().count()
+    );
+    assert!(
+        snapshot.final_live_members().count() >= identities.len(),
+        "every routed contact needs at least one live member reaching it: {} members for {} \
+         contacts",
+        snapshot.final_live_members().count(),
+        identities.len()
     );
 }
 
