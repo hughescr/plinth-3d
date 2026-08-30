@@ -134,9 +134,20 @@ const RECORDED_RATCHETS_PATH: &str = "tests/fixtures/support_ratchets.json";
 /// would need many hours to exhaust the candidate pool, not the minutes a
 /// test suite can spend. Every model here therefore runs on its own thread
 /// with this wall-clock budget; a model that exceeds it is reported as a
-/// measurement failure naming the budget, never waited on. This is
-/// deliberately NOT special-cased to `Weeping Treant` by name — the guard is
-/// for whichever model regresses into this shape next.
+/// measurement failure naming the budget, and THIS call stops waiting on it.
+///
+/// Say precisely what that does and does not promise, because an earlier
+/// version of this sentence said "never waited on" and that was false. The
+/// breaching model's thread keeps running — Rust has no safe preemption — and
+/// the NEXT model's [`run_with_budget`] call joins it, blocking until it
+/// finishes, before starting its own measurement. That is deliberate: an
+/// overrun stealing CPU from the next model's window would show up as a false
+/// budget breach in an innocent model. What is guaranteed is that no two
+/// measurement windows overlap; what is NOT guaranteed is a bounded run, if a
+/// breaching model is ever followed by another one.
+///
+/// This is deliberately NOT special-cased to `Weeping Treant` by name — the
+/// guard is for whichever model regresses into this shape next.
 const PER_MODEL_MEASUREMENT_BUDGET: Duration = Duration::from_secs(120);
 
 /// **The exact eight-model corpus**, in the order named by
@@ -799,12 +810,31 @@ fn support_ratchets_do_not_regress() {
             }
         }
     }
-    // The last model in the corpus may have left a straggler behind too --
-    // join it here so the same no-overlap guarantee holds at the tail of the
-    // run, not only between consecutive models.
-    if let Some(handle) = previous_worker.take() {
-        let _ = handle.join();
-    }
+    // DELIBERATELY NOT JOINED, and the reason is the whole point of the join.
+    // `previous_worker` may still hold the straggler left behind by the LAST
+    // model. Joining it here protects nothing: the join exists so that one
+    // model's overrun cannot steal CPU from the NEXT model's measurement
+    // window, and after the last model there is no next one.
+    //
+    // Joining anyway is what turned the mandated `cargo test --workspace`
+    // gate into a non-terminating run. `Weeping Treant v1.2` breaches
+    // `PER_MODEL_MEASUREMENT_BUDGET`, then opens an 8,906-candidate repair
+    // search whose FIRST trial alone measured 161 s -- so this join waited on
+    // work that needs hours, at the tail of a suite that had already passed
+    // everything it was going to pass. The straggler is left to be reaped
+    // when the test process exits, which is what the budget promised: a model
+    // over budget is "reported as a measurement failure naming the budget,
+    // never waited on".
+    //
+    // RESIDUAL, stated because it is real and load-bearing: termination here
+    // holds only because the budget-breaching model is LAST in
+    // `CORPUS_MODELS`. The between-models join inside `run_with_budget` is
+    // unbounded by construction -- std has no join-with-timeout -- so placing
+    // any model AFTER one that breaches its budget moves the same hang to
+    // that model's join point. If that happens the fix is a bounded wait that
+    // discloses the overlap and proceeds, NOT a longer budget: overlapping
+    // measurement is a flake, and a hung gate is a stopped project.
+    drop(previous_worker.take());
 
     assert!(
         reachability_regressions.is_empty(),
