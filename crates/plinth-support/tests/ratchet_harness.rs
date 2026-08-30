@@ -9,7 +9,7 @@
 //! this test executes.
 //!
 //! **The three-kind doctrine this implements one third of.**
-//! `docs/development.md`'s "Three kinds of check, three lifetimes" section
+//! `docs/development.md`'s "Testing doctrine: three kinds of check" section
 //! describes three kinds of check with three different lifetimes:
 //!
 //! 1. **Invariants** — permanent, placement-independent, never refreshed. Not

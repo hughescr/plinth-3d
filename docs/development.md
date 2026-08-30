@@ -427,44 +427,6 @@ claim failing, not a test to fix. Run the census whenever you touch anything the
 can see, including code you believe is inert — that belief is exactly the claim an
 equivalence check exists to test.
 
-## Three kinds of check, three lifetimes
-
-A fingerprint (the digest above, a pinned member count) tells you the output changed. It
-tells you nothing about whether it got **better**, and those are different questions: a
-deliberate placement improvement and a silent regression move the same digest, and only a
-human reading a diff could once tell them apart. That made every placement improvement
-expensive and unbounded, which blocked exactly the work this project most needs to do
-(better support placement) — Craig's 2026-08-29 ruling. Every check in this tree is now one
-of three kinds, and the kind decides its lifetime:
-
-1. **Invariants** — permanent, placement-independent, never refreshed. A property true of
-   ANY acceptable support plan whatever the placement (the area law, a closed load path, no
-   demand-bearing contact left unrouted). **A broken invariant is always a bug.** No
-   argument, no refresh.
-2. **Quality ratchets** — a recorded number, per corpus model, that says how GOOD a plan is
-   rather than merely whether it changed. A change may improve one freely and silently; that
-   is the iteration loop the owner wants. Worsening one requires an argument, because the
-   argument is about a number that means something ("worst load ratio went from 9 to 14" is
-   a sentence you can reason about; "the hash changed" is not). Implemented in
-   `crates/plinth-support/tests/ratchet_harness.rs`, whose module doc is the primary
-   reference: what the six registered metrics are, why each one and not a support/contact
-   count, the exact tolerance rule, and the two environment variables
-   (`PLINTH_RATCHET_UPDATE`, `PLINTH_RATCHET_ACCEPT_REGRESSION`) that record an improvement
-   or a deliberate, argued regression. The recorded values live beside it in
-   `crates/plinth-support/tests/fixtures/support_ratchets.json`, keyed to each corpus model's
-   own STL digest — a corpus file changing re-baselines that model's ratchets rather than
-   comparing two different meshes as if they were one.
-3. **Equivalence checks** — a procedure run at the time of a specific change, not a stored
-   constant. For "make it faster without changing the supports": run before, run after,
-   compare byte for byte, record the result in the commit that makes the claim. A digest
-   comparison is this kind of check, not a ratchet — it has no direction, only equal or not.
-
-The regime follows from what a change CLAIMS: a placement improvement is expected to move
-fingerprints (no argument needed) but must not worsen a ratchet and must hold every
-invariant; a performance change or refactor must not move fingerprints at all (checked at
-the time) and must hold every invariant; a physics change may move fingerprints and may move
-a ratchet, but only by the owner's ruling, argued in the commit.
-
 ## Reading a repair search that has not finished
 
 The coverage-repair controller writes its trial stream — `steps` in
