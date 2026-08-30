@@ -3657,6 +3657,22 @@ pub(crate) struct RetainedLoadTranspose {
     buckets: Vec<(u32, u32)>,
     /// Live cells `= Σ len`, maintained by ± deltas; the charged scan size.
     cells: usize,
+    /// The `cells` this carrier held at its last absorption from a full build
+    /// — the figure that build's own [`load_resource_plan`] priced and had
+    /// checked against [`LoadFinalizeLimits`] before its scan was allowed to
+    /// run.
+    ///
+    /// This is the affordability anchor the whole retained fast path rests
+    /// on.  A retained round runs no resource check of its own —
+    /// [`finalize_load_rows`], the one site carrying the cells term, never
+    /// runs on that path (F-G6-2/F-G6-3) — so what makes its scan afforded is
+    /// that `cells` only ever SHRINKS after an absorption:
+    /// [`Self::record_commit`] replaces two buckets with their ascending
+    /// dedup merge, and a dedup merge is never longer than its two parents
+    /// together.  The design record states that in prose ("`cells`, rows and
+    /// contacts only shrink under committed merges"); this field is what lets
+    /// [`Self::retained_scan_operations`] assert it in code instead.
+    absorbed_cells: usize,
     /// Row invariants, retained from the full build, never touched by updates.
     row_face_id: Vec<u32>,
     row_area_mm2: Vec<f64>,
@@ -4196,11 +4212,96 @@ impl RetainedLoadTranspose {
         &self,
         contact_count: usize,
     ) -> Result<usize, GenericPerceptionError> {
-        self.cells
-            .checked_mul(LOAD_WITNESS_SLOTS + 5)
-            .and_then(|scan| scan.checked_add(self.row_face_id.len()))
+        self.retained_scan_operations()?
+            .checked_add(self.row_face_id.len())
             .and_then(|work| work.checked_add(contact_count))
             .and_then(|work| work.checked_add(self.last_update_operations))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    /// FU-8f phase G6c — the per-cell scan term alone,
+    /// `cells x (LOAD_WITNESS_SLOTS + 5)`, priced at the SAME per-cell
+    /// allowance [`LoadTransposeCounts::operations`] gives the full build's
+    /// own fill/scan pass.  It is the dominant term of
+    /// [`Self::executed_operations`], factored out because it is also the one
+    /// term the round's stated charge does not contain.
+    ///
+    /// **The preflight structurally cannot contain it.**
+    /// [`specialized_load_resource_plan`] is built from
+    /// [`load_resource_plan_from_counts`], whose every operation term is row-,
+    /// owner-entry- or contact-shaped; the cells term is added only by
+    /// [`load_resource_plan`], which only [`finalize_load_rows`] calls, and a
+    /// retained round never calls that.  The omission is deliberate and
+    /// already documented on [`load_resource_plan_from_counts`] ("the preflight
+    /// `specialized_load_resource_plan` under-states this finalizer's
+    /// operations by the cells term"): `cells` is knowable only after
+    /// [`LoadTransposeCounts::count`] has walked the eligibility, and every
+    /// bound a preflight *could* state over-states by two to three orders of
+    /// magnitude.
+    ///
+    /// **Corrected 2026-08-29 (`fix/cylinder-load-accounting`).**  Phase G6c
+    /// compared [`Self::executed_operations`], which contains this term,
+    /// against the preflight, which cannot — two different populations of
+    /// work.  The two diverge by exactly the mean contacts per [`LoadOwner`]
+    /// (`cells = Σ_owner contacts(owner) x rows(owner)` against the
+    /// preflight's `Σ_owner rows(owner)`), so the comparison held only while
+    /// contacts stayed spread thin over owners.  On the corpus Cylinder — 77
+    /// of 83 contacts on a handful of generic islands, because its whole
+    /// footprint is one solid disc — it did not: 1,074,715 metered against a
+    /// stated 309,896.  See [`Self::full_build_equivalent_operations`] for the
+    /// target that replaces it.
+    pub(crate) fn retained_scan_operations(&self) -> Result<usize, GenericPerceptionError> {
+        // The affordability anchor, asserted rather than assumed.  The scan
+        // this term prices is afforded because the LAST FULL BUILD's own
+        // `load_resource_plan` check — the one check that carries the cells
+        // term — admitted at least this many cells, and `cells` never grows
+        // after an absorption.
+        debug_assert!(
+            self.cells <= self.absorbed_cells,
+            "retained cells grew from {} to {} after absorption; only a committed merge may \
+             change them, and a dedup merge is never longer than its two parents together",
+            self.absorbed_cells,
+            self.cells,
+        );
+        self.cells
+            .checked_mul(LOAD_WITNESS_SLOTS + 5)
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    /// FU-8f phase G6c (D-G6-4) — what a FULL build of THIS SAME round would
+    /// spend, and therefore the only figure [`Self::executed_operations`] may
+    /// be compared against.
+    ///
+    /// `preflight_operations` is the round's stated charge, exactly as
+    /// [`crate::specialized::build_gate_load_state`] computes it from
+    /// [`specialized_load_resource_plan`].  The return adds the cells term
+    /// that charge omits, reconstructing the shape of the full build's own
+    /// exact plan — [`load_resource_plan`] is precisely those same
+    /// preflight-shaped terms plus [`LoadTransposeCounts::operations`].  The
+    /// cells added are this carrier's own, which is the right number: the
+    /// entry guards have already matched the carrier to this round's mesh,
+    /// contact list and bucket cardinalities, so a fresh build of this round
+    /// derives the same eligibility and therefore the same cells (F-G6-1).
+    ///
+    /// **No charge moves.**  `GateLoadState::baseline_operations`, and
+    /// therefore everything `gate_resource_plan` refuses on, stays the
+    /// preflight figure it has always been.  This is a comparison target for
+    /// the meter and nothing else — the accounting defect was in the
+    /// comparison, not in the work and not in the charge.
+    ///
+    /// Once the cells term stands on both sides it cancels, which is correct
+    /// and not a weakening: both sides price *identical* work at an
+    /// *identical* rate, so there is nothing there to check.  What the
+    /// comparison still has to prove is that the retained round's
+    /// `O(rows + contacts + remap)` TAIL fits inside the preflight — and that
+    /// tail is exactly the part of a retained round that is NOT the full
+    /// build's own work, so it is exactly the part worth checking.
+    pub(crate) fn full_build_equivalent_operations(
+        &self,
+        preflight_operations: usize,
+    ) -> Result<usize, GenericPerceptionError> {
+        preflight_operations
+            .checked_add(self.retained_scan_operations()?)
             .ok_or(GenericPerceptionError::LoadResourceOverflow)
     }
 
@@ -4432,6 +4533,10 @@ impl RetainedLoadTranspose {
             arena: rows,
             buckets,
             cells,
+            // The build that produced these cells is the build whose own
+            // `load_resource_plan` check admitted them.  Every retained round
+            // reached from this absorption spends against that admission.
+            absorbed_cells: cells,
             row_face_id: partition.rows().iter().map(|row| row.face_id).collect(),
             row_area_mm2: baseline.row_area_mm2.clone(),
             row_centroid_mm: baseline.row_centroid_mm.clone(),
@@ -4491,6 +4596,7 @@ impl RetainedLoadTranspose {
             arena,
             buckets: refs,
             cells,
+            absorbed_cells: cells,
             row_face_id: Vec::new(),
             row_area_mm2: Vec::new(),
             row_centroid_mm: Vec::new(),
@@ -13401,13 +13507,19 @@ mod tests {
     /// schedule, a real dedup union: seats 2 and 4 share no face, so this
     /// also exercises the concatenation arm rather than only the dedup one
     /// the sibling test names): [`RetainedLoadTranspose::executed_operations`]
-    /// on the retained round is compared against
-    /// [`specialized_load_resource_plan`] — the SAME function
-    /// `build_gate_load_state` calls for the round's CHARGE — on the round's
-    /// own shape. The executed figure must never exceed it, because a
-    /// retained round is a strict subset of what a full build of the same
-    /// shape would do (F-G6-2/F-G6-3: the two eligibility traversals never
-    /// run on this path at all).
+    /// on the retained round is compared against what a FULL build of that
+    /// same round would spend — [`specialized_load_resource_plan`], the same
+    /// function `build_gate_load_state` calls for the round's charge, with
+    /// the cells term that charge omits restored by
+    /// [`RetainedLoadTranspose::full_build_equivalent_operations`]. The
+    /// executed figure must never exceed it, because a retained round is a
+    /// strict subset of what a full build of the same shape would do
+    /// (F-G6-2/F-G6-3: the two eligibility traversals never run on this path
+    /// at all).
+    ///
+    /// Corrected 2026-08-29 (`fix/cylinder-load-accounting`) — it used to
+    /// compare against the bare preflight, which is not an invariant. See the
+    /// sweep test below for the full argument and the Cylinder measurement.
     #[test]
     fn fu8f_g6c_retained_round_executes_no_more_than_it_is_charged() {
         let fixture = retention_fixture();
@@ -13491,25 +13603,40 @@ mod tests {
         );
 
         // The round is retained: `build_gate_load_state` would take this
-        // exact branch. Meter it, and price the SAME round's full-build
-        // charge from the SAME function `build_gate_load_state` calls.
+        // exact branch. Meter it, and price the SAME round's full build from
+        // the SAME function `build_gate_load_state` calls for its charge.
+        //
+        // CORRECTED 2026-08-29 (`fix/cylinder-load-accounting`): this used to
+        // assert `executed <= preflight`, which is not an invariant — the
+        // preflight carries no cells-shaped term and the meter is mostly that
+        // term. It held here only because this fixture gives every
+        // `LoadOwner` exactly ONE contact, the regime where the two happen
+        // not to diverge. The comparison target is now the same one
+        // production uses; the sweep in
+        // `fu8f_g6c_retained_round_executes_no_more_than_a_full_build_of_the_same_round`
+        // is what takes the fixture OUT of this regime and guards the
+        // difference.
         let executed = carrier
             .executed_operations(new_contacts.len())
             .expect("the meter must not overflow on a fixture-sized round");
-        let charged = specialized_load_resource_plan(
+        let preflight = specialized_load_resource_plan(
             &fixture.plan,
             new_contacts.len(),
             SpecializedLoadCounts::bounded(new_pairs.len(), mesh_faces),
         )
         .expect("the charge must not overflow on a fixture-sized round")
         .operations;
+        let full_build = carrier
+            .full_build_equivalent_operations(preflight)
+            .expect("the full-build-equivalent figure must not overflow");
         assert!(
             executed > 0,
             "a non-empty retained round must meter SOME work",
         );
         assert!(
-            executed <= charged,
-            "a retained round executed {executed} operations against a charge of {charged}",
+            executed <= full_build,
+            "a retained round executed {executed} operations against a full build's \
+             {full_build} for the same round (stated charge {preflight})",
         );
 
         // The retained carrier's own held-bytes ceiling must be computable
@@ -13521,6 +13648,241 @@ mod tests {
             .retained_bytes()
             .expect("the byte ceiling must not overflow on a fixture-sized round");
         assert!(retained_bytes > 0, "a populated carrier holds SOME bytes");
+    }
+
+    /// FU-8f phase G6c (D-G6-4), CORRECTED 2026-08-29
+    /// (`fix/cylinder-load-accounting`) — the charge-vs-meter invariant
+    /// stated against the RIGHT target, and the regression guard for the
+    /// Cylinder trip that proved the old target wrong.
+    ///
+    /// # What was wrong
+    ///
+    /// The sibling test above, and the two production `debug_assert!`s in
+    /// `specialized.rs` it stands in for, compared
+    /// [`RetainedLoadTranspose::executed_operations`] against
+    /// [`specialized_load_resource_plan`] — the PREFLIGHT.  Those two count
+    /// different populations of work:
+    ///
+    /// - `executed_operations` is `cells x (LOAD_WITNESS_SLOTS + 5)` plus an
+    ///   `O(rows + contacts + remap)` tail.  It CONTAINS the per-cell term.
+    /// - the preflight's every operation term is row-, owner-entry- or
+    ///   contact-shaped.  It contains NO cells-shaped term, by its own
+    ///   documented contract — see the "under-states this finalizer's
+    ///   operations by the cells term" paragraph on
+    ///   [`load_resource_plan_from_counts`].  Only [`load_resource_plan`],
+    ///   which only [`finalize_load_rows`] calls, adds it, and a retained
+    ///   round never calls that.
+    ///
+    /// So the comparison was never an invariant.  It held on six of the eight
+    /// corpus models by luck; on the Cylinder it did not — 1,074,715 metered
+    /// against a stated 309,896, a `debug_assert!` panic that killed the gate
+    /// worker under `cargo test --workspace --offline`.
+    ///
+    /// # Why an owner run length is the whole story
+    ///
+    /// `cells = Σ_owner contacts(owner) x rows(owner)`, while the preflight's
+    /// owner term is `Σ_owner rows(owner)`.  The two diverge by exactly the
+    /// MEAN CONTACTS PER [`LoadOwner`], and by nothing else.  The Cylinder
+    /// puts 77 of its 83 contacts on a handful of generic islands (8 distinct
+    /// owners, widest run 42) because its whole footprint is one solid disc;
+    /// every other corpus model spreads its contacts thin over many owners.
+    /// [`retention_fixture`] gives every owner exactly ONE contact, which is
+    /// why no test had ever entered the regime.
+    ///
+    /// # What this sweeps
+    ///
+    /// Replicating the fixture's generic-island seat onto its OWN owner is
+    /// the only thing that changes across the sweep — same mesh, same
+    /// eligibility, same pairs, same limits.  Each extra replica adds
+    /// `8R + 1 = 17` to the meter (this island owns `R = 2` eligibility rows)
+    /// against roughly `log2(contacts) + 6` to the preflight, so the meter
+    /// pulls ahead until a `log` step in the charge overtakes it again: a
+    /// real but BOUNDED window, which is why the sweep asserts over a range
+    /// rather than pinning one replica count.  The corpus Cylinder is not
+    /// near such a boundary — its generic owners hold thousands of rows each,
+    /// so `8R` is in the tens of thousands.
+    ///
+    /// Measured on this fixture 2026-08-29: 240 of the 2000 swept shapes
+    /// exceed the preflight, the first at 415 replicas (7,191 against 7,189).
+    /// Against the corrected target, zero do.
+    #[test]
+    fn fu8f_g6c_retained_round_executes_no_more_than_a_full_build_of_the_same_round() {
+        let fixture = retention_fixture();
+        let mesh_faces = fixture.mesh.tris().len();
+        let generic = &fixture.contacts[fixture.specialized_seats..];
+        let mut exceeded_the_preflight = 0usize;
+        let mut first_exceedance = None;
+        for replicas in 1usize..=2000 {
+            let mut contacts = fixture.contacts[..fixture.specialized_seats].to_vec();
+            for (slot, seat) in generic.iter().enumerate() {
+                for copy in 0..replicas {
+                    contacts.push(PhysicalContact {
+                        contact_id: contacts.len() as u64,
+                        owner: seat.owner,
+                        // Distinct positions: `validated_contact_order`
+                        // refuses duplicates.  The fixture's mesh sits near
+                        // the origin, so these stay well clear of it and the
+                        // eligibility is unchanged — only the owner run
+                        // length moves.
+                        point_mm: [
+                            seat.point_mm[0] - (slot * 4096 + copy) as f64,
+                            seat.point_mm[1],
+                            seat.point_mm[2],
+                        ],
+                    });
+                }
+            }
+            let mut slot = None;
+            fixture.absorb(&mut slot, None, &contacts);
+            let carrier = slot.expect("absorb_full_build always populates the slot");
+            let executed = carrier
+                .executed_operations(contacts.len())
+                .expect("the meter must not overflow on a fixture-sized round");
+            let preflight = specialized_load_resource_plan(
+                &fixture.plan,
+                contacts.len(),
+                SpecializedLoadCounts::bounded(fixture.pairs.len(), mesh_faces),
+            )
+            .expect("the charge must not overflow on a fixture-sized round")
+            .operations;
+            let full_build = carrier
+                .full_build_equivalent_operations(preflight)
+                .expect("the full-build-equivalent figure must not overflow");
+
+            // The corrected invariant, and what both production
+            // `debug_assert!`s now check: a retained round is a strict subset
+            // of what a full build of the SAME round performs, because the
+            // two eligibility traversals, the grouping and the extension
+            // never run on this path (F-G6-2/F-G6-3).
+            assert!(
+                executed <= full_build,
+                "at {replicas} replicas a retained round executed {executed} load operations \
+                 against a full build's {full_build} for the same round",
+            );
+            assert!(
+                executed > 0,
+                "a non-empty retained round must meter SOME work",
+            );
+            if executed > preflight {
+                exceeded_the_preflight += 1;
+                first_exceedance.get_or_insert((replicas, executed, preflight));
+            }
+        }
+
+        // Non-vacuity, and the sabotage guard: the sweep must actually ENTER
+        // the regime the old comparison could not survive.  If a future
+        // change to the charge, the meter or the fixture takes it out of that
+        // regime, this test stops guarding the defect it was written for and
+        // says so rather than passing quietly.
+        let (replicas, executed, preflight) = first_exceedance.expect(
+            "the sweep no longer reaches a shape whose metered spend exceeds the preflight; \
+             it can no longer distinguish the corrected comparison target from the old one",
+        );
+        assert!(
+            exceeded_the_preflight > 100,
+            "only {exceeded_the_preflight} of 2000 swept shapes exceeded the preflight (first \
+             at {replicas} replicas, {executed} against {preflight}); the window has narrowed \
+             far enough that this guard is no longer meaningful",
+        );
+    }
+
+    /// The affordability anchor
+    /// [`RetainedLoadTranspose::retained_scan_operations`] asserts, exercised
+    /// on a real committed merge.
+    ///
+    /// A retained round runs NO resource check of its own:
+    /// [`finalize_load_rows`], the one site carrying the cells term, never
+    /// runs on that path.  What makes its scan afforded is that `cells` never
+    /// grows after an absorption — [`RetainedLoadTranspose::record_commit`]
+    /// replaces two buckets with their ascending dedup merge, which is never
+    /// longer than the two parents together.  The design record states that
+    /// in prose ("`cells`, rows and contacts only shrink under committed
+    /// merges") and nothing checked it; this does.
+    #[test]
+    fn fu8f_g6c_retained_cells_never_grow_after_absorption() {
+        let fixture = retention_fixture();
+        let proof = fixture.proof();
+        let served: [&[u32]; 6] = [
+            &[0, 1, 2],
+            &[0, 1, 3],
+            &[2, 3, 4],
+            &[4, 5],
+            &[5, 6],
+            &[6, 7],
+        ];
+        let seats = fixture.contacts[..fixture.specialized_seats]
+            .iter()
+            .zip(served)
+            .map(|(contact, served)| (contact.point_mm, served.to_vec()))
+            .collect::<Vec<_>>();
+        let (contacts, pairs) = harness_inputs(&fixture, &seats);
+        let mut slot = None;
+        {
+            let (partition, baseline, transpose) = SpecializedLoadBaseline::build(
+                &fixture.plan,
+                &proof,
+                &fixture.surface,
+                &contacts,
+                &pairs,
+                retention_limits(),
+            )
+            .expect("the harness fixture must build");
+            RetainedLoadTranspose::absorb_full_build(
+                &mut slot, None, &proof, transpose, &partition, &baseline, &contacts,
+            );
+        }
+        let mut carrier = slot.expect("absorb_full_build always populates the slot");
+        let absorbed = carrier.cells_for_test();
+        assert!(absorbed > 0, "the fixture must retain SOME cells");
+
+        // Seats 0 and 1 share faces 0 and 1, so their union is a real dedup
+        // merge — the arm where `merged_len < left_len + right_len` and the
+        // live cells strictly FALL.
+        let (left, right, insert_at) = (0usize, 1usize, 0usize);
+        let merged_point = [
+            seats[left].0[0] + 0.125,
+            seats[left].0[1] + 0.125,
+            seats[left].0[2] + 0.125,
+        ];
+        let mut merged_served = seats[left].1.clone();
+        merged_served.extend_from_slice(&seats[right].1);
+        merged_served.sort_unstable();
+        merged_served.dedup();
+        let mut next = seats
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != left && *index != right)
+            .map(|(_, seat)| seat.clone())
+            .collect::<Vec<_>>();
+        next.insert(insert_at, (merged_point, merged_served));
+        let (new_contacts, _) = harness_inputs(&fixture, &next);
+        carrier.record_commit(
+            left,
+            right,
+            new_contacts.iter().map(|contact| contact.point_mm),
+            merged_point,
+            true,
+        );
+        assert!(
+            !carrier.is_poisoned_for_test(),
+            "a well-formed commit must not poison retention",
+        );
+        assert_eq!(
+            carrier.entry_rebuild_cause(&proof, &new_contacts),
+            None,
+            "an entry guard fired on a well-formed commit",
+        );
+        assert!(
+            carrier.cells_for_test() < absorbed,
+            "a dedup merge of two OVERLAPPING buckets must shrink the live cells: {} against \
+             {absorbed}",
+            carrier.cells_for_test(),
+        );
+        // The anchor's own `debug_assert!` runs inside this call; it is the
+        // check that would fire if a future remap ever grew the cells.
+        carrier
+            .retained_scan_operations()
+            .expect("the scan term must not overflow on a fixture-sized round");
     }
 
     /// FU-8f phase G6b — the identity walk's position-key hazard, CLOSED

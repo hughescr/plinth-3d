@@ -4652,11 +4652,18 @@ fn evaluate_gate_batch(
     // same "check it where it is produced and check it where it is
     // consumed" belt-and-braces `evaluate_gate_batch` already applies to the
     // G3 executed/charged invariant a few lines below.
+    // CORRECTED 2026-08-29 (`fix/cylinder-load-accounting`) in step with the
+    // assertion inside `build_gate_load_state`: the comparison target is what
+    // a full build of the same round would spend, not the preflight charge,
+    // which by its own documented contract omits the per-cell term the meter
+    // is mostly made of.
     debug_assert!(
-        load_state.executed_operations <= load_state.baseline_operations,
-        "GateLoadState reports {:?} at {} operations against a charge of {}",
+        load_state.executed_operations <= load_state.full_build_operations,
+        "GateLoadState reports {:?} at {} operations against a full build's {} for the same \
+         round (stated charge {})",
         load_state.executed_load_build,
         load_state.executed_operations,
+        load_state.full_build_operations,
         load_state.baseline_operations,
     );
     let plan = gate_resource_plan(
@@ -5199,25 +5206,49 @@ fn build_gate_load_state(
                     // FU-8f phase G6c (D-G6-4): meter the retained round's
                     // actual spend BESIDE the charge, never instead of it —
                     // `baseline_operations` below stays the full build's own
-                    // figure, the admissible worst case, because no plan can
-                    // know at plan time whether a guard will miss.  The
-                    // executed figure is a strict subset of what a full
-                    // build performs (F-G6-2/F-G6-3: the count/finish
-                    // eligibility traversals never run on this path), so the
-                    // assertion is provable, not merely hoped: it is checked
-                    // here every round in debug, and pinned by
-                    // `fu8f_g6c_retained_round_executes_no_more_than_it_is_charged`
-                    // in release (a `debug_assert` is compiled out there, the
-                    // same disposition G3's charged/executed invariant took).
+                    // preflight figure, the admissible worst case, because no
+                    // plan can know at plan time whether a guard will miss.
+                    //
+                    // CORRECTED 2026-08-29 (`fix/cylinder-load-accounting`).
+                    // The claim "the executed figure is a strict subset of
+                    // what a full build performs" is TRUE — the count/finish
+                    // eligibility traversals, the grouping and the extension
+                    // never run on this path (F-G6-2/F-G6-3).  But it is a
+                    // claim about the full build's WORK, and this assertion
+                    // used to test it against `baseline_resource.operations`,
+                    // which is the PREFLIGHT and by its own documented
+                    // contract omits the per-cell term the executed figure is
+                    // mostly made of.  Two different populations of work; the
+                    // comparison was never provable and held on six of the
+                    // eight corpus models by luck.  It failed on the Cylinder
+                    // — 1,074,715 metered against 309,896 stated — killing the
+                    // gate worker under `cargo test --workspace --offline`.
+                    //
+                    // The right target is what a full build of THIS SAME round
+                    // would spend: the preflight plus the cells term the full
+                    // build's own exact plan (`load_resource_plan`, checked
+                    // inside `finalize_load_rows`) adds to it.  The charge
+                    // itself is untouched — see
+                    // `RetainedLoadTranspose::full_build_equivalent_operations`
+                    // for why the cells cancel and what the comparison still
+                    // proves.  Checked here every round in debug, at the call
+                    // site in `evaluate_gate_batch` a second time, and pinned
+                    // in release by
+                    // `fu8f_g6c_retained_round_executes_no_more_than_a_full_build_of_the_same_round`
+                    // (a `debug_assert` is compiled out there, the same
+                    // disposition G3's charged/executed invariant took).
                     let executed_operations = state.executed_operations(physical.len())?;
+                    let full_build_operations =
+                        state.full_build_equivalent_operations(baseline_resource.operations)?;
                     crate::census_record!(crate::census::record_load_build_meter(
                         baseline_resource.operations,
                         executed_operations,
                     ));
                     debug_assert!(
-                        executed_operations <= baseline_resource.operations,
+                        executed_operations <= full_build_operations,
                         "a retained round executed {executed_operations} load operations \
-                         against a charge of {}",
+                         against a full build's {full_build_operations} for the same round \
+                         (stated charge {})",
                         baseline_resource.operations,
                     );
                     return Ok(GateLoadState {
@@ -5232,6 +5263,7 @@ fn build_gate_load_state(
                         baseline_scratch_bytes: baseline_resource.scratch_bytes,
                         executed_load_build: ExecutedLoadBuild::Retained,
                         executed_operations,
+                        full_build_operations,
                     });
                 }
             }
@@ -5275,6 +5307,15 @@ fn build_gate_load_state(
     // prices, so charged and executed are the same number here, restated
     // rather than duplicated, and the meter still records it so a run's
     // rebuild rounds appear in the same total as its retained ones.
+    //
+    // Noted 2026-08-29 (`fix/cylinder-load-accounting`), NOT changed here: a
+    // rebuilt round's real spend also contains that build's own cells term,
+    // which the preflight restated on this line omits, so this arm of the
+    // meter under-states a rebuilt round by exactly the amount the retained
+    // arm's assertion was tripping over.  Correcting it would move the
+    // `retained_load_charged_operations`/`..._executed_operations` census
+    // lines, which is an observable-output change this lane deliberately did
+    // not make; it is reported for the integrator instead.
     crate::census_record!(crate::census::record_load_build_meter(
         baseline_resource.operations,
         baseline_resource.operations,
@@ -5291,6 +5332,11 @@ fn build_gate_load_state(
         baseline_scratch_bytes: baseline_resource.scratch_bytes,
         executed_load_build: ExecutedLoadBuild::Rebuilt,
         executed_operations: baseline_resource.operations,
+        // A rebuilt round IS the full build, so the two are the same figure
+        // here by construction — no cells term is added, because none is
+        // added to `executed_operations` on this arm either.  Both sides
+        // count the same population, which is all the comparison asks.
+        full_build_operations: baseline_resource.operations,
     })
 }
 
@@ -7656,6 +7702,23 @@ struct GateLoadState {
     /// what `baseline_operations` charges, so charged and executed are the
     /// same figure there by construction, not by coincidence.
     executed_operations: usize,
+    /// FU-8f phase G6c (D-G6-4), added 2026-08-29
+    /// (`fix/cylinder-load-accounting`) — what a FULL build of this same
+    /// round would spend, which is the only figure `executed_operations` may
+    /// be compared against.
+    ///
+    /// On a [`ExecutedLoadBuild::Retained`] round this is
+    /// `baseline_operations` plus the per-cell scan term the preflight
+    /// structurally omits
+    /// ([`RetainedLoadTranspose::full_build_equivalent_operations`]); on a
+    /// [`ExecutedLoadBuild::Rebuilt`] round it is `baseline_operations`
+    /// restated, because both sides then count the same population.
+    ///
+    /// It is NOT a charge and nothing refuses on it — `gate_resource_plan`
+    /// still reads `baseline_operations` and only that.  It exists so the
+    /// charge-vs-meter assertion compares like with like; comparing against
+    /// `baseline_operations` was the Cylinder accounting defect.
+    full_build_operations: usize,
 }
 
 /// FU-8f phase G6c (D-G6-4) — which path a gate round's load build actually
