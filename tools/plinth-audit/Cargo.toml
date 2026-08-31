@@ -1,0 +1,50 @@
+# plinth-audit — the emitted-bytes audit instrument.
+#
+# THIS CRATE IS DELIBERATELY NOT A WORKSPACE MEMBER.
+#
+# The empty `[workspace]` table below makes this manifest its own workspace
+# root, so `cargo build` here never resolves up into the repository workspace.
+# The repository root manifest additionally lists `tools/plinth-audit` in its
+# `exclude`, so neither direction can accidentally pull the other in.
+#
+# ZERO DEPENDENCIES. Not `serde`, not `serde_json`, not any `plinth-*` crate,
+# not `geom_kernel`. The audit reads only the emitted bytes and reimplements
+# every primitive it needs, because an audit that shares code with the engine
+# it is auditing cannot see the engine's defects
+# (`docs/specs/audit-invariants.md` §0). SHA-256, JSON reading and JSON
+# writing are hand-rolled here for the same reason, and because a dependency
+# graph would cost every one of the nine agents a multi-minute build.
+#
+# If you want to add a dependency: don't. If you truly must, state the reason
+# in a comment here, and confirm it is neither a `plinth-*` crate nor
+# `geom_kernel` nor anything that transitively reaches one.
+
+[workspace]
+
+[package]
+name = "plinth-audit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+description = "Standalone print-candidate audit of emitted .chitubox bytes"
+
+[dependencies]
+
+[lib]
+name = "plinth_audit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "plinth-audit"
+path = "src/main.rs"
+
+[profile.release]
+# No LTO: the whole point is that eight agents each build this in seconds.
+lto = false
+opt-level = 3
+codegen-units = 16
+debug = false
+
+[profile.test]
+opt-level = 2

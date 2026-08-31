@@ -1,0 +1,8 @@
+{
+  "description": "a Member rod whose start point exactly joins the model's own load-bearing chain (the taper/member junction at (0,0,-4.0)) but whose far end (4,0,-4.0) touches nothing -- not the model, not the plate, not any other support. A dangling stub, the arm-in-free-space half of audit-invariants.md §3.5 clause (b).",
+  "check": "i5_closed_load_path",
+  "expect": "check_fails",
+  "codes": ["PATH_FREE_END"],
+  "model": 0,
+  "min_failures": 1
+}

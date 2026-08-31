@@ -1,0 +1,8 @@
+{
+  "description": "one tip, r_tip=0.185 mm, embedded h_delivered=0.103 mm (h_required=0.100 mm, a real 3% margin -- I1 passes). The ideal geometric cap disc at that depth is A_ideal=0.14626 mm^2, comfortably above what this contact owes (A_required=0.10752 mm^2, 36% margin) -- read from the record fields alone, this contact looks fine. But the CURED, rasterised patch measures only A_rast=0.10746 mm^2 (a 26.5% raster loss from the ideal disc), 0.053% short of A_required -- a real, deterministic, quantisation-caused shortfall the declared geometry cannot see.",
+  "check": "i2_contact_area",
+  "expect": "check_fails",
+  "codes": ["CONTACT_AREA_SHORT"],
+  "model": 0,
+  "min_failures": 1
+}

@@ -1,0 +1,8 @@
+{
+  "description": "a closed triangular loop of three JointSphere junctions and three Member rods, floating 3.6 mm above the plate and 20+ mm sideways from the model -- a legitimate cycle in the undirected connection graph whose only route to ground is through itself. This is the exact case audit-invariants.md §3.5 clause (c) calls out by name: bracing cycles are legitimate, but a set of primitives whose only route to ground is through each other is not, and PATH_ORPHAN is that statement as a number.",
+  "check": "i5_closed_load_path",
+  "expect": "check_fails",
+  "codes": ["PATH_ORPHAN"],
+  "model": 0,
+  "min_failures": 6
+}

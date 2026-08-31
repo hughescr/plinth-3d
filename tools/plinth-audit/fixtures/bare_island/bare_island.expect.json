@@ -1,0 +1,8 @@
+{
+  "description": "a 2.517x2.517x2mm floating slab (the 'island') sits 3mm above the plate with air underneath. Its one support contact is real and correctly sized (embeds into the slab's SIDE wall at mid-height, 1mm above the slab's own bottom face), so the slab's bottom-most printer layer -- where it is born as a raster blob with nothing cured under it -- has zero cured support material at that exact layer. i7_island_coverage must catch this: a detached island of model material born with no support intersecting it at its birth layer.",
+  "check": "i7_island_coverage",
+  "expect": "check_fails",
+  "codes": ["ISLAND_UNSUPPORTED"],
+  "model": 0,
+  "min_failures": 1
+}

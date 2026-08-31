@@ -1,0 +1,8 @@
+{
+  "description": "two independent chains on one thin shared wall: chain A's tip is driven clean through it (a second exterior blob on the far side); chain B seats healthily but its own arm turns back and re-buries itself in the same wall 1.6 mm from its seat, outside any zone",
+  "check": "i6_no_intersection",
+  "expect": "check_fails",
+  "codes": ["INTERSECT_OUTSIDE_SEAT", "INTERSECT_FAR_SIDE_BREACH"],
+  "model": 0,
+  "min_failures": 3
+}

@@ -1,5 +1,13 @@
 [workspace]
 members = ["crates/*", "rust/chitubox_io", "rust/geom_kernel"]
+# `tools/plinth-audit` is the emitted-bytes audit instrument. It is excluded on
+# purpose: its independence from every `plinth-*` crate and from `geom_kernel`
+# is the entire reason its findings are worth anything
+# (`docs/specs/audit-invariants.md` §0). It carries its own empty `[workspace]`
+# table as well, so the exclusion holds from both directions. Do not promote it
+# to a member to "share" a type -- sharing a type is the defect this design
+# exists to prevent.
+exclude = ["tools/plinth-audit"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,8 @@
+{
+  "description": "two contacts, 2.5 mm apart on one flat 5x4 mm down-facing patch (D_total = 20 mm^2), each tip sized via A_implied = x_allowed*pi*r_tip^2 as though it ALONE carried the whole 20 mm^2 patch -- so the engine's books declare 40 mm^2 of load against 20 mm^2 of actual down-facing demand: one region of model surface counted as carried by two different contacts",
+  "check": "i4_load_ownership",
+  "expect": "check_fails",
+  "codes": ["LOAD_BOOKS_DISAGREE"],
+  "model": 0,
+  "min_failures": 1
+}

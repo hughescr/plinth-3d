@@ -1,0 +1,8 @@
+{
+  "description": "one tip seated at zero depth (never touches the model) and one embedded 0.05 mm, below its own computed h_required of 0.11459 mm",
+  "check": "i1_seat_depth",
+  "expect": "check_fails",
+  "codes": ["SEAT_DEPTH_ZERO", "SEAT_DEPTH_SHALLOW"],
+  "model": 0,
+  "min_failures": 2
+}
