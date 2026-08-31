@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I4 must PASS, STRICTLY -- no clamp-limited tip in this file (all four r_tip in [0.3257,0.3258], far from the [0.050,1.000] clamp bounds), so clause (d) is graded as a real equality, not a wide bracket. Measured 2026-08-31: D_total=16.0 mm2 exactly (a 4x4mm box footprint, f32-exact), books ratio 1.0000000000166 (residual 2.66e-10 mm2, comfortably under the 1e-9 mm2 floor), a_unowned=0, 4 of 4 contacts three-way r_tip-agree. This is the f32-exactness step of audit-known-good.md section 2.5: three tips share r_tip=0.3257014751mm and the fourth carries r_tip=0.3258355856mm, a difference in the 4th decimal (not the 7th, disclosed in the README) found by an ULP sweep that also required each candidate to satisfy R6 (R=1.5*r_tip exact in f32).",
+  "check": "i4_load_ownership",
+  "expect": "check_passes",
+  "model": 0
+}

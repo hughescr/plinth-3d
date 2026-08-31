@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I4 load ownership, graded STRICT (no clamped tips -- audit-known-good.md §4's 'strict' meaning): D_total=16.00mm^2 exactly (4x4mm footprint), four contacts each own their exact 4.00mm^2 quadrant, and clause (d)'s books bracket closes to a measured residual of 2.66e-10 mm^2 against the 1e-9 mm^2 floor via the f32-ULP sweep audit-known-good.md §2.5 describes (three tips share one r_tip f32 value, the fourth differs in its 4th-5th significant decimal -- disclosed in README.md, not hidden).",
+  "check": "i4_load_ownership",
+  "expect": "check_passes",
+  "model": 0
+}

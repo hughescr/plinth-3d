@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: worst X delivered 9.848-9.861 (X_ALLOWED=12); A_rast measured 0.40565-0.40618 mm2 against A_ideal ~0.480 mm2 at each of the 4 contacts, matching the hand-derived prediction in README.md.",
+  "check": "i2_contact_area",
+  "expect": "check_passes"
+}

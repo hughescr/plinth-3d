@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: strict pass (no clamp-limited tip: all four r_tip in [0.32570,0.32584], far from the [0.050,1.000] clamp bounds). Books ratio measured 1.0000000000167 -- residual 2.663e-10 mm2 against the 1e-9 mm2 floor, reached by choosing the closest-to-symmetric R6-exact (r_a x3, r_n x1) pair under the floor rather than the global residual minimum (see README).",
+  "check": "i4_load_ownership",
+  "expect": "check_passes"
+}

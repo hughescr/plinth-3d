@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i5_closed_load_path specifically in its PASSING direction. All 16 records: 4 grounded via seat (tips), 4 grounded via plate (flares), 8 connected via the deliberate >=0.10mm R1-rule overlaps; 0 free ends.",
+  "check": "i5_closed_load_path",
+  "expect": "check_passes",
+  "model": 0
+}

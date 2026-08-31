@@ -1,0 +1,8 @@
+{
+  "description": "DIAGNOSTIC PROBE (see four_leg_overhang_probe_tight_joint_i3.expect.json and README.md). With the graph now connected (tight joints), I8 stops reporting GEOM_INDETERMINATE (as it does on the shipped 0.10mm-overlap fixture) and instead resolves cleanly to GEOM_DEAD_MEMBER on exactly the 12 non-tip records (3 per post x 4 posts) -- empirically confirming docs/specs/audit-known-good.md §5.1's PREDICTED finding that I8 as specified cannot be passed by any well-formed multi-record support chain, because no TAPER/MEMBER/FLARE here satisfies any of I8's liveness roles R1-R4.",
+  "check": "i8_no_dead_geometry",
+  "expect": "check_fails",
+  "codes": ["GEOM_DEAD_MEMBER"],
+  "model": 0,
+  "min_failures": 12
+}

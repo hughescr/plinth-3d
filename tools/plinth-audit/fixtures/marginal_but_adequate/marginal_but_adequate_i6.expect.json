@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i6_no_intersection specifically in its PASSING direction. 16 records checked, 0 intersections: R2/R5 clearances (arm axis >=2x ball radius from any other surface; adjacent arms >=1.0mm true gap against the 0.30mm FINAL_CLEARANCE_GAP_MM floor) hold by design.",
+  "check": "i6_no_intersection",
+  "expect": "check_passes",
+  "model": 0
+}

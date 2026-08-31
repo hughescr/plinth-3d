@@ -1,0 +1,6 @@
+{
+  "description": "I1 seat depth -- known-good KG-4 (docs/specs/audit-known-good.md sec 3.4): an 8.40x8.40x4.50mm block with a 4.20x4.20mm recess milled 3.00mm up into its underside (1.50mm roof, open downward), on a 16-post 2.10mm grid, floating 4.00mm above the plate. Every post carries an equal 4.41mm2 cell by symmetry. This artifact is one of ten byte-identical copies in this directory, one per gating check, so the current harness (single check_passes/check_fails per artifact stem) can assert all ten verdicts against the same design. See README.md for the full derivation and the owner's plain-language paragraph.",
+  "check": "i1_seat_depth",
+  "expect": "check_passes",
+  "model": 0
+}

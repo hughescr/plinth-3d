@@ -1,0 +1,5 @@
+{
+  "description": "KG-1 kg_slab_four_post: a 4x4x2mm slab on four load-sized posts, physically derived (docs/physics.md, printer profile) and built to PASS, not fail. Canonical artifact for this fixture; I1 seat depth is the check bound to this filename -- see i2..i10 siblings for the other nine.",
+  "check": "i1_seat_depth",
+  "expect": "check_passes"
+}

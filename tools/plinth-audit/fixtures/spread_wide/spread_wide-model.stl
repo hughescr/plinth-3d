@@ -1,0 +1,86 @@
+solid spread_wide_model
+  facet normal 0e0 0e0 -1e0
+    outer loop
+      vertex -2e0 -2e0 -1e0
+      vertex 2e0 2e0 -1e0
+      vertex 2e0 -2e0 -1e0
+    endloop
+  endfacet
+  facet normal 0e0 0e0 -1e0
+    outer loop
+      vertex -2e0 -2e0 -1e0
+      vertex -2e0 2e0 -1e0
+      vertex 2e0 2e0 -1e0
+    endloop
+  endfacet
+  facet normal 0e0 0e0 1e0
+    outer loop
+      vertex -2e0 -2e0 1e0
+      vertex 2e0 -2e0 1e0
+      vertex 2e0 2e0 1e0
+    endloop
+  endfacet
+  facet normal 0e0 0e0 1e0
+    outer loop
+      vertex -2e0 -2e0 1e0
+      vertex 2e0 2e0 1e0
+      vertex -2e0 2e0 1e0
+    endloop
+  endfacet
+  facet normal 0e0 -1e0 0e0
+    outer loop
+      vertex -2e0 -2e0 -1e0
+      vertex 2e0 -2e0 -1e0
+      vertex 2e0 -2e0 1e0
+    endloop
+  endfacet
+  facet normal 0e0 -1e0 0e0
+    outer loop
+      vertex -2e0 -2e0 -1e0
+      vertex 2e0 -2e0 1e0
+      vertex -2e0 -2e0 1e0
+    endloop
+  endfacet
+  facet normal 1e0 0e0 0e0
+    outer loop
+      vertex 2e0 -2e0 -1e0
+      vertex 2e0 2e0 -1e0
+      vertex 2e0 2e0 1e0
+    endloop
+  endfacet
+  facet normal 1e0 0e0 0e0
+    outer loop
+      vertex 2e0 -2e0 -1e0
+      vertex 2e0 2e0 1e0
+      vertex 2e0 -2e0 1e0
+    endloop
+  endfacet
+  facet normal 0e0 1e0 0e0
+    outer loop
+      vertex 2e0 2e0 -1e0
+      vertex -2e0 2e0 -1e0
+      vertex -2e0 2e0 1e0
+    endloop
+  endfacet
+  facet normal 0e0 1e0 -0e0
+    outer loop
+      vertex 2e0 2e0 -1e0
+      vertex -2e0 2e0 1e0
+      vertex 2e0 2e0 1e0
+    endloop
+  endfacet
+  facet normal -1e0 0e0 0e0
+    outer loop
+      vertex -2e0 2e0 -1e0
+      vertex -2e0 -2e0 -1e0
+      vertex -2e0 -2e0 1e0
+    endloop
+  endfacet
+  facet normal -1e0 0e0 0e0
+    outer loop
+      vertex -2e0 2e0 -1e0
+      vertex -2e0 -2e0 1e0
+      vertex -2e0 2e0 1e0
+    endloop
+  endfacet
+endsolid spread_wide_model

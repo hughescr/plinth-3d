@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: worst A_min measured 0.481474 mm2 against a required 0.333333 mm2 (X_ALLOWED=12 boundary), at every one of the 4 contacts' load paths.",
+  "check": "i3_min_section",
+  "expect": "check_passes"
+}

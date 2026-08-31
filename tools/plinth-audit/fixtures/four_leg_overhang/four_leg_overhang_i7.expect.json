@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I7 island coverage: the slab's single down-facing island (the whole 4x4mm underside, one connected component at its birth layer) is supported -- established, non-vacuous (checked=1, indeterminate=0).",
+  "check": "i7_island_coverage",
+  "expect": "check_passes",
+  "model": 0
+}

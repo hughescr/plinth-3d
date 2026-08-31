@@ -1,0 +1,8 @@
+{
+  "description": "NOT a planted defect -- a MEASURED, PREDICTED-IN-ADVANCE TOOL FINDING (docs/specs/audit-known-good.md sec 5.1 predicted, before this file was built, that i8 cannot pass ANY well-formed support file under the current liveness-role model, because a validly-seated TIP is its own ground and nothing in roles R1-R4 can ever mark a plain TAPER/MEMBER/FLARE beneath it as live). Measured here: every TIP is 'live' (role R1, carries demand); every TAPER/MEMBER/FLARE reports GEOM_INDETERMINATE reason=path_indeterminate -- the same SupportGraph plain-join gap named in marginal_but_adequate_i3.expect.json, feeding i8's own R2/R3 role analysis exactly as fixtures/shallow_seat/README.md section 2 independently found for the project's own reference file ('a disagreement between i5 and i8's two notions of grounded worth someone's attention, not a property of the seat-depth defect' -- true here too, substituting i3 for the seat-depth defect).",
+  "check": "i8_no_dead_geometry",
+  "expect": "check_fails",
+  "codes": ["GEOM_INDETERMINATE"],
+  "model": 0,
+  "min_failures": 12
+}

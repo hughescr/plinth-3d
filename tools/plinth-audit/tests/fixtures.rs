@@ -544,12 +544,26 @@ fn every_fixture_trips_the_check_it_names() {
     let mut satisfied = 0usize;
     let mut pending: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    // Split the satisfied count by DIRECTION. Until 2026-08-31 every one of the
+    // eleven expectations was `check_fails`: the harness supported
+    // `check_passes` and not one fixture used it, so no check in this tool had
+    // ever been asked to say yes, and "0 of 31 files passes" could not be read
+    // -- it was equally consistent with "the corpus is bad" and with "a check
+    // refuses everything". A bare total cannot tell those apart either, and a
+    // total is what the old backstop asserted. These two counts can.
+    let mut satisfied_passing = 0usize;
+    let mut satisfied_failing = 0usize;
     for e in expectations {
         match e {
             Err(msg) => failed.push(format!("MALFORMED  {msg}")),
             Ok(e) => match run_fixture(&e) {
                 Verdict::Satisfied => {
                     satisfied += 1;
+                    if e.expect == "check_passes" {
+                        satisfied_passing += 1;
+                    } else {
+                        satisfied_failing += 1;
+                    }
                     let doc = run::audit_file(&e.artifact, &AuditOptions::default(), None).document;
                     let collateral = collateral_failures(&doc, e.model, &e.check);
                     eprintln!(
@@ -574,7 +588,8 @@ fn every_fixture_trips_the_check_it_names() {
         }
     }
     eprintln!(
-        "fixtures: {satisfied} satisfied, {} pending, {} failed",
+        "fixtures: {satisfied} satisfied ({satisfied_passing} check_passes, \
+         {satisfied_failing} check_fails), {} pending, {} failed",
         pending.len(),
         failed.len()
     );
@@ -600,14 +615,51 @@ fn every_fixture_trips_the_check_it_names() {
         pending.len(),
         pending.join("\n  ")
     );
+    // The backstop that makes a silently-vanishing fixture loud. Update these
+    // numbers DELIBERATELY when adding or removing a fixture; never to make a
+    // red suite go green.
+    //
+    // 60 expectations over the 15 directories `fixture_dirs_on_disk()` reports,
+    // covering 16 fixture DESIGNS in 18 distinct artifact byte-streams:
+    //
+    //   11 planted-defect fixtures, one expectation each, all `check_fails`
+    //      (bare_cavity_ceiling, bare_island, broken_path x2, buried_arm,
+    //      collinear_arms, double_load, eccentric_polygon, long_ledge,
+    //      shallow_seat, starved_patch) -- plus broken_path_control, the
+    //      declared-unexpected 12th artifact.
+    //    5 known-good fixtures landed 2026-08-31 (four_leg_overhang,
+    //      hollow_drained, marginal_but_adequate, spread_wide, trivial_cube)
+    //      carrying 49 expectations between them, of which 42 are
+    //      `check_passes` and 7 are `check_fails` recording a MEASURED refusal
+    //      of a file whose correctness is derived by hand in its README.
+    //
+    // Those 7 are the result of this round and they must not be quietly
+    // deleted: they are the tool refusing files that a human derivation says
+    // are good. Their fixtures may be RETIRED when a check is fixed, which
+    // moves the number below; they may not be edited into passing.
     assert_eq!(
-        satisfied,
-        11,
-        "the fixture count changed. Eleven expectations are expected here \
-         (bare_cavity_ceiling, bare_island, broken_path x2, buried_arm, collinear_arms, \
-         double_load, eccentric_polygon, long_ledge, shallow_seat, starved_patch). \
-         Update this number DELIBERATELY when adding or removing a fixture -- it is the \
-         backstop that makes a silently-vanishing fixture loud."
+        satisfied, 60,
+        "the fixture count changed -- {satisfied_passing} check_passes + \
+         {satisfied_failing} check_fails. See the comment above this assertion for the \
+         60 it expects and how they decompose."
+    );
+    // The direction split, asserted separately, because the total cannot see a
+    // swap. Before 2026-08-31 this tool had 11 expectations and ALL of them
+    // were `check_fails`: no check had ever been required to say yes about
+    // anything, so a check that refused every file in the world would have had
+    // a perfect fixture record. If this number ever returns to zero the tool
+    // has lost the only evidence it has that its checks can pass a good file,
+    // and every "N of M files fail" headline it produces becomes unreadable
+    // again.
+    assert_eq!(
+        satisfied_passing, 42,
+        "the count of PASSING expectations changed. A check_passes fixture is the only \
+         thing standing between this tool and a check that refuses everything."
+    );
+    assert_eq!(
+        satisfied_failing, 18,
+        "the count of FAILING expectations changed (11 planted defects + 7 measured \
+         refusals of known-good files)."
     );
 }
 

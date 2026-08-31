@@ -1,0 +1,8 @@
+{
+  "description": "KG-F1 (see README.md sec 'Findings against the tool'): I4 clause (d) refuses this known-good, physics-derived, all-other-checks-passing file by 2.412e-9 mm^2 -- 2.4x the 1e-9 floor -- because the audit's own three-way r_tip cross-check (R/ball_factor, computed and used at full f64 precision) disagrees with the DECLARED taper radius by ~1e-8 mm per contact, an irreducible artifact of dividing a stored f32 by 1.5 without re-rounding, propagated through 16 contacts. This is NOT a planted defect: this file was built to satisfy clause (d) exactly and got within 3.4e-11 relative (ratio 1.0000000034) after two rounds of measurement-driven refinement. Registered as a finding against the check's tolerance, not against the file -- see docs/specs/audit-known-good.md sec 8.",
+  "check": "i4_load_ownership",
+  "expect": "check_fails",
+  "codes": ["LOAD_BOOKS_DISAGREE"],
+  "model": 0,
+  "min_failures": 1
+}

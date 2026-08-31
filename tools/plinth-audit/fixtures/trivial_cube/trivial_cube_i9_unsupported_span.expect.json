@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: worst reach 1.051635 mm against the 1.344976 mm span allowance (78.2%), 0 of 1 down-face regions exceed it.",
+  "check": "i9_unsupported_span",
+  "expect": "check_passes"
+}

@@ -605,53 +605,390 @@ impl RunRaster {
         Ok(out)
     }
 
-    /// Connected components of one layer's cured pixels under 4-connectivity
-    /// on runs. Returns one run list per component.
+    /// Connected components of one layer's cured pixels under **Rule K1** --
+    /// shared-face adjacency, in-plane 4-connectivity
+    /// (`docs/specs/audit-connectivity-rule.md` §3.1, §4 site 1). Returns one
+    /// run list per component.
     ///
-    /// This is I7's island primitive and I2's patch-component primitive.
+    /// This is I7's island primitive. It is **not** I2's patch primitive: I2
+    /// walks voxels under 3-D 6-connectivity in `checks/contact_area.rs` (§4
+    /// site 7). The comment that used to claim otherwise here was the only
+    /// place in `src/` asserting the two shared a connectivity rule, and they
+    /// never have.
+    ///
+    /// Callers that apply an area censor must use [`Self::layer_components_k4`]
+    /// instead and censor on the clump, not on the component (K4, §3.5).
     #[must_use]
     pub fn layer_components(&self, k: i64) -> Vec<Vec<(i64, Run)>> {
-        let Some(layer) = self.layer(k) else {
-            return Vec::new();
-        };
-        let mut items: Vec<(i64, Run)> = Vec::new();
-        for (&row, runs) in &layer.rows {
-            for r in runs {
-                items.push((row, *r));
-            }
-        }
-        let n = items.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        fn find(p: &mut [usize], mut x: usize) -> usize {
-            while p[x] != x {
-                p[x] = p[p[x]];
-                x = p[x];
-            }
-            x
-        }
-        // Same row: adjacent runs never touch after normalise(). Cross-row:
-        // runs in row j and j+1 whose column spans overlap.
-        for i in 0..n {
-            for jx in (i + 1)..n {
-                if (items[i].0 - items[jx].0).abs() != 1 {
-                    continue;
-                }
-                let (a, b) = (items[i].1, items[jx].1);
-                if a.c0 < b.c1 && b.c0 < a.c1 {
-                    let (ra, rb) = (find(&mut parent, i), find(&mut parent, jx));
-                    if ra != rb {
-                        parent[ra] = rb;
-                    }
-                }
-            }
-        }
-        let mut groups: BTreeMap<usize, Vec<(i64, Run)>> = BTreeMap::new();
-        for i in 0..n {
-            let r = find(&mut parent, i);
-            groups.entry(r).or_default().push(items[i]);
-        }
-        groups.into_values().collect()
+        self.layer_components_k4(k).components
     }
+
+    /// [`Self::layer_components`] plus, per component, the pixel count of the
+    /// **K4 clump** containing it -- the object any minimum-area censor is
+    /// evaluated on (`audit-connectivity-rule.md` §3.1 K4). See
+    /// [`RowRuns::components_with_clumps`] for the defect this exists to stop.
+    #[must_use]
+    pub fn layer_components_k4(&self, k: i64) -> LayerComponents {
+        let Some(layer) = self.layer(k) else {
+            return LayerComponents::default();
+        };
+        RowRuns::from_layer(layer).components_with_clumps()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule K -- the one connectivity rule  (docs/specs/audit-connectivity-rule.md)
+// ---------------------------------------------------------------------------
+//
+// **One implementation, here, for every site the ruling assigns to it**: I7's
+// islands (§4 site 1, [`RunRaster::layer_components`] above), I9's down-face
+// regions and its `support_borne` components (§4 sites 2 and 3,
+// `checks/unsupported_span.rs`), and I10's rigid bodies (§4 site 4,
+// `checks/arrangement_spread.rs`). Until 2026-08-31 those were three separate
+// copies giving three different answers to the same question -- 4-connectivity,
+// 8-connectivity, and a bool parameter -- so the same shape was one region to
+// one check and two to another, and nothing in the tool recorded the
+// disagreement. The copies are deleted; their call sites call in here.
+//
+// Sites the ruling deliberately EXCLUDES keep a different rule, and each one
+// says at its own site which rule it uses and why the physical one does not
+// apply: the disclosure instrument (§4 #5, [`InPlaneJoin::SharedFaceOrCorner`]),
+// I2's 6-connected voxel patch (§4 #7, already K1-compliant,
+// `checks/contact_area.rs`), I3's quadrature lattice (§4 #8,
+// `checks/narrowest_section.rs`), the vertical attachment predicates (§4 #9,
+// #10), mesh topology (§4 #11, `mesh.rs`) and the support graph (§4 #12,
+// `graph.rs`).
+//
+// **NOT DONE HERE, and the gap is real.** §4 #6 rules that
+// `checks/intersection.rs::components_26` must move to K1 too, and it is the
+// loosest and most consequential site in the tool (§5.6: +67 failed I6 records,
+// breach volume x69.4). That file is outside this change's ownership and still
+// joins exterior voxels across corners and edges.
+
+/// Shared-face area of a **rook contact across columns** -- same row,
+/// neighbouring columns, the plane `x = const`.
+///
+/// `Derived` from [`c::PIXEL_PITCH_Y_MM`] (Measured, vendor,
+/// `plinth-core/src/constants/evidence.rs:154-159`) and
+/// [`c::LAYER_HEIGHT_DEFAULT_MM`] (Measured, PROJECT RECORD, `evidence.rs:210-220`).
+/// `audit-connectivity-rule.md` §1.1: **9.500e-4 mm^2**.
+pub const JOIN_FACE_AREA_ACROSS_COLUMNS_MM2: f64 =
+    c::PIXEL_PITCH_Y_MM * c::LAYER_HEIGHT_DEFAULT_MM;
+
+/// Shared-face area of a **rook contact across rows** -- neighbouring rows,
+/// same column, the plane `y = const`. This is the face every in-plane join in
+/// this module actually counts, because runs are columns within a row and a
+/// component walk only ever joins ACROSS rows.
+///
+/// `Derived` from [`c::PIXEL_PITCH_X_MM`] (Measured, vendor, `evidence.rs:261-266`)
+/// and [`c::LAYER_HEIGHT_DEFAULT_MM`]. `audit-connectivity-rule.md` §1.1:
+/// **7.000e-4 mm^2**.
+pub const JOIN_FACE_AREA_ACROSS_ROWS_MM2: f64 = c::PIXEL_PITCH_X_MM * c::LAYER_HEIGHT_DEFAULT_MM;
+
+/// Shared-face area of a **vertical contact** -- same column, neighbouring
+/// layers, the plane `z = const`. `Derived`; it is [`c::PIXEL_AREA_MM2`] itself,
+/// **2.660e-4 mm^2** (`audit-connectivity-rule.md` §1.1).
+pub const JOIN_FACE_AREA_VERTICAL_MM2: f64 = c::PIXEL_AREA_MM2;
+
+/// **The connection threshold, and it is an area, not a pixel count.** A
+/// contact joins two cured cells when the area they share EXCEEDS this. It is
+/// the area of a corner (bishop) contact, and it is exactly zero.
+///
+/// `Ruled`, `audit-connectivity-rule.md` §1.2 and §3.3, and the ruling is
+/// **epistemic rather than a strength claim**. A corner has zero area only in
+/// the nominal geometry; in cured resin, anti-aliased exposure bleeds `delta`
+/// per side and the neck between two diagonal cells is
+/// `A_bishop = 2*sqrt(2)*delta*h`, which over the plausible range of `delta`
+/// runs from 0.10x to 2.63x one across-rows face. **`delta` has never been
+/// measured on this machine** -- plate 5's witness pads `W5A`, `W5B` and `Q2`
+/// were printed to measure it and no reading of any of them exists. So a corner
+/// contact sits in the audit's fusion-uncertain band ([`c::D3_MM`],
+/// `audit-invariants.md` §1.5), and the contract's first rule -- anything the
+/// audit cannot establish is a hard failure -- sends it to zero rather than to
+/// a pass. A `delta` measurement SUPERSEDES this constant; it does not collide
+/// with it.
+///
+/// It is stated as an area and never as a count because the two in-plane axes
+/// differ by `19/14 = 1.357x`: any rule stated as a pixel count is 36 %
+/// stricter on one axis than the other (§1.1).
+pub const JOIN_AREA_CORNER_MM2: f64 = 0.0;
+
+/// `A_JOIN_MIN`, the load tier's floor: `pi * TIP_RADIUS_MIN_ALLOWED_MM^2`,
+/// **7.853982e-3 mm^2**.
+///
+/// `Derived` from [`c::TIP_RADIUS_MIN_ALLOWED_MM`], which is itself `Derived`
+/// from `TIP_DIAMETER_MIN_ALLOWED_MM = 0.100 mm`
+/// (`plinth-core/src/constants/evidence.rs:352-358`) and is the validator
+/// minimum -- the smallest cross-section this project admits as a load-bearing
+/// member anywhere. `audit-connectivity-rule.md` §3.1 K2 and §3.2 `N_built`.
+///
+/// **It is NOT used as an identity predicate and must never be.** §3.4 and §5.5
+/// measured that: applied per run pair it turns a smooth sphere into 307
+/// islands and hands two files a gate pass by fragmenting their defects below
+/// the area censor. K2 is a statement about a **cut** -- the summed joint across
+/// a whole interface -- and belongs to the neck check of §3.4, which does not
+/// exist yet. This constant and [`join_min_faces`] are here so that check
+/// inherits the derivation instead of re-deciding it.
+pub const A_JOIN_MIN_MM2: f64 =
+    std::f64::consts::PI * c::TIP_RADIUS_MIN_ALLOWED_MM * c::TIP_RADIUS_MIN_ALLOWED_MM;
+
+/// Whole faces needed to reach [`A_JOIN_MIN_MM2`] on each axis, as
+/// `(across columns, across rows, vertical)` -- 9, 12 and 30 on this printer.
+///
+/// **Computed from the grid at run time and never hard-coded**
+/// (`audit-connectivity-rule.md` §3.1): a constant whose derivation is not in
+/// the code has been converted into a chosen number, which physics-first
+/// doctrine forbids (`docs/physics.md` §12). The three counts differ by 36 %
+/// between the two in-plane axes, which is why the rule is an area and the
+/// counts come from it and never the reverse.
+#[must_use]
+pub fn join_min_faces(grid: RasterGrid) -> (i64, i64, i64) {
+    let h = grid.layer_height_mm;
+    let per_column = grid.pitch_y_mm * h;
+    let per_row = grid.pitch_x_mm * h;
+    let per_layer = grid.pitch_x_mm * grid.pitch_y_mm;
+    (
+        (A_JOIN_MIN_MM2 / per_column).ceil() as i64,
+        (A_JOIN_MIN_MM2 / per_row).ceil() as i64,
+        (A_JOIN_MIN_MM2 / per_layer).ceil() as i64,
+    )
+}
+
+/// Columns two runs in neighbouring rows share. Exact: runs are half-open.
+#[must_use]
+pub const fn shared_columns(a: Run, b: Run) -> i64 {
+    let lo = if a.c0 > b.c0 { a.c0 } else { b.c0 };
+    let hi = if a.c1 < b.c1 { a.c1 } else { b.c1 };
+    if hi > lo { hi - lo } else { 0 }
+}
+
+/// The joint area, mm^2, between two runs in **neighbouring rows**: the shared
+/// column count times [`JOIN_FACE_AREA_ACROSS_ROWS_MM2`]
+/// (`audit-connectivity-rule.md` §3.1 K1, the `n_y` term).
+#[must_use]
+pub fn shared_face_area_across_rows_mm2(a: Run, b: Run) -> f64 {
+    shared_columns(a, b) as f64 * JOIN_FACE_AREA_ACROSS_ROWS_MM2
+}
+
+/// Which in-plane contacts join two cured cells into one region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InPlaneJoin {
+    /// **Rule K1, the physical criterion.** Two cells are joined only through a
+    /// shared FACE; edge and corner contacts contribute
+    /// [`JOIN_AREA_CORNER_MM2`] -- zero -- and never join. In lattice terms,
+    /// in-plane 4-connectivity. This is the rule at every gating site.
+    SharedFace,
+    /// **NOT a verdict rule, and never a gate.** A corner contact joins here,
+    /// which K1 refuses. Two uses, both deliberate and both named:
+    ///
+    /// 1. **The disclosure instrument** of `audit-spread-criterion.md` §5 and
+    ///    `audit-connectivity-rule.md` §4 #5. Its whole job is to price the
+    ///    stricter choice -- the count of bodies that would merge if corners
+    ///    joined -- so it must keep computing the looser answer. Applying K1
+    ///    here would make the instrument report zero and the tool would lose
+    ///    the one number that says what the connectivity choice costs (55 % of
+    ///    prefix-connected bodies, corpus-wide, §5.2).
+    /// 2. **The K4 clump** (§3.1 K4, §3.5). A minimum-area censor is evaluated
+    ///    on the whole clump of material, never on a fragment a stricter rule
+    ///    carved off it. See [`RowRuns::components_with_clumps`].
+    SharedFaceOrCorner,
+}
+
+impl InPlaneJoin {
+    /// Does this contact join runs `a` and `b`, which lie in **neighbouring
+    /// rows**? Runs within one row are disjoint and normalised, so they never
+    /// touch and this is the only adjacency an in-plane walk has to test.
+    #[must_use]
+    pub fn joins_across_rows(self, a: Run, b: Run) -> bool {
+        match self {
+            // K1: the joint must have area. `> JOIN_AREA_CORNER_MM2` is the
+            // threshold in its own units, not `n > 0` -- the zero is the
+            // corner's ruled area and carries the reason it is zero.
+            Self::SharedFace => shared_face_area_across_rows_mm2(a, b) > JOIN_AREA_CORNER_MM2,
+            // A corner counts: half-open spans that merely abut (`a.c1 == b.c0`)
+            // are one column apart in the closed sense, hence `<=` not `<`.
+            Self::SharedFaceOrCorner => a.c0 <= b.c1 && b.c0 <= a.c1,
+        }
+    }
+}
+
+/// Union-find over run indices. One copy, here.
+struct Dsu(Vec<u32>);
+
+impl Dsu {
+    fn new(n: usize) -> Self {
+        Self((0..n as u32).collect())
+    }
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.0[x] as usize != x {
+            self.0[x] = self.0[self.0[x] as usize];
+            x = self.0[x] as usize;
+        }
+        x
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.0[ra] = rb as u32;
+        }
+    }
+}
+
+/// One layer's runs, flattened and grouped by row: the input every in-plane
+/// component walk in this tool takes.
+///
+/// `groups[g] = (row, start, end)`, a half-open range into `runs`, ascending by
+/// row, one entry per non-empty row. `runs` is ascending by row then column.
+#[derive(Clone, Debug, Default)]
+pub struct RowRuns {
+    pub runs: Vec<(i64, Run)>,
+    pub groups: Vec<(i64, usize, usize)>,
+}
+
+impl RowRuns {
+    /// From a row table, **verbatim**: every run is kept and the flattened
+    /// order is the table's own, so a caller may index `runs` with offsets it
+    /// computed from the table.
+    #[must_use]
+    pub fn from_row_table(rows: &[(i64, Vec<Run>)]) -> Self {
+        let mut runs: Vec<(i64, Run)> = Vec::new();
+        let mut groups: Vec<(i64, usize, usize)> = Vec::new();
+        for (row, rs) in rows {
+            let start = runs.len();
+            for r in rs {
+                runs.push((*row, *r));
+            }
+            if runs.len() > start {
+                groups.push((*row, start, runs.len()));
+            }
+        }
+        Self { runs, groups }
+    }
+
+    /// From a rasterised layer, dropping empty runs (they carry no pixels and
+    /// no face area, so they can neither be a component nor join one).
+    #[must_use]
+    pub fn from_layer(layer: &Layer) -> Self {
+        let mut runs: Vec<(i64, Run)> = Vec::new();
+        let mut groups: Vec<(i64, usize, usize)> = Vec::new();
+        for (&row, rs) in &layer.rows {
+            let start = runs.len();
+            for r in rs {
+                if !r.is_empty() {
+                    runs.push((row, *r));
+                }
+            }
+            if runs.len() > start {
+                groups.push((row, start, runs.len()));
+            }
+        }
+        Self { runs, groups }
+    }
+
+    /// Label every run with its component id under `join`. Returns
+    /// `(label per run, component count)`; labels are dense, `0..count`, and
+    /// assigned in flattened order, so the numbering is deterministic.
+    ///
+    /// Batch-first: one sweep over adjacent row pairs with a two-pointer
+    /// interval join, `O(runs)` on already-sorted rows. A per-run search would
+    /// be `O(runs^2)`, which is what [`RunRaster::layer_components`] used to
+    /// run before the three copies were merged into this one.
+    #[must_use]
+    pub fn label(&self, join: InPlaneJoin) -> (Vec<u32>, usize) {
+        let n = self.runs.len();
+        let mut ds = Dsu::new(n);
+        for w in self.groups.windows(2) {
+            let (r0, s0, e0) = w[0];
+            let (r1, s1, e1) = w[1];
+            if r1 - r0 != 1 {
+                continue; // rows not neighbours: no in-plane contact exists
+            }
+            let (mut i, mut j) = (s0, s1);
+            while i < e0 && j < e1 {
+                let (a, b) = (self.runs[i].1, self.runs[j].1);
+                if join.joins_across_rows(a, b) {
+                    ds.union(i, j);
+                }
+                if a.c1 < b.c1 {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            }
+        }
+        let mut canon = vec![u32::MAX; n];
+        let mut labels = vec![u32::MAX; n];
+        let mut next = 0u32;
+        for i in 0..n {
+            let r = ds.find(i);
+            if canon[r] == u32::MAX {
+                canon[r] = next;
+                next += 1;
+            }
+            labels[i] = canon[r];
+        }
+        (labels, next as usize)
+    }
+
+    /// Pixel count per label, for a labelling this table produced.
+    #[must_use]
+    pub fn pixels_per_label(&self, labels: &[u32], count: usize) -> Vec<i64> {
+        let mut out = vec![0i64; count];
+        for (i, (_, r)) in self.runs.iter().enumerate() {
+            out[labels[i] as usize] += r.len().max(0);
+        }
+        out
+    }
+
+    /// The K1 components, each paired with the pixel count of the **K4 clump**
+    /// that contains it.
+    ///
+    /// **Corollary K4** (`audit-connectivity-rule.md` §3.1, §3.5): a
+    /// minimum-area censor is evaluated on the clump of material, never on a
+    /// fragment a stricter rule carved off it. A rule that subdivides material
+    /// may never delete it from a denominator.
+    ///
+    /// This is not a hypothetical. Moving I9 from 8-connectivity to K1 without
+    /// K4 makes `Bat Cat Owl`, `Crawler Zombie` and `Decomposing Zombie` each
+    /// lose a failure -- `regions_censored_one_pixel` rises, `regions_failed`
+    /// falls, and `max_reach_mm` is identical to the last digit, so no geometry
+    /// moved (§5.4). A failing region was fragmented until its pieces fell under
+    /// the one-pixel censor and stopped being reported. **A stricter rule that
+    /// lowers a failure count is this project's signature defect wearing a new
+    /// hat**, and K4 is what stops it.
+    ///
+    /// The clump is the component under [`InPlaneJoin::SharedFaceOrCorner`],
+    /// which is the loosest adjacency any rule in this tool has ever used, so it
+    /// contains the K1 component by construction. Censoring on the clump asks
+    /// "is this material the printer's own noise?" rather than "is this piece,
+    /// after I cut it up, small?".
+    #[must_use]
+    pub fn components_with_clumps(&self) -> LayerComponents {
+        let (labels, count) = self.label(InPlaneJoin::SharedFace);
+        let (clumps, clump_count) = self.label(InPlaneJoin::SharedFaceOrCorner);
+        let clump_px = self.pixels_per_label(&clumps, clump_count);
+        let mut components: Vec<Vec<(i64, Run)>> = vec![Vec::new(); count];
+        let mut clump_pixels = vec![0i64; count];
+        for (i, item) in self.runs.iter().enumerate() {
+            let g = labels[i] as usize;
+            components[g].push(*item);
+            // Every run of a K1 component lies in one clump, because the clump
+            // rule joins everything K1 joins.
+            clump_pixels[g] = clump_px[clumps[i] as usize];
+        }
+        LayerComponents {
+            components,
+            clump_pixels,
+        }
+    }
+}
+
+/// K1 components of one layer, with the K4 clump size each one belongs to.
+/// `components[i]` and `clump_pixels[i]` are the same component.
+#[derive(Clone, Debug, Default)]
+pub struct LayerComponents {
+    pub components: Vec<Vec<(i64, Run)>>,
+    pub clump_pixels: Vec<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -949,6 +1286,160 @@ mod tests {
         let r = RunRaster::from_primitives(&[a, b], g, &Budget::default()).expect("raster");
         let k = g.layer_at_or_below(1.0);
         assert_eq!(r.layer_components(k).len(), 2);
+    }
+
+    // -- Rule K: the connectivity boundary  ---------------------------------
+    // docs/specs/audit-connectivity-rule.md §1.1, §3.1
+
+    fn table(rows: &[(i64, &[Run])]) -> RowRuns {
+        RowRuns::from_row_table(
+            &rows
+                .iter()
+                .map(|(r, rs)| (*r, rs.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The three face areas of §1.1, to the digits the specification states.
+    /// They are the whole geometric content of the rule, so they are asserted
+    /// rather than trusted to the multiplication above.
+    #[test]
+    fn the_three_face_areas_are_the_ones_the_ruling_derives() {
+        assert!((JOIN_FACE_AREA_ACROSS_COLUMNS_MM2 - 9.500e-4).abs() < 1e-18);
+        assert!((JOIN_FACE_AREA_ACROSS_ROWS_MM2 - 7.000e-4).abs() < 1e-18);
+        assert!((JOIN_FACE_AREA_VERTICAL_MM2 - 2.660e-4).abs() < 1e-18);
+        // The two in-plane axes differ by 19/14: this is why the rule is an
+        // area and every count is derived from it, never the reverse.
+        let ratio = JOIN_FACE_AREA_ACROSS_COLUMNS_MM2 / JOIN_FACE_AREA_ACROSS_ROWS_MM2;
+        assert!((ratio - 19.0 / 14.0).abs() < 1e-12);
+        // A corner contributes exactly zero, and that is the threshold itself.
+        assert_eq!(JOIN_AREA_CORNER_MM2, 0.0);
+    }
+
+    /// §3.1's K2 table: 9 / 12 / 30 faces, and they must be COMPUTED from the
+    /// grid rather than written down. This asserts the arithmetic, and that
+    /// changing the grid changes the counts -- a hard-coded 12 would survive
+    /// the second half and fail nothing.
+    #[test]
+    fn a_join_min_and_its_face_counts_are_derived_not_written_down() {
+        assert!((A_JOIN_MIN_MM2 - 7.853_982e-3).abs() < 1e-9);
+        let g = RasterGrid::saturn4(0.0);
+        assert_eq!(join_min_faces(g), (9, 12, 30));
+        let half = RasterGrid {
+            pitch_x_mm: g.pitch_x_mm,
+            pitch_y_mm: g.pitch_y_mm,
+            layer_height_mm: g.layer_height_mm * 0.5,
+            z_plate_mm: 0.0,
+        };
+        assert_eq!(join_min_faces(half), (17, 23, 30));
+    }
+
+    /// **The boundary of Rule K1, one shared column either side of it.**
+    /// The threshold is zero area, so the three cases are: zero shared columns
+    /// (a corner), one shared column (one face), and two (two faces).
+    #[test]
+    fn the_join_threshold_is_area_and_a_corner_carries_none() {
+        let a = Run { c0: 0, c1: 5 };
+        // n = 0: the runs meet at the corner between column 4 and column 5.
+        let corner = Run { c0: 5, c1: 9 };
+        assert_eq!(shared_columns(a, corner), 0);
+        assert_eq!(shared_face_area_across_rows_mm2(a, corner), 0.0);
+        assert!(!InPlaneJoin::SharedFace.joins_across_rows(a, corner));
+        assert!(InPlaneJoin::SharedFaceOrCorner.joins_across_rows(a, corner));
+        // n = 1: one shared face. This is the smallest joint K1 admits.
+        let one = Run { c0: 4, c1: 9 };
+        assert_eq!(shared_columns(a, one), 1);
+        assert!(
+            (shared_face_area_across_rows_mm2(a, one) - JOIN_FACE_AREA_ACROSS_ROWS_MM2).abs()
+                < 1e-18
+        );
+        assert!(InPlaneJoin::SharedFace.joins_across_rows(a, one));
+        // n = 2, and n = 7: the area is exactly n faces, linearly.
+        for n in [2i64, 7] {
+            let b = Run { c0: 5 - n, c1: 9 };
+            assert_eq!(shared_columns(a, b), n.min(5));
+            assert!(
+                (shared_face_area_across_rows_mm2(a, b)
+                    - n.min(5) as f64 * JOIN_FACE_AREA_ACROSS_ROWS_MM2)
+                    .abs()
+                    < 1e-17
+            );
+            assert!(InPlaneJoin::SharedFace.joins_across_rows(a, b));
+        }
+        // Disjoint by a whole column: nothing joins it under any rule.
+        let gap = Run { c0: 6, c1: 9 };
+        assert!(!InPlaneJoin::SharedFace.joins_across_rows(a, gap));
+        assert!(!InPlaneJoin::SharedFaceOrCorner.joins_across_rows(a, gap));
+    }
+
+    /// The same boundary through the component walk, which is what every
+    /// caller actually uses.
+    #[test]
+    fn component_labelling_splits_a_corner_and_joins_one_shared_column() {
+        let corner = table(&[(0, &[Run { c0: 0, c1: 5 }]), (1, &[Run { c0: 5, c1: 9 }])]);
+        assert_eq!(corner.label(InPlaneJoin::SharedFace).1, 2);
+        assert_eq!(corner.label(InPlaneJoin::SharedFaceOrCorner).1, 1);
+
+        let one = table(&[(0, &[Run { c0: 0, c1: 5 }]), (1, &[Run { c0: 4, c1: 9 }])]);
+        assert_eq!(one.label(InPlaneJoin::SharedFace).1, 1);
+
+        // A staircase keeps a shared face between consecutive steps, so K1 does
+        // NOT shatter ordinary rasterised curvature: only a diagonal-only
+        // contact splits (§4 #6 makes the same point about I6).
+        let stair = table(&[
+            (0, &[Run { c0: 0, c1: 4 }]),
+            (1, &[Run { c0: 3, c1: 7 }]),
+            (2, &[Run { c0: 6, c1: 10 }]),
+        ]);
+        assert_eq!(stair.label(InPlaneJoin::SharedFace).1, 1);
+
+        // Non-adjacent rows never join, at any rule.
+        let skip = table(&[(0, &[Run { c0: 0, c1: 5 }]), (2, &[Run { c0: 0, c1: 5 }])]);
+        assert_eq!(skip.label(InPlaneJoin::SharedFace).1, 2);
+        assert_eq!(skip.label(InPlaneJoin::SharedFaceOrCorner).1, 2);
+    }
+
+    /// **Corollary K4.** A one-pixel component corner-attached to a larger
+    /// piece of material must report the CLUMP's size, so an area censor
+    /// reading `clump_pixels` cannot delete it. This is the guard on §5.4's
+    /// defect: a stricter rule lowering a failure count.
+    #[test]
+    fn the_k4_clump_of_a_corner_attached_single_pixel_is_the_whole_material() {
+        // Row 0: a 20-pixel bar. Row 1: one pixel, touching it only at a
+        // corner. K1 says two components; K4 says the censor sees 21 pixels.
+        let t = table(&[
+            (0, &[Run { c0: 0, c1: 20 }]),
+            (1, &[Run { c0: 20, c1: 21 }]),
+        ]);
+        let lc = t.components_with_clumps();
+        assert_eq!(lc.components.len(), 2, "K1 splits the corner");
+        assert_eq!(lc.clump_pixels, vec![21, 21], "K4 censors on the clump");
+
+        // A genuinely isolated single pixel is still censorable: its clump is
+        // itself. K4 must not disable the censor, only aim it.
+        let lone = table(&[
+            (0, &[Run { c0: 0, c1: 20 }]),
+            (5, &[Run { c0: 60, c1: 61 }]),
+        ]);
+        let lc = lone.components_with_clumps();
+        assert_eq!(lc.components.len(), 2);
+        assert!(lc.clump_pixels.contains(&1), "an isolated pixel is noise");
+    }
+
+    /// Empty runs carry no pixels and no face area, so they can neither be a
+    /// component nor join one -- and `from_row_table` keeps them anyway,
+    /// because I9 indexes its flattened table with offsets it computed itself.
+    #[test]
+    fn the_two_constructors_differ_only_in_dropping_empty_runs() {
+        let mut layer = Layer {
+            k: 0,
+            z_mm: 0.0,
+            rows: BTreeMap::new(),
+        };
+        layer.rows.insert(0, vec![Run { c0: 0, c1: 3 }, Run { c0: 5, c1: 5 }]);
+        assert_eq!(RowRuns::from_layer(&layer).runs.len(), 1);
+        let verbatim = RowRuns::from_row_table(&[(0i64, vec![Run { c0: 0, c1: 3 }, Run { c0: 5, c1: 5 }])]);
+        assert_eq!(verbatim.runs.len(), 2);
     }
 
     #[test]

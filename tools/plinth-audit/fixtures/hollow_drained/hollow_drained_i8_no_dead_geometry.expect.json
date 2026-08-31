@@ -1,0 +1,8 @@
+{
+  "description": "Predicted in advance by docs/specs/audit-known-good.md sec 5.1 and confirmed exactly here: every TAPER (16), MEMBER (16) and FLARE (16) -- 48 of 64 records -- reports GEOM_DEAD_MEMBER, because a correctly-seated TIP is its own ground (sec 3.5) so no live TIP ever reaches ground THROUGH the arm below it, and role R3 (whether removing a member increases some live member's free span) cannot fire on a chain with no branching. This is a specification-level finding, not a defect in this file: no well-formed support file can pass I8 as currently specified. Registered per audit-known-good.md sec 8; the fix is a ruling on what 'ground' means for role R2, not a change to this fixture.",
+  "check": "i8_no_dead_geometry",
+  "expect": "check_fails",
+  "codes": ["GEOM_DEAD_MEMBER"],
+  "model": 0,
+  "min_failures": 48
+}

@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I10 must PASS. Measured 2026-08-31: 1 body, 40 of 40 body-layer evaluations in equilibrium (d > +sigma at every one, 0 failures, 0 indeterminate); worst-per-body normalised margin m_hat=0.5 (the JSON gives only this per-body aggregate, not a per-layer trace). Hand-derived cross-check (audit-known-good.md section 3.1): support hull is the 2.00mm square of the four post axes, load centroid at its centre, d=1.000mm against sigma ~0.077mm (sigma_q<=0.0653 + sigma_H~1e-5 + d2/2=0.0118) -- about 13x the tolerance band, consistent with the comfortable measured pass.",
+  "check": "i10_arrangement_spread",
+  "expect": "check_passes",
+  "model": 0
+}

@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical; see that pair's expect.json for the geometry). NEGATIVE-of-negative control: I2 must PASS. Measured 2026-08-31: worst delivered X = 9.86 against X_ALLOWED=12 (18% headroom), median raster loss 15.47% of the ideal disc (measured full-containment rasterisation, not estimated), cured patch A_rast=0.4056-0.4062 mm2 against A_required=0.3333 mm2 -- a genuine 22-24% surplus after quantisation, not merely at the ideal-disc level.",
+  "check": "i2_contact_area",
+  "expect": "check_passes",
+  "model": 0
+}

@@ -1,0 +1,6 @@
+{
+  "description": "KG-1 kg_slab_four_post, the first known-good fixture (docs/specs/audit-known-good.md section 3.1): a 4.00x4.00x2.00mm slab on four posts at (+-1,+-1), each carrying an exact 2x2mm quadrant (A_cell=4.0 mm2). NEGATIVE-of-negative: this is a PASSING control, not a planted defect -- I1 must PASS. Measured 2026-08-31: all 4 contacts pass their own seat requirement, h_delivered=0.195421mm (post 4: 0.195501mm) against h_required=0.124407mm (ball-term-bound, normal incidence), a real 57% margin. r_tip three-way spread <= 2.27e-9 mm (tol 5.34e-7mm) -- R6's f32-exact-1.5x construction confirmed working.",
+  "check": "i1_seat_depth",
+  "expect": "check_passes",
+  "model": 0
+}

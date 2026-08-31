@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: the slab's one detached island is intersected by support at its birth layer.",
+  "check": "i7_island_coverage",
+  "expect": "check_passes"
+}

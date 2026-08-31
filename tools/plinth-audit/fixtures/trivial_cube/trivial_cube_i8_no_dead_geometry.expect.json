@@ -1,0 +1,7 @@
+{
+  "description": "KG-1 GENUINE TOOL/SPECIFICATION FINDING KG-F2, predicted in advance by docs/specs/audit-known-good.md section 5.1 before this file was built: every non-TIP record (taper, member, flare -- 12 of 16) reports GEOM_DEAD_MEMBER. Per audit-invariants.md section 3.5/3.8, a correctly-seated TIP is its own ground, so a TAPER/MEMBER/FLARE's only route to 'live' is role R3 (bracing), which a simple unbraced post-chain never exercises. This is a specification result about what 'ground' means for role R2, not a defect in this file -- see README and audit-known-good.md section 8.",
+  "check": "i8_no_dead_geometry",
+  "expect": "check_fails",
+  "codes": ["GEOM_DEAD_MEMBER"],
+  "min_failures": 12
+}

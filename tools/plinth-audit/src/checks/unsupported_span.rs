@@ -32,10 +32,10 @@
 //!            u { p in model(k) : column in support(k-1) }       column below
 //! ```
 //!
-//! where `support_borne(k)` keeps only those 8-connected components of
-//! `support(k)` that have at least one pixel whose own column is cured in the
-//! support raster at `k-1` -- a support blob born in mid-air at this layer
-//! carries nothing (§3.2).
+//! where `support_borne(k)` keeps only those K1 components (shared face, never
+//! a corner) of `support(k)` that have at least one pixel whose own column is
+//! cured in the support raster at `k-1` -- a support blob born in mid-air at
+//! this layer carries nothing (§3.2), and neither does one held on by a corner.
 //!
 //! **Attachment is a distance-zero seed, never an early exit.** That single
 //! sentence is Finding 1's fix. `carrier(k) = model(k) \ working_set(k)`
@@ -44,10 +44,17 @@
 //!
 //! ## The one censor, carried over unchanged from I7 (§6.1)
 //!
-//! A region whose reach is `+infinity` AND whose area is at most one pixel
-//! (`0.014 * 0.019 = 2.66e-4 mm^2`) is not counted. The censor applies ONLY to
-//! the infinite-reach case; a region with a finite reach is never censored by
-//! area, because area is not what this gate measures.
+//! A region whose reach is `+infinity` AND whose **clump** area is at most one
+//! pixel (`0.014 * 0.019 = 2.66e-4 mm^2`) is not counted. The censor applies
+//! ONLY to the infinite-reach case; a region with a finite reach is never
+//! censored by area, because area is not what this gate measures.
+//!
+//! "Clump", not "region", is corollary **K4** of
+//! `docs/specs/audit-connectivity-rule.md` §3.1: the censor is decided on the
+//! material, never on a fragment the connectivity rule carved off it. A rule
+//! that subdivides material may not delete it from a denominator. §5.4 measured
+//! what happens without K4 -- three corpus files each LOSE a failure when the
+//! rule gets stricter, with `max_reach_mm` identical to the last digit.
 //!
 //! ## The constant, computed here and never hard-coded (§2.6)
 //!
@@ -131,7 +138,7 @@
 use crate::check::{Check, CheckOutcome, Failure};
 use crate::context::{DeclaredInputs, ModelContext};
 use crate::json::Json;
-use crate::raster::{Layer, RasterError, RasterGrid, Run, RunRaster};
+use crate::raster::{InPlaneJoin, Layer, RasterError, RasterGrid, RowRuns, Run, RunRaster};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -414,83 +421,22 @@ fn runs_contain(runs: &[Run], col: i64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 8-connected components over a row-sorted run table
+// In-plane components: Rule K1, from `raster.rs`
 // ---------------------------------------------------------------------------
+//
+// This file used to carry its own `components_8`, an 8-connectivity walk that
+// joined two runs touching only at a corner. `docs/specs/audit-span-criterion.md`
+// §3.2 and §3.3 specified 8-connectivity twice and gave no reason anywhere in
+// the document, while `raster.rs` used 4 and `arrangement_spread.rs` took a
+// bool. `docs/specs/audit-connectivity-rule.md` §4 sites 2 and 3 rule both of
+// this file's uses onto **Rule K1** -- shared face, zero for a corner -- and
+// the local copy is deleted rather than left to drift.
+//
+// Both uses are load questions, which is why the physical rule applies to them:
+// a down-face region is the object the reach criterion grades, and a support
+// blob held to the material below it by a corner is held on by nothing this
+// project has ever measured.
 
-struct DisjointSet(Vec<u32>);
-
-impl DisjointSet {
-    fn new(n: usize) -> Self {
-        Self((0..n as u32).collect())
-    }
-    fn find(&mut self, mut x: u32) -> u32 {
-        while self.0[x as usize] != x {
-            self.0[x as usize] = self.0[self.0[x as usize] as usize];
-            x = self.0[x as usize];
-        }
-        x
-    }
-    fn union(&mut self, a: u32, b: u32) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra != rb {
-            self.0[ra as usize] = rb;
-        }
-    }
-}
-
-/// Label every run of `table` with its 8-connected component id.
-///
-/// Batch-first: one sweep over adjacent row pairs with a two-pointer interval
-/// join, `O(runs)` on already-sorted rows -- not the `O(runs^2)` all-pairs
-/// scan a per-run search would cost. Returns
-/// `(label per run in flattened order, component count, the flattened runs)`.
-fn components_8(table: &[(i64, Vec<Run>)]) -> (Vec<u32>, usize, Vec<(i64, Run)>) {
-    let mut flat: Vec<(i64, Run)> = Vec::new();
-    let mut row_start: Vec<usize> = Vec::with_capacity(table.len() + 1);
-    for (row, runs) in table {
-        row_start.push(flat.len());
-        for r in runs {
-            flat.push((*row, *r));
-        }
-    }
-    row_start.push(flat.len());
-
-    let mut ds = DisjointSet::new(flat.len());
-    for w in 0..table.len().saturating_sub(1) {
-        if table[w + 1].0 - table[w].0 != 1 {
-            continue; // rows not adjacent: nothing can touch
-        }
-        let (a0, a1) = (row_start[w], row_start[w + 1]);
-        let (b0, b1) = (row_start[w + 1], row_start[w + 2]);
-        let (mut i, mut j) = (a0, b0);
-        while i < a1 && j < b1 {
-            let (x, y) = (flat[i].1, flat[j].1);
-            // 8-connectivity: runs in adjacent rows touch when their spans
-            // overlap OR meet corner to corner, i.e. within one column.
-            if x.c0 <= y.c1 && y.c0 <= x.c1 {
-                ds.union(i as u32, j as u32);
-            }
-            if x.c1 < y.c1 {
-                i += 1;
-            } else {
-                j += 1;
-            }
-        }
-    }
-
-    let mut labels = vec![u32::MAX; flat.len()];
-    let mut canon: Vec<u32> = vec![u32::MAX; flat.len()];
-    let mut next = 0u32;
-    for i in 0..flat.len() {
-        let r = ds.find(i as u32) as usize;
-        if canon[r] == u32::MAX {
-            canon[r] = next;
-            next += 1;
-        }
-        labels[i] = canon[r];
-    }
-    (labels, next as usize, flat)
-}
 
 // ---------------------------------------------------------------------------
 // The working set: the pixels whose reach must actually be computed
@@ -1061,8 +1007,23 @@ fn score_layer(
 
     // Regions are components of unattached(k) -- carried pixels included,
     // because a region carried at one end and cantilevered at the other is
-    // exactly the case Finding 1 was about.
-    let (labels, region_count, flat) = components_8(&unattached);
+    // exactly the case Finding 1 was about. Rule K1: shared face, and a corner
+    // contact joins nothing (`audit-connectivity-rule.md` §4 site 2).
+    let table = RowRuns::from_row_table(&unattached);
+    let flat = &table.runs;
+    let (labels, region_count) = table.label(InPlaneJoin::SharedFace);
+    // K4 (§3.1, §3.5): the one-pixel censor below is decided on the CLUMP of
+    // material, never on a fragment K1 carved out of it. Without this, K1
+    // shatters a failing region until its pieces fall under the censor and the
+    // file's failure count goes DOWN because the rule got stricter -- measured
+    // on three corpus files in §5.4.
+    let (clump_labels, clump_count) = table.label(InPlaneJoin::SharedFaceOrCorner);
+    let clump_pixels_by_clump = table.pixels_per_label(&clump_labels, clump_count);
+    let mut region_clump_pixels = vec![0i64; region_count];
+    for i in 0..flat.len() {
+        region_clump_pixels[labels[i] as usize] =
+            clump_pixels_by_clump[clump_labels[i] as usize];
+    }
     let mut region_pixels = vec![0i64; region_count];
     let mut region_sx = vec![0.0f64; region_count];
     let mut region_sy = vec![0.0f64; region_count];
@@ -1141,7 +1102,12 @@ fn score_layer(
             // Every pixel of this region is carried: reach is zero everywhere.
             None => (0.0, (0, 0), u32::MAX),
         };
-        if !reach.is_finite() && (pixels as f64 * one_pixel) <= one_pixel {
+        // K4: the censor's subject is the clump, not this region. A region of
+        // one pixel that a corner contact attaches to more unattached material
+        // is a FRAGMENT of that material, not the printer's noise floor, and
+        // K1 declining to join them is not permission to delete one of them.
+        let clump_area = region_clump_pixels[g] as f64 * one_pixel;
+        if !reach.is_finite() && clump_area <= one_pixel {
             // The printer's own noise level (§6.1) -- infinite-reach case ONLY.
             st.regions_censored += 1;
             continue;
@@ -1276,7 +1242,7 @@ fn reach_field(
     ReachField { dist, src, seeds }
 }
 
-/// `support_borne(k)`: the runs of `support(k)` whose own 8-connected
+/// `support_borne(k)`: the runs of `support(k)` whose own K1
 /// component has at least one pixel cured in the support raster at `k-1`.
 ///
 /// Component-level, not pixel-level, and deliberately so (§3.2): a tip ball is
@@ -1295,7 +1261,12 @@ fn support_borne_rows(sup_k: Option<&Layer>, sup_prev: Option<&Layer>) -> Vec<(i
     if table.is_empty() {
         return Vec::new();
     }
-    let (labels, count, flat) = components_8(&table);
+    // Rule K1 (`audit-connectivity-rule.md` §4 site 3): same lattice, same load
+    // meaning. A support component held to the layer below by a corner is held
+    // on by nothing that has been established, so it is not `support_borne`.
+    let rr = RowRuns::from_row_table(&table);
+    let flat = &rr.runs;
+    let (labels, count) = rr.label(InPlaneJoin::SharedFace);
     let mut ok = vec![false; count];
     for (i, (row, run)) in flat.iter().enumerate() {
         let g = labels[i] as usize;
@@ -1525,23 +1496,46 @@ mod tests {
         assert!(!runs_contain(&a, 15));
     }
 
+    /// I9's regions are K1 components: a corner contact does NOT make two
+    /// down-face regions one (`audit-connectivity-rule.md` §4 site 2). This
+    /// test asserted the opposite until 2026-08-31 and is the reason this
+    /// invariant's region counts roughly double.
     #[test]
-    fn components_are_eight_connected_including_the_diagonal_touch() {
+    fn regions_are_k1_components_and_a_corner_contact_never_joins_two() {
+        let count = |t: &[(i64, Vec<Run>)]| {
+            RowRuns::from_row_table(t).label(InPlaneJoin::SharedFace).1
+        };
+        // Runs [0,5) and [5,9) in neighbouring rows share ZERO columns: they
+        // meet at the corner between column 4 and column 5.
         let diag = vec![
             (0i64, vec![Run { c0: 0, c1: 5 }]),
             (1, vec![Run { c0: 5, c1: 9 }]),
         ];
-        assert_eq!(components_8(&diag).1, 1, "corner contact is 8-connected");
+        assert_eq!(count(&diag), 2, "a corner contact carries no face area");
+        // One shared column is a face, and it joins.
+        let edge = vec![
+            (0i64, vec![Run { c0: 0, c1: 5 }]),
+            (1, vec![Run { c0: 4, c1: 9 }]),
+        ];
+        assert_eq!(count(&edge), 1, "one shared column is one shared face");
         let apart = vec![
             (0i64, vec![Run { c0: 0, c1: 5 }]),
             (1, vec![Run { c0: 6, c1: 9 }]),
         ];
-        assert_eq!(components_8(&apart).1, 2);
+        assert_eq!(count(&apart), 2);
         let skip = vec![
             (0i64, vec![Run { c0: 0, c1: 5 }]),
             (2, vec![Run { c0: 0, c1: 5 }]),
         ];
-        assert_eq!(components_8(&skip).1, 2, "non-adjacent rows never join");
+        assert_eq!(count(&skip), 2, "non-adjacent rows never join");
+        // The clump rule -- and ONLY the clump rule -- still fuses the corner.
+        assert_eq!(
+            RowRuns::from_row_table(&diag)
+                .label(InPlaneJoin::SharedFaceOrCorner)
+                .1,
+            1,
+            "the K4 clump is the loosest adjacency and must keep fusing corners"
+        );
     }
 
     // ------------------------------------------------------------------

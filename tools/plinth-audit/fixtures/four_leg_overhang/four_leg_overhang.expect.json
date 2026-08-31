@@ -1,0 +1,6 @@
+{
+  "description": "KG-1 known-good fixture (docs/specs/audit-known-good.md kg_slab_four_post): a 4.00x4.00x2.00 mm slab on four identical posts at (+-1,+-1), each carrying an exact 2x2mm=4.00mm^2 Voronoi quadrant, sized to X_ALLOWED=12 with a 0.60*r_tip ball seat (57% over the ruled minimum). I2 is the load-bearing check ('the one no instrument has measured') and the one this file exists to answer 'yes' on: measured worst X_delivered = 9.86 against the 12 allowance, a real ~18% margin on the cured (rasterised) patch, not merely the ideal disc. See README.md for the full arithmetic, the owner's plain-language paragraph, and the two checks (I3, I8) this same file FAILS -- a finding, not a defect fixed here.",
+  "check": "i2_contact_area",
+  "expect": "check_passes",
+  "model": 0
+}

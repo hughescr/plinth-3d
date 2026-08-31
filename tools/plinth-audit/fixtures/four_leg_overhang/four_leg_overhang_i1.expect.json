@@ -1,0 +1,6 @@
+{
+  "description": "KG-1 (see four_leg_overhang.expect.json for the shared design). I1 seat depth: all four tips embed h_delivered ~0.1955mm against h_required ~0.1244mm (the ball term binds, 57% margin), and the three-way r_tip triangulation agrees to ~5e-10mm (R6 f32 exactness). Same bytes as four_leg_overhang.chitubox, named separately because the harness binds one expectation to one artifact.",
+  "check": "i1_seat_depth",
+  "expect": "check_passes",
+  "model": 0
+}

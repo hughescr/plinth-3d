@@ -8,8 +8,8 @@
 //! layer `k` (`RunRaster::layer_components`) is a **detached island** if it
 //! contains zero attached pixels AND `k` is not the first layer above the
 //! plate (`grid.layer_at_or_above(z_plate)`, which is `0` on this grid by
-//! construction). For every detached island whose area exceeds one printer
-//! pixel, the cured SUPPORT raster (`ModelContext::support_raster`) must
+//! construction). For every detached island whose **clump** area exceeds one
+//! printer pixel, the cured SUPPORT raster (`ModelContext::support_raster`) must
 //! intersect it -- any pixel-level overlap at the SAME layer, since this
 //! invariant is a presence test, not an adequacy test (that is I2/I3/I4's
 //! job: the demand set `D` already counts every cantilever and cavity
@@ -19,6 +19,21 @@
 //! The definition is fully derived from the printer grid: no self-support
 //! angle, no reach radius. It is uncontestable physics -- material with
 //! nothing under it and nothing beside it falls into the vat.
+//!
+//! ## Connectivity: Rule K1, and the censor rides on the clump (K4)
+//!
+//! "Connected" here is **Rule K1** of `docs/specs/audit-connectivity-rule.md`
+//! §3.1 -- two cured cells are one region only through a shared FACE, never a
+//! corner. This site was already 4-connected and so already satisfied K1; §4
+//! site 1 records that and changes nothing about which pixels are one island.
+//!
+//! What DID change on 2026-08-31 is the censor. **K4**: the one-pixel censor is
+//! evaluated on the clump of cured material, not on a fragment K1 carved off
+//! it, so a single cured pixel that touches a larger island at a corner is
+//! still checked. Measured over the 31-file corpus, that takes I7 from 1,389
+//! islands checked and 434 failed to 1,998 and 954 -- more than doubling the
+//! failures without moving one pixel of geometry, and §6.9 of the ruling
+//! records that this effect had never been measured before.
 //!
 //! ## What this predicate does NOT gate, by the specification's own admission
 //!
@@ -121,7 +136,16 @@ impl Check for IslandCoverage {
                 // it; nothing here is a "detached island" by definition.
                 continue;
             }
-            for comp in model_raster.layer_components(k) {
+            // Islands are Rule K1 components -- shared face, a corner contact
+            // joins nothing (`docs/specs/audit-connectivity-rule.md` §4 site 1;
+            // this site was already 4-connected and so already satisfied K1).
+            // `clump_pixels` is what K4 adds.
+            let layer_comps = model_raster.layer_components_k4(k);
+            for (comp, clump_pixels) in layer_comps
+                .components
+                .iter()
+                .zip(&layer_comps.clump_pixels)
+            {
                 // EXEMPT from the interval policy
                 // (`audit-interval-policy.md` §1.7, §3.4): `area_mm2` is an
                 // EXACT integer pixel count times the pixel area, so it
@@ -129,22 +153,32 @@ impl Check for IslandCoverage {
                 // no interval to widen. The censor is one pixel, which is
                 // itself the quantum of the quantity. Adding a tolerance here
                 // would invent an uncertainty the raster does not have.
-                let area_mm2 = component_area_mm2(&comp, &grid);
-                if area_mm2 <= pixel_area {
+                let area_mm2 = component_area_mm2(comp, &grid);
+                // **K4** (`audit-connectivity-rule.md` §3.1, §3.5): the censor
+                // is decided on the CLUMP -- the material under the loosest
+                // adjacency the tool has ever used -- never on a fragment K1
+                // carved off it. A one-pixel component that a corner contact
+                // attaches to a larger piece of cured material is not the
+                // printer's noise floor; K1 refusing to say the corner CARRIES
+                // load is not permission to say the pixel is not there. The
+                // clump contains the component by construction, so this is
+                // never looser than the old `area_mm2 <= pixel_area`.
+                let clump_area_mm2 = *clump_pixels as f64 * pixel_area;
+                if clump_area_mm2 <= pixel_area {
                     // The printer's own censor: one pixel is noise, not an
                     // island (audit-invariants.md §3.7 predicate clause).
                     continue;
                 }
-                if is_attached(&comp, model_raster, k) {
+                if is_attached(comp, model_raster, k) {
                     // Continuing material, not a detached island at all.
                     continue;
                 }
 
                 out.checked += 1;
-                let (cx_mm, cy_mm) = component_centroid_mm(&comp, &grid);
+                let (cx_mm, cy_mm) = component_centroid_mm(comp, &grid);
                 let z_mm = grid.layer_z_mm(k);
-                let pixels = component_pixel_count(&comp);
-                let supported = is_supported(&comp, support_raster, k);
+                let pixels = component_pixel_count(comp);
+                let supported = is_supported(comp, support_raster, k);
 
                 let mut row = Json::obj();
                 row.set("layer", Json::int(k));

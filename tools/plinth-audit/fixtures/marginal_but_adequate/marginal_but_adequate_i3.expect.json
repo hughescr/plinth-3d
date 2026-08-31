@@ -1,0 +1,8 @@
+{
+  "description": "NOT a planted defect -- a MEASURED TOOL FINDING on an otherwise known-good file (see README section 'Findings against the tool', KG-F-mba-1). i3_min_section reports MIN_SECTION_INDETERMINATE reason=path_open on all four contacts, even though i5_closed_load_path reports the SAME 16 records fully connected and grounded (0 free ends) and i1/i2/i4 all pass cleanly on the same geometry. The file's joints deliberately overlap by >=0.10mm along the axis per audit-invariants.md sec 3.5 / this project's own R1 rule (a bare touch, separation in [0, d3=0.0553mm], is fusion-uncertain and must NOT be treated as joined) -- but i3's own path-walk appears to use SupportGraph's plain point-coincidence join test (JOIN_TOL_EMITTED_MM=1e-3mm), two orders of magnitude tighter than the deliberate overlap, so it never crosses the taper->member or member->flare joint. Independently corroborated on the project's OWN 'clean' reference artifact by fixtures/shallow_seat/README.md section 2, for the analogous MEMBER-to-RAFT gap named in docs/specs/chitubox-format.md sec 5 -- this is not unique to this file.",
+  "check": "i3_min_section",
+  "expect": "check_fails",
+  "codes": ["MIN_SECTION_INDETERMINATE"],
+  "model": 0,
+  "min_failures": 4
+}

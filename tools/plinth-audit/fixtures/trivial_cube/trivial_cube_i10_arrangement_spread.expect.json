@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: 40 body-layer evaluations, every one in equilibrium by more than sigma, on the 4-contact 2mm-square hull.",
+  "check": "i10_arrangement_spread",
+  "expect": "check_passes"
+}

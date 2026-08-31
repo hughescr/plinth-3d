@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: 0 mm3 outside-seat volume over the 1.33e-5 mm3 censor across all 16 records; no exterior breach; no centreline burial.",
+  "check": "i6_no_intersection",
+  "expect": "check_passes"
+}

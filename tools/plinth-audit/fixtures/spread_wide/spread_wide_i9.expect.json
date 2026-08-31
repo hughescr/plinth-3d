@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I9 must PASS. Measured 2026-08-31: 0 of 1 down-face regions exceed the derived 1.344976mm allowance; worst reach 1.051635mm (78.2% of the allowance under the audit's own chamfer metric) at layer 80, i.e. near the underside's own birth layer, exactly where a support-fed lattice is tightest before the slab's own bulk starts carrying span. Hand-derived prediction (audit-known-good.md section 3.1): 1.0233mm euclidean / 1.1144mm chamfer = 82.9% -- the measured chamfer value (1.0516mm, 78.2%) differs from the hand prediction by about 5.6%, plausibly because the hand derivation used the cell corner as the worst point under the euclidean metric while the audit's own chamfer metric and voxel-grid discretisation do not measure the identical path; both agree the region passes with comfortable margin.",
+  "check": "i9_unsupported_span",
+  "expect": "check_passes",
+  "model": 0
+}

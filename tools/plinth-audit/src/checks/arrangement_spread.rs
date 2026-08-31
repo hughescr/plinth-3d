@@ -28,8 +28,20 @@
 //! ## The object graded
 //!
 //! A connected component of MODEL material cured at layers `0..=k`, in-plane
-//! 4-connected (not 8 -- the more-gating direction, with the merge count
-//! disclosed), vertically same-column between `k` and `k-1`. Support material
+//! joined under **Rule K1** (`docs/specs/audit-connectivity-rule.md` §3.1, §4
+//! site 4): a shared FACE joins, a corner joins nothing. Rigidity is exactly a
+//! "does this cross-section transmit a moment" question and a corner transmits
+//! none anyone has measured. This site was already 4-connected and so already
+//! satisfied K1, and the corpus confirms it: I10 is bit-identical across the
+//! change, 21,663 body-layer evaluations and 7,439 refusals before and after.
+//! K4 adds nothing here because I10 applies no area censor.
+//!
+//! The cost of the choice is still disclosed, and it is the ONE place in this
+//! crate that keeps the looser rule: `sensitivity.
+//! a_bodies_merged_if_corner_contacts_joined` (renamed from
+//! `a_bodies_merged_under_8_connectivity` on 2026-08-31, to name the new
+//! baseline). Vertically the rule is unchanged -- same-column between `k` and
+//! `k-1`, which §4 #9/#10 hold out of scope on purpose. Support material
 //! is excluded from a body; supports enter only as forces at their contacts.
 //! This is deliberately NOT the down-facing surface component (which collapses
 //! to "the whole model" on a watertight mesh and would watch nothing) and NOT
@@ -98,7 +110,7 @@ use crate::check::{Check, CheckOutcome, Failure};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
-use crate::raster::{Layer, RasterError, RasterGrid, Run, RunRaster};
+use crate::raster::{InPlaneJoin, Layer, RasterError, RasterGrid, RowRuns, Run, RunRaster};
 use crate::vec3 as v;
 use std::collections::BTreeMap;
 
@@ -691,67 +703,33 @@ impl Uf {
     }
 }
 
+// In-plane components come from `raster.rs`, under Rule K1. This file used to
+// carry its own copy with an `eight: bool` parameter -- one of the three
+// disagreeing implementations `docs/specs/audit-connectivity-rule.md` was
+// written to end. §4 site 4 rules the GATE onto K1 (it was already
+// 4-connected, which IS K1); §4 site 5 keeps the looser rule for the disclosure
+// instrument alone, and `count_bodies` is the only caller allowed to ask for it.
+
 /// One layer's runs, sorted by `(row, c0)`, with the row group boundaries.
-struct LayerRuns {
-    runs: Vec<(i64, Run)>,
-    groups: Vec<(i64, usize, usize)>,
+fn layer_runs(layer: &Layer) -> RowRuns {
+    RowRuns::from_layer(layer)
 }
 
-fn layer_runs(layer: &Layer) -> LayerRuns {
-    let mut runs: Vec<(i64, Run)> = Vec::new();
-    let mut groups: Vec<(i64, usize, usize)> = Vec::new();
-    for (&row, rs) in &layer.rows {
-        let start = runs.len();
-        for r in rs {
-            if !r.is_empty() {
-                runs.push((row, *r));
-            }
-        }
-        if runs.len() > start {
-            groups.push((row, start, runs.len()));
-        }
-    }
-    LayerRuns { runs, groups }
-}
-
-/// In-plane connected components of one layer's runs. `eight` switches
-/// 4-connectivity for 8-connectivity, which is the sensitivity (a) probe and
-/// never the gate. Linear in the run count: a two-pointer merge between
-/// adjacent rows, not the quadratic all-pairs scan.
-fn inplane_labels(lr: &LayerRuns, eight: bool) -> Vec<usize> {
-    let n = lr.runs.len();
-    let mut uf = Uf::new();
-    for _ in 0..n {
-        uf.push();
-    }
-    let pad = i64::from(eight);
-    for w in lr.groups.windows(2) {
-        let (r0, s0, e0) = w[0];
-        let (r1, s1, e1) = w[1];
-        if r1 - r0 != 1 {
-            continue;
-        }
-        let (mut i, mut j) = (s0, s1);
-        while i < e0 && j < e1 {
-            let a = lr.runs[i].1;
-            let b = lr.runs[j].1;
-            if a.c0 - pad < b.c1 && b.c0 - pad < a.c1 {
-                uf.union(i, j);
-            }
-            if a.c1 < b.c1 {
-                i += 1;
-            } else {
-                j += 1;
-            }
-        }
-    }
-    (0..n).map(|i| uf.find(i)).collect()
+/// In-plane component id per run, under `join`.
+///
+/// The gate passes [`InPlaneJoin::SharedFace`] -- Rule K1. Rigidity is exactly
+/// a "does this cross-section transmit a moment" question, and a corner
+/// transmits none that anyone has measured (`audit-connectivity-rule.md` §4
+/// site 4).
+fn inplane_labels(lr: &RowRuns, join: InPlaneJoin) -> Vec<usize> {
+    let (labels, _) = lr.label(join);
+    labels.into_iter().map(|l| l as usize).collect()
 }
 
 /// Every `(cur index, prev index)` pair whose runs share a column in the same
 /// row -- the vertical adjacency of §2.2, identical to I7's own attachment
 /// definition. Linear, two-pointer, never per-pixel.
-fn for_each_vertical_overlap(cur: &LayerRuns, prev: &LayerRuns, mut f: impl FnMut(usize, usize)) {
+fn for_each_vertical_overlap(cur: &RowRuns, prev: &RowRuns, mut f: impl FnMut(usize, usize)) {
     let (mut gi, mut gj) = (0usize, 0usize);
     while gi < cur.groups.len() && gj < prev.groups.len() {
         let (rc, cs, ce) = cur.groups[gi];
@@ -782,12 +760,19 @@ fn for_each_vertical_overlap(cur: &LayerRuns, prev: &LayerRuns, mut f: impl FnMu
     }
 }
 
-/// Body count only, at the requested in-plane connectivity. This is the
-/// sensitivity (a) instrument of §5: the count of bodies that would merge
-/// under 8-connectivity is the disclosed cost of choosing 4.
-fn count_bodies(raster: &RunRaster, eight: bool) -> usize {
+/// Body count only, at the requested in-plane connectivity.
+///
+/// **This is an instrument, not a verdict** (`audit-connectivity-rule.md` §4
+/// site 5). Its whole job is to price the gate's choice, so it is the one
+/// caller in this crate permitted to pass [`InPlaneJoin::SharedFaceOrCorner`]:
+/// the difference between this count and the gate's is how many bodies would
+/// merge if a corner contact joined. Applying K1 here would make the disclosure
+/// report zero and the tool would lose the only number that says what the
+/// connectivity ruling costs -- 55 % of prefix-connected bodies corpus-wide
+/// (§5.2). Nothing this function returns can fail a file.
+fn count_bodies(raster: &RunRaster, join: InPlaneJoin) -> usize {
     let mut uf = Uf::new();
-    let mut prev: Option<(LayerRuns, Vec<usize>)> = None;
+    let mut prev: Option<(RowRuns, Vec<usize>)> = None;
     let mut prev_k = i64::MIN;
     for layer in &raster.layers {
         let lr = layer_runs(layer);
@@ -795,7 +780,7 @@ fn count_bodies(raster: &RunRaster, eight: bool) -> usize {
             prev = None;
             continue;
         }
-        let labels = inplane_labels(&lr, eight);
+        let labels = inplane_labels(&lr, join);
         let mut slot: Vec<usize> = vec![usize::MAX; lr.runs.len()];
         let mut comp_slot: BTreeMap<usize, usize> = BTreeMap::new();
         if let Some((p_lr, p_slot)) = prev.as_ref() {
@@ -974,7 +959,7 @@ fn sweep(raster: &RunRaster, contacts: &[ContactLine], budget: u64) -> Sweep {
     // Which body slots each contact has already been attached to.
     let mut contact_slots: Vec<Vec<usize>> = vec![Vec::new(); contacts.len()];
 
-    let mut prev: Option<(LayerRuns, Vec<usize>)> = None;
+    let mut prev: Option<(RowRuns, Vec<usize>)> = None;
     let mut prev_k = i64::MIN;
 
     for layer in &raster.layers {
@@ -985,7 +970,7 @@ fn sweep(raster: &RunRaster, contacts: &[ContactLine], budget: u64) -> Sweep {
         }
         s.layers_with_material += 1;
         let z_k = grid.layer_z_mm(layer.k);
-        let labels = inplane_labels(&lr, false);
+        let labels = inplane_labels(&lr, InPlaneJoin::SharedFace);
 
         // Attach this layer's in-plane components to the bodies below.
         let mut comp_slot: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1652,7 +1637,7 @@ fn finish(
         .map(|b| b.max_slenderness)
         .fold(0.0f64, f64::max);
 
-    let bodies_8 = count_bodies(raster, true);
+    let bodies_corner = count_bodies(raster, InPlaneJoin::SharedFaceOrCorner);
 
     let mut bodies_j = Json::obj();
     bodies_j.set("count", Json::usize(per_body.len()));
@@ -1715,11 +1700,17 @@ fn finish(
         "c_line_of_action_vs_contact_points",
         Json::num(sw.sensitivity_line_of_action as f64),
     );
+    // Renamed 2026-08-31 to name the new baseline (`audit-connectivity-rule.md`
+    // §4 site 5): the gate is Rule K1, so the disclosure is what a CORNER
+    // contact would buy, not what "8-connectivity" would.
     sens_j.set(
-        "a_bodies_merged_under_8_connectivity",
-        Json::num((per_body.len() as i64 - bodies_8 as i64) as f64),
+        "a_bodies_merged_if_corner_contacts_joined",
+        Json::num((per_body.len() as i64 - bodies_corner as i64) as f64),
     );
-    sens_j.set("a_bodies_8_connectivity", Json::usize(bodies_8));
+    sens_j.set(
+        "a_bodies_under_corner_contact_rule",
+        Json::usize(bodies_corner),
+    );
     sens_j.set(
         "b_pixel_centre_fill_rule",
         Json::str("not computed: it needs a second raster, which report_metrics.rs owns"),
@@ -2303,17 +2294,24 @@ mod tests {
         assert_eq!(overlap_len(&a, &[Run { c0: 40, c1: 50 }]), 0);
     }
 
+    /// The gate is Rule K1 and the disclosure instrument is the ONLY thing that
+    /// still fuses a corner. If both answered the same, `sensitivity.
+    /// a_bodies_merged_if_corner_contacts_joined` would be structurally zero
+    /// and the tool would have stopped pricing its own choice.
     #[test]
-    fn four_connectivity_splits_what_eight_connectivity_would_fuse() {
+    fn the_gate_splits_a_corner_contact_and_only_the_instrument_fuses_it() {
         // Two pixels touching only at a corner.
-        let lr = LayerRuns {
+        let lr = RowRuns {
             runs: vec![(0, Run { c0: 0, c1: 1 }), (1, Run { c0: 1, c1: 2 })],
             groups: vec![(0, 0, 1), (1, 1, 2)],
         };
-        let four = inplane_labels(&lr, false);
-        assert_ne!(four[0], four[1], "4-connectivity must split them");
-        let eight = inplane_labels(&lr, true);
-        assert_eq!(eight[0], eight[1], "8-connectivity must fuse them");
+        let gate = inplane_labels(&lr, InPlaneJoin::SharedFace);
+        assert_ne!(gate[0], gate[1], "K1 must split a corner contact");
+        let instrument = inplane_labels(&lr, InPlaneJoin::SharedFaceOrCorner);
+        assert_eq!(
+            instrument[0], instrument[1],
+            "the disclosure instrument must keep fusing it"
+        );
     }
 }
 
@@ -2369,7 +2367,7 @@ mod real_bytes {
             o.failed,
             o.indeterminate,
             num(o, &["bodies", "count"]),
-            num(o, &["sensitivity", "a_bodies_8_connectivity"]),
+            num(o, &["sensitivity", "a_bodies_under_corner_contact_rule"]),
             num(o, &["sensitivity", "c_line_of_action_vs_contact_points"]),
             num(o, &["bodies", "contacts_held_by_some_body"]),
             num(o, &["bodies", "contacts_total"]),

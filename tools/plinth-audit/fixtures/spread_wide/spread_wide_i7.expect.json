@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I7 must PASS. Measured 2026-08-31: 1 of 1 detached island (the whole slab, one surface component) is intersected by support at its birth layer -- the only down-facing geometry is the slab's own flat underside, directly over the four posts.",
+  "check": "i7_island_coverage",
+  "expect": "check_passes",
+  "model": 0
+}

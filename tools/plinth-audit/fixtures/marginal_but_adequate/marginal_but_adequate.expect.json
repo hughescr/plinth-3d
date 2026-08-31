@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. A 4.00x4.00x2.00mm slab on four posts at (+/-1,+/-1)mm, tips sized to exactly X=12 and seated at h=0.54*r_tip -- the thinnest seat-depth margin in docs/specs/audit-known-good.md's five-file set, still genuinely adequate by docs/physics.md. i2_contact_area is the headline check: worst delivered X = 10.87 against X_ALLOWED=12 (10.9% margin), the tightest of the eight checks this file passes. See README.md for the full derivation, all ten measured results, and the two checks (i3, i8) this file is refused by along with the evidence that both trace to one documented tool inconsistency, not to this file.",
+  "check": "i2_contact_area",
+  "expect": "check_passes",
+  "model": 0
+}

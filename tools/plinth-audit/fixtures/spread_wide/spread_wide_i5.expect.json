@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I5 must PASS. Measured 2026-08-31: 16 of 16 records checked, 0 orphaned, 0 free ends, 0 indeterminate; 4 flares ground via the plate clause (i) and 4 tips ground via the seat clause (ii); every TAPER/MEMBER is 'connected' in the grounded component. This result required a build fix: audit-invariants.md section 1.2's stated z_plate=-translate_z is only exact when the mesh's own bbox-min z is 0. This fixture's mesh is bbox-CENTRED (bbox_min_z=-1.0mm), so the correct relation (src/context.rs::resolve_plate, already used correctly by fixtures/double_load/generate.rs) is z_plate=mesh.bbox.min.z-translate_z. Using the doc's simplified line verbatim (translate_z=5.0) reconstructed z_plate=-6.0 instead of the intended -5.0, and every flare -- correctly built, ending exactly at the intended plate -- then sat 0.95mm short of the (wrongly reconstructed) plate and reported PATH_FREE_END on all 4. Fixed by setting translate_z=4.0 (see README 'What I got wrong').",
+  "check": "i5_closed_load_path",
+  "expect": "check_passes",
+  "model": 0
+}

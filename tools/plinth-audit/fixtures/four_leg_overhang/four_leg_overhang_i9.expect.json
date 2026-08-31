@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I9 unsupported span: 1 down-face region (the slab underside), 0 exceed the 1.3449762463mm allowance; measured worst reach 1.0516mm at layer 80 (78% of the allowance) -- close to but independently corroborating the hand-derived euclidean prediction of 1.0233mm/82.9% in README.md (the audit's own chamfer-metric reach is expected to read a little higher than a pure euclidean hand calc).",
+  "check": "i9_unsupported_span",
+  "expect": "check_passes",
+  "model": 0
+}

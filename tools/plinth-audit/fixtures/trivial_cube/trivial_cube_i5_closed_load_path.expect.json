@@ -1,0 +1,5 @@
+{
+  "description": "KG-1: all 16 records (4 chains of TIP/TAPER/MEMBER/FLARE) form a closed path to the plate or a valid seat -- 0 orphaned, 0 free ends, 0 indeterminate. Each flare's foot grounds on the plate with no raft pad, per audit-invariants.md section 3.5 clause (i).",
+  "check": "i5_closed_load_path",
+  "expect": "check_passes"
+}

@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I5 closed load path: all 16 records (4 chains of TIP->TAPER->MEMBER->FLARE) resolve cleanly -- 4 grounded via seat (the tips), 12 connected up to a flare whose foot lands exactly at the reconstructed z_plate, 0 free ends, 0 fusion-uncertain pairs, 0 orphaned. This is the file that also exposed and let us fix a frame bug (README 'Findings' #1: z_plate_mm = mesh.bbox.min[2] - translate_z, not simply -translate_z, for a Z-centred model mesh) before it shipped.",
+  "check": "i5_closed_load_path",
+  "expect": "check_passes",
+  "model": 0
+}

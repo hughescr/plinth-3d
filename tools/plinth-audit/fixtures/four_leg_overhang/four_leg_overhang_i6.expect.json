@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I6 no intersection: 16 support records checked, 0 failures -- no support solid self-intersects the model outside its own declared seat zone, and no two support arms intersect each other (R2/R5 clearance rules hold with ~2x-3x margin over FINAL_CLEARANCE_GAP_MM).",
+  "check": "i6_no_intersection",
+  "expect": "check_passes",
+  "model": 0
+}

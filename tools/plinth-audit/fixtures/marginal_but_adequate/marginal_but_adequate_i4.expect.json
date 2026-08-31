@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i4_load_ownership specifically in its PASSING direction. The equality clause (d): implied_lo/hi bracket collapses to d_total=16.0mm2 to within the measured residual, after sweeping the ball radius R (not the taper's own r_tip field -- see README 'What load_ownership actually reads') so Sigma(12*pi*(R/1.5)^2) lands inside the 1e-9mm2 floor.",
+  "check": "i4_load_ownership",
+  "expect": "check_passes",
+  "model": 0
+}

@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i7_island_coverage specifically in its PASSING direction. The slab's one down-facing surface component is a supported island at its birth layer.",
+  "check": "i7_island_coverage",
+  "expect": "check_passes",
+  "model": 0
+}

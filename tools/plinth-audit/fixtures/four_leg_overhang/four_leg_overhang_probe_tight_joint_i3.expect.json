@@ -1,0 +1,6 @@
+{
+  "description": "DIAGNOSTIC PROBE, not a known-good file (see README.md 'The I3/I8 finding'). Byte-identical to four_leg_overhang.chitubox except the two design-joint overlaps (taper->member, member->flare) are shrunk from 0.10mm to 0.0005mm -- inside I3's SupportGraph point-coincidence tolerance (JOIN_TOL_EMITTED_MM=1e-3mm, src/graph.rs). This confirms the root cause of I3's failure on the shipped fixture: with a tight joint, I3 establishes and PASSES cleanly (was MIN_SECTION_INDETERMINATE reason=path_open on all 4 contacts at 0.10mm overlap).",
+  "check": "i3_min_section",
+  "expect": "check_passes",
+  "model": 0
+}

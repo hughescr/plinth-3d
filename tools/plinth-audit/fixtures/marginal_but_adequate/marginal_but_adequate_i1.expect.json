@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i1_seat_depth specifically in its PASSING direction. All four contacts: h_delivered ~0.1756-0.1769mm against h_required ~0.1242-0.1251mm (41-42% margin), tri-way r_tip agreement within 1.5e-8mm.",
+  "check": "i1_seat_depth",
+  "expect": "check_passes",
+  "model": 0
+}

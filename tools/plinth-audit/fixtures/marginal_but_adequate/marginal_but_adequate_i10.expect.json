@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i10_arrangement_spread specifically in its PASSING direction. 40 body-layer evaluations, all in equilibrium: 4 non-collinear contacts spanning the full 2D footprint, the strongest arrangement geometry in the known-good set.",
+  "check": "i10_arrangement_spread",
+  "expect": "check_passes",
+  "model": 0
+}

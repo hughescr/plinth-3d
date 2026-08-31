@@ -1,0 +1,6 @@
+{
+  "description": "KG-1. I10 arrangement spread: 1 body, 40 body-layer evaluations, every one in equilibrium by more than sigma. Hull is the exact 2x2mm square of the four post axes, load centroid at its centre, so the containment margin d=1.000mm is maximal by symmetry (normalised m_hat=0.5, measured).",
+  "check": "i10_arrangement_spread",
+  "expect": "check_passes",
+  "model": 0
+}

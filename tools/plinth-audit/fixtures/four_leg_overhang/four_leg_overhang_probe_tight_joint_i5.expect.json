@@ -1,0 +1,8 @@
+{
+  "description": "DIAGNOSTIC PROBE (see four_leg_overhang_probe_tight_joint_i3.expect.json and README.md). The SAME tight-joint (0.0005mm) file that lets I3 pass now trips I5: shrinking the column pulls each tip's own ball 0.199mm closer to its member, and the resulting tip-to-member separation (0.0261mm) lands inside the fusion-uncertain band (0, d3=0.0553mm], which I5 correctly refuses to resolve either way. Measured: 4 PATH_INDETERMINATE failures, reason=fusion_uncertain, one per post.",
+  "check": "i5_closed_load_path",
+  "expect": "check_fails",
+  "codes": ["PATH_INDETERMINATE"],
+  "model": 0,
+  "min_failures": 4
+}

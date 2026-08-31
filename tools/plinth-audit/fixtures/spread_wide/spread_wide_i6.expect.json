@@ -1,0 +1,6 @@
+{
+  "description": "Same KG-1 file as spread_wide.chitubox (byte-identical). NEGATIVE-of-negative control: I6 must PASS. Measured 2026-08-31: 16 of 16 records checked, 0 outside-seat material over the 1.33e-5 mm3 censor, worst buried span 0mm, 0mm3 exterior breach, 0% centreline burial. Each tip axis stands 1.0-1.41mm from every other surface (R2, >=2x the R=0.4886mm ball radius) and each contact centre sits 1.0mm from the underside's own edge, comfortably clear of a=0.39mm (R4).",
+  "check": "i6_no_intersection",
+  "expect": "check_passes",
+  "model": 0
+}

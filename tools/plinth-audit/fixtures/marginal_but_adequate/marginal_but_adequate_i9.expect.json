@@ -1,0 +1,6 @@
+{
+  "description": "KNOWN-GOOD (positive control), NOT a planted defect. Same file as marginal_but_adequate.chitubox (symlinked; see that fixture's README for the full derivation) -- this expectation exercises i9_unsupported_span specifically in its PASSING direction. Worst measured reach 1.066mm against the 1.345mm allowance (79.3%), at layer 80 -- the four 2x2mm Voronoi cells' worst corner, well inside the span limit.",
+  "check": "i9_unsupported_span",
+  "expect": "check_passes",
+  "model": 0
+}
