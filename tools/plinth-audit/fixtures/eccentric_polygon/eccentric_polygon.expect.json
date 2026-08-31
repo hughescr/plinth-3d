@@ -1,0 +1,8 @@
+{
+  "description": "one floating slab body (6.8 x 5.4 x 4 mm), footprint centroid (0,0), carried by THREE tips at (1.05,1.5011), (-0.25,-0.7506), (2.35,-0.7506) mm -- a small equilateral triangle (side 2.6 mm) clustered to one side. Every arm is individually oversized against its own real Voronoi-owned share (a_owned_mm2 11.05/17.73/7.94) by a 35% safety margin (r_tip 0.533-0.797 mm), so I3's own measured per-arm ratio a_owned/a_min is 6.56-6.79 at every contact, comfortably under X_ALLOWED=12; I1/I2/I3 all pass. But the triangle does not contain the slab's own footprint centroid: the nearest edge clears the origin by only 0.1833 mm along y=0, so the peel resultant at every layer falls outside the resisting hull by margin -0.1588 mm at the worst layer, more than double the derived uncertainty sigma=0.0788 mm.",
+  "check": "i10_arrangement_spread",
+  "expect": "check_fails",
+  "codes": ["SPREAD_NO_EQUILIBRIUM"],
+  "model": 0,
+  "min_failures": 1
+}

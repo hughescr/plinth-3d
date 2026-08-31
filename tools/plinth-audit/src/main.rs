@@ -2,7 +2,8 @@
 //!
 //! Exits non-zero when any invariant fails, when a file-level failure aborts
 //! the run, or when the arguments are wrong. It exits zero only when every
-//! model of the file passed all eight gating invariants.
+//! model of the file passed all ten gating invariants: I1-I8, plus I9
+//! unsupported span and I10 arrangement spread.
 //!
 //! **stdout carries the human summary and nothing else**, so the tool
 //! composes. `--json` puts the document on stdout instead. Diagnostics go to
@@ -13,8 +14,9 @@ use plinth_audit::run;
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "\
-plinth-audit -- audit the emitted bytes of a .chitubox file against the eight
-gating invariants of docs/specs/audit-invariants.md.
+plinth-audit -- audit the emitted bytes of a .chitubox file against the ten
+gating invariants of docs/specs/audit-invariants.md, plus I9 unsupported span
+(audit-span-criterion.md) and I10 arrangement spread (audit-spread-criterion.md).
 
 USAGE:
   plinth-audit <file.chitubox> [OPTIONS]
@@ -40,7 +42,10 @@ OPTIONS:
                           graph gets built quietly.
   -h, --help              this text.
 
-EXIT CODE: 0 only when every model is a print candidate.
+EXIT CODE: 0 only when every model passes all ten gating invariants. That is
+           NOT a statement that the print is safe -- see audit-span-criterion.md
+           section 8 and audit-spread-criterion.md section 6 for what a full
+           pass still cannot see.
 ";
 
 fn main() {

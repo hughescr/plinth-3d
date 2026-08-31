@@ -233,7 +233,7 @@ pub const NOT_IMPLEMENTED_CODE: &str = "AUDIT_CHECK_NOT_IMPLEMENTED";
 
 /// One gating invariant.
 ///
-/// Implementations live one per file in `src/checks/`, so eight agents each
+/// Implementations live one per file in `src/checks/`, so ten agents each
 /// edit exactly one file and nobody touches a shared module list.
 pub trait Check {
     /// The schema key, e.g. `"i1_seat_depth"`. It is the JSON field name and

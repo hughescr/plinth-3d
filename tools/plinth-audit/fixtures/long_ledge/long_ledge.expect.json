@@ -1,0 +1,8 @@
+{
+  "description": "a one-layer-thick ledge, 3.00mm x 2.00mm, half seated over a grounded spine block and half projecting 3.00mm past the spine's own edge with nothing under it and no support anywhere in the file -- the attached-along-one-edge cantilever I7's early-exit is structurally unable to see (docs/specs/audit-span-criterion.md section 3.5, Finding 1). i9_unsupported_span is currently a stub (AUDIT_CHECK_NOT_IMPLEMENTED) and this fixture is PENDING, not satisfied, until it is implemented; see README.md for the required verdict once it is, and for a load_ownership.rs crash this fixture also discovered.",
+  "check": "i9_unsupported_span",
+  "expect": "check_fails",
+  "codes": ["SPAN_UNSUPPORTED"],
+  "model": 0,
+  "min_failures": 1
+}

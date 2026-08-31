@@ -18,8 +18,10 @@
 //! primitive's own solid reaches the plate (`aabb().min[2] <= z_plate +
 //! layer_height`, which is exact because every [`Primitive::aabb`] here is the
 //! TIGHT box), or (ii) the primitive is itself a TIP whose own seat already
-//! satisfies I1's predicate (`h_delivered > 0` and `h_delivered >= h_req -
-//! tol_geom`), recomputed here from [`crate::seat::Seat`] rather than trusted
+//! satisfies I1's predicate (`h_delivered > 0` and, in the conservative
+//! minimum-type form of `audit-interval-policy.md` §3.2,
+//! `h_delivered - tol_geom >= h_req`), recomputed here from
+//! [`crate::seat::Seat`] rather than trusted
 //! from anywhere else. **This is narrower than the full clause (ii)**: the
 //! specification also requires the seat zone to pass I6, which this file does
 //! not reimplement (I6 owns that machinery, in its own file). A tip that
@@ -119,6 +121,7 @@
 //!    stricter reading.
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::graph::SupportGraph;
@@ -179,6 +182,10 @@ impl Check for NarrowestSection {
         let mut rows = Vec::with_capacity(scope);
         // (margin, a_min, a_required) for the worst contact actually measured.
         let mut worst: Option<(f64, f64, f64)> = None;
+        // Sections measured but not resolvable against their own requirement
+        // (`audit-interval-policy.md` §3.2 row 10), kept apart from the
+        // could-not-measure-at-all indeterminates below.
+        let mut band_indeterminate_count = 0usize;
 
         for seat in &ctx.seats {
             let cid = seat.contact_id;
@@ -197,14 +204,57 @@ impl Check for NarrowestSection {
                 Ok(r) => {
                     let a_required_mm2 = r.a_owned_mm2 / x_allowed;
                     let tol = c::tol_area(r.a_owned_mm2, x_allowed);
-                    let ok = passes_area_law(r.a_min_mm2, r.a_owned_mm2, x_allowed);
+                    let verdict = area_law_verdict(r.a_min_mm2, r.a_owned_mm2, x_allowed);
                     let x_delivered =
                         r.a_min_mm2 / (std::f64::consts::PI * r.r_at_min_mm.max(1.0e-9).powi(2));
                     let margin = r.a_min_mm2 - a_required_mm2;
                     if worst.is_none_or(|(m, ..)| margin < m) {
                         worst = Some((margin, r.a_min_mm2, a_required_mm2));
                     }
-                    if !ok {
+                    // The straddling band: the section was measured, and the
+                    // instrument cannot resolve it against its own
+                    // requirement. It gates as a failure and carries its
+                    // interval (`audit-interval-policy.md` §5).
+                    if verdict == Verdict::Indeterminate {
+                        let (edge_lo, edge_hi) = interval::edges(r.a_min_mm2, tol);
+                        band_indeterminate_count += 1;
+                        out.indeterminate(Failure::line(
+                            "MIN_SECTION_INDETERMINATE",
+                            &file,
+                            ctx.model_index,
+                            Some(cid),
+                            Some(r.primitive_record),
+                            &[
+                                (
+                                    "reason",
+                                    interval::REASON_WITHIN_TOLERANCE_BAND.to_string(),
+                                ),
+                                ("a_min_mm2", fmt(r.a_min_mm2)),
+                                (
+                                    "a_min_interval_mm2",
+                                    interval::fmt_interval(r.a_min_mm2, tol),
+                                ),
+                                ("a_required_mm2", fmt(a_required_mm2)),
+                                ("tolerance_mm2", fmt(tol)),
+                            ],
+                            {
+                                let mut v = Json::obj();
+                                v.set(
+                                    "reason",
+                                    Json::str(interval::REASON_WITHIN_TOLERANCE_BAND),
+                                );
+                                v.set("station_mm", Json::num(r.station_mm));
+                                v.set("primitive_record", Json::usize(r.primitive_record));
+                                v.set("a_min_mm2", Json::num(r.a_min_mm2));
+                                v.set("a_min_interval_mm2", Json::nums([edge_lo, edge_hi]));
+                                v.set("a_required_mm2", Json::num(a_required_mm2));
+                                v.set("a_owned_mm2", Json::num(r.a_owned_mm2));
+                                v.set("tolerance_mm2", Json::num(tol));
+                                v
+                            },
+                        ));
+                    }
+                    if verdict == Verdict::Fail {
                         let deficit = ((a_required_mm2 - tol) - r.a_min_mm2).max(0.0);
                         out.fail(Failure::line(
                             "MIN_SECTION_SHORT",
@@ -238,8 +288,9 @@ impl Check for NarrowestSection {
                     }
                     rows.push(contact_row(
                         cid,
-                        if ok { "pass" } else { "fail" },
-                        None,
+                        verdict.as_str(),
+                        (verdict == Verdict::Indeterminate)
+                            .then_some(interval::REASON_WITHIN_TOLERANCE_BAND),
                         Some(r.a_min_mm2),
                         Some(a_required_mm2),
                         Some(r.a_owned_mm2),
@@ -288,6 +339,10 @@ impl Check for NarrowestSection {
         }
 
         out.measured.set("contacts", Json::Arr(rows));
+        out.measured.set(
+            "area_law_band_indeterminate_count",
+            Json::usize(band_indeterminate_count),
+        );
         let headline = worst.map_or_else(
             || format!("0 of {scope} contacts had a measurable section"),
             |(_, a_min, a_req)| format!("worst A_min {a_min:.4} mm2 needs {a_req:.4}"),
@@ -301,21 +356,38 @@ impl Check for NarrowestSection {
 // The predicate, pure and separately testable
 // ---------------------------------------------------------------------------
 
-/// `A_min(c) >= A_owned(c) / x_allowed - tol_area(A_owned(c))`
-/// (`audit-invariants.md` §3.3). Any non-finite or otherwise unmeasurable
-/// input is a hard `false`: an input this check cannot establish never maps
-/// to a pass.
+/// The area law of `audit-invariants.md` §3.3,
+/// `A_min(c) >= A_owned(c) / x_allowed`, in the conservative
+/// **minimum-type** form of `audit-interval-policy.md` §3.2 row 10: the
+/// delivered narrowest section must reach the required one, so the
+/// conservative bound of `A_min` is its LOWER bound.
+///
+/// ```text
+/// PASS           a_min - tol >= required
+/// FAIL           a_min + tol <  required
+/// INDETERMINATE  otherwise -- the interval straddles the requirement
+/// ```
+///
+/// **This replaces `a_min >= required - tol`**, which graded `A_min`'s
+/// *upper* bound against the requirement and so certified a section
+/// genuinely thinner than the area law demands, by up to `tol_area`.
+///
+/// Any non-finite or otherwise unmeasurable input is
+/// [`Verdict::Indeterminate`], never a pass — including the degenerate
+/// `x_allowed <= 0` and the physically impossible negative area, which used
+/// to return a bare `false` that the caller could not tell apart from a
+/// measured shortfall.
 #[must_use]
-pub fn passes_area_law(a_min_mm2: f64, a_owned_mm2: f64, x_allowed: f64) -> bool {
+pub fn area_law_verdict(a_min_mm2: f64, a_owned_mm2: f64, x_allowed: f64) -> Verdict {
     if !a_min_mm2.is_finite() || !a_owned_mm2.is_finite() || !x_allowed.is_finite() {
-        return false;
+        return Verdict::Indeterminate;
     }
     if a_min_mm2 < 0.0 || a_owned_mm2 < 0.0 || x_allowed <= 0.0 {
-        return false;
+        return Verdict::Indeterminate;
     }
     let required = a_owned_mm2 / x_allowed;
     let tol = c::tol_area(a_owned_mm2, x_allowed);
-    a_min_mm2 >= required - tol
+    interval::min_type(a_min_mm2, required, tol)
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +400,25 @@ fn ground_flags(ctx: &ModelContext) -> Vec<bool> {
     let plate_z = ctx.z_plate_mm + ctx.inputs().layer_height_mm;
     for i in 0..n {
         if let Ok(p) = &ctx.primitives[i] {
-            if p.aabb().min[2] <= plate_z {
+            // EQUALITY-BAND coincidence test, not a margin test
+            // (`audit-interval-policy.md` §3.4): "does this solid's lowest
+            // point coincide with the plate", where both sides are stored
+            // f32 coordinates. It is NOT converted to the three-outcome
+            // interval form -- there is no safety margin under test, so
+            // there is no conservative side and no third outcome to add.
+            //
+            // The one genuine gap §3.4 names is here: this copy carried no
+            // tolerance at all while the structurally identical tests in
+            // `load_path.rs:212` and `dead_geometry.rs:267` carry `+
+            // tol_geom`. Added for consistency across the three copies. It
+            // is a widening, so it can only ground MORE records; grounding
+            // terminates another contact's walk, so the direction is
+            // checked: `seat_reaches_required_depth` above is the clause
+            // that had to tighten, and this one is a coincidence test whose
+            // tolerance is the resolution of the evidence, not slack.
+            let bb = p.aabb();
+            let tol = c::tol_geom_mag(bb.min[2].abs().max(plate_z.abs()).max(1.0));
+            if bb.min[2] <= plate_z + tol {
                 g[i] = true;
             }
         }
@@ -346,6 +436,15 @@ fn ground_flags(ctx: &ModelContext) -> Vec<bool> {
 /// I1's own predicate (`audit-invariants.md` §3.1), recomputed from the shared
 /// [`Seat`] reconstruction rather than trusted from I1's own verdict -- each
 /// invariant establishes what it needs independently.
+///
+/// **Conservative minimum-type form** (`audit-interval-policy.md` §3.2
+/// row 2; this is duplicate #2 of the same predicate, and it carried the same
+/// copied bug). It replaces `h >= h_req - tol`.
+///
+/// Grounding is the *permissive* outcome here — a grounded record terminates
+/// another contact's load-path walk — so only [`Verdict::Pass`] may ground.
+/// An interval that straddles the requirement has not established a valid
+/// seat and must not be allowed to end a walk.
 fn seat_reaches_required_depth(seat: &Seat) -> bool {
     let (Some(h), Some(h_req)) = (seat.h_delivered_mm, seat.h_required_mm) else {
         return false;
@@ -353,7 +452,7 @@ fn seat_reaches_required_depth(seat: &Seat) -> bool {
     if h <= 0.0 {
         return false;
     }
-    h >= h_req - seat.tol_geom_mm()
+    interval::min_type(h, h_req, seat.tol_geom_mm()).is_pass()
 }
 
 /// `in_degree(r)`: the count of neighbours one step FARTHER from ground, i.e.
@@ -835,27 +934,72 @@ mod tests {
 
     // -- the predicate's boundary --------------------------------------
 
+    /// **This test asserted the OPPOSITE before `audit-interval-policy.md`
+    /// §3.2 row 10.** It pinned `passes_area_law(required - tol) == true` --
+    /// a section genuinely thinner than the area law demands, certified
+    /// because the shortfall was smaller than the measurement uncertainty.
+    /// That is Finding 3 written down as a passing test, which is how the
+    /// defect survived review. The conservative form inverts it.
     #[test]
-    fn the_predicate_passes_exactly_at_the_tolerance_and_fails_one_step_below() {
+    fn the_area_law_refuses_a_section_short_by_less_than_its_own_tolerance() {
         let a_owned = 4.8; // mm^2, an ordinary value
         let x_allowed = c::X_ALLOWED;
         let required = a_owned / x_allowed;
         let tol = c::tol_area(a_owned, x_allowed);
-        assert!(passes_area_law(required - tol, a_owned, x_allowed));
-        assert!(!passes_area_law(
-            required - tol - 1.0e-12,
-            a_owned,
-            x_allowed
-        ));
-        assert!(passes_area_law(required, a_owned, x_allowed));
+
+        // The retired predicate's own boundary case. It passed; it must not.
+        assert_eq!(
+            area_law_verdict(required - tol, a_owned, x_allowed),
+            Verdict::Indeterminate,
+            "a section short by exactly tol used to certify"
+        );
+        // Exactly AT the bare requirement is also unresolved: the evidence
+        // cannot tell `required` from `required - tol`.
+        assert_eq!(
+            area_law_verdict(required, a_owned, x_allowed),
+            Verdict::Indeterminate
+        );
+        // Clear of the band on the high side: a real pass.
+        assert_eq!(
+            area_law_verdict(required + 2.0 * tol, a_owned, x_allowed),
+            Verdict::Pass
+        );
+        // Clear of the band on the low side: a measured defect, and it must
+        // stay distinguishable from the unresolved cases above.
+        assert_eq!(
+            area_law_verdict(required - 2.0 * tol, a_owned, x_allowed),
+            Verdict::Fail
+        );
+    }
+
+    /// The pass boundary is `a_min - tol >= required`, exactly.
+    #[test]
+    fn the_area_law_passes_exactly_at_the_conservative_edge() {
+        let a_owned = 4.8;
+        let x_allowed = c::X_ALLOWED;
+        let required = a_owned / x_allowed;
+        let tol = c::tol_area(a_owned, x_allowed);
+        assert_eq!(
+            area_law_verdict(required + tol, a_owned, x_allowed),
+            Verdict::Pass
+        );
+        assert_eq!(
+            area_law_verdict(required + tol * 0.5, a_owned, x_allowed),
+            Verdict::Indeterminate
+        );
     }
 
     #[test]
     fn the_predicate_never_passes_on_an_unmeasurable_input() {
-        assert!(!passes_area_law(f64::NAN, 1.0, c::X_ALLOWED));
-        assert!(!passes_area_law(1.0, f64::INFINITY, c::X_ALLOWED));
-        assert!(!passes_area_law(1.0, 1.0, 0.0));
-        assert!(!passes_area_law(-0.1, 1.0, c::X_ALLOWED));
+        for v in [
+            area_law_verdict(f64::NAN, 1.0, c::X_ALLOWED),
+            area_law_verdict(1.0, f64::INFINITY, c::X_ALLOWED),
+            area_law_verdict(1.0, 1.0, 0.0),
+            area_law_verdict(-0.1, 1.0, c::X_ALLOWED),
+        ] {
+            assert_eq!(v, Verdict::Indeterminate, "unmeasurable is never a pass");
+            assert!(!v.is_pass());
+        }
     }
 
     // -- fixtures --------------------------------------------------------

@@ -142,6 +142,7 @@
 //!   a wrong requirement from a right one.
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
@@ -384,6 +385,12 @@ impl Check for ContactArea {
             }
 
             // ---- 5. the specification's exceeds-ideal tripwire --------------
+            // EXEMPT (`audit-interval-policy.md` §1.2 row 9): already the
+            // conservative MAXIMUM-type form. `a_rast` may not exceed
+            // `a_ideal`, and excess beyond the tolerance routes to
+            // `indeterminate` rather than being accepted -- doubt never
+            // resolves to a pass. Nothing to change here; the row below is
+            // the one that was backwards.
             if a_rast > a_ideal + tol {
                 let beyond = a_rast - a_ideal > allowance;
                 if beyond {
@@ -412,7 +419,21 @@ impl Check for ContactArea {
             }
 
             // ---- 6. the predicate -------------------------------------------
-            if a_rast >= a_required - tol {
+            // I2's whole pass/fail decision, in the conservative
+            // MINIMUM-type form of `audit-interval-policy.md` §3.2 row 8:
+            // the cured contact patch must REACH the area its own owned
+            // demand requires, so the conservative bound of `a_rast` is its
+            // LOWER bound.
+            //
+            // **Replaces `a_rast >= a_required - tol`**, which is
+            // algebraically `a_rast + tol >= a_required` -- the patch's
+            // UPPER bound against the requirement, backwards for this
+            // direction. A patch genuinely too small to carry its load, by
+            // less than `tol_area`, used to certify.
+            let verdict = interval::min_type(a_rast, a_required, tol);
+            let (edge_lo, edge_hi) = interval::edges(a_rast, tol);
+            row.set("a_rast_interval_mm2", Json::nums([edge_lo, edge_hi]));
+            if verdict == Verdict::Pass {
                 // **A pass on a zero owner is a vacuous pass, and it is
                 // counted.** A contact the Voronoi partition charges with no
                 // model area satisfies the area law against nothing, so it
@@ -430,11 +451,48 @@ impl Check for ContactArea {
             }
 
             let deficit = a_required - a_rast;
+
+            if verdict == Verdict::Indeterminate {
+                // The patch was measured and the instrument cannot resolve it
+                // against its own requirement. It gates as a failure
+                // (`audit-invariants.md` §0 rule 3) and stays distinguishable
+                // from a measured shortfall, because the two tell a reader
+                // different things (`audit-interval-policy.md` §5).
+                acc.band_indeterminate += 1;
+                row.set("status", Json::str("indeterminate"));
+                row.set("reason", Json::str(interval::REASON_WITHIN_TOLERANCE_BAND));
+                row.set("deficit_mm2", Json::num(deficit));
+                rows.push(row);
+                out.indeterminate(indeterminate_line(
+                    &file,
+                    model,
+                    cid,
+                    interval::REASON_WITHIN_TOLERANCE_BAND,
+                    &[
+                        ("a_rast_mm2", Json::num(a_rast)),
+                        ("a_rast_interval_mm2", Json::nums([edge_lo, edge_hi])),
+                        ("a_required_mm2", Json::num(a_required)),
+                        ("a_owned_mm2", Json::num(a_owned)),
+                        ("tol_area_mm2", Json::num(tol)),
+                        ("deficit_mm2", Json::num(deficit)),
+                    ],
+                ));
+                continue;
+            }
+
             acc.worst_deficit = acc.worst_deficit.max(deficit);
             // A_rast can exceed A_ideal only by the quantisation allowance, so
             // a contact short of its requirement even against the whole allowed
             // disc is short under EVERY fill rule. That count is the part of
             // this finding no reviewer can argue away as conservatism.
+            //
+            // NOT IN THE POLICY'S INVENTORY, and re-derived here rather than
+            // swept: this is a CLAIM OF FAILURE ("short under every fill
+            // rule"), not a claim of adequacy, so its conservative direction
+            // is the reverse of the gate above. `tol` is added to the LEFT,
+            // which makes the claim HARDER to assert -- the check must be
+            // sure before it calls a contact unrescuable. Moving `tol` to
+            // the other side would over-claim. Left exactly as it was.
             let unrescuable = a_ideal + allowance + tol < a_required;
             if unrescuable {
                 acc.failed_even_at_ideal += 1;
@@ -501,6 +559,11 @@ struct Totals {
     exceeds_within_quantisation: usize,
     exceeds_beyond_quantisation: usize,
     passed_on_zero_owned: usize,
+    /// Patches whose interval straddled their own requirement
+    /// (`audit-interval-policy.md` §3.2 row 8). Gates as a failure; kept
+    /// apart from `worst_deficit` because a blunt instrument and a short
+    /// patch are different findings.
+    band_indeterminate: usize,
     zero_seat: usize,
     lattice_aligned: usize,
     grown: usize,
@@ -537,6 +600,10 @@ impl Totals {
         totals.set(
             "passed_on_zero_owned_area",
             Json::usize(self.passed_on_zero_owned),
+        );
+        totals.set(
+            "band_indeterminate",
+            Json::usize(self.band_indeterminate),
         );
         totals.set("zero_seat", Json::usize(self.zero_seat));
         totals.set("patches_grown", Json::usize(self.grown));

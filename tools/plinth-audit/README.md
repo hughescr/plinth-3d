@@ -6,7 +6,7 @@ The emitted-bytes print-candidate audit. Reads **only** the bytes of a
 Specifications: [`docs/specs/audit-contract.md`](../../docs/specs/audit-contract.md)
 (what the bytes can answer) and
 [`docs/specs/audit-invariants.md`](../../docs/specs/audit-invariants.md) (the
-eight gating invariants, the report, the output schema). **Where an engine
+ten gating invariants, the report, the output schema). **Where an engine
 source and `audit-invariants.md` disagree, that file governs.**
 
 ## Independence, and why it is not negotiable
@@ -31,7 +31,8 @@ cargo test  --release          # unit + fixture + real-artifact suites
 ./target/release/plinth-audit <file> --dump-graph        # diagnostic, decides nothing
 ```
 
-Exit code is 0 only when every model passed all eight gating invariants.
+Exit code is 0 only when every model passed all ten gating invariants
+(`support_invariants_pass`); that is not a claim the print is safe.
 
 ## Implementing one invariant
 

@@ -60,6 +60,7 @@
 //! failures.
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
@@ -91,6 +92,19 @@ pub enum ClauseState {
 }
 
 impl ClauseState {
+    /// Lift an interval comparison's verdict into this check's own
+    /// three-state vocabulary. The two enums are the same three outcomes
+    /// under different names; this is the only place they meet, so a
+    /// `Verdict::Indeterminate` cannot be flattened into a pass on the way
+    /// across.
+    #[must_use]
+    pub const fn from_verdict(v: Verdict) -> Self {
+        match v {
+            Verdict::Pass => Self::Pass,
+            Verdict::Fail => Self::Fail,
+            Verdict::Indeterminate => Self::Indeterminate,
+        }
+    }
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -110,16 +124,30 @@ impl ClauseState {
 /// Censored at one printer pixel because the printer cannot render less
 /// (§1.5). A non-finite input is **unmeasurable**, and an unmeasurable input
 /// is indeterminate, never a pass.
+///
+/// **Conservative MAXIMUM-type form** (`audit-interval-policy.md` §3.3
+/// row 11): unowned area must not EXCEED the censor, so the conservative
+/// bound of `A_unowned` is its UPPER bound and the pass condition is
+/// `A_unowned + tol <= censor`. This is the OPPOSITE bound from the
+/// minimum-type rows in this same sweep (I1's depth, I2's patch area, I3's
+/// section) — applying one rule to both directions is exactly the inversion
+/// the policy warns about.
+///
+/// `tol` is `tol_sum(A_unowned)`: `A_unowned` is a summed quantity (Source C,
+/// §2.3), while the censor is a fixed printer constant with no uncertainty of
+/// its own. §2.4 predicts this changes nothing measurable — `tol_sum`'s
+/// absolute leg is `1e-9 mm²` against a `2.66e-4 mm²` censor, five decades
+/// apart — and it is fixed for correctness regardless.
 #[must_use]
 pub fn clause_a_unowned(a_unowned_mm2: f64, censor_mm2: f64) -> ClauseState {
     if !a_unowned_mm2.is_finite() || !censor_mm2.is_finite() || censor_mm2 < 0.0 {
         return ClauseState::Indeterminate;
     }
-    if a_unowned_mm2 <= censor_mm2 {
-        ClauseState::Pass
-    } else {
-        ClauseState::Fail
-    }
+    ClauseState::from_verdict(interval::max_type(
+        a_unowned_mm2,
+        censor_mm2,
+        c::tol_sum(a_unowned_mm2),
+    ))
 }
 
 /// Clause (b): the partition identity, `|accounted - D_total| <= tol`, with
@@ -133,6 +161,14 @@ pub fn clause_b_identity(accounted_mm2: f64, d_total_mm2: f64) -> ClauseState {
     if !accounted_mm2.is_finite() || !d_total_mm2.is_finite() {
         return ClauseState::Indeterminate;
     }
+    // EXEMPT, EQUALITY-BAND (`audit-interval-policy.md` §1.4 row 12, §3.4):
+    // two independent reconstructions of ONE physical quantity, not a
+    // delivered value against a design requirement. There is no safety
+    // margin under test, so there is no conservative side to pick and no
+    // third outcome to add -- "within combined tolerance" already MEANS "the
+    // evidence cannot distinguish these", which is the expected outcome for
+    // two correct reconstructions. Converting this to the minimum/maximum
+    // interval form would be a category error.
     if (accounted_mm2 - d_total_mm2).abs() <= c::tol_sum(d_total_mm2) {
         ClauseState::Pass
     } else {
@@ -175,6 +211,11 @@ pub fn clause_c_components(
         // A component with no contact owns nothing; its demand is unowned and
         // clause (a) and LOAD_COMPONENT_UNSUPPORTED speak to it.
         let expected = if has_contact[k] { want } else { 0.0 };
+        // EXEMPT (`audit-interval-policy.md` §1.4 row 13, §3.4): an
+        // equality-band comparison of two independent reconstructions of one
+        // component's demand, AND it already routes disagreement to
+        // `Indeterminate` rather than to `Fail` or `Pass` -- ambiguity never
+        // resolves to a pass here. Nothing to correct.
         let resid = (owned - expected).abs();
         let tol = c::tol_sum(expected.max(want));
         if resid > tol {
@@ -202,12 +243,26 @@ pub fn clause_d_books(d_total_mm2: f64, lo_mm2: f64, hi_mm2: f64) -> ClauseState
     if hi_mm2 < lo_mm2 {
         return ClauseState::Indeterminate;
     }
+    // **Two-sided bracket, needing BOTH rules at once**
+    // (`audit-interval-policy.md` §3.3 row 14 -- the sharpest instance in the
+    // corpus, because it compounds the bug in two directions on one
+    // predicate). `D_total` must clear `lo` from above (a MINIMUM-type
+    // relation to `lo`) and clear `hi` from below (a MAXIMUM-type relation to
+    // `hi`):
+    //
+    //   PASS           D - tol >= lo  AND  D + tol <= hi
+    //   FAIL           D + tol <  lo  OR   D - tol >  hi
+    //   INDETERMINATE  otherwise -- the interval overlaps an end without
+    //                  clearing it
+    //
+    // **Replaces `D >= lo - tol && D <= hi + tol`**, which widened the
+    // passing region on both ends simultaneously: it graded `D`'s UPPER
+    // bound against `lo` (should be the lower) and `D`'s LOWER bound against
+    // `hi` (should be the upper). Both halves were backwards, in opposite
+    // senses -- which is why one rule applied twice with the same sign would
+    // not have fixed it.
     let tol = c::tol_sum(d_total_mm2);
-    if d_total_mm2 >= lo_mm2 - tol && d_total_mm2 <= hi_mm2 + tol {
-        ClauseState::Pass
-    } else {
-        ClauseState::Fail
-    }
+    ClauseState::from_verdict(interval::bracket(d_total_mm2, lo_mm2, hi_mm2, tol))
 }
 
 /// Clause (e), §2.1: `D_total` reconstructed a second way, off the raster, and
@@ -227,6 +282,10 @@ pub fn clause_e_demand_agrees(
     if perimeter_total_mm < 0.0 {
         return ClauseState::Indeterminate;
     }
+    // EXEMPT, EQUALITY-BAND (`audit-interval-policy.md` §1.4 row 15, §3.4):
+    // `D_total` and `D_raster` are the same demand reconstructed two ways.
+    // Same reasoning as clause (b) -- symmetric, already conservative, no
+    // direction to correct.
     let bound = 0.5 * perimeter_total_mm * c::D2_MM + c::tol_sum(d_total_mm2);
     if (d_total_mm2 - d_raster_mm2).abs() <= bound {
         ClauseState::Pass
@@ -692,7 +751,17 @@ impl Check for LoadOwnership {
                 ],
             ));
         }
-        let ratio = if lo > 0.0 { d_total / lo } else { f64::INFINITY };
+        // **Pre-existing crash, found by the `long_ledge` fixture while
+        // verifying the interval sweep, and unrelated to it.** `lo == 0`
+        // (no unclamped contact contributes a lower bound) made this
+        // `f64::INFINITY`, which `Json::num` asserts against -- the whole
+        // audit panicked on the file rather than reporting anything about
+        // it. The ratio is genuinely UNDEFINED when the books recover no
+        // lower bound, which is what `num_or_null` is for; the guard forbids
+        // hiding a NaN produced by arithmetic, not reporting an undefined
+        // quotient as absent. Verified against the unmodified binary at
+        // c01e9d7 + the new fixtures: it panicked there too.
+        let ratio: Option<f64> = (lo > 0.0).then(|| d_total / lo);
         if state_d == ClauseState::Fail {
             failed = true;
             lines.push(Failure::line(
@@ -706,7 +775,10 @@ impl Check for LoadOwnership {
                     ("implied_lo_mm2", num(lo)),
                     ("implied_hi_mm2", num(hi)),
                     ("clamped_contacts", clamped.to_string()),
-                    ("ratio", num(ratio)),
+                    (
+                        "ratio",
+                        ratio.map_or_else(|| "undefined".to_string(), num),
+                    ),
                 ],
                 {
                     let mut o = Json::obj();
@@ -714,7 +786,7 @@ impl Check for LoadOwnership {
                     o.set("implied_lo_mm2", Json::num(lo));
                     o.set("implied_hi_mm2", Json::num(hi));
                     o.set("clamped_contacts", Json::usize(clamped));
-                    o.set("ratio", Json::num(ratio));
+                    o.set("ratio", Json::num_or_null(ratio));
                     o.set("ratio_definition", Json::str("d_total_mm2 / implied_lo_mm2"));
                     o
                 },
@@ -837,7 +909,7 @@ impl Check for LoadOwnership {
         measured.set("clamped_contacts", Json::usize(clamped));
         measured.set("unclamped_contacts", Json::usize(unclamped));
         measured.set("tip_radius_disputed_contacts", Json::usize(disputed_radius.len()));
-        measured.set("books_ratio", Json::num(ratio));
+        measured.set("books_ratio", Json::num_or_null(ratio));
         measured.set("books_ratio_definition", Json::str("d_total_mm2 / implied_lo_mm2"));
         measured.set("books_tolerance_mm2", Json::num(c::tol_sum(d_total)));
 
@@ -1005,17 +1077,40 @@ mod tests {
 
     // -- clause (a) -----------------------------------------------------
 
+    /// **This test asserted `clause_a_unowned(px, px) == Pass` before
+    /// `audit-interval-policy.md` §3.3 row 11** -- unowned area sitting
+    /// exactly ON the censor was certified as under it. Clause (a) is a
+    /// MAXIMUM-type relation, so the conservative bound of `A_unowned` is
+    /// its UPPER bound and the censor must be cleared with room.
+    ///
+    /// Note the direction: this is the OPPOSITE bound from clause (d)'s low
+    /// end and from I1/I2/I3's minimum-type rows, which is why the sweep
+    /// could not be applied mechanically.
     #[test]
-    fn clause_a_passes_exactly_at_the_pixel_censor_and_fails_one_ulp_above() {
+    fn clause_a_refuses_unowned_area_it_cannot_place_under_the_censor() {
         let px = c::PIXEL_AREA_MM2;
+        // Genuinely nothing unowned: `tol_sum(0)` is 1e-9 mm2 against a
+        // 2.66e-4 mm2 censor, so this still clears with five decades to
+        // spare. The gate is not vacuous in the passing direction.
         assert_eq!(clause_a_unowned(0.0, px), ClauseState::Pass);
+        assert_eq!(clause_a_unowned(px * 0.5, px), ClauseState::Pass);
+        // Exactly at the censor: no longer a pass. The evidence cannot place
+        // it under the limit.
         assert_eq!(
             clause_a_unowned(px, px),
-            ClauseState::Pass,
-            "the censor is inclusive: <= one pixel"
+            ClauseState::Indeterminate,
+            "at the censor is not established to be under it"
         );
+        // One ULP above is likewise unresolved, not yet a measured breach --
+        // it is well inside `tol_sum`. Both gate as failures regardless.
         let just_over = f64::from_bits(px.to_bits() + 1);
-        assert_eq!(clause_a_unowned(just_over, px), ClauseState::Fail);
+        assert_eq!(
+            clause_a_unowned(just_over, px),
+            ClauseState::Indeterminate
+        );
+        assert!(!clause_a_unowned(just_over, px).is_pass());
+        // Clear of the band: a measured breach, still distinguishable.
+        assert_eq!(clause_a_unowned(px * 2.0, px), ClauseState::Fail);
         // The real corpus scale: hundreds of mm2 unassigned.
         assert_eq!(clause_a_unowned(310.0, px), ClauseState::Fail);
     }
@@ -1107,17 +1202,66 @@ mod tests {
 
     // -- clause (d) -----------------------------------------------------
 
+    /// **This test asserted `clause_d_books(lo - tol, lo, hi) == Pass`
+    /// before `audit-interval-policy.md` §3.3 row 14** -- a reconstructed
+    /// demand genuinely BELOW the books' own lower end, certified because
+    /// the shortfall was inside `tol_sum`. Row 14 is the widest of the ten
+    /// optimistic comparisons because it did that at both ends at once.
     #[test]
-    fn clause_d_brackets_the_demand_and_fails_outside_it() {
-        // 24 tips at the corpus median radius 0.197 mm, none clamped.
+    fn clause_d_refuses_a_demand_it_cannot_place_inside_the_bracket() {
+        // A genuinely wide bracket: 1 clamped contact, so the books admit an
+        // interval rather than a point. This is the shape the clause can
+        // actually certify -- see the zero-width case below.
+        let lo = 10.0;
+        let hi = 120.0;
+        let d = 100.0;
+        let tol = c::tol_sum(d);
+        assert_eq!(clause_d_books(d, lo, hi), ClauseState::Pass);
+
+        // The retired form's own boundary cases, both ends. Both passed;
+        // neither may.
+        assert_eq!(
+            clause_d_books(lo - tol * 0.5, lo, hi),
+            ClauseState::Indeterminate,
+            "below the books' low end used to certify"
+        );
+        assert_eq!(
+            clause_d_books(hi + c::tol_sum(hi) * 0.5, lo, hi),
+            ClauseState::Indeterminate,
+            "above the books' high end used to certify"
+        );
+        // Clear of the bracket at either end is still a measured defect.
+        assert_eq!(clause_d_books(lo * 0.5, lo, hi), ClauseState::Fail);
+        assert_eq!(clause_d_books(hi * 3.0, lo, hi), ClauseState::Fail);
+    }
+
+    /// **A zero-width bracket can no longer PASS, and that is a real
+    /// consequence worth pinning rather than discovering later.** With no
+    /// clamped contacts the books recover a point (`lo == hi`), and a point
+    /// cannot contain a nonzero-width interval: §3.3's rule needs
+    /// `D - tol >= lo` AND `D + tol <= hi` simultaneously, which no finite
+    /// `tol > 0` satisfies when `lo == hi`.
+    ///
+    /// Measured on the artifacts in this checkout, this changes nothing:
+    /// every point-bracket file already failed clause (d) under the retired
+    /// form, with `|D - lo|` four to six decades ABOVE `tol_sum(D)`
+    /// (`bare_island` 3.7e-7 against 5.8e-12; `collinear_arms` 6.4e-6
+    /// against 9.3e-11; `starved_patch` 3.3e-8 against 1.2e-12). The
+    /// tolerance was never doing work at a point bracket.
+    #[test]
+    fn a_zero_width_bracket_can_never_certify_and_the_shortfall_is_still_measured() {
         let a = 12.0 * std::f64::consts::PI * 0.197 * 0.197;
         let lo = 24.0 * a;
-        let hi = lo; // no clamped contacts, so the interval is a point
-        assert_eq!(clause_d_books(lo, lo, hi), ClauseState::Pass);
-        let tol = c::tol_sum(lo);
-        assert_eq!(clause_d_books(lo - tol, lo, hi), ClauseState::Pass);
-        assert_eq!(clause_d_books(lo - tol * 4.0, lo, hi), ClauseState::Fail);
+        let hi = lo; // no clamped contacts, so the bracket is a point
+        assert_eq!(
+            clause_d_books(lo, lo, hi),
+            ClauseState::Indeterminate,
+            "a point bracket cannot contain an interval of nonzero width"
+        );
+        // And a demand clear of the point is still a measured FAIL, so the
+        // clause has not collapsed into reporting one value for everything.
         assert_eq!(clause_d_books(lo * 3.0, lo, hi), ClauseState::Fail);
+        assert_eq!(clause_d_books(lo * 0.1, lo, hi), ClauseState::Fail);
     }
 
     #[test]

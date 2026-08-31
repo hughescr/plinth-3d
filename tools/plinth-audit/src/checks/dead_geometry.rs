@@ -38,7 +38,9 @@
 //!
 //! ## Known simplifications, disclosed rather than hidden
 //!
-//! * Ground clause (ii) here is `h_delivered > 0 and h_delivered >= h_required`
+//! * Ground clause (ii) here is `h_delivered > 0` and, in the conservative
+//!   minimum-type form of `audit-interval-policy.md` §3.2,
+//!   `h_delivered - tol_geom >= h_required`
 //!   (I1's own predicate, read from the shared [`crate::seat::Seat`]
 //!   reconstruction). The full specification also requires the seat zone to
 //!   pass I6; that check lives in `intersection.rs`, is not owned by this
@@ -63,6 +65,7 @@
 //! `path_indeterminate`).
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::graph::{Ambiguity, Link};
@@ -96,6 +99,15 @@ impl Check for DeadGeometry {
         // Pass 1: degeneracy. Exact tests, no tolerance except the one
         // §1.4 mesh-agreement check, which already carries its own
         // magnitude-derived tolerance.
+        //
+        // EXEMPT from the interval policy (`audit-interval-policy.md` §1.8,
+        // §3.4). The degeneracy tests compare exact stored fields against
+        // `0`, `> 0` and non-finite, and `audit-invariants.md` §3.8 requires
+        // them exact: "Degenerate, exact, no tolerance". A zero-length axis
+        // is zero-length; there is no measurement whose uncertainty could
+        // straddle that. The mesh-agreement check below IS an equality-band
+        // comparison and is already correct for the same reason clause (b)
+        // of I4 is.
         // -------------------------------------------------------------
         let mut degenerate_count = 0usize;
         let mut degenerate_reasons: HashMap<usize, Vec<&'static str>> = HashMap::new();
@@ -264,6 +276,11 @@ impl Check for DeadGeometry {
             match ctx.primitives.get(r).and_then(|p| p.as_ref().ok()) {
                 None => false,
                 Some(p) => {
+                    // EQUALITY-BAND coincidence test against the plate
+                    // (`audit-interval-policy.md` §3.4), left as-is: it asks
+                    // whether two stored coordinates are the same coordinate
+                    // at the evidence's own resolution, not whether a
+                    // delivered value clears a safety margin.
                     if p.aabb().min[2] <= z_ground + ground_tol {
                         return true;
                     }
@@ -273,8 +290,19 @@ impl Check for DeadGeometry {
                                 if let (Some(hd), Some(hr)) =
                                     (seat.h_delivered_mm, seat.h_required_mm)
                                 {
+                                    // Conservative minimum-type form
+                                    // (`audit-interval-policy.md` §3.2
+                                    // row 3 -- duplicate #3 of I1's
+                                    // predicate, carrying the same copied
+                                    // bug). Replaces `hd >= hr - tol`.
+                                    // Grounding is the permissive outcome,
+                                    // so only a clear PASS may ground: a
+                                    // seat whose interval straddles its
+                                    // requirement has not established a
+                                    // load path to the plate.
                                     let tol = seat.tol_geom_mm();
-                                    return hd > 0.0 && hd >= hr - tol;
+                                    return hd > 0.0
+                                        && interval::min_type(hd, hr, tol).is_pass();
                                 }
                             }
                         }
@@ -299,7 +327,12 @@ impl Check for DeadGeometry {
 
         let mut tip_a_owned: HashMap<usize, f64> = HashMap::new();
         let mut tip_live: HashMap<usize, bool> = HashMap::new();
-        let mut tip_indeterminate: HashSet<usize> = HashSet::new();
+        // Reason per indeterminate tip, so the straddling-band case
+        // (`audit-interval-policy.md` §3.2 row 16) stays distinguishable in
+        // the output from "ownership could not be computed at all". Both gate
+        // as failures; they tell a reader different things.
+        let mut tip_indeterminate: HashMap<usize, &'static str> = HashMap::new();
+        let mut r1_band_indeterminate_count = 0usize;
         for &i in &clean_records {
             if ctx.model.records[i].kind != RecordKind::ContactSphere {
                 continue;
@@ -308,20 +341,49 @@ impl Check for DeadGeometry {
                 continue; // already indeterminate for a different reason
             }
             if ownership_budget_exceeded {
-                tip_indeterminate.insert(i);
+                tip_indeterminate.insert(i, "ownership_indeterminate");
                 continue;
             }
             match ctx.seat(i) {
                 None => {
-                    tip_indeterminate.insert(i);
+                    tip_indeterminate.insert(i, "ownership_indeterminate");
                 }
                 Some(seat) => {
                     if seat.indeterminate.is_some() || seat.entry_component.is_none() {
-                        tip_indeterminate.insert(i);
+                        tip_indeterminate.insert(i, "ownership_indeterminate");
                     } else {
                         let a = ctx.a_owned_mm2(i).unwrap_or(0.0);
                         tip_a_owned.insert(i, a);
-                        tip_live.insert(i, a > c::PIXEL_AREA_MM2);
+                        // R1: this tip is LIVE because it owns more model
+                        // area than the printer's own censor. Live is the
+                        // permissive outcome (a live tip is not dead
+                        // geometry, and it keeps its component and its raft
+                        // pads alive too), so this is a MINIMUM-type
+                        // relation -- "A_owned must CLEARLY exceed the
+                        // censor" -- and the conservative bound of A_owned
+                        // is its lower bound (`audit-interval-policy.md`
+                        // §3.2 row 16). Replaces the bare `a >
+                        // PIXEL_AREA_MM2`.
+                        //
+                        // §2.4 predicts this changes nothing measurable:
+                        // tol_sum's absolute leg is 1e-9 mm^2 against a
+                        // 2.66e-4 mm^2 censor, five decades apart. It is
+                        // fixed for correctness, and the count below
+                        // discloses whether that prediction held.
+                        let tol = c::tol_sum(a);
+                        match interval::min_type(a, c::PIXEL_AREA_MM2, tol) {
+                            Verdict::Pass => {
+                                tip_live.insert(i, true);
+                            }
+                            Verdict::Fail => {
+                                tip_live.insert(i, false);
+                            }
+                            Verdict::Indeterminate => {
+                                r1_band_indeterminate_count += 1;
+                                tip_indeterminate
+                                    .insert(i, interval::REASON_WITHIN_TOLERANCE_BAND);
+                            }
+                        }
                     }
                 }
             }
@@ -377,19 +439,33 @@ impl Check for DeadGeometry {
                 record_status.insert(i, "indeterminate");
                 continue;
             }
-            if tip_indeterminate.contains(&i) {
+            if let Some(&reason) = tip_indeterminate.get(&i) {
+                let mut fields = vec![("reason", reason.to_string())];
+                let mut o = Json::obj();
+                o.set("reason", Json::str(reason));
+                // The straddling-band case carries its interval, so a reader
+                // can judge how close it was rather than take the word
+                // "indeterminate" on trust (`audit-interval-policy.md` §5).
+                if reason == interval::REASON_WITHIN_TOLERANCE_BAND {
+                    let a = tip_a_owned.get(&i).copied().unwrap_or(0.0);
+                    let tol = c::tol_sum(a);
+                    let (lo, hi) = interval::edges(a, tol);
+                    fields.push(("a_owned_mm2", format!("{a}")));
+                    fields.push(("a_owned_interval_mm2", interval::fmt_interval(a, tol)));
+                    fields.push(("censor_mm2", format!("{}", c::PIXEL_AREA_MM2)));
+                    o.set("a_owned_mm2", Json::num(a));
+                    o.set("a_owned_interval_mm2", Json::nums([lo, hi]));
+                    o.set("censor_mm2", Json::num(c::PIXEL_AREA_MM2));
+                    o.set("tolerance_mm2", Json::num(tol));
+                }
                 outcome.indeterminate(Failure::line(
                     "GEOM_INDETERMINATE",
                     &file,
                     ctx.model_index,
                     None,
                     Some(i),
-                    &[("reason", "ownership_indeterminate".to_string())],
-                    {
-                        let mut o = Json::obj();
-                        o.set("reason", Json::str("ownership_indeterminate"));
-                        o
-                    },
+                    &fields,
+                    o,
                 ));
                 record_status.insert(i, "indeterminate");
                 continue;
@@ -520,6 +596,13 @@ impl Check for DeadGeometry {
         measured.set("dead_count", Json::usize(dead_count));
         measured.set("clean_records_evaluated", Json::usize(clean_records.len()));
         measured.set("live_tips", Json::usize(live_tips.len()));
+        // R1's straddling band (`audit-interval-policy.md` §3.2 row 16,
+        // §2.4). §2.4 predicts zero; this is the number that shows whether
+        // the prediction held on real bytes rather than asserting it.
+        measured.set(
+            "r1_band_indeterminate_count",
+            Json::usize(r1_band_indeterminate_count),
+        );
         measured.set(
             "ownership_budget_exceeded",
             Json::Bool(ownership_budget_exceeded),

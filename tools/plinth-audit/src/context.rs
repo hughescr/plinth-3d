@@ -73,6 +73,24 @@ pub struct DeclaredInputs {
     pub x_allowed: f64,
     pub tip_radius_min_allowed_mm: f64,
     pub tip_radius_max_mm: f64,
+    /// I9 input. `L_SURVIVED_MAX_MM`, `docs/specs/audit-span-criterion.md`
+    /// §2.6: plate 1 rung 14, `0.7982 * 1.2169^5` mm -- the largest span with
+    /// zero recorded loss. One of the four inputs `L_SPAN_ALLOWED_MM` must be
+    /// computed from at run time; see [`SPAN_L_SURVIVED_MAX_MM`].
+    pub span_l_survived_max_mm: f64,
+    /// I9 input. `CONDITION_SHIFT_MAX`, same section: the upper end of the
+    /// measured-but-unidentified 1.31-1.53x condition shift between plate 1
+    /// and plate 4 at the one length where they overlap.
+    pub span_condition_shift_max: f64,
+    /// **NOT an I9 input.** `docs/specs/audit-span-criterion.md` §4: I9
+    /// applies no angle rule and does not read this value. Threaded here only
+    /// so the legacy `OVERHANG_ANGLE_DEG = 45.0` convention stays visible next
+    /// to the criterion that measures the angle it should have been, and
+    /// nobody quietly wires it into I9 as a gating input. The measured
+    /// contradiction: at 45 degrees a layer reaches 0.050 mm past the layer
+    /// below; the coupons say the derived `alpha_min` implied by
+    /// `L_SPAN_ALLOWED_MM` is 2.1290 degrees, a factor of 26.9 in reach.
+    pub span_overhang_angle_legacy_deg: f64,
 }
 
 impl Default for DeclaredInputs {
@@ -86,9 +104,37 @@ impl Default for DeclaredInputs {
             x_allowed: c::X_ALLOWED,
             tip_radius_min_allowed_mm: c::TIP_RADIUS_MIN_ALLOWED_MM,
             tip_radius_max_mm: c::TIP_RADIUS_MAX_MM,
+            span_l_survived_max_mm: SPAN_L_SURVIVED_MAX_MM,
+            span_condition_shift_max: SPAN_CONDITION_SHIFT_MAX,
+            span_overhang_angle_legacy_deg: SPAN_OVERHANG_ANGLE_LEGACY_DEG,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// I9 (`unsupported_span`) and I10 (`arrangement_spread`) inputs.
+//
+// `src/consts.rs` is out of scope for this stub-registration pass (it is not
+// one of the files this change owns), so the two new checks' literals are
+// pinned here instead, next to the `DeclaredInputs` rows that echo them. Both
+// specifications require an implementation to COMPUTE its gate constant from
+// these inputs at run time and never hard-code the result
+// (`audit-span-criterion.md` §2.6); this stub carries the inputs only, not
+// the derived `L_SPAN_ALLOWED_MM` itself, so a later agent cannot accidentally
+// skip that computation by finding a ready-made constant here.
+// ---------------------------------------------------------------------------
+
+/// `docs/specs/audit-span-criterion.md` §2.6. MEASURED, plate 1 rung 14.
+pub const SPAN_L_SURVIVED_MAX_MM: f64 = 2.130_032_25;
+/// `docs/specs/audit-span-criterion.md` §2.6. MEASURED, plate 4 §3.3, upper
+/// end of the 1.31-1.53x range (a larger divisor is the conservative choice).
+pub const SPAN_CONDITION_SHIFT_MAX: f64 = 1.53;
+/// The legacy, discredited `OVERHANG_ANGLE_DEG`
+/// (`crates/plinth-core/src/constants/placeholders.rs:1301`). Placeholder
+/// provenance in the engine's own registry ("Legacy tool convention lacking
+/// the required geometric-extent criterion"); carried here as a Placeholder
+/// too, for disclosure only.
+pub const SPAN_OVERHANG_ANGLE_LEGACY_DEG: f64 = 45.0;
 
 /// Why a declared input was refused. Every variant maps to
 /// `FILE_DECLARED_INPUT_MISSING`.
@@ -163,6 +209,35 @@ impl DeclaredInputs {
                 provenance: Provenance::Placeholder,
                 source: "TIP_RADIUS_MAX_LEGACY_MM (RADIUS, not diameter)",
             },
+            DeclaredInput {
+                name: "span_l_survived_max_mm",
+                value: self.span_l_survived_max_mm,
+                units: "mm",
+                provenance: Provenance::Measured,
+                source: "audit-span-criterion.md §2.6; plate-01-results.md, rung 14 = \
+                         0.7982 * 1.2169^5 mm, largest span with zero recorded loss. I9 \
+                         must compute L_SPAN_ALLOWED_MM from this at run time, never hard-code it",
+            },
+            DeclaredInput {
+                name: "span_condition_shift_max",
+                value: self.span_condition_shift_max,
+                units: "1",
+                provenance: Provenance::Measured,
+                source: "audit-span-criterion.md §2.6; plate-04-results.md §3.3, upper end of \
+                         the measured 1.31-1.53x shift between plate 1 and plate 4; cause \
+                         unidentified, larger divisor taken as the conservative choice",
+            },
+            DeclaredInput {
+                name: "span_overhang_angle_legacy_deg",
+                value: self.span_overhang_angle_legacy_deg,
+                units: "deg",
+                provenance: Provenance::Placeholder,
+                source: "OVERHANG_ANGLE_DEG; placeholders.rs:1301 (\"Legacy tool convention \
+                         lacking the required geometric-extent criterion\"). NOT read by I9 \
+                         (audit-span-criterion.md §4) -- the measured span implies alpha_min \
+                         = 2.1290 deg, a factor of 26.9 below this value. Disclosed so nobody \
+                         reintroduces it as a gating input",
+            },
         ]
     }
 
@@ -222,9 +297,53 @@ pub struct AuditOptions {
     pub inputs: DeclaredInputs,
     pub raster_budget: Budget,
     pub sample_budget: SampleBudget,
+    /// I10's cost bound (`docs/specs/audit-spread-criterion.md` §2.6): "A
+    /// bounded budget, and exceeding it fails" -- the precedent named there is
+    /// [`SampleBudget`], whose default had to be raised after real exhaustion
+    /// was MEASURED against the corpus rather than assumed. This one has now
+    /// been measured too, and was never approached; see
+    /// [`SpreadBudget::default`] for the numbers.
+    pub spread_budget: SpreadBudget,
     /// Override the reconstructed file class's endpoint tolerance. Leave
     /// `None`: a hand-picked tolerance is how a wrong graph gets built quietly.
     pub join_tol_override_mm: Option<f64>,
+}
+
+/// I10's per-model evaluation cap: `max_body_layer_evaluations` of
+/// `docs/specs/audit-spread-criterion.md` §2.6. Exceeding it must emit
+/// `SPREAD_INDETERMINATE reason=budget_exceeded` and fail -- never a silent
+/// coarsening, the same rule [`crate::raster::Budget`] and [`SampleBudget`]
+/// already enforce.
+#[derive(Clone, Copy, Debug)]
+pub struct SpreadBudget {
+    pub max_body_layer_evaluations: u64,
+}
+
+impl Default for SpreadBudget {
+    /// **MEASURED against the corpus, 2026-08-31, and left where it was.**
+    /// This value began as an unmeasured placeholder written while I10 was
+    /// still a stub. I10 has since been implemented and run over all 31
+    /// audited artifacts (24 real miniatures, 7 development fixtures) plus the
+    /// 12 planted fixtures. **The budget was never exceeded and never came
+    /// close:** the worst per-model body-layer evaluation count over the whole
+    /// corpus is **2,079** (`Round 100`), then 1,756 (`make_overhang_table`),
+    /// 1,378 (`Thorny Vegepygmy`) and 1,269 (`Giant Wolf Spider`). This cap is
+    /// ~4,800x the worst observed, so it is a backstop, not a working limit.
+    ///
+    /// It is deliberately NOT lowered to fit. `docs/specs/audit-spread-criterion.md`
+    /// §2.6 puts the cost at `O(K * C log C)`, so a taller model with more
+    /// contacts grows this faster than linearly, and the corpus contains no
+    /// Large+ creature -- the treant was never run. Tightening a bound to the
+    /// largest thing measured so far is how the next model gets refused for
+    /// being big rather than for being wrong.
+    ///
+    /// If it is ever raised, raise it the way [`SampleBudget`] was raised:
+    /// by MEASURING a real exhaustion, not by guessing a bigger number.
+    fn default() -> Self {
+        Self {
+            max_body_layer_evaluations: 10_000_000,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

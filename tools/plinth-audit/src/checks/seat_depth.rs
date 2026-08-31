@@ -24,9 +24,10 @@
 //! declared depth against the reconstructed one, whenever both exist.
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::context::ModelContext;
 use crate::json::Json;
-use crate::seat::Seat;
+use crate::seat::{BindingTerm, Seat};
 use crate::vec3::V3;
 
 pub struct SeatDepth;
@@ -56,6 +57,7 @@ impl Check for SeatDepth {
         let mut radius_mismatch_count = 0usize;
         let mut taper_mismatch_count = 0usize;
         let mut indeterminate_count = 0usize;
+        let mut band_indeterminate_count = 0usize;
 
         for seat in &ctx.seats {
             let ev = evaluate_seat(&file, model, seat);
@@ -70,6 +72,9 @@ impl Check for SeatDepth {
             }
             if ev.taper_mismatch {
                 taper_mismatch_count += 1;
+            }
+            if ev.band_indeterminate {
+                band_indeterminate_count += 1;
             }
             if let Some(d) = ev.deficit_mm {
                 worst_deficit_mm = Some(worst_deficit_mm.map_or(d, |w: f64| w.max(d)));
@@ -97,6 +102,14 @@ impl Check for SeatDepth {
             Json::usize(taper_mismatch_count),
         );
         measured.set("indeterminate_count", Json::usize(indeterminate_count));
+        // Broken out of `indeterminate_count` so a reader can tell "the seat
+        // could not be reconstructed" from "the seat was reconstructed and
+        // the instrument cannot resolve it against its own requirement"
+        // (`audit-interval-policy.md` §5). Both gate as failures.
+        measured.set(
+            "depth_band_indeterminate_count",
+            Json::usize(band_indeterminate_count),
+        );
         measured.set("worst_deficit_mm", Json::num_or_null(worst_deficit_mm));
         measured.set(
             "default_contact_depth_mm",
@@ -144,6 +157,9 @@ struct SeatEval {
     taper_mismatch: bool,
     zero: bool,
     shallow: bool,
+    /// The depth interval straddled the requirement: not established
+    /// adequate, not established short (`audit-interval-policy.md` §3.2).
+    band_indeterminate: bool,
 }
 
 /// Grade one contact's seat. Pure with respect to the reconstruction: every
@@ -195,6 +211,11 @@ fn evaluate_seat(file: &str, model: usize, seat: &Seat) -> SeatEval {
     let mut taper_mismatch = false;
     let mut zero = false;
     let mut shallow = false;
+    // The seat whose interval straddles its own requirement: neither
+    // established adequate nor established short (`audit-interval-policy.md`
+    // §3.2). Counted separately from the reconstruction-level indeterminates
+    // so a reader can tell a blunt instrument from an unreadable seat.
+    let mut band_indeterminate = false;
 
     // --- (A) The three-way tip-radius agreement. Always evaluable: it is
     // computed by the shared reconstruction before anything about the axis
@@ -236,8 +257,9 @@ fn evaluate_seat(file: &str, model: usize, seat: &Seat) -> SeatEval {
         ));
     }
 
-    // --- (B) The depth predicate: `h_delivered > 0` and
-    // `h_delivered >= h_required - tol_geom`. Indeterminate dominates: an
+    // --- (B) The depth predicate: `h_delivered > 0` and, in the
+    // conservative minimum-type form of `audit-interval-policy.md` §3.2,
+    // `h_delivered - tol_geom >= h_required`. Indeterminate dominates: an
     // unestablished quantity never gets a pass/fail verdict computed on top
     // of it. ---
     match seat.h_delivered_mm {
@@ -282,32 +304,52 @@ fn evaluate_seat(file: &str, model: usize, seat: &Seat) -> SeatEval {
                 match (seat.h_required_mm, seat.sin_theta, seat.binding_term) {
                     (Some(h_req), Some(sin_theta), Some(term)) => {
                         let tol = seat.tol_geom_mm();
-                        if let Some(deficit) = shallow_deficit(h, h_req, tol) {
-                            shallow = true;
-                            deficit_mm = Some(deficit);
-                            let mut values = Json::obj();
-                            values.set("h_delivered_mm", Json::num(h));
-                            values.set("h_required_mm", Json::num(h_req));
-                            values.set("binding_term", Json::str(term.token()));
-                            values.set("r_tip_mm", Json::num(seat.r_tip_mm));
-                            values.set("sin_theta", Json::num(sin_theta));
-                            values.set("deficit_mm", Json::num(deficit));
-                            failures.push(Failure::line(
-                                "SEAT_DEPTH_SHALLOW",
-                                file,
-                                model,
-                                Some(contact),
-                                Some(record),
-                                &[
-                                    ("h_delivered_mm", fmt(h)),
-                                    ("h_required_mm", fmt(h_req)),
-                                    ("binding_term", term.token().to_string()),
-                                    ("r_tip_mm", fmt(seat.r_tip_mm)),
-                                    ("sin_theta", fmt(sin_theta)),
-                                    ("deficit_mm", fmt(deficit)),
-                                ],
-                                values,
-                            ));
+                        let (verdict, deficit) = shallow_verdict(h, h_req, tol);
+                        row.set("depth_verdict", Json::str(verdict.as_str()));
+                        let (edge_lo, edge_hi) = interval::edges(h, tol);
+                        row.set("h_delivered_interval_mm", Json::nums([edge_lo, edge_hi]));
+                        row.set("depth_tolerance_mm", Json::num(tol));
+                        match verdict {
+                            Verdict::Pass => {}
+                            Verdict::Fail => {
+                                shallow = true;
+                                deficit_mm = Some(deficit);
+                                let mut values = Json::obj();
+                                values.set("h_delivered_mm", Json::num(h));
+                                values.set("h_required_mm", Json::num(h_req));
+                                values.set("binding_term", Json::str(term.token()));
+                                values.set("r_tip_mm", Json::num(seat.r_tip_mm));
+                                values.set("sin_theta", Json::num(sin_theta));
+                                values.set("deficit_mm", Json::num(deficit));
+                                failures.push(Failure::line(
+                                    "SEAT_DEPTH_SHALLOW",
+                                    file,
+                                    model,
+                                    Some(contact),
+                                    Some(record),
+                                    &[
+                                        ("h_delivered_mm", fmt(h)),
+                                        ("h_required_mm", fmt(h_req)),
+                                        ("binding_term", term.token().to_string()),
+                                        ("r_tip_mm", fmt(seat.r_tip_mm)),
+                                        ("sin_theta", fmt(sin_theta)),
+                                        ("deficit_mm", fmt(deficit)),
+                                    ],
+                                    values,
+                                ));
+                            }
+                            // The interval straddles the requirement: the
+                            // seat is neither established as adequate nor
+                            // established as short. It gates as a failure
+                            // (`audit-invariants.md` §0 rule 3) and reports
+                            // its own interval so a reader can see how close
+                            // it was (`audit-interval-policy.md` §5).
+                            Verdict::Indeterminate => {
+                                band_indeterminate = true;
+                                indeterminates.push(band_indeterminate_line(
+                                    file, model, contact, record, h, h_req, tol, term, seat,
+                                ));
+                            }
                         }
                     }
                     _ => {
@@ -334,6 +376,13 @@ fn evaluate_seat(file: &str, model: usize, seat: &Seat) -> SeatEval {
     // against `h_delivered`. Independent of whether (B) could be graded --
     // it only needs `h_delivered` to be KNOWN, not the incidence term. ---
     if let (Some(declared), Some(h)) = (seat.declared_depth_mm, seat.h_delivered_mm) {
+        // EXEMPT, EQUALITY-BAND (`audit-interval-policy.md` §1.1 row 6,
+        // §3.4): the TAPER's DECLARED depth against the RECONSTRUCTED one --
+        // two accounts of the same physical quantity, not a delivered value
+        // against a design requirement. There is no safety margin under
+        // test, so no side is the conservative one and there is no third
+        // outcome to add. `|a - b| <= tol` is already symmetric and already
+        // conservative.
         let tol = seat.tol_geom_mm();
         if (declared - h).abs() > tol {
             taper_mismatch = true;
@@ -368,7 +417,51 @@ fn evaluate_seat(file: &str, model: usize, seat: &Seat) -> SeatEval {
         taper_mismatch,
         zero,
         shallow,
+        band_indeterminate,
     }
+}
+
+/// The straddling-band line of `audit-interval-policy.md` §5: same code as
+/// every other I1 indeterminate, a new reason token, and **the interval
+/// itself**, because an indeterminate that reports only "indeterminate" is no
+/// more evidence than a pass that reports no numbers (§5 pinned-rule 3).
+#[allow(clippy::too_many_arguments)]
+fn band_indeterminate_line(
+    file: &str,
+    model: usize,
+    contact: usize,
+    record: usize,
+    h: f64,
+    h_req: f64,
+    tol: f64,
+    term: BindingTerm,
+    seat: &Seat,
+) -> Failure {
+    let (lo, hi) = interval::edges(h, tol);
+    let mut values = Json::obj();
+    values.set("reason", Json::str(interval::REASON_WITHIN_TOLERANCE_BAND));
+    values.set("h_delivered_mm", Json::num(h));
+    values.set("h_delivered_interval_mm", Json::nums([lo, hi]));
+    values.set("h_required_mm", Json::num(h_req));
+    values.set("tolerance_mm", Json::num(tol));
+    values.set("binding_term", Json::str(term.token()));
+    values.set("r_tip_mm", Json::num(seat.r_tip_mm));
+    values.set("shortfall_mm", Json::num(h_req - h));
+    Failure::line(
+        "SEAT_DEPTH_INDETERMINATE",
+        file,
+        model,
+        Some(contact),
+        Some(record),
+        &[
+            ("reason", interval::REASON_WITHIN_TOLERANCE_BAND.to_string()),
+            ("h_delivered_mm", fmt(h)),
+            ("h_delivered_interval_mm", interval::fmt_interval(h, tol)),
+            ("h_required_mm", fmt(h_req)),
+            ("tolerance_mm", fmt(tol)),
+        ],
+        values,
+    )
 }
 
 fn indeterminate_line(
@@ -391,16 +484,30 @@ fn indeterminate_line(
     )
 }
 
-/// The predicate of `audit-invariants.md` §3.1: pass requires
-/// `h_delivered >= h_required - tol`. Returns the deficit in mm when it does
-/// not, `None` when the seat meets its own requirement (including exactly at
-/// the tolerance boundary).
-fn shallow_deficit(h_delivered_mm: f64, h_required_mm: f64, tol_mm: f64) -> Option<f64> {
-    if h_delivered_mm >= h_required_mm - tol_mm {
-        None
-    } else {
-        Some(h_required_mm - h_delivered_mm)
-    }
+/// The predicate of `audit-invariants.md` §3.1, in the conservative
+/// **minimum-type** form of `audit-interval-policy.md` §3.2 row 1: the seat
+/// must reach its own requirement, so the conservative bound of the delivered
+/// depth is its LOWER bound.
+///
+/// ```text
+/// PASS           h_delivered - tol >= h_required
+/// FAIL           h_delivered + tol <  h_required
+/// INDETERMINATE  otherwise -- the interval straddles h_required
+/// ```
+///
+/// **This replaces `h_delivered >= h_required - tol`**, which is
+/// algebraically `h_delivered + tol >= h_required` and therefore graded the
+/// delivered depth's *upper* bound against the requirement. A seat genuinely
+/// shallower than its requirement, by less than `tol_geom`, used to certify.
+///
+/// The deficit returned alongside is the shortfall against the bare
+/// requirement, unchanged, so the failure line still reports how far short
+/// the seat is rather than how far short its interval edge is.
+fn shallow_verdict(h_delivered_mm: f64, h_required_mm: f64, tol_mm: f64) -> (Verdict, f64) {
+    (
+        interval::min_type(h_delivered_mm, h_required_mm, tol_mm),
+        h_required_mm - h_delivered_mm,
+    )
 }
 
 fn fmt(v: f64) -> String {
@@ -466,17 +573,66 @@ mod tests {
         assert!(!ev.zero && !ev.shallow && !ev.radius_mismatch && !ev.taper_mismatch);
     }
 
+    /// **This test asserted the opposite before `audit-interval-policy.md`
+    /// §3.2 row 1**, under the name `the_boundary_itself_passes`: a seat
+    /// exactly one `tol_geom` SHORT of its requirement was pinned as a pass,
+    /// on the reasoning that the retired predicate `h >= h_req - tol` is an
+    /// equality at that point. That is Finding 3 written down as a passing
+    /// test.
+    ///
+    /// It matters that this is asserted positively. `shallow` and
+    /// `deficit_mm` are both false/None for an INDETERMINATE seat too, so
+    /// the old assertions stayed green after the fix while no longer
+    /// testing anything -- the verdict has to be read directly.
     #[test]
-    fn the_boundary_itself_passes() {
-        // h_delivered >= h_required - tol is the predicate; AT the boundary
-        // (equality) it must pass, not fail.
+    fn a_seat_one_tolerance_short_is_indeterminate_not_a_pass() {
         let mut seat = base_seat();
         let tol = seat.tol_geom_mm();
         seat.h_delivered_mm = Some(0.2);
         seat.h_required_mm = Some(0.2 + tol);
         let ev = evaluate_seat("f", 0, &seat);
-        assert!(!ev.shallow, "exactly at tol_geom must pass");
+        assert!(!ev.shallow, "not a measured shortfall");
         assert!(ev.deficit_mm.is_none());
+        assert!(
+            ev.band_indeterminate,
+            "a seat short by less than tol_geom must not certify"
+        );
+        assert_eq!(ev.indeterminates.len(), 1);
+        let f = &ev.indeterminates[0];
+        assert_eq!(f.code, "SEAT_DEPTH_INDETERMINATE");
+        assert!(
+            f.message.contains("reason=within_tolerance_band"),
+            "{}",
+            f.message
+        );
+        // §5: the interval must reach the reader, not just the word.
+        assert!(
+            f.message.contains("h_delivered_interval_mm=["),
+            "{}",
+            f.message
+        );
+        assert_eq!(
+            ev.row.get("depth_verdict").and_then(Json::as_str),
+            Some("indeterminate")
+        );
+    }
+
+    /// The other side of the same boundary: a seat clear of the band by more
+    /// than `tol_geom` still passes cleanly, so the fix tightened the gate
+    /// rather than making it refuse everything.
+    #[test]
+    fn a_seat_clear_of_the_band_still_passes() {
+        let mut seat = base_seat();
+        let tol = seat.tol_geom_mm();
+        seat.h_delivered_mm = Some(0.2);
+        seat.h_required_mm = Some(0.2 - 2.0 * tol);
+        let ev = evaluate_seat("f", 0, &seat);
+        assert!(!ev.shallow && !ev.band_indeterminate);
+        assert!(ev.indeterminates.is_empty(), "{:?}", ev.indeterminates);
+        assert_eq!(
+            ev.row.get("depth_verdict").and_then(Json::as_str),
+            Some("pass")
+        );
     }
 
     #[test]

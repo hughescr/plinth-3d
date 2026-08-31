@@ -42,6 +42,7 @@
 //! §1.3) and this check does not gate regardless.
 
 use crate::check::{Check, CheckOutcome};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
@@ -124,7 +125,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 /// would otherwise force thousands of empty rows -- a presentational choice
 /// the specification does not pin, disclosed here rather than left implicit.
 fn histogram(values: &[f64], bin_width: f64, unit: &str) -> Json {
-    if values.is_empty() || !(bin_width > 0.0) {
+    if values.is_empty() || bin_width <= 0.0 || bin_width.is_nan() {
         return Json::Arr(Vec::new());
     }
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -227,6 +228,13 @@ fn spacing_section(ctx: &ModelContext) -> Json {
     }
     nn.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
+    // EXEMPT (`audit-interval-policy.md` §1.9, §4): these are counts against
+    // REFERENCE LINES, not thresholds. `SPACING_MINIMUM_REF_MM` and
+    // `TARGET_SPACING_REF_MM` are both `Placeholder` and are documented
+    // "reference lines, never thresholds" (`audit-invariants.md` §4);
+    // nothing here is pass/fail, so there is no requirement for an interval
+    // to straddle. Wrapping them in a tolerance would invent a precision
+    // claim the numbers do not have.
     let below_floor = nn.iter().filter(|&&x| x < c::SPACING_MINIMUM_REF_MM).count();
     let below_target = nn.iter().filter(|&&x| x < c::TARGET_SPACING_REF_MM).count();
 
@@ -289,6 +297,11 @@ fn arm_radius_section(ctx: &ModelContext) -> Json {
     }
 
     radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // EXEMPT, EQUALITY-BAND (`audit-interval-policy.md` §1.9, §3.4): a
+    // COINCIDENCE count -- "how many arms sit at exactly the placeholder
+    // radius" -- comparing a stored f32 against a constant at the evidence's
+    // own resolution. Non-gating, and there is no delivered-versus-required
+    // relation to give it a conservative side.
     let tol = c::tol_geom_mag(c::MIN_SHOOT_R_MM);
     let count_at_min_shoot_r = radii
         .iter()
@@ -639,6 +652,10 @@ fn raster_erosion_sensitivity_section(ctx: &ModelContext) -> Json {
     let mut checked = 0usize;
     let mut flips = 0usize;
     let mut unresolved = 0usize;
+    // Contacts whose interval straddles the requirement under each fill
+    // rule. Non-gating disclosure, like everything else in this section.
+    let mut full_band = 0usize;
+    let mut centre_band = 0usize;
 
     if let Ok(support) = ctx.support_raster() {
         for s in &ctx.seats {
@@ -668,10 +685,30 @@ fn raster_erosion_sensitivity_section(ctx: &ModelContext) -> Json {
             let centre_area = centre_pixels as f64 * support.grid.pixel_area_mm2();
 
             checked += 1;
-            let full_pass = full_area >= required - tol;
-            let centre_pass = centre_area >= required - tol;
-            if full_pass != centre_pass {
+            // This metric exists to disclose how many contacts would change
+            // I2's verdict under a different fill rule, so its predicate
+            // must be I2's real one -- otherwise the disclosed sensitivity
+            // is measuring the wrong gate. I2's predicate is now the
+            // conservative MINIMUM-type form of
+            // `audit-interval-policy.md` §3.2 (rows 17-18, mirrors of
+            // row 8), so this is too: it replaces
+            // `area >= required - tol` on both fill rules.
+            //
+            // With three outcomes, "flip" is a change in VERDICT, not a
+            // change in a boolean: pass->indeterminate and
+            // indeterminate->fail are both real sensitivities to the fill
+            // rule and both used to be invisible when the two states were
+            // collapsed into `bool`.
+            let full_verdict = interval::min_type(full_area, required, tol);
+            let centre_verdict = interval::min_type(centre_area, required, tol);
+            if full_verdict != centre_verdict {
                 flips += 1;
+            }
+            if full_verdict == Verdict::Indeterminate {
+                full_band += 1;
+            }
+            if centre_verdict == Verdict::Indeterminate {
+                centre_band += 1;
             }
         }
     } else {
@@ -681,6 +718,8 @@ fn raster_erosion_sensitivity_section(ctx: &ModelContext) -> Json {
     o.set("i2_contact_area_checked", Json::usize(checked));
     o.set("i2_contact_area_flip_count", Json::usize(flips));
     o.set("i2_contact_area_unresolved", Json::usize(unresolved));
+    o.set("i2_full_rule_band_indeterminate", Json::usize(full_band));
+    o.set("i2_centre_rule_band_indeterminate", Json::usize(centre_band));
     o.set(
         "i2_method",
         Json::str(

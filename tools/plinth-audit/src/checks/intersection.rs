@@ -336,6 +336,12 @@ impl Check for Intersection {
         }
 
         // The predicate is on the TOTAL, censored at one voxel.
+        //
+        // EXEMPT from the interval policy (`audit-interval-policy.md` §1.6,
+        // §3.4): `residual_mm3` is an EXACT voxel count times the voxel
+        // volume, and the censor is a count of one. I6 is graded on the cured
+        // raster precisely so its quantities are exact integer sums; there is
+        // no continuous uncertainty and therefore no interval to widen.
         if residual_mm3 > voxel_mm3 {
             for (&ri, acc) in &illegal_per_record {
                 let vol = acc.count as f64 * voxel_mm3;

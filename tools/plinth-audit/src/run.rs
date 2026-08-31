@@ -5,8 +5,14 @@
 //! section is enforced here rather than left to the checks:
 //!
 //! * `status` takes exactly two values and `indeterminate > 0` forces `fail`;
-//! * `print_candidate` is true only when all EIGHT gating invariants pass, and
-//!   the report section never contributes to it;
+//! * `support_invariants_pass` is true only when every gating invariant in
+//!   [`crate::checks::gating`] passes (ten, as of I9 and I10), and the report
+//!   section never contributes to it. The name says exactly what was
+//!   established -- that the checked support invariants passed -- and
+//!   deliberately not that a print is safe (`print_candidate`, the name this
+//!   field replaces, overstated that; see `docs/specs/audit-span-criterion.md`
+//!   §8 and `docs/specs/audit-spread-criterion.md` §6 for what even a full
+//!   pass still cannot see);
 //! * a file-level failure aborts before any invariant runs, and **the document
 //!   is still written**, with every invariant `"fail"` and `indeterminate`
 //!   equal to its `checked` count, so a parse failure is never confused with a
@@ -38,9 +44,11 @@ pub struct FileFailure {
 pub struct AuditResult {
     pub document: Json,
     pub summary: String,
-    /// `true` only when every model is a print candidate and there is no
-    /// file-level failure.
-    pub print_candidate: bool,
+    /// `true` only when every model passed every gating invariant and there
+    /// is no file-level failure. Named for what it establishes -- that the
+    /// support invariants this audit currently checks all passed -- and not
+    /// for a stronger claim about print safety this audit does not make.
+    pub support_invariants_pass: bool,
     pub file_level_failures: Vec<FileFailure>,
 }
 
@@ -48,7 +56,7 @@ impl AuditResult {
     /// The process exit code: 0 only for a clean pass.
     #[must_use]
     pub const fn exit_code(&self) -> i32 {
-        if self.print_candidate {
+        if self.support_invariants_pass {
             0
         } else {
             1
@@ -138,7 +146,8 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
 
     let mut models_json = Json::Arr(Vec::new());
     let mut summary = String::new();
-    let mut models_print_candidate = 0usize;
+    let mut models_support_invariants_pass = 0usize;
+    let gating_total = gating.len();
 
     for mi in 0..file.models.len() {
         let ctx = ModelContext::build(&audit, mi);
@@ -230,9 +239,9 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
             Json::Bool(!report_outcome.is_not_implemented()),
         );
 
-        let model_candidate = passed == 8;
-        if model_candidate {
-            models_print_candidate += 1;
+        let model_support_invariants_pass = passed == gating_total;
+        if model_support_invariants_pass {
+            models_support_invariants_pass += 1;
         }
 
         let m = &file.models[mi];
@@ -248,9 +257,12 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
         mj.set("report", report_json);
         mj.set("reconstruction", reconstruction_json(&ctx));
         let mut vj = Json::obj();
-        vj.set("print_candidate", Json::Bool(model_candidate));
+        vj.set(
+            "support_invariants_pass",
+            Json::Bool(model_support_invariants_pass),
+        );
         vj.set("gating_passed", Json::usize(passed));
-        vj.set("gating_total", Json::usize(8));
+        vj.set("gating_total", Json::usize(gating_total));
         vj.set(
             "first_failure",
             first_failure.clone().map_or(Json::Null, Json::str),
@@ -259,14 +271,14 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
         models_json.push(mj);
 
         summary.push_str(&format!(
-            "{}  model {mi} \"{}\"   {}  ({passed}/8)\n",
+            "{}  model {mi} \"{}\"   {}  ({passed}/{gating_total})\n",
             path.file_stem()
                 .map_or_else(|| "?".into(), |s| s.to_string_lossy().into_owned()),
             m.name,
-            if model_candidate {
-                "PRINT CANDIDATE"
+            if model_support_invariants_pass {
+                "SUPPORT INVARIANTS PASS"
             } else {
-                "NOT A PRINT CANDIDATE"
+                "SUPPORT INVARIANTS FAIL"
             }
         ));
         for line in model_summary {
@@ -283,18 +295,21 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
         ));
     }
 
-    let print_candidate = file_failures.is_empty()
-        && models_print_candidate == file.models.len()
+    let support_invariants_pass = file_failures.is_empty()
+        && models_support_invariants_pass == file.models.len()
         && !file.models.is_empty();
 
     let mut doc = envelope(path, options, Some(&file), &file_failures);
     doc.set("models", models_json);
     let mut fv = Json::obj();
-    fv.set("print_candidate", Json::Bool(print_candidate));
+    fv.set(
+        "support_invariants_pass",
+        Json::Bool(support_invariants_pass),
+    );
     fv.set("models_total", Json::usize(file.models.len()));
     fv.set(
-        "models_print_candidate",
-        Json::usize(models_print_candidate),
+        "models_support_invariants_pass",
+        Json::usize(models_support_invariants_pass),
     );
     fv.set(
         "file_level_failures",
@@ -320,7 +335,7 @@ pub fn audit_file(path: &Path, options: &AuditOptions, sidecar_path: Option<&Pat
     AuditResult {
         document: doc,
         summary,
-        print_candidate,
+        support_invariants_pass,
         file_level_failures: file_failures,
     }
 }
@@ -493,9 +508,9 @@ fn aborted_document(
     let mut doc = envelope(path, options, file, failures);
     doc.set("models", Json::Arr(Vec::new()));
     let mut fv = Json::obj();
-    fv.set("print_candidate", Json::Bool(false));
+    fv.set("support_invariants_pass", Json::Bool(false));
     fv.set("models_total", Json::usize(0));
-    fv.set("models_print_candidate", Json::usize(0));
+    fv.set("models_support_invariants_pass", Json::usize(0));
     fv.set(
         "file_level_failures",
         Json::Arr(
@@ -518,7 +533,7 @@ fn aborted_document(
     AuditResult {
         document: doc,
         summary,
-        print_candidate: false,
+        support_invariants_pass: false,
         file_level_failures: failures.to_vec(),
     }
 }

@@ -1,0 +1,8 @@
+{
+  "description": "a closed hollow box (7x7x5 mm outer, 5x5x3 mm cavity, 1 mm walls/floor/ceiling) resting flat on the plate, with no support of any kind inside the cavity. A separate, fully detached, correctly-and-minimally-supported witness island sits far away (x=20) purely to keep the model's total contact count above zero -- see the README's 'Why a witness island exists' section for the i4_load_ownership crash this works around. The cavity ceiling closes over at its own birth layer with nothing reaching up into the cavity to carry it; the nearest carrier is the cavity's own side wall, 2.5 mm away at the ceiling's centre -- well past the measured 1.344976 mm span allowance. i7_island_coverage cannot see this at all (the ceiling is attached along its whole rim, so its early-exit skips the component entirely); i9_unsupported_span must.",
+  "check": "i9_unsupported_span",
+  "expect": "check_fails",
+  "codes": ["SPAN_UNSUPPORTED"],
+  "model": 0,
+  "min_failures": 1
+}

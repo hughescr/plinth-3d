@@ -21,7 +21,7 @@
 //! an engine type is the signal to reimplement.**
 //!
 //! Its two specifications are `docs/specs/audit-contract.md` (what the bytes
-//! can answer) and `docs/specs/audit-invariants.md` (the eight gating
+//! can answer) and `docs/specs/audit-invariants.md` (the ten gating
 //! invariants, the report, and the output schema). Where an engine source and
 //! `audit-invariants.md` disagree, that file governs: the audit is not
 //! permitted to agree with the engine by construction.
@@ -52,7 +52,7 @@
 //! | [`ownership`] | the demand set and the complete Voronoi partition I2, I3 and I4 share |
 //! | [`sidecar`] | the optional `.coverage.repair.json`, where `null` never becomes zero |
 //! | [`check`] | the [`check::Check`] trait, [`check::CheckOutcome`], [`check::Failure`] |
-//! | [`checks`] | the eight invariants plus the non-gating report, one file each |
+//! | [`checks`] | the ten invariants plus the non-gating report, one file each |
 //! | [`context`] | declared inputs and the shared per-model context |
 //! | [`run`] | the driver and the output document |
 //! | [`json`] | hand-rolled JSON value, reader and writer |

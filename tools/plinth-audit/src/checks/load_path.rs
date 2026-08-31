@@ -42,6 +42,7 @@
 //! before its grounding is even asked. None of these ever becomes a pass.
 
 use crate::check::{Check, CheckOutcome, Failure};
+use crate::checks::interval::{self, Verdict};
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
@@ -165,6 +166,11 @@ impl Check for LoadPath {
                         .flatten()
                         .fold(1.0f64, |m, x| m.max(x.abs())),
                 );
+                // EXEMPT, and it is the MODEL the rest of this sweep copies
+                // (`audit-interval-policy.md` §1.5): already the
+                // three-outcome form. Connected, fusion-uncertain, or
+                // disconnected -- doubt resolves to `indeterminate`, never
+                // to an edge. Nothing to change.
                 if sep <= tol {
                     adj[i].push(j);
                     adj[j].push(i);
@@ -207,6 +213,13 @@ impl Check for LoadPath {
         let mut n_ground_seat = 0usize;
 
         for &(i, p) in &ok {
+            // EXEMPT from the interval policy (`audit-interval-policy.md`
+            // §1.5, §3.4): an EQUALITY-BAND coincidence test, not a margin
+            // test. It asks whether this solid's lowest stored coordinate is
+            // the same coordinate as the plate, and `tol_geom` here is the
+            // resolution of the f32 evidence on both sides -- there is no
+            // delivered-versus-required relation, so there is no conservative
+            // side to pick and no third outcome to add.
             let bb = p.aabb();
             let tol = c::tol_geom_mag(bb.min[2].abs().max(z_ground.abs()).max(1.0));
             if bb.min[2] <= z_ground + tol {
@@ -503,8 +516,22 @@ fn seat_ground_status(ctx: &ModelContext, seat: &Seat) -> SeatGround {
     let Some(h_req) = seat.h_required_mm else {
         return SeatGround::Indeterminate("h_required_missing");
     };
-    if h < h_req - tol {
-        return SeatGround::NotValid;
+    // Conservative minimum-type form (`audit-interval-policy.md` §3.2
+    // row 4 -- duplicate #4 of I1's predicate, carrying the same copied
+    // bug). It replaces `if h < h_req - tol { NotValid }`, whose passing
+    // branch was `h >= h_req - tol`: the delivered depth's UPPER bound
+    // against the requirement, backwards for a minimum-type relation.
+    //
+    // This function already had the three outcomes; the fix is to route the
+    // straddling band to the third one instead of letting it fall through to
+    // `Valid`. A seat whose interval straddles its requirement has not
+    // established a load path to the model.
+    match interval::min_type(h, h_req, tol) {
+        Verdict::Pass => {}
+        Verdict::Fail => return SeatGround::NotValid,
+        Verdict::Indeterminate => {
+            return SeatGround::Indeterminate(interval::REASON_WITHIN_TOLERANCE_BAND)
+        }
     }
     match seat_zone_breach_probe(ctx, seat, h) {
         BreachStatus::Clean => SeatGround::Valid,
@@ -558,7 +585,19 @@ fn seat_zone_breach_probe(ctx: &ModelContext, seat: &Seat, h_delivered: f64) -> 
         let p = v::add(seat.centre, v::mul(dir, seat.r_ball_mm));
         let axial = v::dot(v::sub(p, seat.p0), u);
         let tol = c::tol_geom_at(p);
-        if axial > band_hi + tol {
+        // **A candidate-SELECTION threshold, not a pass/fail gate**
+        // (`audit-interval-policy.md` §3.2 row 7), and its conservative
+        // direction is the opposite of a gate's. The goal is not to miss a
+        // real breach, so the selection must be INCLUSIVE of every sample
+        // that might lie beyond the seat zone: `band_hi - tol`, the band's
+        // effective lower edge.
+        //
+        // The retired form was `axial > band_hi + tol`, which TIGHTENED the
+        // candidate set -- the minimum-direction bug wearing a filter's
+        // clothing. It silently dropped samples that could be genuine
+        // breaches and biased this probe toward `Clean`, and `Clean` is the
+        // outcome that lets a seat ground a load path.
+        if axial > band_hi - tol {
             pts.push(p);
         }
     }
@@ -799,6 +838,10 @@ enum EndStatus {
 }
 
 fn end_status(end: V3, exclude: usize, ok: &[(usize, Primitive)], z_ground: f64) -> EndStatus {
+    // EXEMPT, EQUALITY-BAND (`audit-interval-policy.md` §1.5, §3.4): the same
+    // plate-coincidence test as the grounding loop above, and consistent with
+    // it by construction. No delivered-versus-required relation, no
+    // conservative side, no third outcome.
     let tol = c::tol_geom_at(end);
     if end[2] <= z_ground + tol {
         return EndStatus::Grounded;

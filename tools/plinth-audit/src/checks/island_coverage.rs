@@ -37,7 +37,7 @@
 //!    against is the union of every reconstructed primitive, live or dead,
 //!    grounded or orphaned. A support blob that geometrically overlaps an
 //!    island but traces to no ground (I5's job) or is itself degenerate (I8's
-//!    job) still satisfies I7. The eight gating invariants are meant to be
+//!    job) still satisfies I7. The ten gating invariants are meant to be
 //!    read together; I7 alone only proves "something cured is touching this
 //!    island here", not "something load-bearing is".
 //! 2. **Same-layer strictness.** The predicate as specified tests the support
@@ -122,6 +122,13 @@ impl Check for IslandCoverage {
                 continue;
             }
             for comp in model_raster.layer_components(k) {
+                // EXEMPT from the interval policy
+                // (`audit-interval-policy.md` §1.7, §3.4): `area_mm2` is an
+                // EXACT integer pixel count times the pixel area, so it
+                // carries no continuous measurement uncertainty and there is
+                // no interval to widen. The censor is one pixel, which is
+                // itself the quantum of the quantity. Adding a tolerance here
+                // would invent an uncertainty the raster does not have.
                 let area_mm2 = component_area_mm2(&comp, &grid);
                 if area_mm2 <= pixel_area {
                     // The printer's own censor: one pixel is noise, not an
@@ -354,7 +361,7 @@ mod tests {
         })
     }
 
-    fn ctx_and_run<F: FnOnce(&ModelContext) -> ()>(sf: &SynthFile, f: F) {
+    fn ctx_and_run<F: FnOnce(&ModelContext)>(sf: &SynthFile, f: F) {
         let file = parse(sf);
         let options = AuditOptions::default();
         let audit = AuditContext {

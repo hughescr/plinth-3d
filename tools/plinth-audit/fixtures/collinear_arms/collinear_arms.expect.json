@@ -1,0 +1,8 @@
+{
+  "description": "three independent, individually-adequate support chains seated on one straight line (x-axis, y=0), each sized so its OWN Voronoi-owned share of the box's down-facing patch satisfies the per-arm area law (A_implied == A_owned by construction) -- but the box's down-facing footprint is NOT centred on that line, so the peel-load centroid sits 1.2445 mm off the one line every line of action lies on: docs/physics.md sec 2(c), 'three collinear arms have no lateral stability perpendicular to their line, at any X', made physical",
+  "check": "i10_arrangement_spread",
+  "expect": "check_fails",
+  "codes": ["SPREAD_COLLINEAR_NO_EQUILIBRIUM"],
+  "model": 0,
+  "min_failures": 1
+}
