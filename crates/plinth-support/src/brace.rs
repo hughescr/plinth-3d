@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::vec3::{dot, norm, scale, sub};
 use geom_kernel::{NativeSurface, PenetrationBatchError, PenetrationBatchLimits};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_mesh::FaceTopology;
@@ -3219,22 +3220,6 @@ fn finite(value: f64) -> Result<Finite, BraceError> {
 
 fn finite3(values: [f64; 3]) -> Result<[Finite; 3], BraceError> {
     Ok([finite(values[0])?, finite(values[1])?, finite(values[2])?])
-}
-
-fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn scale(value: [f64; 3], factor: f64) -> [f64; 3] {
-    [value[0] * factor, value[1] * factor, value[2] * factor]
-}
-
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
-fn norm(value: [f64; 3]) -> f64 {
-    dot(value, value).sqrt()
 }
 
 #[cfg(test)]

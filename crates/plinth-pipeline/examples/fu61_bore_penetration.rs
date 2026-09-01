@@ -1049,6 +1049,16 @@ fn write_binary_stl(path: &Path, mesh: &Mesh) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
 }
 
+// GEOM-EXEMPT(independent measurement harness -- the module doc at the top of
+// this file states the reason directly: "measures the drilled geometry with
+// an independent ray caster written here, so the measurement shares no code
+// with the geom_kernel casts prove_centerlines already uses." Consolidating
+// this vec3 block onto geom_kernel::vec3 would make this diagnostic share
+// arithmetic with the very production path it checks (plinth-emit adopts
+// geom_kernel::vec3 under canon C1), defeating the independence that is the
+// harness's whole purpose. Same principle as geometry-canon.md §4.1
+// (plinth-audit) and §4.7 (plinth-verify), extended here by analogy since
+// this file is not itself named in canon §4.)
 fn normalize_or_zero(a: V3) -> V3 {
     let n = norm(a);
     if n > 0.0 {
@@ -1076,6 +1086,9 @@ fn fin3(value: [Finite; 3]) -> V3 {
     [value[0].get(), value[1].get(), value[2].get()]
 }
 
+// GEOM-EXEMPT(same independent-harness reason as `normalize_or_zero` above --
+// docs/specs/geometry-canon.md §4.1/§4.7 principle, applied by analogy; see
+// that comment for the full citation.)
 fn add(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }

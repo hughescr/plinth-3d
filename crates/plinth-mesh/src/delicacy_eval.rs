@@ -67,6 +67,7 @@
 //! is serial in source index order, so the result does not depend on how the
 //! kernel's index-parallel map-collect was scheduled.
 
+use geom_kernel::vec3::{cross, dot, norm, normalize, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 
 use crate::delicacy::{
@@ -186,10 +187,16 @@ impl FaceGeometryPass {
             ]);
             let e1 = sub(b, a);
             let e2 = sub(c, a);
-            let cross = cross(e1, e2);
-            let length = norm(cross);
-            if length.is_finite() && length > 0.0 {
-                normals.push([cross[0] / length, cross[1] / length, cross[2] / length]);
+            // Canonical face normal: `geom_kernel::vec3` cross + `normalize`
+            // (docs/specs/geometry-canon.md §1 OP-4 and OP-6, triage rule (d)).
+            // `normalize`'s `None` is exactly this site's former
+            // `length.is_finite() && length > 0.0` guard, so no input class
+            // changes side; the SPELLING does move bits, by <= 1 ULP per
+            // component, because the kernel multiplies by one reciprocal where
+            // this file divided three times (kernel `normalize` doc, "Spelling,
+            // and the ULP it costs").
+            if let Some(unit) = normalize(cross(e1, e2)) {
+                normals.push(unit);
                 degenerate.push(false);
             } else {
                 // A zero-area face has no outward direction.  It is given the
@@ -395,27 +402,6 @@ fn thinness_by_face(
         });
     }
     Ok(by_face)
-}
-
-#[inline]
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-#[inline]
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-#[inline]
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-#[inline]
-fn norm(a: [f64; 3]) -> f64 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
 }
 
 #[cfg(test)]

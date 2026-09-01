@@ -21,14 +21,23 @@
 //!   --model "/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Round 100.stl"
 //! ```
 //!
-//! **Why this duplicates two whole rasterizers instead of calling the crate.**
-//! `raster_work_item_count`/`voxelize_filled`/`walk_raster_candidates` and the
-//! frozen `walk_raster_leaves` they replaced are crate-private, and the old
-//! one is gone from production entirely (FU-50's dead-code removal). The only
-//! way to measure the delta between "what the old rasterizer would have
-//! marked" and "what the new one marks" is to run both, so both are
-//! reproduced here verbatim as a read-only reference oracle -- exactly the
-//! `#[cfg(test)]`/example-only retention the ruling calls for. The in-crate
+//! **Why this reproduces the OLD rasterizer instead of calling the crate.**
+//! The frozen `walk_raster_leaves` is gone from production entirely (FU-50's
+//! dead-code removal), so the only way to measure what it would have marked is
+//! to run a verbatim read-only reference copy of it -- exactly the
+//! `#[cfg(test)]`/example-only retention the ruling calls for.
+//!
+//! **The NEW side is production, not a copy of it.** Its separating-axis
+//! acceptance test -- the step that decides which candidate cells are actually
+//! marked -- calls `plinth_hollow::diagnostics::triangle_cube_overlaps`, which
+//! delegates to the production `triangle_cube_overlaps`. A harness that
+//! reproduced the code it is measuring would be measuring the reproduction;
+//! this one is not (`docs/specs/geometry-canon.md` §1 OP-9, §2). The candidate
+//! *enumeration* around it (`walk_triangle_candidates` and the column clipper)
+//! is still reproduced here, because `walk_raster_candidates` is crate-private
+//! and takes a visitor this harness cannot construct; it is a superset filter
+//! whose only effect on the marked set is which cells reach the acceptance
+//! test, and the in-crate unit test below is what pins it. The in-crate
 //! unit test `frozen_walker_marks_a_subset_of_the_area_proportional_rasterizer`
 //! makes the same superset claim mechanically, against the *real* production
 //! `walk_raster_candidates` (this binary's production-side numbers are cross-
@@ -52,6 +61,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use plinth_hollow::diagnostics::triangle_cube_overlaps;
 use plinth_hollow::{H0AdmissionLimits, HollowSettings};
 use plinth_mesh::{load_binary_stl, Mesh, WeldPolicy};
 use scirs2_core::ndarray::Array3;
@@ -256,21 +266,18 @@ fn old_marked_set(mesh: &Mesh, spec: GridSpec) -> Result<(usize, Vec<bool>), &'s
 // The work-item counts it prints do move -- down.
 // ---------------------------------------------------------------------
 
-fn sub3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn cross3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn dot3(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
+// The 45-line verbatim copy of production's `triangle_cube_overlaps` and its
+// three private vector helpers that used to sit here is gone
+// (`docs/specs/geometry-canon.md` §1 OP-9, §2). The "new" column of this table
+// is supposed to be what production marks, so it now calls production, through
+// `plinth_hollow::diagnostics::triangle_cube_overlaps`.
+//
+// The copy had already drifted from what it was reproducing: its final plane
+// test read `d <= r && d >= -r`, which returns `false` for a `NaN` `d`, where
+// production's `if d > r || d < -r { return false } true` returns `true`. On
+// finite input the two agree; on a degenerate triangle they disagreed about
+// whether the voxel is marked, and this harness would have reported that
+// disagreement as a rasterizer delta.
 
 fn to_index_space(point: [f64; 3], spec: GridSpec) -> [f64; 3] {
     [
@@ -278,44 +285,6 @@ fn to_index_space(point: [f64; 3], spec: GridSpec) -> [f64; 3] {
         (point[1] - spec.origin[1]) / spec.pitch,
         (point[2] - spec.origin[2]) / spec.pitch,
     ]
-}
-
-fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) -> bool {
-    let v = [
-        sub3(tri[0], center),
-        sub3(tri[1], center),
-        sub3(tri[2], center),
-    ];
-    let e = [sub3(v[1], v[0]), sub3(v[2], v[1]), sub3(v[0], v[2])];
-
-    for axis in 0..3 {
-        let lo = v[0][axis].min(v[1][axis]).min(v[2][axis]);
-        let hi = v[0][axis].max(v[1][axis]).max(v[2][axis]);
-        if lo > half[axis] || hi < -half[axis] {
-            return false;
-        }
-    }
-
-    const BOX_AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    for box_axis in BOX_AXES {
-        for edge in e {
-            let axis = cross3(box_axis, edge);
-            let p0 = dot3(axis, v[0]);
-            let p1 = dot3(axis, v[1]);
-            let p2 = dot3(axis, v[2]);
-            let r = half[0] * axis[0].abs() + half[1] * axis[1].abs() + half[2] * axis[2].abs();
-            let lo = p0.min(p1).min(p2);
-            let hi = p0.max(p1).max(p2);
-            if lo > r || hi < -r {
-                return false;
-            }
-        }
-    }
-
-    let normal = cross3(e[0], e[1]);
-    let d = dot3(normal, v[0]);
-    let r = half[0] * normal[0].abs() + half[1] * normal[1].abs() + half[2] * normal[2].abs();
-    d <= r && d >= -r
 }
 
 #[expect(

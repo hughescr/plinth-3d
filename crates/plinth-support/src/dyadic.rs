@@ -7,6 +7,7 @@
 
 use std::cmp::Ordering;
 
+use geom_kernel::vec3::{cross, dot, norm, sub};
 use plinth_core::m0_constants;
 use plinth_mesh::Mesh;
 use thiserror::Error;
@@ -778,39 +779,124 @@ pub(crate) fn max_edge_mm([a, b, c]: [[f64; 3]; 3]) -> f64 {
     dist_sq(a, b).max(dist_sq(b, c)).max(dist_sq(c, a)).sqrt()
 }
 
+/// Squared distance `|a - b|^2` in mm^2, plain (no FMA).
+///
+/// Canon item C7 (`docs/specs/geometry-canon.md` §1 OP-4): this used to be a
+/// `mul_add` chain, which is a fused multiply-add and therefore a DIFFERENT
+/// value from the kernel's, in violation of the no-FMA/no-reassociation house
+/// rule (`rust/geom_kernel/src/vec3.rs:1-5`, spec sec 5.1). It feeds
+/// [`max_edge_mm`], a planning threshold input, and — through
+/// [`face_normal`]'s length — the coverage sampler, so the fused form could
+/// move a sampling decision by a few ULP for no stated reason.
+///
+/// Spelled `dot(sub(a, b), sub(a, b))` per canon §1 OP-9: a squared length is
+/// the kernel's `dot` of a difference with itself, not a fourteenth private
+/// helper.
 fn dist_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (a[0] - b[0]).mul_add(
-        a[0] - b[0],
-        (a[1] - b[1]).mul_add(a[1] - b[1], (a[2] - b[2]) * (a[2] - b[2])),
-    )
+    let d = sub(a, b);
+    dot(d, d)
 }
 
 fn triangle_area_mm2([a, b, c]: [[f64; 3]; 3]) -> f64 {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let cross = [
-        u[1].mul_add(v[2], -u[2] * v[1]),
-        u[2].mul_add(v[0], -u[0] * v[2]),
-        u[0].mul_add(v[1], -u[1] * v[0]),
-    ];
-    0.5 * dist_sq(cross, [0.0; 3]).sqrt()
+    // Canon C7: plain `vec3::cross` and `vec3::norm`, not the retired FMA
+    // cross plus `dist_sq(cross, [0.0; 3]).sqrt()`.
+    0.5 * norm(cross(sub(b, a), sub(c, a)))
 }
 
+/// Unit normal of a triangle, or `None` when the triangle has no area.
+///
+/// Canon C7 + §1 OP-4. The cross and the length are now the kernel's plain
+/// forms. The degeneracy predicate is unchanged and deliberately exact
+/// (`length > 0.0`, no tolerance): it is precisely the condition under which
+/// the three divisions produce a unit vector.
+///
+/// The division is kept as a per-component `n[k] / length` rather than
+/// `vec3::normalize`, which multiplies by the reciprocal `1.0 / length`.
+/// `x / n` and `x * (1.0 / n)` are not the same f64, and swapping them here
+/// would move every sampled normal by up to 1 ULP — a change the canon's
+/// expected-movement table (§3) does not authorise for C7, whose stated scope
+/// is the FMA removal only.
 fn face_normal([a, b, c]: [[f64; 3]; 3]) -> Option<[f64; 3]> {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1].mul_add(v[2], -u[2] * v[1]),
-        u[2].mul_add(v[0], -u[0] * v[2]),
-        u[0].mul_add(v[1], -u[1] * v[0]),
-    ];
-    let length = dist_sq(n, [0.0; 3]).sqrt();
+    let n = cross(sub(b, a), sub(c, a));
+    let length = norm(n);
     (length.is_finite() && length > 0.0).then(|| [n[0] / length, n[1] / length, n[2] / length])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Canon item C7 (`docs/specs/geometry-canon.md` §1 OP-4): the coverage
+    /// sampler's normal and area are plain, not fused.
+    ///
+    /// This asserts BIT equality with the kernel's own `vec3` expressions, and
+    /// then asserts that the retired FMA spelling is a DIFFERENT f64 on the
+    /// same triangle. Without the second half the test would pass against
+    /// either implementation and prove nothing — the fixture would be
+    /// admitting it cannot tell them apart.
+    #[test]
+    fn face_normal_and_area_are_plain_not_fused() {
+        // Chosen because the fused and plain crosses disagree here; the
+        // assertion at the bottom is what proves that, not this comment.
+        let cell = [
+            [0.1, 0.2, 0.3],
+            [1.7, 0.30000000000000004, 2.9],
+            [0.9, 2.3000000000000003, 1.1],
+        ];
+        let [a, b, c] = cell;
+        let u = sub(b, a);
+        let v = sub(c, a);
+
+        let plain = cross(u, v);
+        // GEOM-EXEMPT(the retired FMA spelling, quoted so the test can prove
+        // the production form is not it) — GEOMETRY-CANON EXEMPT: canon §2
+        // step 3. These three lines are the ONLY `.mul_add(` left in this
+        // crate's `src/`; they are inside a test whose whole job is to assert
+        // that `face_normal` does NOT produce these bits. Listed in
+        // tests/no_private_vector_algebra.rs.
+        let fused = [
+            u[1].mul_add(v[2], -u[2] * v[1]),
+            u[2].mul_add(v[0], -u[0] * v[2]),
+            u[0].mul_add(v[1], -u[1] * v[0]),
+        ];
+        assert_ne!(
+            plain.map(f64::to_bits),
+            fused.map(f64::to_bits),
+            "fixture is blind: the plain and fused crosses agree on this \
+             triangle, so neither assertion below can discriminate. Pick a \
+             different triangle rather than deleting the check."
+        );
+
+        let length = norm(plain);
+        let expected_normal = [plain[0] / length, plain[1] / length, plain[2] / length];
+        assert_eq!(
+            face_normal(cell).expect("non-degenerate").map(f64::to_bits),
+            expected_normal.map(f64::to_bits),
+            "face_normal must be geom_kernel::vec3 cross+norm exactly"
+        );
+        assert_eq!(
+            triangle_area_mm2(cell).to_bits(),
+            (0.5 * norm(plain)).to_bits(),
+            "triangle_area_mm2 must be 0.5 * norm(cross(...)) exactly"
+        );
+    }
+
+    /// Canon §1 OP-4: a zero-area face has NO normal — never `[0, 0, 0]`,
+    /// which every consumer downstream would read as a direction.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "an exact pin is the claim: canon section 1 OP-4 rules the degeneracy predicate \
+                  tolerance-free, so a degenerate face's area is exactly 0.0 and its normal is \
+                  None. See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_degenerate_face_has_no_normal_at_all() {
+        let collinear = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]];
+        assert_eq!(face_normal(collinear), None);
+        let repeated = [[3.0, 4.0, 5.0]; 3];
+        assert_eq!(face_normal(repeated), None);
+        assert_eq!(triangle_area_mm2(collinear), 0.0);
+    }
 
     fn triangle() -> Mesh {
         Mesh::new(

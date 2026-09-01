@@ -60,6 +60,7 @@
 
 use std::collections::BTreeSet;
 
+use geom_kernel::vec3;
 use plinth_core::{m0_constants, Fidelity, Finite};
 use plinth_decimate::{simplify_locked, SimplifyError, SimplifyRequest};
 use plinth_mesh::Mesh;
@@ -1112,10 +1113,7 @@ fn ledger(
     let winner_direction = grid.candidates()[winner.candidate].direction.get();
     let angle = runner_up.map(|entry| {
         let other = grid.candidates()[entry.candidate].direction.get();
-        let dot = (winner_direction[0] * other[0]
-            + winner_direction[1] * other[1]
-            + winner_direction[2] * other[2])
-            .clamp(-1.0, 1.0);
+        let dot = vec3::dot(winner_direction, other).clamp(-1.0, 1.0);
         dot.acos().to_degrees()
     });
     let margin = runner_up.map(|entry| entry.terms.score.get() - winner.terms.score.get());
@@ -1128,9 +1126,7 @@ fn ledger(
     let mut highest = f64::NEG_INFINITY;
     for entry in &coarse.ranking {
         let other = grid.candidates()[entry.candidate].direction.get();
-        let dot = winner_direction[0] * other[0]
-            + winner_direction[1] * other[1]
-            + winner_direction[2] * other[2];
+        let dot = vec3::dot(winner_direction, other);
         if dot >= neighbour_cosine {
             lowest = lowest.min(entry.terms.score.get());
             highest = highest.max(entry.terms.score.get());

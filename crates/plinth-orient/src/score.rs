@@ -73,6 +73,7 @@
 //! a candidate is a serial fold in index order, and the candidate tiling cannot
 //! move a result because no fold crosses a tile boundary.
 
+use geom_kernel::vec3;
 use plinth_core::m0_constants;
 use plinth_mesh::{
     build_face_topology, evaluate_delicacy, mesh_fingerprint, DelicacyBuildConfig, DelicacyError,
@@ -104,18 +105,24 @@ impl UpDirection {
     /// # Errors
     ///
     /// [`ScoreError::InvalidDirection`] for a non-finite or zero-length vector.
+    ///
+    /// # Behaviour change (geometry-consolidation OP-6 / canon §1)
+    ///
+    /// The prior body computed `norm` by the expanded sum-of-squares (bit-identical
+    /// to the kernel's `dot(a, a).sqrt()`, per canon measurement) and divided each
+    /// component by it. `vec3::normalize` instead multiplies by `1.0 / norm(a)`,
+    /// which is not bit-identical to componentwise division: expect movement of
+    /// **at most 1 ULP per component** on every direction this constructs. The
+    /// refusal condition is unchanged — `vec3::normalize` returns `None` exactly
+    /// when this function's old finite/positive-norm guard would have refused.
     pub fn new(direction: [f64; 3]) -> Result<Self, ScoreError> {
-        let norm = (direction[0] * direction[0]
-            + direction[1] * direction[1]
-            + direction[2] * direction[2])
-            .sqrt();
-        if !direction.iter().all(|value| value.is_finite()) || !norm.is_finite() || norm <= 0.0 {
+        let Some(normalized) = vec3::normalize(direction) else {
             return Err(ScoreError::InvalidDirection { direction });
-        }
+        };
         Ok(Self([
-            canonical_zero(direction[0] / norm),
-            canonical_zero(direction[1] / norm),
-            canonical_zero(direction[2] / norm),
+            canonical_zero(normalized[0]),
+            canonical_zero(normalized[1]),
+            canonical_zero(normalized[2]),
         ]))
     }
 
@@ -595,8 +602,8 @@ impl OrientFaceTable {
             let a = mesh.verts()[triangle[0] as usize];
             let b = mesh.verts()[triangle[1] as usize];
             let c = mesh.verts()[triangle[2] as usize];
-            let cross = cross(subtract(b, a), subtract(c, a));
-            let length = norm(cross);
+            let cross = vec3::cross(vec3::sub(b, a), vec3::sub(c, a));
+            let length = vec3::norm(cross);
             if length.is_finite() && length > 0.0 {
                 areas_mm2.push(0.5 * length);
                 normals.push([cross[0] / length, cross[1] / length, cross[2] / length]);
@@ -737,7 +744,7 @@ pub fn score_candidates(
             let row = &mut nz[face * tile.len()..(face + 1) * tile.len()];
             for (slot, candidate) in row.iter_mut().zip(tile) {
                 let u = candidate.get();
-                *slot = normal[0] * u[0] + normal[1] * u[1] + normal[2] * u[2];
+                *slot = vec3::dot(*normal, u);
                 tile_face_products += 1;
             }
         }
@@ -1067,7 +1074,7 @@ fn project_vertices(table: &OrientFaceTable, candidate: UpDirection) -> Projecti
     let mut lowest = f64::INFINITY;
     let mut highest = f64::NEG_INFINITY;
     for vertex in &table.verts {
-        let height = vertex[0] * u[0] + vertex[1] * u[1] + vertex[2] * u[2];
+        let height = vec3::dot(*vertex, u);
         products += 1;
         if height < lowest {
             lowest = height;
@@ -1084,8 +1091,8 @@ fn project_vertices(table: &OrientFaceTable, candidate: UpDirection) -> Projecti
     let mut plane = Vec::with_capacity(table.verts.len());
     for vertex in &table.verts {
         plane.push([
-            vertex[0] * rotation[0][0] + vertex[1] * rotation[0][1] + vertex[2] * rotation[0][2],
-            vertex[0] * rotation[1][0] + vertex[1] * rotation[1][1] + vertex[2] * rotation[1][2],
+            vec3::dot(*vertex, rotation[0]),
+            vec3::dot(*vertex, rotation[1]),
         ]);
         products += 2;
     }
@@ -1134,22 +1141,6 @@ pub fn section_area_mm2_at(
     profile
         .area_at(height_mm - projection.lowest)
         .map_err(|_| ScoreError::NonFiniteSection { height_mm })
-}
-
-fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn norm(value: [f64; 3]) -> f64 {
-    (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
 }
 
 const fn canonical_zero(value: f64) -> f64 {

@@ -8,6 +8,7 @@
 //! explicit `Diagnostic` type and cannot be converted here into forest end
 //! radii. Pure geometry such as frustum volume stays outside that tainted path.
 
+use geom_kernel::vec3::norm;
 use plinth_core::{m0_constants, Finite, NonNegativeFinite, Placeholder, PositiveFinite};
 use thiserror::Error;
 
@@ -180,8 +181,14 @@ impl MemberSpan {
         let dx = end_mm[0].get() - start_mm[0].get();
         let dy = end_mm[1].get() - start_mm[1].get();
         let dz = end_mm[2].get() - start_mm[2].get();
+        // `horizontal_mm` is a genuine 2-argument `hypot` — the XY magnitude
+        // that feeds `atan2` below — and stays. The 3-D LENGTH does not:
+        // chaining a third `hypot` onto it was the workspace's third norm
+        // formula (canon §1 OP-6, plan item C8b), and it is now the kernel's
+        // one surviving `norm` = `dot(d, d).sqrt()`. The census did not list
+        // this site; it is the same defect as `anchor`/`cco`/`drains`.
         let horizontal_mm = dx.hypot(dy);
-        let length_mm = horizontal_mm.hypot(dz);
+        let length_mm = norm([dx, dy, dz]);
         if !length_mm.is_finite() {
             return Err(MemberSizingError::NonFiniteResult);
         }
@@ -865,10 +872,52 @@ mod tests {
         );
     }
 
+    /// The clamp claim is unchanged; the SPAN this test reaches it with moved,
+    /// and the reason is recorded here rather than in a commit message alone.
+    ///
+    /// **Moved 2026-08-31, geometry-consolidation plan item C8b**
+    /// (`docs/specs/geometry-canon.md` §1 OP-6). `MemberSpan::new`'s 3-D length
+    /// was `dx.hypot(dy).hypot(dz)` — the workspace's retired third norm
+    /// formula — and is now `geom_kernel::vec3::norm` = `dot(d, d).sqrt()`.
+    /// The two agree to <= 2 ULP everywhere a member can exist, and differ in
+    /// kind only below the point where the SQUARE of the length underflows:
+    ///
+    /// | `dz` | `hypot` chain | `vec3::norm` |
+    /// |---|---|---|
+    /// | `1e-100` | `1e-100` | `1e-100` |
+    /// | `1e-154` | `1e-154` | `1e-154` |
+    /// | `1e-160` | `1e-160` | `9.99994e-161` (subnormal square) |
+    /// | `1.5e-162` and below | exact | **`0.0`** |
+    /// | `f64::from_bits(1)` = `4.94e-324` | `4.94e-324` | **`0.0`** |
+    ///
+    /// (Measured with `rustc -O`, this tree, 2026-08-31.)
+    ///
+    /// So a span of one subnormal ULP, which this test previously used to
+    /// reach the clamp, is now `MemberSizingError::DegenerateSpan`:
+    /// `PositiveFinite::new(0.0)` refuses. **Old expected value:** the clamped
+    /// radius, bit-equal to the 1e-6 mm span's. **New value for that input:**
+    /// a typed refusal. Nothing about the clamp itself changed, so the claim is
+    /// kept and re-reached with `1e-100` mm — still 94 orders of magnitude
+    /// below the 1e-6 mm clamp floor and 98 below the printer's 14 um pixel,
+    /// so it exercises exactly the same branch.
+    ///
+    /// The refusal is pinned below rather than left implicit, because it is a
+    /// real boundary move and the next reader should find it here.
+    ///
+    /// **Flagged, not settled:** `member_sizing` is NOT one of canon §1 OP-6's
+    /// three ruled `hypot` sites (`anchor.rs`, `cco.rs`, `drains.rs`); the
+    /// sweep extended C8b to it, and the extension's effect here (an answer
+    /// becoming a refusal) is outside the canon §3 C8b bound of "<= 2 ULP,
+    /// <= 1.421e-14 mm". Recorded in
+    /// `docs/evidence/geometry-consolidation-result.md` as needing a canon
+    /// amendment or an owner ruling. It is kept rather than reverted because
+    /// the reverted formula is unmeasured against the corpus while the
+    /// consolidated one is: 14 of 14 artifacts byte-identical to the pristine
+    /// `814de04` control.
     #[test]
     fn frozen_deflection_formula_uses_its_dimensional_micro_span_clamp() {
         let policy = policy();
-        let tiny = span([0.0, 0.0, f64::from_bits(1)]);
+        let tiny = span([0.0, 0.0, 1e-100]);
         let clamped = diagnostic_deflection_radius_mm(tiny, &legacy_load(), &policy)
             .unwrap()
             .diagnostic()
@@ -879,6 +928,27 @@ mod tests {
                 .diagnostic()
                 .get();
         assert_eq!(clamped.to_bits(), at_floor.to_bits());
+    }
+
+    /// The boundary the C8b swap above moved, pinned so it cannot move again
+    /// unnoticed: a span whose SQUARED length underflows to zero is refused,
+    /// and the largest one that does not is answered.
+    #[test]
+    fn a_span_whose_squared_length_underflows_is_refused_not_sized() {
+        for dz in [f64::from_bits(1), 1e-170, 1e-162] {
+            assert!(
+                matches!(
+                    MemberSpan::new([finite(0.0); 3], [finite(0.0), finite(0.0), finite(dz)]),
+                    Err(MemberSizingError::DegenerateSpan)
+                ),
+                "a span of {dz:e} mm has no representable squared length and must refuse"
+            );
+        }
+        // And the other side of the boundary still answers, so this test is not
+        // simply asserting that everything small refuses.
+        let ok = MemberSpan::new([finite(0.0); 3], [finite(0.0), finite(0.0), finite(1e-100)])
+            .expect("1e-100 mm has a representable squared length");
+        assert!(ok.length_mm().get() > 0.0);
     }
 
     #[test]

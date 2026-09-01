@@ -5,7 +5,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
+use geom_kernel::vec3::{add, cross, dot, norm, normalize as unit_vector, scale, sub};
+use geom_kernel::{segment_segment_distance, NativeSurface, NativeSurfaceConfig, V3};
 use plinth_core::{m0_constants, Finite};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, validate_face_topology, Mesh, WeldPolicy,
@@ -1468,7 +1469,7 @@ fn validate_final_holes(holes: &[HoleGeometry]) -> Result<(), DrillingRefusal> {
     }
     for (first, left) in holes.iter().enumerate() {
         for (second, right) in holes.iter().enumerate().skip(first + 1) {
-            let distance = segment_distance(
+            let distance = keepout_axis_distance(
                 point(left.keepout_start_mm),
                 point(left.keepout_end_mm),
                 point(right.keepout_start_mm),
@@ -1922,70 +1923,40 @@ fn finite_bounds(value: ([f64; 3], [f64; 3])) -> Result<[[Finite; 3]; 2], Drilli
 fn point(value: [Finite; 3]) -> V3 {
     value.map(Finite::get)
 }
-fn add(a: V3, b: V3) -> V3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: V3, s: f64) -> V3 {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn dot(a: V3, b: V3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-fn norm(a: V3) -> f64 {
-    dot(a, a).sqrt()
-}
+/// Drilling's typed refusal wrapper around the canonical
+/// [`geom_kernel::vec3::normalize`] (`docs/specs/geometry-canon.md` §1 OP-6,
+/// plan item C4). The kernel returns `None` rather than a sentinel vector; no
+/// caller may unwrap that into a default direction, so this maps it to
+/// drilling's own [`DrillingRefusal::InvalidHoleGeometry`].
+///
+/// Byte-neutral against the private copy this replaces: the retired guard was
+/// `!n.is_finite() || n <= 0.0` over the same `dot(a, a).sqrt()` norm and the
+/// same `scale(a, 1.0 / n)` spelling, which is exactly the kernel's rule.
 fn normalize(a: V3) -> Result<V3, DrillingRefusal> {
-    let n = norm(a);
-    if !n.is_finite() || n <= 0.0 {
-        Err(DrillingRefusal::InvalidHoleGeometry)
-    } else {
-        Ok(scale(a, 1.0 / n))
-    }
+    unit_vector(a).ok_or(DrillingRefusal::InvalidHoleGeometry)
 }
 
-#[allow(
-    clippy::suspicious_operation_groupings,
-    reason = "`a * c - b * b` is the segment-segment denominator |u|^2|v|^2 \
-              - (u.v)^2, a determinant whose middle term is squared by \
-              construction, not a mis-typed `a * b`"
-)]
-fn segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, DrillingRefusal> {
+/// Distance between two drain/vent keepout axes, in mm.
+///
+/// The geometry is [`geom_kernel::segment_segment_distance`]
+/// (`docs/specs/geometry-canon.md` §1 OP-1, plan item C3). The retired private
+/// copy short-circuited its parallel branch on `|denom| < PROOF_EPSILON_MM`,
+/// comparing an mm⁴ determinant against an mm constant: at drain-keepout scale
+/// (0.005–0.05 mm axes) that fired on 35.98 % of pairs and returned distances
+/// wrong by up to 4.494e-2 mm — 4.5e5 times the margin of the very comparison
+/// it feeds. The kernel's guard selects a branch whose A21 re-clamp recovers
+/// the minimum, so it prunes instead of deciding.
+///
+/// **The refusal stays here, not in the shared primitive** (canon §1 OP-1): the
+/// kernel returns a distance for every input, so this wrapper keeps drilling's
+/// own zero-length-axis and non-finite refusals, in drilling's vocabulary.
+fn keepout_axis_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, DrillingRefusal> {
     let u = sub(q1, p1);
     let v = sub(q2, p2);
-    let w = sub(p1, p2);
-    let a = dot(u, u);
-    let b = dot(u, v);
-    let c = dot(v, v);
-    let d = dot(u, w);
-    let e = dot(v, w);
-    if a <= 0.0 || c <= 0.0 {
+    if dot(u, u) <= 0.0 || dot(v, v) <= 0.0 {
         return Err(DrillingRefusal::InvalidHoleGeometry);
     }
-    let denom = a * c - b * b;
-    let mut s = if denom.abs() < PROOF_EPSILON_MM {
-        0.0
-    } else {
-        ((b * e - c * d) / denom).clamp(0.0, 1.0)
-    };
-    let mut t = (b * s + e) / c;
-    if t < 0.0 {
-        t = 0.0;
-        s = (-d / a).clamp(0.0, 1.0);
-    } else if t > 1.0 {
-        t = 1.0;
-        s = ((b - d) / a).clamp(0.0, 1.0);
-    }
-    let distance = norm(sub(add(p1, scale(u, s)), add(p2, scale(v, t))));
+    let (distance, _, _) = segment_segment_distance(p1, q1, p2, q2);
     if distance.is_finite() {
         Ok(distance)
     } else {
@@ -2004,6 +1975,156 @@ mod tests {
     };
     use scirs2_core::ndarray::Array3;
     use std::path::PathBuf;
+
+    /// The true minimum distance between two segments, by dense independent
+    /// sweep of both parameters. Deliberately NOT a closed form: a test that
+    /// re-derives the production formula grades the formula against itself.
+    fn brute_force_segment_minimum(p1: V3, q1: V3, p2: V3, q2: V3, samples: usize) -> f64 {
+        let u = sub(q1, p1);
+        let v = sub(q2, p2);
+        let last = (samples - 1) as f64;
+        let mut best = f64::INFINITY;
+        for i in 0..samples {
+            let a = add(p1, scale(u, i as f64 / last));
+            for j in 0..samples {
+                let b = add(p2, scale(v, j as f64 / last));
+                best = best.min(norm(sub(a, b)));
+            }
+        }
+        best
+    }
+
+    /// C3, the bug fix (`docs/specs/geometry-canon.md` §1 OP-1): the keepout
+    /// distance drilling's hole-pair admission reads is the true minimum, at
+    /// the scale drain holes are actually drilled.
+    ///
+    /// Both axes here are 0.02 mm long and skewed. That is squarely inside the
+    /// band the retired private copy short-circuited -- its guard compared the
+    /// mm^4 determinant `|u|^2|v|^2 - (u.v)^2` against the mm constant
+    /// `PROOF_EPSILON_MM = 1e-7`, which at 0.02 mm axes fires at every angle
+    /// below 52.239 deg. The oracle is a 2001x2001 sweep of the two segment
+    /// parameters, computed here and compared to the production path; it is an
+    /// upper bound on the true minimum, so the assertion is two-sided.
+    ///
+    /// The tolerance is 1e-8 mm: 3.75e-5 of the 2.667e-4 mm answer, 1/30,000
+    /// of the 0.3 mm hard clearance limit, and 1/10 of the `PROOF_EPSILON_MM`
+    /// margin of the comparison this value feeds. The kernel's near-parallel
+    /// branch is documented as landing up to 5.145e-6 mm ABOVE the true
+    /// minimum at this scale; this pair does not take that branch, and the
+    /// tolerance is tight enough to fail if it ever starts to.
+    #[test]
+    fn keepout_axis_distance_is_the_true_minimum_at_drain_keepout_scale() {
+        let p1 = [0.0, 0.0, 0.0];
+        let q1 = [0.02, 0.0, 0.0];
+        let p2 = [0.004, -0.006, 0.011];
+        let q2 = [0.0164, 0.0092, 0.0043];
+
+        let measured =
+            keepout_axis_distance(p1, q1, p2, q2).expect("both axes are finite and non-degenerate");
+        let brute = brute_force_segment_minimum(p1, q1, p2, q2, 2001);
+
+        assert!(
+            measured <= brute + 1.0e-8,
+            "the production distance {measured} sits above a 2001x2001 sweep's {brute}, so it is \
+             not the minimum"
+        );
+        assert!(
+            measured >= brute - 1.0e-8,
+            "the production distance {measured} sits below a 2001x2001 sweep's {brute}, which no \
+             true minimum can do by more than the sweep's own resolution"
+        );
+    }
+
+    /// The same claim across a spread of drain-keepout-scale pairs, so the
+    /// previous test is not one lucky configuration. Deterministic inputs; no
+    /// RNG, so a failure names the exact pair.
+    #[test]
+    fn keepout_axis_distance_is_the_true_minimum_across_the_short_axis_regime() {
+        // (length_mm, skew) pairs spanning 0.005-0.05 mm, the regime the
+        // census measured the retired copy over.
+        let cases: [(f64, f64); 5] = [
+            (0.005, 0.13),
+            (0.010, 0.37),
+            (0.020, 0.61),
+            (0.035, 0.05),
+            (0.050, 0.89),
+        ];
+        let mut checked = 0_usize;
+        for (length, skew) in cases {
+            let p1 = [0.0, 0.0, 0.0];
+            let q1 = [length, 0.0, 0.0];
+            let p2 = [0.3 * length, -0.4 * length, 0.55 * length];
+            let q2 = [
+                0.3 * length + length * (1.0 - skew),
+                -0.4 * length + length * skew,
+                0.55 * length - 0.2 * length,
+            ];
+
+            let measured = keepout_axis_distance(p1, q1, p2, q2)
+                .expect("both axes are finite and non-degenerate");
+            let brute = brute_force_segment_minimum(p1, q1, p2, q2, 1001);
+
+            // 1e-8 mm absolute, as above: still 1/30,000 of the 0.3 mm hard
+            // clearance limit at the shortest axis in the set.
+            assert!(
+                (measured - brute).abs() <= 1.0e-8,
+                "length {length} skew {skew}: production {measured} vs 1001x1001 sweep {brute}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, cases.len(), "the case loop skipped rows");
+    }
+
+    /// The caller's refusal semantics did NOT move into the shared primitive
+    /// (canon §1 OP-1: "refusal semantics stay at the caller"). The kernel
+    /// answers a zero-length segment with a finite distance; drilling still
+    /// refuses one, because a keepout axis with no length is a planning defect
+    /// rather than a measurable clearance.
+    #[test]
+    fn a_zero_length_keepout_axis_is_still_refused_by_drilling_not_by_the_kernel() {
+        let degenerate = [1.0, 2.0, 3.0];
+        let (kernel_distance, _, _) = geom_kernel::segment_segment_distance(
+            degenerate,
+            degenerate,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        );
+        assert!(
+            kernel_distance.is_finite(),
+            "the shared primitive must answer every input; it returned {kernel_distance}"
+        );
+
+        assert!(matches!(
+            keepout_axis_distance(degenerate, degenerate, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            Err(DrillingRefusal::InvalidHoleGeometry)
+        ));
+        assert!(matches!(
+            keepout_axis_distance([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], degenerate, degenerate),
+            Err(DrillingRefusal::InvalidHoleGeometry)
+        ));
+    }
+
+    /// C4 (canon §1 OP-6): drilling's `normalize` is a typed refusal, never a
+    /// sentinel vector. A `[NaN, NaN, NaN]` direction compares `false` against
+    /// every `<` and `>` downstream, so a guard reads it as "not violated".
+    #[test]
+    fn normalize_refuses_every_directionless_input_instead_of_returning_one() {
+        for input in [
+            [0.0, 0.0, 0.0],
+            [-0.0, -0.0, -0.0],
+            [f64::NAN, 0.0, 1.0],
+            [f64::INFINITY, 0.0, 1.0],
+            [f64::NEG_INFINITY, 1.0, 0.0],
+        ] {
+            assert!(
+                matches!(normalize(input), Err(DrillingRefusal::InvalidHoleGeometry)),
+                "{input:?} must refuse, not produce a direction"
+            );
+        }
+        let unit = normalize([0.0, 3.0, 4.0]).expect("a real direction normalizes");
+        assert!(unit.iter().all(|component| component.is_finite()));
+        assert!((norm(unit) - 1.0).abs() <= 1.0e-15);
+    }
 
     /// Two boxes that meet at exactly one vertex and share nothing else.
     ///

@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use geom_kernel::vec3::{add, dot, norm, scale, sub};
 use plinth_core::{m0_constants, Finite, PositiveFinite, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use serde::Serialize;
 use thiserror::Error;
@@ -1416,22 +1417,6 @@ fn finite3(v: [f64; 3]) -> Result<[Finite; 3], RewireError> {
         .try_into()
         .map_err(|_| RewireError::InvalidGeometry)
 }
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn norm(a: [f64; 3]) -> f64 {
-    dot(a, a).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

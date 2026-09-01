@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use geom_kernel::vec3::{cross, dot, norm, sub};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -859,27 +860,14 @@ pub fn certify_closed_components(
         let a_point = mesh.verts()[triangle[0] as usize];
         let b_point = mesh.verts()[triangle[1] as usize];
         let c_point = mesh.verts()[triangle[2] as usize];
-        let a = [
-            a_point[0] - origin[0],
-            a_point[1] - origin[1],
-            a_point[2] - origin[2],
-        ];
-        let b = [
-            b_point[0] - origin[0],
-            b_point[1] - origin[1],
-            b_point[2] - origin[2],
-        ];
-        let c = [
-            c_point[0] - origin[0],
-            c_point[1] - origin[1],
-            c_point[2] - origin[2],
-        ];
-        let cross = [
-            b[1] * c[2] - b[2] * c[1],
-            b[2] * c[0] - b[0] * c[2],
-            b[0] * c[1] - b[1] * c[0],
-        ];
-        let term = (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+        // `geom_kernel::vec3` (docs/specs/geometry-canon.md §1 OP-9, plan item
+        // C8a). Byte-neutral: the retired inline forms had exactly the kernel's
+        // subtraction, cross-product operand order and left-to-right dot
+        // association.
+        let a = sub(a_point, origin);
+        let b = sub(b_point, origin);
+        let c = sub(c_point, origin);
+        let term = dot(a, cross(b, c)) / 6.0;
         let next = volumes[component] + term;
         if !term.is_finite() || !next.is_finite() {
             return Err(TopologyError::CertificateVolumeArithmetic {
@@ -1036,12 +1024,20 @@ fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, Topol
                     };
                     if let Some(candidates) = cells.get(&(x, y, z)) {
                         for &other in candidates {
-                            let delta = [
-                                point[0] - points[other][0],
-                                point[1] - points[other][1],
-                                point[2] - points[other][2],
-                            ];
-                            if delta[0].hypot(delta[1]).hypot(delta[2]) <= tolerance {
+                            // Canonical distance: `geom_kernel::vec3::norm`
+                            // over `sub` (docs/specs/geometry-canon.md §1
+                            // OP-6, triage rule (c) — the `hypot` chain that
+                            // was here is the retired third formula). This
+                            // comparison decides whether two vertices weld, so
+                            // it is a tolerance decision and had to move: two
+                            // spellings of "distance" disagreeing by 2 ULP at
+                            // a weld threshold is exactly the class of
+                            // divergence the sweep exists to remove. Input
+                            // class now answered differently: vertex pairs
+                            // whose separation is within 2 ULP of `tolerance`
+                            // may weld where they did not, or the reverse.
+                            let delta = sub(*point, points[other]);
+                            if norm(delta) <= tolerance {
                                 union(&mut parent, index, other);
                             }
                         }

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::Cell;
 
+use geom_kernel::vec3::{dot, sub};
 use geom_kernel::{
     KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits,
     SurfaceBuildError,
@@ -3145,13 +3146,12 @@ fn route_outcome(
                 let Some(sample) = samples.get(index) else {
                     continue;
                 };
-                let delta = [
-                    row.seat_mm[0] - sample.point_mm[0],
-                    row.seat_mm[1] - sample.point_mm[1],
-                    row.seat_mm[2] - sample.point_mm[2],
-                ];
-                let distance_sq =
-                    delta[0].mul_add(delta[0], delta[1].mul_add(delta[1], delta[2] * delta[2]));
+                let delta = sub(row.seat_mm, sample.point_mm);
+                // Canon C7 (`docs/specs/geometry-canon.md` §2 step 2(c)): the
+                // retired `mul_add` chain is a fused, therefore different,
+                // value from the kernel's, and it is compared against
+                // `radius_mm * radius_mm` two lines below.
+                let distance_sq = dot(delta, delta);
                 row_nearest_sq = row_nearest_sq.min(distance_sq);
             }
             if row_nearest_sq <= radius_mm * radius_mm {

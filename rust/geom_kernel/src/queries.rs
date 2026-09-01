@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use rayon::prelude::*;
 
 use crate::bvh::Bvh;
-use crate::closest::{closest_on_tri, segseg};
+use crate::closest::{closest_on_tri, segment_segment_distance};
 use crate::consts::{DEDUP_LOC_MM, EPS, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
 use crate::moller::{dedup_loc_into, moller};
@@ -1991,7 +1991,7 @@ impl NativeSurface {
         }
         // (b) segment vs each triangle edge
         for &(x, y) in &[(p, q), (q, r), (r, p)] {
-            let (d, _c1, c2) = segseg(a, b, x, y);
+            let (d, _c1, c2) = segment_segment_distance(a, b, x, y);
             if d < best_d {
                 best_d = d;
                 best_pt = c2;

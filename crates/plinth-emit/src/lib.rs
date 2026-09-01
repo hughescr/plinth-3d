@@ -10,6 +10,9 @@ use chitubox_io::{
     ModelGeometry, ModelSource, Placement, PlacementUpdate, Project, SegmentType, SupportBatch,
     SupportMode, SupportRecord, TriangleSoup,
 };
+#[cfg(test)]
+use geom_kernel::vec3::dot;
+use geom_kernel::vec3::{add, cross, norm, scale, sub};
 use geom_kernel::SoupTriangle;
 use plinth_core::{m0_constants, PrinterProfile};
 use plinth_mesh::Mesh;
@@ -777,7 +780,7 @@ fn frustum_triangles(
         return Err(EmitError::RecordEncodingRejected);
     }
     let axis = sub(end, start);
-    let axis_length = length(axis);
+    let axis_length = norm(axis);
     if !axis_length.is_finite() || axis_length <= f64::EPSILON {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -942,7 +945,7 @@ fn raft_bridge_triangles(
         return Err(EmitError::RecordEncodingRejected);
     }
     let axis = [end[0] - start[0], end[1] - start[1], 0.0];
-    let length = length(axis);
+    let length = norm(axis);
     if !length.is_finite() || length <= f64::EPSILON {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -985,7 +988,7 @@ fn perpendicular_basis(normal: [f64; 3]) -> Result<([f64; 3], [f64; 3]), EmitErr
         [0.0, 1.0, 0.0]
     };
     let u = cross(normal, reference);
-    let length = length(u);
+    let length = norm(u);
     if !length.is_finite() || length <= f64::EPSILON {
         return Err(EmitError::RecordEncodingRejected);
     }
@@ -1005,29 +1008,6 @@ fn wind_outward(soups: &mut [Vec<SoupTriangle>]) -> Result<(), EmitError> {
     geom_kernel::wind_soups_outward(soups)
         .map(|_| ())
         .map_err(|_| EmitError::RecordEncodingRejected)
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: [f64; 3], scalar: f64) -> [f64; 3] {
-    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
-}
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-fn length(a: [f64; 3]) -> f64 {
-    dot(a, a).sqrt()
 }
 
 #[cfg(test)]
@@ -1145,7 +1125,7 @@ mod tests {
         let mut outward = 0;
         for triangle in triangles {
             let normal = cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
-            if length(normal) <= 0.0 {
+            if norm(normal) <= 0.0 {
                 continue;
             }
             checked += 1;
@@ -1572,12 +1552,12 @@ mod tests {
             for (axis, value) in normal.iter().enumerate() {
                 total[axis] += value;
             }
-            area += length(normal);
+            area += norm(normal);
         }
         if area == 0.0 {
             return 0.0;
         }
-        length(total) / area
+        norm(total) / area
     }
 
     /// The precondition the whole winding decision rests on.
@@ -1709,7 +1689,7 @@ mod tests {
                     let normal =
                         cross(sub(triangle[1], triangle[0]), sub(triangle[2], triangle[0]));
                     assert!(
-                        length(normal) > 0.0,
+                        norm(normal) > 0.0,
                         "center {center:?} radius {radius}: degenerate triangle {triangle:?}"
                     );
                     for &corner in triangle {
@@ -1782,11 +1762,11 @@ mod tests {
                             continue;
                         }
                         assert!(
-                            length(sub(vertex, expected_north)) > pole_tolerance,
+                            norm(sub(vertex, expected_north)) > pole_tolerance,
                             "center {center:?} radius {radius}: stray vertex {vertex:?} sits within pole tolerance of the north pole"
                         );
                         assert!(
-                            length(sub(vertex, expected_south)) > pole_tolerance,
+                            norm(sub(vertex, expected_south)) > pole_tolerance,
                             "center {center:?} radius {radius}: stray vertex {vertex:?} sits within pole tolerance of the south pole"
                         );
                     }

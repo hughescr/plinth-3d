@@ -392,6 +392,17 @@ pub fn audit_disk_artifact(path: &Path, artifact: &str) -> Result<DiskAudit, Str
 /// vertices. For a closed surface this is translation invariant, so a strictly
 /// positive value is exactly the outward-winding claim `plinth-emit` enforces
 /// on the producer side -- re-derived here from the bytes rather than trusted.
+// GEOM-EXEMPT(independent disk audit -- the module doc at the top of this
+// file names it directly: "the independent on-disk audit that re-reads what
+// the chain wrote... a second reader of the artifact rather than part of
+// producing it." Its `volume > 0.0` result at the call site feeds the
+// outward-winding count precisely because it is re-derived from bytes rather
+// than trusted; importing geom_kernel::vec3::cross/dot here would make this
+// check share arithmetic with the producer it verifies (plinth-emit adopts
+// geom_kernel::vec3 under canon C1), so an error common to both would go
+// undetected. Same principle as geometry-canon.md §4.1 (plinth-audit) and
+// §4.7 (plinth-verify), extended here by analogy since this file is not
+// itself named in canon §4.)
 fn signed_volume_f32(xyz: &[f32]) -> Option<f64> {
     if xyz.is_empty() || !xyz.len().is_multiple_of(9) {
         return None;

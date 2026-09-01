@@ -177,12 +177,46 @@ fn the_sphere_commits_to_the_pose_its_proxies_ranked_478th() {
 /// formula moves — without reference to any mesh. The per-model candidate-set
 /// digest is asserted separately, inside the record, where the dedupe and the
 /// rest poses join in.
+/// **Re-pinned 2026-08-31, geometry-consolidation plan item C4 /
+/// `docs/specs/geometry-canon.md` §1 OP-6.** PRIOR RECORD, kept verbatim:
+/// `f10c343324d390bd3f72074484270d67db57f401991e7e8320b86fd292bce051`.
+///
+///   from -> to:
+///   `f10c343324d390bd3f72074484270d67db57f401991e7e8320b86fd292bce051`
+///   -> `67a4fa9dad43aed93db4296eb636e371e4b1d8ce43d357106ce4b3a40a44f089`
+///
+/// **Cause, and it is the one this test's own doc predicts** ("fails the moment
+/// the expression order ... moves"): `UpDirection::new`
+/// (`crates/plinth-orient/src/score.rs`) divided each component by the norm and
+/// now calls `geom_kernel::vec3::normalize`, whose canon-ruled body is
+/// `scale(a, 1.0 / norm(a))` — one reciprocal and three multiplies. `x / n` and
+/// `x * (1.0 / n)` are not the same `f64`, so every direction this lattice
+/// constructs may move by up to 1 ULP per component. The norm itself is
+/// unchanged: the retired expanded sum-of-squares is bit-identical to the
+/// kernel's `dot(a, a).sqrt()` (canon measurement, 0 differences over
+/// 2,000,000 vectors).
+///
+/// **Attribution proven by bisect, not asserted:** with ONLY
+/// `UpDirection::new` restored to componentwise division and every other sweep
+/// change in place, this golden returns to `f10c3433...` exactly.
+///
+/// **Why the new value is correct.** The refusal condition is unchanged —
+/// `vec3::normalize` returns `None` exactly where the old finite/positive-norm
+/// guard refused — and nothing downstream moved: the sibling tests in this
+/// binary still pass, including the dense sweep reaching the same pose as the
+/// committed `Sphere` baseline, and
+/// `orientation_rederivation::every_pinned_orientation_record_rederives_its_committed_oriented_solid_artifact`
+/// is green. Corpus-wide, all 14 artifacts of the attributable control set are
+/// byte-identical to the pristine `814de04` build
+/// (`docs/evidence/geometry-consolidation-result.md`). This is one shared
+/// `normalize` replacing twelve private ones, which is the whole point of the
+/// sweep; it is not a change to what the lattice means.
 #[test]
 fn the_fibonacci_lattice_is_a_frozen_golden() {
     let directions = fibonacci_directions(512).expect("the 512-point lattice");
     assert_eq!(
         direction_set_digest(&directions),
-        "f10c343324d390bd3f72074484270d67db57f401991e7e8320b86fd292bce051"
+        "67a4fa9dad43aed93db4296eb636e371e4b1d8ce43d357106ce4b3a40a44f089"
     );
 }
 

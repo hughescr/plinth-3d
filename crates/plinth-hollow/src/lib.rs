@@ -25,6 +25,7 @@ pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
+use geom_kernel::vec3;
 use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 use plinth_core::{m0_constants, Finite, M0ConstantsError, PositiveFinite, PrinterProfile};
 use plinth_mesh::{
@@ -3079,22 +3080,6 @@ fn walk_triangle_candidates(
     Ok(())
 }
 
-fn sub3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn cross3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn dot3(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
 /// Exact triangle/axis-aligned-box overlap: the 13-axis separating-axis test
 /// (Akenine-Moller 2001; Ericson, *Real-Time Collision Detection* §5.2.9).
 /// `half` is the box's per-axis half-extent about `center`. Touching exactly
@@ -3105,11 +3090,15 @@ fn dot3(left: [f64; 3], right: [f64; 3]) -> f64 {
 /// special case.
 fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) -> bool {
     let v = [
-        sub3(tri[0], center),
-        sub3(tri[1], center),
-        sub3(tri[2], center),
+        vec3::sub(tri[0], center),
+        vec3::sub(tri[1], center),
+        vec3::sub(tri[2], center),
     ];
-    let e = [sub3(v[1], v[0]), sub3(v[2], v[1]), sub3(v[0], v[2])];
+    let e = [
+        vec3::sub(v[1], v[0]),
+        vec3::sub(v[2], v[1]),
+        vec3::sub(v[0], v[2]),
+    ];
 
     for axis in 0..3 {
         let lo = v[0][axis].min(v[1][axis]).min(v[2][axis]);
@@ -3122,10 +3111,10 @@ fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) 
     const BOX_AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     for box_axis in BOX_AXES {
         for edge in e {
-            let axis = cross3(box_axis, edge);
-            let p0 = dot3(axis, v[0]);
-            let p1 = dot3(axis, v[1]);
-            let p2 = dot3(axis, v[2]);
+            let axis = vec3::cross(box_axis, edge);
+            let p0 = vec3::dot(axis, v[0]);
+            let p1 = vec3::dot(axis, v[1]);
+            let p2 = vec3::dot(axis, v[2]);
             let r = half[0] * axis[0].abs() + half[1] * axis[1].abs() + half[2] * axis[2].abs();
             let lo = p0.min(p1).min(p2);
             let hi = p0.max(p1).max(p2);
@@ -3135,14 +3124,45 @@ fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) 
         }
     }
 
-    let normal = cross3(e[0], e[1]);
-    let d = dot3(normal, v[0]);
+    let normal = vec3::cross(e[0], e[1]);
+    let d = vec3::dot(normal, v[0]);
     let r = half[0] * normal[0].abs() + half[1] * normal[1].abs() + half[2] * normal[2].abs();
     if d > r || d < -r {
         return false;
     }
 
     true
+}
+
+/// Crate internals reachable by the in-repo diagnostic binaries under
+/// `examples/`, and by nothing else.
+///
+/// This exists for one reason: `examples/raster_delta.rs` measures the
+/// production rasterizer against the retired midpoint-quartering one, and it
+/// used to carry a verbatim 45-line copy of [`triangle_cube_overlaps`] and its
+/// three vector helpers. A harness that reproduces the code it is measuring
+/// measures the copy, not production — the copy had already drifted (its final
+/// plane test was spelled `d <= r && d >= -r`, which reports *no* overlap for a
+/// `NaN` `d` where production reports overlap). The delta a diagnostic reports
+/// has to be the delta production would produce, so the diagnostic calls
+/// production.
+///
+/// This is the opposite case to `tools/plinth-audit`
+/// (`docs/specs/geometry-canon.md` §4.1), whose independence *is* its evidence:
+/// there the auditor and the audited are different programs, and sharing an
+/// implementation would make the verdict circular. Here production is the
+/// subject of the measurement, so sharing its implementation is what makes the
+/// measurement real.
+#[doc(hidden)]
+pub mod diagnostics {
+    /// Production's exact triangle/axis-aligned-box overlap test, verbatim —
+    /// see [`super::triangle_cube_overlaps`] for the contract. `tri` and
+    /// `center` are in voxel-index space; the conservative rasterizer passes
+    /// `half = [0.5, 0.5, 0.5]`.
+    #[must_use]
+    pub fn triangle_cube_overlaps(tri: [[f64; 3]; 3], center: [f64; 3], half: [f64; 3]) -> bool {
+        super::triangle_cube_overlaps(tri, center, half)
+    }
 }
 
 fn mark_voxel_index(

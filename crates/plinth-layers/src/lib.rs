@@ -280,26 +280,16 @@ fn dequantize(value: i64) -> f64 {
     value as f64 * SLICE_UNION_QUANTUM_MM
 }
 
-/// Shoelace area over emitted f64 points, intended to match
-/// `plinth-support::perception`'s private `signed_area` byte for byte, but
-/// nothing enforces that: the two are separate hand-copies with no shared
-/// implementation or cross-crate pin test. `geom_kernel::vec3` (public since
-/// this note was written) does not close this gap -- it is 3-vector
-/// arithmetic on `[f64; 3]`, not the 2D polygon primitives (shoelace area,
-/// point-in-polygon, segment distance) this function is one copy of. Moving
-/// those to one shared home with one named degeneracy tolerance is tracked
-/// as the standing duplication-consolidation sweep, not done here.
+/// Shoelace area over emitted f64 points.
+///
+/// Consolidated onto `geom_kernel::poly2::signed_area`
+/// (`docs/specs/geometry-canon.md` §1 OP-8, plan item C2): this crate's copy
+/// and `plinth-support::perception`'s were byte-identical text with no shared
+/// implementation or cross-crate pin test, so the swap is byte-neutral by
+/// construction -- verified by the unchanged corpus digests after this
+/// consolidation.
 fn signed_area(points: &[[f64; 2]]) -> f64 {
-    if points.len() < 3 {
-        return 0.0;
-    }
-    (0..points.len())
-        .map(|i| {
-            let next = (i + 1) % points.len();
-            points[i][0] * points[next][1] - points[next][0] * points[i][1]
-        })
-        .sum::<f64>()
-        * 0.5
+    geom_kernel::poly2::signed_area(points)
 }
 
 /// Twice the signed area of a quantized contour, exactly, in quantum^2 units.

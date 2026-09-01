@@ -52,19 +52,14 @@ pub fn shoelace(points: &[[f64; 2]]) -> f64 {
         * 0.5
 }
 
-/// Even-odd point containment, the perception stitcher's exact formula.
+/// Even-odd point containment.
+///
+/// Repointed at `geom_kernel::poly2::point_in_polygon`
+/// (`docs/specs/geometry-canon.md` §1 OP-8, plan item C2): this was a fourth
+/// hand-copy of the perception stitcher's formula, text-identical to the
+/// other three, so the swap is byte-neutral.
 pub fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut inside = false;
-    for i in 0..polygon.len() {
-        let a = polygon[i];
-        let b = polygon[(i + 1) % polygon.len()];
-        if (a[1] > point[1]) != (b[1] > point[1])
-            && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
-        {
-            inside = !inside;
-        }
-    }
-    inside
+    geom_kernel::poly2::point_in_polygon(point, polygon)
 }
 
 /// Signed winding number of `point` with respect to `polygon`.

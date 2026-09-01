@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 
+use geom_kernel::vec3::{add, cross, norm, scale, sub};
 use geom_kernel::{
     indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest, MOLLER_PARAMETER_SLACK,
 };
@@ -1981,15 +1982,29 @@ fn validate_surface_matches_mesh(
     let geometry = surface.geometry();
     for (face, indices) in mesh.tris().iter().enumerate() {
         let [a, b, c] = indices.map(|index| mesh.verts()[index as usize]);
+        // This block is a DELIBERATE bit-exact mirror of the kernel's own
+        // face build (`geom_kernel::mesh::from_indexed`): the whole point of
+        // the `bits3(...)` comparisons below is that an identical formula on
+        // identical vertices must reproduce the stored metadata exactly. The
+        // subtraction, cross and length are now the kernel's own
+        // `vec3::{sub, cross, norm}`, which are character-for-character the
+        // same operations in the same order the mirrored code uses, so this is
+        // byte-neutral (canon §1 OP-9, plan item C8a).
         let e1 = sub(b, a);
         let e2 = sub(c, a);
-        let cross = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-        let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
-        let normal = cross.map(|value| value / length.max(1e-30));
+        let face_cross = cross(e1, e2);
+        let length = norm(face_cross);
+        // GEOM-EXEMPT(divisor kept as the mirrored `length.max(1e-30)`, NOT
+        // `vec3::normalize`) — GEOMETRY-CANON EXEMPT: canon §1 OP-6 fixes
+        // `normalize` as `scale(a, 1.0 / norm(a))`, a reciprocal MULTIPLY;
+        // this mirror must reproduce a per-component DIVIDE, and `x / n` is
+        // not `x * (1.0 / n)` in f64. `geom_kernel::mesh::from_indexed`
+        // refuses `length <= 0.0` outright, so on any surface built from an
+        // indexed mesh the `.max(1e-30)` is unreachable; it survives only for
+        // a surface built through `from_triangle_soup` with supplied normals,
+        // where this comparison is the check. Changing either half is a
+        // separate ruling, not a consolidation.
+        let normal = face_cross.map(|value| value / length.max(1e-30));
         let area = 0.5 * length;
         let centroid = [
             (a[0] + b[0] + c[0]) / 3.0,
@@ -2072,18 +2087,6 @@ fn finite3_to_f64(values: [Finite; 3]) -> [f64; 3] {
 }
 fn bits3(values: [f64; 3]) -> [u64; 3] {
     values.map(f64::to_bits)
-}
-fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
-}
-fn scale(value: [f64; 3], factor: f64) -> [f64; 3] {
-    [value[0] * factor, value[1] * factor, value[2] * factor]
-}
-fn norm(value: [f64; 3]) -> f64 {
-    value[0].hypot(value[1]).hypot(value[2])
 }
 fn lean_deg(delta: [f64; 3], length: f64) -> f64 {
     if length < 1e-9 {

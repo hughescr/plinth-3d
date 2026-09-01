@@ -23,6 +23,15 @@ mod moller;
 pub mod par;
 mod parity;
 mod point_index;
+/// 2D polygon and segment primitives on `[f64; 2]` slice-loop points.
+///
+/// Public because it is the canonical home for the shoelace area,
+/// point-in-polygon, segment-intersection and point-to-segment-distance
+/// primitives that were previously hand-copied into `plinth-support` and
+/// `plinth-layers` with three different degeneracy rules
+/// (`docs/specs/geometry-canon.md` §1 OP-3 and OP-8). `vec3` could not close
+/// that gap: it is 3-vector arithmetic on `[f64; 3]`, not 2D polygon work.
+pub mod poly2;
 mod queries;
 mod segment_batch;
 mod slicing;
@@ -51,6 +60,11 @@ use std::borrow::Cow;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
+/// The canonical segment-vs-segment distance for the whole workspace
+/// (`docs/specs/geometry-canon.md` §1 OP-1). Read its degenerate-input
+/// contract before calling: it answers for every input and refuses nothing, so
+/// a caller's refusal stays at the caller.
+pub use closest::segment_segment_distance;
 /// The Möller acceptance slack every ray result of this kernel carries BY
 /// CONTRACT.
 ///
@@ -67,6 +81,11 @@ use sha2::{Digest, Sha256};
 pub use consts::EPS as MOLLER_EPS;
 use mesh::Mesh;
 pub use mesh::{DegenerateFaceCause, FaceBounds, FaceGeometry};
+/// The canonical ray-vs-triangle intersection for the whole workspace
+/// (`docs/specs/geometry-canon.md` §1 OP-2), exposing the barycentrics the
+/// pinned sequence already computed so call-site policy needs no second
+/// formula. `u`, `v` and `t` are meaningless when `hit` is `false`.
+pub use moller::{ray_triangle, RayTriangleHit};
 use parity::ParityBuildError;
 pub use point_index::{
     knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr,

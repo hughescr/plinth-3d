@@ -71,6 +71,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::vec3::{dot, sub};
 use plinth_core::m0_constants;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1271,14 +1272,16 @@ impl Ord for OrderedScore {
     }
 }
 
+/// Squared distance `|left - right|^2` in mm^2, plain (no FMA).
+///
+/// Canon item C7 (`docs/specs/geometry-canon.md` §2 step 2(c), §1 OP-4/OP-9):
+/// this was a `mul_add` chain. Every caller compares the result against a
+/// squared radius, so the fused form was a second definition of "near" a few
+/// ULP away from the kernel's, inside a crate whose house rule
+/// (`rust/geom_kernel/src/vec3.rs:1-5`, spec sec 5.1) forbids FMA.
 fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
-    (left[0] - right[0]).mul_add(
-        left[0] - right[0],
-        (left[1] - right[1]).mul_add(
-            left[1] - right[1],
-            (left[2] - right[2]) * (left[2] - right[2]),
-        ),
-    )
+    let d = sub(left, right);
+    dot(d, d)
 }
 
 #[cfg(test)]

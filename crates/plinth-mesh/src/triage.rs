@@ -6,9 +6,13 @@
 //! it again would destroy its wall and emit trapped resin.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use plinth_core::{m0_constants, M0ConstantsError};
 use thiserror::Error;
+
+use geom_kernel::ray_triangle;
+use geom_kernel::vec3::{cross, dot, norm, sub};
 
 use crate::topology::{TopologyError, WeldedView};
 use crate::{Mesh, MeshError, WeldPolicy};
@@ -965,6 +969,108 @@ impl ComponentDetail {
     }
 }
 
+/// Counts of the containment ray caster's work, for evidence that a change to
+/// the ray/triangle primitive actually exercised the path it claims to change.
+///
+/// This exists because of a recorded project failure mode: a byte-identity
+/// proof over a model that never fired the changed code path. A verdict table
+/// captured across `docs/specs/geometry-canon.md` §1 OP-2 (plan item C5) must
+/// be able to say **how many face tests ran**, not only what the verdict was —
+/// a corpus model with no nested closed component never builds a classifier at
+/// all, and "the verdict did not move" then means nothing.
+///
+/// Counters are process-global, monotonically increasing, `Relaxed`, and
+/// accumulated once per ray from ray-local counts, so the per-face inner loop
+/// is untouched. They are instrumentation: nothing in this crate reads them to
+/// make a decision, and they never influence a verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContainmentRayCounters {
+    /// `ContainmentClassifier::build` calls: one per candidate container.
+    pub classifiers_built: u64,
+    /// `classify_ray` calls: `containment_samples` x 3 directions per nested
+    /// candidate component.
+    pub rays_cast: u64,
+    /// Ray/triangle tests that survived the per-face bounding-box filter.
+    pub face_tests: u64,
+    /// Ray/triangle tests that returned a forward crossing.
+    pub face_hits: u64,
+    /// Ray/triangle tests that returned no crossing.
+    pub face_misses: u64,
+    /// Ray/triangle tests the triage call-site policy could not sign.
+    pub face_ambiguous: u64,
+    /// Rays short-circuited by the `point_on_triangle` boundary pre-check,
+    /// which is triage policy and not part of the ray/triangle primitive.
+    pub point_on_triangle_hits: u64,
+}
+
+static CLASSIFIERS_BUILT: AtomicU64 = AtomicU64::new(0);
+static RAYS_CAST: AtomicU64 = AtomicU64::new(0);
+static FACE_TESTS: AtomicU64 = AtomicU64::new(0);
+static FACE_HITS: AtomicU64 = AtomicU64::new(0);
+static FACE_MISSES: AtomicU64 = AtomicU64::new(0);
+static FACE_AMBIGUOUS: AtomicU64 = AtomicU64::new(0);
+static POINT_ON_TRIANGLE_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// Read the process-global containment ray counters.
+#[must_use]
+pub fn containment_ray_counters() -> ContainmentRayCounters {
+    ContainmentRayCounters {
+        classifiers_built: CLASSIFIERS_BUILT.load(Ordering::Relaxed),
+        rays_cast: RAYS_CAST.load(Ordering::Relaxed),
+        face_tests: FACE_TESTS.load(Ordering::Relaxed),
+        face_hits: FACE_HITS.load(Ordering::Relaxed),
+        face_misses: FACE_MISSES.load(Ordering::Relaxed),
+        face_ambiguous: FACE_AMBIGUOUS.load(Ordering::Relaxed),
+        point_on_triangle_hits: POINT_ON_TRIANGLE_HITS.load(Ordering::Relaxed),
+    }
+}
+
+/// One ray's tallies, folded into the globals in a single pass at the end of
+/// the ray so the per-face inner loop stays atomic-free.
+#[derive(Default)]
+struct RayTally {
+    rays: u64,
+    tests: u64,
+    hits: u64,
+    misses: u64,
+    ambiguous: u64,
+    point_on_triangle: u64,
+}
+
+impl RayTally {
+    fn publish(&self) {
+        for (counter, value) in [
+            (&RAYS_CAST, self.rays),
+            (&FACE_TESTS, self.tests),
+            (&FACE_HITS, self.hits),
+            (&FACE_MISSES, self.misses),
+            (&FACE_AMBIGUOUS, self.ambiguous),
+            (&POINT_ON_TRIANGLE_HITS, self.point_on_triangle),
+        ] {
+            if value != 0 {
+                counter.fetch_add(value, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Zero the process-global containment ray counters.
+///
+/// Process-global, so a caller that needs per-model figures must not run
+/// models concurrently with each other or with anything else that triages.
+pub fn reset_containment_ray_counters() {
+    for counter in [
+        &CLASSIFIERS_BUILT,
+        &RAYS_CAST,
+        &FACE_TESTS,
+        &FACE_HITS,
+        &FACE_MISSES,
+        &FACE_AMBIGUOUS,
+        &POINT_ON_TRIANGLE_HITS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContainmentClass {
     Inside,
@@ -1009,6 +1115,7 @@ impl ContainmentClassifier {
             }
             table.push(ContainmentFace { vertices, lo, hi });
         }
+        CLASSIFIERS_BUILT.fetch_add(1, Ordering::Relaxed);
         Ok(Self { faces: table })
     }
 
@@ -1045,14 +1152,32 @@ impl ContainmentClassifier {
         point: [f64; 3],
         direction: [f64; 3],
     ) -> Result<ContainmentClass, TriageError> {
+        // Ray-local tallies, folded into the process-global instrumentation
+        // once per ray so the per-face loop below carries no atomic.
+        let mut tally = RayTally::default();
         let mut hits = Vec::new();
+        let outcome = self.classify_ray_counted(point, direction, &mut tally, &mut hits);
+        tally.publish();
+        outcome
+    }
+
+    fn classify_ray_counted(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        tally: &mut RayTally,
+        hits: &mut Vec<f64>,
+    ) -> Result<ContainmentClass, TriageError> {
+        tally.rays = 1;
         for face in &self.faces {
             if point_on_triangle(point, *face)? {
+                tally.point_on_triangle = 1;
                 return Ok(ContainmentClass::Ambiguous);
             }
             if !ray_can_reach_bbox(point, direction, face.lo, face.hi) {
                 continue;
             }
+            tally.tests += 1;
             match ray_triangle_distance(
                 point,
                 direction,
@@ -1060,12 +1185,27 @@ impl ContainmentClassifier {
                 face.vertices[1],
                 face.vertices[2],
             )? {
-                RayHit::Hit(distance) => hits.push(distance),
-                RayHit::Miss => {}
-                RayHit::Ambiguous => return Ok(ContainmentClass::Ambiguous),
+                RayHit::Hit(distance) => {
+                    tally.hits += 1;
+                    hits.push(distance);
+                }
+                RayHit::Miss => tally.misses += 1,
+                RayHit::Ambiguous => {
+                    tally.ambiguous += 1;
+                    return Ok(ContainmentClass::Ambiguous);
+                }
             }
         }
         hits.sort_by(f64::total_cmp);
+        // GEOMETRY-CANON EXEMPT: docs/specs/geometry-canon.md §1 OP-2 and §4
+        // item 1 of §5's flagged uncertainties. This RELATIVE 1e-9 crossing
+        // dedup deliberately diverges from the kernel's ABSOLUTE
+        // `DEDUP_LOC_MM = 3e-3`, which belongs to the parity engine (OP-5) and
+        // is explicitly out of scope for this sweep. Both merge the same-`t`
+        // duplicate hits the kernel's shared-edge slack produces, so C5 is
+        // safe under either; they differ only on walls thinner than 3 µm,
+        // which is an OP-5 question. Marked so the next census does not
+        // re-discover it as an unexamined divergence.
         hits.dedup_by(|left, right| {
             (*left - *right).abs() <= 1e-9 * left.abs().max(right.abs()).max(1.0)
         });
@@ -1096,6 +1236,36 @@ enum RayHit {
     Ambiguous,
 }
 
+/// Triage's ray/triangle CALL-SITE POLICY, over the canonical geometry.
+///
+/// The geometry is `geom_kernel::moller::ray_triangle`
+/// (`docs/specs/geometry-canon.md` §1 OP-2, plan item C5). This module's own
+/// Möller-Trumbore copy is retired: it agreed with the kernel on the algorithm
+/// and disagreed with it categorically on four acceptance rules, so the same
+/// ray against the same triangle could be a kernel hit and a triage miss —
+/// and a shared-edge crossing could miss BOTH adjacent faces, silently
+/// flipping parity for every point beyond it.
+///
+/// **What is geometry and lives in the kernel:** the determinant guard
+/// (`DET_EPS = 1e-14`), the barycentric acceptance region with its
+/// `EPS = 1e-6` shared-edge slack, and the ray parameter `t`.
+///
+/// **What is triage policy and lives here:**
+/// * `TRIAGE_ORIGIN_EPS` — a crossing whose distance from the query point is
+///   too small to sign. Canon §1 OP-2 keeps this explicitly, as call-site
+///   policy rather than a geometry rule.
+/// * half-ray semantics — a crossing behind the query point is not a crossing.
+///   This is parity policy, not geometry: the classifier counts forward
+///   crossings only, and FU-43 (commit ee58444) is the record of what happens
+///   when a real behind-origin hit is allowed to poison a ray.
+/// * the non-finite refusal — the kernel propagates non-finite input by
+///   contract (canon §1 OP-2), so `TriageError::RayArithmetic` is raised here.
+///
+/// **Deleted with no replacement:** the old `EDGE_EPS = 1e-10` band, which
+/// mapped a hit within 1e-10 barycentric of an edge to `Ambiguous` and
+/// poisoned the whole component. That is exactly the shared-edge case the
+/// kernel's slack now answers correctly; keeping it would re-refuse what the
+/// slack just fixed (canon §1 OP-2, "EDGE_EPS dies with no replacement").
 fn ray_triangle_distance(
     origin: [f64; 3],
     direction: [f64; 3],
@@ -1103,50 +1273,43 @@ fn ray_triangle_distance(
     b: [f64; 3],
     c: [f64; 3],
 ) -> Result<RayHit, TriageError> {
-    let edge_a = subtract(b, a);
-    let edge_b = subtract(c, a);
-    let p = cross(direction, edge_b);
-    let determinant = dot(edge_a, p);
-    if !determinant.is_finite() {
+    // A6 RECONSTRUCTION, declared as the kernel's contract requires: this
+    // classifier holds vertices, not stored edges, so it builds `e1`/`e2` with
+    // `geom_kernel::vec3::sub` — the same subtraction the kernel's own surface
+    // build uses.
+    let e1 = sub(b, a);
+    let e2 = sub(c, a);
+    // `t_max = INFINITY`: a parity ray is unbounded forward.
+    //
+    // UNITS: `direction` is one of `classify`'s three fixed sampling vectors
+    // and is NOT unit length, so `t` is in units of `|direction|` and the
+    // kernel's ±`EPS` slack scales with it — stated by the kernel's own units
+    // contract. `TRIAGE_ORIGIN_EPS` below is applied in those same units,
+    // exactly as the retired copy's `ORIGIN_EPS` was, so this is not a change.
+    let hit = ray_triangle(origin, direction, a, e1, e2, f64::INFINITY);
+    if !hit.hit {
+        return Ok(RayHit::Miss);
+    }
+    if !hit.t.is_finite() {
         return Err(TriageError::RayArithmetic);
     }
-    if determinant.abs() < 1e-12 {
-        return Ok(RayHit::Miss);
-    }
-    let inverse = determinant.recip();
-    let offset = subtract(origin, a);
-    let u = dot(offset, p) * inverse;
-    if !(0.0..=1.0).contains(&u) {
-        return Ok(RayHit::Miss);
-    }
-    let q = cross(offset, edge_a);
-    let v = dot(direction, q) * inverse;
-    if v < 0.0 || u + v > 1.0 {
-        return Ok(RayHit::Miss);
-    }
-    let distance = dot(edge_b, q) * inverse;
-    if !distance.is_finite() {
-        return Err(TriageError::RayArithmetic);
-    }
-    // Half-ray semantics: only a genuine near-origin degeneracy is
-    // `Ambiguous`. The band is symmetric around zero and reuses this
-    // function's own existing magnitude (previously applied, wrongly, as a
-    // one-sided `distance <= 1e-9`) so a hit within 1e-9 mm of the origin on
-    // either side still reads as too close to trust the sign of, but a real
-    // intersection strictly outside that band is a definite forward `Hit` or
-    // a definite behind-the-origin `Miss` -- not a coin flip.
-    const ORIGIN_EPS: f64 = 1e-9;
-    if distance.abs() <= ORIGIN_EPS {
+    // Triage policy, not a geometry rule: a crossing this close to the query
+    // point has an untrustworthy sign, so the parity it would contribute is
+    // untrustworthy too. In units of `|direction|` (see above).
+    const TRIAGE_ORIGIN_EPS: f64 = 1e-9;
+    if hit.t.abs() <= TRIAGE_ORIGIN_EPS {
         return Ok(RayHit::Ambiguous);
     }
-    if distance < 0.0 {
+    if hit.t < 0.0 {
+        // Half-ray semantics. The kernel accepts `t >= -EPS` so that a
+        // crossing sitting exactly at the origin registers; triage's own
+        // `TRIAGE_ORIGIN_EPS` band above already covers that case, and covers
+        // it more conservatively (1e-9 against the kernel's 1e-6-scaled
+        // slack), so everything reaching here is a genuine behind-the-origin
+        // crossing and is not counted.
         return Ok(RayHit::Miss);
     }
-    const EDGE_EPS: f64 = 1e-10;
-    if u <= EDGE_EPS || v <= EDGE_EPS || 1.0 - u - v <= EDGE_EPS {
-        return Ok(RayHit::Ambiguous);
-    }
-    Ok(RayHit::Hit(distance))
+    Ok(RayHit::Hit(hit.t))
 }
 
 #[allow(
@@ -1160,21 +1323,28 @@ fn point_on_triangle(point: [f64; 3], face: ContainmentFace) -> Result<bool, Tri
     {
         return Ok(false);
     }
-    let edge_a = subtract(face.vertices[1], face.vertices[0]);
-    let edge_b = subtract(face.vertices[2], face.vertices[0]);
+    let edge_a = sub(face.vertices[1], face.vertices[0]);
+    let edge_b = sub(face.vertices[2], face.vertices[0]);
     let normal = cross(edge_a, edge_b);
-    let normal_length = normal[0].hypot(normal[1]).hypot(normal[2]);
+    // Canonical length: `geom_kernel::vec3::norm` (`dot(n, n).sqrt()`).
+    // docs/specs/geometry-canon.md §1 OP-6 retires the `hypot` chain that was
+    // here — one formula project-wide, not two that differ by 2 ULP on 20 % of
+    // values. The chain's only real advantage is range beyond ~1e±150 mm,
+    // unreachable on a 218 mm plate; the one input class that now answers
+    // differently is a cross product whose squared magnitude overflows, which
+    // the `is_finite` refusal below already handles the same way.
+    let normal_length = norm(normal);
     if !normal_length.is_finite() {
         return Err(TriageError::RayArithmetic);
     }
     if normal_length <= 1e-15 {
         return Ok(false);
     }
-    let plane_distance = dot(subtract(point, face.vertices[0]), normal).abs() / normal_length;
+    let plane_distance = dot(sub(point, face.vertices[0]), normal).abs() / normal_length;
     if plane_distance > 1e-10 {
         return Ok(false);
     }
-    let p = subtract(point, face.vertices[0]);
+    let p = sub(point, face.vertices[0]);
     let dot_aa = dot(edge_a, edge_a);
     let dot_ab = dot(edge_a, edge_b);
     let dot_bb = dot(edge_b, edge_b);
@@ -1220,23 +1390,30 @@ fn compact_mesh(
     Ok(Mesh::new_welded(compact, output, policy)?)
 }
 
-fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use super::*;
+
+    /// Serializes the tests that READ a process-global counter against the
+    /// tests that INCREMENT one.
+    ///
+    /// `INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED` and the containment ray
+    /// counters are process-global by design — they measure the whole
+    /// process's work — so a test asserting `before` / `before + 1` around its
+    /// own call races every concurrently scheduled test that triages or builds
+    /// a classifier. This is a test-isolation defect, not a claim about the
+    /// code under test: measured at 1 failure in 6 parallel runs of this
+    /// module, passing 6 of 6 under `--test-threads=1`. Every test that
+    /// touches either counter takes this guard.
+    static GLOBAL_COUNTER_TESTS: Mutex<()> = Mutex::new(());
+
+    fn global_counter_guard() -> MutexGuard<'static, ()> {
+        GLOBAL_COUNTER_TESTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     fn exact_limits(mesh: &Mesh) -> TriageTopologyLimits {
         let faces = mesh.tris().len();
@@ -1255,6 +1432,7 @@ mod tests {
 
     #[test]
     fn every_cap_minus_one_refuses_before_input_proportional_triage_work_starts() {
+        let _guard = global_counter_guard();
         use std::sync::atomic::Ordering;
 
         let closed = crate::fixtures::make_box_default().expect("box");
@@ -1383,6 +1561,7 @@ mod tests {
 
     #[test]
     fn classifier_builds_one_reused_face_table_and_classifies_a_gathered_batch() {
+        let _guard = global_counter_guard();
         let mesh = crate::fixtures::make_box_default().expect("box");
         let face_ids = (0..mesh.tris().len()).collect::<Vec<_>>();
         let classifier = ContainmentClassifier::build(mesh.verts(), mesh.tris(), &face_ids)
@@ -1492,7 +1671,7 @@ mod tests {
             .into_iter()
             .map(|face| {
                 let [a, b, c] = face.map(|index| verts[index as usize]);
-                let normal = cross(subtract(b, a), subtract(c, a));
+                let normal = cross(sub(b, a), sub(c, a));
                 if dot(normal, a) > 0.0 {
                     face
                 } else {
@@ -1548,10 +1727,10 @@ mod tests {
     /// The triangle sits on the plane `x = -5`; the ray starts at the origin
     /// and points along `+x`. The intersection is real (the triangle spans
     /// `y` and `z` well past where the ray crosses the plane, so `u`, `v`,
-    /// and `1 - u - v` all sit far above `EDGE_EPS`) and lies exactly 5 mm
+    /// and `1 - u - v` all sit far inside the triangle) and lies exactly 5 mm
     /// *behind* the ray's origin.
     #[test]
-    fn ray_triangle_distance_reports_ambiguous_for_a_real_hit_behind_the_origin() {
+    fn a_real_hit_behind_the_ray_origin_is_a_miss_not_a_crossing() {
         let origin = [0.0, 0.0, 0.0];
         let direction = [1.0, 0.0, 0.0];
         let a = [-5.0, -5.0, -5.0];
@@ -1561,8 +1740,8 @@ mod tests {
         // Ground truth from the plane equation alone, independent of
         // `ray_triangle_distance`'s own epsilon handling: this triangle's
         // plane is only ever reached at `t = -5`.
-        let normal = cross(subtract(b, a), subtract(c, a));
-        let plane_t = -dot(subtract(origin, a), normal) / dot(direction, normal);
+        let normal = cross(sub(b, a), sub(c, a));
+        let plane_t = -dot(sub(origin, a), normal) / dot(direction, normal);
         assert!(
             (plane_t + 5.0).abs() < 1e-9,
             "hand-derived intersection parameter must be -5 (5 mm behind the origin)"
@@ -1587,6 +1766,203 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // C5: `ray_triangle_distance` is now triage POLICY over
+    // `geom_kernel::ray_triangle` (docs/specs/geometry-canon.md §1 OP-2).
+    // These tests pin what the new arrangement answers, rule by rule. They
+    // are not characterizations of the retired copy; each states the rule it
+    // exercises and why the kernel's answer is the correct one.
+    // -----------------------------------------------------------------
+
+    /// The unit triangle in `z = 0`, and a ray straight down onto it from
+    /// `(x, y, 1)`. Every C5 acceptance-rule test below aims at this target,
+    /// so `u` and `v` are just the query's own `x` and `y`.
+    fn unit_triangle_z0() -> ([f64; 3], [f64; 3], [f64; 3]) {
+        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    }
+
+    fn straight_down(x: f64, y: f64) -> ([f64; 3], [f64; 3]) {
+        ([x, y, 1.0], [0.0, 0.0, -1.0])
+    }
+
+    /// Rule 1, barycentric slack (`EPS = 1e-6`). A ray passing 5e-7 outside a
+    /// triangle's edge registers a crossing.
+    ///
+    /// The slack is not a tolerance on "is this really inside" — it is what
+    /// makes a crossing through an edge SHARED by two faces register on at
+    /// least one of them. A zero-slack test, which is what this module used
+    /// to have, can miss both, and every point beyond that ray then has the
+    /// wrong parity. The accepted cost is this: a ray just outside a
+    /// silhouette edge registers on both adjacent faces, at the same `t`, and
+    /// the crossing dedup merges the pair back to one.
+    #[test]
+    fn a_ray_within_the_barycentric_slack_of_an_edge_registers_a_crossing() {
+        let (a, b, c) = unit_triangle_z0();
+        let (origin, direction) = straight_down(-5.0e-7, 0.25);
+        assert_eq!(
+            ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
+            RayHit::Hit(1.0),
+            "u = -5e-7 is inside the kernel's 1e-6 barycentric slack, so this is a crossing"
+        );
+
+        // And the slack is bounded: twice outside it is a definite miss.
+        let (origin, direction) = straight_down(-2.0e-6, 0.25);
+        assert_eq!(
+            ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
+            RayHit::Miss,
+            "u = -2e-6 is outside the slack and must not be a crossing"
+        );
+    }
+
+    /// Rule 2, the retired `EDGE_EPS = 1e-10` band. A crossing 5e-11 inside an
+    /// edge is a definite `Hit`.
+    ///
+    /// It used to be `Ambiguous`, and one `Ambiguous` face made the whole
+    /// component `Ambiguous` and the whole model refused. Refusing a crossing
+    /// for being near an edge is precisely what the kernel's slack now
+    /// answers correctly, so keeping the band would re-refuse the fix.
+    #[test]
+    fn a_crossing_just_inside_an_edge_is_a_definite_hit_not_ambiguous() {
+        let (a, b, c) = unit_triangle_z0();
+        let (origin, direction) = straight_down(0.25, 5.0e-11);
+        assert_eq!(
+            ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
+            RayHit::Hit(1.0),
+            "v = 5e-11 is interior; edge proximity is not a reason to refuse to count it"
+        );
+    }
+
+    /// Rule 3, the determinant guard. A triangle whose determinant lands in
+    /// the band `[1e-14, 1e-12)` is now measured rather than skipped.
+    ///
+    /// This module used to refuse to look below `1e-12`; the kernel prunes at
+    /// `1e-14`. The 100x-wide band between them is real geometry that was
+    /// never measured. Here the triangle is scaled so that
+    /// `det = dot(e1, cross(dv, e2))` sits inside it.
+    #[test]
+    fn a_determinant_in_the_retired_hundredfold_band_is_measured_not_skipped() {
+        // det for a `-z` ray against a `z = 0` triangle with legs `s` is
+        // `s^2`, so a leg of `10^-6.5` mm puts `|det|` at 1e-13 — inside
+        // `[1e-14, 1e-12)`, the band this module used to refuse to look at.
+        let scale = 1.0e-7_f64 * (10.0_f64).sqrt();
+        let a = [0.0, 0.0, 0.0];
+        let b = [scale, 0.0, 0.0];
+        let c = [0.0, scale, 0.0];
+        let e1 = sub(b, a);
+        let e2 = sub(c, a);
+        let determinant = dot(e1, cross([0.0, 0.0, -1.0], e2));
+        assert!(
+            (1.0e-14..1.0e-12).contains(&determinant.abs()),
+            "fixture must sit in the retired band; |det| = {}",
+            determinant.abs()
+        );
+        let (origin, direction) = straight_down(scale / 4.0, scale / 4.0);
+        let outcome = ray_triangle_distance(origin, direction, a, b, c).expect("finite");
+        // `t` is 1 to within the rounding a 3e-7 mm triangle can carry; the
+        // claim under test is that the crossing is MEASURED at all.
+        assert!(
+            matches!(outcome, RayHit::Hit(t) if (t - 1.0).abs() < 1.0e-9),
+            "a triangle this small is still a triangle; the kernel prunes at 1e-14, not 1e-12; \
+             got {outcome:?}"
+        );
+    }
+
+    /// The shared-edge property the slack exists for, stated as a test on two
+    /// adjacent faces rather than on one.
+    ///
+    /// Two triangles meet along the diagonal from `(1,0,0)` to `(0,1,0)`. A
+    /// ray aimed exactly at the midpoint of that shared edge must register on
+    /// at least one of them: if it registers on neither, parity flips for
+    /// every point beyond it, silently.
+    #[test]
+    fn a_crossing_through_a_shared_edge_registers_on_at_least_one_face() {
+        let lower = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let upper = ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+        let (origin, direction) = straight_down(0.5, 0.5);
+        let on_lower =
+            ray_triangle_distance(origin, direction, lower.0, lower.1, lower.2).expect("finite");
+        let on_upper =
+            ray_triangle_distance(origin, direction, upper.0, upper.1, upper.2).expect("finite");
+        let crossings = [on_lower, on_upper]
+            .iter()
+            .filter(|outcome| matches!(outcome, RayHit::Hit(_)))
+            .count();
+        assert!(
+            crossings >= 1,
+            "a ray through a shared edge must be counted by at least one of the two faces; \
+             lower = {on_lower:?}, upper = {on_upper:?}"
+        );
+    }
+
+    /// Triage policy survives the primitive swap, in both directions.
+    ///
+    /// `TRIAGE_ORIGIN_EPS` is call-site policy the canon keeps deliberately:
+    /// a crossing this close to the query point has an untrustworthy sign.
+    /// The half-ray rule is policy too, and it is the FU-43 fix — the kernel
+    /// accepts `t >= -EPS`, and triage must NOT read that slack as licence to
+    /// count a crossing behind the query point.
+    #[test]
+    fn triage_call_site_policy_still_owns_the_origin_band_and_half_ray_rule() {
+        let (a, b, c) = unit_triangle_z0();
+
+        // A crossing 5e-10 in front of the query point: inside the origin
+        // band, so unsignable.
+        let origin = [0.25, 0.25, 5.0e-10];
+        assert_eq!(
+            ray_triangle_distance(origin, [0.0, 0.0, -1.0], a, b, c).expect("finite"),
+            RayHit::Ambiguous,
+            "a crossing within TRIAGE_ORIGIN_EPS of the query point cannot be signed"
+        );
+
+        // A crossing 1 mm behind it: definite, and not counted.
+        let origin = [0.25, 0.25, -1.0];
+        assert_eq!(
+            ray_triangle_distance(origin, [0.0, 0.0, -1.0], a, b, c).expect("finite"),
+            RayHit::Miss,
+            "half-ray semantics: a crossing behind the query point is not a crossing"
+        );
+    }
+
+    /// The counters are instrumentation, and instrumentation that reports
+    /// zero work while work happened is worse than none.
+    ///
+    /// A verdict table whose probe rows all read `ray_tests = 0` would look
+    /// exactly like "nothing changed". This asserts the counters actually
+    /// move on a mesh that provably reaches the ray caster.
+    #[test]
+    fn the_containment_ray_counters_report_the_work_that_actually_ran() {
+        let _guard = global_counter_guard();
+        let (verts, faces) = octahedron_faces(10.0);
+        let face_ids = (0..faces.len()).collect::<Vec<_>>();
+        let classifier = ContainmentClassifier::build(&verts, &faces, &face_ids).expect("build");
+        reset_containment_ray_counters();
+        assert_eq!(
+            containment_ray_counters(),
+            ContainmentRayCounters::default()
+        );
+        let before = ContainmentClassifier::build(&verts, &faces, &face_ids).expect("build");
+        drop(before);
+        classifier
+            .classify_batch(&[[0.0, 0.0, 0.0]])
+            .expect("finite");
+        let counters = containment_ray_counters();
+        assert_eq!(counters.classifiers_built, 1, "one build after the reset");
+        assert_eq!(
+            counters.rays_cast, 3,
+            "three sampling directions, one point"
+        );
+        assert!(
+            counters.face_tests > 0,
+            "the ray caster ran against real faces; counters reporting zero would make every \
+             verdict table a false negative"
+        );
+        assert_eq!(
+            counters.face_tests,
+            counters.face_hits + counters.face_misses + counters.face_ambiguous,
+            "every counted face test lands in exactly one outcome bucket"
+        );
+    }
+
     /// Tier 2: a full closed shell, and today's actual parity consequence.
     ///
     /// The three fixed sampling directions in `ContainmentClassifier::
@@ -1599,6 +1975,7 @@ mod tests {
     #[test]
     fn octahedron_centroid_reads_ambiguous_though_every_direction_has_exactly_one_forward_crossing()
     {
+        let _guard = global_counter_guard();
         let (verts, faces) = octahedron_faces(10.0);
         let face_ids = (0..faces.len()).collect::<Vec<_>>();
         let classifier = ContainmentClassifier::build(&verts, &faces, &face_ids).expect("build");
@@ -1652,7 +2029,7 @@ mod tests {
     /// deeply interior: every box corner satisfies `|x| + |y| + |z| <= 3`,
     /// against the octahedron's own boundary at `|x| + |y| + |z| = 10` --
     /// 7 mm of clearance on the tightest direction, and no sample point sits
-    /// within any triangle's `EDGE_EPS` of an edge. This is exactly the
+    /// near any triangle's edge. This is exactly the
     /// "sealed cavity" shape triage exists to refuse; compare
     /// `triage_batches_bounded_samples_and_refuses_a_pre_hollowed_shell` in
     /// `tests/topology_triage.rs`, the axis-aligned version of this same
@@ -1687,6 +2064,7 @@ mod tests {
     /// exists to prevent.
     #[test]
     fn triage_accepts_a_pre_hollowed_octahedron_shell_the_containment_fraction_should_refuse() {
+        let _guard = global_counter_guard();
         let (verts, faces) = octahedron_faces(10.0);
         let mesh = join_centered_box(verts, faces, 2.0);
         let limits = TriageTopologyLimits::new(

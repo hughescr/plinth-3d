@@ -4,6 +4,7 @@
 //! nor declares the result drainable or printable; those claims belong to H1b
 //! and the later cavity-support verifier.
 
+use geom_kernel::vec3::{add, cross, scale, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 use plinth_core::{m0_constants, Finite};
 use serde::{Deserialize, Serialize};
@@ -2072,34 +2073,23 @@ fn neighbors(field: &CavityField, flat: usize) -> impl Iterator<Item = usize> {
     values.into_iter().flatten()
 }
 
+/// Drain planning's typed refusal wrapper around the canonical
+/// [`geom_kernel::vec3::normalize`] (`docs/specs/geometry-canon.md` §1 OP-6,
+/// plan item C4). `None` becomes this module's own
+/// [`DrainPlanningRefusal::NonFinite`]; it is never unwrapped into a default
+/// direction.
+///
+/// **Not byte-neutral, by ruling.** The retired copy measured length with a
+/// `hypot` chain and divided componentwise; the canon retires `hypot`
+/// project-wide (§1 OP-6, plan item C8b) in favour of `dot(a, a).sqrt()`, and
+/// pins the `scale(a, 1.0 / n)` spelling over three divisions. Every drain
+/// direction can therefore move by a few ULP — the canon's measured bound is
+/// ≤ 2 ULP / 1.421e-14 mm for the formula change, plus ≤ 1 ULP per component
+/// for the reciprocal-versus-divide spelling.
 fn normalize(value: V3) -> Result<V3, DrainPlanningRefusal> {
-    let length = value[0].hypot(value[1]).hypot(value[2]);
-    if !length.is_finite() || length == 0.0 {
-        return Err(DrainPlanningRefusal::NonFinite {
-            role: HoleRole::Drain,
-        });
-    }
-    Ok([value[0] / length, value[1] / length, value[2] / length])
-}
-
-fn add(a: V3, b: V3) -> V3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn scale(value: V3, amount: f64) -> V3 {
-    [value[0] * amount, value[1] * amount, value[2] * amount]
+    geom_kernel::vec3::normalize(value).ok_or(DrainPlanningRefusal::NonFinite {
+        role: HoleRole::Drain,
+    })
 }
 
 #[cfg(test)]
@@ -2113,6 +2103,61 @@ mod tests {
 
     fn field(mask: Array3<bool>) -> CavityField {
         CavityField::from_selected_mask(&mask, [0.0, 0.0, 0.0], 0.5).expect("finite field")
+    }
+
+    /// C4 (`docs/specs/geometry-canon.md` §1 OP-6): drain planning's
+    /// `normalize` is a typed refusal, never a sentinel vector. The kernel
+    /// returns `None` for a directionless input and this module maps it to
+    /// [`DrainPlanningRefusal::NonFinite`]; nothing unwraps it into a default.
+    #[test]
+    fn normalize_refuses_every_directionless_input_instead_of_returning_one() {
+        for input in [
+            [0.0, 0.0, 0.0],
+            [-0.0, -0.0, -0.0],
+            [f64::NAN, 0.0, 1.0],
+            [f64::INFINITY, 0.0, 1.0],
+            [0.0, f64::NEG_INFINITY, 1.0],
+        ] {
+            assert!(
+                matches!(
+                    normalize(input),
+                    Err(DrainPlanningRefusal::NonFinite {
+                        role: HoleRole::Drain
+                    })
+                ),
+                "{input:?} must refuse, not produce a direction"
+            );
+        }
+        let unit = normalize([0.0, 3.0, 4.0]).expect("a real direction normalizes");
+        assert!(unit.iter().all(|component| component.is_finite()));
+        let length = (unit[0] * unit[0] + unit[1] * unit[1] + unit[2] * unit[2]).sqrt();
+        assert!(
+            (length - 1.0).abs() <= 1.0e-15,
+            "a returned direction must be unit; {unit:?} has length {length}"
+        );
+    }
+
+    /// The one direction the canon's `normalize` spelling is expected to move:
+    /// `scale(a, 1.0 / norm(a))` is one reciprocal and three multiplies, where
+    /// the retired `hypot`-chain copy divided componentwise. The two are not
+    /// bit-identical, and the canon pins the multiply form
+    /// (`geom_kernel::vec3::normalize`, "Spelling, and the ULP it costs"). This
+    /// pins the direction of the choice so a future "tidy-up" back to three
+    /// divisions is a failing test rather than a silent digest move.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the exact bits ARE the claim: this test exists to pin the reciprocal-multiply \
+                  spelling against componentwise division, and a tolerance would make it unable \
+                  to tell them apart. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn normalize_uses_the_canonical_reciprocal_spelling_not_componentwise_division() {
+        let value = [3.0, 4.0, 0.0];
+        let unit = normalize(value).expect("a real direction normalizes");
+        assert_eq!(unit[0], 0.600_000_000_000_000_1);
+        assert_eq!(unit[1], 0.8);
+        assert_eq!(unit[2], 0.0);
     }
 
     /// `shipped_chambers` on a field small enough to state cell by cell.

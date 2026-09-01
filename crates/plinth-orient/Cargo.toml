@@ -9,9 +9,11 @@ publish = false
 workspace = true
 
 [dependencies]
-# The shared kernel is depended on for exactly one thing: `current_threads`,
-# the single `PLINTH_THREADS` pool authority every crate's batch calls share
-# (06-conventions §3).  No spatial query in this crate goes anywhere else, and
+# The shared kernel is depended on for two things: `run_in_pool`, the single
+# `PLINTH_THREADS` pool authority every crate's batch calls share
+# (06-conventions §3), and `geom_kernel::vec3` for this crate's dot/cross/norm
+# arithmetic (docs/specs/geometry-canon.md §1 OP-6/OP-7/OP-9, geometry
+# consolidation sweep). No spatial query in this crate goes anywhere else, and
 # there is no second BVH here (O-5).
 geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }

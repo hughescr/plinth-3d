@@ -860,6 +860,14 @@ fn xml_escape(text: &str) -> String {
 /// faces, or their area-weighted normals cancel exactly), in which case the
 /// caller falls back to the plate axis rather than rendering a basis built
 /// from noise.
+// GEOM-EXEMPT(this function's cross/norm/normalize arithmetic feeds only the
+// SVG render basis below -- module doc above: "evidence only, and never a
+// gate input", never imported by gates.rs. Same reasoning as the module's
+// named `dot` exemption at geometry-canon.md §1 OP-7 / §4.6, extended here to
+// the sibling FMA arithmetic the census's `fn`-name grep did not itemize
+// separately because it is inlined rather than named. A formula divergence
+// from geom_kernel here cannot move a printed byte; consolidating would cost
+// review for no behavioural change.)
 fn island_view_basis(
     mesh: &RenderMesh,
     highlighted: &BTreeSet<u32>,
@@ -924,6 +932,10 @@ fn island_view_basis(
     Some((u, v, n))
 }
 
+// GEOM-EXEMPT(evidence-only SVG basis projection, never a gate input --
+// docs/specs/geometry-canon.md §1 OP-7 and §4.6: the module doc above states
+// the owner ruling directly, "never imported by gates.rs", two call sites
+// inside the SVG projection. The FMA cannot move a printed byte.)
 fn dot(left: [f64; 3], right: &[f64; 3]) -> f64 {
     left[0].mul_add(right[0], left[1].mul_add(right[1], left[2] * right[2]))
 }

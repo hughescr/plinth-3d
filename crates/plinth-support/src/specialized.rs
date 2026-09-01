@@ -8,6 +8,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::poly2::{point_in_polygon, point_segment_distance};
+use geom_kernel::vec3::dist;
 use geom_kernel::{
     knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, NativeSurface,
     NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits,
@@ -8258,40 +8260,15 @@ fn point_in_solid(point: [f64; 2], solid: &SliceSolid, tolerance: f64) -> bool {
         })
 }
 
-fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut inside = false;
-    for index in 0..polygon.len() {
-        let a = polygon[index];
-        let b = polygon[(index + 1) % polygon.len()];
-        if (a[1] > point[1]) != (b[1] > point[1])
-            && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
-        {
-            inside = !inside;
-        }
-    }
-    inside
-}
-
 fn boundary_distance(point: [f64; 2], polygon: &[[f64; 2]]) -> f64 {
     polygon
         .iter()
         .enumerate()
         .map(|(index, &a)| {
             let b = polygon[(index + 1) % polygon.len()];
-            segment_distance(point, a, b)
+            point_segment_distance(point, a, b)
         })
         .fold(f64::INFINITY, f64::min)
-}
-
-fn segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
-    let edge = [b[0] - a[0], b[1] - a[1]];
-    let length_squared = edge[0] * edge[0] + edge[1] * edge[1];
-    if length_squared == 0.0 {
-        return (point[0] - a[0]).hypot(point[1] - a[1]);
-    }
-    let t = (((point[0] - a[0]) * edge[0] + (point[1] - a[1]) * edge[1]) / length_squared)
-        .clamp(0.0, 1.0);
-    (point[0] - (a[0] + t * edge[0])).hypot(point[1] - (a[1] + t * edge[1]))
 }
 
 fn compare_demands(left: &SpecializedDemand, right: &SpecializedDemand) -> Ordering {
@@ -8448,10 +8425,17 @@ fn same_point(left: [f64; 3], right: [f64; 3]) -> bool {
     left == right
 }
 
+/// Distance in mm between two seat positions.
+///
+/// Canon item C8b (`docs/specs/geometry-canon.md` §1 OP-6): this was a `hypot`
+/// chain, the third of the workspace's three norm formulas. `hypot` is
+/// semantically better only beyond ~1e+-150 mm, which a 218 mm plate cannot
+/// reach, and it costs a permanent 2-ULP divergence from the kernel on ~20 %
+/// of values. One formula wins, and it is `vec3::dist` = `dot(d, d).sqrt()`.
+/// The census did not list this site; it is the same defect as
+/// `anchor`/`cco`/`drains` and lands in the same batch.
 fn distance3(left: [f64; 3], right: [f64; 3]) -> f64 {
-    (left[0] - right[0])
-        .hypot(left[1] - right[1])
-        .hypot(left[2] - right[2])
+    dist(left, right)
 }
 
 fn bound_authority_base(
@@ -15271,7 +15255,28 @@ mod tests {
                 "toed slab",
                 "make_toed_slab",
                 make_toed_slab().unwrap(),
-                5_397_140_793_948_005_744_u64,
+                // Re-pinned 2026-08-31, geometry-consolidation plan item C7
+                // (`docs/specs/geometry-canon.md` §1 OP-4). PRIOR RECORD, kept
+                // verbatim: `5_397_140_793_948_005_744` (2026-08-08 FU-10
+                // phase-C polygon-union cutover, below).
+                //   from -> to: 5_397_140_793_948_005_744 -> 10_015_988_567_687_648_348
+                // Cause, MEASURED not argued: `dyadic.rs`'s `dist_sq`,
+                // `triangle_area_mm2` and `face_normal` were fused (`mul_add`)
+                // in violation of the kernel's no-FMA house rule
+                // (`rust/geom_kernel/src/vec3.rs:1-5`, spec sec 5.1) and are
+                // now the kernel's plain `cross`/`norm`/`dot`. Those three feed
+                // `build_rows` -> the coverage sampler, which is what this
+                // digest binds. Attribution proven by bisect: with ONLY
+                // `dyadic.rs` restored to its fused spelling and every other
+                // sweep change in place, this digest returns to
+                // `5_397_140_793_948_005_744` exactly.
+                // Everything else this test asserts is UNCHANGED and still
+                // checked: counts `(42, 34_304, 8)`, `coalesced = 0`,
+                // `shared_seats = 3`, `baseline == accepted`, and every contact
+                // on a distinct physical position. Only the last bits of the
+                // sampled normals moved, which is what canon §3 C7 says to
+                // expect ("island demands may shift at sampling thresholds").
+                10_015_988_567_687_648_348_u64,
                 (42, 34_304, 8),
                 3_usize,
                 0_usize,
@@ -15280,7 +15285,14 @@ mod tests {
                 "raking blade",
                 "make_raking_blade",
                 make_raking_blade().unwrap(),
-                9_036_091_150_423_983_742_u64,
+                // Re-pinned 2026-08-31, same cause and same bisect as the toed
+                // slab above (plan item C7, `dyadic.rs` de-FMA). PRIOR RECORD:
+                // `9_036_091_150_423_983_742` (2026-08-08).
+                //   from -> to: 9_036_091_150_423_983_742 -> 6_765_996_461_499_092_628
+                // Counts `(33, 34_176, 8)`, `coalesced = 1` (this model is the
+                // one that still exercises `coalesce_exact_regular_seats`) and
+                // `shared_seats = 3` are all unchanged.
+                6_765_996_461_499_092_628_u64,
                 (33, 34_176, 8),
                 3,
                 1,
@@ -15348,7 +15360,19 @@ mod tests {
                 // than a regeneration of an older one.
                 "toed slab",
                 make_toed_slab().unwrap(),
-                11_859_964_443_161_510_103_u64,
+                // Re-pinned 2026-08-31, geometry-consolidation plan item C7
+                // (`docs/specs/geometry-canon.md` §1 OP-4), same cause and same
+                // bisect as the two digests in
+                // `oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing`:
+                // `dyadic.rs`'s fused `dist_sq` / `triangle_area_mm2` /
+                // `face_normal` are now the kernel's plain forms, and they feed
+                // the coverage sampler this digest binds. PRIOR RECORD, kept:
+                // `11_859_964_443_161_510_103` (the fresh freeze noted above).
+                //   from -> to: 11_859_964_443_161_510_103 -> 12_394_382_057_751_394_813
+                // Counts `(73, 50_176, 7)` and gate `(3, 0, 3, 0)` are
+                // unchanged, as are `non_worsening`, `unique_faces` and
+                // `thin_fin_coverage`.
+                12_394_382_057_751_394_813_u64,
                 (73, 50_176, 7),
                 (3, 0, 3, 0),
             ),

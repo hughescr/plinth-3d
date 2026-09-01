@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use geom_kernel::vec3::{cross, dot, norm, sub};
+
 use crate::forest::{ContactEnd, MemberKind};
 use crate::runner::SupportVerificationSnapshot;
 
@@ -893,12 +895,8 @@ pub(crate) fn record_segment_batch(
 ) {
     with(|census| {
         for index in 0..p0s.len() {
-            let delta = [
-                p1s[index][0] - p0s[index][0],
-                p1s[index][1] - p0s[index][1],
-                p1s[index][2] - p0s[index][2],
-            ];
-            let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+            let delta = sub(p1s[index], p0s[index]);
+            let length = norm(delta);
             // Exactly `seg_clear_one_excluding`'s two INFINITY predicates.
             let degenerate = length < 1e-9;
             let usable = (length - inset1s[index]) - inset0s[index];
@@ -1131,17 +1129,13 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
         let (_, _, _, normals) = surface.project(&seats);
         let mut cosines = Vec::with_capacity(seats.len());
         for (entry, normal) in census.anchors.iter().zip(normals) {
-            let axis = [
-                entry.seat[0] - entry.stub_end[0],
-                entry.seat[1] - entry.stub_end[1],
-                entry.seat[2] - entry.stub_end[2],
-            ];
-            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let axis = sub(entry.seat, entry.stub_end);
+            let length = norm(axis);
             if length <= 0.0 {
                 continue;
             }
-            let dot = (axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2]) / length;
-            cosines.push(dot.abs());
+            let cosine = dot(axis, normal) / length;
+            cosines.push(cosine.abs());
         }
         let counts = histogram(cosines.iter().copied());
         let grazing = cosines.iter().filter(|value| **value < 0.5).count();
@@ -1178,13 +1172,13 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
         let (_, _, _, normals) = surface.project(&seats);
         let mut cosines = Vec::with_capacity(seats.len());
         for ((p0, p1), normal) in surviving.iter().zip(normals) {
-            let axis = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let axis = sub(*p1, *p0);
+            let length = norm(axis);
             if length <= 0.0 {
                 continue;
             }
-            let dot = (axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2]) / length;
-            cosines.push(dot.abs());
+            let cosine = dot(axis, normal) / length;
+            cosines.push(cosine.abs());
         }
         let counts = histogram(cosines.iter().copied());
         let grazing = cosines.iter().filter(|value| **value < 0.5).count();
@@ -1317,20 +1311,12 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
             } else {
                 [1.0, 0.0, 0.0]
             };
-            let mut u = [
-                normal[1] * helper[2] - normal[2] * helper[1],
-                normal[2] * helper[0] - normal[0] * helper[2],
-                normal[0] * helper[1] - normal[1] * helper[0],
-            ];
-            let un = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+            let mut u = cross(normal, helper);
+            let un = norm(u);
             for axis in &mut u {
                 *axis /= un;
             }
-            let v = [
-                normal[1] * u[2] - normal[2] * u[1],
-                normal[2] * u[0] - normal[0] * u[2],
-                normal[0] * u[1] - normal[1] * u[0],
-            ];
+            let v = cross(normal, u);
             let step = entry.tip_radius_mm.max(0.05);
             for (sign_u, sign_v) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
                 probes.push(std::array::from_fn(|axis| {

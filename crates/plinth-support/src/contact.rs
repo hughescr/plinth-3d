@@ -24,6 +24,7 @@
 //! Nothing in this module invents a constant.  Every number comes from the M0
 //! registry via [`ContactPolicy`], or from the run's own [`LayerPlan`].
 
+use geom_kernel::vec3::{dot, norm, sub};
 use plinth_core::LayerPlan;
 
 use crate::forest::{ContactEnd, MemberKind};
@@ -381,7 +382,7 @@ pub(crate) fn seat_endpoint(
     seat_depth_mm: f64,
 ) -> ([f64; 3], f64, f64) {
     debug_assert!(
-        (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] - 1.0).abs() < 1e-6,
+        (dot(normal, normal) - 1.0).abs() < 1e-6,
         "seat_endpoint requires a unit normal"
     );
     let p_contact = [
@@ -389,14 +390,15 @@ pub(crate) fn seat_endpoint(
         p_surface[1] - normal[1] * seat_depth_mm,
         p_surface[2] - normal[2] * seat_depth_mm,
     ];
-    let v1 = [
-        p_contact[0] - other_end[0],
-        p_contact[1] - other_end[1],
-        p_contact[2] - other_end[2],
-    ];
-    let len = (v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]).sqrt();
+    // Canon §1 OP-9 / plan item C8a: `sub`, `norm` and `dot` are the kernel's
+    // spellings of exactly these formulas in exactly this order, so this is
+    // byte-neutral. The `len > 0.0` guard stays: it is already the canon's
+    // exact, tolerance-free degeneracy predicate (§1 OP-4), and it keeps the
+    // divide out of the zero case rather than emitting a NaN cosine.
+    let v1 = sub(p_contact, other_end);
+    let len = norm(v1);
     let abs_cos = if len > 0.0 {
-        ((v1[0] * normal[0] + v1[1] * normal[1] + v1[2] * normal[2]) / len).abs()
+        (dot(v1, normal) / len).abs()
     } else {
         0.0
     };

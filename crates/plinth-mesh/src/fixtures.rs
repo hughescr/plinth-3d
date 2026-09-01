@@ -1,3 +1,5 @@
+use geom_kernel::vec3::{cross, dot, sub};
+
 use crate::{Mesh, MeshError};
 
 const BOX_FACES: [[u32; 3]; 12] = [
@@ -167,16 +169,15 @@ fn append_tetra(
     points: [[f64; 3]; 4],
 ) -> Result<(), MeshError> {
     let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
-    let edge = |to: usize| {
-        [
-            points[to][0] - points[0][0],
-            points[to][1] - points[0][1],
-            points[to][2] - points[0][2],
-        ]
-    };
+    let edge = |to: usize| sub(points[to], points[0]);
     let (u, v, w) = (edge(1), edge(2), edge(3));
-    let determinant = u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
-        + u[2] * (v[0] * w[1] - v[1] * w[0]);
+    // `geom_kernel::vec3` (docs/specs/geometry-canon.md §1 OP-9, plan item
+    // C8a). Byte-neutral: the retired inline scalar triple product spelled its
+    // middle term `-u[1] * (v[0]*w[2] - v[2]*w[0])`, which is the exact IEEE
+    // negation of the kernel's `u[1] * (v[2]*w[0] - v[0]*w[2])`, and negation
+    // is exact — so the sum associates identically and the sign test below
+    // cannot move.
+    let determinant = dot(u, cross(v, w));
     if !determinant.is_finite() || determinant == 0.0 {
         return Err(MeshError::InvalidFiniteFixtureParameter {
             parameter: "tetra volume",
@@ -1031,12 +1032,9 @@ fn mesh_signed_volume(mesh: &Mesh) -> f64 {
             let a = mesh.verts()[triangle[0] as usize];
             let b = mesh.verts()[triangle[1] as usize];
             let c = mesh.verts()[triangle[2] as usize];
-            let cross = [
-                b[1] * c[2] - b[2] * c[1],
-                b[2] * c[0] - b[0] * c[2],
-                b[0] * c[1] - b[1] * c[0],
-            ];
-            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+            // `geom_kernel::vec3` (canon §1 OP-9, C8a). Byte-neutral: same
+            // cross operand order, same left-to-right dot association.
+            dot(a, cross(b, c)) / 6.0
         })
         .sum()
 }

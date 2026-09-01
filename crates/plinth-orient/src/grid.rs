@@ -56,6 +56,7 @@
 //! clock.  Every tie — nearest bin, heaviest bin — resolves to the lowest index,
 //! so the grid is a pure function of `(mesh, registered constants)`.
 
+use geom_kernel::vec3;
 use plinth_core::{m0_constants, Finite};
 use sha2::{Digest, Sha256};
 
@@ -363,7 +364,7 @@ fn push_unique(
     let u = direction.get();
     for existing in candidates.iter() {
         let v = existing.direction.get();
-        if u[0] * v[0] + u[1] * v[1] + u[2] * v[2] > cosine {
+        if vec3::dot(u, v) > cosine {
             *duplicates_dropped += 1;
             return;
         }
@@ -440,7 +441,7 @@ fn rest_poses(
         let mut best_dot = f64::NEG_INFINITY;
         for (bin, candidate) in reference.iter().enumerate() {
             let v = candidate.get();
-            let dot = down[0] * v[0] + down[1] * v[1] + down[2] * v[2];
+            let dot = vec3::dot(down, v);
             // Strict `>`: the lowest bin index wins a tie.
             if dot > best_dot {
                 best_dot = dot;

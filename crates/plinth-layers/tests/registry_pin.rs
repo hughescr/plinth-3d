@@ -48,3 +48,23 @@ fn quantum_is_exactly_the_stitch_key() {
         geom_kernel::PLANE_SLICE_MERGE_TOLERANCE_MM
     );
 }
+
+/// `geom_kernel::poly2::SLICE_QUANTUM_MM` is the mirror of this crate's
+/// quantum that `docs/specs/geometry-canon.md` §1 OP-3 requires: the
+/// dependency edge points `plinth-layers -> geom_kernel`, so `poly2` cannot
+/// import `SLICE_UNION_QUANTUM_MM` directly and instead declares its own copy.
+/// This test is the cross-crate pin that keeps the two from drifting
+/// silently, the same pattern `quantum_is_exactly_the_stitch_key` already
+/// uses for `LOOP_MERGE_MM`.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+fn poly2_quantum_mirrors_slice_union_quantum() {
+    assert_eq!(
+        geom_kernel::poly2::SLICE_QUANTUM_MM,
+        plinth_layers::SLICE_UNION_QUANTUM_MM
+    );
+}

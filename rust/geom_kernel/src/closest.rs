@@ -76,9 +76,71 @@ pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
     }
 }
 
-/// Segment-vs-segment closest distance + points, geometry_exact.py:287-310.
-/// P1Q1 is the (broadcast) query segment, P2Q2 the triangle edge. Returns
-/// `(dist, c1_on_seg, c2_on_edge)`. The re-clamp sequence is pinned (A21).
+/// Closest distance between two 3D segments, plus the closest point on each.
+///
+/// **Canonical for the workspace** (`docs/specs/geometry-canon.md` §1 OP-1,
+/// plan item C3). `crates/plinth-hollow/src/drilling.rs`'s private
+/// `segment_distance()` is retired in favour of this function: its parallel
+/// guard compared an mm⁴ determinant against an mm constant
+/// (`PROOF_EPSILON_MM = 1e-7`), forcing the `s = 0` branch on 35.98 % of pairs
+/// at drain-keepout scale with no correct recovery, and answering wrong by up
+/// to 4.494e-2 mm. This implementation is bit-identical to a 20,001²
+/// brute-force sweep on that worst case.
+///
+/// Ported TERM-FOR-TERM from geometry_exact.py:287-310. **A21 pin, carried
+/// verbatim from this module's header so a later "simplification" fails review
+/// rather than parity:** *"ported TERM-FOR-TERM from geometry_exact.py with the
+/// pinned operand-construction sequences of Amendments A6/A21. Idiomatic
+/// reassociation is a spec violation here even when algebraically neutral —
+/// these outputs feed bit-parity pins."* Concretely, the pinned sequence is:
+/// `s` from the denominator then clamped; `t` computed from that `s` then
+/// clamped; `s` RE-computed from `t` then clamped again. Collapsing the
+/// re-clamp is what makes the retired copy wrong.
+///
+/// # Units and orientation
+///
+/// All four points are mm. Returns `(distance_mm, closest_on_p1q1,
+/// closest_on_p2q2)` — the distance is `dist` of the two returned points, so a
+/// caller never recomputes it. `p1q1` is the (broadcast) query segment and
+/// `p2q2` the triangle edge in this kernel's own use; the function itself is
+/// symmetric apart from which returned point belongs to which segment.
+///
+/// # Degenerate-input contract
+///
+/// Every finite input gets a finite answer. There is no refusal path and no
+/// `Option`.
+///
+/// * **Parallel or near-parallel** (`denom = |u|²|v|² − (u·v)² ≤ 1e-14`): takes
+///   the `s = 0` branch, and the A21 re-clamp then recovers the minimum. For
+///   EXACTLY parallel pairs that minimum is exact. **For NEAR-parallel pairs it
+///   is not exact, and the canon's OP-1 sentence overstates it**: the re-clamp
+///   is one coordinate-descent step, so the answer can sit slightly ABOVE the
+///   true minimum. Measured over 20,000 near-parallel pairs at drain-keepout
+///   scale (0.005–0.05 mm segments, every case on this branch, brute-forced
+///   against a 20,001-sample sweep): the excess is at most **5.145e-6 mm**
+///   (2.49e-3 relative), and it shrinks with segment length — 4.10e-8 mm at
+///   0.5–5 mm, 4.50e-9 mm at 5–50 mm.
+///
+///   The guard therefore still PRUNES rather than decides, but by a measured
+///   margin, not by exactness: 5.145e-6 mm is 1/58,000 of the 0.3 mm hard
+///   clearance limit and 1/117,000 of the 0.6 mm placement margin, and it is
+///   8,700× smaller than the retired drilling copy's 4.494e-2 mm error. The
+///   difference in kind remains the one the canon names: this branch lands
+///   within a few parts in 10⁶ of the true answer, drilling's landed 2.55×
+///   away from it.
+/// * **Zero-length first segment** (`a = |p1q1|² ≤ 1e-14`): `s = 0`, and the
+///   call degenerates to point-vs-segment. Correct finite answer, no refusal.
+/// * **Zero-length second segment** (`e = |p2q2|² ≤ 1e-14`): `t = 0`;
+///   point-vs-point when both segments are degenerate. Correct finite answer.
+/// * **Non-finite input is NOT guarded**; the output is non-finite. Callers
+///   that must refuse check before or after the call.
+/// * **Refusal semantics stay at the caller.** This primitive returns a
+///   distance for every input and never encodes one caller's refusal.
+///   `validate_final_holes` keeps checking for zero-length keepout axes itself
+///   and keeps raising `InvalidHoleGeometry` itself.
+///
+/// `SEGSEG_EPS = 1e-14` is oracle-pinned; changing it is a parity break with no
+/// benefit.
 #[inline]
 #[allow(
     clippy::suspicious_operation_groupings,
@@ -86,7 +148,7 @@ pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
               - (u.v)^2, a determinant whose middle term is squared by \
               construction, not a mis-typed `a * b`"
 )]
-pub fn segseg(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3) {
+pub fn segment_segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3) {
     let d1 = sub(q1, p1);
     let d2 = sub(q2, p2);
     let r = sub(p1, p2);

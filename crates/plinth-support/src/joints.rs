@@ -5,6 +5,7 @@
 //! contains the ball centre.  Any numerical, depth, work, or memory limit
 //! leaves the ball in the result.
 
+use geom_kernel::vec3::{add, dot, norm, normalize, scale, sub};
 use plinth_core::{Finite, PositiveFinite};
 use thiserror::Error;
 
@@ -1328,7 +1329,15 @@ fn certify_sphere(
     if !certificate_peak_fits(credited_bytes, initial_bytes, scratch) {
         return false;
     }
-    let mut patches = icosahedron();
+    // Canon C4: `icosahedron` normalises its twelve seed vertices through
+    // `vec3::normalize`, which declines rather than returning `[NaN; 3]`.
+    // A decline here is a numerical refusal, and this function's contract is
+    // that any numerical, depth, work, or memory limit leaves the ball in the
+    // result (module header) - so it is `false`, exactly like every other
+    // bail-out above.
+    let Some(mut patches) = icosahedron() else {
+        return false;
+    };
     let mut total = patches.len();
     if total > config.max_patches {
         return false;
@@ -1356,7 +1365,16 @@ fn certify_sphere(
         let mut theta = Vec::with_capacity(patches.len());
         let mut points = Vec::with_capacity(patches.len());
         for patch in &patches {
-            let direction = normalize(add(add(patch.a, patch.b), patch.c));
+            // Canon C4 (`docs/specs/geometry-canon.md` §1 OP-6): the retired
+            // private `normalize` returned a measured `[NaN, NaN, NaN]` for a
+            // zero-length vector, and a NaN direction compares `false` against
+            // every `<` and `>` downstream — a value meaning "measured
+            // nothing" that every guard reads as "not violated". The kernel
+            // declines instead, and a decline is a numerical refusal, which
+            // this function answers with `false` (ball retained).
+            let Some(direction) = normalize(add(add(patch.a, patch.b), patch.c)) else {
+                return false;
+            };
             theta.push(
                 angle(direction, patch.a)
                     .max(angle(direction, patch.b))
@@ -1426,9 +1444,16 @@ fn certify_sphere(
         }
         let mut children = Vec::with_capacity(child_count);
         for patch in unresolved {
-            let ab = normalize(add(patch.a, patch.b));
-            let bc = normalize(add(patch.b, patch.c));
-            let ca = normalize(add(patch.c, patch.a));
+            // Canon C4: as above — an edge midpoint with no direction is a
+            // refusal (`false`, ball retained), never a `[NaN; 3]` vertex fed
+            // into the next subdivision level.
+            let (Some(ab), Some(bc), Some(ca)) = (
+                normalize(add(patch.a, patch.b)),
+                normalize(add(patch.b, patch.c)),
+                normalize(add(patch.c, patch.a)),
+            ) else {
+                return false;
+            };
             let depth = patch.depth + 1;
             children.extend([
                 Patch {
@@ -1477,7 +1502,14 @@ fn signed_distances_to_frustum(points: &[[f64; 3]], member: &LiveMember, output:
 
 fn signed_distance_to_frustum(point: [f64; 3], member: &LiveMember) -> f64 {
     let d = sub(member.p1, member.p0);
-    let l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    // GEOM-EXEMPT(the THRESHOLD, not the arithmetic) — GEOMETRY-CANON EXEMPT:
+    // canon §1 OP-3 rules only on the 2D slice-lattice degeneracy test; this is
+    // a 3D axis-degeneracy guard on frustum member endpoints, which the canon
+    // does not cover. The formula is now the kernel's `dot(d, d)` (identical
+    // text, byte-neutral, canon §1 OP-9); `DEGENERATE_LENGTH_SQUARED` is left
+    // exactly as it was because choosing a value for it would be improvising
+    // policy the canon deliberately did not set.
+    let l2 = dot(d, d);
     if l2 < DEGENERATE_LENGTH_SQUARED {
         return norm(sub(point, member.p0)) - member.r0;
     }
@@ -1486,10 +1518,7 @@ fn signed_distance_to_frustum(point: [f64; 3], member: &LiveMember) -> f64 {
     let delta = sub(point, member.p0);
     let axial = dot(delta, axis);
     let radial_vector = sub(sub(point, member.p0), scale(axis, axial));
-    let radial = (radial_vector[0] * radial_vector[0]
-        + radial_vector[1] * radial_vector[1]
-        + radial_vector[2] * radial_vector[2])
-        .sqrt();
+    let radial = norm(radial_vector);
     let cap0 = segment_distance_2d(axial, radial, 0.0, 0.0, 0.0, member.r0);
     let slant = segment_distance_2d(axial, radial, 0.0, member.r0, length, member.r1);
     let cap1 = segment_distance_2d(axial, radial, length, member.r1, length, 0.0);
@@ -1502,6 +1531,16 @@ fn signed_distance_to_frustum(point: [f64; 3], member: &LiveMember) -> f64 {
     }
 }
 
+/// Distance from `(qx, qy)` to the segment `(ax, ay)`-`(bx, by)`.
+///
+/// GEOM-EXEMPT(different data: this is an `(axial, radial)` frustum PROFILE,
+/// not a slice loop) — GEOMETRY-CANON EXEMPT: canon §4 item 5 and §1 OP-3.
+/// `geom_kernel::poly2::point_segment_distance` carries
+/// `DEGENERATE_EDGE_L2_MM2`, derived from the 1e-8 mm SLICE lattice; that
+/// derivation is meaningless for a profile whose degeneracies come from
+/// `r0`/`r1` caps collapsing to exactly zero, which is what
+/// `DEGENERATE_LENGTH_SQUARED` guards. The canon forbids growing `poly2` a
+/// tolerance parameter to absorb this, so the formula stays here.
 fn segment_distance_2d(qx: f64, qy: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     let dx = bx - ax;
     let dy = by - ay;
@@ -1513,7 +1552,16 @@ fn segment_distance_2d(qx: f64, qy: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
     (qx - (ax + t * dx)).hypot(qy - (ay + t * dy))
 }
 
-fn icosahedron() -> Vec<Patch> {
+/// The twenty seed patches of a unit icosahedron, or `None` if any seed vertex
+/// has no direction.
+///
+/// Canon C4: the `None` arm is unreachable for the twelve compile-time seeds
+/// below — every one has norm `sqrt(1 + phi^2)` = 1.902..., verified by the
+/// `icosahedron_seeds_all_normalize` test — but it is a real `Option` rather
+/// than an `expect`, because the alternative the canon forbids is exactly the
+/// one this function used to take: divide by the norm unguarded and hand back
+/// `[NaN, NaN, NaN]`.
+fn icosahedron() -> Option<Vec<Patch>> {
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
     let mut vertices = [[0.0; 3]; 12];
     let mut next = 0;
@@ -1526,7 +1574,7 @@ fn icosahedron() -> Vec<Patch> {
         }
     }
     for vertex in &mut vertices {
-        *vertex = normalize(*vertex);
+        *vertex = normalize(*vertex)?;
     }
     let mut nearest = f64::INFINITY;
     for i in 0..vertices.len() {
@@ -1554,27 +1602,14 @@ fn icosahedron() -> Vec<Patch> {
         }
     }
     debug_assert_eq!(faces.len(), 20);
-    faces
+    Some(faces)
 }
 
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn norm(a: [f64; 3]) -> f64 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
-fn normalize(a: [f64; 3]) -> [f64; 3] {
-    scale(a, 1.0 / norm(a))
-}
+/// Angle in radians between two UNIT vectors, `acos(clamp(a.b, -1, 1))`.
+///
+/// Not a kernel operation — it is a joints-local policy that a dot product a
+/// hair outside `[-1, 1]` from rounding is clamped rather than turned into a
+/// `NaN` by `acos`. The dot itself is the kernel's (canon §1 OP-7).
 fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
     dot(a, b).clamp(-1.0, 1.0).acos()
 }
@@ -1585,6 +1620,57 @@ mod tests {
 
     use super::*;
     use crate::forest::{MemberKey, MemberSpec, RootwardEndRadius, TerminalEndRadius};
+
+    /// Canon item C4 (`docs/specs/geometry-canon.md` §1 OP-6): the retired
+    /// private `normalize` divided by the norm unguarded and handed back
+    /// `[NaN, NaN, NaN]` for the zero vector — a value meaning "measured
+    /// nothing" that every downstream `<`/`>` reads as "not violated".
+    /// `geom_kernel::vec3::normalize` declines instead, so `icosahedron`
+    /// returns `Option`.
+    ///
+    /// The `None` arm is unreachable for these twelve compile-time seeds, and
+    /// this test is what says so: every seed normalises, all twenty patches
+    /// are built, and every patch vertex is a unit vector.
+    #[test]
+    fn icosahedron_seeds_all_normalize() {
+        let patches = icosahedron().expect("every icosahedron seed has a direction");
+        assert_eq!(patches.len(), 20);
+        for patch in &patches {
+            for vertex in [patch.a, patch.b, patch.c] {
+                let length = norm(vertex);
+                assert!(
+                    (length - 1.0).abs() < 1e-15,
+                    "patch vertex {vertex:?} has length {length}, expected unit"
+                );
+                assert!(
+                    vertex.iter().all(|value| value.is_finite()),
+                    "patch vertex {vertex:?} is not finite -- this is exactly the \
+                     [NaN, NaN, NaN] the C4 refusal removes"
+                );
+            }
+            assert_eq!(patch.depth, 0);
+        }
+    }
+
+    /// Canon C4, the other half: the refusal the new contract adds is real,
+    /// not decorative. A direction cannot be derived from a zero vector, and
+    /// the answer is `None` rather than a sentinel every guard passes.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact pins are the claim: `normalize` answers `None` or an exact unit basis \
+                  vector, and a tolerance here could not tell a sentinel from a refusal. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_directionless_vector_refuses_instead_of_returning_nan() {
+        assert_eq!(normalize([0.0, 0.0, 0.0]), None);
+        assert_eq!(normalize([-0.0, -0.0, -0.0]), None);
+        assert_eq!(normalize([f64::NAN, 0.0, 0.0]), None);
+        assert_eq!(normalize([f64::INFINITY, 0.0, 0.0]), None);
+        // ...and a real direction still normalises.
+        let unit = normalize([0.0, 0.0, 3.0]).expect("a 3 mm +z vector has a direction");
+        assert_eq!(unit, [0.0, 0.0, 1.0]);
+    }
 
     fn finite3(value: [f64; 3]) -> [Finite; 3] {
         value.map(|v| Finite::new(v).unwrap())

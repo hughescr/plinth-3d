@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use geom_kernel::vec3::{dot, sub};
 use serde::{Deserialize, Serialize};
 
 use crate::coverage_closure::{CoverageClosureGap, CoverageScoreShare};
@@ -1334,11 +1335,14 @@ impl RepairVetoIndex {
 /// The diversity disc's own containment arithmetic, to the term order — the
 /// two memories must agree on what "near" means, and a second formula would be
 /// a second definition.
+///
+/// Canon item C7 (`docs/specs/geometry-canon.md` §2 step 2(c)): the term order
+/// is now the kernel's `dot(sub, sub)`, not a `mul_add` chain. The comment
+/// above was already the right argument; it was being made against a formula
+/// the rest of the workspace does not use.
 fn seat_distance_sq(left: [f64; 3], right: [f64; 3]) -> f64 {
-    let dx = left[0] - right[0];
-    let dy = left[1] - right[1];
-    let dz = left[2] - right[2];
-    dx.mul_add(dx, dy.mul_add(dy, dz * dz))
+    let d = sub(left, right);
+    dot(d, d)
 }
 
 // ---------------------------------------------------------------------------
@@ -2894,6 +2898,13 @@ mod tests {
                 reason = "test-local coordinate spread; the value is a seat position, not a count"
             )]
             let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+            // GEOM-EXEMPT(scalar affine map, not vector algebra) —
+            // GEOMETRY-CANON EXEMPT: canon §2 step 3 (MAY-STAY, test code).
+            // This is a test-local LCG mapping a unit scalar onto [-20, 20] mm;
+            // there is no vector, no tolerance comparison and no verdict, so
+            // the no-FMA rule (canon §1 OP-7) has nothing to bite on. Listed in
+            // tests/no_private_vector_algebra.rs so the `.mul_add(` matcher
+            // stays a hard failure everywhere else.
             unit.mul_add(40.0, -20.0)
         };
 

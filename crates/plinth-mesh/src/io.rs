@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use geom_kernel::vec3::{cross, dot, normalize, sub};
 use thiserror::Error;
 
 use crate::{Mesh, MeshError, WeldPolicy};
@@ -302,20 +303,24 @@ fn unit_normal(mesh: &Mesh, triangle: usize, indices: [u32; 3]) -> Result<[f64; 
     let a = mesh.verts[indices[0] as usize];
     let b = mesh.verts[indices[1] as usize];
     let c = mesh.verts[indices[2] as usize];
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let normal = [
-        ab[1] * ac[2] - ab[2] * ac[1],
-        ab[2] * ac[0] - ab[0] * ac[2],
-        ab[0] * ac[1] - ab[1] * ac[0],
-    ];
-    let length_squared = normal.iter().map(|value| value * value).sum::<f64>();
-    if !length_squared.is_finite() {
+    // Canonical face normal: `geom_kernel::vec3` cross + `normalize`
+    // (docs/specs/geometry-canon.md §1 OP-4 and OP-6, triage rule (d)).
+    // `normalize` refuses on exactly this site's two former refusals — a
+    // non-finite squared norm and a zero-length cross product — so the two
+    // typed errors are separated by re-testing the squared norm, which keeps
+    // `NormalArithmeticOverflow` and `DegenerateTriangle` distinguishable.
+    //
+    // The SPELLING moves bits: the kernel multiplies by one reciprocal where
+    // this function divided three times (kernel `normalize` doc, "Spelling,
+    // and the ULP it costs"). Measured over the eight-model corpus, 27.26 % of
+    // f64 normal components move, all by exactly 1 ULP (<= 1.110e-16) — and
+    // **0 of 1,303,152 differ after the f32 cast this function's caller
+    // applies**, so no emitted STL byte moves.
+    let normal = cross(sub(b, a), sub(c, a));
+    if !dot(normal, normal).is_finite() {
         return Err(MeshError::NormalArithmeticOverflow { triangle }.into());
     }
-    if length_squared == 0.0 {
-        return Err(MeshError::DegenerateTriangle { triangle }.into());
-    }
-    let length = length_squared.sqrt();
-    Ok([normal[0] / length, normal[1] / length, normal[2] / length])
+    // With the squared norm known finite, `normalize` is `None` on exactly the
+    // remaining former refusal: a zero-length cross product.
+    normalize(normal).ok_or_else(|| MeshError::DegenerateTriangle { triangle }.into())
 }

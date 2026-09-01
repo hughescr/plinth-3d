@@ -6,6 +6,7 @@
 //! is committed to the live forest.
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::vec3::{add, dot, norm, scale, sub};
 use geom_kernel::NativeSurface;
 use plinth_core::{m0_constants, Finite, PositiveFinite, CUBIC_MILLIMETRES_PER_MILLILITRE};
 use plinth_mesh::FaceTopology;
@@ -5732,9 +5733,11 @@ fn member_volume(member: &Member) -> Result<f64, CcoError> {
         member.p1_mm().map(Finite::get),
         member.p0_mm().map(Finite::get),
     );
-    // NumPy's frozen `linalg.norm` vector executes sqrt(sum(delta**2));
-    // `f64::hypot` has different rounding on mixed-axis spans.
-    let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+    // NumPy's frozen `linalg.norm` vector executes sqrt(sum(delta**2)); that
+    // is exactly `geom_kernel::vec3::norm` (`dot(a, a).sqrt()`), which is the
+    // one surviving norm for the workspace (canon §1 OP-6). `f64::hypot` has
+    // different rounding on mixed-axis spans and is retired here (canon C8b).
+    let length = norm(delta);
     let r0 = member.terminal_radius_mm().get().get();
     let r1 = member.rootward_radius_mm().get().get();
     let volume = std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
@@ -5831,22 +5834,6 @@ fn finite3(values: [f64; 3]) -> Result<[Finite; 3], CcoError> {
             ))
         })
 }
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn norm(a: [f64; 3]) -> f64 {
-    a[0].hypot(a[1]).hypot(a[2])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

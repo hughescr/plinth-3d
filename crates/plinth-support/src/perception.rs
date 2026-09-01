@@ -9,6 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use geom_kernel::poly2::{
+    point_in_polygon, point_segment_distance, segments_intersect, signed_area,
+};
+use geom_kernel::vec3::{dot, norm, sub};
 use geom_kernel::{
     KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PlaneSliceLimits,
     PointCloudIndex, PointQueryError, RadiusQueryLimits,
@@ -1597,40 +1601,6 @@ fn canonicalize_loop(mut points: Vec<[f64; 2]>, _hole: bool) -> Vec<[f64; 2]> {
     points
 }
 
-fn signed_area(points: &[[f64; 2]]) -> f64 {
-    if points.len() < 3 {
-        return 0.0;
-    }
-    (0..points.len())
-        .map(|i| {
-            let next = (i + 1) % points.len();
-            points[i][0] * points[next][1] - points[next][0] * points[i][1]
-        })
-        .sum::<f64>()
-        * 0.5
-}
-
-fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut inside = false;
-    for i in 0..polygon.len() {
-        let a = polygon[i];
-        let b = polygon[(i + 1) % polygon.len()];
-        if (a[1] > point[1]) != (b[1] > point[1])
-            && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
-        {
-            inside = !inside;
-        }
-    }
-    inside
-}
-
-fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    let ccw = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
-        (r[1] - p[1]) * (q[0] - p[0]) > (q[1] - p[1]) * (r[0] - p[0])
-    };
-    ccw(a, c, d) != ccw(b, c, d) && ccw(a, b, c) != ccw(a, b, d)
-}
-
 /// FU-10 phase A -- consumer-side in-plane loop orientation.
 ///
 /// Design history: phase table row A (git log only, the design doc that
@@ -1721,6 +1691,15 @@ mod orientation {
         let segment = [b[0] - a[0], b[1] - a[1]];
         // d = z_hat x n projected to the slice plane.
         let derived = [-normal[1], normal[0]];
+        // GEOM-EXEMPT(no canon home: this is 2-D dot and 2-D cross) —
+        // GEOMETRY-CANON EXEMPT: `geom_kernel::vec3` is 3-vector algebra and
+        // `geom_kernel::poly2` publishes only `signed_area`,
+        // `point_in_polygon`, `segments_intersect` and
+        // `point_segment_distance` (canon §1 OP-8). Neither has a 2-D dot or a
+        // 2-D perp-dot, so there is nothing to consolidate TO. The value does
+        // reach a verdict (the winding vote below), which makes this a
+        // MUST-CONSOLIDATE site with no survivor — reported to the canon
+        // rather than improvised into one.
         let along = segment[0] * derived[0] + segment[1] * derived[1];
         // cross(segment, d) = segment . n_xy: deviation from parallel.
         let across = segment[0] * derived[1] - segment[1] * derived[0];
@@ -2465,18 +2444,30 @@ fn find_local_minima(
             let p = welded.verts()[representative];
             let a = welded.verts()[ids[(corner + 1) % 3]];
             let b = welded.verts()[ids[(corner + 2) % 3]];
-            let va = [a[0] - p[0], a[1] - p[1], a[2] - p[2]];
-            let vb = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
-            let la = (va[0] * va[0] + va[1] * va[1] + va[2] * va[2]).sqrt();
-            let lb = (vb[0] * vb[0] + vb[1] * vb[1] + vb[2] * vb[2]).sqrt();
-            let cosine =
-                ((va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2]) / (la * lb)).clamp(-1.0, 1.0);
+            // Canon §1 OP-9 / plan item C8a: the kernel's `sub`, `norm` and
+            // `dot` are character-for-character these formulas in this order,
+            // so the swap is byte-neutral.
+            let va = sub(a, p);
+            let vb = sub(b, p);
+            let la = norm(va);
+            let lb = norm(vb);
+            let cosine = (dot(va, vb) / (la * lb)).clamp(-1.0, 1.0);
             let angle = cosine.acos();
             for (axis, value) in normal.iter_mut().enumerate() {
                 *value += angle * normals[face][axis];
             }
         }
-        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        let length = norm(normal);
+        // GEOM-EXEMPT(the DIVIDE is kept, `vec3::normalize` is not used) —
+        // GEOMETRY-CANON EXEMPT: canon §1 OP-6 fixes `normalize` as
+        // `scale(a, 1.0 / norm(a))`, a reciprocal MULTIPLY, and `x * (1.0 / n)`
+        // is not `x / n` in f64. Swapping this divide for it would move EVERY
+        // angle-weighted vertex normal in perception by up to 1 ULP — movement
+        // the canon's expected-change table (§3) does not authorise for any
+        // item in this sweep. The `length > 0.0` guard already matches the
+        // canon's exact, tolerance-free degeneracy predicate (§1 OP-4), so
+        // nothing here returns a NaN direction. `length` itself is now the
+        // kernel's `norm`, which is bit-identical to the retired spelling.
         if length > 0.0 {
             for value in &mut normal {
                 *value /= length;
@@ -2783,16 +2774,6 @@ fn birth_xy_ok(solid: &SliceSolid, point: [f64; 2], reach: f64) -> bool {
         })
         .fold(f64::INFINITY, f64::min)
         <= reach
-}
-
-fn point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
-    let ab = [b[0] - a[0], b[1] - a[1]];
-    let denominator = ab[0] * ab[0] + ab[1] * ab[1];
-    if denominator < 1.0e-15 {
-        return (point[0] - a[0]).hypot(point[1] - a[1]);
-    }
-    let t = (((point[0] - a[0]) * ab[0] + (point[1] - a[1]) * ab[1]) / denominator).clamp(0.0, 1.0);
-    (point[0] - (a[0] + t * ab[0])).hypot(point[1] - (a[1] + t * ab[1]))
 }
 
 fn build_load_eligibility(
@@ -6804,6 +6785,74 @@ mod tests {
     use plinth_mesh::{
         make_box, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
     };
+
+    /// Canon item C6 (`docs/specs/geometry-canon.md` §1 OP-3): perception and
+    /// specialized walk the SAME `SliceSolid` loops and both answer "is this
+    /// point within reach of that boundary". They now share one function, so
+    /// they cannot disagree; this pins what that shared function answers at
+    /// the scale where they used to.
+    ///
+    /// The change here is perception's, and it is a change: a 3-quantum
+    /// lattice edge used to be called a POINT (the retired `< 1.0e-15`
+    /// threshold on `|ab|^2` is `|ab| < 3.162e-8` mm, which a 3e-8 mm edge is
+    /// under), so the reach was measured to the endpoint `a`. The union
+    /// normalizer that emitted that edge asserts it exists, and the consumer
+    /// must agree with the producer: the answer is the projection.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact comparison IS the claim: this test asserts a real 1-3 quantum lattice \
+                  edge is NOT collapsed to its endpoint, and a tolerance would make the \
+                  assertion vacuous. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_three_quantum_slice_edge_is_projected_onto_not_treated_as_a_point() {
+        // Three quanta of the 1e-8 mm slice lattice, along +x from the origin.
+        let quantum = geom_kernel::poly2::SLICE_QUANTUM_MM;
+        let a = [0.0, 0.0];
+        let b = [3.0 * quantum, 0.0];
+        let query = [1.0, 0.0];
+
+        let measured = point_segment_distance(query, a, b);
+        let endpoint_distance = 1.0_f64;
+        let projected = 1.0 - 3.0 * quantum;
+
+        assert_ne!(
+            measured, endpoint_distance,
+            "a real 1-3 quantum edge must not be collapsed to its first endpoint"
+        );
+        assert!(
+            (measured - projected).abs() <= 1e-20,
+            "expected the projection {projected:.17e}, measured {measured:.17e}"
+        );
+    }
+
+    /// The other side of the same ruling: an edge the producer could not have
+    /// emitted — shorter than half a lattice quantum, therefore not two
+    /// distinct lattice points — IS a point, and answering it costs no
+    /// division and can emit no NaN.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact comparison IS the claim: a sub-half-quantum edge is a point, so the \
+                  answer is the endpoint distance exactly, with no division performed. See \
+                  docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_sub_half_quantum_edge_is_a_point_and_never_divides() {
+        let quantum = geom_kernel::poly2::SLICE_QUANTUM_MM;
+        let a = [0.0, 0.0];
+        let query = [1.0, 0.0];
+        for shrink in [0.0, 0.1, 0.49] {
+            let b = [shrink * quantum, 0.0];
+            let measured = point_segment_distance(query, a, b);
+            assert_eq!(
+                measured, 1.0,
+                "an edge of {shrink} quanta is a point; the answer is the \
+                 distance to `a`"
+            );
+            assert!(measured.is_finite());
+        }
+    }
 
     const SWEEP_CHILD: &str = "PLINTH_PERCEPTION_SWEEP_CHILD";
     const SWEEP_LINE: &str = "PLINTH_PERCEPTION_SWEEP=";
