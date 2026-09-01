@@ -65,8 +65,8 @@
 //!
 //! | fixture | `PRODUCTION_SHAPE` | `ALL_RAYS_SHAPE` |
 //! |---|---|---|
-//! | raking blade | `[0, 0, 0, 0]` | `[0, 0, 4, 0]` |
-//! | overhang table | `[0, 0, 0, 0, 0]` | `[0, 0, 0, 2, 0]` |
+//! | raking blade | `[0, 0, 0, 0]` | `[0, 0, 0, 0]` (was `[0, 0, 4, 0]`) |
+//! | overhang table | `[0, 0, 0, 0, 0]` | `[0, 0, 0, 0, 0]` (was `[0, 0, 0, 2, 0]`) |
 //! | dense lamella stack | `[0, 0, 0, 0]` | `[0, 0, 0, 0]` |
 //!
 //! The production shape is decidable throughout; the offset-ray FAN is what
@@ -605,18 +605,33 @@ fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
     // Row 3: horizontal run through the slab's full 20 mm width.
     rows.push([-15.0, 1.3, 12.4], [15.0, 1.3, 12.4], 0.05, 0.15);
 
-    // The undecidable-crossing tally, MEASURED per shape (2026-09-01).
+    // The undecidable-crossing tally, MEASURED per shape. Row 2's ALL_RAYS
+    // entry was `4` when this file was written on 2026-08-09 and is `0` from
+    // `1f7a62f`; the reason is recorded here because the assertion below
+    // demands it before anyone re-pins.
     //
-    // The production shape is entirely decidable. The offset-ray fan is not:
-    // row 2 runs down the 0.03 mm blade raked 85 degrees below horizontal, so
-    // the fan's rays lie nearly IN the blade's own plane and 4 of the faces
-    // they reach land in `0 < |det| <= DET_EPS`. That is this file's witness
-    // that the classified walks return their predecessors' payload BYTE FOR
-    // BYTE on a row that genuinely hits the band — every assertion inside the
-    // harness passes on that row.
+    // **The fixture geometry did not move** — `make_raking_blade` is untouched
+    // by that commit. The kernel's classification did, and the specific change
+    // was `queries::turn_cos_sin`. The fan is built by `capsule_rays`, whose
+    // azimuths used `(2*PI*k/n).cos()/.sin()`; at the quarter turns that
+    // returned a residue of order `1.2e-16` instead of zero, so a ray that was
+    // parallel to the blade's plane in intent was tilted out of it in bits.
+    // `det` came back nonzero but tiny — `NearParallel` — where exact
+    // arithmetic gives `det == 0.0`, which is `ExactParallel`, a genuine prune
+    // that is deliberately not counted. The azimuths are now exact at the
+    // cardinals, so those four events are pruned rather than tallied.
+    //
+    // MEASURED, not inferred, by classifying the same fan against every face
+    // of this fixture and partitioning the verdicts by a determinant
+    // recomputed independently: **36 `ExactParallel`, 0 in-band `Miss`,
+    // 0 in-band `NearParallel`**. The count of events retired by
+    // `moller::ray_clears_triangle` — the other change in that commit, and the
+    // only one that could have retired a face the ray genuinely reaches — is
+    // ZERO here. Nothing was decided by proximity; everything was pruned as
+    // exactly parallel.
     for (shape, expected_near_parallel) in [
         (PRODUCTION_SHAPE, &[0, 0, 0, 0][..]),
-        (ALL_RAYS_SHAPE, &[0, 0, 4, 0][..]),
+        (ALL_RAYS_SHAPE, &[0, 0, 0, 0][..]),
     ] {
         let (census, intervals) =
             assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
@@ -675,17 +690,19 @@ fn fu8g_h5_overhang_table_hole_row_census_equals_execution_bit_for_bit() {
     // hole row.
     rows.push([10.2, -20.0, 9.7], [10.2, 20.0, 9.7], 0.05, 0.1);
 
-    // The undecidable-crossing tally, MEASURED per shape (2026-09-01).
+    // The undecidable-crossing tally, MEASURED per shape. Row 3's ALL_RAYS
+    // entry was `2` and is `0` from `1f7a62f`, for exactly the reason recorded
+    // on the raking blade above: the cardinal azimuths of the offset fan are
+    // now exact, so rays that grazed the leg-wall quads with a `1.2e-16` trig
+    // residue are exactly coplanar with them, `det` is exactly `0.0`, and
+    // `ExactParallel` is pruned rather than tallied.
     //
-    // Again decidable under the production shape and not under the fan. Row 3
-    // runs vertically through the top slab between the legs, and the fan's
-    // offset rays graze the leg-wall quad centerlines — the same diagonal
-    // geometry this fixture's mutation transcript above already calls out as
-    // the reason row 1 reports 8 executed crossings rather than 4. Two of the
-    // faces they reach land in `0 < |det| <= DET_EPS`.
+    // Partitioned the same way on this fixture: **120 `ExactParallel`, 0
+    // in-band `Miss`, 0 in-band `NearParallel`**. Again nothing was retired by
+    // proximity.
     for (shape, expected_near_parallel) in [
         (PRODUCTION_SHAPE, &[0, 0, 0, 0, 0][..]),
-        (ALL_RAYS_SHAPE, &[0, 0, 0, 2, 0][..]),
+        (ALL_RAYS_SHAPE, &[0, 0, 0, 0, 0][..]),
     ] {
         let (census, intervals) =
             assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
@@ -916,4 +933,143 @@ fn fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes() {
             counted,
         )
         .expect("the exact counted demand must be admitted");
+}
+
+/// The tilt that keeps a row inside the undecidable band, in REAL GEOMETRY.
+///
+/// Exactly two ulps of `2.0`, so `2.0 + WALL_TILT_MM` is representable without
+/// rounding and the wall really is off-axis by that much.
+const WALL_TILT_MM: f64 = 4.0 * f64::EPSILON;
+
+/// A closed 2 x 2 x 2 mm box whose `+x` wall is raked by [`WALL_TILT_MM`] over
+/// its 2 mm height: the top two `x = 2` vertices sit at `2 + WALL_TILT_MM`.
+///
+/// # Why this fixture exists
+///
+/// Until `1f7a62f` this file's in-band rows were the raking blade's row 2 and
+/// the overhang table's row 3, and both are now `ExactParallel` — see the
+/// measured note at each. Re-pinning them to zero and stopping there would
+/// have left the harness with NO row that reaches the undecidable band, so
+/// claim 5 in this file's header (the tally lockstep) would have been compared
+/// on rows of zeros only. That is the precise failure the header itself warns
+/// about: "Claims 1-4 would all stay green with the census's tally stuck at
+/// zero." A harness whose only in-band witnesses have evaporated is green and
+/// vacuous at the same time.
+///
+/// So the witness is rebuilt, and rebuilt so that it cannot evaporate again.
+/// The previous rows depended on `cos`/`sin` returning a `1.2e-16` residue at
+/// the quarter turns; the moment that was corrected the rows became exactly
+/// coplanar and the events were pruned. **A plant that survives only because
+/// of a rounding residue is a plant that any correctness fix will kill.** This
+/// one puts the tilt in the geometry instead, where no present or future
+/// change to the trig can remove it.
+///
+/// # The arithmetic, derived here rather than measured from the kernel
+///
+/// The `+x` wall triangulates as `[1, 2, 6]` and `[1, 6, 5]` on the corner
+/// numbering below. For `[1, 2, 6]`, `v0 = (2, 0, 0)`, `e1 = (0, 2, 0)` and
+/// `e2 = (WALL_TILT_MM, 2, 2)`. A vertical ray `dv = (0, 0, dz)` gives
+/// `cross(dv, e2) = (-2*dz, WALL_TILT_MM*dz, 0)` and hence
+/// `det = 2 * WALL_TILT_MM * dz`. `[1, 6, 5]` yields the same. With the 4 mm
+/// row below, `det = 8 * WALL_TILT_MM = 7.1e-15` — nonzero, and inside
+/// `DET_EPS = 1e-14`.
+///
+/// The ray also genuinely REACHES the wall, which is what stops
+/// `ray_clears_triangle` retiring it: the row's axis sits exactly on `x = 2`,
+/// well inside a facet whose bounding sphere spans the whole 2 x 2 mm wall.
+fn tilted_wall_box() -> NativeSurface {
+    let top_x = 2.0 + WALL_TILT_MM;
+    let vertices = vec![
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 2.0],
+        [top_x, 0.0, 2.0],
+        [top_x, 2.0, 2.0],
+        [0.0, 2.0, 2.0],
+    ];
+    let faces: Vec<[u32; 3]> = vec![
+        [0, 2, 1],
+        [0, 3, 2],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+        [2, 3, 7],
+        [2, 7, 6],
+        [3, 0, 4],
+        [3, 4, 7],
+    ];
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 1.0,
+            max_grid_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("tilted wall box surface")
+}
+
+/// **THE IN-BAND WITNESS.** The equivalence harness, run on a row that really
+/// does reach the undecidable band, so claim 5's lockstep is compared on a
+/// nonzero tally rather than only on rows of zeros.
+#[test]
+fn fu8g_h5_tilted_wall_census_equals_execution_bit_for_bit_on_an_undecidable_row() {
+    let surface = tilted_wall_box();
+    let mut rows = Rows::default();
+    // Row 0: a deliberate miss, far from the box — the least-demanding row.
+    rows.push([50.0, 50.0, 0.0], [50.0, 50.0, 1.0], 0.02, 0.02);
+    // Row 1: a 4 mm vertical column whose axis lies exactly on the raked
+    // wall's base plane, so its rays run alongside that wall for their whole
+    // length. `r0 == r1` keeps every ray exactly vertical, which is what makes
+    // the determinant above the determinant the walk actually evaluates.
+    rows.push([2.0, 1.0, -1.0], [2.0, 1.0, 3.0], 0.02, 0.02);
+
+    let census = surface
+        .penetration_census_batch_classified(
+            &rows.p0s,
+            &rows.p1s,
+            &rows.r0s,
+            &rows.r1s,
+            ALL_RAYS_SHAPE.n_offset_rays,
+            ALL_RAYS_SHAPE.rays_all,
+        )
+        .expect("census pass");
+    let measured: Vec<u32> = census.iter().map(|row| row.near_parallel).collect();
+    println!("TILTED WALL measured near_parallel = {measured:?}");
+    // NON-VACUITY, and the whole reason this fixture exists. If this ever goes
+    // to zero, REBUILD THE PLANT — do not re-pin it. A zero here means the
+    // harness has no in-band row left and claim 5 is being checked on nothing.
+    assert!(
+        measured[1] > 0,
+        "row 1 must reach the undecidable band; measured {measured:?}. The tilt \
+         is real geometry precisely so that this cannot be retired by a trig \
+         fix; if it has been retired anyway, find out what retired it before \
+         touching this number"
+    );
+
+    // And now the equivalence harness itself, on that in-band row. This is the
+    // claim the file exists to make — the counting walk and the filling walk
+    // return the same payload BYTE FOR BYTE — demonstrated on a row whose
+    // crossings are genuinely undecidable, which is strictly better evidence
+    // than demonstrating it on rows that could never have exercised the band.
+    // `[0, 12]` is MEASURED, printed above; the production shape reaches the
+    // band too here, because the axis ray alone is enough on this fixture.
+    for (shape, expected_near_parallel) in [
+        (PRODUCTION_SHAPE, &[0, 2][..]),
+        (ALL_RAYS_SHAPE, &[0, 12][..]),
+    ] {
+        let (census, _intervals) =
+            assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
+        assert_eq!(census[0].crossings, 0, "row 0 must miss");
+        assert!(
+            census[1].crossings > 0,
+            "row 1 must genuinely cross the box, or the in-band tally is the \
+             only thing this row proves"
+        );
+    }
 }

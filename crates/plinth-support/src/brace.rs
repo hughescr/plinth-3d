@@ -7898,6 +7898,52 @@ mod tests {
         ])
     }
 
+    /// The §O4 triangle with its third vertex lifted a deliberate `2e-15 mm`
+    /// out of the `z = 0` plane, for the one test that needs a CONE to reach
+    /// the undecidable band.
+    ///
+    /// # Why the tilt had to move into the geometry
+    ///
+    /// `an_undecidable_foot_ball_...` below used `near_parallel_face` and a
+    /// 90-degree half-angle, on the argument that a full 90-degree cone puts
+    /// its rim rays in the triangle's own plane. That argument was right about
+    /// the intent and wrong about the bits, and the difference was the whole
+    /// plant. `cone_dirs` builds a ray as
+    /// `axis*cos(th) + (e1*cos(ph) + e2*sin(ph))*sin(th)`, and `cos(90 deg)`
+    /// used to evaluate to `6.123233995736766e-17` rather than to zero, so
+    /// every rim ray carried a `dz` of that size. For this triangle
+    /// `det = -4 * dz`, giving `-2.4e-16` — nonzero, inside `DET_EPS`, and
+    /// therefore `NearParallel` on all sixteen rays. **The entire tally was
+    /// that one rounding residue.**
+    ///
+    /// `queries::deg_cos_sin` now returns exactly `(0.0, 1.0)` at 90 degrees,
+    /// which is the correct answer: the rim rays lie exactly in the plane,
+    /// `det` is exactly `0.0`, and that is `ExactParallel` — a genuine prune
+    /// which is deliberately not counted. So the plant reported a tally of
+    /// zero and the test failed on its own non-vacuity check, exactly as it
+    /// was written to.
+    ///
+    /// **The expectation was NOT moved to zero.** A test whose input class has
+    /// evaporated is not a passing test; it is a test that has stopped asking
+    /// anything, and re-pinning it would have deleted the property
+    /// (undecidable sphere => treated as breached) rather than checking it.
+    /// The fixture is rebuilt instead, on the same device `NP_P0`/`NP_P1`
+    /// already use two lines below: put the tilt in REAL GEOMETRY, where no
+    /// present or future correctness fix to the trig can remove it. With
+    /// `e1 = (2, 0, 0)` and `e2 = (0, 2, 2e-15)`, a rim ray `(dx, dy, 0)` gives
+    /// `det = 4e-15 * dy` — nonzero for every ray off the two cardinal
+    /// azimuths, and inside `DET_EPS = 1e-14` for all of them.
+    ///
+    /// The tilt is invisible to every other quantity: at 2e-15 mm the face's
+    /// position, area and normal are unchanged to well beyond any tolerance in
+    /// this module, so the breach verdict the test asserts is the verdict it
+    /// always was.
+    fn tilted_near_parallel_face() -> NativeSurface {
+        geom_kernel::testkit::build_from_tris(vec![
+            0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0e-15, //
+        ])
+    }
+
     /// A segment along the §O4 ray: `b - a` is `(1, 0, 2e-15)` to within one
     /// ulp, which is all `det = -4 * dv_z` needs to land in the band.
     const NP_P0: [f64; 3] = [0.4, 0.5, -1.0e-16];
@@ -8026,9 +8072,12 @@ mod tests {
     /// what admits a foot standing inside the model. The candidate is dropped.
     #[test]
     fn an_undecidable_foot_ball_is_treated_as_breached_and_the_candidate_is_dropped() {
-        let surface = near_parallel_face();
-        // A cone that opens to the full 90 degrees puts its rim rays in the
-        // triangle's own plane, which is the geometry the §O4 band describes.
+        // The tilted face, NOT `near_parallel_face`: a 90-degree cone now puts
+        // its rim rays exactly in the plane of an untilted triangle, which is
+        // `ExactParallel` and a prune. The 2e-15 mm tilt is what keeps this
+        // plant inside the band, and it is real geometry rather than a trig
+        // residue — see `tilted_near_parallel_face` for the full history.
+        let surface = tilted_near_parallel_face();
         let planted = surface
             .sphere_breach_classified(&[[0.4, 0.5, 0.0]], &[0.2], 1.0e-9, 90.0, 16)
             .expect("planted sphere batch");
@@ -8037,7 +8086,16 @@ mod tests {
         // test itself calls CLEAN — which is exactly the dangerous shape.
         assert!(
             planted.near_parallel[0] > 0,
-            "the planted cone must reach the undecidable band; tally was {}",
+            "the planted cone must reach the undecidable band; tally was {}. \
+             If this is zero again, REBUILD THE PLANT — do not relax the \
+             assertion and do not re-pin the tally. A zero here means the \
+             fixture no longer occupies the input class this test exists to \
+             check, so the property below (an undecidable sphere is dropped) \
+             would be asserted over geometry that can never produce one. That \
+             is how this plant died once already: it depended on \
+             `cos(90 deg)` returning a rounding residue instead of zero. The \
+             tilt in `tilted_near_parallel_face` is real geometry for exactly \
+             that reason; make the next one real too",
             planted.near_parallel[0]
         );
         assert!(

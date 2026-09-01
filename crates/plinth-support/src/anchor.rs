@@ -3099,34 +3099,53 @@ mod tests {
                 FOOT_BREACH_CONE_RAYS,
             )
             .unwrap();
-        // MEASURED, and reported to the owner as a finding rather than tuned
-        // away (`docs/specs/geometry-adjudication.md` §EXT-1 site 5).
+        // WAS `vec![4]`, AND THE FOUR WERE MANUFACTURED. This comment used to
+        // report them as a finding for the owner to rule on; `1f7a62f` removed
+        // their cause, so the finding is closed rather than re-pinned.
         //
-        // Four of this row's cone-ray face evaluations land in the undecidable
-        // band — on a fixture whose geometry is exactly axis-aligned and
-        // carries no geometric ambiguity at all. The cause is the kernel's own
-        // cone construction, not the rib. `cone_dirs` builds azimuth `k` as
+        // The original measurement, kept because it names the mechanism: four
+        // of this row's cone-ray face evaluations landed in the undecidable
+        // band on a fixture whose geometry is exactly axis-aligned and carries
+        // no geometric ambiguity at all. The cause was the kernel's own cone
+        // construction, not the rib. `cone_dirs` builds azimuth `k` as
         // `e1*cos(ph) + e2*sin(ph)` with `ph = 2*pi*k/n`; for this axis `e2` is
         // the `x` direction, so a ray's `x` component is `sin(ph)*sin(25 deg)`.
-        // At `ph = pi` (`k = n/2`) `sin(pi)` is `1.2246467991473532e-16`, not
-        // zero, giving `x = 5.1755e-17`; against the rib's `x = +/-0.5` walls
-        // (`2A = 20`) that is a determinant of `1.0351e-15`, inside
-        // `DET_EPS = 1e-14`. Two walls, two triangles each, one ray: four.
+        // At `ph = pi` (`k = n/2`) `sin(pi)` evaluated to
+        // `1.2246467991473532e-16` rather than zero, giving `x = 5.1755e-17`;
+        // against the rib's `x = +/-0.5` walls (`2A = 20`) that is a
+        // determinant of `1.0351e-15`, inside `DET_EPS = 1e-14`. Two walls,
+        // two triangles each, one ray: four.
         //
-        // Those walls are EXACTLY parallel to that ray. Nothing about the
-        // crossing is uncertain in the geometry; the band is populated by the
-        // residue of a trig call. The same four appear below for `n = 2`,
-        // where `k = 1` is the same `ph = pi`, and for `n = 8`, where `k = 4`
-        // is.
+        // The comment's own conclusion was that those walls are EXACTLY
+        // parallel to that ray, that nothing about the crossing is uncertain in
+        // the geometry, and that the band was populated by the residue of a
+        // trig call. That diagnosis was right. `queries::turn_cos_sin` now
+        // returns the exact cosine and sine at the quarter turns, so the ray is
+        // parallel in bits as well as in intent, `det` is exactly `0.0`, and
+        // the class is `ExactParallel` — a genuine prune that is not counted.
+        // A pinned constant whose own documentation calls it manufactured is a
+        // constant that should move when the manufacture stops.
         //
-        // These are pinned, not asserted-to-zero, because the number IS the
-        // finding: it is what makes `validate_anchor_feet_bound` treat this
-        // foot as breached, and it is what the owner has to rule on.
+        // **One claim in the old comment is REFUTED by measurement, and that is
+        // why this is a repair and not a re-pin.** It said the four "is what
+        // makes `validate_anchor_feet_bound` treat this foot as breached". It
+        // is not: with the tally at zero every verdict assertion below still
+        // holds — the frozen pair still breaches, the measured wall is still
+        // thinner than the ball, and both single-factor controls still clear.
+        // The engine admits and rejects exactly the feet it did before; only
+        // the manufactured uncertainty is gone.
+        //
+        // The zero is ASSERTED rather than deleted, on the same reasoning as
+        // `geom_kernel/tests/near_wall_thin_feature.rs`: if anything
+        // reintroduces a computed cardinal angle into the cone construction,
+        // this fixture is where it shows up first.
         assert_eq!(
             frozen_breach.near_parallel,
-            vec![4],
-            "the undecidable tally on an exactly axis-aligned fixture is the measurement \
-             this site was retargeted to produce"
+            vec![0],
+            "the undecidable tally on an exactly axis-aligned fixture is an \
+             ASSERTED zero: the cone's cardinal azimuths are exact, so a ray \
+             parallel to a wall gives `det == 0.0` and prunes. If this moves, \
+             a computed cardinal angle is back"
         );
         let (frozen, thickness) = (frozen_breach.breached, frozen_breach.thickness_mm);
         assert!(
@@ -3159,7 +3178,15 @@ mod tests {
         let two_rays = surface
             .sphere_breach_classified(&centers, &radii, eps_mm, FOOT_BREACH_HALF_DEG, 2)
             .unwrap();
-        assert_eq!(two_rays.near_parallel, vec![4], "same `ph = pi` residue, same four");
+        // Was `vec![4]`, "same `ph = pi` residue, same four" — and with the
+        // residue gone it is the same ZERO, for the same reason. The control
+        // this line guards is unchanged: two rays must still clear what eight
+        // rays breach.
+        assert_eq!(
+            two_rays.near_parallel,
+            vec![0],
+            "same cardinal azimuth, now exact, so the same prune"
+        );
         let two_rays = two_rays.breached;
         assert!(
             !two_rays[0],
