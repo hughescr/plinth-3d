@@ -13,6 +13,14 @@ name = "plinth"
 path = "src/main.rs"
 
 [dependencies]
+# The near-parallel counters the run report prints at end of run
+# (`geom_kernel::telemetry`, `docs/specs/geometry-adjudication.md` §O4/§EXT-2).
+# This is a REPORTING dependency and nothing else: the CLI reads three atomics
+# and prints them, and no `geom_kernel` type crosses into a decision here.  It
+# is a direct edge because none of the four crates below depends on or
+# re-exports `geom_kernel` -- routing the read through one of them would put a
+# telemetry re-export in a crate that has no other reason to carry one.
+geom_kernel = { path = "../../rust/geom_kernel" }
 # The wall-thickness default is a registered constant, so the parser reads the
 # one M0 publication directly rather than restating 2.5 as a CLI literal.
 plinth-core = { path = "../plinth-core" }

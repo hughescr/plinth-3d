@@ -309,6 +309,30 @@ fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64
 /// rather than a neighbour across a convex crease, and which excludes the
 /// originating face itself without needing a self-hit epsilon: a face's normal
 /// dotted with itself is `+1`.
+///
+/// # Undecidable crossings saturate to the THIN extreme
+///
+/// The cast is [`NativeSurface::cast_rays_classified`], which reports per ray
+/// how many faces it reached whose Möller determinant landed in
+/// `0 < |det| <= DET_EPS` — the band where whether the ray crosses that face is
+/// undecidable at f64 scale (`docs/specs/geometry-adjudication.md` §O4, §EXT-1
+/// row 2).  Those faces contribute no crossing, so before this ruling a real
+/// opposite wall could be dropped out of the list in silence and the face read
+/// as arbitrarily THICK — up to full saturation, thinness `0`.
+///
+/// That is the dangerous direction.  Delicacy exists to protect fragile
+/// geometry, and understating fragility is what lets an anchor land on a
+/// needle.  So a ray with a nonzero tally saturates the OTHER way: thinness
+/// `1.0`, the maximum delicacy contribution, whatever crossings the walk did
+/// accept — an accepted crossing only bounds the thickness from above, and a
+/// skipped one can only be nearer.  The event is counted by the kernel's own
+/// `kernel.walk.collecting` telemetry atomic
+/// ([`geom_kernel::telemetry::near_parallel_counts`]), so a nonzero corpus
+/// reading is visible to the owner rather than silently load-bearing.
+///
+/// Uncertainty is tolerated here — rather than refused — only because every
+/// direction it can move the outcome is the PROTECTIVE one: more delicacy, more
+/// faces withheld from anchoring.  It never moves a face toward acceptance.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -359,15 +383,26 @@ fn thinness_by_face(
     }
     // The single batched call.  One cast for every face, not one call per
     // face.
-    let (offsets, distances, hit_faces) = surface
-        .cast_rays(&geometry.centroids, &directions, thin_feature_mm)
+    let cast = surface
+        .cast_rays_classified(&geometry.centroids, &directions, thin_feature_mm)
         .map_err(|error| DelicacyError::Kernel(error.to_string()))?;
+    let offsets = &cast.offsets;
+    let distances = &cast.t_all;
+    let hit_faces = &cast.face_all;
     let face_ids = surface.face_ids();
 
     let mut by_face = Vec::with_capacity(tris.len());
     for face in 0..tris.len() {
         if geometry.degenerate[face] {
             by_face.push(0.0);
+            continue;
+        }
+        // The undecidable band, saturated to the thin extreme.  Read BEFORE the
+        // accepted crossings, because an accepted crossing does not resolve the
+        // uncertainty: it bounds the thickness from above, and the crossing the
+        // arithmetic could not decide may be nearer still.
+        if cast.near_parallel[face] > 0 {
+            by_face.push(1.0);
             continue;
         }
         let start = offsets[face] as usize;
@@ -419,6 +454,100 @@ mod tests {
 
     fn field(mesh: &Mesh, lod: &str) -> DelicacyField {
         evaluate_delicacy(mesh, lod, settings(), config()).expect("delicacy field")
+    }
+
+    /// Two triangles, arranged so that face 0's inward thinness ray reaches a
+    /// face whose Möller determinant lands INSIDE the undecidable band and
+    /// face 1's reaches nothing undecidable at all.
+    ///
+    /// Every number here is chosen so the determinant is exact in f64 rather
+    /// than approximately small, which is what makes the test a pin instead of
+    /// a hope.
+    ///
+    /// * **Face 0** is `(-1,0,5), (1,0,5), (0,2,5)`: flat in `z = 5`, so
+    ///   `E1 x E2 = (0,0,4)`, `|n| = 4` and `normalize` divides by an exact
+    ///   power of two — the unit normal is exactly `(0,0,1)` and the inward ray
+    ///   direction exactly `(-0,-0,-1)`. Its centroid x is `(-1+1+0)/3 = 0`
+    ///   exactly.
+    /// * **Face 1** is `(0,0,4), (0,2,4), (2e-15,1,4.5)`, so `E1 = (0,2,0)` and
+    ///   `E2 = (2e-15,1,0.5)`. For a straight-down ray the Möller determinant
+    ///   reduces to `E1.x*E2.y - E1.y*E2.x = 0*1 - 2*2e-15 = -4e-15`: nonzero,
+    ///   and inside `DET_EPS = 1e-14`. Geometrically it is a wall standing
+    ///   almost exactly parallel to the ray, tilted by 2e-15 mm over 2 mm.
+    ///
+    /// Face 0's ray therefore reaches exactly one undecidable face, 0.5 mm
+    /// below it — well inside the 1.5 mm saturation length. Face 1's own ray
+    /// runs along `-x` and reaches no undecidable face (its determinant against
+    /// face 0 is -1.6e-14, OUTSIDE the band, which is the near miss that makes
+    /// the contrast between the two rows meaningful).
+    fn planted_near_parallel_pair() -> Mesh {
+        Mesh::new(
+            vec![
+                [-1.0, 0.0, 5.0],
+                [1.0, 0.0, 5.0],
+                [0.0, 2.0, 5.0],
+                [0.0, 0.0, 4.0],
+                [0.0, 2.0, 4.0],
+                [2e-15, 1.0, 4.5],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .expect("planted near-parallel pair")
+    }
+
+    /// **A ray that reached an undecidable face scores the face as THIN.**
+    ///
+    /// The input class: a face whose inward, saturation-length thinness ray
+    /// reaches at least one triangle whose Möller determinant lands in
+    /// `0 < |det| <= DET_EPS`. Whether that triangle is crossed is undecidable
+    /// at f64 scale, so the crossing list the thickness was read from is
+    /// incomplete in an unknown direction and the opposite wall may be nearer
+    /// than anything on it — possibly touching. Delicacy exists to protect
+    /// fragile geometry, so the row saturates to the thin extreme.
+    ///
+    /// Face 1 in the same mesh, same batch, is the control: its ray reaches
+    /// nothing undecidable and finds no wall facing back, so it scores 0 and
+    /// shows the saturation is a per-ROW answer rather than a batch-wide one.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact pins over hand-written fixture values whose determinant is exact in f64"
+    )]
+    fn an_undecidable_crossing_saturates_that_face_to_the_thin_extreme() {
+        let mesh = planted_near_parallel_pair();
+        let before = geom_kernel::telemetry::near_parallel_counts();
+        let built = field(&mesh, "planted-lod");
+        let after = geom_kernel::telemetry::near_parallel_counts();
+
+        let values = built.face_values();
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values[0].thinness(),
+            1.0,
+            "the undecidable row must saturate to the thin extreme, not report a thickness \
+             nobody measured"
+        );
+        assert_eq!(
+            values[1].thinness(),
+            0.0,
+            "the control row's ray reached no undecidable face; saturation must not spill \
+             across the batch"
+        );
+        // Both faces are all-boundary, so curvature is 0 and the blend is the
+        // thinness weight alone: the saturation really does reach the field
+        // value orientation scoring reads.
+        assert_eq!(values[0].curvature(), 0.0);
+        assert_eq!(values[0].weight(), settings().thinness_weight());
+
+        // The path was exercised, measured rather than assumed: the collecting
+        // walk's process-global counter moved. Global counters only ever grow
+        // and other tests in this binary share them, so the pin is a delta
+        // minimum, while the exact per-row figure above is the strong claim.
+        assert!(
+            after.collecting_walk - before.collecting_walk >= 1,
+            "the kernel's collecting-walk near-parallel counter did not move: {before:?} -> \
+             {after:?}; this fixture did not reach the classified path"
+        );
     }
 
     #[test]

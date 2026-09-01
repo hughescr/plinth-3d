@@ -1692,17 +1692,18 @@ mod orientation {
         // d = z_hat x n projected to the slice plane.
         let derived = [-normal[1], normal[0]];
         // GEOM-EXEMPT(no canon home: this is 2-D dot and 2-D cross) —
-        // GEOMETRY-CANON EXEMPT: `geom_kernel::vec3` is 3-vector algebra and
-        // `geom_kernel::poly2` publishes only `signed_area`,
-        // `point_in_polygon`, `segments_intersect` and
-        // `point_segment_distance` (canon §1 OP-8). Neither has a 2-D dot or a
-        // 2-D perp-dot, so there is nothing to consolidate TO. The value does
-        // reach a verdict (the winding vote below), which makes this a
-        // MUST-CONSOLIDATE site with no survivor — reported to the canon
-        // rather than improvised into one.
-        let along = segment[0] * derived[0] + segment[1] * derived[1];
-        // cross(segment, d) = segment . n_xy: deviation from parallel.
-        let across = segment[0] * derived[1] - segment[1] * derived[0];
+        // `docs/specs/geometry-adjudication.md` §O6 — the no-survivor exemption
+        // that stood here is RETIRED, because the survivor now exists. Under
+        // the ratified precedence rule a verdict-feeding site with no kernel
+        // home gets a kernel home BUILT rather than an exemption marker, and
+        // `geom_kernel::poly2` now publishes `dot` and `perp_dot` with the same
+        // operand and term order this site used. The arithmetic is
+        // term-for-term identical (`a[0]*b[0] + a[1]*b[1]` and
+        // `a[0]*b[1] - a[1]*b[0]`), so no winding vote moves; what changes is
+        // that there is one statement of it in the workspace instead of two.
+        let along = geom_kernel::poly2::dot(segment, derived);
+        // perp_dot(segment, d) = segment . n_xy: deviation from parallel.
+        let across = geom_kernel::poly2::perp_dot(segment, derived);
         (along.abs() > across.abs()).then_some(along > 0.0)
     }
 

@@ -9,7 +9,8 @@
 
 use geom_kernel::testkit::build_from_tris;
 use geom_kernel::{
-    NativeSurface, NearFaceBatchError, NearFaceBatchLimits, SegmentClearance, UnmeasuredSegment,
+    NativeSurface, NearFaceBatchError, NearFaceBatchLimits, SegmentClearanceClassified,
+    UnmeasuredSegment,
 };
 
 fn uncapped() -> NearFaceBatchLimits {
@@ -35,6 +36,19 @@ fn crevice() -> NativeSurface {
     ])
 }
 
+/// The measured millimetres of one row, or a panic naming what came back
+/// instead.
+///
+/// Deliberately NOT a fallback. A helper that quietly accepted an `UpperBound`
+/// or an `Unmeasured` here would put the test back in the position the type
+/// exists to prevent: grading a number nobody measured.
+fn measured_mm(row: SegmentClearanceClassified) -> f64 {
+    match row {
+        SegmentClearanceClassified::Measured { clearance_mm, .. } => clearance_mm,
+        other => panic!("expected a measured row, got {other:?}"),
+    }
+}
+
 #[test]
 fn an_empty_exclusion_set_is_bit_identical_to_the_unrestricted_test() {
     let surface = crevice();
@@ -45,19 +59,20 @@ fn an_empty_exclusion_set_is_bit_identical_to_the_unrestricted_test() {
     let insets = vec![0.0, 0.0];
 
     let plain = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, 0.3, &insets, &insets)
+        .segment_clearance_classified(&p0, &p1, &r0, &r1, 0.3, &insets, &insets)
         .unwrap();
     let empty = surface
-        .segment_clearance_excluding(&p0, &p1, &r0, &r1, 0.3, &insets, &insets, &[])
+        .segment_clearance_excluding_classified(&p0, &p1, &r0, &r1, 0.3, &insets, &insets, &[])
         .unwrap();
     let per_row: Vec<&[u32]> = vec![&[], &[]];
     let per_row_empty = surface
-        .segment_clearance_excluding(&p0, &p1, &r0, &r1, 0.3, &insets, &insets, &per_row)
+        .segment_clearance_excluding_classified(&p0, &p1, &r0, &r1, 0.3, &insets, &insets, &per_row)
         .unwrap();
 
-    assert_eq!(plain.0, empty.0);
-    assert_eq!(plain.0, per_row_empty.0);
-    assert_eq!(plain.1, empty.1);
+    // Whole rows, not just their numbers: the classified type carries the
+    // variant and the uncertainty count too, and all of it must match.
+    assert_eq!(plain, empty);
+    assert_eq!(plain, per_row_empty);
 }
 
 #[test]
@@ -69,17 +84,20 @@ fn excluding_the_nearest_face_hands_the_verdict_to_the_next_one() {
     let r = vec![0.25];
     let insets = vec![0.0];
 
-    let (unrestricted, _) = surface
-        .segment_clearance(&p0, &p1, &r, &r, 0.0, &insets, &insets)
-        .unwrap();
-    assert!((unrestricted[0] - 0.75).abs() < 1e-12, "1.0 − 0.25");
-
-    let near_wall: Vec<&[u32]> = vec![&[0]];
-    let (excluded, _) = surface
-        .segment_clearance_excluding(&p0, &p1, &r, &r, 0.0, &insets, &insets, &near_wall)
+    let unrestricted = surface
+        .segment_clearance_classified(&p0, &p1, &r, &r, 0.0, &insets, &insets)
         .unwrap();
     assert!(
-        (excluded[0] - 1.75).abs() < 1e-12,
+        (measured_mm(unrestricted[0]) - 0.75).abs() < 1e-12,
+        "1.0 − 0.25"
+    );
+
+    let near_wall: Vec<&[u32]> = vec![&[0]];
+    let excluded = surface
+        .segment_clearance_excluding_classified(&p0, &p1, &r, &r, 0.0, &insets, &insets, &near_wall)
+        .unwrap();
+    assert!(
+        (measured_mm(excluded[0]) - 1.75).abs() < 1e-12,
         "with face 0 exempt the verdict is the FAR wall's 2.0 − 0.25, not infinity: \
          exempting a face never exempts the rest of the surface"
     );
@@ -100,9 +118,13 @@ fn excluding_the_nearest_face_hands_the_verdict_to_the_next_one() {
 /// not comparable to a demand, which is the point: a caller has to say what an
 /// untested row means before it can grade one.
 ///
-/// The second half pins the LOSSINESS as a fact rather than a comment: the
-/// float shim collapses "not measured" and "measured, enormous" onto the same
-/// `f64::INFINITY`, so on the float form the two are indistinguishable.
+/// The float shim this test used to contrast against
+/// (`segment_clearance_excluding`, returning `(Vec<f64>, Vec<V3>)`) is now
+/// REMOVED, not merely discouraged: it could not carry the third clearance
+/// state either, and leaving a lossy entry point beside a classified one is an
+/// invitation to collapse the uncertainty back to a boolean at the first
+/// awkward call site. There is no longer an API through which an untested row
+/// can present itself as `+INFINITY`.
 #[test]
 fn excluding_every_face_leaves_nothing_to_grade() {
     let surface = crevice();
@@ -113,11 +135,11 @@ fn excluding_every_face_leaves_nothing_to_grade() {
     let all: Vec<&[u32]> = vec![&[0, 1]];
 
     let typed = surface
-        .segment_clearance_excluding_typed(&p0, &p1, &r, &r, 0.0, &insets, &insets, &all)
+        .segment_clearance_excluding_classified(&p0, &p1, &r, &r, 0.0, &insets, &insets, &all)
         .unwrap();
     assert_eq!(
         typed[0],
-        SegmentClearance::Unmeasured(UnmeasuredSegment::AllFacesExcluded),
+        SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::AllFacesExcluded),
         "a row whose exclusion set covers every face was never measured; the \
          kernel must not hand back a number for it"
     );
@@ -127,24 +149,19 @@ fn excluding_every_face_leaves_nothing_to_grade() {
         "there is no clearance to report"
     );
     assert!(
-        !typed[0].clears_or(false),
+        !typed[0].clears(false, false),
         "a stage that REFUSES must be able to refuse an untested row"
     );
-
-    // The float shim, for contrast: same row, same call, and the answer is the
-    // most permissive float there is.
-    let (clearance, _) = surface
-        .segment_clearance_excluding(&p0, &p1, &r, &r, 0.0, &insets, &insets, &all)
-        .unwrap();
-    assert!(
-        clearance[0].is_infinite() && clearance[0] > 0.0,
-        "the shim still encodes UNTESTED as +INFINITY -- that is why callers \
-         must migrate off it, not a property to rely on"
+    assert_eq!(
+        typed[0].upper_bound_mm(),
+        None,
+        "and an untested row is not a one-sided row either -- there is no \
+         number at all, not even a bound"
     );
-    assert!(
-        clearance[0] >= 0.0,
-        "and this is the bug in one line: the untested row passes the same \
-         `>= demand` test a well-cleared row passes"
+    assert_eq!(
+        typed[0].near_parallel_faces(),
+        0,
+        "no face was tested, so no face can have been undecidable"
     );
 }
 
@@ -168,8 +185,8 @@ fn a_thinner_arm_never_grades_worse_than_a_fatter_one_on_a_frozen_face_set() {
 
     let mut previous = f64::NEG_INFINITY;
     for radius in [0.9_f64, 0.6, 0.45, 0.3, 0.1] {
-        let (clearance, _) = surface
-            .segment_clearance_excluding(
+        let rows = surface
+            .segment_clearance_excluding_classified(
                 &[p0],
                 &[p1],
                 &[radius],
@@ -180,13 +197,13 @@ fn a_thinner_arm_never_grades_worse_than_a_fatter_one_on_a_frozen_face_set() {
                 &frozen,
             )
             .unwrap();
+        let clearance = measured_mm(rows[0]);
         assert!(
-            clearance[0] >= previous,
+            clearance >= previous,
             "clearance must not fall as the arm thins: {radius} mm radius graded \
-             {} against the previous {previous}",
-            clearance[0]
+             {clearance} against the previous {previous}"
         );
-        previous = clearance[0];
+        previous = clearance;
     }
 }
 
@@ -198,31 +215,43 @@ fn the_band_collects_exactly_the_faces_within_reach_sorted_and_deduplicated() {
 
     // 0.5 mm reaches neither wall (1.0 and 2.0 away).
     let none = surface
-        .faces_near_segments_batch(&p0, &p1, &[0.5], uncapped())
+        .faces_near_segments_batch_classified(&p0, &p1, &[0.5], uncapped())
         .unwrap();
-    assert_eq!(none, vec![Vec::<u32>::new()]);
+    assert_eq!(none.rows, vec![Vec::<u32>::new()]);
+    assert_eq!(
+        none.near_parallel,
+        vec![0],
+        "nothing undecidable on axis-aligned walls"
+    );
 
     // 1.5 mm reaches the near wall only.
     let near = surface
-        .faces_near_segments_batch(&p0, &p1, &[1.5], uncapped())
+        .faces_near_segments_batch_classified(&p0, &p1, &[1.5], uncapped())
         .unwrap();
-    assert_eq!(near, vec![vec![0]]);
+    assert_eq!(near.rows, vec![vec![0]]);
+    assert_eq!(near.near_parallel, vec![0]);
 
     // 2.5 mm reaches both, ascending.
     let both = surface
-        .faces_near_segments_batch(&p0, &p1, &[2.5], uncapped())
+        .faces_near_segments_batch_classified(&p0, &p1, &[2.5], uncapped())
         .unwrap();
-    assert_eq!(both, vec![vec![0, 1]]);
+    assert_eq!(both.rows, vec![vec![0, 1]]);
+    assert_eq!(both.near_parallel, vec![0]);
 }
 
 #[test]
 fn a_face_exactly_at_the_band_edge_is_inside_the_band() {
     let surface = crevice();
     let exact = surface
-        .faces_near_segments_batch(&[[1.0, 2.0, 2.0]], &[[1.0, 2.0, 6.0]], &[1.0], uncapped())
+        .faces_near_segments_batch_classified(
+            &[[1.0, 2.0, 2.0]],
+            &[[1.0, 2.0, 6.0]],
+            &[1.0],
+            uncapped(),
+        )
         .unwrap();
     assert_eq!(
-        exact,
+        exact.rows,
         vec![vec![0]],
         "the seat exemption must not turn on a knife edge; admitting the \
          boundary face can only widen the seat's own zone by one face"
@@ -240,7 +269,7 @@ fn the_batch_refuses_rather_than_returning_a_truncated_band() {
         ..uncapped()
     };
     assert!(matches!(
-        surface.faces_near_segments_batch(&p0, &p1, &[2.5], per_row),
+        surface.faces_near_segments_batch_classified(&p0, &p1, &[2.5], per_row),
         Err(NearFaceBatchError::RowFaceLimitExceeded { row: 0, limit: 1 })
     ));
 
@@ -249,7 +278,7 @@ fn the_batch_refuses_rather_than_returning_a_truncated_band() {
         ..uncapped()
     };
     assert!(matches!(
-        surface.faces_near_segments_batch(&p0, &p1, &[2.5], total),
+        surface.faces_near_segments_batch_classified(&p0, &p1, &[2.5], total),
         Err(NearFaceBatchError::TotalFaceLimitExceeded {
             required: 2,
             limit: 1
@@ -261,7 +290,7 @@ fn the_batch_refuses_rather_than_returning_a_truncated_band() {
         ..uncapped()
     };
     assert!(matches!(
-        surface.faces_near_segments_batch(&p0, &p1, &[2.5], rows),
+        surface.faces_near_segments_batch_classified(&p0, &p1, &[2.5], rows),
         Err(NearFaceBatchError::RowLimitExceeded {
             required: 1,
             limit: 0
@@ -273,7 +302,7 @@ fn the_batch_refuses_rather_than_returning_a_truncated_band() {
 fn the_batch_refuses_a_non_finite_radius_or_endpoint() {
     let surface = crevice();
     assert!(matches!(
-        surface.faces_near_segments_batch(
+        surface.faces_near_segments_batch_classified(
             &[[1.0, 2.0, 2.0]],
             &[[1.0, 2.0, 6.0]],
             &[f64::NAN],
@@ -282,7 +311,7 @@ fn the_batch_refuses_a_non_finite_radius_or_endpoint() {
         Err(NearFaceBatchError::InvalidRadius { row: 0, .. })
     ));
     assert!(matches!(
-        surface.faces_near_segments_batch(
+        surface.faces_near_segments_batch_classified(
             &[[1.0, 2.0, 2.0]],
             &[[1.0, 2.0, 6.0]],
             &[-1.0],
@@ -291,7 +320,7 @@ fn the_batch_refuses_a_non_finite_radius_or_endpoint() {
         Err(NearFaceBatchError::InvalidRadius { row: 0, .. })
     ));
     assert!(matches!(
-        surface.faces_near_segments_batch(
+        surface.faces_near_segments_batch_classified(
             &[[f64::INFINITY, 2.0, 2.0]],
             &[[1.0, 2.0, 6.0]],
             &[1.0],
@@ -305,12 +334,21 @@ fn the_batch_refuses_a_non_finite_radius_or_endpoint() {
 fn companion_slices_must_match_the_batch_length() {
     let surface = crevice();
     assert!(matches!(
-        surface.faces_near_segments_batch(&[[0.0; 3]], &[], &[1.0], uncapped()),
+        surface.faces_near_segments_batch_classified(&[[0.0; 3]], &[], &[1.0], uncapped()),
         Err(NearFaceBatchError::BatchInput(_))
     ));
     let one = vec![0.0];
     let two: Vec<&[u32]> = vec![&[], &[]];
     assert!(surface
-        .segment_clearance_excluding(&[[0.0; 3]], &[[1.0; 3]], &one, &one, 0.3, &one, &one, &two)
+        .segment_clearance_excluding_classified(
+            &[[0.0; 3]],
+            &[[1.0; 3]],
+            &one,
+            &one,
+            0.3,
+            &one,
+            &one,
+            &two
+        )
         .is_err());
 }

@@ -757,17 +757,33 @@ mod tests {
         // One batched kernel call for the whole case set -- the same shape the
         // production caller uses.
         let n = p0s.len();
-        let (clearances, _) = surface
-            .segment_clearance(
-                &p0s,
-                &p1s,
-                &vec![R; n],
-                &vec![R; n],
-                p.standoff_mm,
-                &vec![0.0; n],
-                &inset1s,
-            )
-            .expect("batched segment clearance");
+        // Migrated to the classified entry point (`docs/specs/geometry-
+        // adjudication.md` §EXT-2 name table). These rows sweep a clean fixture
+        // and are all `Measured`, so no expected value here moves;
+        // `clearance_mm()` returning `None` would mean the fixture stopped
+        // measuring, which must fail loudly rather than read as a huge gap the
+        // way the retired float shim's `INFINITY` did.
+        let measured = |rows: Vec<geom_kernel::SegmentClearanceClassified>| {
+            rows.into_iter()
+                .map(|row| {
+                    row.clearance_mm()
+                        .expect("the fixture's rows are measured, not one-sided or untested")
+                })
+                .collect::<Vec<f64>>()
+        };
+        let clearances = measured(
+            surface
+                .segment_clearance_classified(
+                    &p0s,
+                    &p1s,
+                    &vec![R; n],
+                    &vec![R; n],
+                    p.standoff_mm,
+                    &vec![0.0; n],
+                    &inset1s,
+                )
+                .expect("batched segment clearance"),
+        );
 
         for (index, clearance) in clearances.iter().enumerate() {
             println!(
@@ -807,20 +823,22 @@ mod tests {
                 (mask - h * (1.0 / seated_cos - 1.0), seated_cos)
             })
             .collect::<Vec<_>>();
-        let (legacy_clearances, _) = surface
-            .segment_clearance(
-                &p0s,
-                &p1s,
-                &vec![R; n],
-                &vec![R; n],
-                p.standoff_mm,
-                &vec![0.0; n],
-                &legacy_insets
-                    .iter()
-                    .map(|(mask, _)| *mask)
-                    .collect::<Vec<_>>(),
-            )
-            .expect("batched segment clearance");
+        let legacy_clearances = measured(
+            surface
+                .segment_clearance_classified(
+                    &p0s,
+                    &p1s,
+                    &vec![R; n],
+                    &vec![R; n],
+                    p.standoff_mm,
+                    &vec![0.0; n],
+                    &legacy_insets
+                        .iter()
+                        .map(|(mask, _)| *mask)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("batched segment clearance"),
+        );
         for (index, clearance) in legacy_clearances.iter().enumerate() {
             let (_, seated_cos) = legacy_insets[index];
             let h = seat_depth_mm(cases[index].0, R, &p, false);

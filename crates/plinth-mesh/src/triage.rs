@@ -7,12 +7,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 use plinth_core::{m0_constants, M0ConstantsError};
 use thiserror::Error;
 
-use geom_kernel::ray_triangle;
 use geom_kernel::vec3::{cross, dot, norm, sub};
+use geom_kernel::{ray_triangle_classified, RayTriangleClass};
 
 use crate::topology::{TopologyError, WeldedView};
 use crate::{Mesh, MeshError, WeldPolicy};
@@ -996,8 +997,29 @@ pub struct ContainmentRayCounters {
     pub face_hits: u64,
     /// Ray/triangle tests that returned no crossing.
     pub face_misses: u64,
-    /// Ray/triangle tests the triage call-site policy could not sign.
+    /// Ray/triangle tests the triage call-site policy could not sign: the
+    /// crossing landed inside `TRIAGE_ORIGIN_EPS` of the query point.
+    ///
+    /// This bucket is DISJOINT from [`Self::face_near_parallel`]. The two are
+    /// different uncertainties: this one means "a crossing exists and its sign
+    /// is untrustworthy", the other means "whether a crossing exists at all is
+    /// undecidable".
     pub face_ambiguous: u64,
+    /// Ray/triangle tests the KERNEL could not decide: `0 < |det| <= DET_EPS`,
+    /// [`geom_kernel::RayTriangleClass::NearParallel`].
+    ///
+    /// **This is the counter the near-parallel adjudication exists to produce**
+    /// (`docs/specs/geometry-adjudication.md` §O4 Part 2, §EXT-1 row 1). Before
+    /// the retarget, every one of these evaluations was reported as a definite
+    /// Miss and silently dropped a real interior crossing out of the parity
+    /// count, flipping the containment verdict for every point beyond it. They
+    /// now poison their ray to `Ambiguous`, which the 2-of-3 vote excludes.
+    ///
+    /// A nonzero reading is the measured refusal rate the owner asked for, not
+    /// a value to tune away: the §O4 fallback (escalating only above a sliver
+    /// area threshold) would introduce a new deciding constant and needs a new
+    /// ruling.
+    pub face_near_parallel: u64,
     /// Rays short-circuited by the `point_on_triangle` boundary pre-check,
     /// which is triage policy and not part of the ray/triangle primitive.
     pub point_on_triangle_hits: u64,
@@ -1009,6 +1031,7 @@ static FACE_TESTS: AtomicU64 = AtomicU64::new(0);
 static FACE_HITS: AtomicU64 = AtomicU64::new(0);
 static FACE_MISSES: AtomicU64 = AtomicU64::new(0);
 static FACE_AMBIGUOUS: AtomicU64 = AtomicU64::new(0);
+static FACE_NEAR_PARALLEL: AtomicU64 = AtomicU64::new(0);
 static POINT_ON_TRIANGLE_HITS: AtomicU64 = AtomicU64::new(0);
 
 /// Read the process-global containment ray counters.
@@ -1021,6 +1044,7 @@ pub fn containment_ray_counters() -> ContainmentRayCounters {
         face_hits: FACE_HITS.load(Ordering::Relaxed),
         face_misses: FACE_MISSES.load(Ordering::Relaxed),
         face_ambiguous: FACE_AMBIGUOUS.load(Ordering::Relaxed),
+        face_near_parallel: FACE_NEAR_PARALLEL.load(Ordering::Relaxed),
         point_on_triangle_hits: POINT_ON_TRIANGLE_HITS.load(Ordering::Relaxed),
     }
 }
@@ -1034,6 +1058,7 @@ struct RayTally {
     hits: u64,
     misses: u64,
     ambiguous: u64,
+    near_parallel: u64,
     point_on_triangle: u64,
 }
 
@@ -1045,6 +1070,7 @@ impl RayTally {
             (&FACE_HITS, self.hits),
             (&FACE_MISSES, self.misses),
             (&FACE_AMBIGUOUS, self.ambiguous),
+            (&FACE_NEAR_PARALLEL, self.near_parallel),
             (&POINT_ON_TRIANGLE_HITS, self.point_on_triangle),
         ] {
             if value != 0 {
@@ -1066,6 +1092,7 @@ pub fn reset_containment_ray_counters() {
         &FACE_HITS,
         &FACE_MISSES,
         &FACE_AMBIGUOUS,
+        &FACE_NEAR_PARALLEL,
         &POINT_ON_TRIANGLE_HITS,
     ] {
         counter.store(0, Ordering::Relaxed);
@@ -1084,6 +1111,43 @@ struct ContainmentFace {
     lo: [f64; 3],
     hi: [f64; 3],
 }
+
+/// The three sampling ANGLES, as chosen. These literals are the record of the
+/// directions this classifier has always sampled; they are deliberately not
+/// unit length, and nothing casts a ray along them any more.
+///
+/// Their measured norms are 1.075_564_155_9, 1.027_921_468_3 and
+/// 1.061_765_048_8 (`docs/specs/geometry-adjudication.md` §O4), which is the
+/// whole problem: every quantity the kernel returns for a ray is in units of
+/// `|direction|`, so `t`, the kernel's `±EPS` acceptance slack and
+/// `TRIAGE_ORIGIN_EPS` were all in units of a number that is not a millimetre
+/// and differs per direction — and the determinant compared against the
+/// ABSOLUTE `DET_EPS` scaled linearly with `|direction|`, so the same geometric
+/// ray could land on either side of the undecidable band depending only on how
+/// its direction vector happened to be written down.
+const RAW_DIRECTIONS: [[f64; 3]; 3] = [
+    [1.0, 0.371_390_676_354_103_7, 0.137_503_523_749_935_02],
+    [0.211_324_865_405_187_1, 1.0, 0.109_381_654_230_983_1],
+    [0.127_412_352_941_232_4, 0.333_333_333_333_333_3, 1.0],
+];
+
+/// [`RAW_DIRECTIONS`], each divided componentwise by its own canonical norm
+/// (`geom_kernel::vec3::norm`, OP-6) — the vectors actually cast
+/// (`docs/specs/geometry-adjudication.md` §O4 Part 2 item 1).
+///
+/// After this the units are honest: `t` IS millimetres, `TRIAGE_ORIGIN_EPS`
+/// IS 1e-9 mm, the kernel's t-slack IS 1e-6 mm, and the determinant is
+/// `2A·cos θ` with no direction-scaling term, so the hit/miss boundary no
+/// longer depends on the representation of the direction.
+///
+/// Componentwise scalar division, not a consolidated vector operation: this is
+/// three divisions written out, and it trips no inline-geometry guard pattern.
+static SAMPLING_DIRECTIONS: LazyLock<[[f64; 3]; 3]> = LazyLock::new(|| {
+    RAW_DIRECTIONS.map(|raw| {
+        let length = norm(raw);
+        [raw[0] / length, raw[1] / length, raw[2] / length]
+    })
+});
 
 /// A container-specific, immutable classifier. It builds the triangle table
 /// once, accepts only gathered batches, and scatters classifications in input
@@ -1124,14 +1188,9 @@ impl ContainmentClassifier {
     }
 
     fn classify(&self, point: [f64; 3]) -> Result<ContainmentClass, TriageError> {
-        const DIRECTIONS: [[f64; 3]; 3] = [
-            [1.0, 0.371_390_676_354_103_7, 0.137_503_523_749_935_02],
-            [0.211_324_865_405_187_1, 1.0, 0.109_381_654_230_983_1],
-            [0.127_412_352_941_232_4, 0.333_333_333_333_333_3, 1.0],
-        ];
         let mut inside = 0;
         let mut outside = 0;
-        for direction in DIRECTIONS {
+        for direction in *SAMPLING_DIRECTIONS {
             match self.classify_ray(point, direction)? {
                 ContainmentClass::Inside => inside += 1,
                 ContainmentClass::Outside => outside += 1,
@@ -1194,6 +1253,16 @@ impl ContainmentClassifier {
                     tally.ambiguous += 1;
                     return Ok(ContainmentClass::Ambiguous);
                 }
+                RayHit::NearParallel => {
+                    // Refuse rather than observe a missing crossing. The
+                    // kernel could not decide whether this ray crosses this
+                    // face; counting it either way would be a guess, and a
+                    // guess here flips the containment verdict for every point
+                    // beyond the face. The ray is excluded from the 2-of-3
+                    // vote instead.
+                    tally.near_parallel += 1;
+                    return Ok(ContainmentClass::Ambiguous);
+                }
             }
         }
         hits.sort_by(f64::total_cmp);
@@ -1233,12 +1302,24 @@ fn ray_can_reach_bbox(origin: [f64; 3], direction: [f64; 3], lo: [f64; 3], hi: [
 enum RayHit {
     Hit(f64),
     Miss,
+    /// A crossing exists and its SIGN is untrustworthy: it landed inside
+    /// `TRIAGE_ORIGIN_EPS` of the query point. Triage call-site policy.
     Ambiguous,
+    /// Whether a crossing exists AT ALL is undecidable: the kernel classified
+    /// the determinant into `0 < |det| <= DET_EPS`
+    /// ([`RayTriangleClass::NearParallel`]).
+    ///
+    /// Kept distinct from [`Self::Ambiguous`] because the two are different
+    /// uncertainties and are counted separately
+    /// (`ContainmentRayCounters::face_ambiguous` vs `face_near_parallel`).
+    /// Both poison the ray, so the containment outcome is the same; only the
+    /// evidence differs.
+    NearParallel,
 }
 
 /// Triage's ray/triangle CALL-SITE POLICY, over the canonical geometry.
 ///
-/// The geometry is `geom_kernel::moller::ray_triangle`
+/// The geometry is `geom_kernel::moller::ray_triangle_classified`
 /// (`docs/specs/geometry-canon.md` §1 OP-2, plan item C5). This module's own
 /// Möller-Trumbore copy is retired: it agreed with the kernel on the algorithm
 /// and disagreed with it categorically on four acceptance rules, so the same
@@ -1246,11 +1327,21 @@ enum RayHit {
 /// and a shared-edge crossing could miss BOTH adjacent faces, silently
 /// flipping parity for every point beyond it.
 ///
-/// **What is geometry and lives in the kernel:** the determinant guard
+/// **What is geometry and lives in the kernel:** the determinant band
 /// (`DET_EPS = 1e-14`), the barycentric acceptance region with its
 /// `EPS = 1e-6` shared-edge slack, and the ray parameter `t`.
 ///
 /// **What is triage policy and lives here:**
+/// * the disposition of the kernel's undecidable class. `DET_EPS` is NOT a
+///   verdict for an interior crossing (`docs/specs/geometry-adjudication.md`
+///   §O4): a ray nearly parallel to a face's plane, with its origin close to
+///   that plane, pierces the face INTERIOR at a real finite `t` that no
+///   adjacent face contains. The pinned `ray_triangle` calls that a Miss, the
+///   crossing vanishes from the parity count, and the verdict flips for every
+///   point beyond it. `ray_triangle_classified` surfaces the band instead, and
+///   this call site maps it to [`RayHit::NearParallel`] — uncertainty routes to
+///   an ambiguous ray, which the 2-of-3 vote excludes. No new constant is
+///   introduced.
 /// * `TRIAGE_ORIGIN_EPS` — a crossing whose distance from the query point is
 ///   too small to sign. Canon §1 OP-2 keeps this explicitly, as call-site
 ///   policy rather than a geometry rule.
@@ -1281,21 +1372,38 @@ fn ray_triangle_distance(
     let e2 = sub(c, a);
     // `t_max = INFINITY`: a parity ray is unbounded forward.
     //
-    // UNITS: `direction` is one of `classify`'s three fixed sampling vectors
-    // and is NOT unit length, so `t` is in units of `|direction|` and the
-    // kernel's ±`EPS` slack scales with it — stated by the kernel's own units
-    // contract. `TRIAGE_ORIGIN_EPS` below is applied in those same units,
-    // exactly as the retired copy's `ORIGIN_EPS` was, so this is not a change.
-    let hit = ray_triangle(origin, direction, a, e1, e2, f64::INFINITY);
-    if !hit.hit {
-        return Ok(RayHit::Miss);
-    }
+    // UNITS: `direction` is one of `SAMPLING_DIRECTIONS`, each of which is
+    // `RAW_DIRECTIONS`'s chosen angle divided by its own canonical norm, so
+    // `|direction| = 1` and `t` is MILLIMETRES. The kernel's ±`EPS` acceptance
+    // slack is therefore 1e-6 mm and `TRIAGE_ORIGIN_EPS` below is genuinely
+    // 1e-9 mm. This is a change from the pre-normalization code, where all
+    // three were in units of `|direction|` (1.0756, 1.0279, 1.0618) and
+    // differed per direction.
+    //
+    // The classified call is the decision-feeding form: the pinned
+    // `ray_triangle` folds the undecidable determinant band into `hit = false`
+    // for oracle parity, and this call site decides a triage verdict.
+    let class = ray_triangle_classified(origin, direction, a, e1, e2, f64::INFINITY);
+    let hit = match class {
+        RayTriangleClass::Hit(hit) => hit,
+        // A definite miss: the determinant is well clear of the band, so the
+        // arithmetic decided this.
+        RayTriangleClass::Miss => return Ok(RayHit::Miss),
+        // `det == 0.0` exactly. A genuine prune, per the kernel's corrected
+        // degenerate-input contract: no interior crossing exists, and the
+        // crossings a ray exactly in this plane does make are edge crossings,
+        // registered on the adjacent non-parallel faces.
+        RayTriangleClass::ExactParallel => return Ok(RayHit::Miss),
+        // `0 < |det| <= DET_EPS`. Undecidable at this scale, so this ray
+        // cannot contribute a trustworthy parity bit.
+        RayTriangleClass::NearParallel => return Ok(RayHit::NearParallel),
+    };
     if !hit.t.is_finite() {
         return Err(TriageError::RayArithmetic);
     }
     // Triage policy, not a geometry rule: a crossing this close to the query
     // point has an untrustworthy sign, so the parity it would contribute is
-    // untrustworthy too. In units of `|direction|` (see above).
+    // untrustworthy too. Millimetres (see the units note above).
     const TRIAGE_ORIGIN_EPS: f64 = 1e-9;
     if hit.t.abs() <= TRIAGE_ORIGIN_EPS {
         return Ok(RayHit::Ambiguous);
@@ -1304,7 +1412,7 @@ fn ray_triangle_distance(
         // Half-ray semantics. The kernel accepts `t >= -EPS` so that a
         // crossing sitting exactly at the origin registers; triage's own
         // `TRIAGE_ORIGIN_EPS` band above already covers that case, and covers
-        // it more conservatively (1e-9 against the kernel's 1e-6-scaled
+        // it more conservatively (1e-9 mm against the kernel's 1e-6 mm
         // slack), so everything reaching here is a genuine behind-the-origin
         // crossing and is not counted.
         return Ok(RayHit::Miss);
@@ -1923,6 +2031,137 @@ mod tests {
         );
     }
 
+    /// The sampling directions the classifier casts are unit length; the
+    /// literals they came from are not.
+    ///
+    /// This is the whole point of the `RAW_DIRECTIONS`/`SAMPLING_DIRECTIONS`
+    /// split (`docs/specs/geometry-adjudication.md` §O4 Part 2 item 1). The raw
+    /// norms are stated here as MEASURED values, so a future edit to the angles
+    /// that quietly reintroduced a unit-length literal would be visible rather
+    /// than silently making the split look pointless.
+    #[test]
+    fn the_sampling_directions_are_unit_length_so_t_is_millimetres() {
+        let raw_norms = RAW_DIRECTIONS.map(norm);
+        for (index, measured) in raw_norms.iter().enumerate() {
+            let expected = [1.075_564_155_9, 1.027_921_468_3, 1.061_765_048_8][index];
+            assert!(
+                (measured - expected).abs() < 5.0e-11,
+                "raw direction {index} norm moved: measured {measured}, recorded {expected}"
+            );
+            assert!(
+                (measured - 1.0).abs() > 0.02,
+                "the raw literals are deliberately NOT unit length; direction {index} is \
+                 {measured}, so the split has nothing to fix"
+            );
+        }
+        for (index, direction) in SAMPLING_DIRECTIONS.iter().enumerate() {
+            let length = norm(*direction);
+            // One division per component, so the error is a couple of ULP of
+            // 1.0, not a tolerance on geometry.
+            assert!(
+                (length - 1.0).abs() <= 4.0 * f64::EPSILON,
+                "sampling direction {index} must be unit length so `t` is millimetres; \
+                 got {length}"
+            );
+        }
+    }
+
+    /// The §O4 counterexample, on the exact literals the adjudication pinned.
+    ///
+    /// `det = dot(e1, cross(dv, e2)) = -8e-15` — nonzero, and inside
+    /// `DET_EPS = 1e-14`. Every product in that chain is exact in f64
+    /// (doublings of a stored value and products with zero), so this is not a
+    /// rounding accident: the ray genuinely pierces the face INTERIOR at
+    /// `t = 1e-16 / 2e-15 ~ 0.05`, at barycentric `u = 0.225, v = 0.25`, and no
+    /// adjacent face contains that crossing point.
+    ///
+    /// The right answer for a parity classifier is therefore neither `Hit` nor
+    /// `Miss`: the arithmetic cannot decide at this scale, so the ray must not
+    /// contribute a parity bit at all.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the exactness IS the claim: every product in this determinant chain is a \
+                  doubling of a stored value or a product with zero, so `-8e-15` is the \
+                  arithmetic's answer and not a rounded one. A tolerance here would let the \
+                  fixture drift out of the band it is built to sit in."
+    )]
+    fn the_o4_counterexample_is_undecidable_not_a_crossing_and_not_a_miss() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [0.0, 2.0, 0.0];
+        let origin = [0.4, 0.5, -1.0e-16];
+        let direction = [1.0, 0.0, 2.0e-15];
+
+        // The fixture proves itself: the determinant really is in the band.
+        let determinant = dot(sub(b, a), cross(direction, sub(c, a)));
+        assert_eq!(
+            determinant, -8.0e-15,
+            "the pinned construction must produce exactly this determinant"
+        );
+        assert!(
+            determinant != 0.0 && determinant.abs() <= 1.0e-14,
+            "nonzero and inside DET_EPS: the undecidable band, not the exact-parallel prune"
+        );
+
+        assert_eq!(
+            ray_triangle_distance(origin, direction, a, b, c).expect("finite"),
+            RayHit::NearParallel,
+            "a determinant inside DET_EPS says the crossing is undecidable at this scale; \
+             triage must say so rather than assert a Miss"
+        );
+    }
+
+    /// The same undecidable band, reached through the classifier, poisoning
+    /// its ray — and counted where the run report can see it.
+    ///
+    /// The origin is moved from the pinned `z = -1e-16` to `z = -1e-9` for one
+    /// reason: at `-1e-16` the query point lies ON the triangle's plane and the
+    /// `point_on_triangle` pre-check answers `Ambiguous` before any ray is
+    /// cast, so the pinned literals cannot exercise this path. `det` depends
+    /// only on `e1`, `e2` and `dv`, so moving the origin along `z` leaves the
+    /// band membership exactly as pinned above.
+    ///
+    /// A counter that cannot fire is worthless, so this asserts the tally
+    /// moved, not merely that the verdict did.
+    #[test]
+    fn an_undecidable_face_poisons_its_ray_and_the_tally_records_it() {
+        let verts = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]];
+        let faces = vec![[0_u32, 1, 2]];
+        let classifier = ContainmentClassifier::build(&verts, &faces, &[0]).expect("build");
+
+        let origin = [0.4, 0.5, -1.0e-9];
+        let direction = [1.0, 0.0, 2.0e-15];
+        let mut tally = RayTally::default();
+        let mut hits = Vec::new();
+        let outcome = classifier
+            .classify_ray_counted(origin, direction, &mut tally, &mut hits)
+            .expect("finite");
+
+        assert_eq!(
+            outcome,
+            ContainmentClass::Ambiguous,
+            "an undecidable face must poison its ray; the 2-of-3 vote then excludes it"
+        );
+        assert_eq!(
+            tally.near_parallel, 1,
+            "the undecidable evaluation must be counted -- this is the measured refusal rate \
+             the owner asked for"
+        );
+        assert_eq!(
+            tally.ambiguous, 0,
+            "the kernel's undecidable band is a DIFFERENT uncertainty from triage's \
+             origin band and must not be folded into it"
+        );
+        assert_eq!(tally.hits, 0, "no crossing was established");
+        assert_eq!(tally.misses, 0, "and none was ruled out either");
+        assert_eq!(tally.tests, 1, "exactly one face was evaluated");
+        assert!(
+            hits.is_empty(),
+            "an undecidable evaluation contributes no crossing to the parity list"
+        );
+    }
+
     /// The counters are instrumentation, and instrumentation that reports
     /// zero work while work happened is worse than none.
     ///
@@ -1958,8 +2197,13 @@ mod tests {
         );
         assert_eq!(
             counters.face_tests,
-            counters.face_hits + counters.face_misses + counters.face_ambiguous,
-            "every counted face test lands in exactly one outcome bucket"
+            counters.face_hits
+                + counters.face_misses
+                + counters.face_ambiguous
+                + counters.face_near_parallel,
+            "every counted face test lands in exactly one outcome bucket -- including the \
+             kernel's undecidable band, which is a bucket of its own and must not be lost \
+             into the miss count"
         );
     }
 

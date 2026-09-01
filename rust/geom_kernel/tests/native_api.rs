@@ -1,5 +1,5 @@
 use geom_kernel::{
-    indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, Interval, NativeSurface,
+    indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, NativeSurface,
     NativeSurfaceConfig, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
     PlaneIntersectionKind, PlaneSliceError, PlaneSliceLimits, SurfaceBuildError,
     SurfaceSubsetError, TriangleSoup,
@@ -470,7 +470,15 @@ fn slicing_thread_identity_is_subprocess_invariant() {
     );
 }
 
-fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
+fn assert_intervals_equal(
+    left: &geom_kernel::PenetrationIntervalsClassified,
+    right: &geom_kernel::PenetrationIntervalsClassified,
+) {
+    // The uncertainty tallies are part of the answer, not decoration: two runs
+    // that agree on every interval but disagree on which rows were undecidable
+    // have NOT produced the same result.
+    assert_eq!(left.near_parallel, right.near_parallel);
+    let (left, right) = (&left.rows, &right.rows);
     assert_eq!(left.len(), right.len());
     for (left_row, right_row) in left.iter().zip(right) {
         assert_eq!(left_row.len(), right_row.len());
@@ -490,8 +498,8 @@ fn bounded_penetration(
     p0s: &[[f64; 3]],
     p1s: &[[f64; 3]],
     limits: PenetrationBatchLimits,
-) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
-    surface.penetration_intervals_batch_bounded(
+) -> Result<geom_kernel::PenetrationIntervalsClassified, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded_classified(
         p0s,
         p1s,
         &vec![0.0; p0s.len()],
@@ -566,26 +574,54 @@ fn seat_exemption_pair(surface: &NativeSurface) -> SeatExemptionAnswer {
     let p1s = [SEAT_PROBE_P1];
     let zero = [0.0];
     let band = surface
-        .faces_near_segments_batch(
+        .faces_near_segments_batch_classified(
             &p0s,
             &p1s,
             &[SEAT_PROBE_BAND_MM],
             generous_near_face_limits(),
         )
         .unwrap();
-    let (open_clr, open_pt) = surface
-        .segment_clearance(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
+    let open = surface
+        .segment_clearance_classified(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
         .unwrap();
-    let exempt_rows: Vec<&[u32]> = band.iter().map(Vec::as_slice).collect();
-    let (exempt_clr, exempt_pt) = surface
-        .segment_clearance_excluding(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero, &exempt_rows)
+    let exempt_rows: Vec<&[u32]> = band.rows.iter().map(Vec::as_slice).collect();
+    let exempt = surface
+        .segment_clearance_excluding_classified(
+            &p0s,
+            &p1s,
+            &zero,
+            &zero,
+            0.0,
+            &zero,
+            &zero,
+            &exempt_rows,
+        )
         .unwrap();
+    // Both halves must be MEASURED rows. An `UpperBound` here would mean the
+    // seat-exemption numbers below are one-sided, and grading them as if they
+    // were measurements is precisely the defect the third state exists to
+    // expose, so it panics rather than unwrapping to a plausible number.
+    let measured = |row: geom_kernel::SegmentClearanceClassified| match row {
+        geom_kernel::SegmentClearanceClassified::Measured {
+            clearance_mm,
+            witness,
+        } => (clearance_mm, witness),
+        other => panic!("seat exemption probe expected a measured row, got {other:?}"),
+    };
+    let (open_clearance_mm, open_point) = measured(open[0]);
+    let (exempt_clearance_mm, exempt_point) = measured(exempt[0]);
+    assert_eq!(
+        band.near_parallel,
+        [0],
+        "the seat probe fixture must not be undecidable, or the band below is \
+         a proof-only subset of the faces the exemption meant to name"
+    );
     SeatExemptionAnswer {
-        band: band[0].clone(),
-        open_clearance_mm: open_clr[0],
-        open_point: open_pt[0],
-        exempt_clearance_mm: exempt_clr[0],
-        exempt_point: exempt_pt[0],
+        band: band.rows[0].clone(),
+        open_clearance_mm,
+        open_point,
+        exempt_clearance_mm,
+        exempt_point,
     }
 }
 
@@ -620,10 +656,10 @@ fn census_penetration_limits(
     rays_all: bool,
 ) -> PenetrationBatchLimits {
     let census = surface
-        .penetration_census_batch(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)
+        .penetration_census_batch_classified(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)
         .unwrap();
     surface
-        .penetration_intervals_batch_census_limits(
+        .penetration_intervals_batch_census_limits_classified(
             &census,
             n_offset_rays,
             cap,
@@ -640,8 +676,8 @@ const HETEROGENEOUS_RADII: [f64; 3] = [0.1, 0.05, 0.2];
 fn heterogeneous_penetration(
     surface: &NativeSurface,
     limits: PenetrationBatchLimits,
-) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
-    surface.penetration_intervals_batch_bounded(
+) -> Result<geom_kernel::PenetrationIntervalsClassified, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded_classified(
         &HETEROGENEOUS_P0,
         &HETEROGENEOUS_P1,
         &HETEROGENEOUS_RADII,
@@ -739,8 +775,13 @@ fn bounded_penetration_frozen_heterogeneous_rows_are_bit_exact_and_ordered() {
         ],
         &[],
     ];
-    assert_eq!(rows.len(), expected.len());
-    for (row, expected_row) in rows.iter().zip(expected) {
+    assert_eq!(rows.rows.len(), expected.len());
+    assert_eq!(
+        rows.near_parallel,
+        vec![0; expected.len()],
+        "frozen fixture must be fully decided"
+    );
+    for (row, expected_row) in rows.rows.iter().zip(expected) {
         let actual = row
             .iter()
             .map(|interval| {
@@ -783,9 +824,10 @@ fn bounded_penetration_preflights_every_resource_at_exact_cap() {
         &bounded_penetration(&surface, &p0s, &p1s, worst_case).unwrap(),
     );
     let bounded = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
-    assert_eq!(bounded.len(), 1);
-    assert_eq!(bounded[0].len(), 1);
-    let interval = &bounded[0][0];
+    assert_eq!(bounded.rows.len(), 1);
+    assert_eq!(bounded.near_parallel, vec![0]);
+    assert_eq!(bounded.rows[0].len(), 1);
+    let interval = &bounded.rows[0][0];
     assert_eq!(interval.s_a.to_bits(), 1.0f64.to_bits());
     assert_eq!(interval.s_b.to_bits(), 2.0f64.to_bits());
     assert_eq!(interval.max_depth.to_bits(), 4_601_678_019_255_453_472);
@@ -857,8 +899,20 @@ fn bounded_penetration_handles_zero_rows_and_checked_overflow() {
     };
     assert_eq!(
         surface
-            .penetration_intervals_batch_bounded(&[], &[], &[], &[], 0, 0.12, 8, 0.05, false, zero,)
+            .penetration_intervals_batch_bounded_classified(
+                &[],
+                &[],
+                &[],
+                &[],
+                0,
+                0.12,
+                8,
+                0.05,
+                false,
+                zero,
+            )
             .unwrap()
+            .rows
             .len(),
         0
     );
@@ -882,8 +936,9 @@ fn bounded_penetration_high_crossing_mesh_has_one_ordered_refusal() {
     let radii = vec![0.0; p0s.len()];
     let limits = census_penetration_limits(&surface, &p0s, &p1s, &radii, &radii, 0, 8, 0.12, false);
     let intervals = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
-    assert_eq!(intervals.len(), 2);
-    assert!(intervals[0].len() >= 4, "all four cubes are crossed");
+    assert_eq!(intervals.rows.len(), 2);
+    assert_eq!(intervals.near_parallel, vec![0, 0]);
+    assert!(intervals.rows[0].len() >= 4, "all four cubes are crossed");
     let below = geom_kernel::PenetrationBatchLimits {
         max_total_hits: limits.max_total_hits - 1,
         ..limits
@@ -934,7 +989,7 @@ fn penetration_census_severs_work_from_hits_and_prices_the_counted_row() {
     let p1s = [[4.0, 0.5, 0.5]];
     let radii = [0.0];
     let census = surface
-        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .penetration_census_batch_classified(&p0s, &p1s, &radii, &radii, 0, false)
         .unwrap();
     assert_eq!(census.len(), 1);
     let row = census[0];
@@ -945,7 +1000,7 @@ fn penetration_census_severs_work_from_hits_and_prices_the_counted_row() {
     assert!(row.tests > row.crossings);
     assert_eq!(row.seg_mm.to_bits(), 5.0f64.to_bits());
     let limits = surface
-        .penetration_intervals_batch_census_limits(&census, 0, 8, 0.12, false)
+        .penetration_intervals_batch_census_limits_classified(&census, 0, 8, 0.12, false)
         .unwrap();
     // work is charged as traversal tests, hits as crossings: severed.
     assert_eq!(limits.max_total_work, row.tests);
@@ -984,7 +1039,7 @@ fn penetration_census_sample_budget_is_the_closed_form_bound() {
     let p1s = [[2.0, 0.5, 0.5]];
     let radii = [0.0];
     let census = surface
-        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .penetration_census_batch_classified(&p0s, &p1s, &radii, &radii, 0, false)
         .unwrap();
     let row = census[0];
     // At cap = 80 the F10 arm governs: 3 x subsegments + ceil(seg / step)
@@ -994,16 +1049,17 @@ fn penetration_census_sample_budget_is_the_closed_form_bound() {
     let expected = (3 * subsegments + (row.seg_mm / 0.12).ceil() as usize).min(80 * subsegments);
     assert!(expected < 80 * subsegments);
     let limits = surface
-        .penetration_intervals_batch_census_limits(&census, 0, 80, 0.12, false)
+        .penetration_intervals_batch_census_limits_classified(&census, 0, 80, 0.12, false)
         .unwrap();
     assert_eq!(limits.max_total_samples, expected);
     // The bound admits the execution it prices: the batch runs at exactly it.
     let rows = surface
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &p0s, &p1s, &radii, &radii, 0, 0.12, 80, 0.05, false, limits,
         )
         .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.near_parallel, vec![0]);
 }
 
 #[test]
@@ -1013,7 +1069,7 @@ fn penetration_census_degenerate_row_counts_zero_and_executes_empty() {
     let p1s = [[5.0, 5.0, 5.0]];
     let radii = [0.0];
     let census = surface
-        .penetration_census_batch(&p0s, &p1s, &radii, &radii, 0, false)
+        .penetration_census_batch_classified(&p0s, &p1s, &radii, &radii, 0, false)
         .unwrap();
     assert_eq!(
         census[0],
@@ -1022,17 +1078,19 @@ fn penetration_census_degenerate_row_counts_zero_and_executes_empty() {
             tests: 0,
             seg_mm: 0.0,
             max_ray_crossings: 0,
-            max_ray_seg_mm: 0.0
+            max_ray_seg_mm: 0.0,
+            near_parallel: 0
         }
     );
     let limits = surface
-        .penetration_intervals_batch_census_limits(&census, 0, 8, 0.12, false)
+        .penetration_intervals_batch_census_limits_classified(&census, 0, 8, 0.12, false)
         .unwrap();
     assert_eq!(limits.max_total_work, 0);
     assert_eq!(limits.max_total_hits, 0);
     let rows = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].is_empty());
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0].is_empty());
+    assert_eq!(rows.near_parallel, vec![0]);
 }
 
 /// FU-8g H2 — the charged-vs-executed receipt. `work` and `hits` are the same
@@ -1045,7 +1103,7 @@ fn penetration_census_degenerate_row_counts_zero_and_executes_empty() {
 fn penetration_meter_receipt_matches_the_counted_charge() {
     let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
     let census = surface
-        .penetration_census_batch(
+        .penetration_census_batch_classified(
             &HETEROGENEOUS_P0,
             &HETEROGENEOUS_P1,
             &HETEROGENEOUS_RADII,
@@ -1057,10 +1115,10 @@ fn penetration_meter_receipt_matches_the_counted_charge() {
     let counted_tests: usize = census.iter().map(|row| row.tests).sum();
     let counted_crossings: usize = census.iter().map(|row| row.crossings).sum();
     let limits = surface
-        .penetration_intervals_batch_census_limits(&census, 2, 8, 0.12, true)
+        .penetration_intervals_batch_census_limits_classified(&census, 2, 8, 0.12, true)
         .unwrap();
     let (rows, meter) = surface
-        .penetration_intervals_batch_bounded_metered(
+        .penetration_intervals_batch_bounded_metered_classified(
             &HETEROGENEOUS_P0,
             &HETEROGENEOUS_P1,
             &HETEROGENEOUS_RADII,
@@ -1106,7 +1164,12 @@ fn bounded_penetration_thread_identity_child() {
         .unwrap();
     let rows = heterogeneous_penetration(&surface, limits).unwrap();
     let mut hash = 1_469_598_103_934_665_603u64;
-    for (row_index, row) in rows.into_iter().enumerate() {
+    assert!(
+        rows.near_parallel.iter().all(|&n| n == 0),
+        "the thread-identity fixture must be fully decided: {:?}",
+        rows.near_parallel
+    );
+    for (row_index, row) in rows.rows.into_iter().enumerate() {
         update_penetration_hash(&mut hash, 0x524f_575f_4245_4749 ^ row_index as u64);
         update_penetration_hash(&mut hash, row.len() as u64);
         for interval in row {
@@ -1441,9 +1504,9 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
         "no-hit sentinel remains the immutable global face count"
     );
     assert_eq!(
-        tied.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0)
+        tied.cast_rays_classified(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0)
             .unwrap()
-            .2,
+            .face_all,
         [0],
         "coincident-hit tie-break returns the lowest global face ID"
     );
@@ -1453,8 +1516,8 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
         "caller order cannot change canonical subset query bits"
     );
     assert_eq!(
-        tied.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
-        tied_reordered.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
+        tied.cast_rays_classified(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
+        tied_reordered.cast_rays_classified(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
         "caller order cannot change canonical subset ray ties"
     );
     assert_eq!(
@@ -1511,18 +1574,18 @@ fn identity_subset_matches_every_native_query_family() {
     assert_eq!(full.project(&points), subset.project(&points));
     assert_eq!(full.inside(&points), subset.inside(&points));
     assert_eq!(
-        full.cast_rays(&origins, &dirs, 1.0).unwrap(),
-        subset.cast_rays(&origins, &dirs, 1.0).unwrap()
+        full.cast_rays_classified(&origins, &dirs, 1.0).unwrap(),
+        subset.cast_rays_classified(&origins, &dirs, 1.0).unwrap()
     );
     assert_eq!(
-        full.segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+        full.segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
             .unwrap(),
         subset
-            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
             .unwrap()
     );
     let full_intervals = full
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &p0s,
             &p1s,
             &radii,
@@ -1536,7 +1599,7 @@ fn identity_subset_matches_every_native_query_family() {
         )
         .unwrap();
     let subset_intervals = subset
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &p0s,
             &p1s,
             &radii,
@@ -1551,10 +1614,10 @@ fn identity_subset_matches_every_native_query_family() {
         .unwrap();
     assert_intervals_equal(&full_intervals, &subset_intervals);
     assert_eq!(
-        full.sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+        full.sphere_breach_classified(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap(),
         subset
-            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .sphere_breach_classified(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap()
     );
     let full_seat = seat_exemption_pair(&full);
@@ -1603,19 +1666,19 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
     assert!(child_project.2.iter().all(|&face_id| face_id >= 12));
     assert_eq!(parent.inside(&points), child.inside(&points));
     assert_eq!(
-        parent.cast_rays(&origins, &dirs, 1.0).unwrap(),
-        child.cast_rays(&origins, &dirs, 1.0).unwrap()
+        parent.cast_rays_classified(&origins, &dirs, 1.0).unwrap(),
+        child.cast_rays_classified(&origins, &dirs, 1.0).unwrap()
     );
     assert_eq!(
         parent
-            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
             .unwrap(),
         child
-            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
             .unwrap()
     );
     let parent_intervals = parent
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &p0s,
             &p1s,
             &radii,
@@ -1629,7 +1692,7 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
         )
         .unwrap();
     let child_intervals = child
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &p0s,
             &p1s,
             &radii,
@@ -1645,10 +1708,10 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
     assert_intervals_equal(&parent_intervals, &child_intervals);
     assert_eq!(
         parent
-            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .sphere_breach_classified(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap(),
         child
-            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .sphere_breach_classified(&points[..2], &radii, 0.05, 25.0, 8)
             .unwrap()
     );
     // The seat-exemption pair, on views that are NOT the identity map. Both
@@ -1723,7 +1786,7 @@ fn a_narrowed_view_reports_the_face_the_walk_found_not_the_slot_it_sat_in() {
     let p1s = [SEAT_PROBE_P1];
     let zero = [0.0];
     let band = view
-        .faces_near_segments_batch(
+        .faces_near_segments_batch_classified(
             &p0s,
             &p1s,
             &[SEAT_PROBE_BAND_MM],
@@ -1731,30 +1794,44 @@ fn a_narrowed_view_reports_the_face_the_walk_found_not_the_slot_it_sat_in() {
         )
         .unwrap();
     assert_eq!(
-        band,
+        band.rows,
         vec![vec![14]],
         "the band holds the top triangle the walk actually measured at 0.1 mm"
     );
 
-    let exempt_rows: Vec<&[u32]> = band.iter().map(Vec::as_slice).collect();
-    let (open_clr, _) = view
-        .segment_clearance(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
+    let exempt_rows: Vec<&[u32]> = band.rows.iter().map(Vec::as_slice).collect();
+    let open_rows = view
+        .segment_clearance_classified(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero)
         .unwrap();
-    let (exempt_clr, _) = view
-        .segment_clearance_excluding(&p0s, &p1s, &zero, &zero, 0.0, &zero, &zero, &exempt_rows)
+    let exempt_result = view
+        .segment_clearance_excluding_classified(
+            &p0s,
+            &p1s,
+            &zero,
+            &zero,
+            0.0,
+            &zero,
+            &zero,
+            &exempt_rows,
+        )
         .unwrap();
+    let open_clearance = open_rows[0]
+        .clearance_mm()
+        .expect("the seat probe view is fully decided; a one-sided row would not be gradable");
+    let exempt_clearance = exempt_result[0]
+        .clearance_mm()
+        .expect("the seat probe view is fully decided; a one-sided row would not be gradable");
     assert!(
-        (open_clr[0] - SEAT_PROBE_OPEN_CLEARANCE_MM).abs() < 1e-12,
-        "unexempt clearance {} is not the 0.1 mm gap to the top triangle",
-        open_clr[0]
+        (open_clearance - SEAT_PROBE_OPEN_CLEARANCE_MM).abs() < 1e-12,
+        "unexempt clearance {open_clearance} is not the 0.1 mm gap to the top triangle"
     );
     // This view does not own the `y = 0` side triangle the fuller views fall back
     // to, so exempting face 14 leaves the top face's OTHER triangle nearest, at
     // sqrt(0.1^2 + 0.1^2 + 0.1^2) mm.
     assert!(
-        (exempt_clr[0] - 0.03_f64.sqrt()).abs() < 1e-12,
-        "exempting face 14 left {}, not the sqrt(0.03) mm gap to the top face's other triangle",
-        exempt_clr[0]
+        (exempt_clearance - 0.03_f64.sqrt()).abs() < 1e-12,
+        "exempting face 14 left {exempt_clearance}, not the sqrt(0.03) mm gap to \
+         the top face's other triangle"
     );
 }
 
@@ -1829,7 +1906,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
     let scalars = [0.1];
 
     assert_batch_error(
-        surface.cast_rays(&points, &[], 1.0),
+        surface.cast_rays_classified(&points, &[], 1.0),
         "cast_rays",
         "dirs",
         1,
@@ -1837,35 +1914,75 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
     );
 
     assert_batch_error(
-        surface.segment_clearance(&points, &[], &scalars, &scalars, 0.05, &scalars, &scalars),
+        surface.segment_clearance_classified(
+            &points,
+            &[],
+            &scalars,
+            &scalars,
+            0.05,
+            &scalars,
+            &scalars,
+        ),
         "segment_clearance",
         "p1s",
         1,
         0,
     );
     assert_batch_error(
-        surface.segment_clearance(&points, &points, &[], &scalars, 0.05, &scalars, &scalars),
+        surface.segment_clearance_classified(
+            &points,
+            &points,
+            &[],
+            &scalars,
+            0.05,
+            &scalars,
+            &scalars,
+        ),
         "segment_clearance",
         "r0s",
         1,
         0,
     );
     assert_batch_error(
-        surface.segment_clearance(&points, &points, &scalars, &[], 0.05, &scalars, &scalars),
+        surface.segment_clearance_classified(
+            &points,
+            &points,
+            &scalars,
+            &[],
+            0.05,
+            &scalars,
+            &scalars,
+        ),
         "segment_clearance",
         "r1s",
         1,
         0,
     );
     assert_batch_error(
-        surface.segment_clearance(&points, &points, &scalars, &scalars, 0.05, &[], &scalars),
+        surface.segment_clearance_classified(
+            &points,
+            &points,
+            &scalars,
+            &scalars,
+            0.05,
+            &[],
+            &scalars,
+        ),
         "segment_clearance",
         "inset0s",
         1,
         0,
     );
     assert_batch_error(
-        surface.segment_clearance(&points, &points, &scalars, &scalars, 0.05, &scalars, &[]),
+        surface.segment_clearance_classified(
+            &points,
+            &points,
+            &scalars,
+            &scalars,
+            0.05,
+            &scalars,
+            &[],
+        ),
         "segment_clearance",
         "inset1s",
         1,
@@ -1873,7 +1990,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
     );
 
     assert_penetration_input_error(
-        surface.penetration_intervals_batch_bounded(
+        surface.penetration_intervals_batch_bounded_classified(
             &points,
             &[],
             &scalars,
@@ -1891,7 +2008,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
         0,
     );
     assert_penetration_input_error(
-        surface.penetration_intervals_batch_bounded(
+        surface.penetration_intervals_batch_bounded_classified(
             &points,
             &points,
             &[],
@@ -1909,7 +2026,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
         0,
     );
     assert_penetration_input_error(
-        surface.penetration_intervals_batch_bounded(
+        surface.penetration_intervals_batch_bounded_classified(
             &points,
             &points,
             &scalars,
@@ -1928,7 +2045,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
     );
 
     assert_batch_error(
-        surface.sphere_breach(&points, &[], 0.05, 25.0, 8),
+        surface.sphere_breach_classified(&points, &[], 0.05, 25.0, 8),
         "sphere_breach",
         "radii",
         1,
@@ -2061,11 +2178,16 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
         }
     }
     assert_eq!(indexed.inside(&points), soup.inside(&points));
-    let (io, it, ifaces) = indexed.cast_rays(&origins, &dirs, 2.0).unwrap();
-    let (so, st, sfaces) = soup.cast_rays(&origins, &dirs, 2.0).unwrap();
-    assert_eq!(io, so);
-    assert_eq!(ifaces, sfaces);
-    for (&left, &right) in it.iter().zip(&st) {
+    let indexed_rays = indexed.cast_rays_classified(&origins, &dirs, 2.0).unwrap();
+    let soup_rays = soup.cast_rays_classified(&origins, &dirs, 2.0).unwrap();
+    assert_eq!(indexed_rays.offsets, soup_rays.offsets);
+    assert_eq!(indexed_rays.face_all, soup_rays.face_all);
+    assert_eq!(
+        indexed_rays.near_parallel, soup_rays.near_parallel,
+        "two constructions of the same geometry must agree on which rays were \
+         undecidable, not merely on the crossings they kept"
+    );
+    for (&left, &right) in indexed_rays.t_all.iter().zip(&soup_rays.t_all) {
         assert_eq!(left.to_bits(), right.to_bits());
     }
 }

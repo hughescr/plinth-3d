@@ -106,6 +106,19 @@ pub enum CandidateUnavailable {
     /// count is how many sampled points of the cutter's rear boundary landed
     /// in open air outside the model.
     RearOverTravelBreachesSkin { outside_samples: usize },
+    /// The exit ray reached at least one shell triangle whose Möller
+    /// determinant landed in `0 < |det| <= DET_EPS`, where whether the ray
+    /// crosses that triangle is **undecidable at f64 scale**
+    /// (`docs/specs/geometry-adjudication.md` §O4, §EXT-1 row 16).
+    ///
+    /// This is NOT a crossing count of any kind. The undecidable faces
+    /// contributed no crossing at all, so the list this candidate's exit was
+    /// read from is incomplete in an unknown direction: the count could be two
+    /// when the truth is four, and the "clean way out" would then be a bore
+    /// through solid material. `faces` is how many such triangles that one ray
+    /// reached — it is evidence, not a distance, and there is no `t` to report
+    /// because a non-`Hit` Möller result carries no usable one.
+    NearParallel { faces: u32 },
 }
 
 /// Sole move-forward authority after H1a. There is still exactly one mesh and
@@ -234,6 +247,58 @@ pub enum DrainPlanningRefusal {
     #[error("no vent site escaped through a horizontal wall within 45mm")]
     NoVentSite {
         diagnostics: Vec<CandidateDiagnostic>,
+    },
+    /// No chamber produced a drained-and-vented pair, **and** at least one
+    /// candidate direction was struck out because its exit ray reached a
+    /// triangle the ray/triangle arithmetic could not decide
+    /// (`CandidateUnavailable::NearParallel`).
+    ///
+    /// This variant exists so the planner does not say something it cannot
+    /// support. [`Self::NoExit`] asserts that no direction found a clean way
+    /// out, and [`Self::NoVentSite`] that no vent escaped; both are positive
+    /// claims about geometry. Once an undecidable face is in the record neither
+    /// claim is affirmable — the crossing list those directions were judged on
+    /// is incomplete in an unknown direction, so the model may well drain
+    /// perfectly and may equally have no exit at all. The honest report is that
+    /// the question was not answered.
+    ///
+    /// It fires whenever an undecidable face was recorded on a plan that
+    /// shipped no holes, WITHOUT claiming the uncertainty caused the emptiness:
+    /// `near_parallel_candidates` counts the directions actually struck out for
+    /// it, and `diagnostics` carries every reason — near-parallel and otherwise
+    /// — so the reader can see the mix rather than infer it.
+    ///
+    /// This is a refusal, and refusal is the correct side: the alternative is
+    /// drilling a bore on a crossing count that may be missing entries, which
+    /// puts a hole through solid material.
+    #[error(
+        "H1a drain planning shipped no drained-and-vented chamber, and {near_parallel_candidates} \
+         candidate direction(s) were struck out on an UNDECIDABLE ray/triangle determinant \
+         (0 < |det| <= DET_EPS): whether those rays crossed the shell is not knowable at this \
+         scale, so this refusal is NOT evidence that no exit exists -- read `diagnostics` for the \
+         full reason mix"
+    )]
+    NearParallelUncertain {
+        near_parallel_candidates: usize,
+        diagnostics: Vec<CandidateDiagnostic>,
+    },
+    /// The census walk and the collecting walk disagreed on how many
+    /// undecidable faces one ray reached.
+    ///
+    /// The two walks are mirror twins — same traversal, same acceptance
+    /// predicate, same classification — so their per-ray tallies agree by
+    /// construction. Nothing in the kernel enforces that on a consumer's behalf
+    /// (`CensusDrift` covers hits, subsegments, samples and intervals, not
+    /// tallies), so this planner compares them explicitly and refuses on a
+    /// disagreement rather than picking one of the two numbers to trust.
+    #[error(
+        "candidate {candidate}: census walk counted {census} undecidable faces, collecting walk \
+         counted {collecting}; the two walks are mirror twins and must agree"
+    )]
+    NearParallelCensusDrift {
+        candidate: usize,
+        census: u32,
+        collecting: u32,
     },
 }
 
@@ -706,10 +771,11 @@ fn plan(
     // crossing count rather than the rays x faces ceiling. A ray through a
     // closed hollow shell crosses the surface a handful of times no matter how
     // finely that surface is tessellated.
-    let crossings = surface
-        .cast_rays_census(&origins, &directions, ceiling)
+    let census = surface
+        .cast_rays_census_classified(&origins, &directions, ceiling)
         .map_err(|_| DrainPlanningRefusal::Kernel)?;
-    if crossings.len() != candidates.len() {
+    let crossings = census.crossings;
+    if crossings.len() != candidates.len() || census.near_parallel.len() != candidates.len() {
         return Err(DrainPlanningRefusal::PreflightUnderestimated);
     }
     let ray_crossings = crossings
@@ -750,19 +816,55 @@ fn plan(
 
     // One gathered batch covers every drain and vent candidate. Results are
     // scattered solely by the stable candidate ID below.
-    let (offsets, ts, _faces) = surface
-        .cast_rays(&origins, &directions, ceiling)
+    let cast = surface
+        .cast_rays_classified(&origins, &directions, ceiling)
         .map_err(|_| DrainPlanningRefusal::Kernel)?;
+    let (offsets, ts) = (cast.offsets, cast.t_all);
     // The census walk and the collecting walk are the same traversal, and
     // dedup only merges neighbours, so the flattened array can never be longer
     // than the counted crossings. Refuse rather than let a drift go unnoticed.
-    if ts.len() > ray_crossings {
+    if ts.len() > ray_crossings || cast.near_parallel.len() != candidates.len() {
         return Err(DrainPlanningRefusal::PreflightUnderestimated);
+    }
+    // The near-parallel tallies are the OTHER half of that mirror, and the
+    // kernel documents that nothing compares them on a consumer's behalf. Do it
+    // here, per ray, before either number is used to decide anything.
+    for candidate in &candidates {
+        let (census, collecting) = (
+            census.near_parallel[candidate.id],
+            cast.near_parallel[candidate.id],
+        );
+        if census != collecting {
+            return Err(DrainPlanningRefusal::NearParallelCensusDrift {
+                candidate: candidate.id,
+                census,
+                collecting,
+            });
+        }
     }
 
     let mut paths = vec![None; candidates.len()];
     let mut unavailable_candidates = Vec::new();
     for candidate in &candidates {
+        // An undecidable face on this ray makes the crossing list below
+        // incomplete in an unknown direction, so the exit it reports is a guess
+        // and this direction is unavailable. Struck out BEFORE `exit_length`
+        // reads the list: a list that may be missing entries can present any
+        // count at all, including the exactly-two that would have shipped a
+        // bore through solid material.
+        let faces = cast.near_parallel[candidate.id];
+        if faces > 0 {
+            unavailable_candidates.push(CandidateDiagnostic {
+                role: candidate.role,
+                lobe_id: candidate.lobe_id,
+                site: candidate.site,
+                direction: candidate.direction.map(|value| {
+                    Finite::new(value).expect("normalized registered direction is finite")
+                }),
+                reason: CandidateUnavailable::NearParallel { faces },
+            });
+            continue;
+        }
         let begin =
             usize::try_from(offsets[candidate.id]).map_err(|_| DrainPlanningRefusal::Kernel)?;
         let end =
@@ -853,6 +955,24 @@ fn plan(
     // a vent, so an empty list means no chamber did — the whole model is
     // refused, and the refusal names whichever of the two was missing.
     if holes.is_empty() {
+        // Uncertainty first. `NoExit` and `NoVentSite` are positive claims
+        // about geometry ("no direction found a clean way out"), and once an
+        // undecidable face is in the record neither is affirmable — the
+        // crossing lists those directions were judged on may be missing
+        // entries. Naming the uncertainty is what stops this refusal being read
+        // as proof that the model cannot drain.
+        let near_parallel_candidates = unavailable_candidates
+            .iter()
+            .filter(|diagnostic| {
+                matches!(diagnostic.reason, CandidateUnavailable::NearParallel { .. })
+            })
+            .count();
+        if near_parallel_candidates > 0 {
+            return Err(DrainPlanningRefusal::NearParallelUncertain {
+                near_parallel_candidates,
+                diagnostics: std::mem::take(&mut unavailable_candidates),
+            });
+        }
         return Err(match first_lobe_without_exit {
             Some(lobe_id) => DrainPlanningRefusal::NoExit {
                 lobe_id,
@@ -2232,10 +2352,10 @@ mod tests {
         .expect("native surface");
         let origins: Vec<_> = rays.iter().map(|(origin, _)| *origin).collect();
         let directions: Vec<_> = rays.iter().map(|(_, direction)| *direction).collect();
-        let (offsets, _, _) = surface
-            .cast_rays(&origins, &directions, 45.0)
+        let cast = surface
+            .cast_rays_classified(&origins, &directions, 45.0)
             .expect("ray batch");
-        offsets
+        cast.offsets
             .windows(2)
             .map(|window| usize::try_from(window[1] - window[0]).expect("nonnegative offsets"))
             .collect()
@@ -2993,6 +3113,244 @@ mod tests {
         );
     }
 
+    /// The `a_bore_whose_rear_over_travel...` slab, optionally with ONE extra
+    /// triangle planted below the model that the straight-down drain ray
+    /// cannot decide.
+    ///
+    /// The slab is the fixture whose only surviving drain is straight down:
+    /// the registered drain fan is five directions, and the two obliques that
+    /// leave along x are struck out because their cutters' rear over-travel
+    /// breaks back out through the skin. So a plant that takes the three
+    /// remaining directions empties the lobe's drain set, which is exactly the
+    /// "a required candidate set empties" case of
+    /// `docs/specs/geometry-adjudication.md` §EXT-1 row 16.
+    ///
+    /// **The planted triangle**, and why its determinant is a pin rather than a
+    /// hope. The lobe's drain site is the cavity cell all of whose 26
+    /// neighbours are members, which on this field is `(0, 20, 8.5)`. The
+    /// triangle `(0,0,-5), (0,40,-5), (1e-16,20,-4)` gives `E1 = (0,40,0)` and
+    /// `E2 = (1e-16,20,1)`, so `E1 x E2 = (40, 0, -4e-15)` — a wall in the y–z
+    /// plane, tilted by 1e-16 mm over 40 mm. The Möller determinant is
+    /// `-dv · (E1 x E2)`, so it is the ray direction that decides the class,
+    /// and it splits the fan cleanly:
+    ///
+    /// * the three directions with `dv.x == 0` — straight down `(0,0,-1)` and
+    ///   the two `(0, ±0.4472, -0.8944)` obliques — run nearly IN the wall's
+    ///   plane. Their determinants are `-4e-15` and `∓3.578e-15`: nonzero, and
+    ///   inside `DET_EPS = 1e-14`. All three are undecidable, and all three
+    ///   reach the wall (they hold `x = 0` exactly, and at `z = -4.5` their `y`
+    ///   is 20 or 20 ± 6.5, inside the wall's `y ∈ [0, 40]`).
+    /// * the two `(±0.4472, 0, -0.8944)` obliques leave along x, giving
+    ///   `|det| = 17.9` — three orders of magnitude clear of the band, a
+    ///   definite classification — and they are 6.7 mm away in x by the time
+    ///   they reach that depth, against a bounding-box pad of 1.2e-4 mm. They
+    ///   are struck out by rear over-travel, exactly as in the control.
+    ///
+    /// The wall sits at `z ∈ [-5, -4]`, below the whole model and 13.5 mm along
+    /// a ray whose ceiling is 45 mm, so:
+    ///
+    /// * the vent rays cannot reach it: they are horizontal, at the top of the
+    ///   cavity;
+    /// * it cannot move the `inside` parity vote, which counts crossings
+    ///   STRICTLY ABOVE the query point and every point the rear-over-travel
+    ///   test asks about is above `z = -4`;
+    /// * no OTHER face is undecidable for these rays: the boxes' vertical walls
+    ///   have all three vertices at one x (or one y), so their determinant is
+    ///   exactly `0.0` — `ExactParallel`, a genuine prune — and the horizontal
+    ///   faces' determinants are twice their area. Each affected ray's tally is
+    ///   therefore exactly 1, which the test pins.
+    ///
+    /// So the planted triangle is the single difference between the two
+    /// candidates this helper builds.
+    fn slab_candidate(plant_undecidable_wall: bool) -> ShellCandidate {
+        let mut mesh = hollow_slab(
+            [5.6, 40.0, 40.0],
+            [0.0, 20.0, 0.0],
+            [2.0, 26.0, 26.0],
+            [0.0, 20.0, 7.0],
+        );
+        if plant_undecidable_wall {
+            let offset = u32::try_from(mesh.verts().len()).expect("small fixture");
+            let mut verts = mesh.verts().to_vec();
+            verts.extend_from_slice(&[
+                [0.0, 0.0, -5.0],
+                [0.0, 40.0, -5.0],
+                [1e-16, 20.0, -4.0],
+            ]);
+            let mut tris = mesh.tris().to_vec();
+            tris.push([offset, offset + 1, offset + 2]);
+            mesh = plinth_mesh::Mesh::new(verts, tris).expect("planted slab");
+        }
+        let pitch = 0.5;
+        let origin_mm = [-3.0, 0.0, 0.0];
+        let dims = [13_usize, 81, 81];
+        let world = |index: [usize; 3]| {
+            [
+                origin_mm[0] + index[0] as f64 * pitch,
+                origin_mm[1] + index[1] as f64 * pitch,
+                origin_mm[2] + index[2] as f64 * pitch,
+            ]
+        };
+        let mut occupancy = Array3::from_elem((dims[2], dims[1], dims[0]), false);
+        let mut cavity = Array3::from_elem((dims[2], dims[1], dims[0]), false);
+        let mut cavity_voxels = 0_usize;
+        for z in 0..dims[2] {
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    let point = world([x, y, z]);
+                    occupancy[(z, y, x)] = point[0].abs() <= 2.75
+                        && (0.25..=39.75).contains(&point[1])
+                        && (0.25..=39.75).contains(&point[2]);
+                    cavity[(z, y, x)] = point[0].abs() <= 0.5
+                        && (8.0..=32.0).contains(&point[1])
+                        && (8.0..=32.0).contains(&point[2]);
+                    if cavity[(z, y, x)] {
+                        cavity_voxels += 1;
+                    }
+                }
+            }
+        }
+        // The cavity mask is deliberately NOT changed by the plant: the void to
+        // drain is identical in both candidates, so any difference in the plan
+        // comes from the geometry the rays are cast against.
+        let field =
+            CavityField::from_selected_mask_and_occupancy(&cavity, &occupancy, origin_mm, pitch)
+                .expect("slab field");
+        ShellCandidate {
+            mesh,
+            cavity: CavityEvidence {
+                wall_thickness_mm: Finite::new(2.3).expect("finite"),
+                frozen_voxel_pitch_mm: Finite::new(pitch).expect("finite"),
+                cavity_volume_mm3: Finite::new(cavity_voxels as f64 * pitch.powi(3))
+                    .expect("finite"),
+                source_volume_mm3: Finite::new(5.6 * 40.0 * 40.0).expect("finite"),
+                resources: slab_resources(),
+                drain_planning_cap_bytes: usize::MAX,
+                realized_wall: RealizedWall::measured(Finite::new(2.3).expect("finite")),
+                cavity_components: 1,
+            },
+            cavity_field: field,
+        }
+    }
+
+    /// **A drain direction whose exit ray reached an undecidable face is
+    /// unavailable, and a plan left with nothing says so in those words.**
+    ///
+    /// The input class: a candidate whose exit ray reaches at least one shell
+    /// triangle whose Möller determinant lands in `0 < |det| <= DET_EPS`. Those
+    /// faces contribute no crossing, so the crossing list the exit was read
+    /// from is incomplete in an unknown direction — the count can be the
+    /// exactly-two that ships a bore while the truth is four, and the bore then
+    /// runs through solid material. Drilling on an undecidable count is the one
+    /// outcome that cannot be taken back, so the direction is struck out.
+    ///
+    /// The control is the same fixture without the planted triangle: it plans a
+    /// single straight-down drain. Everything else — the cavity mask, the
+    /// field, the resources, the cap — is identical, so the planted triangle is
+    /// the whole of the difference.
+    ///
+    /// The refusal is [`DrainPlanningRefusal::NearParallelUncertain`] and not
+    /// `NoExit`, because `NoExit` asserts that no direction found a clean way
+    /// out and that claim is no longer affirmable once an undecidable face is
+    /// in the record.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact pins over hand-written fixture values and a registered unit direction"
+    )]
+    fn an_undecidable_exit_ray_strikes_out_that_direction_and_is_named_in_the_refusal() {
+        // Control: the unplanted slab drains, straight down, exactly once.
+        let control = plan_drains(slab_candidate(false)).expect("the slab drains straight down");
+        let control_drains: Vec<&HoleGeometry> = control
+            .drain_plan()
+            .holes()
+            .iter()
+            .filter(|hole| hole.role == HoleRole::Drain)
+            .collect();
+        assert_eq!(control_drains.len(), 1);
+        assert_eq!(
+            control_drains[0].direction.map(Finite::get),
+            [0.0, 0.0, -1.0]
+        );
+
+        let before = geom_kernel::telemetry::near_parallel_counts();
+        let Err(failure) = plan_drains(slab_candidate(true)) else {
+            panic!("the planted wall must take the last drain direction");
+        };
+        let after = geom_kernel::telemetry::near_parallel_counts();
+
+        let DrainPlanningRefusal::NearParallelUncertain {
+            near_parallel_candidates,
+            diagnostics,
+        } = failure.reason()
+        else {
+            panic!(
+                "expected the refusal to name the uncertainty, got {:?}",
+                failure.reason()
+            );
+        };
+        assert_eq!(
+            *near_parallel_candidates, 3,
+            "the three drain directions that run in the planted wall's plane"
+        );
+
+        let struck: Vec<&CandidateDiagnostic> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                matches!(diagnostic.reason, CandidateUnavailable::NearParallel { .. })
+            })
+            .collect();
+        assert_eq!(struck.len(), 3);
+        for diagnostic in &struck {
+            assert_eq!(diagnostic.role, HoleRole::Drain);
+            assert_eq!(
+                diagnostic.direction[0].get(),
+                0.0,
+                "only the directions with no x component run in the wall's plane"
+            );
+            assert_eq!(
+                diagnostic.reason,
+                CandidateUnavailable::NearParallel { faces: 1 },
+                "one undecidable face on that ray, counted -- not inferred"
+            );
+        }
+        assert!(
+            struck
+                .iter()
+                .any(|diagnostic| diagnostic.direction.map(Finite::get) == [0.0, 0.0, -1.0]),
+            "the drain the control shipped is among the struck directions"
+        );
+
+        // The two x-leaving obliques are NOT undecidable: their determinant is
+        // 17.9, and they are struck out by rear over-travel exactly as in the
+        // control. The band is decided by the arithmetic, not by which ray the
+        // fixture aimed at the wall.
+        let breached = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.reason,
+                    CandidateUnavailable::RearOverTravelBreachesSkin { .. }
+                )
+            })
+            .count();
+        assert_eq!(breached, 2);
+
+        // Both walks are charged, measured rather than assumed: the census walk
+        // and the collecting walk each ran this ray, and `plan` refuses if their
+        // tallies disagree, so reaching the diagnostic at all means they agreed.
+        // Global counters only grow and are shared with every other test in this
+        // binary, so these are delta minimums.
+        assert!(
+            after.collecting_walk - before.collecting_walk >= 1,
+            "collecting walk counter did not move: {before:?} -> {after:?}"
+        );
+        assert!(
+            after.counting_walk - before.counting_walk >= 1,
+            "counting walk counter did not move: {before:?} -> {after:?}"
+        );
+    }
+
     fn slab_resources() -> H0ResourceDiagnostics {
         H0ResourceDiagnostics {
             voxel_count: 1,
@@ -3296,22 +3654,29 @@ mod tests {
             .collect();
         assert!(origins.len() > 8);
         let directions = vec![[0.0, 0.0, 1.0]; origins.len()];
-        let counts = surface
-            .cast_rays_census(&origins, &directions, 45.0)
+        let census = surface
+            .cast_rays_census_classified(&origins, &directions, 45.0)
             .expect("census");
-        let (offsets, ts, _faces) = surface
-            .cast_rays(&origins, &directions, 45.0)
+        let cast = surface
+            .cast_rays_classified(&origins, &directions, 45.0)
             .expect("batch");
+        let counts = &census.crossings;
         assert_eq!(counts.len(), origins.len());
         assert!(counts.iter().any(|count| *count > 0));
         for (ray, count) in counts.iter().enumerate() {
-            let deduplicated = (offsets[ray + 1] - offsets[ray]) as usize;
+            let deduplicated = (cast.offsets[ray + 1] - cast.offsets[ray]) as usize;
             assert!(
                 deduplicated <= *count,
                 "ray {ray} returned {deduplicated} rows against {count} counted crossings"
             );
         }
-        assert!(ts.len() <= counts.iter().sum::<usize>());
+        assert!(cast.t_all.len() <= counts.iter().sum::<usize>());
+        // The tallies are the other half of the mirror, and `plan` refuses on a
+        // disagreement, so pin the agreement on real corpus geometry here.
+        assert_eq!(
+            census.near_parallel, cast.near_parallel,
+            "census and collecting walks must report the same undecidable-face tally per ray"
+        );
     }
 
     #[test]
@@ -3433,12 +3798,16 @@ mod drain_origins_start_in_the_void {
             },
         )
         .expect("committed shell indexes");
-        let (offsets, ts, _) = surface
-            .cast_rays(&[origin], &[direction], 45.0)
+        let cast = surface
+            .cast_rays_classified(&[origin], &[direction], 45.0)
             .expect("one ray");
-        let begin = offsets[0] as usize;
-        let end = offsets[1] as usize;
-        ts[begin..end].to_vec()
+        assert_eq!(
+            cast.near_parallel[0], 0,
+            "this fixture's crossing list is only meaningful if the ray reached no undecidable face"
+        );
+        let begin = cast.offsets[0] as usize;
+        let end = cast.offsets[1] as usize;
+        cast.t_all[begin..end].to_vec()
     }
 
     #[test]

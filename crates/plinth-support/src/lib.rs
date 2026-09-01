@@ -955,9 +955,32 @@ pub(crate) fn perceive_contacts_on_surface(
         })
         .collect();
     let directions = vec![[0.0, 0.0, -1.0]; origins.len()];
-    let (offsets, hits, _) = surface
-        .cast_rays(&origins, &directions, t_max)
+    // `docs/specs/geometry-adjudication.md` §EXT-1 site 3
+    // (`support.perception.columns`), disposition RULED in revision 4: a
+    // `NearParallel` on a column's ray changes NO `grounded` bit.
+    //
+    // `grounded[face]` below is a MEASURED-DISTANCE claim -- "a surface exists
+    // within the bridge gap under this face" -- and it is an EXEMPTION from the
+    // whole support machinery. An undecidable crossing carries no usable `t`
+    // (the primitive contract: non-`Hit` products must not cross an API
+    // boundary), so affirming `grounded` from one would assert a distance
+    // nobody measured, and an exemption may grow only on proof. The skipped
+    // crossing is therefore treated as ABSENT -- which is what this arithmetic
+    // already does, since an undecidable face contributes no entry to `t_all`
+    // -- and the affected faces STAY candidates, routed INTO scrutiny (seat
+    // discovery, foot validation, clearance acceptance) rather than out of it.
+    // Behaviour here is unchanged by the migration: the classified walk's
+    // accepted-hit set is bit-identical to the retired `cast_rays`.
+    //
+    // The per-column tally is `cast.near_parallel[column]`. It is deliberately
+    // NOT carried on `ContactCandidatePool`: by owner ruling the per-model
+    // ledger of §EXT-4 is replaced by the kernel's process-global counters
+    // (`geom_kernel::telemetry`, site `kernel.walk.collecting`), which answer
+    // the run-rate question this tally was raised to answer.
+    let cast = surface
+        .cast_rays_classified(&origins, &directions, t_max)
         .map_err(|error| SupportPerceptionError::NativeSurface(error.to_string()))?;
+    let (offsets, hits) = (cast.offsets, cast.t_all);
 
     let mut grounded = vec![false; surface.nfaces()];
     for (column, faces) in columns.values().enumerate() {
@@ -4279,5 +4302,145 @@ mod tests {
             .expect("selection uses only already-gathered S0 evidence")
             .digest();
         println!("\n{THREAD_SWEEP_SIGNATURE}{digest:?}");
+    }
+}
+
+#[cfg(test)]
+mod near_parallel_perception_tests {
+    use super::*;
+
+    /// A closed box standing above the plate, with ONE side-wall vertex nudged
+    /// in x by `dx` millimetres.
+    ///
+    /// For a straight-down column ray `d = (0,0,-1)` the Möller determinant of a
+    /// face reduces to `(e1 x e2)_z` exactly, so an exactly vertical wall gives
+    /// `det == 0` — `ExactParallel`, a genuine prune — and a wall tilted by `dx`
+    /// gives `det = 2 * dx`. A nudge of `2.5e-15 mm` therefore puts `det` at
+    /// `5e-15`: inside `DET_EPS = 1e-14` and nonzero, which is undecidable.
+    fn nudged_box(dx: f64) -> Mesh {
+        let vertices = vec![
+            [-1.0, -1.0, 5.0],
+            [1.0, -1.0, 5.0],
+            [1.0, 1.0, 5.0],
+            [-1.0, 1.0, 5.0],
+            [-1.0, -1.0, 9.0],
+            [1.0 + dx, -1.0, 9.0],
+            [1.0 + dx, 1.0, 9.0],
+            [-1.0, 1.0, 9.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        Mesh::new(vertices, faces).expect("fixture mesh")
+    }
+
+    fn perception_config(delicacy: &[f64]) -> SupportPerceptionConfig<'_> {
+        SupportPerceptionConfig::current(
+            Finite::new(0.0).unwrap(),
+            PositiveFinite::new(0.25).unwrap(),
+            PositiveFinite::new(0.5).unwrap(),
+            8 * 1024 * 1024,
+            Some(delicacy),
+        )
+        .expect("registered perception constants")
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 3, the revision-4
+    /// RULING — a `NearParallel` on a column's ray changes NO `grounded` bit,
+    /// and the affected faces STAY candidates.**
+    ///
+    /// `grounded[face]` is a MEASURED-DISTANCE claim ("a surface exists within
+    /// the bridge gap below this face") and it is an EXEMPTION from the entire
+    /// support machinery. An undecidable crossing carries no usable `t`, so
+    /// affirming `grounded` from one would assert a distance nobody measured,
+    /// and an exemption may grow only on proof. Candidacy routes a face INTO
+    /// scrutiny — seat discovery, foot validation, clearance acceptance, each
+    /// with its own refusal — while grounding routes it OUT, past perception's
+    /// island discovery, where no downstream coverage refusal can ever see it.
+    ///
+    /// The input class: a column whose ray grazes a face at a determinant the
+    /// arithmetic cannot resolve. The pair below differs by `2.5e-15 mm` of
+    /// wall tilt and by nothing else.
+    #[test]
+    fn an_undecidable_column_ray_changes_no_grounded_bit_and_keeps_its_candidates() {
+        let delicacy = vec![0.0_f64; 12];
+
+        let perceive = |dx: f64| {
+            let mesh = nudged_box(dx);
+            let config = perception_config(&delicacy);
+            let (topology, delicacy_by_face) =
+                validate_perception_input(&mesh, &config).expect("strict fixture mesh");
+            let surface = NativeSurface::from_indexed(
+                mesh.verts(),
+                mesh.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: config.surface_grid_pitch_mm.get(),
+                    max_grid_bytes: config.max_grid_bytes,
+                },
+            )
+            .expect("fixture surface");
+            let pool =
+                perceive_contacts_on_surface(&mesh, &config, &topology, delicacy_by_face, &surface)
+                    .expect("perception runs");
+            let mut faces: Vec<u32> = pool.candidates.iter().map(|row| row.face_id).collect();
+            faces.sort_unstable();
+            (faces, surface)
+        };
+
+        let (clean_faces, clean_surface) = perceive(0.0);
+        let (planted_faces, planted_surface) = perceive(2.5e-15);
+
+        // NON-VACUITY at both ends, measured on the SAME rays perception casts:
+        // the exactly-vertical fixture prunes cleanly, the nudged one does not.
+        let column_probe = |surface: &NativeSurface| {
+            let bounds = surface.geometry().bounds();
+            let ztop = bounds[1][2] + 1.0;
+            let t_max = ztop - bounds[0][2] + 1.0;
+            let origins: Vec<[f64; 3]> = (0..9)
+                .map(|k| {
+                    let step = 0.25 * f64::from(k) - 1.0;
+                    [step, 0.0, ztop]
+                })
+                .collect();
+            let dirs = vec![[0.0, 0.0, -1.0]; origins.len()];
+            surface
+                .cast_rays_classified(&origins, &dirs, t_max)
+                .expect("the column probe runs")
+                .total_near_parallel()
+        };
+        assert_eq!(
+            column_probe(&clean_surface),
+            0,
+            "the exactly-vertical walls must be a GENUINE prune (det == 0), or \
+             the control half of this pair proves nothing"
+        );
+        assert!(
+            column_probe(&planted_surface) > 0,
+            "the nudged wall must put a column ray in the undecidable band, or \
+             the planted half of this pair proves nothing"
+        );
+
+        // THE RULING. The candidate set does not move.
+        assert!(
+            !clean_faces.is_empty(),
+            "the box's underside must offer candidates at all"
+        );
+        assert_eq!(
+            planted_faces, clean_faces,
+            "an undecidable column ray must not exempt any face from support: \
+             the skipped crossing is treated as ABSENT, which is both what the \
+             arithmetic already does and the fail-closed side"
+        );
     }
 }

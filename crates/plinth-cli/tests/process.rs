@@ -146,6 +146,30 @@ fn prepare_searches_each_model_orientation_and_writes_one_artifact_each() {
         stdout.contains("--no-cache is a no-op"),
         "the cache state must be reported honestly: {stdout}"
     );
+    // The near-parallel counters, ACROSS THE PROCESS BOUNDARY. `execute.rs`
+    // has unit tests for what the block says at each count, but a formatter
+    // nobody calls formats nothing: this is the only assertion that proves the
+    // kernel's `telemetry` counters are actually read at end of run and
+    // actually reach an operator's screen. A counter that never reaches output
+    // is the same defect as a safety check nobody reads
+    // (`docs/specs/geometry-adjudication.md` §O4, §EXT-2).
+    //
+    // Asserted on the HEADER, which is unconditional, rather than on a
+    // per-site row or a count. This test's subject is the WIRING — that the
+    // counters are read and printed — and pinning a number here would pin an
+    // expectation about corpus geometry inside a process-boundary test, where
+    // it would move for reasons that have nothing to do with the CLI.
+    //
+    // For the record, because "asserted on the header" would otherwise read as
+    // "this fixture is quiet": it is not. Measured 2026-09-01, this exact
+    // model prints `kernel.walk.collecting 8` and still emits. The number
+    // belongs to the corpus re-measure; its presence on stdout belongs here.
+    // `execute.rs`'s unit tests cover what the block says at each count,
+    // including the all-zero form.
+    assert!(
+        stdout.contains("near-parallel geometry"),
+        "the run report must state the kernel's near-parallel counters, zero or not: {stdout}"
+    );
 
     // The pipeline's own exit-code projection, not a second contract.
     assert_eq!(output.status.code(), Some(0), "stdout was: {stdout}");

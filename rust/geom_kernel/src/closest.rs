@@ -3,7 +3,7 @@
 //! Amendments A6/A21. Idiomatic reassociation is a spec violation here even
 //! when algebraically neutral — these outputs feed bit-parity pins.
 
-use crate::consts::{CLOSEST_DENOM_REG, SEGSEG_EPS};
+use crate::consts::{CLOSEST_DENOM_REG, SEGSEG_DENOM_EPS_MM4, SEGSEG_LEN2_EPS_MM2};
 use crate::vec3::{add, dot, scale, sub, V3};
 
 /// Closest point on triangle (Ericson), geometry_exact.py:81-107.
@@ -139,8 +139,29 @@ pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
 ///   `validate_final_holes` keeps checking for zero-length keepout axes itself
 ///   and keeps raising `InvalidHoleGeometry` itself.
 ///
-/// `SEGSEG_EPS = 1e-14` is oracle-pinned; changing it is a parity break with no
-/// benefit.
+/// # DECISION-FEEDING CALLERS MUST NOT USE THIS FUNCTION
+///
+/// Use [`segment_segment_distance_min`], which performs the complete
+/// minimisation and has no epsilon on its decision path. The one-step recovery
+/// above is a one-sided OVERestimate, and an overestimated gap turns a refusal
+/// into an acceptance. Measured on the §O2 counterexample
+/// (`docs/specs/geometry-adjudication.md`, mirrored in `tests/segseg_min.rs`):
+/// this function returns `0.09871890374623554` mm where the true minimum is
+/// `0.09871809337695624` mm — an excess of `8.104e-7` mm, **8.1× the
+/// `PROOF_EPSILON_MM = 1e-7` slack** of the drilling comparison that value used
+/// to feed.
+///
+/// After §O2 and §EXT-2c this function's only remaining duties are the kernel's
+/// oracle parity tests and cross-checking [`segment_segment_distance_min`].
+///
+/// # Constants
+///
+/// `SEGSEG_DENOM_EPS_MM4` and `SEGSEG_LEN2_EPS_MM2` are **chosen behavior
+/// pins**, both carrying `1e-14` verbatim from `geometry_exact.py:298` for
+/// parity; neither is derived. They were ONE constant compared against both an
+/// mm⁴ determinant and an mm² squared length — see
+/// `consts::SEGSEG_DENOM_EPS_MM4`'s documentation for the split, which is byte-neutral
+/// by construction. Changing either VALUE is a parity break with no benefit.
 #[inline]
 #[allow(
     clippy::suspicious_operation_groupings,
@@ -158,18 +179,18 @@ pub fn segment_segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3)
     let c = dot(d1, r);
     let b = dot(d1, d2);
     let denom = a * e - b * b;
-    let mut s = if denom > SEGSEG_EPS {
+    let mut s = if denom > SEGSEG_DENOM_EPS_MM4 {
         (b * f - c * e) / denom
     } else {
         0.0
     };
     s = s.clamp(0.0, 1.0);
-    let e_safe = if e > SEGSEG_EPS { e } else { 1.0 };
+    let e_safe = if e > SEGSEG_LEN2_EPS_MM2 { e } else { 1.0 };
     let mut t = (b * s + f) / e_safe;
-    t = if e > SEGSEG_EPS { t } else { 0.0 };
+    t = if e > SEGSEG_LEN2_EPS_MM2 { t } else { 0.0 };
     t = t.clamp(0.0, 1.0);
-    let a_safe = if a > SEGSEG_EPS { a } else { 1.0 };
-    s = if a > SEGSEG_EPS {
+    let a_safe = if a > SEGSEG_LEN2_EPS_MM2 { a } else { 1.0 };
+    s = if a > SEGSEG_LEN2_EPS_MM2 {
         (b * t - c) / a_safe
     } else {
         0.0
@@ -179,4 +200,144 @@ pub fn segment_segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3)
     let c2 = add(p2, scale(d2, t));
     let dist = crate::vec3::dist(c1, c2);
     (dist, c1, c2)
+}
+
+/// **The COMPLETE segment-vs-segment minimisation.** Canonical for every
+/// decision-feeding caller (`docs/specs/geometry-adjudication.md` §O2).
+///
+/// Returns `(distance_mm, closest_on_p1q1, closest_on_p2q2)` — the same return
+/// contract as [`segment_segment_distance`]: the distance IS `dist` of the two
+/// returned points, so a caller never recomputes it.
+///
+/// # Why a second function rather than a fix to the first
+///
+/// [`segment_segment_distance`] is TERM-FOR-TERM parity-pinned (Amendment A21)
+/// and consumed by this kernel's oracle parity path. Its near-parallel
+/// `s = 0` branch is one coordinate-descent step, not a minimisation, and its
+/// error is one-sided HIGH — it returns the distance between two points that
+/// really do lie on the segments, so it can only ever OVERestimate. An
+/// overestimated gap turns a refusal into an acceptance. Editing the pin was
+/// ruled out; a caller-side guard would re-create private geometry in the file
+/// the consolidation sweep just cleaned. So: a second primitive, and the
+/// decision chains move onto it.
+///
+/// # The algorithm, and why it is complete
+///
+/// The squared distance `D(s, t) = |(p1 + s·d1) − (p2 + t·d2)|²` is a convex
+/// quadratic on the unit square `[0,1]²`. A convex function on a box attains
+/// its minimum either at the unconstrained critical point (when that point
+/// lies in the box) or on the boundary; each of the four edge restrictions is
+/// itself a 1-D convex quadratic with an exact closed-form minimiser. So five
+/// candidates, each clamped into the box, cover every case:
+///
+/// 1. the interior critical point `((b·f − c·e)/denom, (a·f − b·c)/denom)`,
+///    included only when `denom > 0.0` and both quotients are finite;
+/// 2. `s = 0`, `t = clamp(f / e)`;
+/// 3. `s = 1`, `t = clamp((b + f) / e)`;
+/// 4. `t = 0`, `s = clamp(−c / a)`;
+/// 5. `t = 1`, `s = clamp((b − c) / a)`.
+///
+/// **No epsilon constant appears anywhere.** The parallel case needs no guard:
+/// for a parallel or near-parallel pair the minimum lies on a boundary edge,
+/// where the closed forms are exact, and an ill-conditioned interior candidate
+/// is merely one more evaluated point that can never make the minimum worse.
+/// A clamped candidate is always a real point of the box, so every candidate
+/// distance is an achievable distance and the least of them is the minimum.
+///
+/// Measured validation of exactly this candidate scheme (§O2, 20,000
+/// deterministic near-parallel pairs at 0.005–0.05 mm scale, 19,990 of which
+/// fire the pinned function's `s = 0` branch):
+/// `max(candidates − converged alternating descent) = 0.0` exactly, while the
+/// pinned function's excess on the same battery reached 1.754e-6 mm.
+///
+/// # Degenerate-input contract
+///
+/// * **Zero-length segments** fall out of the exact `a > 0.0` / `e > 0.0`
+///   guards: a zero-length first segment pins `s = 0`, a zero-length second
+///   pins `t = 0`, and both zero gives point-vs-point. Because the guards are
+///   exact rather than an mm²-scaled epsilon, a genuinely nonzero segment of
+///   ANY length is projected onto — the mm² mislabelling that
+///   [`segment_segment_distance`] carried cannot occur here.
+/// * **Non-finite input is NOT guarded**, matching the pinned function.
+///   Non-finite candidates fail the `is_finite` interior test and lose the
+///   `<` comparison against a finite candidate; with every input non-finite,
+///   the answer is non-finite. Callers that must refuse check at their own
+///   call site.
+/// * **Deterministic ties.** Candidate 2 always exists and seeds the fold; the
+///   others are accepted only on a strict `<`, in the fixed order 2, 1, 3, 4,
+///   5. An exact tie therefore keeps the earlier candidate, and the result does
+///   not depend on thread count or evaluation order.
+/// * Never panics, never allocates, never returns an error.
+#[inline]
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "`a * e - b * b` is the segment-segment denominator |u|^2|v|^2 \
+              - (u.v)^2, a determinant whose middle term is squared by \
+              construction, not a mis-typed `a * b`"
+)]
+pub fn segment_segment_distance_min(p1: V3, q1: V3, p2: V3, q2: V3) -> (f64, V3, V3) {
+    let d1 = sub(q1, p1);
+    let d2 = sub(q2, p2);
+    let r = sub(p1, p2);
+    let a = dot(d1, d1);
+    let e = dot(d2, d2);
+    let f = dot(d2, r);
+    let c = dot(d1, r);
+    let b = dot(d1, d2);
+    let denom = a * e - b * b;
+
+    // Evaluate one candidate `(s, t)` into a real pair of points on the two
+    // segments, plus their distance. Every candidate reaching here has been
+    // clamped into `[0,1]^2`, so this is always an ACHIEVABLE distance.
+    let at = |s: f64, t: f64| -> (f64, V3, V3) {
+        let c1 = add(p1, scale(d1, s));
+        let c2 = add(p2, scale(d2, t));
+        (crate::vec3::dist(c1, c2), c1, c2)
+    };
+
+    // The four boundary-edge minimisers. `e > 0.0` guards the `t` forms and
+    // `a > 0.0` the `s` forms; a degenerate segment collapses its parameter to
+    // 0 rather than dividing. Exact guards, not epsilons.
+    let t_at = |s: f64| -> f64 {
+        if e > 0.0 {
+            ((b * s + f) / e).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let s_at = |t: f64| -> f64 {
+        if a > 0.0 {
+            ((b * t - c) / a).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+
+    // Candidate 2 always exists, so it seeds the fold; every other candidate
+    // must strictly beat the incumbent. A `NaN` distance therefore never
+    // displaces a finite one, and an all-`NaN` input keeps a `NaN` answer whose
+    // two returned points really do produce it.
+    let (mut best_d, mut best_c1, mut best_c2) = at(0.0, t_at(0.0));
+    let mut consider = |s: f64, t: f64| {
+        let (d, c1, c2) = at(s, t);
+        if d < best_d {
+            best_d = d;
+            best_c1 = c1;
+            best_c2 = c2;
+        }
+    };
+
+    // Candidate 1: the unconstrained critical point, when it exists.
+    if denom > 0.0 {
+        let s = (b * f - c * e) / denom;
+        let t = (a * f - b * c) / denom;
+        if s.is_finite() && t.is_finite() {
+            consider(s.clamp(0.0, 1.0), t.clamp(0.0, 1.0));
+        }
+    }
+    consider(1.0, t_at(1.0)); // candidate 3
+    consider(s_at(0.0), 0.0); // candidate 4
+    consider(s_at(1.0), 1.0); // candidate 5
+
+    (best_d, best_c1, best_c2)
 }

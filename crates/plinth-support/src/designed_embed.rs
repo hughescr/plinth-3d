@@ -294,8 +294,10 @@ fn witness_batch(
     }
     #[cfg(test)]
     record_endpoint_validation_kernel_call();
-    let interval_rows = surface
-        .penetration_intervals_batch_bounded(
+    // `docs/specs/geometry-adjudication.md` §EXT-1 site 15
+    // (`support.embed.witness`).
+    let classified = surface
+        .penetration_intervals_batch_bounded_classified(
             &p0s,
             &p1s,
             &r0s,
@@ -308,15 +310,37 @@ fn witness_batch(
             limits.penetration,
         )
         .map_err(|_| DesignedMaskError::KernelRefusal)?;
-    if interval_rows.len() != rows.len() {
+    if classified.rows.len() != rows.len() || classified.near_parallel.len() != rows.len() {
         return Err(DesignedMaskError::CorruptKernelResult);
     }
+    let near_parallel = classified.near_parallel;
+    let interval_rows = classified.rows;
     #[cfg(test)]
     let interval_rows = sabotage_endpoint_intervals(interval_rows);
+    // An UNDECIDABLE row's witness is INVALID, so the embed it would have
+    // attested is refused by name.
+    //
+    // This is a connectivity PROOF: `endpoint_engagement` affirms that a
+    // declared end really is in the solid, by matching interval evidence
+    // against the capsule's rays. A skipped crossing UNDERSTATES the interval
+    // set, so an affected row's evidence is a LOWER bound on engagement — the
+    // direction that turns an engaged end into an unengaged-looking one AND, at
+    // the other end of the same understatement, lets a row's centreline or rim
+    // engagement be assembled from evidence that is missing pieces nobody can
+    // account for. A proof cannot be completed from an incomplete record, so
+    // the row refuses rather than returning an engagement nobody proved.
+    // Refusal is candidate-granular: this is an ordinary attestation refusal
+    // routed to quarantine (OD-4), not a pipeline failure.
     Ok(rows
         .iter()
         .zip(interval_rows)
-        .map(|(row, intervals)| endpoint_engagement(row, &intervals))
+        .zip(near_parallel)
+        .map(|((row, intervals), near_parallel)| {
+            if near_parallel > 0 {
+                return Err(DesignedMaskError::NearParallelWitness { near_parallel });
+            }
+            endpoint_engagement(row, &intervals)
+        })
         .collect())
 }
 
@@ -2076,6 +2100,26 @@ pub(crate) enum DesignedMaskError {
     },
     #[error("designed embed geometry is not connected to its endpoint: {end:?}")]
     DisconnectedGeometry { end: ContactEnd },
+    /// `docs/specs/geometry-adjudication.md` §EXT-1 site 15 — at least one of
+    /// this row's rays reached a face whose crossing was UNDECIDABLE
+    /// (`RayTriangleClass::NearParallel`: a nonzero determinant inside the
+    /// epsilon band, where whether the ray crosses the face cannot be settled
+    /// at this scale).
+    ///
+    /// The refusal is NOT the kernel being broken — that is
+    /// [`Self::CorruptKernelResult`], and conflating the two is what the
+    /// separate variant prevents. The kernel answered correctly; the answer is
+    /// that this row's interval evidence is INCOMPLETE by an unknown amount,
+    /// and a connectivity witness assembled from it would affirm an engagement
+    /// nobody measured. The count is carried because the distinguishing fact is
+    /// how much evidence went missing.
+    ///
+    /// Appended, per the frozen-tag rule on [`Self::tag`].
+    #[error(
+        "endpoint mask validation reached {near_parallel} face(s) whose crossing is undecidable at \
+         this scale, so the connectivity witness cannot be affirmed"
+    )]
+    NearParallelWitness { near_parallel: u32 },
 }
 
 impl DesignedMaskError {
@@ -2100,6 +2144,11 @@ impl DesignedMaskError {
             Self::CorruptKernelResult => 13,
             Self::DisconnectedGeometry { .. } => 14,
             Self::EndpointEvidenceOutsideAdmittedSpan { .. } => 15,
+            // §EXT-1 site 15. APPENDED, never renumbered: the fifteen above are
+            // load-bearing in the recorded seat-attestation transcript and
+            // reordering them would move every model's digest with no geometry
+            // moving.
+            Self::NearParallelWitness { .. } => 16,
         }
     }
 }
@@ -3922,5 +3971,88 @@ mod tests {
         assert_eq!(*bounded.last().unwrap(), bound_mm);
         assert!(bounded.iter().all(|radius| *radius <= bound_mm));
         assert!(unbounded.iter().any(|radius| *radius > bound_mm));
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 15 — an undecidable
+    /// witness row REFUSES the embed, by name.**
+    ///
+    /// The plant is the §O4 counterexample triangle `(0,0,0) (2,0,0) (0,2,0)`,
+    /// for which `e1 = (2,0,0)` and `e2 = (0,2,0)` give `det = -4 * dv_z`
+    /// exactly; a row whose axis runs almost in that plane puts `det` at
+    /// `-8e-15`, inside the `DET_EPS = 1e-14` band and nonzero — undecidable,
+    /// not a genuine prune.
+    ///
+    /// The input class that changes: a row whose interval evidence is EMPTY
+    /// because the crossings that would have filled it could not be decided.
+    /// Before this ruling that row was indistinguishable from a row with
+    /// nothing to find, and the difference decides whether an embed is
+    /// attested.
+    #[test]
+    fn an_undecidable_witness_row_refuses_the_embed_and_names_the_uncertainty() {
+        let surface = geom_kernel::testkit::build_from_tris(vec![
+            0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, //
+        ]);
+        let row = EndpointValidationRow {
+            member: 0,
+            end: ContactEnd::Terminalward,
+            extent: extent(0.01),
+            fraction: 0.01,
+            p0: [0.4, 0.5, -1.0e-16],
+            p1: [1.4, 0.5, 1.9e-15],
+            r0: 0.05,
+            r1: 0.05,
+        };
+        let limits = validation_limits(&surface, 1);
+
+        // NON-VACUITY, straight from the kernel: the plant reaches the
+        // undecidable band, and the interval evidence it leaves behind is
+        // EMPTY — so on the arithmetic alone this row looks like a clean
+        // "nothing here" rather than "we could not tell".
+        let probe = surface
+            .penetration_intervals_batch_bounded_classified(
+                &[row.p0],
+                &[row.p1],
+                &[row.r0],
+                &[row.r1],
+                ENDPOINT_VALIDATION_OFFSET_RAYS,
+                limits.majority_step_mm.get(),
+                limits.samples_per_subsegment,
+                0.0,
+                true,
+                limits.penetration,
+            )
+            .expect("the planted batch runs");
+        assert!(
+            probe.near_parallel[0] > 0,
+            "the plant must fire; tally was {}",
+            probe.near_parallel[0]
+        );
+        assert!(
+            probe.rows[0].is_empty(),
+            "and it must leave no interval, so only the tally can refuse"
+        );
+
+        let engagements = witness_batch(&surface, std::slice::from_ref(&row), limits)
+            .expect("the batch itself succeeds; the REFUSAL is per row");
+        assert_eq!(engagements.len(), 1);
+        match engagements[0] {
+            Err(DesignedMaskError::NearParallelWitness { near_parallel }) => {
+                assert_eq!(
+                    near_parallel, probe.near_parallel[0],
+                    "the refusal carries the tally it refused on"
+                );
+            }
+            ref other => panic!(
+                "an undecidable row must refuse by name, and never as \
+                 CorruptKernelResult or as a measured engagement: {other:?}"
+            ),
+        }
+
+        // The refusal is DISTINGUISHABLE in the recorded transcript, and its
+        // tag is appended rather than colliding with an existing one.
+        assert_eq!(
+            DesignedMaskError::NearParallelWitness { near_parallel: 1 }.tag(),
+            16
+        );
     }
 }

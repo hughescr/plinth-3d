@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use geom_kernel::vec3::{add, cross, dot, norm, normalize as unit_vector, scale, sub};
-use geom_kernel::{segment_segment_distance, NativeSurface, NativeSurfaceConfig, V3};
+use geom_kernel::{segment_segment_distance_min, NativeSurface, NativeSurfaceConfig, V3};
 use plinth_core::{m0_constants, Finite};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, validate_face_topology, Mesh, WeldPolicy,
@@ -609,6 +609,85 @@ pub enum DrillingRefusal {
         requested: usize,
         cap: usize,
     },
+    /// The centerline proof for one hole could not be completed: the ray
+    /// reached `undecidable_faces` faces whose crossing the arithmetic could
+    /// not decide (`0 < |det| <= DET_EPS`).
+    ///
+    /// This is NOT [`Self::BlockedOpening`] — nothing was proved blocked — and
+    /// it is deliberately not the blanket [`Self::InvalidDrilledTopology`]
+    /// either: a refusal must say what it saw
+    /// (`docs/specs/geometry-adjudication.md` §EXT-1 site 18). A skipped
+    /// crossing can only make the bore look CLEARER than it is, so a silent
+    /// pass here would be an unproven opening, and the whole point of this
+    /// proof is that the opening is proven.
+    #[error(
+        "centerline proof for opening {hole} is undecidable: {undecidable_faces} face \
+         crossings could not be decided"
+    )]
+    UndecidedOpening {
+        hole: usize,
+        undecidable_faces: u32,
+    },
+    /// The census walk and the collecting walk disagreed about how many
+    /// undecidable faces a row reached.
+    ///
+    /// The two walks are mirror twins with the same traversal and the same hit
+    /// predicate, so their per-row tallies are equal BY CONSTRUCTION — and the
+    /// kernel says in as many words that it does not enforce that equality on a
+    /// consumer's behalf (`CensusDrift` covers hits, subsegments, samples and
+    /// intervals, not tallies). A consumer that wants the guarantee must
+    /// compare them, which is what this refusal reports.
+    #[error(
+        "{stage} row {row}: census walk counted {census} undecidable faces, collecting walk \
+         counted {collected}"
+    )]
+    CensusTallyDrift {
+        stage: &'static str,
+        row: usize,
+        census: u32,
+        collected: u32,
+    },
+    /// A ray batch was rejected by the kernel before any walk ran.
+    ///
+    /// Split out of [`Self::InvalidDrilledTopology`], which said "the drilled
+    /// mesh failed strict closed, wound, single-body validation" about a
+    /// mismatched batch length. Nothing about the topology was tested.
+    #[error("{stage} ray batch was rejected by the kernel: {detail}")]
+    RayBatchInput {
+        stage: &'static str,
+        detail: String,
+    },
+}
+
+/// The census walk's per-row undecidable tally against the collecting walk's,
+/// row by row.
+///
+/// Counted rows, not an exit code: the length check is asserted first, so a
+/// short vector cannot make a zero-iteration loop look like agreement.
+fn agree_on_near_parallel(
+    stage: &'static str,
+    census: &[u32],
+    collected: &[u32],
+) -> Result<(), DrillingRefusal> {
+    if census.len() != collected.len() {
+        return Err(DrillingRefusal::CensusTallyDrift {
+            stage,
+            row: census.len().min(collected.len()),
+            census: u32::try_from(census.len()).unwrap_or(u32::MAX),
+            collected: u32::try_from(collected.len()).unwrap_or(u32::MAX),
+        });
+    }
+    for (row, (census_row, collected_row)) in census.iter().zip(collected).enumerate() {
+        if census_row != collected_row {
+            return Err(DrillingRefusal::CensusTallyDrift {
+                stage,
+                row,
+                census: *census_row,
+                collected: *collected_row,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn drill_planned_shell(planned: PlannedShell) -> Result<HollowedAndDrilled, DrillingFailure> {
@@ -1028,10 +1107,14 @@ fn prepare_audit_plan(
         // batch's demand is a measured crossing count rather than the rays x
         // faces ceiling a finely tessellated shell would otherwise be
         // charged under.
-        let crossing_counts = surface
-            .cast_rays_census(&origins, &directions, audit_max_exit_mm)
-            .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-        let result_upper_bound = crossing_counts
+        let census = surface
+            .cast_rays_census_classified(&origins, &directions, audit_max_exit_mm)
+            .map_err(|error| DrillingRefusal::RayBatchInput {
+                stage: "audit centerline census",
+                detail: error.to_string(),
+            })?;
+        let result_upper_bound = census
+            .crossings
             .iter()
             .try_fold(0_usize, |total, count| total.checked_add(*count))
             .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
@@ -1040,9 +1123,13 @@ fn prepare_audit_plan(
             result_upper_bound,
             limits.max_centerline_results,
         )?;
-        let (offsets, ts, _) = surface
-            .cast_rays(&origins, &directions, audit_max_exit_mm)
-            .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+        let cast = surface
+            .cast_rays_classified(&origins, &directions, audit_max_exit_mm)
+            .map_err(|error| DrillingRefusal::RayBatchInput {
+                stage: "audit centerline cast",
+                detail: error.to_string(),
+            })?;
+        let (offsets, ts) = (cast.offsets, cast.t_all);
         // The census walk and the collecting walk are the same traversal,
         // and dedup only merges neighbours, so the flattened array can never
         // be longer than the counted crossings. Refuse rather than let a
@@ -1050,6 +1137,13 @@ fn prepare_audit_plan(
         if ts.len() > result_upper_bound {
             return Err(DrillingRefusal::ResourceAccountingOverflow);
         }
+        // The same two walks must also agree about UNDECIDABLE faces, and the
+        // kernel does not check that for us. Compared explicitly, per row.
+        agree_on_near_parallel(
+            "audit centerline",
+            &census.near_parallel,
+            &cast.near_parallel,
+        )?;
         for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
             // This is the cap that actually binds the number of audit drains
             // a model can receive — `qualifies_audit_drain` only screens
@@ -1066,6 +1160,7 @@ fn prepare_audit_plan(
                 &candidates,
                 &offsets,
                 &ts,
+                &cast.near_parallel,
                 component_id,
                 &accepted_holes,
                 drain_radius_mm,
@@ -1120,11 +1215,12 @@ fn select_exact_audit_candidate(
     candidates: &[AuditCandidate],
     offsets: &[i64],
     ts: &[f64],
+    near_parallel: &[u32],
     component_id: usize,
     accepted_holes: &[HoleGeometry],
     drain_radius_mm: f64,
 ) -> Result<Option<(usize, HoleGeometry)>, DrillingRefusal> {
-    if offsets.len() != candidates.len() + 1 {
+    if offsets.len() != candidates.len() + 1 || near_parallel.len() != candidates.len() {
         return Err(DrillingRefusal::ResourceAccountingOverflow);
     }
     let mut ordered: Vec<usize> = candidates
@@ -1143,6 +1239,24 @@ fn select_exact_audit_candidate(
             )
     });
     for index in ordered {
+        // §EXT-1 site 17, candidate-granular unavailability. This candidate's
+        // ray reached a face whose crossing the arithmetic could not decide, so
+        // its crossing list is incomplete in an unknown direction — and the
+        // acceptance below reads that list as an exact entry/exit pair and
+        // turns it into a hole that gets cut. A missing crossing could make a
+        // three-crossing ray look like a clean two-crossing bore, so this
+        // candidate is UNAVAILABLE, not silently usable.
+        //
+        // Dropping it moves the outcome toward pruning only: the component
+        // simply goes unaudited and is refilled below, which costs resin and
+        // opens nothing. That is the tolerable direction under the propagation
+        // contract, so there is no refusal here — the audit-drain set is not a
+        // required set. The per-run rate is on the kernel's process-global
+        // counters, and a component that stops being audited shows up as
+        // moved hollow volume in the corpus comparison.
+        if near_parallel[index] != 0 {
+            continue;
+        }
         let begin = usize::try_from(offsets[index])
             .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
         let end = usize::try_from(offsets[index + 1])
@@ -1624,10 +1738,14 @@ fn prove_centerlines(
     // walks each ray's BVH descent without storing a hit, so the batch's
     // demand is a measured crossing count rather than the rays x faces
     // ceiling a finely tessellated shell would otherwise be charged under.
-    let crossing_counts = surface
-        .cast_rays_census(&origins, &directions, ceiling)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-    let result_upper_bound = crossing_counts
+    let census = surface
+        .cast_rays_census_classified(&origins, &directions, ceiling)
+        .map_err(|error| DrillingRefusal::RayBatchInput {
+            stage: "centerline census",
+            detail: error.to_string(),
+        })?;
+    let result_upper_bound = census
+        .crossings
         .iter()
         .try_fold(0_usize, |total, count| total.checked_add(*count))
         .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
@@ -1636,9 +1754,13 @@ fn prove_centerlines(
         result_upper_bound,
         limits.max_centerline_results,
     )?;
-    let (offsets, ts, _) = surface
-        .cast_rays(&origins, &directions, ceiling)
-        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    let cast = surface
+        .cast_rays_classified(&origins, &directions, ceiling)
+        .map_err(|error| DrillingRefusal::RayBatchInput {
+            stage: "centerline cast",
+            detail: error.to_string(),
+        })?;
+    let (offsets, ts) = (cast.offsets, cast.t_all);
     // The census walk and the collecting walk are the same traversal, and
     // dedup only merges neighbours, so the flattened array can never be
     // longer than the counted crossings. Refuse rather than let a drift go
@@ -1646,8 +1768,24 @@ fn prove_centerlines(
     if ts.len() > result_upper_bound {
         return Err(DrillingRefusal::ResourceAccountingOverflow);
     }
+    // The same two walks must also agree about UNDECIDABLE faces, and the
+    // kernel does not check that for us. Compared explicitly, per row.
+    agree_on_near_parallel("centerline", &census.near_parallel, &cast.near_parallel)?;
     let mut counts = Vec::with_capacity(holes.len());
     for hole in 0..holes.len() {
+        // §EXT-1 site 18. This proof decides whether the model can be
+        // hollowed, and it decides it by counting crossings inside the bore.
+        // An undecidable face contributes no crossing, so the failure
+        // direction is a bore that LOOKS clear: `count` comes back 0 and the
+        // opening passes unproven. Refuse the hole by name instead. The
+        // per-run rate is on the kernel's process-global counters.
+        let undecidable_faces = cast.near_parallel[hole];
+        if undecidable_faces != 0 {
+            return Err(DrillingRefusal::UndecidedOpening {
+                hole,
+                undecidable_faces,
+            });
+        }
         let begin = usize::try_from(offsets[hole])
             .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
         let end = usize::try_from(offsets[hole + 1])
@@ -1938,14 +2076,25 @@ fn normalize(a: V3) -> Result<V3, DrillingRefusal> {
 
 /// Distance between two drain/vent keepout axes, in mm.
 ///
-/// The geometry is [`geom_kernel::segment_segment_distance`]
-/// (`docs/specs/geometry-canon.md` §1 OP-1, plan item C3). The retired private
-/// copy short-circuited its parallel branch on `|denom| < PROOF_EPSILON_MM`,
+/// The geometry is [`geom_kernel::segment_segment_distance_min`]
+/// (`docs/specs/geometry-canon.md` §1 OP-1, plan item C3;
+/// `docs/specs/geometry-adjudication.md` §O2). The retired private copy
+/// short-circuited its parallel branch on `|denom| < PROOF_EPSILON_MM`,
 /// comparing an mm⁴ determinant against an mm constant: at drain-keepout scale
 /// (0.005–0.05 mm axes) that fired on 35.98 % of pairs and returned distances
 /// wrong by up to 4.494e-2 mm — 4.5e5 times the margin of the very comparison
-/// it feeds. The kernel's guard selects a branch whose A21 re-clamp recovers
-/// the minimum, so it prunes instead of deciding.
+/// it feeds.
+///
+/// The pinned [`geom_kernel::segment_segment_distance`] fixed the units but not
+/// the completeness: its near-parallel one-step recovery is a measured
+/// ONE-SIDED OVERESTIMATE — 8.104e-7 mm on the §O2 counterexample, against the
+/// 1e-7 mm slack of the very comparison this feeds, and 1.754e-6 mm worst case
+/// over a 20,000-pair battery. Overestimating a keepout distance admits a hole
+/// pair that is actually closer than the rule allows, which is the acceptance
+/// direction. `segment_segment_distance_min` takes the minimum over all five
+/// candidates of the convex problem, so there is no parallel branch on this
+/// path to be incomplete: complete minimisation, no epsilon, no decision made
+/// by a guard.
 ///
 /// **The refusal stays here, not in the shared primitive** (canon §1 OP-1): the
 /// kernel returns a distance for every input, so this wrapper keeps drilling's
@@ -1956,7 +2105,7 @@ fn keepout_axis_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, Drilling
     if dot(u, u) <= 0.0 || dot(v, v) <= 0.0 {
         return Err(DrillingRefusal::InvalidHoleGeometry);
     }
-    let (distance, _, _) = segment_segment_distance(p1, q1, p2, q2);
+    let (distance, _, _) = segment_segment_distance_min(p1, q1, p2, q2);
     if distance.is_finite() {
         Ok(distance)
     } else {
@@ -1975,6 +2124,57 @@ mod tests {
     };
     use scirs2_core::ndarray::Array3;
     use std::path::PathBuf;
+
+    /// Six audit candidates over two components, in the order
+    /// `select_exact_audit_candidate` receives them. Shared by the ordering
+    /// test and the undecidable-candidate test so both grade the SAME
+    /// selection, one with every ray decided and one without.
+    fn audit_selection_fixture() -> Vec<AuditCandidate> {
+        vec![
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 0,
+                origin: [1.0, 0.0, 0.0],
+                direction: [0.0, 0.0, -1.0],
+                sampled_mm: 1.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 1,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.5, 0.0, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 2,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([-0.5, 0.0, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 1,
+                direction_order: 0,
+                origin: [-1.0, 0.0, 0.0],
+                direction: [0.0, 0.0, -1.0],
+                sampled_mm: 8.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 3,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.0, 0.5, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 4,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.0, -0.5, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+        ]
+    }
 
     /// The true minimum distance between two segments, by dense independent
     /// sweep of both parameters. Deliberately NOT a closed form: a test that
@@ -2032,6 +2232,96 @@ mod tests {
             measured >= brute - 1.0e-8,
             "the production distance {measured} sits below a 2001x2001 sweep's {brute}, which no \
              true minimum can do by more than the sweep's own resolution"
+        );
+    }
+
+    /// The census/collecting tally comparison actually compares.
+    ///
+    /// Both drilling ray sites call this on two walks that are mirror twins by
+    /// construction, so on real input it can never fire — which is exactly the
+    /// shape of check that quietly degrades into a no-op. Graded directly on
+    /// planted disagreements instead: an unequal row, and a short vector,
+    /// which is the case a per-row loop alone would pass by iterating zero
+    /// times.
+    #[test]
+    fn the_census_tally_comparison_refuses_a_planted_disagreement() {
+        assert_eq!(
+            agree_on_near_parallel("probe", &[0, 1, 0], &[0, 1, 0]),
+            Ok(())
+        );
+        assert_eq!(
+            agree_on_near_parallel("probe", &[0, 1, 0], &[0, 2, 0]),
+            Err(DrillingRefusal::CensusTallyDrift {
+                stage: "probe",
+                row: 1,
+                census: 1,
+                collected: 2,
+            }),
+            "an unequal row must be named, with both numbers"
+        );
+        assert!(
+            agree_on_near_parallel("probe", &[0, 0, 0], &[0, 0]).is_err(),
+            "a short vector is a drift, not an agreement reached in zero iterations"
+        );
+        assert!(
+            agree_on_near_parallel("probe", &[], &[0]).is_err(),
+            "and so is an empty one"
+        );
+    }
+
+    /// §O2: a NEAR-parallel keepout pair is measured by complete
+    /// minimisation, not by one coordinate-descent step.
+    ///
+    /// The input class now answered differently: two keepout axes whose
+    /// `denom = |u|^2|v|^2 - (u.v)^2` is 9.653e-15 mm^4. That is inside the
+    /// pinned function's `s = 0` short-circuit, whose one-step recovery is a
+    /// ONE-SIDED OVERESTIMATE — and an overestimated keepout distance is the
+    /// acceptance direction: a hole pair closer than the rule allows gets
+    /// drilled. The overestimate here is 8.1037e-7 mm, 8.1x the
+    /// `PROOF_EPSILON_MM = 1e-7` slack of the very comparison at
+    /// `hole_pair_is_ambiguous` that this distance feeds.
+    ///
+    /// The true minimum lies at `s = 1, t = 0.8952405822914677` — on a
+    /// boundary edge of the unit square, where the closed forms are exact, and
+    /// exactly the candidate the one-step branch never evaluates.
+    #[test]
+    fn near_parallel_keepout_pair_is_measured_by_complete_minimisation() {
+        let p1 = [0.0, 0.0, 0.0];
+        let q1 = [0.107_809_924_939_717_08, 0.0, 0.0];
+        let p2 = [
+            0.017_559_309_679_091_19,
+            -0.098_053_488_880_395_89,
+            -0.011_442_695_278_674_364,
+        ];
+        let q2 = [
+            0.118_371_877_206_833_15,
+            -0.098_052_577_535_768_63,
+            -0.011_442_695_278_674_364,
+        ];
+
+        let measured = keepout_axis_distance(p1, q1, p2, q2).expect("finite, non-degenerate");
+        assert!(
+            (measured - 0.098_718_093_376_956_24).abs() <= 1.0e-12,
+            "complete minimisation lands at 0.09871809337695624 mm; got {measured}"
+        );
+
+        // Graded against a structurally different oracle as well: a dense
+        // independent sweep of both parameters, which never re-derives the
+        // candidate enumeration under test. The sweep is an upper bound on
+        // the true minimum, so the check is two-sided.
+        let brute = brute_force_segment_minimum(p1, q1, p2, q2, 2001);
+        assert!(
+            measured <= brute + 1.0e-8 && measured >= brute - 1.0e-8,
+            "the production distance {measured} disagrees with a 2001x2001 sweep's {brute}"
+        );
+
+        // And the one-step answer is not merely close to the minimum, it is
+        // 8.1e-7 mm above it — this asserts the gap is real at the scale the
+        // comparison cares about, so a return of the one-step branch could not
+        // hide inside the tolerance above.
+        assert!(
+            measured < 0.098_718_903_746_235_54 - 5.0e-7,
+            "an 8.1e-7 mm overestimate would clear a 1e-7 mm slack; got {measured}"
         );
     }
 
@@ -3076,50 +3366,7 @@ mod tests {
             None
         );
 
-        let candidates = vec![
-            AuditCandidate {
-                component_id: 0,
-                direction_order: 0,
-                origin: [1.0, 0.0, 0.0],
-                direction: [0.0, 0.0, -1.0],
-                sampled_mm: 1.0,
-            },
-            AuditCandidate {
-                component_id: 0,
-                direction_order: 1,
-                origin: [1.0, 0.0, 0.0],
-                direction: normalize([0.5, 0.0, -1.0]).unwrap(),
-                sampled_mm: 2.0,
-            },
-            AuditCandidate {
-                component_id: 0,
-                direction_order: 2,
-                origin: [1.0, 0.0, 0.0],
-                direction: normalize([-0.5, 0.0, -1.0]).unwrap(),
-                sampled_mm: 2.0,
-            },
-            AuditCandidate {
-                component_id: 1,
-                direction_order: 0,
-                origin: [-1.0, 0.0, 0.0],
-                direction: [0.0, 0.0, -1.0],
-                sampled_mm: 8.0,
-            },
-            AuditCandidate {
-                component_id: 0,
-                direction_order: 3,
-                origin: [1.0, 0.0, 0.0],
-                direction: normalize([0.0, 0.5, -1.0]).unwrap(),
-                sampled_mm: 2.0,
-            },
-            AuditCandidate {
-                component_id: 0,
-                direction_order: 4,
-                origin: [1.0, 0.0, 0.0],
-                direction: normalize([0.0, -0.5, -1.0]).unwrap(),
-                sampled_mm: 2.0,
-            },
-        ];
+        let candidates = audit_selection_fixture();
         assert_eq!(
             candidates
                 .iter()
@@ -3135,19 +3382,96 @@ mod tests {
             0.5, 1.5, 0.5, 8.0, // exact 8mm component 1 boundary
             0.5, 1.5, 0.5, 1.5,
         ];
+        // Every candidate's ray was fully decided; the undecidable-candidate
+        // rule is exercised by `an_undecidable_audit_ray_...` below.
+        let decided = [0_u32; 6];
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &offsets, &ts, 0, &[], 1.25)
+            select_exact_audit_candidate(&candidates, &offsets, &ts, &decided, 0, &[], 1.25)
                 .unwrap()
                 .map(|(index, _)| index),
             Some(1),
             "a two-crossing ray with outer > sampled must fall through to the first fully valid tie"
         );
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &offsets, &ts, 1, &[], 1.25)
+            select_exact_audit_candidate(&candidates, &offsets, &ts, &decided, 1, &[], 1.25)
                 .unwrap()
                 .map(|(index, _)| index),
             Some(3),
             "the exact 8mm candidate remains selectable"
+        );
+    }
+
+    /// §EXT-1 site 17: a candidate whose ray reached an undecidable face is
+    /// UNAVAILABLE, and selection moves on to the next candidate rather than
+    /// reading an incomplete crossing list as an exact entry/exit pair.
+    ///
+    /// The fixture is the one above, unchanged, with the winning candidate's
+    /// ray marked undecidable. The input class now answered differently is
+    /// exactly that: an audit candidate whose ray reached a face with
+    /// `0 < |det| <= DET_EPS`. Its two collected crossings look like a clean
+    /// bore and would be cut as one; the truth is that an unknown number of
+    /// crossings is missing from that list.
+    #[test]
+    fn an_undecidable_audit_ray_makes_its_candidate_unavailable_not_silently_usable() {
+        let candidates = audit_selection_fixture();
+        let offsets = [0, 2, 4, 6, 8, 10, 12];
+        let ts = [
+            0.5, 1.5, // two crossings, but outer > sampled for candidate 0
+            0.5, 1.5, // the candidate that wins when every ray is decided
+            0.5, 1.5, 0.5, 8.0, 0.5, 1.5, 0.5, 1.5,
+        ];
+
+        let decided = [0_u32; 6];
+        let winner = select_exact_audit_candidate(&candidates, &offsets, &ts, &decided, 0, &[], 1.25)
+            .unwrap()
+            .map(|(index, _)| index);
+        assert_eq!(winner, Some(1), "fixture check: candidate 1 wins when every ray is decided");
+
+        // Same rays, same crossings; candidate 1's ray reached one face the
+        // arithmetic could not decide.
+        let mut undecided = [0_u32; 6];
+        undecided[1] = 1;
+        let after = select_exact_audit_candidate(
+            &candidates,
+            &offsets,
+            &ts,
+            &undecided,
+            0,
+            &[],
+            1.25,
+        )
+        .unwrap()
+        .map(|(index, _)| index);
+        assert_ne!(
+            after,
+            Some(1),
+            "an undecidable ray's crossing list is incomplete in an unknown direction; it must \
+             not be cut into a hole"
+        );
+        assert!(
+            after.is_some(),
+            "unavailability is CANDIDATE-granular: the remaining decided candidates are still \
+             selectable, and this fixture has one"
+        );
+
+        // And when every candidate for the component is undecidable, the
+        // component simply goes unaudited -- the prune direction, which the
+        // caller answers by refilling it.
+        let none_decided = [1_u32; 6];
+        assert_eq!(
+            select_exact_audit_candidate(
+                &candidates,
+                &offsets,
+                &ts,
+                &none_decided,
+                0,
+                &[],
+                1.25
+            )
+            .unwrap()
+            .map(|(index, _)| index),
+            None,
+            "no candidate survives, and the answer is 'no audit drain', not a guessed one"
         );
     }
 
@@ -3322,9 +3646,16 @@ mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
             },
         )
         .expect("box indexes");
-        let (offsets, ts, _) = surface
-            .cast_rays(&[[5.0, 5.0, 0.0]], &[[0.0, 0.0, -1.0]], 45.0)
+        let cast = surface
+            .cast_rays_classified(&[[5.0, 5.0, 0.0]], &[[0.0, 0.0, -1.0]], 45.0)
             .expect("one ray");
+        let (offsets, ts) = (&cast.offsets, &cast.t_all);
+        assert_eq!(
+            cast.near_parallel,
+            vec![0],
+            "the fixture must be fully decided, or the crossing count below is measuring \
+             something else"
+        );
         let hits = &ts[offsets[0] as usize..offsets[1] as usize];
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].abs(), 0.0, "{hits:?}");
@@ -3360,5 +3691,94 @@ mod a_bore_may_not_be_blocked_by_its_own_rear_cap {
             prove_centerlines(&box_mesh, &[hole], 0.5, DrillingLimits::production()),
             Err(DrillingRefusal::BlockedOpening { hole: 0 })
         ));
+    }
+
+    /// §EXT-1 site 18: a centerline whose ray reaches an undecidable face is
+    /// REFUSED by name, not passed as a clear bore.
+    ///
+    /// **The planted configuration.** The bore runs 4 mm along the box's own
+    /// bottom face, in that face's plane, tipped out of it by `5e-17` per mm.
+    /// The determinant Möller forms for a face in the `z = 0` plane is
+    /// `dv_z * (e1_x*e2_y - e1_y*e2_x)` — the ray's out-of-plane rate times
+    /// twice the triangle's area — so each 10x10 bottom half-face gives
+    /// `|det| = 5e-17 * 100 = 5e-15`: nonzero, and inside `DET_EPS = 1e-14`.
+    /// Whether the bore grazes into that face or skims over it is exactly what
+    /// the arithmetic cannot decide at this scale.
+    ///
+    /// **The input class now answered differently** is precisely that one: a
+    /// centerline running nearly in the plane of a face it is nearly touching.
+    /// The fixture asserts below that the collected crossing list for this ray
+    /// is EMPTY — so a proof that only counts crossings sees a clear bore and
+    /// admits the opening on no evidence. The undecidable tally is the only
+    /// thing that distinguishes it from a genuinely clear bore, and this test
+    /// pins that the tally is what decides.
+    #[test]
+    fn an_undecidable_centerline_is_refused_by_name_not_admitted_as_a_clear_bore() {
+        let box_mesh =
+            plinth_mesh::make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("10 mm box fixture");
+        // 5e-17 mm of rise per mm of run: enough that the ray is not exactly
+        // in the plane (which would be `ExactParallel`, a genuine prune), and
+        // far too little for the determinant to decide anything.
+        const RISE: f64 = 5.0e-17;
+        let start = [-3.0, 0.0, 0.0];
+        let end = [1.0, 0.0, 4.0 * RISE];
+        let hole = HoleGeometry {
+            role: HoleRole::Vent,
+            lobe_id: None,
+            center_mm: finite3([-1.0, 0.0, 2.0 * RISE]),
+            direction: finite3([1.0, 0.0, RISE]),
+            outer_exit_mm: finite3(end),
+            radius_mm: Finite::new(0.25).expect("finite"),
+            inner_crossing_mm: Finite::new(1.0).expect("finite"),
+            length_mm: Finite::new(4.0).expect("finite"),
+            sampled_exit_mm: Finite::new(4.0).expect("finite"),
+            keepout_start_mm: finite3(start),
+            keepout_end_mm: finite3(end),
+        };
+
+        // The fixture states its own two properties before the proof is asked
+        // about anything: the ray reaches undecidable faces, and it collects
+        // no crossings at all.
+        let surface = NativeSurface::from_indexed(
+            box_mesh.verts(),
+            box_mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: usize::MAX,
+            },
+        )
+        .expect("box indexes");
+        let cast = surface
+            .cast_rays_classified(&[start], &[[1.0, 0.0, RISE]], 4.0 + PROOF_EPSILON_MM)
+            .expect("one ray");
+        assert!(
+            cast.near_parallel[0] > 0,
+            "the planted configuration must actually reach the undecidable band, or this test \
+             proves nothing; tally = {:?}",
+            cast.near_parallel
+        );
+        assert_eq!(
+            cast.offsets[1] - cast.offsets[0],
+            0,
+            "and it must collect no crossings, so a counting-only proof would admit it: {:?}",
+            cast.t_all
+        );
+
+        match prove_centerlines(&box_mesh, &[hole], 0.5, DrillingLimits::production()) {
+            Err(DrillingRefusal::UndecidedOpening {
+                hole,
+                undecidable_faces,
+            }) => {
+                assert_eq!(hole, 0, "the refusal names the hole it could not prove");
+                assert_eq!(
+                    undecidable_faces, cast.near_parallel[0],
+                    "and it carries what it saw, not a bare flag"
+                );
+            }
+            other => panic!(
+                "an undecidable centerline must refuse by name rather than pass as clear; \
+                 got {other:?}"
+            ),
+        }
     }
 }

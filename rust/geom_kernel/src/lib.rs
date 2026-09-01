@@ -35,6 +35,16 @@ pub mod poly2;
 mod queries;
 mod segment_batch;
 mod slicing;
+/// Process-global, result-inert counters for near-parallel Möller
+/// classifications — how often the undecidable determinant band actually fires,
+/// per kernel call site, readable at the end of a run.
+///
+/// Public because the run report reads it. Read the module docs before wiring
+/// anything to it: these counters answer the run-RATE question and are not a
+/// substitute for the per-row `near_parallel` tallies that every classified
+/// entry point returns, which are what a caller's disposition must be decided
+/// from.
+pub mod telemetry;
 /// Minimal `[f64; 3]` vector arithmetic (`V3`), evaluated in the fixed element
 /// order the kernel's bit-parity guarantees depend on (spec sec 5.1).
 ///
@@ -60,11 +70,23 @@ use std::borrow::Cow;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-/// The canonical segment-vs-segment distance for the whole workspace
-/// (`docs/specs/geometry-canon.md` §1 OP-1). Read its degenerate-input
-/// contract before calling: it answers for every input and refuses nothing, so
-/// a caller's refusal stays at the caller.
-pub use closest::segment_segment_distance;
+/// The two segment-vs-segment distances, and they are NOT interchangeable.
+///
+/// * [`segment_segment_distance`] is the PARITY PIN
+///   (`docs/specs/geometry-canon.md` §1 OP-1), carried term-for-term from the
+///   oracle. Its near-parallel branch is one coordinate-descent step, not a
+///   minimisation, and its error is one-sided HIGH — measured at 8.104e-7 mm on
+///   the §O2 counterexample, 8.1x the 1e-7 mm slack of the comparison it used
+///   to feed. **Decision-feeding callers must not use it.** Its remaining
+///   duties are this kernel's parity tests and cross-checking `_min`.
+/// * [`segment_segment_distance_min`] is the COMPLETE minimisation — the convex
+///   quadratic's interior critical point plus the four boundary edges, with no
+///   epsilon on the decision path at all. **Canonical for every
+///   decision-feeding caller** (`docs/specs/geometry-adjudication.md` §O2).
+///
+/// Both answer for every input and refuse nothing, so a caller's refusal stays
+/// at the caller. Read the degenerate-input contracts before calling.
+pub use closest::{segment_segment_distance, segment_segment_distance_min};
 /// The Möller acceptance slack every ray result of this kernel carries BY
 /// CONTRACT.
 ///
@@ -81,11 +103,26 @@ pub use closest::segment_segment_distance;
 pub use consts::EPS as MOLLER_EPS;
 use mesh::Mesh;
 pub use mesh::{DegenerateFaceCause, FaceBounds, FaceGeometry};
-/// The canonical ray-vs-triangle intersection for the whole workspace
-/// (`docs/specs/geometry-canon.md` §1 OP-2), exposing the barycentrics the
-/// pinned sequence already computed so call-site policy needs no second
-/// formula. `u`, `v` and `t` are meaningless when `hit` is `false`.
-pub use moller::{ray_triangle, RayTriangleHit};
+/// The ray-vs-triangle intersection, in its two forms.
+///
+/// * [`ray_triangle_classified`] returns a [`RayTriangleClass`] — `Hit`,
+///   `Miss`, `NearParallel` or `ExactParallel`. **Canonical for every
+///   decision-feeding caller**: anything that can decide a gate, a refusal, or
+///   a byte of an emitted artifact. `NearParallel` is the nonzero-determinant
+///   band, where whether the ray crosses the face is undecidable at this scale;
+///   a caller routes it to its own conservative side and counts it.
+/// * [`ray_triangle`] is the PARITY PIN (`docs/specs/geometry-canon.md` §1
+///   OP-2), exposing the barycentrics the pinned sequence already computed so
+///   call-site policy needs no second formula. `u`, `v` and `t` are meaningless
+///   when `hit` is `false`. **It maps the undecidable band to `hit = false`,
+///   for oracle parity only** — that silent miss is the defect §O4 of
+///   `docs/specs/geometry-adjudication.md` was raised against, pinned by exact
+///   arithmetic in `tests/ray_class.rs`.
+///
+/// The two agree exactly on the hit set: `ray_triangle(..).hit` is
+/// `matches!(classified, Hit(_))`, and a `Hit` carries bit-identical `t, u, v`.
+/// That agreement is a committed test battery, not a claim.
+pub use moller::{ray_triangle, ray_triangle_classified, RayTriangleClass, RayTriangleHit};
 use parity::ParityBuildError;
 pub use point_index::{
     knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr,
@@ -95,10 +132,11 @@ pub use queries::capsule_rays;
 pub use queries::{
     AllowedFaceProjection, AllowedFaceProjectionError, AllowedFaceProjectionLimits,
     AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
-    BatchInputError, CapsuleRay, CapsuleRays, CastRaysBatch, Interval, NativeSurface,
-    NearFaceBatchError, NearFaceBatchLimits, PenetrationBatchError, PenetrationBatchLimits,
-    PenetrationBatchMeter, PenetrationRowCensus, SegmentClearance, SphereBreachBatch,
-    UnmeasuredSegment,
+    BatchInputError, CapsuleRay, CapsuleRays, CastRaysCensusClassified, CastRaysClassified,
+    FacesNearSegmentsClassified, Interval, NativeSurface, NearFaceBatchError, NearFaceBatchLimits,
+    PenetrationBatchError, PenetrationBatchLimits, PenetrationBatchMeter,
+    PenetrationIntervalsClassified, PenetrationRowCensus, SegmentClearanceClassified,
+    SphereBreachClassified, UnmeasuredSegment,
 };
 pub use segment_batch::{
     point_nearest_segment_batch, point_segment_distances_batch, point_segment_taper_batch,
@@ -1056,7 +1094,7 @@ mod thread_tests {
             surface.query(&points, f64::INFINITY),
             subset.query(&points, f64::INFINITY),
             subset.inside(&points),
-            surface.cast_rays(
+            surface.cast_rays_classified(
                 &[[0.25, 0.25, 1.0], [2.0, 2.0, 1.0]],
                 &[[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]],
                 2.0,

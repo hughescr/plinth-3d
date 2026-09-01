@@ -1242,7 +1242,7 @@ fn validate_changed_geometry(
     // #36 step 5 — the FULL axis against surface-minus-Z.
     let clearances = geometry
         .surface()
-        .segment_clearance_excluding_typed(
+        .segment_clearance_excluding_classified(
             &p0,
             &p1,
             &r0,
@@ -1268,7 +1268,16 @@ fn validate_changed_geometry(
     // in the forest: erasure by exemption laundered into a pass, which is
     // precisely what naming the exempt FACES instead of a skipped LENGTH was
     // introduced to prevent. A support was admitted on a check that never ran.
-    Ok(clearances.into_iter().all(|row| row.clears_or(false)))
+    //
+    // **AND A ONE-SIDED ROW REFUSES TOO** — `docs/specs/geometry-adjudication.md`
+    // §EXT-1 site 11 (`support.rewire.clearance`). The second fallback is new
+    // with the classified type: `UpperBound` means the walk skipped an
+    // undecidable pierce candidate, so its number is an upper bound and the
+    // true clearance may be negative. A bound cannot affirm a gap. EXT-2 lets a
+    // PRUNING stage pass `true` here only when a later REFUSING stage retests
+    // the survivor; this stage commits the move it is validating, so it takes
+    // no such latitude and there is no later stage to name.
+    Ok(clearances.into_iter().all(|row| row.clears(false, false)))
 }
 
 /// The PR-1..PR-4 policy this stage validates under — every number the
@@ -2675,6 +2684,111 @@ mod tests {
                 Err(RewireError::StaleBrace)
             ),
             "an unanswerable question is not a comfortable pass"
+        );
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 11 — a rewire move
+    /// whose clearance is only BOUNDED is not published.**
+    ///
+    /// The plant is a pair of moves that differ by `2e-17 mm` of x-drift in the
+    /// changed member's axis, against one wall triangle at `x = 1` for which
+    /// `det = -200 * dv_x` exactly. Both rows carry the SAME clearance f64; one
+    /// is `Measured` and clears, the other is `UpperBound` — the walk skipped an
+    /// undecidable pierce candidate, so the number is an upper bound and the
+    /// true clearance may be negative.
+    ///
+    /// The input class that changes: a move with a comfortably POSITIVE-looking
+    /// clearance whose walk could not affirm it. This stage commits the move it
+    /// validates, so EXT-2's pruning latitude — pass a one-sided row only if a
+    /// later refusing stage retests the survivor — is not available and no such
+    /// stage exists to name.
+    #[test]
+    fn a_rewire_move_whose_clearance_is_only_bounded_is_not_published() {
+        let mesh = Mesh::new(
+            vec![[1.0, -10.0, 0.0], [1.0, 10.0, 0.0], [1.0, 0.0, 10.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = Config::current(0.05).unwrap();
+
+        // NON-VACUITY, from the kernel at this stage's own demand: the two axes
+        // carry the same number and differ only in whether it can be affirmed.
+        let policy = contact_policy(&config).unwrap();
+        let probe = |p1: [f64; 3]| {
+            surface
+                .segment_clearance_excluding_classified(
+                    &[[0.0, 0.0, 9.0]],
+                    &[p1],
+                    &[0.1],
+                    &[0.1],
+                    policy.demanded_gap_mm,
+                    &[0.0],
+                    &[0.0],
+                    &[&[][..]],
+                )
+                .expect("the row runs")[0]
+        };
+        let clean_row = probe([0.0, 0.0, 1.0]);
+        let planted_row = probe([2.0e-17, 0.0, 1.0]);
+        assert!(
+            clean_row.clearance_mm().is_some_and(|mm| mm > 0.0),
+            "the exactly-parallel twin must MEASURE a positive gap, or the test \
+             proves nothing: {clean_row:?}"
+        );
+        assert_eq!(
+            planted_row.upper_bound_mm(),
+            clean_row.clearance_mm(),
+            "and the planted twin must carry the SAME number as a BOUND: \
+             {planted_row:?}"
+        );
+
+        // The same move, validated through the production path, at both axes.
+        let validate = |p1: [f64; 3]| {
+            let mut before = Forest::new();
+            let key = before.add_member(member(
+                [0.0, 0.0, 9.0],
+                p1,
+                MemberKind::Trunk,
+                41,
+            ));
+            before
+                .set_radii(
+                    key,
+                    TerminalEndRadius::new(p(0.1)),
+                    RootwardEndRadius::new(p(0.1)),
+                )
+                .unwrap();
+            let mut after = before.clone();
+            after
+                .set_radii(
+                    key,
+                    TerminalEndRadius::new(p(0.1)),
+                    RootwardEndRadius::new(p(0.1)),
+                )
+                .unwrap();
+            validate_changed_geometry(&before, &mut after, &authority, &config, &mut 0).unwrap()
+        };
+
+        assert!(
+            validate([0.0, 0.0, 1.0]),
+            "NOT SIMPLY ALWAYS OFF: the decided twin with the same clearance is \
+             published"
+        );
+        assert!(
+            !validate([2.0e-17, 0.0, 1.0]),
+            "a move whose clearance the walk could not affirm must not be \
+             published, however comfortable the bound looks"
         );
     }
 }

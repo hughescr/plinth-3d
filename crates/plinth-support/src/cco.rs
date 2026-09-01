@@ -2452,7 +2452,14 @@ impl CcoController {
                         ),
                     });
                 }
-                ClearanceVerdict::Distance => {
+                // A measured shortfall and an unaffirmable row both leave
+                // through the clearance channel: in each case the clearance
+                // screen is what dropped the candidate, and this channel carries
+                // no number a reader could mistake for a measurement. The
+                // distinction between them is kept in `ClearanceVerdict` and is
+                // not widened into `RewireCandidateRefusalReason` here, which
+                // would grow a refusal vocabulary this ruling did not ask for.
+                ClearanceVerdict::Distance | ClearanceVerdict::Unmeasured => {
                     refusals.push(RewireCandidateRefusal {
                         generation_index,
                         family: candidate.family,
@@ -3217,6 +3224,12 @@ fn digest_anchor_seat_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorSea
             crate::anchor::AnchorSeatRefusalReason::NoFirstHit => 8,
             crate::anchor::AnchorSeatRefusalReason::ZeroLengthSnappedAnchor => 9,
             crate::anchor::AnchorSeatRefusalReason::NearerNonExteriorObstruction => 10,
+            // `docs/specs/geometry-adjudication.md` §EXT-1 site 4. APPENDED,
+            // never renumbered — the same rule the sibling
+            // `digest_anchor_refusals` table states below: the eleven above are
+            // load-bearing in the sealed transcript digest, and reordering them
+            // would move every model's digest without any geometry changing.
+            crate::anchor::AnchorSeatRefusalReason::NearParallelFirstHit => 11,
         });
         word(refusal.first_hit_t.map_or(0, |value| value.get().to_bits()));
         word(u64::from(refusal.first_hit_t.is_some()));
@@ -3927,7 +3940,12 @@ fn grow_terminal_inner(
         let degenerate = match verdict {
             ClearanceVerdict::GrazingIncidence => false,
             ClearanceVerdict::DegenerateIncidence => true,
-            ClearanceVerdict::Survives | ClearanceVerdict::Distance => continue,
+            // `Unmeasured` joins the two non-emergence verdicts here: this loop
+            // exists to route PR-2/PR-3 physics refusals into the anchor
+            // channel, and a row nobody could measure is not one of those.
+            ClearanceVerdict::Survives
+            | ClearanceVerdict::Distance
+            | ClearanceVerdict::Unmeasured => continue,
         };
         if let Some(anchor) = validated_anchors.remove(&candidate.generation_index) {
             anchor_refusals.push(AnchorFootRefusal::seat_emergence(
@@ -4116,6 +4134,17 @@ enum ClearanceVerdict {
     Survives,
     /// The kernel's distance test refused at least one row.
     Distance,
+    /// The kernel could not AFFIRM a gap on at least one row — either the row
+    /// was never tested (`Unmeasured`) or its number is one-sided because an
+    /// undecidable pierce candidate was skipped (`UpperBound`).
+    ///
+    /// This is a fourth verdict for the same reason the enum stopped being a
+    /// `bool`: a refusal that is not a measured distance failure must not be
+    /// reported as one. The retired float shim collapsed the untested case onto
+    /// `f64::INFINITY`, which cleared every threshold and produced `Survives` —
+    /// so the state this variant names was previously invisible AND
+    /// permissive. `docs/specs/geometry-adjudication.md` §EXT-1 site 10.
+    Unmeasured,
     /// PR-3 — at least one contact-declaring row cannot emerge from its own
     /// mask(s).
     GrazingIncidence,
@@ -4259,8 +4288,10 @@ fn clearance_survival(
     // #36 step 5 — the FULL axis against surface-minus-Z, at this stage's
     // registered demand, through the SAME shared kernel predicate the final
     // pass uses; only the number differs.
-    let (clearances, _) = surface
-        .segment_clearance_excluding(
+    // §EXT-1 site 10 (`support.cco.clearance`). Migrated off the retired
+    // `segment_clearance_excluding` float shim onto the classified typed form.
+    let clearances = surface
+        .segment_clearance_excluding_classified(
             &p0,
             &p1,
             &r0,
@@ -4274,9 +4305,9 @@ fn clearance_survival(
     Ok(ranges
         .into_iter()
         .map(|range| {
-            // Physics refusals outrank the distance verdict, because for a row
-            // whose mask consumed the segment the kernel's number is `INFINITY`
-            // and says nothing.
+            // Physics refusals outrank the clearance verdict, because for a row
+            // whose mask consumed the segment the kernel measured nothing and
+            // its answer says nothing.
             if range.clone().any(|row| degenerate[row]) {
                 return ClearanceVerdict::DegenerateIncidence;
             }
@@ -4285,7 +4316,32 @@ fn clearance_survival(
             }) {
                 return ClearanceVerdict::GrazingIncidence;
             }
-            if clearances[range].iter().all(|clearance| *clearance >= 0.0) {
+            // THE POLICY, restated here because the kernel refuses to default
+            // it. This screen grades CCO candidate survival and its survivors
+            // are emitted, so neither non-affirming state may clear:
+            //
+            // * `Unmeasured` — nothing about this row was tested. Under the
+            //   retired shim it read `f64::INFINITY` and satisfied the
+            //   `>= 0.0` test below, which is the "unmeasured reads as a pass"
+            //   defect this migration exists to remove.
+            // * `UpperBound` — the walk skipped an undecidable pierce
+            //   candidate, so the true clearance is AT MOST this number and may
+            //   be negative. A bound that cannot affirm a gap must not affirm
+            //   one. There is no later refusing stage that retests a CCO
+            //   survivor's clearance at this demand, so the pruning latitude
+            //   EXT-2 allows is not available here.
+            //
+            // Both are reported as `Unmeasured` rather than folded into
+            // `Distance`: a row nobody could measure did not fail a distance
+            // test.
+            let rows = &clearances[range];
+            if rows
+                .iter()
+                .any(|row| !matches!(row, geom_kernel::SegmentClearanceClassified::Measured { .. }))
+            {
+                return ClearanceVerdict::Unmeasured;
+            }
+            if rows.iter().all(|row| row.clears(false, false)) {
                 ClearanceVerdict::Survives
             } else {
                 ClearanceVerdict::Distance
@@ -8696,8 +8752,8 @@ mod tests {
         // point production uses.
         let p0 = [0.0, 0.0, 5.0];
         let raw_seat = [0.0, 0.0, 0.0];
-        let (flat, _) = surface
-            .segment_clearance(
+        let flat = surface
+            .segment_clearance_classified(
                 &[p0],
                 &[raw_seat],
                 &[r_max],
@@ -8706,7 +8762,13 @@ mod tests {
                 &[0.0],
                 &[policy.standoff_mm],
             )
-            .expect("kernel clearance for the retired inset pair");
+            .expect("kernel clearance for the retired inset pair")
+            .into_iter()
+            .map(|row| {
+                row.clearance_mm()
+                    .expect("the retired inset pair leaves axis to measure")
+            })
+            .collect::<Vec<f64>>();
         assert!(
             (flat[0] + r_max).abs() < 1e-9,
             "the retired flat inset must fail by EXACTLY r_max = {r_max}; kernel said {}",
@@ -8742,8 +8804,8 @@ mod tests {
             &policy,
         )
         .unwrap();
-        let (masked, _) = surface
-            .segment_clearance(
+        let masked = surface
+            .segment_clearance_classified(
                 &[p0],
                 &[seated],
                 &[r_max],
@@ -8752,7 +8814,13 @@ mod tests {
                 &[0.0],
                 &[mask],
             )
-            .expect("kernel clearance for the converged mask");
+            .expect("kernel clearance for the converged mask")
+            .into_iter()
+            .map(|row| {
+                row.clearance_mm()
+                    .expect("the converged mask leaves axis to measure")
+            })
+            .collect::<Vec<f64>>();
         assert!(
             (masked[0] - policy.process_resolution_mm).abs() < 1e-9,
             "PR-2 returns exactly MARGIN = {}; kernel said {}",
@@ -8799,8 +8867,8 @@ mod tests {
             "the fixture must be grazing enough that the mask consumes the member \
              (mask {mask} mm vs length {length} mm)"
         );
-        let (erased, _) = surface
-            .segment_clearance(
+        let erased = surface
+            .segment_clearance_classified(
                 &[p0],
                 &[seated],
                 &[r_max],
@@ -8809,12 +8877,26 @@ mod tests {
                 &[0.0],
                 &[mask],
             )
-            .expect("kernel clearance for the over-long mask");
+            .expect("kernel clearance for the over-long mask")[0];
+        // MOVED EXPECTATION, and this is the one the migration was for. This
+        // used to read `erased[0].is_infinite()` — the float shim answered
+        // `f64::INFINITY`, a value that satisfies every `>= threshold` test ever
+        // written against it, which is exactly the admission PR-3 exists to
+        // prevent. The classified type cannot express that: an over-long mask
+        // is now `Unmeasured(InsetsConsumeAxis)` BY NAME, and there is no number
+        // for a caller to launder into a pass.
+        assert_eq!(
+            erased,
+            geom_kernel::SegmentClearanceClassified::Unmeasured(
+                geom_kernel::UnmeasuredSegment::InsetsConsumeAxis
+            ),
+            "NON-VACUITY: an over-long mask must leave the kernel with nothing to \
+             measure, and it must SAY so rather than return a number; kernel said \
+             {erased:?}"
+        );
         assert!(
-            erased[0].is_infinite(),
-            "NON-VACUITY: an over-long mask must make the kernel answer INFINITY, \
-             which is the admission PR-3 exists to prevent; kernel said {}",
-            erased[0]
+            !erased.clears(false, false),
+            "and a refusing caller's predicate must not clear it"
         );
 
         // PR-3 refuses it BY NAME instead.
@@ -8910,8 +8992,8 @@ mod tests {
 
         // NON-VACUITY, from the kernel: at a demand of zero the number IS the
         // true gap, and it sits strictly between the two registered demands.
-        let (true_gap, _) = surface
-            .segment_clearance(
+        let true_gap = surface
+            .segment_clearance_classified(
                 &[[-2.0, 0.0, 0.9]],
                 &[[2.0, 0.0, 0.9]],
                 &[radius_mm],
@@ -8920,7 +9002,10 @@ mod tests {
                 &[0.0],
                 &[0.0],
             )
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|row| row.clearance_mm().expect("the slab fixture row is measured"))
+            .collect::<Vec<f64>>();
         assert!(
             (true_gap[0] - 0.45).abs() < 1e-9,
             "the fixture's TRUE gap must be 0.45 mm; the kernel said {}",
@@ -11252,5 +11337,106 @@ mod tests {
                 geometry.topology().n_faces()
             );
         });
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 10 — a CCO candidate
+    /// whose clearance cannot be AFFIRMED does not survive, and the verdict says
+    /// which kind of not-affirmed it was.**
+    ///
+    /// # The plant, and why this pair is the whole argument
+    ///
+    /// One wall triangle at `x = 1` with `e1 = (0,20,0)` and `e2 = (0,10,10)`,
+    /// for which `det = -200 * dv_x` exactly. Two candidates differ ONLY in the
+    /// x-drift of their axis, by `2e-17 mm`:
+    ///
+    /// | axis drift | `det` | kernel row | MEASURED clearance |
+    /// |---|---|---|---|
+    /// | `0` | `-0e0` (exactly parallel — a genuine prune) | `Measured` | `+0.30000000000000004 mm` |
+    /// | `2e-17` | `-4e-15` (inside `DET_EPS = 1e-14`, nonzero) | `UpperBound` | `+0.30000000000000004 mm` |
+    ///
+    /// The two numbers are the same f64. Under the retired
+    /// `segment_clearance_excluding` float shim the two rows were the same
+    /// answer, and both survived. They are not the same answer: the second walk
+    /// SKIPPED an undecidable pierce candidate, so `+0.300` is an upper bound
+    /// and the true clearance may be anything at or below it, including
+    /// negative. That is the input class this site now refuses — a comfortably
+    /// positive-LOOKING clearance on a candidate whose survivors are emitted.
+    ///
+    /// The second input class, `Unmeasured`, is pinned in `brace.rs`
+    /// (`a_row_whose_exclusion_set_erased_every_face_does_not_clear`) against
+    /// the same predicate.
+    ///
+    /// Neither is reported as `ClearanceVerdict::Distance`: a row nobody could
+    /// measure did not fail a distance test.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the point of the pin is BIT equality: the planted row and its clean twin \
+              must carry the same f64, and the strict sentinel must be exactly the value \
+              every `>= threshold` screen in the module fails against. A tolerance here \
+              would let the distinction this test exists to measure slip through."
+    )]
+    fn a_candidate_whose_clearance_cannot_be_affirmed_does_not_survive() {
+        let wall = geom_kernel::testkit::build_from_tris(vec![
+            1.0, -10.0, 0.0, 1.0, 10.0, 0.0, 1.0, 0.0, 10.0, //
+        ]);
+        let policy = seat_contact_policy(0.05).unwrap();
+        const RADIUS_MM: f64 = 0.1;
+        let clean_p1 = [0.0, 0.0, 1.0];
+        let planted_p1 = [2.0e-17, 0.0, 1.0];
+        let p0 = [0.0, 0.0, 9.0];
+
+        // NON-VACUITY, from the kernel at THIS stage's own demand: the two rows
+        // carry the SAME number and differ only in whether the walk could
+        // affirm it.
+        let probe = |p1: [f64; 3]| {
+            wall.segment_clearance_excluding_classified(
+                &[p0],
+                &[p1],
+                &[RADIUS_MM],
+                &[RADIUS_MM],
+                policy.demanded_gap_mm,
+                &[0.0],
+                &[0.0],
+                &[&[][..]],
+            )
+            .expect("the row runs")[0]
+        };
+        let clean_row = probe(clean_p1);
+        let planted_row = probe(planted_p1);
+        assert_eq!(
+            clean_row.clearance_mm(),
+            Some(0.300_000_000_000_000_04),
+            "the exactly-parallel twin must MEASURE a comfortable gap"
+        );
+        let geom_kernel::SegmentClearanceClassified::UpperBound {
+            clearance_mm,
+            near_parallel_faces,
+            ..
+        } = planted_row
+        else {
+            panic!("the planted row must be one-sided, not {planted_row:?}");
+        };
+        assert_eq!(near_parallel_faces, 1, "one undecidable face was planted");
+        assert_eq!(
+            clearance_mm, 0.300_000_000_000_000_04,
+            "and its bound must be the SAME f64 the clean twin measured, or this \
+             test is not measuring the distinction it names"
+        );
+
+        // The verdicts diverge where the numbers do not.
+        assert_eq!(
+            clearance_survival(&wall, &policy, &[plain_candidate(p0, clean_p1, RADIUS_MM)])
+                .expect("the screen runs"),
+            vec![ClearanceVerdict::Survives],
+            "NOT SIMPLY ALWAYS ON: a decided row with the same number survives"
+        );
+        assert_eq!(
+            clearance_survival(&wall, &policy, &[plain_candidate(p0, planted_p1, RADIUS_MM)])
+                .expect("the screen runs"),
+            vec![ClearanceVerdict::Unmeasured],
+            "an unaffirmable row must neither survive nor be filed as a measured \
+             distance failure"
+        );
     }
 }

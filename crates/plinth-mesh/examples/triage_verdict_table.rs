@@ -83,16 +83,26 @@ fn run() -> Result<String, String> {
     table.push_str(
         "One row per corpus model. `verdict` is `triage_components(production limits, \
          ExactBits)`; `digest` is SHA-256 over the triaged mesh's vertex and triangle bits \
-         (`-` when triage refused). `ray_tests`/`hits`/`misses`/`ambig` are measured counts \
-         from the containment ray caster, and `classifiers` is how many nested-component \
+         (`-` when triage refused). `ray_tests`/`hits`/`misses`/`ambig`/`near_par` are measured \
+         counts from the containment ray caster, and `classifiers` is how many nested-component \
          containment queries ran at all: a row with `classifiers=0` did not exercise the \
          ray/triangle path, so its unchanged verdict is NOT evidence about C5.\n\n",
     );
     table.push_str(
-        "| model | faces | verdict | components | main | stripped_comp | stripped_faces | \
-         digest | classifiers | rays | ray_tests | hits | misses | ambig | on_tri |\n",
+        "`near_par` is the near-parallel column: ray/triangle tests the KERNEL could not \
+         decide (`0 < |det| <= DET_EPS`), which before \
+         `docs/specs/geometry-adjudication.md` were reported as definite misses and dropped a \
+         real interior crossing out of the parity count. It is DISJOINT from `ambig`, which \
+         counts a different uncertainty — a crossing that exists but whose sign triage cannot \
+         sign. A nonzero `near_par` is the measured refusal rate the adjudication exists to \
+         produce, not a value to tune away; a zero one says the corpus never entered the band, \
+         which is a result and not an omission.\n\n",
     );
-    table.push_str("|---|--:|---|--:|--:|--:|--:|---|--:|--:|--:|--:|--:|--:|--:|\n");
+    table.push_str(
+        "| model | faces | verdict | components | main | stripped_comp | stripped_faces | \
+         digest | classifiers | rays | ray_tests | hits | misses | ambig | near_par | on_tri |\n",
+    );
+    table.push_str("|---|--:|---|--:|--:|--:|--:|---|--:|--:|--:|--:|--:|--:|--:|--:|\n");
 
     let mut processed = 0_usize;
     for model in &manifest.models {
@@ -130,7 +140,7 @@ fn run() -> Result<String, String> {
 
         writeln!(
             table,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             model.name,
             faces,
             verdict_text,
@@ -145,6 +155,7 @@ fn run() -> Result<String, String> {
             counters.face_hits,
             counters.face_misses,
             counters.face_ambiguous,
+            counters.face_near_parallel,
             counters.point_on_triangle_hits,
         )
         .map_err(|error| format!("could not format row for {}: {error}", model.name))?;
@@ -201,14 +212,17 @@ fn nested_probe_table(root: &Path, manifest: &Manifest) -> Result<(String, u64),
     table.push_str(
         "A 2 mm box nested at each model's bounding-box centre, so the ray/triangle path runs \
          against that model's own triangles. `ray_tests` is the measured number of \
-         ray-vs-triangle evaluations; `hits`/`misses`/`ambig` are their outcomes.\n\n",
+         ray-vs-triangle evaluations; `hits`/`misses`/`ambig`/`near_par` are their outcomes, and \
+         they partition it — every test lands in exactly one.\n\n",
     );
     table.push_str(
-        "| model | verdict | classifiers | rays | ray_tests | hits | misses | ambig | on_tri |\n",
+        "| model | verdict | classifiers | rays | ray_tests | hits | misses | ambig | near_par | \
+         on_tri |\n",
     );
-    table.push_str("|---|---|--:|--:|--:|--:|--:|--:|--:|\n");
+    table.push_str("|---|---|--:|--:|--:|--:|--:|--:|--:|--:|\n");
 
     let mut fired = 0_u64;
+    let mut near_parallel = 0_u64;
     let mut processed = 0_usize;
     for model in &manifest.models {
         let path = root.join(&model.stl);
@@ -223,10 +237,11 @@ fn nested_probe_table(root: &Path, manifest: &Manifest) -> Result<(String, u64),
         let verdict = triage_one(&joined);
         let counters = containment_ray_counters();
         fired += counters.face_tests;
+        near_parallel += counters.face_near_parallel;
 
         writeln!(
             table,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             model.name,
             match &verdict {
                 Ok(_) => "Ok".to_string(),
@@ -238,6 +253,7 @@ fn nested_probe_table(root: &Path, manifest: &Manifest) -> Result<(String, u64),
             counters.face_hits,
             counters.face_misses,
             counters.face_ambiguous,
+            counters.face_near_parallel,
             counters.point_on_triangle_hits,
         )
         .map_err(|error| format!("could not format probe row for {}: {error}", model.name))?;
@@ -249,8 +265,15 @@ fn nested_probe_table(root: &Path, manifest: &Manifest) -> Result<(String, u64),
             manifest.models.len()
         ));
     }
-    writeln!(table, "\nprobe rows: {processed}")
-        .map_err(|error| format!("could not write the probe row count: {error}"))?;
+    // Stated whether or not it fired. A zero here is a measured result — the
+    // corpus probes never entered the undecidable band — and printing it is
+    // what stops a later reader mistaking a missing line for a clean run.
+    writeln!(
+        table,
+        "\nprobe rows: {processed}; probe near-parallel ray/triangle tests, all rows: \
+         {near_parallel}"
+    )
+    .map_err(|error| format!("could not write the probe row count: {error}"))?;
     Ok((table, fired))
 }
 

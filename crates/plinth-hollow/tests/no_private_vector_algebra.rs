@@ -56,6 +56,21 @@
 //! the production rasterizer at all -- it calls
 //! `plinth_hollow::diagnostics::triangle_cube_overlaps`.
 //!
+//! **Allowlist line numbers re-pointed 2026-09-01**, and only the numbers:
+//! `src/drilling.rs` 1935 -> 2073 and `src/drains.rs` 2089 -> 2209. The
+//! near-parallel adjudication work added text above both, so the two
+//! entries drifted off their targets and
+//! `every_allowlist_entry_still_points_at_a_matching_line` said so — which is
+//! that test doing its job. Both targets were re-read before the move and are
+//! the same typed-refusal `normalize` wrappers with the same bodies, so the
+//! reasons below are unchanged and still true (`unit_vector` at
+//! `drilling.rs:8` is `geom_kernel::vec3::normalize` under an import rename).
+//! No pattern was weakened and no entry was deleted.
+//!
+//! The line numbers in the census paragraphs ABOVE are deliberately not
+//! re-pointed: they record where retired sites used to live, and rewriting
+//! them would erase the history they exist to carry.
+//!
 //! Per the canon's own rule: gate on a **count of files actually scanned**
 //! being greater than zero, not on the grep's exit code -- an empty match
 //! set and an empty file set both "succeed" silently otherwise (the xargs
@@ -69,7 +84,7 @@ use std::path::{Path, PathBuf};
 const ALLOWLIST: &[(&str, u32, &str)] = &[
     (
         "src/drilling.rs",
-        1935,
+        2073,
         "canon §1 OP-6 / plan item C4: not a private normalize but the typed \
          refusal wrapper the canon REQUIRES at each call site. The body is \
          `geom_kernel::vec3::normalize(a).ok_or(InvalidHoleGeometry)`; no \
@@ -78,7 +93,7 @@ const ALLOWLIST: &[(&str, u32, &str)] = &[
     ),
     (
         "src/drains.rs",
-        2089,
+        2209,
         "canon §1 OP-6 / plan item C4: the same typed refusal wrapper, mapping \
          `geom_kernel::vec3::normalize`'s `None` to \
          `DrainPlanningRefusal::NonFinite`.",

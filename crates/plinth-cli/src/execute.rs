@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
+use geom_kernel::telemetry::{near_parallel_counts, NearParallelCounts, NearParallelSite};
 use plinth_hollow::HollowRequest;
 use plinth_orient::PinnedBaseline;
 use plinth_pipeline::{
@@ -208,6 +209,84 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
             "  a gate-refused model has NO artifact on disk, by design; the refusal is the finding"
         );
     }
+    // Read ONCE, here, after every model in the run has been prepared.
+    for line in near_parallel_lines(near_parallel_counts()) {
+        println!("{line}");
+    }
+}
+
+/// The end-of-run near-parallel disclosure, built rather than printed so the
+/// decision about *what* gets reported is testable without capturing stdout —
+/// the same shape as [`repair_lines`] and [`coverage_lines`].
+///
+/// # What these numbers are
+///
+/// `geom_kernel`'s Möller routine classifies a ray/triangle determinant inside
+/// `DET_EPS` as `NearParallel`: whether the ray crosses that face is
+/// undecidable at this scale (`docs/specs/geometry-adjudication.md` §O4). It
+/// used to be reported as a definite miss, which silently dropped real
+/// interior crossings out of seat lists and drilling censuses. It is now
+/// refused instead, and every refusal is counted here.
+///
+/// **A nonzero reading is the cost side of that fix, and it is the number the
+/// owner asked for**: refusing on uncertainty can withhold an anchor seat, a
+/// drain, or a whole model, and this line is where that shows up. Per-model
+/// attribution is deliberately NOT claimed here — the counters are
+/// process-global and cumulative (the ledger threaded per model in §EXT-4 was
+/// dropped by owner ruling as larger than the defect it watched), so a model
+/// that stops emitting is identified by comparing corpus dispositions, not by
+/// reading this table.
+///
+/// # Why end of run and not the per-model card
+///
+/// The obvious home is beside the `safety checks` line inside
+/// [`print_model`], which is the other disclosure that says what did *not*
+/// get decided. It cannot go there and stay honest: [`execute`] runs
+/// `prepare` to completion before this function prints a single character, so
+/// at `print_model` time the counters already hold every model's total.
+/// Printing them under each model would print the identical run total N times
+/// and read as per-model attribution — an unearned claim of exactly the kind
+/// the counters exist to stop making.
+///
+/// # Determinism
+///
+/// The tally is a sum, so thread scheduling cannot move it; it is otherwise
+/// exactly as reproducible as the geometry work the run performs, which the
+/// module header already claims. This function adds no clock and no ordering
+/// of its own. Measured rather than only argued, 2026-09-01: two `prepare`
+/// runs over the same one-model folder printed this block byte-identically
+/// (`kernel.walk.collecting 8` both times, on
+/// `corpus/baseline/make_toed_slab.prepped.stl`). One model, two runs — enough
+/// to show the counters are not a source of nondeterminism, not enough to
+/// generalise over the whole corpus.
+///
+/// # Shape
+///
+/// The header line is unconditional — a run that measured zero and a run that
+/// never measured must not look alike — and one line follows per site that
+/// actually fired. `NearParallelSite::ALL` drives the loop, so a site added to
+/// the kernel appears here without an edit; a hand-written match arm is how a
+/// site goes missing.
+fn near_parallel_lines(counts: NearParallelCounts) -> Vec<String> {
+    let total = counts.total();
+    if total == 0 {
+        return vec![format!(
+            "  near-parallel geometry  none: all {} kernel call site(s) read zero for this run",
+            NearParallelSite::ALL.len()
+        )];
+    }
+    let mut lines = vec![format!(
+        "  near-parallel geometry  {total} ray/triangle determinant(s) landed in the undecidable \
+         band and were REFUSED rather than guessed; a refusal here can withhold a seat, a drain \
+         or a whole model, and is not attributable to one model from this line:"
+    )];
+    for site in NearParallelSite::ALL {
+        let count = counts.get(site);
+        if count > 0 {
+            lines.push(format!("    {}  {count}", site.label()));
+        }
+    }
+    lines
 }
 
 fn print_model(model: &ModelPreparationReport) {
@@ -754,7 +833,116 @@ mod tests {
         ModelPreparationReport, RepairRunReport, UncoveredIslandSummary,
     };
 
-    use super::{coverage_lines, coverage_repair_lines, remedies_tried_line, repair_lines};
+    use geom_kernel::telemetry::{NearParallelCounts, NearParallelSite};
+
+    use super::{
+        coverage_lines, coverage_repair_lines, near_parallel_lines, remedies_tried_line,
+        repair_lines,
+    };
+
+    /// Counts with exactly one site charged.
+    ///
+    /// The `match` is deliberate: a site added to the kernel breaks THIS
+    /// function, and the breakage lands in the one test that walks every site.
+    /// A helper written with `..Default::default()` and a field name would let
+    /// a new site slip through silently, which is the failure this whole
+    /// change is about.
+    fn only(site: NearParallelSite, n: u64) -> NearParallelCounts {
+        let mut counts = NearParallelCounts::default();
+        match site {
+            NearParallelSite::CollectingWalk => counts.collecting_walk = n,
+            NearParallelSite::CountingWalk => counts.counting_walk = n,
+            NearParallelSite::SegTriPierce => counts.seg_tri_pierce = n,
+        }
+        counts
+    }
+
+    /// **A quiet run and an unmeasured run must not look alike.**
+    ///
+    /// The brief for this block asked for one line per NONZERO site, which on
+    /// its own would print nothing at all on any run where no site fires. That
+    /// output is indistinguishable from a build where the counters were never
+    /// wired up — the exact "check nobody reads" shape the near-parallel work
+    /// exists to remove. So the header is unconditional and states the zero.
+    ///
+    /// Not a hypothetical either direction: measured 2026-09-01, a `prepare`
+    /// run over `corpus/baseline/make_toed_slab.prepped.stl` reads
+    /// `kernel.walk.collecting 8` and still emits, while other real models
+    /// read zero. Both readings have to be legible.
+    #[test]
+    fn a_run_that_measured_zero_says_so_instead_of_printing_nothing() {
+        let lines = near_parallel_lines(NearParallelCounts::default());
+        assert_eq!(lines.len(), 1, "the zero case is one stated line: {lines:?}");
+        assert!(lines[0].contains("near-parallel geometry"), "{lines:?}");
+        assert!(lines[0].contains("none"), "{lines:?}");
+        assert!(
+            lines[0].contains(&NearParallelSite::ALL.len().to_string()),
+            "the zero line must say how many sites read zero: {lines:?}"
+        );
+    }
+
+    /// Every site the kernel defines can reach the operator's screen.
+    ///
+    /// Walked from `NearParallelSite::ALL` rather than named one by one: a
+    /// site that exists in the kernel and is missing from the report is a
+    /// counter that fires into a void, and hand-written arms are how that
+    /// happens.
+    #[test]
+    fn every_kernel_site_reaches_the_report_when_it_fires() {
+        for site in NearParallelSite::ALL {
+            let lines = near_parallel_lines(only(site, 3));
+            assert_eq!(
+                lines.len(),
+                2,
+                "one header plus one row for {}: {lines:?}",
+                site.label()
+            );
+            // The whole row, not a `contains`: the label alone would still
+            // pass with the count dropped, and the count is the finding.
+            assert_eq!(
+                lines[1],
+                format!("    {}  3", site.label()),
+                "site {} did not reach the report intact: {lines:?}",
+                site.label()
+            );
+        }
+    }
+
+    /// A site that did not fire prints no row, and the header totals the ones
+    /// that did.
+    #[test]
+    fn only_the_sites_that_fired_get_a_row_and_the_header_sums_them() {
+        let counts = NearParallelCounts {
+            collecting_walk: 4,
+            counting_walk: 0,
+            seg_tri_pierce: 7,
+        };
+        let lines = near_parallel_lines(counts);
+        assert_eq!(lines.len(), 3, "header plus two fired sites: {lines:?}");
+        assert!(
+            lines[0].contains("11"),
+            "the header states the total across sites: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("REFUSED"),
+            "the header must say the uncertain rows were refused, not guessed: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("not attributable to one model"),
+            "the header must decline the per-model attribution these global counters cannot \
+             support: {lines:?}"
+        );
+        let rows = lines[1..].join("\n");
+        assert!(
+            rows.contains(NearParallelSite::CollectingWalk.label())
+                && rows.contains(NearParallelSite::SegTriPierce.label()),
+            "{lines:?}"
+        );
+        assert!(
+            !rows.contains(NearParallelSite::CountingWalk.label()),
+            "a site that never fired must not get a row: {lines:?}"
+        );
+    }
 
     fn report(repair: Option<RepairEvidence>) -> ModelPreparationReport {
         ModelPreparationReport {

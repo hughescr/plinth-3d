@@ -479,7 +479,7 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
     .expect("make_raking_blade has a 5.135 mm² island the frozen repair pool cannot close");
 
     let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got a different SupportRunError");
+        panic!("expected a coverage-closure refusal, got {error:?}");
     };
 
     // Ruling R6: the field named for the registered bound now carries what that
@@ -877,7 +877,7 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
     let refused_lines = capture.lines();
     drop(capture);
     let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal");
+        panic!("expected a coverage-closure refusal, got {error:?}");
     };
     let refused_report = refusal.repair.expect("a refusal carries its §A.8 report");
 
@@ -990,7 +990,7 @@ fn attempt_zero_names_every_stage_it_enters_and_the_trials_stay_quiet() {
     let lines = capture.lines();
     drop(capture);
     let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal");
+        panic!("expected a coverage-closure refusal, got {error:?}");
     };
     let report = refusal.repair.expect("a refusal carries its §A.8 report");
 

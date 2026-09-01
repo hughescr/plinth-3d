@@ -1,7 +1,7 @@
 //! Regression guard: the clearance predicate must never report a measurement
 //! it did not take.
 //!
-//! THE DEFECT THESE TESTS WOULD HAVE CAUGHT. `segment_clearance` returned a
+//! THE DEFECT THESE TESTS WOULD HAVE CAUGHT. the retired float `segment_clearance` returned a
 //! bare `f64` per row and encoded "this row was never tested" as
 //! `f64::INFINITY`. That sentinel is in band, orderable, and larger than every
 //! demanded gap a caller could compare it against, so a caller that graded with
@@ -13,9 +13,9 @@
 //! There are THREE ways to reach an untested row, and the float form collapsed
 //! all three onto the same number as each other AND onto the same verdict as a
 //! genuine pass. Each is exercised below against
-//! `segment_clearance_excluding_typed`, which reports
-//! `SegmentClearance::Unmeasured` and cannot be compared with a threshold until
-//! the caller says, in code, what an untested row means to it.
+//! `segment_clearance_excluding_classified`, which reports
+//! `SegmentClearanceClassified::Unmeasured` and cannot be compared with a
+//! threshold until the caller says, in code, what an untested row means to it.
 //!
 //! These tests do not re-implement the predicate. They assert which VARIANT
 //! comes back for geometry whose classification is decided by inspection, and
@@ -24,7 +24,7 @@
 //! copy of the kernel's formula.
 
 use geom_kernel::testkit::build_from_tris;
-use geom_kernel::{NativeSurface, SegmentClearance, UnmeasuredSegment};
+use geom_kernel::{NativeSurface, SegmentClearanceClassified, UnmeasuredSegment};
 
 /// Two parallel walls 3 mm apart in x, one triangle each, spanning y,z in
 /// [0, 10]. Face 0 is the wall at x = 0; face 1 is the wall at x = 3.
@@ -46,7 +46,7 @@ fn lone_triangle() -> NativeSurface {
 /// The four rows, side by side, in one batch: three ways to be unmeasured and
 /// one genuine measurement. A batch is the right shape for this because the
 /// defect is precisely that all four looked alike to the consumer.
-fn four_rows(surface: &NativeSurface) -> Vec<SegmentClearance> {
+fn four_rows(surface: &NativeSurface) -> Vec<SegmentClearanceClassified> {
     // Row 0: DegenerateAxis -- both endpoints at the same point.
     // Row 1: InsetsConsumeAxis -- a 4 mm axis with 2.5 mm masked off each end.
     // Row 2: AllFacesExcluded -- a normal axis, every face exempted.
@@ -68,7 +68,7 @@ fn four_rows(surface: &NativeSurface) -> Vec<SegmentClearance> {
     let inset1 = vec![0.0, 2.5, 0.0, 0.0];
     let excluded: Vec<&[u32]> = vec![&[], &[], &[0, 1], &[]];
     surface
-        .segment_clearance_excluding_typed(&p0, &p1, &r, &r, 0.0, &inset0, &inset1, &excluded)
+        .segment_clearance_excluding_classified(&p0, &p1, &r, &r, 0.0, &inset0, &inset1, &excluded)
         .expect("well-formed batch")
 }
 
@@ -78,17 +78,17 @@ fn every_unmeasured_reason_is_its_own_variant_and_none_is_a_number() {
 
     assert_eq!(
         rows[0],
-        SegmentClearance::Unmeasured(UnmeasuredSegment::DegenerateAxis),
+        SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::DegenerateAxis),
         "coincident endpoints leave no axis to sweep"
     );
     assert_eq!(
         rows[1],
-        SegmentClearance::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis),
+        SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis),
         "masks that swallow the member leave no length to test"
     );
     assert_eq!(
         rows[2],
-        SegmentClearance::Unmeasured(UnmeasuredSegment::AllFacesExcluded),
+        SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::AllFacesExcluded),
         "an exclusion set covering every face leaves nothing to measure AGAINST. \
          This is the variant the first typed implementation was missing: without \
          it the row comes back Measured with a clearance_mm of INFINITY, and a type \
@@ -117,7 +117,7 @@ fn every_unmeasured_reason_is_its_own_variant_and_none_is_a_number() {
     // fixture's near wall is at x = 0 and the axis sits at x = 1.0, so the
     // surface distance is 1.0 mm; with r = 0.25 and standoff 0.0 the demanded
     // gap subtraction leaves 0.75 mm.
-    let SegmentClearance::Measured {
+    let SegmentClearanceClassified::Measured {
         clearance_mm,
         witness,
     } = rows[3]
@@ -139,39 +139,44 @@ fn every_unmeasured_reason_is_its_own_variant_and_none_is_a_number() {
 
 /// The verdict half, which is where the defect actually bit.
 ///
-/// `clears_or` has no default: a caller must state which way an untested row
-/// falls. A refusing stage passes `false` and refuses; a pruning stage passes
-/// `true` and keeps the candidate for a later test. Under the float form
-/// neither stage could express the first choice, because the value it received
-/// was already larger than any demand it could name.
+/// `clears` has NO defaults: a caller must state which way an untested row
+/// falls AND which way a one-sided (`UpperBound`) row falls. A refusing stage
+/// passes `false` and refuses; a pruning stage passes `true` and keeps the
+/// candidate for a later test. Under the float form neither stage could express
+/// the first choice, because the value it received was already larger than any
+/// demand it could name.
+///
+/// The two knobs are exercised independently below — `clears(true, false)`
+/// admits an untested row while still refusing a one-sided one — so a
+/// predicate that collapsed them back into one fallback fails here.
 #[test]
 fn an_untested_row_can_be_refused_and_a_measured_one_is_graded_on_its_number() {
     let rows = four_rows(&crevice());
 
     for (row, value) in rows.iter().take(3).enumerate() {
         assert!(
-            !value.clears_or(false),
+            !value.clears(false, false),
             "row {row} was never tested, so a REFUSING stage must be able to refuse it"
         );
         assert!(
-            value.clears_or(true),
+            value.clears(true, false),
             "row {row} must also be admissible to a PRUNING stage that says so explicitly"
         );
     }
 
     assert!(
-        rows[3].clears_or(false),
+        rows[3].clears(false, false),
         "the measured row has 0.75 mm of real gap and passes on its own merits, \
          not on the caller's policy for untested rows"
     );
     assert!(
-        rows[3].clears_or(true),
+        rows[3].clears(true, true),
         "and its verdict does not depend on that policy at all"
     );
 }
 
 /// A row that VIOLATES its demanded gap must stay refused. Without this the
-/// three tests above would pass against a `clears_or` that returned `true` for
+/// three tests above would pass against a `clears` that returned `true` for
 /// every measurement.
 #[test]
 fn a_measured_violation_is_still_a_violation() {
@@ -183,7 +188,7 @@ fn a_measured_violation_is_still_a_violation() {
     let r = vec![0.4];
     let zero = vec![0.0];
     let rows = surface
-        .segment_clearance_typed(&p0, &p1, &r, &r, 0.8, &zero, &zero)
+        .segment_clearance_classified(&p0, &p1, &r, &r, 0.8, &zero, &zero)
         .expect("well-formed batch");
 
     let Some(clearance_mm) = rows[0].clearance_mm() else {
@@ -197,134 +202,125 @@ fn a_measured_violation_is_still_a_violation() {
         "1.0 mm of surface distance against a 0.4 mm arm and a 0.8 mm demand, got {clearance_mm}"
     );
     assert!(
-        !rows[0].clears_or(true),
+        !rows[0].clears(true, true),
         "a MEASURED violation is refused whatever the caller's policy for \
          untested rows is -- the policy must not be able to rescue it"
     );
 }
 
-/// The lossiness of the retained float shim, pinned as a fact rather than left
-/// as a claim in a doc comment.
+/// THE THIRD STATE. A row whose walk skipped an undecidable pierce candidate is
+/// neither `Measured` nor `Unmeasured`, and the type says so.
 ///
-/// Note what can and cannot be shown here. No finite mesh can produce a
-/// measured clearance of exactly `+INFINITY`, so the collapse is not visible as
-/// two equal bit patterns; it is visible as two things that matter more:
-///   * all THREE unmeasured reasons become one indistinguishable float, so a
-///     consumer of the shim cannot even ask why a row was not tested; and
-///   * the untested row and a genuinely well-cleared row return the SAME
-///     VERDICT under every `>= demand` test a caller can write, which is the
-///     comparison callers actually make.
+/// The fixture is the §O4 counterexample face itself, hit by a SEGMENT chain
+/// rather than by a bare ray: triangle `(0,0,0),(2,0,0),(0,2,0)` with the axis
+/// running from `(0.4, 0.5, -1e-16)` along `(1, 0, 2e-15)`. That gives
+/// `det = -8e-15` — nonzero, inside `DET_EPS = 1e-14` — so whether the axis
+/// pierces the face's interior is undecidable, while the endpoint candidates
+/// still return a real, tiny distance.
+///
+/// What this pins is the DISTINCTION, not the number: the walk DID produce a
+/// value and that value is one-sided. Reporting it as `Measured` would be the
+/// `INFINITY` defect in a new costume — a number that passes every
+/// `>= demand` test standing in for an answer nobody has. The true clearance
+/// here may be zero (the axis may really pass through the face), and no
+/// arithmetic at this scale can say.
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
-          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
-)]
-fn the_float_shim_collapses_all_three_unmeasured_reasons_onto_one_pass() {
-    let surface = crevice();
-    let p0 = vec![
-        [1.0, 2.0, 2.0],
-        [1.0, 2.0, 2.0],
-        [1.0, 2.0, 2.0],
-        [1.0, 2.0, 2.0],
-    ];
-    let p1 = vec![
-        [1.0, 2.0, 2.0],
-        [1.0, 2.0, 6.0],
-        [1.0, 2.0, 6.0],
-        [1.0, 2.0, 6.0],
-    ];
-    let r = vec![0.25; 4];
-    let inset0 = vec![0.0, 2.5, 0.0, 0.0];
-    let inset1 = vec![0.0, 2.5, 0.0, 0.0];
-    let excluded: Vec<&[u32]> = vec![&[], &[], &[0, 1], &[]];
+fn an_undecidable_pierce_makes_the_row_an_upper_bound_not_a_measurement() {
+    // The §O4 triangle, as a one-face surface.
+    let surface = build_from_tris(vec![
+        0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, //
+    ]);
+    let p0 = vec![[0.4, 0.5, -1.0e-16]];
+    let p1 = vec![[1.4, 0.5, 1.9e-15]];
+    let r = vec![0.0];
+    let zero = vec![0.0];
 
-    let (floats, witnesses) = surface
-        .segment_clearance_excluding(&p0, &p1, &r, &r, 0.0, &inset0, &inset1, &excluded)
+    let rows = surface
+        .segment_clearance_classified(&p0, &p1, &r, &r, 0.0, &zero, &zero)
         .expect("well-formed batch");
 
-    assert_eq!(
-        floats[0], floats[1],
-        "a degenerate axis and a fully masked axis are different facts and the \
-         shim gives them the same number"
-    );
-    assert_eq!(
-        floats[1], floats[2],
-        "and a fully exempted row is a third different fact with that same number"
-    );
-    for row in 0..3 {
-        assert!(
-            floats[row].is_infinite() && floats[row] > 0.0,
-            "row {row} comes back as +INFINITY -- the most permissive value in \
-             the ordering, chosen to mean the least permissive thing"
+    let SegmentClearanceClassified::UpperBound {
+        clearance_mm,
+        witness,
+        near_parallel_faces,
+    } = rows[0]
+    else {
+        panic!(
+            "a skipped pierce candidate must surface as UpperBound, got {:?}",
+            rows[0]
         );
-        assert!(
-            witnesses[row].iter().all(|value| value.is_nan()),
-            "the NaN witness is the only trace the shim leaves, and no production \
-             caller reads it"
-        );
-    }
+    };
+    assert_eq!(
+        near_parallel_faces, 1,
+        "the one face of this surface is the undecidable one"
+    );
+    assert!(
+        clearance_mm.is_finite(),
+        "an UpperBound row carries a real number; what it cannot do is affirm a gap"
+    );
+    assert!(
+        witness.iter().all(|value| value.is_finite()),
+        "and it names the point that produced the bound"
+    );
 
-    // THE BUG, in the shape callers actually write it. Every untested row
-    // passes the same test the well-cleared row passes, at every demand.
-    for demand in [0.0_f64, 0.5, 5.0, 1.0e9] {
-        for (row, &value) in floats.iter().enumerate().take(3) {
-            assert!(
-                value >= demand,
-                "untested row {row} passes a demand of {demand} mm on the shim"
-            );
-        }
-    }
+    // It is neither of the other two states, asserted rather than assumed --
+    // this is the whole point of adding a third variant.
+    assert_eq!(
+        rows[0].clearance_mm(),
+        None,
+        "an UpperBound is NOT a measured clearance"
+    );
+    assert_eq!(
+        rows[0].unmeasured(),
+        None,
+        "and it is NOT an unmeasured row either -- a number does exist"
+    );
+    assert_eq!(rows[0].upper_bound_mm(), Some(clearance_mm));
+
+    // The verdict half: a refusing stage refuses it whatever its policy for
+    // untested rows is, and a pruning stage must SAY so to keep it.
     assert!(
-        floats[3].is_finite(),
-        "while the row that WAS measured is a finite 0.75 mm and can be failed \
-         by a demand above it"
+        !rows[0].clears(true, false),
+        "a REFUSING stage must be able to refuse a one-sided row even while \
+         admitting untested ones"
     );
     assert!(
-        floats[3] < 1.0e9,
-        "which is the asymmetry: no real measurement can beat the sentinel"
+        rows[0].clears(false, true),
+        "and a PRUNING stage keeps it only by stating that policy explicitly"
     );
 }
 
-/// The shim must remain a faithful re-encoding of the typed form, or migrating
-/// a call site would change numbers as well as types and no reviewer could tell
-/// the two effects apart.
+/// The counter half of the same event: the process-global site counter for the
+/// `seg_tri_dist` pierce candidate must actually move.
+///
+/// A counter that cannot fire is the failure mode this project keeps
+/// reproducing, so it is asserted from a DELTA around a call known to fire.
+/// The counters are process-global and other tests in this binary can only ever
+/// add, so the assertion is `>=`.
 #[test]
-fn the_shim_is_exactly_the_typed_form_re_encoded() {
-    let surface = crevice();
-    let p0 = vec![[1.0, 2.0, 2.0], [0.5, 3.0, 1.0], [1.0, 2.0, 2.0]];
-    let p1 = vec![[1.0, 2.0, 6.0], [2.5, 3.0, 5.0], [1.0, 2.0, 2.0]];
-    let r0 = vec![0.2, 0.4, 0.1];
-    let r1 = vec![0.2, 0.4, 0.1];
-    let zero = vec![0.0; 3];
+fn the_undecidable_pierce_charges_its_global_counter() {
+    let surface = build_from_tris(vec![
+        0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, //
+    ]);
+    let p0 = vec![[0.4, 0.5, -1.0e-16]];
+    let p1 = vec![[1.4, 0.5, 1.9e-15]];
+    let r = vec![0.0];
+    let zero = vec![0.0];
 
-    let typed = surface
-        .segment_clearance_typed(&p0, &p1, &r0, &r1, 0.3, &zero, &zero)
+    let before = geom_kernel::telemetry::near_parallel_counts();
+    let rows = surface
+        .segment_clearance_classified(&p0, &p1, &r, &r, 0.0, &zero, &zero)
         .expect("well-formed batch");
-    let (floats, witnesses) = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, 0.3, &zero, &zero)
-        .expect("well-formed batch");
+    let after = geom_kernel::telemetry::near_parallel_counts();
 
-    assert_eq!(typed.len(), floats.len());
-    for (row, value) in typed.iter().enumerate() {
-        let (clearance, witness) = value.to_lossy_pair();
-        assert_eq!(
-            clearance.to_bits(),
-            floats[row].to_bits(),
-            "row {row}: the shim must return the typed value's own re-encoding, \
-             bit for bit"
-        );
-        for axis in 0..3 {
-            assert_eq!(
-                witness[axis].is_nan(),
-                witnesses[row][axis].is_nan(),
-                "row {row} axis {axis}: witness NaN-ness must agree"
-            );
-            if !witness[axis].is_nan() {
-                assert_eq!(witness[axis].to_bits(), witnesses[row][axis].to_bits());
-            }
-        }
-    }
+    assert!(
+        matches!(rows[0], SegmentClearanceClassified::UpperBound { .. }),
+        "the fixture must fire, or the counter assertion below proves nothing"
+    );
+    assert!(
+        after.seg_tri_pierce - before.seg_tri_pierce >= 1,
+        "the seg_tri pierce counter did not move: {before:?} -> {after:?}"
+    );
 }
 
 /// A long-range control, so "unmeasured" cannot be confused with "far away".
@@ -341,7 +337,7 @@ fn a_genuinely_enormous_clearance_is_still_a_measurement() {
     let zero = vec![0.0];
 
     let rows = surface
-        .segment_clearance_typed(&p0, &p1, &r, &r, 0.0, &zero, &zero)
+        .segment_clearance_classified(&p0, &p1, &r, &r, 0.0, &zero, &zero)
         .expect("well-formed batch");
 
     let Some(clearance_mm) = rows[0].clearance_mm() else {

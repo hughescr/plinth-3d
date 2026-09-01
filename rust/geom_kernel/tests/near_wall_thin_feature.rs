@@ -97,8 +97,8 @@ const REACH_MM: f64 = RADIUS_MM - STANDOFF_MM;
 
 fn ball_breaches_wall(wall_mm: f64) -> bool {
     let surface = box_surface([-5.0, 0.0, -5.0], [5.0, wall_mm, 5.0]);
-    let (breached, _thickness, _penetration) = surface
-        .sphere_breach(
+    let result = surface
+        .sphere_breach_classified(
             &[[0.0, -STANDOFF_MM, 0.0]],
             &[RADIUS_MM],
             EPS_MM,
@@ -106,8 +106,38 @@ fn ball_breaches_wall(wall_mm: f64) -> bool {
             FOOT_BREACH_CONE_RAYS,
         )
         .expect("one centre, one radius");
-    breached[0]
+    assert_eq!(
+        result.near_parallel[0], COSINE_ROUNDING_NEAR_PARALLEL,
+        "the near-parallel tally on this fixture is a MEASURED constant, not a \
+         zero: see its definition. If it moves, the classification moved."
+    );
+    result.breached[0]
 }
+
+/// **A MEASURED FINDING, pinned so it cannot drift unnoticed.**
+///
+/// A plain axis-aligned box, hit by production's foot-breach cone, produces six
+/// `NearParallel` classifications per sphere — on every wall thickness tested
+/// here, and independent of the verdict.
+///
+/// The cause is not a sliver face. `cone_dirs` builds its off-axis rays with
+/// `ph.cos()` / `ph.sin()` at `ph` = π/2, π, 3π/2, where the component that
+/// should be exactly `0.0` comes back as an `f64` rounding residue of order
+/// `1e-17`. Those rays are parallel to the box's side walls in intent and
+/// **not** parallel in bits, so their determinants land at a measured
+/// `±5.18e-18` and `±1.04e-17` — three orders of magnitude BELOW
+/// `DET_EPS = 1e-14`, but not zero, which is `NearParallel` by definition and
+/// `ExactParallel` (a genuine prune) in exact arithmetic.
+///
+/// **What this does NOT do is change the verdict.** The accepted-hit set is
+/// bit-identical to the pre-classification walk's, so every `breached` answer in
+/// this file is the answer it always was; the tally is new information, not a
+/// new outcome. What it means for a CALLER is the disclosed risk of §EXT-2 site
+/// 5 landing on its first fixture: a foot-admission stage that maps
+/// `NearParallel` to "breached" would reject every foot on an axis-aligned box.
+/// That is a finding for the caller lane and the owner, not something to tune
+/// away here — a new deciding constant needs a new ruling.
+const COSINE_ROUNDING_NEAR_PARALLEL: u32 = 6;
 
 /// The control every test in this file leans on: a wall the ball CANNOT reach
 /// through must not be reported as breached.

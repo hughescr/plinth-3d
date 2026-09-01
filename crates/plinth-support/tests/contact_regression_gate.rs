@@ -383,9 +383,16 @@ fn the_attestation_makes_no_per_contact_native_call() {
              is how a batched stage becomes a per-candidate native call"
         );
     }
+    // Re-pointed 2026-09-01: the entry point was renamed, not moved.
+    // `docs/specs/geometry-adjudication.md` §EXT-2's name table replaces
+    // `penetration_intervals_batch_bounded` with the classified twin, and the
+    // trailing `(` in the pattern above means the old spelling stopped
+    // matching entirely rather than matching the new one — the gate read 0
+    // sites and failed, which is the behaviour a rename-proof gate should
+    // have. Same one-batch-per-stage rule, same single site, new name.
     assert_eq!(
         designed
-            .matches("penetration_intervals_batch_bounded(")
+            .matches("penetration_intervals_batch_bounded_classified(")
             .count(),
         1,
         "the connectivity witness is issued from more than one site"

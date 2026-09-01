@@ -136,25 +136,29 @@ pub fn grid_mesh(k: usize) -> TestMesh {
 }
 
 /// Exact segment-to-surface minimum via the BVH-pruned branch & bound.
-pub fn surf_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
+pub fn surf_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3, u32) {
     s.seg_surface_min(a, b)
 }
 
 /// Brute-force segment-to-surface minimum over ALL triangles, using the SAME
 /// per-triangle primitive as the pruned path — so a discrepancy isolates the
 /// A17 pruning lower bound, not the triangle math.
-pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
+pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3, u32) {
     let mut best_d = f64::INFINITY;
     let mut best_pt: V3 = [f64::NAN; 3];
+    let mut near_parallel = 0u32;
     for &face_id in s.mesh.face_ids() {
         let t = face_id as usize;
-        let (d, pt) = s.seg_tri_dist(a, b, t);
+        let (d, pt, np) = s.seg_tri_dist(a, b, t);
+        if np {
+            near_parallel += 1;
+        }
         if d < best_d {
             best_d = d;
             best_pt = pt;
         }
     }
-    (best_d, best_pt)
+    (best_d, best_pt, near_parallel)
 }
 
 /// Proves that two surface views retain the same immutable face allocation.
@@ -295,6 +299,7 @@ pub fn surf_nearest(s: &NativeSurface, p: V3) -> (f64, usize, V3) {
 pub fn surf_collect_hits(s: &NativeSurface, o: V3, d: V3, t_max: f64) -> Vec<u32> {
     let mut v: Vec<u32> = s
         .collect_hits(o, d, t_max)
+        .0
         .into_iter()
         .map(|h| h.1)
         .collect();

@@ -8,9 +8,10 @@
 //! returns. This harness states that claim as executable assertions over
 //! real fixture geometry and a synthetic dense-crossing fixture:
 //!
-//! 1. `penetration_intervals_batch_bounded` under census-derived limits is
-//!    `to_bits`-identical, field by field (`s_a`, `s_b`, `entered`, `exited`,
-//!    `max_depth`, `ray`), to the same call under worst-case-derived limits.
+//! 1. `penetration_intervals_batch_bounded_classified` under census-derived
+//!    limits is `to_bits`-identical, field by field (`s_a`, `s_b`, `entered`,
+//!    `exited`, `max_depth`, `ray`), to the same call under worst-case-derived
+//!    limits.
 //! 2. For EVERY row, the census's `crossings` equals the hits the fill walk
 //!    actually pushed and its `tests` equals the traversal effort the fill
 //!    walk actually executed (proven per row through single-row metered
@@ -25,6 +26,70 @@
 //!    `initial::tests::honest_over_demand_still_refuses_at_the_unchanged_production_caps`
 //!    (landed in H2); this file proves the same discipline at the kernel
 //!    boundary, resource by resource.
+//! 5. **The near-parallel tally is in lockstep** (added 2026-09-01 with the
+//!    classified migration; `docs/specs/geometry-adjudication.md` §EXT-1 site
+//!    13). For EVERY row, the counting walk's
+//!    `PenetrationRowCensus::near_parallel` equals the filling walk's
+//!    `PenetrationIntervalsClassified::near_parallel`; the tally is unchanged
+//!    between the two limit regimes; and a row executed alone reports the same
+//!    tally it reported inside the batch. This is a hand-written comparison on
+//!    purpose: `CensusDrift` covers hits, subsegments, samples and intervals
+//!    and has never covered tallies, so the kernel refuses nothing if the two
+//!    walks disagree about uncertainty. Claims 1-4 would all stay green with
+//!    the census's tally stuck at zero. **This claim is not vacuous here**:
+//!    two of the three fixtures reach the undecidable band under the
+//!    offset-ray fan, so the lockstep is compared on rows whose tally is 4 and
+//!    2, not only on rows of zeros.
+//!
+//! **What the 2026-09-01 migration changed, and what it did not.** All ten
+//! call expressions here moved to the classified twins of
+//! `docs/specs/geometry-adjudication.md` §EXT-2's name table
+//! (`penetration_census_batch` x2, `penetration_intervals_batch_census_limits`
+//! x3, `penetration_intervals_batch_bounded_metered` x2,
+//! `penetration_intervals_batch_bounded` x3 — ten, counted).
+//! `penetration_intervals_batch_worst_case_limits` is NOT a Möller consumer and
+//! keeps its name. **No expected value in this file moved.** The classified
+//! walks accept a bit-identical hit set (`hit` <=> `Hit(_)`, the §O4 agreement
+//! contract extended to the walks), so every interval, meter figure, census
+//! figure and typed refusal above is the number it was before; the only
+//! addition is the tally these entry points now return. The mutation triad
+//! transcript recorded below was taken against the pre-classification entry
+//! points and is re-usable unchanged for the same reason.
+//!
+//! **Correction, same day, and the reason it is recorded rather than
+//! quietly fixed.** The first draft of that migration also asserted that no
+//! ray in this file reaches the undecidable band —
+//! `assert!(!under_census.any_near_parallel())` for every fixture. That was
+//! asserted, not measured, and it is false. Measured, per fixture and per
+//! shape:
+//!
+//! | fixture | `PRODUCTION_SHAPE` | `ALL_RAYS_SHAPE` |
+//! |---|---|---|
+//! | raking blade | `[0, 0, 0, 0]` | `[0, 0, 4, 0]` |
+//! | overhang table | `[0, 0, 0, 0, 0]` | `[0, 0, 0, 2, 0]` |
+//! | dense lamella stack | `[0, 0, 0, 0]` | `[0, 0, 0, 0]` |
+//!
+//! The production shape is decidable throughout; the offset-ray FAN is what
+//! finds the band, on exactly the geometry that should find it — a ray running
+//! nearly in the plane of a face it reaches (the 0.03 mm blade raked 85
+//! degrees; the leg-wall quad centerlines). The all-zero stack is the control:
+//! it is axis-aligned at exact binary coordinates, where a coplanar ray gives
+//! `det == 0.0` exactly, which is `ExactParallel` — a genuine prune, not the
+//! band.
+//!
+//! **The "no expected value moved" claim above survives this correction and is
+//! strengthened by it.** Every equivalence assertion in the harness runs before
+//! the tally pin and passes on the rows that hit the band, so byte-identity is
+//! now demonstrated on undecidable rows instead of only on rows that could
+//! never have exercised it. What changed is the harness's expectation about
+//! its own inputs: from "no row is undecidable" to the measured table above.
+//!
+//! And note what the replaced assertion could not see, which is the reason the
+//! replacement is not merely a re-pin. `!any_near_parallel()` is GREEN under
+//! the exact failure this file's claim 5 exists to catch — both walks reporting
+//! a tally stuck at zero. Pinning the measured vector fails under it, loudly,
+//! naming the expected and the measured side. A gate that passes when its
+//! subject is broken is the failure mode this whole change is about.
 //!
 //! Non-vacuity is measured, not argued: the dense fixture genuinely
 //! exercises more than 100 crossings on one ray (the treant's tail regime,
@@ -204,9 +269,10 @@ fn assert_census_matches_execution(
     surface: &NativeSurface,
     rows: &Rows,
     shape: Shape,
+    expected_near_parallel: &[u32],
 ) -> (Vec<PenetrationRowCensus>, Vec<Vec<Interval>>) {
     let census = surface
-        .penetration_census_batch(
+        .penetration_census_batch_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,
@@ -230,7 +296,7 @@ fn assert_census_matches_execution(
     );
 
     let census_limits = surface
-        .penetration_intervals_batch_census_limits(
+        .penetration_intervals_batch_census_limits_classified(
             &census,
             shape.n_offset_rays,
             shape.cap,
@@ -283,7 +349,7 @@ fn assert_census_matches_execution(
     }
 
     let (under_census, meter) = surface
-        .penetration_intervals_batch_bounded_metered(
+        .penetration_intervals_batch_bounded_metered_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,
@@ -297,7 +363,7 @@ fn assert_census_matches_execution(
         )
         .expect("execution under the counted budgets");
     let under_worst_case = surface
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,
@@ -310,7 +376,20 @@ fn assert_census_matches_execution(
             worst_limits,
         )
         .expect("execution under the worst-case ceiling");
-    assert_interval_rows_bit_identical(&under_census, &under_worst_case, "worst-case limits");
+    assert_interval_rows_bit_identical(
+        &under_census.rows,
+        &under_worst_case.rows,
+        "worst-case limits",
+    );
+    // The uncertainty tally is part of the equivalence, not a channel beside
+    // it: two executions of the same geometry that disagree about how many
+    // crossings were undecidable have not executed the same traversal, however
+    // identical their intervals. Asserted for BOTH limit regimes, because the
+    // budget is the only thing that differs between them.
+    assert_eq!(
+        under_census.near_parallel, under_worst_case.near_parallel,
+        "the two limit regimes disagree about which rows were undecidable"
+    );
 
     // The batch receipt: `work` and `hits` are the SAME quantities the census
     // counted, measured by the other walk, so they are EQUAL — not merely
@@ -329,6 +408,64 @@ fn assert_census_matches_execution(
     assert!(meter.samples <= census_limits.max_total_samples);
     assert!(meter.intervals <= census_limits.max_total_intervals);
 
+    // THE TALLY LOCKSTEP, per row (`docs/specs/geometry-adjudication.md` §EXT-1
+    // site 13, §EXT-2 justification 13). The counting walk and the filling walk
+    // are the same traversal, so a face undecidable to one is undecidable to
+    // the other and the two tallies are EQUAL, row by row — not merely
+    // correlated. This has to be asserted here and by hand: `CensusDrift`
+    // covers hits, subsegments, samples and intervals and has never covered
+    // tallies (`PenetrationRowCensus::near_parallel`'s own doc says so), so
+    // nothing inside the kernel refuses a batch whose two walks disagree about
+    // uncertainty. Without this line the census's tally could drift to zero and
+    // every other assertion in this harness would stay green.
+    assert_eq!(
+        under_census.near_parallel.len(),
+        census.len(),
+        "the fill pass returned {} tallies for {} counted rows",
+        under_census.near_parallel.len(),
+        census.len()
+    );
+    for (index, row) in census.iter().enumerate() {
+        assert_eq!(
+            under_census.near_parallel[index], row.near_parallel,
+            "row {index}: the counting walk saw {} undecidable crossing(s) and the \
+             filling walk saw {}; the two walks are the same traversal",
+            row.near_parallel, under_census.near_parallel[index]
+        );
+    }
+
+    // THE INPUT CLASS THIS BATCH ACTUALLY OCCUPIES, stated by the caller and
+    // checked here row by row.
+    //
+    // The first draft of this migration asserted `!any_near_parallel()` for
+    // every fixture — that no ray in this file reaches a face whose Möller
+    // determinant lands in `0 < |det| <= DET_EPS`. **That claim was false, and
+    // it was asserted rather than measured**: under `ALL_RAYS_SHAPE` the
+    // raking blade's row 2 reaches 4 undecidable faces and the overhang
+    // table's row 3 reaches 2. Both are exactly the geometry you would expect
+    // to find the band with: a ray running nearly IN the plane of a face it
+    // reaches — the 0.03 mm blade raked 85 degrees, and the leg-wall quad
+    // centerlines. So each caller now pins the tally it MEASURES, and a
+    // fixture drifting into or out of the band fails loudly with both numbers
+    // instead of being quietly waved through.
+    //
+    // This does not weaken the equivalence, it strengthens it. Every
+    // assertion above — the bit-identity of the interval rows across the two
+    // limit regimes, the meter-versus-census equalities, the per-row
+    // single-execution reproduction — runs BEFORE this line and passes on
+    // these rows. That is the "no expected value moved" claim of this file's
+    // header demonstrated on rows that genuinely hit the undecidable band,
+    // which is strictly better evidence than demonstrating it on rows that
+    // never could.
+    assert_eq!(
+        under_census.near_parallel, expected_near_parallel,
+        "the batch's undecidable-crossing tally is not the pinned one \
+         (expected {expected_near_parallel:?}, measured {:?}); either the \
+         fixture geometry moved or the kernel's classification did — say which \
+         before re-pinning",
+        under_census.near_parallel
+    );
+
     // Per row: the census row's `crossings`/`tests` are that row's executed
     // `hits`/`work`. Single-row metered calls prove it row by row (this loop
     // is verification shape, not production shape: production stays batched)
@@ -337,7 +474,7 @@ fn assert_census_matches_execution(
         let row_range = index..=index;
         let row_census = &census[row_range.clone()];
         let row_limits = surface
-            .penetration_intervals_batch_census_limits(
+            .penetration_intervals_batch_census_limits_classified(
                 row_census,
                 shape.n_offset_rays,
                 shape.cap,
@@ -346,7 +483,7 @@ fn assert_census_matches_execution(
             )
             .expect("single-row census limits");
         let (row_intervals, row_meter) = surface
-            .penetration_intervals_batch_bounded_metered(
+            .penetration_intervals_batch_bounded_metered_classified(
                 &rows.p0s[row_range.clone()],
                 &rows.p1s[row_range.clone()],
                 &rows.r0s[row_range.clone()],
@@ -368,13 +505,22 @@ fn assert_census_matches_execution(
             "row {index}: executed work must equal the census's counted tests"
         );
         assert_interval_rows_bit_identical(
-            &row_intervals,
-            &under_census[index..=index],
+            &row_intervals.rows,
+            &under_census.rows[index..=index],
             "single-row execution",
+        );
+        // The tally is row-local too: a row executed alone must report the same
+        // uncertainty it reported inside the batch, or the tally is a property
+        // of the batch shape rather than of the geometry.
+        assert_eq!(
+            row_intervals.near_parallel,
+            vec![under_census.near_parallel[index]],
+            "row {index}: single-row execution disagrees with the batch about \
+             undecidable crossings"
         );
     }
 
-    (census, under_census)
+    (census, under_census.rows)
 }
 
 /// Field-by-field `to_bits` identity over ragged interval rows — the exact
@@ -459,8 +605,21 @@ fn fu8g_h5_raking_blade_census_equals_execution_bit_for_bit() {
     // Row 3: horizontal run through the slab's full 20 mm width.
     rows.push([-15.0, 1.3, 12.4], [15.0, 1.3, 12.4], 0.05, 0.15);
 
-    for shape in [PRODUCTION_SHAPE, ALL_RAYS_SHAPE] {
-        let (census, intervals) = assert_census_matches_execution(&surface, &rows, shape);
+    // The undecidable-crossing tally, MEASURED per shape (2026-09-01).
+    //
+    // The production shape is entirely decidable. The offset-ray fan is not:
+    // row 2 runs down the 0.03 mm blade raked 85 degrees below horizontal, so
+    // the fan's rays lie nearly IN the blade's own plane and 4 of the faces
+    // they reach land in `0 < |det| <= DET_EPS`. That is this file's witness
+    // that the classified walks return their predecessors' payload BYTE FOR
+    // BYTE on a row that genuinely hits the band — every assertion inside the
+    // harness passes on that row.
+    for (shape, expected_near_parallel) in [
+        (PRODUCTION_SHAPE, &[0, 0, 0, 0][..]),
+        (ALL_RAYS_SHAPE, &[0, 0, 4, 0][..]),
+    ] {
+        let (census, intervals) =
+            assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
         // Non-vacuity: the batch genuinely crosses the model...
         assert!(census.iter().map(|row| row.crossings).sum::<usize>() > 0);
         assert_eq!(census[0].crossings, 0, "row 0 must miss");
@@ -516,8 +675,20 @@ fn fu8g_h5_overhang_table_hole_row_census_equals_execution_bit_for_bit() {
     // hole row.
     rows.push([10.2, -20.0, 9.7], [10.2, 20.0, 9.7], 0.05, 0.1);
 
-    for shape in [PRODUCTION_SHAPE, ALL_RAYS_SHAPE] {
-        let (census, intervals) = assert_census_matches_execution(&surface, &rows, shape);
+    // The undecidable-crossing tally, MEASURED per shape (2026-09-01).
+    //
+    // Again decidable under the production shape and not under the fan. Row 3
+    // runs vertically through the top slab between the legs, and the fan's
+    // offset rays graze the leg-wall quad centerlines — the same diagonal
+    // geometry this fixture's mutation transcript above already calls out as
+    // the reason row 1 reports 8 executed crossings rather than 4. Two of the
+    // faces they reach land in `0 < |det| <= DET_EPS`.
+    for (shape, expected_near_parallel) in [
+        (PRODUCTION_SHAPE, &[0, 0, 0, 0, 0][..]),
+        (ALL_RAYS_SHAPE, &[0, 0, 0, 2, 0][..]),
+    ] {
+        let (census, intervals) =
+            assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
         assert_eq!(census[0].crossings, 0, "row 0 must miss");
         // The hole is real: row 1's axis ray yields two disjoint intervals.
         let row1_axis: Vec<&Interval> = intervals[1]
@@ -569,8 +740,20 @@ fn fu8g_h5_dense_stack_exceeds_one_hundred_crossings_on_one_ray_and_matches() {
     // Row 3: horizontal through one slab's side walls.
     rows.push([-0.5, 0.43, 0.605], [1.5, 0.43, 0.605], 0.02, 0.02);
 
-    for shape in [PRODUCTION_SHAPE, ALL_RAYS_SHAPE] {
-        let (census, _intervals) = assert_census_matches_execution(&surface, &rows, shape);
+    // The undecidable-crossing tally, MEASURED per shape (2026-09-01): zero
+    // under BOTH shapes. The lamella stack is axis-aligned at exact binary
+    // coordinates, so a ray lying in a face's plane produces `det == 0.0`
+    // exactly — `ExactParallel`, a genuine prune that is not counted — rather
+    // than the nonzero-but-tiny determinant the band is defined on. The
+    // contrast with the two fixtures above is the point: this row pins that a
+    // batch CAN come back all-zero, so an all-zero tally elsewhere is a
+    // measurement and not a wiring failure.
+    for (shape, expected_near_parallel) in [
+        (PRODUCTION_SHAPE, &[0, 0, 0, 0][..]),
+        (ALL_RAYS_SHAPE, &[0, 0, 0, 0][..]),
+    ] {
+        let (census, _intervals) =
+            assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);
         // Non-vacuity for the treant's tail: one ray genuinely carries more
         // than 100 crossings, and the census counted every one of them.
         assert!(
@@ -617,7 +800,7 @@ fn fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes() {
     rows.push([0.37, 0.53, -0.5], [0.37, 0.53, top + 0.5], 0.02, 0.05);
     let shape = PRODUCTION_SHAPE;
     let census = surface
-        .penetration_census_batch(
+        .penetration_census_batch_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,
@@ -627,7 +810,7 @@ fn fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes() {
         )
         .expect("census pass");
     let counted = surface
-        .penetration_intervals_batch_census_limits(
+        .penetration_intervals_batch_census_limits_classified(
             &census,
             shape.n_offset_rays,
             shape.cap,
@@ -687,7 +870,7 @@ fn fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes() {
         ),
     ];
     for (resource, limits, counted_demand) in probes {
-        let refusal = surface.penetration_intervals_batch_bounded(
+        let refusal = surface.penetration_intervals_batch_bounded_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,
@@ -720,7 +903,7 @@ fn fu8g_h5_over_demand_is_refused_typed_at_preflight_before_any_row_executes() {
     // And granting exactly the counted demand admits the batch: the charge
     // is a boundary, not a margin.
     surface
-        .penetration_intervals_batch_bounded(
+        .penetration_intervals_batch_bounded_classified(
             &rows.p0s,
             &rows.p1s,
             &rows.r0s,

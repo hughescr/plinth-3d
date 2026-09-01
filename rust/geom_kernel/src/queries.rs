@@ -10,12 +10,13 @@ use std::sync::OnceLock;
 use rayon::prelude::*;
 
 use crate::bvh::Bvh;
-use crate::closest::{closest_on_tri, segment_segment_distance};
+use crate::closest::{closest_on_tri, segment_segment_distance_min};
 use crate::consts::{DEDUP_LOC_MM, EPS, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
-use crate::moller::{dedup_loc_into, moller};
+use crate::moller::{dedup_loc_into, ray_triangle_classified, RayTriangleClass};
 use crate::par;
 use crate::parity::{ParityBuildError, ParityVote};
+use crate::telemetry::{charge_near_parallel, NearParallelSite};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
@@ -24,6 +25,7 @@ thread_local! {
     static ZSCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(64));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Interval {
     pub s_a: f64,
     pub s_b: f64,
@@ -686,6 +688,17 @@ pub struct PenetrationRowCensus {
     /// The longest single ray in millimetres — the per-ray form of the
     /// closed-form sample bound.
     pub max_ray_seg_mm: f64,
+    /// Möller evaluations on this row's rays classified
+    /// [`RayTriangleClass::NearParallel`] — undecidable crossings, summed over
+    /// the row's rays.
+    ///
+    /// **This is not a charge.** The census's `crossings` figure is unchanged by
+    /// classification (identical hit predicate in both walks), so no
+    /// census-driven budget or refusal moves. The tally rides along so a caller
+    /// can compare it against the fill pass's tally for the same row — a
+    /// comparison it must make EXPLICITLY, since `CensusDrift` covers hits,
+    /// subsegments, samples and intervals and has never covered tallies.
+    pub near_parallel: u32,
 }
 
 /// What the fill pass ACTUALLY executed, summed over the batch's rows: the
@@ -722,6 +735,7 @@ struct PenetrationRowMeter {
     hits: usize,
     samples: usize,
     intervals: usize,
+    near_parallel: u32,
 }
 
 /// Counted (census-derived) batch requirements: totals are SUMS over per-row
@@ -866,8 +880,165 @@ fn reserve_penetration_vec<T>(
     Ok(result)
 }
 
-pub type CastRaysBatch = (Vec<i64>, Vec<f64>, Vec<i64>);
-pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
+/// One batched ray cast, ragged, plus the per-ray uncertainty tally.
+///
+/// Replaces the retired `CastRaysBatch` tuple alias. The first three fields are
+/// exactly that alias's three arrays, unchanged in meaning and in element
+/// order; the fourth is the channel it did not have.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CastRaysClassified {
+    /// Ragged row starts, length `rays + 1`; row `i` is
+    /// `[offsets[i], offsets[i + 1])` in [`Self::t_all`] and [`Self::face_all`].
+    pub offsets: Vec<i64>,
+    /// Flattened, per-row-ascending crossing parameters.
+    pub t_all: Vec<f64>,
+    /// Flattened global face IDs, parallel to [`Self::t_all`].
+    pub face_all: Vec<i64>,
+    /// **Per RAY** (length `rays`, parallel to the caller's row order, NOT to
+    /// the flattened arrays): how many faces this ray reached whose crossing was
+    /// undecidable. Those faces contributed no entry to `t_all`/`face_all`, so a
+    /// nonzero entry means that row's crossing list is incomplete in an unknown
+    /// direction.
+    pub near_parallel: Vec<u32>,
+}
+
+impl CastRaysClassified {
+    /// Did any ray in this batch reach an undecidable face?
+    #[must_use]
+    pub fn any_near_parallel(&self) -> bool {
+        self.near_parallel.iter().any(|&n| n > 0)
+    }
+
+    /// Every ray's tally summed. A batch total, for a run report; a per-row
+    /// DECISION must read its own row.
+    #[must_use]
+    pub fn total_near_parallel(&self) -> u64 {
+        self.near_parallel.iter().map(|&n| u64::from(n)).sum()
+    }
+}
+
+/// The counted sibling of [`CastRaysClassified`]: crossings per ray, plus the
+/// same per-ray uncertainty tally. Replaces the retired `Vec<usize>` return of
+/// `cast_rays_census`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CastRaysCensusClassified {
+    /// Crossings the collecting walk would push for each ray, before dedup.
+    pub crossings: Vec<usize>,
+    /// Per-ray undecidable-face tally, equal by construction to the collecting
+    /// walk's for the same ray.
+    pub near_parallel: Vec<u32>,
+}
+
+impl CastRaysCensusClassified {
+    /// Did any ray in this batch reach an undecidable face?
+    #[must_use]
+    pub fn any_near_parallel(&self) -> bool {
+        self.near_parallel.iter().any(|&n| n > 0)
+    }
+
+    /// Every ray's tally summed.
+    #[must_use]
+    pub fn total_near_parallel(&self) -> u64 {
+        self.near_parallel.iter().map(|&n| u64::from(n)).sum()
+    }
+}
+
+/// One batched sphere-breach result, plus the per-sphere uncertainty tally.
+///
+/// Replaces the retired `SphereBreachBatch` tuple alias; the first three fields
+/// are that alias's three arrays unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SphereBreachClassified {
+    /// Whether each sphere breaches the surface.
+    pub breached: Vec<bool>,
+    /// Breaching-orientation wall thickness in mm, or `INFINITY`.
+    pub thickness_mm: Vec<f64>,
+    /// Protrusion in mm (`r - thickness`), or `0.0` when not breaching.
+    pub protrusion_mm: Vec<f64>,
+    /// **Per SPHERE**: the tally summed over every cone ray this sphere cast.
+    /// Any cone ray reaching an undecidable face marks the sphere's row —
+    /// `cone_thickness` takes a MINIMUM over rays, so one skipped crossing can
+    /// only make the reported thickness too LARGE, and too large is the
+    /// permissive direction for a breach test.
+    pub near_parallel: Vec<u32>,
+}
+
+impl SphereBreachClassified {
+    /// Did any sphere in this batch reach an undecidable face?
+    #[must_use]
+    pub fn any_near_parallel(&self) -> bool {
+        self.near_parallel.iter().any(|&n| n > 0)
+    }
+
+    /// Every sphere's tally summed.
+    #[must_use]
+    pub fn total_near_parallel(&self) -> u64 {
+        self.near_parallel.iter().map(|&n| u64::from(n)).sum()
+    }
+}
+
+/// One batched penetration-interval extraction, plus the per-row uncertainty
+/// tally. Replaces the retired `Vec<Vec<Interval>>` return.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PenetrationIntervalsClassified {
+    /// Intervals per row, in row order — the retired return value, unchanged.
+    pub rows: Vec<Vec<Interval>>,
+    /// **Per ROW**: the tally summed over every ray of that row. A skipped
+    /// crossing UNDERSTATES the interval set, so an affected row's illegal
+    /// overlap is a LOWER BOUND — the true overlap can only be equal or higher,
+    /// and a caller that condemns on a large overlap must not read an
+    /// understated one as a pass.
+    pub near_parallel: Vec<u32>,
+}
+
+impl PenetrationIntervalsClassified {
+    /// Did any row in this batch reach an undecidable face?
+    #[must_use]
+    pub fn any_near_parallel(&self) -> bool {
+        self.near_parallel.iter().any(|&n| n > 0)
+    }
+
+    /// Every row's tally summed.
+    #[must_use]
+    pub fn total_near_parallel(&self) -> u64 {
+        self.near_parallel.iter().map(|&n| u64::from(n)).sum()
+    }
+}
+
+/// Every global face ID near each segment, plus the per-row uncertainty tally.
+/// Replaces the retired `Vec<Vec<u32>>` return of `faces_near_segments_batch`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FacesNearSegmentsClassified {
+    /// Per row, sorted ascending and deduplicated global face IDs — the retired
+    /// return value, unchanged. **Membership is proof-only:** a face admitted
+    /// here was MEASURED within the band.
+    pub rows: Vec<Vec<u32>>,
+    /// **Per ROW**: faces whose pierce candidate was undecidable and which were
+    /// therefore NOT admitted to the band unless a measured candidate put them
+    /// there anyway.
+    ///
+    /// These bands are EXEMPTIONS — a face in a band is excluded from later
+    /// clearance walks — and an exemption may grow only on proof
+    /// (`docs/specs/geometry-adjudication.md` §EXT-2 justification 12). Omitting
+    /// the face keeps it in later clearance tests, where a genuine touch fails
+    /// the row: the refusal direction. The tally makes the omission visible
+    /// instead of silent.
+    pub near_parallel: Vec<u32>,
+}
+
+impl FacesNearSegmentsClassified {
+    /// Did any row in this batch reach an undecidable face?
+    #[must_use]
+    pub fn any_near_parallel(&self) -> bool {
+        self.near_parallel.iter().any(|&n| n > 0)
+    }
+
+    /// Every row's tally summed.
+    #[must_use]
+    pub fn total_near_parallel(&self) -> u64 {
+        self.near_parallel.iter().map(|&n| u64::from(n)).sum()
+    }
+}
 
 /// Why a clearance row carries NO measurement.
 ///
@@ -921,47 +1092,90 @@ impl std::fmt::Display for UnmeasuredSegment {
     }
 }
 
-/// One row's answer from the clearance predicate.
+/// One row's answer from the clearance predicate — measured, one-sided, or
+/// not measured at all.
 ///
-/// **This type exists because the two answers below are not the same answer,
-/// and a bare `f64` cannot tell them apart.** The pre-existing float form
-/// encoded [`Self::Unmeasured`] as `f64::INFINITY` -- in band, orderable,
-/// and greater than every threshold a caller could compare it against -- so
+/// **This type exists because the three answers below are not the same answer,
+/// and a bare `f64` cannot tell them apart.** The original float form encoded
+/// [`Self::Unmeasured`] as `f64::INFINITY` -- in band, orderable, and greater
+/// than every threshold a caller could compare it against -- so
 /// `clearance >= 0.0` silently reported "we did not look" as "enormous
 /// clearance, definitely fine". `INFINITY` is exactly the wrong sentinel:
 /// the safe reading of "not measured" is the STRICTEST verdict, and the value
-/// chosen was the most permissive one representable.
+/// chosen was the most permissive one representable. Those float shims
+/// (`segment_clearance`, `segment_clearance_excluding`) are now REMOVED, not
+/// merely discouraged: they could not carry the third state either.
 ///
-/// The enum removes the choice. A caller cannot compare an
-/// [`Self::Unmeasured`] row against a threshold without first saying, in code,
-/// what an unmeasured row means to it -- see [`Self::clears_or`].
+/// The enum removes the choice. A caller cannot compare a row against a
+/// threshold without first saying, in code, what an unmeasured row and what a
+/// one-sided row each mean to it -- see [`Self::clears`], which takes both
+/// fallbacks and defaults neither.
+/// # The third state
+///
+/// The two-state `SegmentClearance` this replaces could say "measured" and "not
+/// measured" and nothing else, so a walk that DID measure but had to skip an
+/// undecidable pierce candidate reported its number as a `Measured` — a
+/// one-sided answer wearing a two-sided type. The walk's error is one-sided by
+/// construction: endpoints are exact via `closest_on_tri`, edges are the
+/// complete minimisation, and a SKIPPED pierce turns a true `0` into something
+/// positive. So the number is an upper bound and the true clearance may be
+/// lower, including below zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SegmentClearance {
-    /// The axis was swept against the surface. `clearance_mm` is
-    /// `nearest_surface_distance - (r_max + standoff)`: negative means the
-    /// demanded gap is violated, non-negative means it is met. `witness` is the
-    /// surface point that produced the nearest distance.
+pub enum SegmentClearanceClassified {
+    /// The axis was swept against the surface and every candidate was decided.
+    /// `clearance_mm` is `nearest_surface_distance - (r_max + standoff)`:
+    /// negative means the demanded gap is violated, non-negative means it is
+    /// met. `witness` is the surface point that produced the nearest distance.
     Measured { clearance_mm: f64, witness: V3 },
+    /// The axis WAS swept, but at least one face's pierce candidate was
+    /// undecidable ([`RayTriangleClass::NearParallel`]), so the true clearance
+    /// is **AT MOST** `clearance_mm` and may be lower, including below zero.
+    ///
+    /// This is deliberately neither [`Self::Measured`] (it cannot affirm a gap)
+    /// nor [`Self::Unmeasured`] (a number does exist; it is one-sided).
+    UpperBound {
+        /// The one-sided bound: the true clearance is `<=` this.
+        clearance_mm: f64,
+        /// The surface point that produced the bounding distance.
+        witness: V3,
+        /// How many faces on this row had an undecidable pierce candidate.
+        near_parallel_faces: u32,
+    },
     /// No part of the axis was tested. There is no number, and inventing one is
     /// the defect this type exists to prevent.
     Unmeasured(UnmeasuredSegment),
 }
 
-impl SegmentClearance {
-    /// The measured gap in mm, or `None` when nothing was measured.
+impl SegmentClearanceClassified {
+    /// The measured gap in mm, or `None` for every other state.
+    ///
+    /// An [`Self::UpperBound`] row deliberately answers `None` here: its number
+    /// is not a measured gap, and a caller that wants the bound asks for it by
+    /// name via [`Self::upper_bound_mm`].
     #[must_use]
     pub const fn clearance_mm(self) -> Option<f64> {
         match self {
             Self::Measured { clearance_mm, .. } => Some(clearance_mm),
-            Self::Unmeasured(_) => None,
+            Self::UpperBound { .. } | Self::Unmeasured(_) => None,
         }
     }
 
-    /// The nearest surface point, or `None` when nothing was measured.
+    /// The one-sided bound in mm, or `None` when the row is not an
+    /// [`Self::UpperBound`].
+    #[must_use]
+    pub const fn upper_bound_mm(self) -> Option<f64> {
+        match self {
+            Self::UpperBound { clearance_mm, .. } => Some(clearance_mm),
+            Self::Measured { .. } | Self::Unmeasured(_) => None,
+        }
+    }
+
+    /// The nearest surface point, or `None` when nothing was measured. An
+    /// [`Self::UpperBound`] row has one: the point that produced the bound.
     #[must_use]
     pub const fn witness(self) -> Option<V3> {
         match self {
-            Self::Measured { witness, .. } => Some(witness),
+            Self::Measured { witness, .. } | Self::UpperBound { witness, .. } => Some(witness),
             Self::Unmeasured(_) => None,
         }
     }
@@ -970,46 +1184,45 @@ impl SegmentClearance {
     #[must_use]
     pub const fn unmeasured(self) -> Option<UnmeasuredSegment> {
         match self {
-            Self::Measured { .. } => None,
+            Self::Measured { .. } | Self::UpperBound { .. } => None,
             Self::Unmeasured(reason) => Some(reason),
+        }
+    }
+
+    /// How many faces on this row had an undecidable pierce candidate.
+    #[must_use]
+    pub const fn near_parallel_faces(self) -> u32 {
+        match self {
+            Self::UpperBound {
+                near_parallel_faces,
+                ..
+            } => near_parallel_faces,
+            Self::Measured { .. } | Self::Unmeasured(_) => 0,
         }
     }
 
     /// Does this row meet its demanded gap?
     ///
-    /// `when_unmeasured` is the verdict for a row that was never tested, and it
-    /// has NO default on purpose: the caller must state which way an untested
-    /// row falls, at the call site, where the consequence is visible.
+    /// **BOTH fallbacks are stated explicitly and NEITHER has a default.** The
+    /// caller must say, at the call site where the consequence is visible,
+    /// which way an untested row falls and which way a one-sided row falls.
     ///
-    /// A stage that REFUSES on this predicate passes `false` -- an untested row
-    /// has earned nothing. A stage that merely PRUNES a search may pass `true`,
-    /// because keeping an untested candidate alive costs a later test rather
-    /// than shipping an unsupported claim.
+    /// * `when_unmeasured` — a row that was never tested. A stage that REFUSES
+    ///   passes `false`: an untested row has earned nothing. A stage that
+    ///   merely PRUNES a search may pass `true`, because keeping an untested
+    ///   candidate alive costs a later test rather than shipping an
+    ///   unsupported claim.
+    /// * `when_upper_bound` — a row whose number is one-sided. A refusing stage
+    ///   passes `false`: the bound cannot affirm a gap, and the true clearance
+    ///   may be negative. A pruning stage may pass `true` **only if a later
+    ///   REFUSING stage retests the survivor**, and must name that stage in a
+    ///   comment at the call site.
     #[must_use]
-    pub fn clears_or(self, when_unmeasured: bool) -> bool {
+    pub fn clears(self, when_unmeasured: bool, when_upper_bound: bool) -> bool {
         match self {
             Self::Measured { clearance_mm, .. } => clearance_mm >= 0.0,
+            Self::UpperBound { .. } => when_upper_bound,
             Self::Unmeasured(_) => when_unmeasured,
-        }
-    }
-
-    /// **LOSSY.** Collapse back to the historical `(clearance, witness)` float
-    /// pair, mapping [`Self::Unmeasured`] to `(f64::INFINITY, [NaN; 3])`.
-    ///
-    /// This is the exact encoding the float entry points still return, and it
-    /// is the encoding this type exists to replace: two different answers land
-    /// on one float, and the float they land on passes every `>= threshold`
-    /// test. It is public only so a caller migrating off the float form can
-    /// prove, one call site at a time, that it produces byte-identical numbers
-    /// before it changes what it does with them. Do not introduce new uses.
-    #[must_use]
-    pub fn to_lossy_pair(self) -> (f64, V3) {
-        match self {
-            Self::Measured {
-                clearance_mm,
-                witness,
-            } => (clearance_mm, witness),
-            Self::Unmeasured(_) => (f64::INFINITY, [f64::NAN; 3]),
         }
     }
 }
@@ -1722,29 +1935,55 @@ impl NativeSurface {
 
     // ---- ray casting ------------------------------------------------------
     /// Collect ALL Möller crossings for one ray (superset broad phase + exact
-    /// filter). Returns unsorted (t, face) pairs.
-    pub(crate) fn collect_hits(&self, o: V3, d: V3, t_max: f64) -> Vec<(f64, u32)> {
+    /// filter). Returns unsorted `(t, face)` pairs plus the ray's
+    /// `NearParallel` tally.
+    ///
+    /// The tally is the number of faces this ray reached whose crossing was
+    /// UNDECIDABLE ([`RayTriangleClass::NearParallel`]). Those faces are absent
+    /// from the returned pairs — the arithmetic cannot say whether they should
+    /// be there — so a nonzero tally means the pair list is INCOMPLETE in an
+    /// unknown direction, and a caller that decides anything must treat it as
+    /// such.
+    pub(crate) fn collect_hits(&self, o: V3, d: V3, t_max: f64) -> (Vec<(f64, u32)>, u32) {
         let mut out: Vec<(f64, u32)> = Vec::new();
-        self.collect_hits_into(o, d, t_max, &mut out);
-        out
+        let near_parallel = self.collect_hits_into(o, d, t_max, &mut out);
+        (out, near_parallel)
     }
 
     /// Shared allocation-free traversal for ordinary ray casting and the
     /// bounded penetration path. Callers which need a hard allocation ceiling
-    /// reserve `out` before entering this routine.
-    fn collect_hits_into(&self, o: V3, d: V3, t_max: f64, out: &mut Vec<(f64, u32)>) {
+    /// reserve `out` before entering this routine. Returns the ray's
+    /// `NearParallel` tally.
+    fn collect_hits_into(&self, o: V3, d: V3, t_max: f64, out: &mut Vec<(f64, u32)>) -> u32 {
         STACK.with(|s| {
-            self.collect_hits_with_stack(o, d, t_max, out, &mut s.borrow_mut());
-        });
+            let (_tests, near_parallel) =
+                self.collect_hits_with_stack(o, d, t_max, out, &mut s.borrow_mut());
+            near_parallel
+        })
     }
 
-    /// Returns the EXECUTED traversal effort of this walk — one per BVH node
+    /// Returns `(tests, near_parallel)`.
+    ///
+    /// `tests` is the EXECUTED traversal effort of this walk — one per BVH node
     /// popped plus one per Möller evaluation — in exactly the units
     /// [`Self::count_hits_with_stack`] counts, so the census pass's `tests`
     /// and this walk's return value are the same quantity measured by the
     /// two walks. The metered penetration path
-    /// ([`Self::penetration_intervals_batch_bounded_metered`], FU-8g H2)
-    /// compares them; every other caller may ignore it.
+    /// ([`Self::penetration_intervals_batch_bounded_metered_classified`],
+    /// FU-8g H2) compares them; every other caller may ignore it.
+    ///
+    /// `near_parallel` is the number of faces this ray reached whose Möller
+    /// evaluation was classified [`RayTriangleClass::NearParallel`]: nonzero but
+    /// in-band determinant, so whether the ray crosses that face is undecidable
+    /// at this scale. **Those faces are not in `out`.** The accepted-hit set is
+    /// bit-identical to the pre-classification walk's — same arithmetic, same
+    /// acceptance predicate — so any row whose tally is zero is byte-identical
+    /// to the old behaviour, and any row whose tally is nonzero is a row where
+    /// the old behaviour was silently guessing.
+    ///
+    /// The tally is also charged to the process-global counter for
+    /// [`NearParallelSite::CollectingWalk`], once per ray rather than once per
+    /// face, so the atomic stays off the innermost loop.
     #[expect(
         clippy::cast_sign_loss,
         reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
@@ -1759,13 +1998,14 @@ impl NativeSurface {
         t_max: f64,
         out: &mut Vec<(f64, u32)>,
         stack: &mut Vec<i32>,
-    ) -> usize {
+    ) -> (usize, u32) {
         out.clear();
         let t0 = -EPS;
         let t1 = t_max + EPS;
         stack.clear();
         stack.push(0);
         let mut tests = 0usize;
+        let mut near_parallel = 0u32;
         while let Some(ni) = stack.pop() {
             tests += 1;
             let node = &self.bvh.nodes[ni as usize];
@@ -1778,16 +2018,25 @@ impl NativeSurface {
                 for &tid in &self.bvh.order[start..start + cnt] {
                     let t = tid as usize;
                     tests += 1;
-                    let (hit, tv) = moller(
+                    match ray_triangle_classified(
                         o,
                         d,
                         self.mesh.v0(t),
                         self.mesh.e1(t),
                         self.mesh.e2(t),
                         t_max,
-                    );
-                    if hit {
-                        out.push((tv, tid));
+                    ) {
+                        RayTriangleClass::Hit(hit) => out.push((hit.t, tid)),
+                        // A nonzero-but-in-band determinant: this face MIGHT be
+                        // crossed and the arithmetic cannot say. It is not
+                        // pushed (a manufactured `t` through a near-singular
+                        // `1/det` would be noise), and the ray's tally carries
+                        // the uncertainty out to the caller.
+                        RayTriangleClass::NearParallel => near_parallel += 1,
+                        // `det == 0.0` is a genuine prune (edge crossings live
+                        // on adjacent faces), and a definite miss is a definite
+                        // miss.
+                        RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
                     }
                 }
             } else {
@@ -1795,20 +2044,38 @@ impl NativeSurface {
                 stack.push(node.b);
             }
         }
-        tests
+        charge_near_parallel(NearParallelSite::CollectingWalk, u64::from(near_parallel));
+        (tests, near_parallel)
     }
 
     /// Counting twin of [`Self::collect_hits_with_stack`]: the SAME traversal
     /// over the same immutable BVH with the same predicates, but it counts
     /// instead of pushing, so it needs the `O(depth)` stack and nothing else.
     ///
-    /// Returns `(crossings, tests)` where `crossings` is exactly the number of
-    /// `(t, tid)` pairs the collecting walk would push, and `tests` is the
-    /// executed traversal effort: one per BVH node popped (its `ray_box`
-    /// evaluation) plus one per Möller evaluation in a reached leaf.
+    /// Returns `(crossings, tests, near_parallel)` where `crossings` is exactly
+    /// the number of `(t, tid)` pairs the collecting walk would push, `tests` is
+    /// the executed traversal effort (one per BVH node popped, plus one per
+    /// Möller evaluation in a reached leaf), and `near_parallel` is exactly the
+    /// tally the collecting walk would report for the same ray.
     ///
-    /// Any edit to one walk must be mirrored in the other; the fill pass
-    /// refuses with [`PenetrationBatchError::CensusDrift`] if they disagree.
+    /// **The tally is part of the mirror.** Both walks run the identical
+    /// traversal, the identical acceptance predicate and the identical
+    /// classification, so on any ray the two walks agree on all three numbers.
+    /// Any edit to one walk must be mirrored in the other; the fill pass refuses
+    /// with [`PenetrationBatchError::CensusDrift`] if the counted and executed
+    /// figures disagree.
+    ///
+    /// **Standing correction, from §EXT-2 of the adjudication:** there is NO
+    /// existing drift enforcement between the census tally and the fill tally.
+    /// `CensusDrift` covers hits, subsegments, samples and intervals — not the
+    /// near-parallel counts. Anything that wants those two tallies compared must
+    /// compare them EXPLICITLY rather than assume a check already exists;
+    /// `tests/walk_classified.rs` is where this kernel does that comparison.
+    ///
+    /// The tally is charged to the process-global counter for
+    /// [`NearParallelSite::CountingWalk`] — a SEPARATE counter from the
+    /// collecting walk's, so a run's two totals are independently readable
+    /// rather than summed into one number that hides which walk fired.
     #[expect(
         clippy::cast_sign_loss,
         reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
@@ -1822,13 +2089,14 @@ impl NativeSurface {
         d: V3,
         t_max: f64,
         stack: &mut Vec<i32>,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, u32) {
         let t0 = -EPS;
         let t1 = t_max + EPS;
         stack.clear();
         stack.push(0);
         let mut crossings = 0usize;
         let mut tests = 0usize;
+        let mut near_parallel = 0u32;
         while let Some(ni) = stack.pop() {
             tests += 1;
             let node = &self.bvh.nodes[ni as usize];
@@ -1841,16 +2109,17 @@ impl NativeSurface {
                 for &tid in &self.bvh.order[start..start + cnt] {
                     let t = tid as usize;
                     tests += 1;
-                    let (hit, _tv) = moller(
+                    match ray_triangle_classified(
                         o,
                         d,
                         self.mesh.v0(t),
                         self.mesh.e1(t),
                         self.mesh.e2(t),
                         t_max,
-                    );
-                    if hit {
-                        crossings += 1;
+                    ) {
+                        RayTriangleClass::Hit(_) => crossings += 1,
+                        RayTriangleClass::NearParallel => near_parallel += 1,
+                        RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
                     }
                 }
             } else {
@@ -1858,16 +2127,20 @@ impl NativeSurface {
                 stack.push(node.b);
             }
         }
-        (crossings, tests)
+        charge_near_parallel(NearParallelSite::CountingWalk, u64::from(near_parallel));
+        (crossings, tests, near_parallel)
     }
 
     /// cast_rays for one ray: deduped by arc location; representative t = first
     /// in group, representative face = LOWEST index in group (Amendment A13).
-    fn cast_one(&self, o: V3, d: V3, t_max: f64) -> (Vec<f64>, Vec<i64>) {
+    ///
+    /// Third element is the ray's `NearParallel` tally. Dedup cannot change it:
+    /// an undecidable face produced no crossing to merge.
+    fn cast_one(&self, o: V3, d: V3, t_max: f64) -> (Vec<f64>, Vec<i64>, u32) {
         let seg_len = norm(d) * t_max;
-        let mut hits = self.collect_hits(o, d, t_max);
+        let (mut hits, near_parallel) = self.collect_hits(o, d, t_max);
         if hits.is_empty() {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), near_parallel);
         }
         // stable sort by t
         hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -1889,48 +2162,78 @@ impl NativeSurface {
         }
         ts.push(group_kept);
         fs.push(group_min_face as i64);
-        (ts, fs)
+        (ts, fs, near_parallel)
     }
 
-    /// Allocation-free crossing census for [`Self::cast_rays`]: the same BVH
-    /// walk that call's collecting pass performs, counting instead of pushing,
-    /// so it needs the `O(depth)` traversal stack per worker and nothing else.
+    /// Allocation-free crossing census for [`Self::cast_rays_classified`]: the
+    /// same BVH walk that call's collecting pass performs, counting instead of
+    /// pushing, so it needs the `O(depth)` traversal stack per worker and
+    /// nothing else.
     ///
-    /// Element `i` is exactly the number of `(t, face)` pairs [`Self::cast_rays`]
-    /// collects for ray `i` BEFORE arc-location dedup. Dedup only merges
-    /// neighbours, so the same figure also bounds that ray's retained `ts`/`fs`
-    /// pair and its contribution to the two flattened arrays.
+    /// `crossings[i]` is exactly the number of `(t, face)` pairs
+    /// [`Self::cast_rays_classified`] collects for ray `i` BEFORE arc-location
+    /// dedup. Dedup only merges neighbours, so the same figure also bounds that
+    /// ray's retained `ts`/`fs` pair and its contribution to the two flattened
+    /// arrays.
+    ///
+    /// `near_parallel[i]` is that ray's undecidable-face tally, equal by
+    /// construction to the collecting walk's for the same ray. **Nothing in
+    /// this kernel enforces that equality on your behalf** — `CensusDrift`
+    /// covers hits, subsegments, samples and intervals, not tallies — so a
+    /// consumer comparing the two must compare them explicitly.
     ///
     /// This is the COUNT of count-before-charge-before-allocate for ray
-    /// casting, the same discipline [`Self::penetration_census_batch`] gives
-    /// the penetration path. The conservative every-ray-crosses-every-face
-    /// shape is a mesh-density ceiling, not a charge: a ray through a closed
-    /// hollow shell crosses the surface a handful of times however finely that
-    /// surface is tessellated.
-    pub fn cast_rays_census(
+    /// casting, the same discipline
+    /// [`Self::penetration_census_batch_classified`] gives the penetration
+    /// path. The conservative every-ray-crosses-every-face shape is a
+    /// mesh-density ceiling, not a charge: a ray through a closed hollow shell
+    /// crosses the surface a handful of times however finely that surface is
+    /// tessellated.
+    pub fn cast_rays_census_classified(
         &self,
         origins: &[V3],
         dirs: &[V3],
         t_max: f64,
-    ) -> Result<Vec<usize>, BatchInputError> {
+    ) -> Result<CastRaysCensusClassified, BatchInputError> {
         let n = origins.len();
         BatchInputError::require_len("cast_rays_census", "dirs", n, dirs.len())?;
-        let mut per = vec![0usize; n];
+        let mut per = vec![(0usize, 0u32); n];
         par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
-                    let (crossings, _tests) = STACK.with(|s| {
+                    let (crossings, _tests, near_parallel) = STACK.with(|s| {
                         self.count_hits_with_stack(origins[i], dirs[i], t_max, &mut s.borrow_mut())
                     });
-                    crossings
+                    (crossings, near_parallel)
                 })
                 .collect_into_vec(&mut per);
         });
-        Ok(per)
+        let mut crossings = Vec::with_capacity(n);
+        let mut near_parallel = Vec::with_capacity(n);
+        for (c, np) in per {
+            crossings.push(c);
+            near_parallel.push(np);
+        }
+        Ok(CastRaysCensusClassified {
+            crossings,
+            near_parallel,
+        })
     }
 
-    /// Batched cast_rays -> ragged (offsets, t_all, face_all).
+    /// Batched ray cast, ragged, **with the per-ray uncertainty tally**.
+    ///
+    /// Replaces the retired `cast_rays`, whose `(offsets, t_all, face_all)`
+    /// triple had no channel for "this ray reached a face whose crossing the
+    /// arithmetic could not decide" — so it reported a silent miss and the
+    /// caller could not tell that from a real absence.
+    ///
+    /// The crossing payload is bit-identical to the retired call's on every ray
+    /// whose `near_parallel` is zero: same traversal, same acceptance
+    /// predicate, same dedup. A ray whose tally is NONZERO is one where the old
+    /// answer was a guess, and the caller must route it to its own conservative
+    /// side per the propagation contract
+    /// (`docs/specs/geometry-adjudication.md` §EXT-2).
     #[expect(
         clippy::cast_possible_wrap,
         reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
@@ -1938,15 +2241,15 @@ impl NativeSurface {
               index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
               site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    pub fn cast_rays(
+    pub fn cast_rays_classified(
         &self,
         origins: &[V3],
         dirs: &[V3],
         t_max: f64,
-    ) -> Result<CastRaysBatch, BatchInputError> {
+    ) -> Result<CastRaysClassified, BatchInputError> {
         let n = origins.len();
         BatchInputError::require_len("cast_rays", "dirs", n, dirs.len())?;
-        let per: Vec<(Vec<f64>, Vec<i64>)> = par::run(|| {
+        let per: Vec<(Vec<f64>, Vec<i64>, u32)> = par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| self.cast_one(origins[i], dirs[i], t_max))
@@ -1957,19 +2260,52 @@ impl NativeSurface {
         offsets.push(0i64);
         let mut t_all = Vec::new();
         let mut f_all = Vec::new();
-        for (ts, fs) in &per {
+        let mut near_parallel = Vec::with_capacity(n);
+        for (ts, fs, np) in &per {
             t_all.extend_from_slice(ts);
             f_all.extend_from_slice(fs);
             offsets.push(t_all.len() as i64);
+            near_parallel.push(*np);
         }
-        Ok((offsets, t_all, f_all))
+        Ok(CastRaysClassified {
+            offsets,
+            t_all,
+            face_all: f_all,
+            near_parallel,
+        })
     }
 
     // ---- segment / capsule minimum distance ------------------------------
-    /// Exact segment [a,b] vs one triangle: min over endpoints, 3 edges, pierce.
-    /// Mirrors _seg_tri_dist (geometry_exact.py:596-630).
+    /// Segment `[a, b]` vs one triangle: min over endpoints, 3 edges, pierce.
+    /// Returns `(distance_mm, witness_point, near_parallel)`.
+    ///
+    /// # Two deliberate departures from the oracle mirror (§EXT-2c)
+    ///
+    /// This used to mirror `_seg_tri_dist` (`geometry_exact.py:596-630`) term
+    /// for term. Byte parity with the oracle on near-parallel configurations is
+    /// now retired **on purpose** for this decision chain, because every error
+    /// the mirror carried was one-sided HIGH — and this distance is compared
+    /// against a demanded gap, where too high means a refusal becomes an
+    /// acceptance:
+    ///
+    /// 1. **Edge candidates use [`segment_segment_distance_min`]**, the
+    ///    complete five-candidate minimisation, instead of the pinned
+    ///    `segment_segment_distance` whose near-parallel one-step recovery
+    ///    OVERestimates by up to a measured 1.754e-6 mm (8.104e-7 mm on the §O2
+    ///    counterexample — 8.1x the 1e-7 mm slack of the comparison it fed).
+    ///    Distances only ever tighten, so band membership only grows toward
+    ///    truth.
+    /// 2. **The pierce candidate is classified.** A `NearParallel` pierce does
+    ///    NOT set the distance to zero — no crossing was established — and does
+    ///    NOT leave silently either. `near_parallel` comes back `true`, and the
+    ///    returned distance is then an UPPER BOUND: the true distance may be
+    ///    zero. Endpoints stay exact via `closest_on_tri`, so that is the only
+    ///    one-sided term left.
+    ///
+    /// The event is charged to the process-global counter for
+    /// [`NearParallelSite::SegTriPierce`].
     #[inline]
-    pub(crate) fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3) {
+    pub(crate) fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3, bool) {
         let v0 = self.mesh.v0(t);
         let p = v0;
         let q = add(v0, self.mesh.e1(t));
@@ -1989,9 +2325,9 @@ impl NativeSurface {
             best_d = db;
             best_pt = cpb;
         }
-        // (b) segment vs each triangle edge
+        // (b) segment vs each triangle edge — complete minimisation, no epsilon
         for &(x, y) in &[(p, q), (q, r), (r, p)] {
-            let (d, _c1, c2) = segment_segment_distance(a, b, x, y);
+            let (d, _c1, c2) = segment_segment_distance_min(a, b, x, y);
             if d < best_d {
                 best_d = d;
                 best_pt = c2;
@@ -1999,15 +2335,26 @@ impl NativeSurface {
         }
         // (c) interior pierce -> distance 0 at crossing point
         let dv = sub(b, a);
-        let (hit, tv) = moller(a, dv, v0, self.mesh.e1(t), self.mesh.e2(t), 1.0);
-        if hit {
-            let pierce = add(a, scale(dv, tv));
-            if 0.0 < best_d {
-                best_d = 0.0;
-                best_pt = pierce;
+        let mut near_parallel = false;
+        match ray_triangle_classified(a, dv, v0, self.mesh.e1(t), self.mesh.e2(t), 1.0) {
+            RayTriangleClass::Hit(hit) => {
+                let pierce = add(a, scale(dv, hit.t));
+                if 0.0 < best_d {
+                    best_d = 0.0;
+                    best_pt = pierce;
+                }
             }
+            // Undecidable: the segment MIGHT pass through this face's interior,
+            // in which case the true distance is 0 and everything above it is an
+            // overestimate. Claiming 0 would be inventing a crossing; staying
+            // silent is the defect being removed. So: keep the bound, flag it.
+            RayTriangleClass::NearParallel => {
+                near_parallel = true;
+                charge_near_parallel(NearParallelSite::SegTriPierce, 1);
+            }
+            RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
         }
-        (best_d, best_pt)
+        (best_d, best_pt, near_parallel)
     }
 
     /// Exact minimum distance from segment [a,b] to the surface (branch & bound).
@@ -2016,7 +2363,7 @@ impl NativeSurface {
     /// with nothing excluded. The whole-surface and the face-excluded distance
     /// can therefore never disagree by arithmetic, only by the face set they
     /// were handed -- which is the property the honest-exemption rule rests on.
-    pub(crate) fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3) {
+    pub(crate) fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3, u32) {
         self.seg_surface_min_excluding(a, b, &[])
     }
 
@@ -2026,11 +2373,23 @@ impl NativeSurface {
     /// `excluded` must be SORTED ascending; membership is one binary search per
     /// triangle actually tested, and an empty set costs one `is_empty` branch.
     ///
+    /// Returns `(distance_mm, witness_point, near_parallel_faces)`. A nonzero
+    /// third element makes the distance an UPPER BOUND: that many faces had an
+    /// undecidable pierce candidate, and the true minimum over the surface may
+    /// be lower, including zero. The count is over FACES, so it is comparable
+    /// across rows.
+    ///
     /// The branch-and-bound prune stays exact under exclusion. `box_box_dist`
     /// is a lower bound over EVERY face in a subtree, so it is still a lower
     /// bound over the subset that survives exclusion; dropping faces can only
     /// raise the true minimum, never lower it, so a subtree the full-surface
     /// walk could skip is a subtree this walk can skip too.
+    ///
+    /// It also stays SOUND under the classified pierce. `best_d` can now be an
+    /// over-estimate of a face's true distance (a skipped pierce leaves the
+    /// endpoint/edge minimum standing), and the prune is `bound > best_d`, so a
+    /// larger `best_d` prunes LESS. Uncertainty therefore costs traversal work,
+    /// never a missed face.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -2040,11 +2399,17 @@ impl NativeSurface {
               index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
               site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    pub(crate) fn seg_surface_min_excluding(&self, a: V3, b: V3, excluded: &[u32]) -> (f64, V3) {
+    pub(crate) fn seg_surface_min_excluding(
+        &self,
+        a: V3,
+        b: V3,
+        excluded: &[u32],
+    ) -> (f64, V3, u32) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut best_d = f64::INFINITY;
         let mut best_pt: V3 = [f64::NAN; 3];
+        let mut near_parallel = 0u32;
         STACK.with(|s| {
             let mut stack = s.borrow_mut();
             stack.clear();
@@ -2068,7 +2433,10 @@ impl NativeSurface {
                         if !excluded.is_empty() && excluded.binary_search(&tid).is_ok() {
                             continue;
                         }
-                        let (d, pt) = self.seg_tri_dist(a, b, tid as usize);
+                        let (d, pt, np) = self.seg_tri_dist(a, b, tid as usize);
+                        if np {
+                            near_parallel += 1;
+                        }
                         if d < best_d {
                             best_d = d;
                             best_pt = pt;
@@ -2092,7 +2460,7 @@ impl NativeSurface {
                 }
             }
         });
-        (best_d, best_pt)
+        (best_d, best_pt, near_parallel)
     }
 
     /// One segment clearance. Tier-1 open-space branch is NOT reproduced
@@ -2123,17 +2491,17 @@ impl NativeSurface {
         inset0: f64,
         inset1: f64,
         excluded: &[u32],
-    ) -> SegmentClearance {
+    ) -> SegmentClearanceClassified {
         let d = sub(p1, p0);
         let l = norm(d);
         if l < 1e-9 {
-            return SegmentClearance::Unmeasured(UnmeasuredSegment::DegenerateAxis);
+            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::DegenerateAxis);
         }
         let u = scale(d, 1.0 / l);
         let s_lo = inset0;
         let s_hi = l - inset1;
         if s_hi - s_lo <= 1e-9 {
-            return SegmentClearance::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis);
+            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis);
         }
         let a = add(p0, scale(u, s_lo));
         let b = add(p0, scale(u, s_hi));
@@ -2141,7 +2509,7 @@ impl NativeSurface {
         let r_hi = r0 + (r1 - r0) * (s_hi / l);
         let r_max = r_lo.max(r_hi);
         let thresh = r_max + standoff;
-        let (best_d, best_pt) = self.seg_surface_min_excluding(a, b, excluded);
+        let (best_d, best_pt, near_parallel_faces) = self.seg_surface_min_excluding(a, b, excluded);
         // NO CANDIDATE IS NOT A MEASUREMENT. `seg_surface_min_excluding` seeds
         // `best_d` with `f64::INFINITY` and only ever lowers it, so a
         // non-finite `best_d` means the walk found no face to measure against.
@@ -2153,12 +2521,26 @@ impl NativeSurface {
         // "clearance" that reads as the best possible result. It is the worst:
         // nothing was tested.
         if !best_d.is_finite() {
-            return SegmentClearance::Unmeasured(UnmeasuredSegment::AllFacesExcluded);
+            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::AllFacesExcluded);
         }
         let clr = best_d - thresh;
         // clearance-vs-0 threshold band (spec sec 5.4 item 3)
         self.band_check(clr, 0.0);
-        SegmentClearance::Measured {
+        // AN UNDECIDED PIERCE IS NOT A MEASUREMENT EITHER. The walk did produce
+        // a number, but at least one face's pierce candidate was skipped, and a
+        // skipped pierce turns a true distance of 0 into something positive. The
+        // number is therefore one-sided HIGH and cannot affirm a gap. Reporting
+        // it as `Measured` would be the `INFINITY` defect again, one variant
+        // along: a value that passes every `>= threshold` test standing in for
+        // an answer nobody has.
+        if near_parallel_faces > 0 {
+            return SegmentClearanceClassified::UpperBound {
+                clearance_mm: clr,
+                witness: best_pt,
+                near_parallel_faces,
+            };
+        }
+        SegmentClearanceClassified::Measured {
             clearance_mm: clr,
             witness: best_pt,
         }
@@ -2168,17 +2550,19 @@ impl NativeSurface {
     // that primitive.s batched (SoA) entry point, one argument per per-member
     // input array plus the shared `standoff` -- the established batch shape,
     // not a candidate for bundling.
-    /// **THE CLEARANCE PREDICATE.** One [`SegmentClearance`] per row, in row
-    /// order.
+    /// **THE CLEARANCE PREDICATE.** One [`SegmentClearanceClassified`] per row,
+    /// in row order.
     ///
-    /// This is [`Self::segment_clearance_excluding_typed`] with an empty
+    /// This is [`Self::segment_clearance_excluding_classified`] with an empty
     /// exclusion set, i.e. the whole-surface test.
     ///
-    /// Prefer this over the float-returning [`Self::segment_clearance`]. The
-    /// float form cannot say "this row was never tested"; it says `INFINITY`,
-    /// which every `>= threshold` comparison reads as a pass.
+    /// Replaces both `segment_clearance_typed` and the lossy float shim
+    /// `segment_clearance`. The float form could not say "this row was never
+    /// tested" — it said `INFINITY`, which every `>= threshold` comparison
+    /// reads as a pass — and could not carry the third state either, so it is
+    /// removed rather than deprecated.
     #[allow(clippy::too_many_arguments)]
-    pub fn segment_clearance_typed(
+    pub fn segment_clearance_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -2187,47 +2571,8 @@ impl NativeSurface {
         standoff: f64,
         inset0s: &[f64],
         inset1s: &[f64],
-    ) -> Result<Vec<SegmentClearance>, BatchInputError> {
-        self.segment_clearance_excluding_typed(
-            p0s,
-            p1s,
-            r0s,
-            r1s,
-            standoff,
-            inset0s,
-            inset1s,
-            &[], //
-        )
-    }
-
-    /// **LOSSY SHIM over [`Self::segment_clearance_typed`]. New code must not
-    /// call this.**
-    ///
-    /// Returns the historical `(clearances, witnesses)` float pair, in which a
-    /// row that was never measured is encoded as `f64::INFINITY` with a
-    /// `[NaN; 3]` witness -- see [`SegmentClearance::to_lossy_pair`]. That
-    /// encoding is the defect: `INFINITY` is in band, it is orderable, and it
-    /// is larger than any demanded gap, so a caller that writes
-    /// `clearances.iter().all(|c| *c >= 0.0)` grades an untested row as a pass.
-    /// The witness `NaN` is the only trace left, and no caller reads it.
-    ///
-    /// Retained solely so the call sites that predate
-    /// [`SegmentClearance`] keep compiling while they are migrated one at a
-    /// time. Migrating a call site means calling the typed form and stating,
-    /// with [`SegmentClearance::clears_or`], what an untested row means to that
-    /// stage.
-    #[allow(clippy::too_many_arguments)]
-    pub fn segment_clearance(
-        &self,
-        p0s: &[V3],
-        p1s: &[V3],
-        r0s: &[f64],
-        r1s: &[f64],
-        standoff: f64,
-        inset0s: &[f64],
-        inset1s: &[f64],
-    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
-        self.segment_clearance_excluding(
+    ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
+        self.segment_clearance_excluding_classified(
             p0s,
             p1s,
             r0s,
@@ -2240,19 +2585,23 @@ impl NativeSurface {
     }
 
     /// **THE CLEARANCE PREDICATE, with exclusions.**
-    /// [`Self::segment_clearance_typed`] with a PER-ROW set of global face IDs
-    /// the distance test must not see. Every other clearance entry point in
-    /// this file -- typed or float -- delegates here.
+    /// [`Self::segment_clearance_classified`] with a PER-ROW set of global face
+    /// IDs the distance test must not see. Every other clearance entry point in
+    /// this file delegates here.
     ///
     /// `excluded_faces` is either empty -- which is exactly
-    /// [`Self::segment_clearance_typed`], and the reason that entry point
+    /// [`Self::segment_clearance_classified`], and the reason that entry point
     /// delegates here rather than repeating the loop -- or one SORTED,
     /// deduplicated slice of global face IDs per row, in row order.
     ///
-    /// One [`SegmentClearance`] per row, in row order. A row the predicate
-    /// never tested comes back as [`SegmentClearance::Unmeasured`], which the
-    /// type system will not let a caller compare against a threshold: see
-    /// [`SegmentClearance::clears_or`].
+    /// One [`SegmentClearanceClassified`] per row, in row order. A row the
+    /// predicate never tested comes back as
+    /// [`SegmentClearanceClassified::Unmeasured`]; a row whose walk skipped an
+    /// undecidable pierce candidate comes back as
+    /// [`SegmentClearanceClassified::UpperBound`]. The type system will not let
+    /// a caller compare either against a threshold without stating what it
+    /// means: see [`SegmentClearanceClassified::clears`], which takes both
+    /// fallbacks and defaults neither.
     ///
     /// WHAT THIS IS FOR, and what it deliberately is not. A contact-declaring
     /// arm is legitimately inside the material it is seated in, so its own seat
@@ -2277,10 +2626,10 @@ impl NativeSurface {
     /// pass would price a check the two production callers already satisfy by
     /// construction -- it simply fails to exclude, which is the SAFE direction:
     /// an unexcluded face can only make the verdict stricter.
-    // Same signature rationale as `segment_clearance_typed` above, plus one
+    // Same signature rationale as `segment_clearance_classified` above, plus one
     // slice of per-row exclusions; every field is read at every call site.
     #[allow(clippy::too_many_arguments)]
-    pub fn segment_clearance_excluding_typed(
+    pub fn segment_clearance_excluding_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -2290,7 +2639,7 @@ impl NativeSurface {
         inset0s: &[f64],
         inset1s: &[f64],
         excluded_faces: &[&[u32]],
-    ) -> Result<Vec<SegmentClearance>, BatchInputError> {
+    ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
         let n = p0s.len();
         BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
         BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
@@ -2318,42 +2667,6 @@ impl NativeSurface {
         }))
     }
 
-    /// **LOSSY SHIM over [`Self::segment_clearance_excluding_typed`]. New code
-    /// must not call this.** Same hazard, same reason, same migration as
-    /// [`Self::segment_clearance`]: a row that was never tested comes back as
-    /// `f64::INFINITY` and reads as a pass under any `>= threshold` test.
-    #[allow(clippy::too_many_arguments)]
-    pub fn segment_clearance_excluding(
-        &self,
-        p0s: &[V3],
-        p1s: &[V3],
-        r0s: &[f64],
-        r1s: &[f64],
-        standoff: f64,
-        inset0s: &[f64],
-        inset1s: &[f64],
-        excluded_faces: &[&[u32]],
-    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
-        let rows = self.segment_clearance_excluding_typed(
-            p0s,
-            p1s,
-            r0s,
-            r1s,
-            standoff,
-            inset0s,
-            inset1s,
-            excluded_faces,
-        )?;
-        let mut clr = Vec::with_capacity(rows.len());
-        let mut pt = Vec::with_capacity(rows.len());
-        for row in rows {
-            let (c, p) = row.to_lossy_pair();
-            clr.push(c);
-            pt.push(p);
-        }
-        Ok((clr, pt))
-    }
-
     /// Every global face ID within `within_mm[i]` of segment `i`, one batched
     /// BVH walk per row and ONE call for the whole row set.
     ///
@@ -2364,7 +2677,22 @@ impl NativeSurface {
     /// owns only the geometric band.
     ///
     /// Each row's IDs come back SORTED ascending and deduplicated, which is the
-    /// order [`Self::segment_clearance_excluding`] requires.
+    /// order [`Self::segment_clearance_excluding_classified`] requires.
+    ///
+    /// # Membership is PROOF-ONLY
+    ///
+    /// A band is an EXEMPTION: a face in it is excluded from later clearance
+    /// walks. So a face joins a band only on a MEASURED `d <= within_mm`. When a
+    /// face's pierce candidate is undecidable, the face is counted in that row's
+    /// `near_parallel` tally and admitted only if its measured
+    /// endpoint/edge distance put it in the band anyway. Adding it on the
+    /// unproven pierce would grow an exemption on uncertainty — the permissive
+    /// direction — while omitting it keeps the face in later clearance tests,
+    /// where a genuine touch fails the row (§EXT-2 justification 12).
+    ///
+    /// Note the asymmetry with the clearance entry points: the SAME
+    /// `seg_tri_dist` uncertainty is band-tolerable and clearance-intolerable,
+    /// because the two consumers sit on opposite sides of the exemption.
     ///
     /// LIMITS. `max_rows` and `max_faces_per_row` are checked before and during
     /// the walk, so the batch's peak memory is bounded by
@@ -2372,13 +2700,13 @@ impl NativeSurface {
     /// own numbers before any allocation. `max_total_faces` is checked against
     /// the REALIZED total, not against `rows * max`, so it charges what the walk
     /// actually collected.
-    pub fn faces_near_segments_batch(
+    pub fn faces_near_segments_batch_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
         within_mm: &[f64],
         limits: NearFaceBatchLimits,
-    ) -> Result<Vec<Vec<u32>>, NearFaceBatchError> {
+    ) -> Result<FacesNearSegmentsClassified, NearFaceBatchError> {
         let n = p0s.len();
         BatchInputError::require_len("faces_near_segments_batch", "p1s", n, p1s.len())?;
         BatchInputError::require_len("faces_near_segments_batch", "within_mm", n, within_mm.len())?;
@@ -2407,7 +2735,7 @@ impl NativeSurface {
             }
         }
 
-        let rows: Vec<Result<Vec<u32>, NearFaceBatchError>> = par::run(|| {
+        let rows: Vec<Result<(Vec<u32>, u32), NearFaceBatchError>> = par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|row| {
@@ -2423,13 +2751,15 @@ impl NativeSurface {
         });
 
         let mut out = Vec::with_capacity(n);
+        let mut near_parallel = Vec::with_capacity(n);
         let mut total = 0_usize;
         for row in rows {
-            let faces = row?;
+            let (faces, np) = row?;
             total = total
                 .checked_add(faces.len())
                 .ok_or(NearFaceBatchError::TotalFaceArithmeticOverflow)?;
             out.push(faces);
+            near_parallel.push(np);
         }
         if total > limits.max_total_faces {
             return Err(NearFaceBatchError::TotalFaceLimitExceeded {
@@ -2437,7 +2767,10 @@ impl NativeSurface {
                 limit: limits.max_total_faces,
             });
         }
-        Ok(out)
+        Ok(FacesNearSegmentsClassified {
+            rows: out,
+            near_parallel,
+        })
     }
 
     /// One row of [`Self::faces_near_segments_batch`].
@@ -2462,10 +2795,11 @@ impl NativeSurface {
         within_mm: f64,
         row: usize,
         max_faces: usize,
-    ) -> Result<Vec<u32>, NearFaceBatchError> {
+    ) -> Result<(Vec<u32>, u32), NearFaceBatchError> {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut found: Vec<u32> = Vec::new();
+        let mut near_parallel = 0u32;
         let mut stack: Vec<i32> = vec![0];
         while let Some(ni) = stack.pop() {
             let node = &self.bvh.nodes[ni as usize];
@@ -2476,7 +2810,15 @@ impl NativeSurface {
                 let start = node.a as usize;
                 let cnt = node.b as usize;
                 for &tid in &self.bvh.order[start..start + cnt] {
-                    let (d, _) = self.seg_tri_dist(a, b, tid as usize);
+                    let (d, _, np) = self.seg_tri_dist(a, b, tid as usize);
+                    if np {
+                        // Counted, NOT admitted on the strength of the
+                        // undecidable pierce: an exemption grows only on proof.
+                        // The face still joins the band if its MEASURED distance
+                        // puts it there, which the `d <= within_mm` test below
+                        // decides on its own.
+                        near_parallel += 1;
+                    }
                     if d <= within_mm {
                         if found.len() >= max_faces {
                             return Err(NearFaceBatchError::RowFaceLimitExceeded {
@@ -2497,7 +2839,7 @@ impl NativeSurface {
         }
         found.sort_unstable();
         found.dedup();
-        Ok(found)
+        Ok((found, near_parallel))
     }
 
     // ---- penetration intervals -------------------------------------------
@@ -2553,7 +2895,10 @@ impl NativeSurface {
             }
             // crossings along this ray
             let mut hits = reserve_penetration_vec(budget.hits_per_ray, Some(row), "hits")?;
-            meter.work += self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            let (executed, near_parallel) =
+                self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            meter.work += executed;
+            meter.near_parallel = meter.near_parallel.saturating_add(near_parallel);
             meter.hits += hits.len();
             if hits.len() > budget.hits_per_ray {
                 return Err(PenetrationBatchError::CensusDrift {
@@ -2814,6 +3159,7 @@ impl NativeSurface {
             seg_mm: 0.0,
             max_ray_crossings: 0,
             max_ray_seg_mm: 0.0,
+            near_parallel: 0,
         };
         if l < 1e-9 {
             return census;
@@ -2823,11 +3169,12 @@ impl NativeSurface {
             if seg < 1e-9 {
                 continue;
             }
-            let (crossings, tests) = STACK.with(|s| {
+            let (crossings, tests, near_parallel) = STACK.with(|s| {
                 self.count_hits_with_stack(ray.origin(), ray.direction(), 1.0, &mut s.borrow_mut())
             });
             census.crossings += crossings;
             census.tests += tests;
+            census.near_parallel = census.near_parallel.saturating_add(near_parallel);
             census.seg_mm += seg;
             census.max_ray_crossings = census.max_ray_crossings.max(crossings);
             if seg > census.max_ray_seg_mm {
@@ -2845,7 +3192,7 @@ impl NativeSurface {
     /// This is the COUNT of count-before-charge-before-allocate: feed the
     /// result to [`Self::penetration_intervals_batch_census_limits`] to state
     /// the batch's honest demand before any interval-sized allocation exists.
-    pub fn penetration_census_batch(
+    pub fn penetration_census_batch_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -2973,7 +3320,7 @@ impl NativeSurface {
     /// `max_total_work` is summed traversal tests (what the ray loop
     /// executes); `max_total_hits` is summed crossings (what the hit buffers
     /// store); every total is a sum over the counted rows.
-    pub fn penetration_intervals_batch_census_limits(
+    pub fn penetration_intervals_batch_census_limits_classified(
         &self,
         census: &[PenetrationRowCensus],
         n_offset_rays: usize,
@@ -3072,12 +3419,14 @@ impl NativeSurface {
     /// execution ever exceed its count). Input gathering, one index-parallel
     /// map per pass, and ordered scatter are retained.
     ///
-    /// This entry point discards the execution receipt. A caller that charges
-    /// a CAP from this batch's counted demand should call
-    /// [`Self::penetration_intervals_batch_bounded_metered`] instead and check
-    /// the receipt against what it charged (FU-8g H2).
+    /// This entry point discards the execution receipt — **but not the
+    /// uncertainty tally**, which rides on the returned
+    /// [`PenetrationIntervalsClassified`]. A caller that charges a CAP from
+    /// this batch's counted demand should call
+    /// [`Self::penetration_intervals_batch_bounded_metered_classified`] instead
+    /// and check the receipt against what it charged (FU-8g H2).
     #[allow(clippy::too_many_arguments)]
-    pub fn penetration_intervals_batch_bounded(
+    pub fn penetration_intervals_batch_bounded_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -3089,8 +3438,8 @@ impl NativeSurface {
         min_illegal_len_mm: f64,
         rays_all: bool,
         limits: PenetrationBatchLimits,
-    ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
-        self.penetration_intervals_batch_bounded_metered(
+    ) -> Result<PenetrationIntervalsClassified, PenetrationBatchError> {
+        self.penetration_intervals_batch_bounded_metered_classified(
             p0s,
             p1s,
             r0s,
@@ -3105,7 +3454,8 @@ impl NativeSurface {
         .map(|(intervals, _meter)| intervals)
     }
 
-    /// [`Self::penetration_intervals_batch_bounded`], plus the receipt: what
+    /// [`Self::penetration_intervals_batch_bounded_classified`], plus the
+    /// receipt: what
     /// the fill pass ACTUALLY executed, so a caller that charged a cap from
     /// the counted demand can assert `executed <= charged` instead of
     /// assuming it (FU-8g H2, the G3/G6c charged-vs-executed idiom).
@@ -3118,7 +3468,7 @@ impl NativeSurface {
     /// derived from a separate counting pass, and only the caller knows which
     /// number it spent.
     #[allow(clippy::too_many_arguments)]
-    pub fn penetration_intervals_batch_bounded_metered(
+    pub fn penetration_intervals_batch_bounded_metered_classified(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -3130,10 +3480,12 @@ impl NativeSurface {
         min_illegal_len_mm: f64,
         rays_all: bool,
         limits: PenetrationBatchLimits,
-    ) -> Result<(Vec<Vec<Interval>>, PenetrationBatchMeter), PenetrationBatchError> {
+    ) -> Result<(PenetrationIntervalsClassified, PenetrationBatchMeter), PenetrationBatchError>
+    {
         let n = p0s.len();
         Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
-        let census = self.penetration_census_batch(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)?;
+        let census =
+            self.penetration_census_batch_classified(p0s, p1s, r0s, r1s, n_offset_rays, rays_all)?;
         let requirements = self.penetration_requirements_from_census(
             &census,
             n_offset_rays,
@@ -3175,6 +3527,7 @@ impl NativeSurface {
             };
         }
         let mut ordered = reserve_penetration_vec(n, None, "ordered interval rows")?;
+        let mut near_parallel = reserve_penetration_vec(n, None, "row uncertainty tallies")?;
         let mut meter = PenetrationBatchMeter {
             rows: n,
             ..PenetrationBatchMeter::default()
@@ -3186,9 +3539,16 @@ impl NativeSurface {
             meter.samples += executed.samples;
             meter.intervals += executed.intervals;
             ordered.push(intervals);
+            near_parallel.push(executed.near_parallel);
         }
         Self::check_penetration_meter(&requirements, meter)?;
-        Ok((ordered, meter))
+        Ok((
+            PenetrationIntervalsClassified {
+                rows: ordered,
+                near_parallel,
+            },
+            meter,
+        ))
     }
 
     /// The executed receipt against the counted charge, resource by resource.
@@ -3305,11 +3665,13 @@ impl NativeSurface {
         _nd: f64,
         half_deg: f64,
         n_cone: usize,
-    ) -> f64 {
+    ) -> (f64, u32) {
         let mut thick = f64::INFINITY;
+        let mut near_parallel = 0u32;
         for dcone in cone_dirs(inward, half_deg, n_cone) {
             let dir = scale(dcone, r);
-            let hits = self.collect_hits(c, dir, 1.0);
+            let (hits, np) = self.collect_hits(c, dir, 1.0);
+            near_parallel = near_parallel.saturating_add(np);
             let mut dmin = f64::INFINITY;
             for (tv, face) in hits {
                 let dd = tv * r;
@@ -3325,7 +3687,11 @@ impl NativeSurface {
                 thick = dmin;
             }
         }
-        thick
+        // `thick` is a MINIMUM over cone rays, so a skipped crossing can only
+        // leave it too LARGE — and a too-large thickness is the permissive
+        // direction for `t < r - eps` breach test above. The tally is what
+        // stops that from being silent.
+        (thick, near_parallel)
     }
 
     fn breach_one(
@@ -3335,7 +3701,7 @@ impl NativeSurface {
         eps_mm: f64,
         half_deg: f64,
         n_cone: usize,
-    ) -> (bool, f64, f64) {
+    ) -> (bool, f64, f64, u32) {
         let (nd, _cp, tri, fn_) = {
             let (d, i, cp) = self.nearest_one(c, f64::INFINITY);
             let n = if i < self.mesh.global_nfaces() {
@@ -3349,7 +3715,8 @@ impl NativeSurface {
         // reach precondition r−nd vs eps_mm threshold band (sec 5.4 item 3)
         self.band_check(r - nd, eps_mm);
         if r - nd <= eps_mm {
-            return (false, f64::INFINITY, 0.0);
+            // No reach: no cone ray is cast, so no face was even evaluated.
+            return (false, f64::INFINITY, 0.0, 0);
         }
         let inward = {
             let iv = scale(fn_, -1.0);
@@ -3360,10 +3727,11 @@ impl NativeSurface {
                 scale(iv, 1.0 / nrm)
             }
         };
-        let t1 = self.cone_thickness(c, r, inward, nd, half_deg, n_cone);
+        let (t1, np1) = self.cone_thickness(c, r, inward, nd, half_deg, n_cone);
 
         // measured-tie detection (Amendment A15): opposing-normal face at dist nd
         let mut t2 = f64::INFINITY;
+        let mut np2 = 0u32;
         let mut tie = false;
         let tied = self.faces_at_distance(c, nd, 1e-12);
         if tied.len() > 1 {
@@ -3378,12 +3746,17 @@ impl NativeSurface {
                             scale(iv, 1.0 / nrm)
                         }
                     };
-                    t2 = self.cone_thickness(c, r, inw2, nd, half_deg, n_cone);
+                    let (t2v, np2v) = self.cone_thickness(c, r, inw2, nd, half_deg, n_cone);
+                    t2 = t2v;
+                    np2 = np2v;
                     tie = true;
                     break;
                 }
             }
         }
+
+        // Every cone ray of both orientations charges the sphere's row.
+        let near_parallel = np1.saturating_add(np2);
 
         // thickness-vs-(r−eps) threshold band, per breaching orientation (sec 5.4 item 3)
         self.band_check(t1, r - eps_mm);
@@ -3398,7 +3771,7 @@ impl NativeSurface {
         let breached = breach1 || breach2;
         if !breached {
             // report primary thickness (matches non-tie oracle behavior)
-            return (false, t1, 0.0);
+            return (false, t1, 0.0, near_parallel);
         }
         // breaching orientation's thickness; smaller finite when both breach
         let thick = if breach1 && breach2 {
@@ -3408,20 +3781,29 @@ impl NativeSurface {
         } else {
             t2
         };
-        (true, thick, r - thick)
+        (true, thick, r - thick, near_parallel)
     }
 
-    pub fn sphere_breach(
+    /// Batched sphere-vs-wall breach test, **with the per-sphere uncertainty
+    /// tally**.
+    ///
+    /// Replaces the retired `sphere_breach`, whose `(breached, thickness,
+    /// protrusion)` triple could not say that a cone ray had reached a face
+    /// whose crossing the arithmetic could not decide. That matters here in one
+    /// direction only, and it is the dangerous one: `cone_thickness` takes a
+    /// MINIMUM over crossings, so a skipped crossing leaves the reported
+    /// thickness too LARGE, and too large reads as "no breach".
+    pub fn sphere_breach_classified(
         &self,
         centers: &[V3],
         radii: &[f64],
         eps_mm: f64,
         half_deg: f64,
         n_cone: usize,
-    ) -> Result<SphereBreachBatch, BatchInputError> {
+    ) -> Result<SphereBreachClassified, BatchInputError> {
         let n = centers.len();
         BatchInputError::require_len("sphere_breach", "radii", n, radii.len())?;
-        let res: Vec<(bool, f64, f64)> = par::run(|| {
+        let res: Vec<(bool, f64, f64, u32)> = par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| self.breach_one(centers[i], radii[i], eps_mm, half_deg, n_cone))
@@ -3430,12 +3812,19 @@ impl NativeSurface {
         let mut br = Vec::with_capacity(n);
         let mut th = Vec::with_capacity(n);
         let mut po = Vec::with_capacity(n);
-        for (b, t, p) in res {
+        let mut near_parallel = Vec::with_capacity(n);
+        for (b, t, p, np) in res {
             br.push(b);
             th.push(t);
             po.push(p);
+            near_parallel.push(np);
         }
-        Ok((br, th, po))
+        Ok(SphereBreachClassified {
+            breached: br,
+            thickness_mm: th,
+            protrusion_mm: po,
+            near_parallel,
+        })
     }
 
     // ---- exterior-face mask ----------------------------------------------

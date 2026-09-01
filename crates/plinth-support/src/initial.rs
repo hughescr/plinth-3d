@@ -106,6 +106,49 @@ pub(crate) struct CondemnedInitialStub {
     pub(crate) remaining_inside_axis_mm: f64,
 }
 
+/// One stub condemned because its overlap could not be MEASURED, only bounded
+/// from below — `docs/specs/geometry-adjudication.md` §EXT-1 site 14,
+/// justification 14.
+///
+/// It is a separate vector from [`CondemnedInitialStub`] for the reason that
+/// module keeps re-learning: a refusal that is not a measurement must not be
+/// filed as one. `remaining_inside_axis_mm` on a condemned row is an exact
+/// post-mask overlap; the number here is a LOWER bound on the same quantity and
+/// the true overlap can only be equal or higher.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UncertainInitialStub {
+    pub(crate) terminal: u32,
+    pub(crate) key: MemberKey,
+    /// The overlap the incomplete interval set produced. A LOWER bound, never a
+    /// measurement — see [`OverlapMeasure::NearParallelLowerBound`].
+    pub(crate) lower_bound_inside_axis_mm: f64,
+    /// How many Möller evaluations on this row's rays were undecidable.
+    pub(crate) near_parallel: u32,
+}
+
+/// What `classify_initial_overlaps` knows about one seed's illegal axis
+/// overlap.
+///
+/// This is an enum and not an `f64` because a bare `f64` cannot say "lower
+/// bound", and the only consumer decision —
+/// [`initial_overlap_exceeds_cutoff`], where a LARGER overlap condemns —
+/// reads an understated number as a PASS. No sentinel value is invented for the
+/// uncertain case; the type carries the fact instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OverlapMeasure {
+    /// Every crossing on this row's rays was decided. The number is the exact
+    /// post-mask overlap.
+    Measured(f64),
+    /// At least one crossing was undecidable, so the interval set is
+    /// INCOMPLETE and the overlap computed from it is a LOWER bound: the true
+    /// illegal overlap can only be equal or higher.
+    ///
+    /// An understated overlap moves a seed from condemned to kept — absorption
+    /// in the permissive direction — so a row in this state is condemned
+    /// UNCONDITIONALLY rather than compared against the cutoff.
+    NearParallelLowerBound { overlap_mm: f64, near_parallel: u32 },
+}
+
 /// Why re-seating was not among the remedies tried.
 ///
 /// One variant today, and it is a fact about this stage rather than a gap: an
@@ -251,6 +294,11 @@ pub(crate) struct InitialContactBuild {
     routing_order: InitialRoutingOrder,
     terminals: Vec<InitialTerminalEvidence>,
     condemned: Vec<CondemnedInitialStub>,
+    /// §EXT-1 site 14 — every stub quarantined because its overlap could only
+    /// be bounded, not measured. Recorded under this module's standing
+    /// discipline that every quarantine reason is recorded even when several
+    /// fire, so a stub appears here AND in `condemned` when both applied.
+    uncertain_overlap: Vec<UncertainInitialStub>,
     unattested: Vec<UnattestedInitialStub>,
     grown: Vec<GrownInitialContact>,
     area_deficient: Vec<DeficientInitialContact>,
@@ -305,6 +353,18 @@ impl InitialContactBuild {
     #[must_use]
     pub(crate) fn condemned(&self) -> &[CondemnedInitialStub] {
         &self.condemned
+    }
+    /// §EXT-1 site 14 — every stub quarantined on an UNMEASURABLE overlap.
+    ///
+    /// A non-empty slice here is the signal the near-parallel ruling was
+    /// designed to surface: stubs are being withheld on uncertainty rather than
+    /// on a measured violation. A withheld stub costs coverage, and missing
+    /// coverage is refused downstream, so the load path stays closed — but the
+    /// rate belongs in front of the owner, which is what this vector and the
+    /// kernel's `kernel.walk.collecting` counter are for.
+    #[must_use]
+    pub(crate) fn uncertain_overlap(&self) -> &[UncertainInitialStub] {
+        &self.uncertain_overlap
     }
     /// PR-8 — every stub whose model contact was refused after every remedy
     /// this stage has was tried, with its reason, the load it abandons and the
@@ -747,6 +807,10 @@ pub(crate) fn build_initial_contacts(
     // and swept at the radius it will actually be built at.
     let majority_step_mm = policy.initial_axis_majority_step_mm().diagnostic().get();
     let axis_batch = axis_batch_input(&seeds)?;
+    // The census pass's per-row undecidable tally, held for the lockstep check
+    // against the fill pass (§EXT-1 site 13). Empty when no census ran, which
+    // is exactly when no fill pass runs either.
+    let mut census_near_parallel: Vec<u32> = Vec::new();
     let penetration_limits = if seeds.is_empty() {
         // No stubs, no native query: the zero demand is stated as zero.
         PenetrationBatchLimits {
@@ -758,9 +822,17 @@ pub(crate) fn build_initial_contacts(
             max_scratch_bytes: 0,
         }
     } else {
+        // §EXT-1 site 13 (`support.initial.census`): ACCOUNTING ONLY. The
+        // census's `crossings` figure is unchanged by classification — both
+        // walks use the identical hit predicate — so no census-driven budget or
+        // refusal moves here. Each row's `near_parallel` tally rides along and
+        // is checked against the fill pass's tally for the same row in
+        // `classify_initial_overlaps`; the kernel's own `CensusDrift` covers
+        // hits, subsegments, samples and intervals and has NEVER covered
+        // tallies, so that comparison has to be made explicitly.
         let census = geometry
             .surface()
-            .penetration_census_batch(
+            .penetration_census_batch_classified(
                 &axis_batch.p0,
                 &axis_batch.p1,
                 &axis_batch.r0,
@@ -769,9 +841,10 @@ pub(crate) fn build_initial_contacts(
                 false,
             )
             .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
+        census_near_parallel = census.iter().map(|row| row.near_parallel).collect();
         geometry
             .surface()
-            .penetration_intervals_batch_census_limits(
+            .penetration_intervals_batch_census_limits_classified(
                 &census,
                 8,
                 interval_cap,
@@ -806,6 +879,7 @@ pub(crate) fn build_initial_contacts(
         interval_cap,
         policy.default_contact_depth_mm().diagnostic().get(),
         penetration_limits,
+        &census_near_parallel,
     )?;
     // FU-8g H2 — the receipt, checked against the charge, at the site that
     // spent it. `penetration_limits` is exactly what `preflight_work` charged
@@ -820,6 +894,10 @@ pub(crate) fn build_initial_contacts(
     condemned
         .try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("quarantine evidence"))?;
+    let mut uncertain_overlap: Vec<UncertainInitialStub> = Vec::new();
+    uncertain_overlap
+        .try_reserve_exact(contact_count)
+        .map_err(|_| InitialContactError::Allocation("uncertain overlap evidence"))?;
     // All recoverable validation, allocation, native work, and classification
     // have succeeded. The fresh local forest is now materialized. Allocations
     // for all contiguous contact-sized payloads, including the
@@ -937,15 +1015,53 @@ pub(crate) fn build_initial_contacts(
                 deficit: *deficit,
             });
         }
-        let condemned_by_overlap =
-            initial_overlap_exceeds_cutoff(*overlap, cutoff, distance(seed.p0, seed.p1));
-        if condemned_by_overlap {
-            condemned.push(CondemnedInitialStub {
-                terminal: seed.terminal,
-                key: *key,
-                remaining_inside_axis_mm: *overlap,
-            });
-        }
+        // §EXT-1 site 14, justification 14. A `NearParallelLowerBound` row is
+        // CONDEMNED UNCONDITIONALLY — it is never compared against the cutoff,
+        // because the comparison condemns on a LARGE overlap and this row's
+        // number is understated by an unknown amount. Comparing it would be
+        // reading "we could not see all of it" as "there is not much of it".
+        //
+        // Condemnation is candidate-granular: one uncertain seed, one
+        // quarantined stub, the build continues. It sits on the refusal side by
+        // a closed load path — a withheld stub costs coverage, and missing
+        // coverage is refused downstream — and it is recorded in its OWN
+        // evidence vector under this module's discipline that every quarantine
+        // reason is recorded even when several fire.
+        //
+        // The uncertain row is filed in `uncertain_overlap` and NOT in
+        // `condemned`. `CondemnedInitialStub::remaining_inside_axis_mm` is
+        // documented as an EXACT post-mask overlap, and `runner.rs` reads it
+        // straight into the trial transcript as the measured reason a terminal
+        // was quarantined — putting a lower bound in that field would publish
+        // an unmeasured number as a measured one. The runner already handles a
+        // quarantine with no condemned row: it reports `None` rather than
+        // guessing, which is the honest answer here.
+        let condemned_by_overlap = match *overlap {
+            OverlapMeasure::Measured(overlap_mm) => {
+                let exceeds =
+                    initial_overlap_exceeds_cutoff(overlap_mm, cutoff, distance(seed.p0, seed.p1));
+                if exceeds {
+                    condemned.push(CondemnedInitialStub {
+                        terminal: seed.terminal,
+                        key: *key,
+                        remaining_inside_axis_mm: overlap_mm,
+                    });
+                }
+                exceeds
+            }
+            OverlapMeasure::NearParallelLowerBound {
+                overlap_mm,
+                near_parallel,
+            } => {
+                uncertain_overlap.push(UncertainInitialStub {
+                    terminal: seed.terminal,
+                    key: *key,
+                    lower_bound_inside_axis_mm: overlap_mm,
+                    near_parallel,
+                });
+                true
+            }
+        };
         if condemned_by_overlap || refusal.is_some() {
             forest.quarantine(*key)?;
         }
@@ -973,6 +1089,7 @@ pub(crate) fn build_initial_contacts(
         routing_order,
         terminals,
         condemned,
+        uncertain_overlap,
         contact_attestation_digest: attestation.digest,
         attested_contacts: contact_count - unattested.len(),
         unattested,
@@ -1437,6 +1554,7 @@ fn attestation_digest(
     digest.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_initial_overlaps(
     seeds: &[StubSeed],
     axis_batch: &AxisBatchInput,
@@ -1445,7 +1563,8 @@ fn classify_initial_overlaps(
     interval_cap: usize,
     contact_depth_mm: f64,
     penetration_limits: PenetrationBatchLimits,
-) -> Result<(Vec<f64>, usize, PenetrationBatchMeter), InitialContactError> {
+    census_near_parallel: &[u32],
+) -> Result<(Vec<OverlapMeasure>, usize, PenetrationBatchMeter), InitialContactError> {
     let mut overlaps = Vec::new();
     overlaps
         .try_reserve_exact(seeds.len())
@@ -1459,7 +1578,7 @@ fn classify_initial_overlaps(
     // assumed to cover it.
     let (intervals, meter) = geometry
         .surface()
-        .penetration_intervals_batch_bounded_metered(
+        .penetration_intervals_batch_bounded_metered_classified(
             &axis_batch.p0,
             &axis_batch.p1,
             &axis_batch.r0,
@@ -1472,13 +1591,64 @@ fn classify_initial_overlaps(
             penetration_limits,
         )
         .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
-    for (seed, rows) in seeds.iter().zip(intervals) {
+    // The row count, checked rather than assumed. `zip` TRUNCATES silently, so
+    // a short result would drop seeds out of `overlaps` and the quarantine walk
+    // downstream would simply not see them — a screen that reports success
+    // having classified nothing.
+    if intervals.rows.len() != seeds.len() || intervals.near_parallel.len() != seeds.len() {
+        return Err(InitialContactError::NativeQuery(format!(
+            "fill pass returned {} interval rows and {} tallies for {} seeds",
+            intervals.rows.len(),
+            intervals.near_parallel.len(),
+            seeds.len()
+        )));
+    }
+    // §EXT-1 site 13's LOCKSTEP CHECK, made explicitly because nothing else
+    // makes it. `CensusDrift` inside the kernel compares hits, subsegments,
+    // samples and intervals between the two walks; it has never compared the
+    // undecidable tallies. The two walks evaluate the same faces with the same
+    // arithmetic, so a per-row disagreement means the passes saw different
+    // geometry — an outcome nothing downstream could interpret.
+    if !census_near_parallel.is_empty() {
+        if census_near_parallel.len() != intervals.near_parallel.len() {
+            return Err(InitialContactError::NativeQuery(format!(
+                "census tallied {} rows and the fill pass tallied {}",
+                census_near_parallel.len(),
+                intervals.near_parallel.len()
+            )));
+        }
+        for (row, (census, fill)) in census_near_parallel
+            .iter()
+            .zip(&intervals.near_parallel)
+            .enumerate()
+        {
+            if census != fill {
+                return Err(InitialContactError::NativeQuery(format!(
+                    "near-parallel tally drift on row {row}: census {census}, fill pass {fill}"
+                )));
+            }
+        }
+    }
+    for ((seed, rows), near_parallel) in seeds
+        .iter()
+        .zip(intervals.rows)
+        .zip(intervals.near_parallel)
+    {
         let length = distance(seed.p0, seed.p1);
-        overlaps.push(remaining_illegal_axis_overlap(
-            &rows,
-            length,
-            contact_depth_mm,
-        ));
+        let overlap_mm = remaining_illegal_axis_overlap(&rows, length, contact_depth_mm);
+        // §EXT-1 site 14. A skipped crossing UNDERSTATES the interval set, so
+        // the number just computed is a LOWER bound on this seed's illegal
+        // overlap rather than a measurement of it. The type says so; nothing
+        // reduces it to a bare `f64` that the cutoff comparison would read as a
+        // small, therefore acceptable, overlap.
+        overlaps.push(if near_parallel > 0 {
+            OverlapMeasure::NearParallelLowerBound {
+                overlap_mm,
+                near_parallel,
+            }
+        } else {
+            OverlapMeasure::Measured(overlap_mm)
+        });
     }
     Ok((overlaps, 1, meter))
 }
@@ -2491,11 +2661,11 @@ mod tests {
         }
         let census = table
             .surface
-            .penetration_census_batch(&p0s, &p1s, &r0s, &r1s, 8, false)
+            .penetration_census_batch_classified(&p0s, &p1s, &r0s, &r1s, 8, false)
             .unwrap();
         let penetration = table
             .surface
-            .penetration_intervals_batch_census_limits(
+            .penetration_intervals_batch_census_limits_classified(
                 &census,
                 8,
                 interval_cap,
@@ -2609,10 +2779,10 @@ mod tests {
             usize::try_from(policy.initial_axis_majority_cap().diagnostic().get()).unwrap();
         let majority_step = policy.initial_axis_majority_step_mm().diagnostic().get();
         let census = surface
-            .penetration_census_batch(&p0s, &p1s, &r0s, &r1s, 8, false)
+            .penetration_census_batch_classified(&p0s, &p1s, &r0s, &r1s, 8, false)
             .unwrap();
         let penetration = surface
-            .penetration_intervals_batch_census_limits(
+            .penetration_intervals_batch_census_limits_classified(
                 &census,
                 8,
                 interval_cap,
@@ -2834,9 +3004,26 @@ mod tests {
                 .surface()
                 .penetration_intervals_batch_worst_case_limits(boundary_seeds.len(), 8, 80, false)
                 .unwrap(),
+            // No census pass ran for this fixture, so there is no tally to hold
+            // the fill pass against; the lockstep check is skipped on an empty
+            // slice rather than compared against zeros it was never given.
+            &[],
         )
         .unwrap();
         assert_eq!(batch_count, 1);
+        // The fixture is a clean stack: every row must be `Measured`, and the
+        // boundary numbers below are unchanged by the migration. A
+        // `NearParallelLowerBound` here would mean this test is measuring
+        // something other than the boundary it names.
+        let boundary_overlaps = boundary_overlaps
+            .into_iter()
+            .map(|overlap| match overlap {
+                OverlapMeasure::Measured(overlap_mm) => overlap_mm,
+                OverlapMeasure::NearParallelLowerBound { .. } => {
+                    panic!("the boundary fixture must measure every row: {overlap:?}")
+                }
+            })
+            .collect::<Vec<f64>>();
         assert!(boundary_overlaps.iter().any(|overlap| *overlap > 0.0));
         assert!(boundary_overlaps
             .iter()
@@ -3226,6 +3413,138 @@ mod tests {
         assert!(
             crate::designed_embed::tip_growth_ladder_for_test(max_radius_mm, max_radius_mm)
                 .is_empty()
+        );
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 14, justification 14
+    /// — a seed whose illegal overlap can only be BOUNDED FROM BELOW is
+    /// condemned unconditionally, and is recorded as a bound rather than as a
+    /// measurement.**
+    ///
+    /// # The input class, and why a bare `f64` could not carry it
+    ///
+    /// The plant is the §O4 counterexample triangle `(0,0,0) (2,0,0) (0,2,0)`,
+    /// for which `e1 = (2,0,0)` and `e2 = (0,2,0)` give `det = -4 * dv_z`
+    /// exactly; a stub axis running almost in that plane puts `det` at
+    /// `-8e-15`, inside `DET_EPS = 1e-14` and nonzero.
+    ///
+    /// The interval set that comes back is EMPTY, so
+    /// `remaining_illegal_axis_overlap` computes `0.0` — and the ONE consumer
+    /// decision, `initial_overlap_exceeds_cutoff`, condemns on a LARGE overlap.
+    /// An understated overlap therefore moves a seed from condemned to KEPT:
+    /// absorption in the permissive direction, and the reason no sentinel value
+    /// is invented here. `0.0` is a perfectly ordinary overlap; the fact that
+    /// separates this row from a genuinely clean one is not a number at all.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the point of the pin is BIT equality: the planted row and its clean twin \
+              must carry the same f64, and the strict sentinel must be exactly the value \
+              every `>= threshold` screen in the module fails against. A tolerance here \
+              would let the distinction this test exists to measure slip through."
+    )]
+    fn a_seed_whose_overlap_is_only_a_lower_bound_is_condemned_and_recorded_as_one() {
+        let mesh = plinth_mesh::Mesh::new(
+            vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology =
+            plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::ExactBits).unwrap();
+        let surface = geom_kernel::NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+
+        let finite = |value: f64| Finite::new(value).unwrap();
+        let positive = |value: f64| PositiveFinite::new(value).unwrap();
+        let seed = |p1_z: f64| StubSeed {
+            terminal: 0,
+            seat_mm: [0.4, 0.5, -1.0e-16],
+            p0: [finite(0.4), finite(0.5), finite(-1.0e-16)],
+            p1: [finite(1.4), finite(0.5), finite(p1_z)],
+            law_r0: positive(0.05),
+            r0: positive(0.05),
+            r1: positive(0.05),
+            carried_mm2: finite(1.0),
+            specialized: false,
+            exterior_probe: [0.4, 0.5, 1.0],
+            tip_clamped_at_max: false,
+        };
+        let classify = |seed: StubSeed| {
+            let seeds = vec![seed];
+            let axis = axis_batch_input(&seeds).unwrap();
+            let limits = geometry
+                .surface()
+                .penetration_intervals_batch_worst_case_limits(1, 8, 80, false)
+                .unwrap();
+            let (overlaps, _batches, _meter) = classify_initial_overlaps(
+                &seeds,
+                &axis,
+                &geometry,
+                m0_constants()
+                    .unwrap()
+                    .placeholders()
+                    .initial_axis_majority_step_mm()
+                    .diagnostic()
+                    .get(),
+                80,
+                m0_constants()
+                    .unwrap()
+                    .placeholders()
+                    .default_contact_depth_mm()
+                    .diagnostic()
+                    .get(),
+                limits,
+                &[],
+            )
+            .unwrap();
+            overlaps[0]
+        };
+
+        // NOT SIMPLY ALWAYS ON: an axis exactly in the plane is a genuine prune
+        // (`det == 0.0`), and it classifies as a measurement.
+        assert_eq!(
+            classify(seed(-1.0e-16)),
+            OverlapMeasure::Measured(0.0),
+            "the exactly-parallel twin must MEASURE, and measure zero overlap"
+        );
+
+        // The planted twin: same empty interval set, same 0.0, and it is a
+        // BOUND rather than a measurement.
+        let planted = classify(seed(1.9e-15));
+        let OverlapMeasure::NearParallelLowerBound {
+            overlap_mm,
+            near_parallel,
+        } = planted
+        else {
+            panic!("the planted seed must be a lower bound, not {planted:?}");
+        };
+        assert!(near_parallel > 0, "the plant must fire");
+        assert_eq!(
+            overlap_mm, 0.0,
+            "and the number it carries must be the SAME 0.0 the clean twin \
+             measured, or this test is not measuring the distinction it names"
+        );
+
+        // The condemnation is unconditional: the cutoff comparison the measured
+        // arm runs would have KEPT this seed.
+        let cutoff = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_illegal_len_mm()
+            .diagnostic()
+            .get();
+        assert!(
+            !initial_overlap_exceeds_cutoff(overlap_mm, cutoff, 1.0),
+            "NON-VACUITY: read as a measurement this overlap is comfortably \
+             under the cutoff, so only the type can condemn it"
         );
     }
 }

@@ -1018,6 +1018,22 @@ pub enum AnchorSeatRefusalReason {
     /// candidate-local self-hit, not a malformed global anchor authority.
     ZeroLengthSnappedAnchor,
     NearerNonExteriorObstruction,
+    /// The first-hit ray for this candidate reached a face whose crossing the
+    /// arithmetic could not decide (`0 < |det| <= DET_EPS`,
+    /// `geom_kernel::RayTriangleClass::NearParallel`).
+    ///
+    /// `docs/specs/geometry-adjudication.md` §EXT-1 site 4. The seat this
+    /// candidate would produce is where a support ATTACHES — emitted bytes —
+    /// and it is read off the ray's FIRST crossing. An undecidable face
+    /// contributes no crossing, so the failure direction is a first hit that
+    /// is really the second: the support gets seated past a surface that was
+    /// in the way, or past a non-exterior obstruction the
+    /// [`Self::NearerNonExteriorObstruction`] screen exists to catch.
+    ///
+    /// The refusal is CANDIDATE-granular. The search continues over the
+    /// remaining candidates, so one uncertain ray costs one seat, not the
+    /// anchor.
+    NearParallelFirstHit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1263,10 +1279,11 @@ fn discover_anchor_seats_bound(
         .iter()
         .map(|candidate| sub(candidate.sample.point_mm, stub_end))
         .collect();
-    let (offsets, ts, faces) = geometry
+    let cast = geometry
         .surface
-        .cast_rays(&origins, &directions, RAY_T_MAX)
+        .cast_rays_classified(&origins, &directions, RAY_T_MAX)
         .map_err(|error| AnchorSearchError::NativeQuery(error.to_string()))?;
+    let (offsets, ts, faces) = (cast.offsets, cast.t_all, cast.face_all);
     let exterior = geometry.surface.exterior_face_mask();
     let config_fingerprint = config.fingerprint();
     let mut seats = Vec::new();
@@ -1274,7 +1291,14 @@ fn discover_anchor_seats_bound(
         let start = offsets[ordinal] as usize;
         let end = offsets[ordinal + 1] as usize;
         let mut observed_first_hit_t = None;
-        let refusal = if start >= end {
+        // §EXT-1 site 4. Checked BEFORE the crossing list is read: an
+        // undecidable face contributes no crossing, so this candidate's list
+        // is incomplete in an unknown direction and `ts[start]` may not be the
+        // first crossing at all. Reading it anyway is how a seat lands past a
+        // surface nobody measured. Refuse the candidate; the loop continues.
+        let refusal = if cast.near_parallel[ordinal] != 0 {
+            Some(AnchorSeatRefusalReason::NearParallelFirstHit)
+        } else if start >= end {
             Some(AnchorSeatRefusalReason::NoFirstHit)
         } else {
             let face = faces[start];
@@ -1823,9 +1847,9 @@ fn validate_anchor_feet_bound(
         .iter()
         .map(|(_, request)| config.ball_factor_foot.get() * request.final_rootward_radius_mm.get())
         .collect();
-    let (breached, thickness, poke) = geometry
+    let breach = geometry
         .surface
-        .sphere_breach(
+        .sphere_breach_classified(
             &centers,
             &radii,
             config.ball_breach_eps_mm.get(),
@@ -1833,8 +1857,24 @@ fn validate_anchor_feet_bound(
             FOOT_BREACH_CONE_RAYS,
         )
         .map_err(|error| AnchorSearchError::NativeQuery(error.to_string()))?;
+    let (breached, thickness, poke) = (
+        breach.breached,
+        breach.thickness_mm,
+        breach.protrusion_mm,
+    );
     for (batch_index, (ordinal, request)) in valid.into_iter().enumerate() {
-        slots[ordinal] = Some(if breached[batch_index] {
+        // §EXT-1 site 5: an uncertain row is treated as BREACHED.
+        //
+        // `cone_thickness` takes a MINIMUM over the cone's rays, so a skipped
+        // crossing can only leave the reported thickness too LARGE — and too
+        // large reads as "no breach", which admits the foot. Admission is the
+        // emitted-byte direction, so the uncertainty has to land on the
+        // rejection side. It reuses `FootBallBreached` rather than a new
+        // reason: the disposition IS "treated as breached", and the sealed
+        // transcript's refusal-reason table is not moved for a row that
+        // refuses for the reason it already names.
+        let breached = breached[batch_index] || breach.near_parallel[batch_index] != 0;
+        slots[ordinal] = Some(if breached {
             AnchorFootOutcome::Refused(AnchorFootRefusal {
                 provenance: request.seat.provenance,
                 reason: AnchorFootRefusalReason::FootBallBreached,
@@ -2891,6 +2931,125 @@ mod tests {
         );
     }
 
+    /// §EXT-1 site 4: a candidate whose first-hit ray reached an undecidable
+    /// face is refused by name, and the seat it would have produced is not
+    /// emitted.
+    ///
+    /// **The planted configuration.** The stub sits at `x = 0` — on the two
+    /// stacked shells' own `x = 0` wall — and the sample sits one exact
+    /// `1e-16 mm` off it, so the ray direction is `(1e-16, 0, -10.5)`: a
+    /// straight drop that leans into that wall by 1e-17 radians. The
+    /// determinant Möller forms against a face in an `x = const` plane is
+    /// `dv_x` times twice the triangle's area, and the wall triangles here are
+    /// 10 mm by 2 mm, so `|det| = 1e-16 * 20 = 2e-15` — nonzero, and inside
+    /// `DET_EPS = 1e-14`.
+    ///
+    /// **The input class now answered differently:** a first-hit ray that
+    /// grazes along a wall it is nearly touching. The refused candidate has a
+    /// perfectly ordinary-looking first crossing waiting for it — the fixture
+    /// asserts below that the crossing list is non-empty — and that crossing
+    /// is what would have been seated. An undecidable face contributes no
+    /// crossing, so what looks like the FIRST hit may be the second, and the
+    /// support would attach past a surface that was in the way. Refusing the
+    /// candidate is the only answer that does not seat on an unmeasured
+    /// assumption.
+    #[test]
+    fn an_undecidable_first_hit_ray_refuses_its_candidate_instead_of_seating_on_it() {
+        let (mesh, topology, surface) = stacked_shells_parts(4.0, 6.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let config = AnchorSearchConfig::current().unwrap();
+        let sidecar = vec![0.25; surface.nfaces()];
+        let (_, base, _) = bindings();
+
+        // 1e-16 is exactly representable, and `0.0 - 1e-16` is exact, so the
+        // ray direction below carries no rounding of its own.
+        const GRAZE_MM: f64 = 1.0e-16;
+        let stub = [0.0, 3.0, 12.5];
+        let point = [GRAZE_MM, 3.0, 2.0];
+        let terminal =
+            AnchorTerminalBinding::new(base.terminal_id(), base.stub(), stub.map(f));
+
+        // The fixture states both of its properties before discovery is asked
+        // about either: the ray reaches undecidable faces, AND it has a
+        // crossing that a seat would otherwise be read off.
+        let direction = [point[0] - stub[0], point[1] - stub[1], point[2] - stub[2]];
+        let cast = surface
+            .cast_rays_classified(&[stub], &[direction], RAY_T_MAX)
+            .unwrap();
+        assert!(
+            cast.near_parallel[0] > 0,
+            "the planted ray must actually reach the undecidable band, or this test proves \
+             nothing; tally = {:?}",
+            cast.near_parallel
+        );
+        assert!(
+            cast.offsets[1] > cast.offsets[0],
+            "and it must have a first crossing, so the refusal is giving something up rather \
+             than restating an empty result"
+        );
+
+        let sample = SurfaceAnchorSample {
+            source_face_id: 2,
+            point_mm: point,
+            delicacy: 0.25,
+        };
+        let result = discover_anchor_seats(
+            &contact(10.0),
+            terminal,
+            &[sample],
+            Some(&sidecar),
+            config,
+            &geometry,
+        )
+        .unwrap();
+
+        assert!(
+            result.seats().is_empty(),
+            "an undecidable first-hit ray must not produce a seat"
+        );
+        assert_eq!(
+            result.refusals().len(),
+            1,
+            "one candidate, one refusal: {:?}",
+            result.refusals()
+        );
+        assert_eq!(
+            result.refusals()[0].reason,
+            AnchorSeatRefusalReason::NearParallelFirstHit,
+            "the refusal must name the uncertainty rather than borrow another screen's name"
+        );
+        assert_eq!(
+            result.refusals()[0].sample_index, 0,
+            "and it must name the candidate it refused, so the search can go on without it"
+        );
+
+        // The control: the SAME fixture, the same sidecar, a stub 5 mm inside
+        // the wall so no face is undecidable. That candidate still seats, so
+        // the refusal above is the uncertainty and not the fixture.
+        let inside_stub = [5.0, 3.0, 12.5];
+        let inside_terminal =
+            AnchorTerminalBinding::new(base.terminal_id(), base.stub(), inside_stub.map(f));
+        let inside = discover_anchor_seats(
+            &contact(10.0),
+            inside_terminal,
+            &[SurfaceAnchorSample {
+                source_face_id: 2,
+                point_mm: [5.0, 3.0, 2.0],
+                delicacy: 0.25,
+            }],
+            Some(&sidecar),
+            config,
+            &geometry,
+        )
+        .unwrap();
+        assert_eq!(
+            inside.seats().len(),
+            1,
+            "a decided ray on the same geometry still seats: {:?}",
+            inside.refusals()
+        );
+    }
+
     /// The cone pair at the top of this file is RESULT-CHANGING, which is what
     /// its comment now says and what its comment used to deny.
     ///
@@ -2931,8 +3090,8 @@ mod tests {
         let radii = vec![1.5];
         let eps_mm = 0.05;
 
-        let (frozen, thickness, _) = surface
-            .sphere_breach(
+        let frozen_breach = surface
+            .sphere_breach_classified(
                 &centers,
                 &radii,
                 eps_mm,
@@ -2940,6 +3099,36 @@ mod tests {
                 FOOT_BREACH_CONE_RAYS,
             )
             .unwrap();
+        // MEASURED, and reported to the owner as a finding rather than tuned
+        // away (`docs/specs/geometry-adjudication.md` §EXT-1 site 5).
+        //
+        // Four of this row's cone-ray face evaluations land in the undecidable
+        // band — on a fixture whose geometry is exactly axis-aligned and
+        // carries no geometric ambiguity at all. The cause is the kernel's own
+        // cone construction, not the rib. `cone_dirs` builds azimuth `k` as
+        // `e1*cos(ph) + e2*sin(ph)` with `ph = 2*pi*k/n`; for this axis `e2` is
+        // the `x` direction, so a ray's `x` component is `sin(ph)*sin(25 deg)`.
+        // At `ph = pi` (`k = n/2`) `sin(pi)` is `1.2246467991473532e-16`, not
+        // zero, giving `x = 5.1755e-17`; against the rib's `x = +/-0.5` walls
+        // (`2A = 20`) that is a determinant of `1.0351e-15`, inside
+        // `DET_EPS = 1e-14`. Two walls, two triangles each, one ray: four.
+        //
+        // Those walls are EXACTLY parallel to that ray. Nothing about the
+        // crossing is uncertain in the geometry; the band is populated by the
+        // residue of a trig call. The same four appear below for `n = 2`,
+        // where `k = 1` is the same `ph = pi`, and for `n = 8`, where `k = 4`
+        // is.
+        //
+        // These are pinned, not asserted-to-zero, because the number IS the
+        // finding: it is what makes `validate_anchor_feet_bound` treat this
+        // foot as breached, and it is what the owner has to rule on.
+        assert_eq!(
+            frozen_breach.near_parallel,
+            vec![4],
+            "the undecidable tally on an exactly axis-aligned fixture is the measurement \
+             this site was retargeted to produce"
+        );
+        let (frozen, thickness) = (frozen_breach.breached, frozen_breach.thickness_mm);
         assert!(
             frozen[0],
             "the frozen cone reaches the rib's side wall and reports a breach"
@@ -2953,9 +3142,13 @@ mod tests {
 
         // Half-angle alone: collapse the cone onto its axis and the same ball
         // on the same geometry reads CLEAR.
-        let (axis_only, _, _) = surface
-            .sphere_breach(&centers, &radii, eps_mm, 0.0, FOOT_BREACH_CONE_RAYS)
+        let axis_only = surface
+            .sphere_breach_classified(&centers, &radii, eps_mm, 0.0, FOOT_BREACH_CONE_RAYS)
             .unwrap();
+        // `half_deg = 0` collapses every ray onto the axis, whose `x` is
+        // exactly zero: `ExactParallel`, a genuine prune, and no tally.
+        assert_eq!(axis_only.near_parallel, vec![0]);
+        let axis_only = axis_only.breached;
         assert!(
             !axis_only[0],
             "half-angle is result-changing: 0 deg must clear what 25 deg breaches"
@@ -2963,9 +3156,11 @@ mod tests {
 
         // Ray count alone: keep the 25 deg opening but sample only the two
         // azimuths that look along Y, and the same ball reads CLEAR again.
-        let (two_rays, _, _) = surface
-            .sphere_breach(&centers, &radii, eps_mm, FOOT_BREACH_HALF_DEG, 2)
+        let two_rays = surface
+            .sphere_breach_classified(&centers, &radii, eps_mm, FOOT_BREACH_HALF_DEG, 2)
             .unwrap();
+        assert_eq!(two_rays.near_parallel, vec![4], "same `ph = pi` residue, same four");
+        let two_rays = two_rays.breached;
         assert!(
             !two_rays[0],
             "ray count is result-changing: 2 rays must clear what 8 rays breach"

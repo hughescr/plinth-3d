@@ -9,7 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::vec3::{dot, norm, scale, sub};
-use geom_kernel::{NativeSurface, PenetrationBatchError, PenetrationBatchLimits};
+use geom_kernel::{
+    NativeSurface, PenetrationBatchError, PenetrationBatchLimits, SegmentClearanceClassified,
+};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_mesh::FaceTopology;
 use serde::Serialize;
@@ -37,6 +39,115 @@ use crate::{
 };
 
 const HEIGHT_TOLERANCE_MM: f64 = 1e-9;
+
+/// The ONE place a classified clearance row becomes the `f64` this module's
+/// screens compare against — `docs/specs/geometry-adjudication.md` §EXT-1
+/// sites 7 (`support.brace.clearance`) and 9 (`support.brace.final_gap`).
+///
+/// # Why a sentinel is safe here, when `f64::INFINITY` was not
+///
+/// The retired `segment_clearance_excluding` float shim encoded "no
+/// measurement" as `f64::INFINITY` — the most permissive value representable,
+/// which satisfies every `>= threshold` screen this module runs. That is the
+/// exact defect this migration removes: an unmeasured row was reading as an
+/// enormous, definitely-fine gap.
+///
+/// This function encodes every non-affirming state as `f64::NEG_INFINITY`, the
+/// STRICTEST value representable, which FAILS every `>= threshold` screen. Both
+/// of this module's thresholds are lower bounds on an acceptable gap
+/// (`>= 0.0` for acceptance, `>= midpoint_trusted_clearance_mm` for trusting
+/// the cheap midpoint proxy over the exact penetration walk), so the direction
+/// is uniform and the `debug_assert` below pins the encoding to the kernel's
+/// own [`SegmentClearanceClassified::clears`] predicate rather than restating
+/// it by hand.
+///
+/// # The three states, and the policy each gets
+///
+/// * `Measured` — the number, unchanged. Every row that used to decide still
+///   decides on the identical `f64`, so no measured verdict moves.
+/// * `UpperBound` — does NOT clear. The walk skipped an undecidable pierce
+///   candidate, so the true clearance is AT MOST this number and may be
+///   negative. Both consumers here can end in an EMITTED brace, so a bound that
+///   cannot affirm a gap must not be allowed to affirm one.
+/// * `Unmeasured` — does NOT clear. An untested row has earned nothing. This is
+///   the direction the float shim got backwards.
+///
+/// Sites 7 and 9 are both acceptance screens (site 7 grades a candidate
+/// tournament whose winners are emitted; site 9 is the final gap gate), so
+/// neither may take the pruning-stage latitude EXT-2 allows a stage whose
+/// survivors a later refusing stage retests.
+/// Which spheres this brace pass must treat as breaching —
+/// `docs/specs/geometry-adjudication.md` §EXT-1 site 6
+/// (`support.brace.candidate_breach`).
+///
+/// A sphere with a nonzero tally is BREACHED whatever `breached` says, so the
+/// candidate is dropped. `cone_thickness` takes a MINIMUM over the sphere's
+/// cone rays, so a skipped crossing can only leave the reported wall thickness
+/// too LARGE, and too large is the permissive direction for the `t < r - eps`
+/// breach test — the direction that admits a foot buried in the model.
+/// Dropping is the prune side: a dropped candidate costs coverage, and missing
+/// coverage is refused downstream, so the load path stays closed.
+fn breached_or_uncertain(batch: &geom_kernel::SphereBreachClassified) -> Vec<bool> {
+    batch
+        .breached
+        .iter()
+        .zip(batch.near_parallel.iter())
+        .map(|(&breached, &near_parallel)| breached || near_parallel > 0)
+        .collect()
+}
+
+/// WHICH of the three classified states produced a row's decision number.
+///
+/// This exists for the same reason `RefusalGapRow::axis_transit_illegal` does:
+/// a reader who takes a non-affirming row's `−inf` for a measured shortfall
+/// reads a sentinel as a measurement. The refusal disclosure names the state
+/// instead of printing the sentinel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ClearanceEvidence {
+    /// A real two-sided gap. The printed number is a measurement.
+    #[default]
+    Measured,
+    /// The walk measured, but skipped an undecidable pierce candidate, so its
+    /// number is only an upper bound and cannot affirm a gap.
+    UpperBound,
+    /// No part of the axis was tested; there is no number at all.
+    Unmeasured,
+}
+
+impl ClearanceEvidence {
+    /// Read the state off a classified row.
+    fn of(row: SegmentClearanceClassified) -> Self {
+        match row {
+            SegmentClearanceClassified::Measured { .. } => Self::Measured,
+            SegmentClearanceClassified::UpperBound { .. } => Self::UpperBound,
+            SegmentClearanceClassified::Unmeasured(_) => Self::Unmeasured,
+        }
+    }
+
+    /// How a refusal disclosure names this state.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::UpperBound => "near-parallel-upper-bound",
+            Self::Unmeasured => "unmeasured",
+        }
+    }
+}
+
+fn brace_decision_clearance_mm(row: SegmentClearanceClassified) -> f64 {
+    let value = match row {
+        SegmentClearanceClassified::Measured { clearance_mm, .. } => clearance_mm,
+        SegmentClearanceClassified::UpperBound { .. } | SegmentClearanceClassified::Unmeasured(_) => {
+            f64::NEG_INFINITY
+        }
+    };
+    debug_assert_eq!(
+        value >= 0.0,
+        row.clears(false, false),
+        "the sentinel encoding must agree with the kernel's own clears predicate"
+    );
+    value
+}
 /// `rungs_that_fit`'s minimum spacing between adjacent evenly-placed rungs
 /// (and between the end rungs and the span's own ends). `n` rungs divide a
 /// span into `n + 1` equal gaps of `span / (n + 1)`; requiring each gap be at
@@ -1438,8 +1549,8 @@ fn gather_candidates(
     let breached = if projected_model.is_empty() {
         Vec::new()
     } else {
-        surface
-            .sphere_breach(
+        let batch = surface
+            .sphere_breach_classified(
                 &projected_model
                     .iter()
                     .map(|candidate| candidate.point)
@@ -1452,8 +1563,23 @@ fn gather_candidates(
                 FOOT_BREACH_HALF_DEG,
                 FOOT_BREACH_CONE_RAYS,
             )
-            .map_err(|error| BraceError::NativeQuery(error.to_string()))?
-            .0
+            .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+        // `docs/specs/geometry-adjudication.md` §EXT-1 site 6
+        // (`support.brace.candidate_breach`): an UNDECIDABLE sphere counts as
+        // BREACHED, so the candidate is dropped.
+        //
+        // Why that is the conservative side here. `cone_thickness` takes a
+        // MINIMUM over the sphere's cone rays, so a skipped crossing can only
+        // make the reported wall thickness too LARGE -- and too large is the
+        // permissive direction for a breach test, i.e. the direction that
+        // silently ADMITS a foot buried in the model. Dropping the candidate
+        // is the prune side: a dropped candidate costs coverage, and missing
+        // coverage is itself refused downstream, so the load path stays closed.
+        //
+        // Per-sphere tallies are `batch.near_parallel`; the run-rate question
+        // is answered by `geom_kernel::telemetry` (`kernel.walk.collecting`)
+        // per the owner ruling that replaced the §EXT-4 per-model ledger.
+        breached_or_uncertain(&batch)
     };
     retain_projected_model_survivors(
         &mut projected_model,
@@ -1874,11 +2000,17 @@ fn evaluate_candidates(
     let placement_gap_mm = config
         .contact_policy(contact::ClearanceStage::Placement)
         .demanded_gap_mm;
+    // §EXT-1 site 7 (`support.brace.clearance`). Migrated off the retired
+    // `segment_clearance_excluding` float shim onto the classified typed form.
+    // `brace_decision_clearance_mm` states the policy: `UpperBound` does not
+    // clear, `Unmeasured` does not clear. The `Unmeasured` half is a real
+    // behaviour change and it is the point of the migration — the shim reported
+    // an untested row as `INFINITY`, which passed every screen below.
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
         surface
-            .segment_clearance_excluding(
+            .segment_clearance_excluding_classified(
                 &p0,
                 &p1,
                 &r0,
@@ -1889,7 +2021,9 @@ fn evaluate_candidates(
                 &excluded,
             )
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
-            .0
+            .into_iter()
+            .map(brace_decision_clearance_mm)
+            .collect::<Vec<f64>>()
     };
     let viable = candidate_revalidation(
         surface,
@@ -2067,7 +2201,7 @@ fn axis_illegal_rows(
         return Ok(BTreeSet::new());
     }
     let (n_offset_rays, majority_step_mm) = transit_screen_sample_params(config);
-    let intervals = surface.penetration_intervals_batch_bounded(
+    let intervals = surface.penetration_intervals_batch_bounded_classified(
         &interval_indices
             .iter()
             .map(|index| p0[*index])
@@ -2091,10 +2225,24 @@ fn axis_illegal_rows(
         false,
         penetration_limits,
     )?;
+    // §EXT-1 site 8 (`support.brace.axis_penetration`): an UNDECIDABLE row is
+    // ILLEGAL.
+    //
+    // A skipped crossing UNDERSTATES the interval set, so this row's illegal
+    // overlap is a LOWER bound — the true overlap can only be equal or higher.
+    // The test below condemns a row when an interval is long enough, so an
+    // understated interval set can only move a row from illegal to legal: the
+    // permissive direction, and the one that ships a brace transiting the
+    // model. Condemning the row outright is the refusal side. Per-row tallies
+    // are `intervals.near_parallel`, parallel to `interval_indices`.
     Ok(interval_indices
         .into_iter()
-        .zip(intervals)
-        .filter_map(|(index, intervals)| {
+        .zip(intervals.rows)
+        .zip(intervals.near_parallel)
+        .filter_map(|((index, intervals), near_parallel)| {
+            if near_parallel > 0 {
+                return Some(index);
+            }
             let length = norm(sub(p1[index], p0[index]));
             let lo = inset0[index];
             let hi = length - inset1[index];
@@ -2355,6 +2503,12 @@ pub(crate) struct RefusalGapRow {
     /// member's axis passes through material away from its seat. `gap_mm` is
     /// then the `−min_illegal_len_mm` sentinel and carries no distance.
     pub(crate) axis_transit_illegal: bool,
+    /// Which classified state the distance walk returned for this row. When it
+    /// is not [`ClearanceEvidence::Measured`], `distance_clearance_mm` is the
+    /// strict `−inf` sentinel and NOT a shortfall — the row refused because the
+    /// walk could not affirm a gap, which is a different fact from a measured
+    /// one, and the render says so rather than printing the sentinel.
+    pub(crate) distance_evidence: ClearanceEvidence,
     /// The radii the resize assigned to this member, in millimetres — the
     /// deciding input the refutation proved cannot be predicted at candidacy.
     pub(crate) terminal_radius_mm: f64,
@@ -2379,7 +2533,18 @@ impl RefusalGapRow {
             self.member.generation(),
             if self.refusable { "" } else { "!" },
         );
-        if self.axis_transit_illegal {
+        if self.distance_evidence != ClearanceEvidence::Measured {
+            // No measured gap exists for this row, so no number is printed for
+            // one. `-inf` here is the strict sentinel that made the row refuse,
+            // and rendering it as a shortfall would be the sentinel-as-
+            // measurement confusion this struct exists to prevent.
+            format!(
+                "{key}={}@r{:.6}/{:.6}mm",
+                self.distance_evidence.label(),
+                self.terminal_radius_mm,
+                self.rootward_radius_mm,
+            )
+        } else if self.axis_transit_illegal {
             format!(
                 "{key}=axis-transit(distance_clearance={:+.6}mm)@r{:.6}/{:.6}mm",
                 self.distance_clearance_mm, self.terminal_radius_mm, self.rootward_radius_mm,
@@ -2434,6 +2599,7 @@ impl FinalPassRefusalAccounting {
                     gap_mm: row.verdict_mm,
                     distance_clearance_mm: row.distance_clearance_mm,
                     axis_transit_illegal: row.axis_transit_illegal,
+                    distance_evidence: row.distance_evidence,
                     terminal_radius_mm,
                     rootward_radius_mm,
                     refusable: refused.contains(&row.member),
@@ -2968,10 +3134,25 @@ fn exact_clearance_rows_detailed(
     let final_gap_mm = config
         .contact_policy(contact::ClearanceStage::Final)
         .demanded_gap_mm;
-    let mut clearance = surface
-        .segment_clearance_excluding(&p0, &p1, &r0, &r1, final_gap_mm, &zero, &zero, &excluded)
-        .map_err(|error| BraceError::NativeQuery(error.to_string()))?
-        .0;
+    // §EXT-1 site 9 (`support.brace.final_gap`). Migrated off the retired
+    // `segment_clearance_excluding` float shim onto the classified typed form.
+    // This is the REFUSING pass, so `brace_decision_clearance_mm`'s policy
+    // (`UpperBound` does not clear, `Unmeasured` does not clear) is mandatory
+    // here rather than merely allowed: the shim's `INFINITY` for an untested
+    // row cleared the only refusing gap in the engine.
+    let clearance_rows = surface
+        .segment_clearance_excluding_classified(
+            &p0, &p1, &r0, &r1, final_gap_mm, &zero, &zero, &excluded,
+        )
+        .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+    let evidence = clearance_rows
+        .iter()
+        .map(|row| ClearanceEvidence::of(*row))
+        .collect::<Vec<_>>();
+    let mut clearance = clearance_rows
+        .into_iter()
+        .map(brace_decision_clearance_mm)
+        .collect::<Vec<f64>>();
     // The DISTANCE path's own answer, kept before the transit screen can stamp
     // over it. Nothing branches on this copy; it exists so a disclosure cannot
     // present the transit sentinel as a measured shortfall (`RefusalGapRow`).
@@ -3000,12 +3181,16 @@ fn exact_clearance_rows_detailed(
         .into_iter()
         .zip(distance_clearance)
         .zip(clearance)
+        .zip(evidence)
         .map(
-            |(((member, _), distance_clearance_mm), verdict_mm)| ExactClearanceRow {
-                member,
-                verdict_mm,
-                distance_clearance_mm,
-                axis_transit_illegal: transit_illegal.contains(&member),
+            |((((member, _), distance_clearance_mm), verdict_mm), distance_evidence)| {
+                ExactClearanceRow {
+                    member,
+                    verdict_mm,
+                    distance_clearance_mm,
+                    axis_transit_illegal: transit_illegal.contains(&member),
+                    distance_evidence,
+                }
             },
         )
         .collect())
@@ -3022,6 +3207,10 @@ struct ExactClearanceRow {
     verdict_mm: f64,
     distance_clearance_mm: f64,
     axis_transit_illegal: bool,
+    /// Which classified state produced `distance_clearance_mm`. Anything but
+    /// [`ClearanceEvidence::Measured`] means the number is the strict sentinel,
+    /// not a distance, and the disclosure prints the state instead.
+    distance_evidence: ClearanceEvidence,
 }
 
 /// The verdict column only — byte-identical to what this function returned
@@ -3647,11 +3836,20 @@ mod tests {
         let radii = vec![RADIUS; gaps.len()];
         let zero = vec![0.0; gaps.len()];
 
+        // Migrated to the classified entry point (§EXT-2 name table). Every row
+        // here is a clean flat-table sweep, so every row is `Measured` and no
+        // expected value moves; `clearance_mm()` returning `None` would mean the
+        // fixture stopped measuring, which is a failure worth the panic.
         let graded = |demand: f64| {
             surface
-                .segment_clearance(&p0, &p1, &radii, &radii, demand, &zero, &zero)
+                .segment_clearance_classified(&p0, &p1, &radii, &radii, demand, &zero, &zero)
                 .unwrap()
-                .0
+                .into_iter()
+                .map(|row| {
+                    row.clearance_mm()
+                        .expect("flat-table rows are measured, not one-sided or untested")
+                })
+                .collect::<Vec<f64>>()
         };
         let pruning = graded(placement);
         let refusing = graded(demanded_final);
@@ -5830,19 +6028,26 @@ mod tests {
             .contact_policy(contact::ClearanceStage::Final)
             .demanded_gap_mm;
         let zero = [0.0];
-        let witness = surface
-            .segment_clearance_excluding(
-                &[p0],
-                &[p1],
-                &[RADIUS_MM],
-                &[RADIUS_MM],
-                final_gap_mm,
-                &zero,
-                &zero,
-                &[zone.zone().as_ref()],
-            )
-            .unwrap()
-            .0[0];
+        // Migrated to the classified entry point (§EXT-2 name table). The
+        // production path this witnesses reads its number through
+        // `brace_decision_clearance_mm`, so this reads it the same way: a
+        // one-sided or untested row would land on `-inf` and fail the
+        // non-vacuity assertion below rather than sneak past it as `INFINITY`,
+        // which is precisely what the retired shim would have done here.
+        let witness = brace_decision_clearance_mm(
+            surface
+                .segment_clearance_excluding_classified(
+                    &[p0],
+                    &[p1],
+                    &[RADIUS_MM],
+                    &[RADIUS_MM],
+                    final_gap_mm,
+                    &zero,
+                    &zero,
+                    &[zone.zone().as_ref()],
+                )
+                .unwrap()[0],
+        );
         assert!(
             witness >= 0.1,
             "NON-VACUITY: the buried arm must read WIDE OPEN on the distance \
@@ -6104,8 +6309,10 @@ mod tests {
 
         // NON-VACUITY, from the kernel: at a demand of zero the number IS the
         // true gap, and it sits strictly between the two registered demands.
-        let (true_gap, _) = surface
-            .segment_clearance(
+        // Migrated to the classified entry point (§EXT-2 name table); the row is
+        // a clean flat-table sweep, so it is `Measured` and 0.45 mm is unchanged.
+        let true_gap = surface
+            .segment_clearance_classified(
                 &[[-2.0, 0.0, 0.9]],
                 &[[2.0, 0.0, 0.9]],
                 &[radius_mm],
@@ -6114,7 +6321,13 @@ mod tests {
                 &[0.0],
                 &[0.0],
             )
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                row.clearance_mm()
+                    .expect("the flat-table fixture row is measured")
+            })
+            .collect::<Vec<f64>>();
         assert!(
             (true_gap[0] - 0.45).abs() < 1e-9,
             "the fixture's TRUE gap must be 0.45 mm; the kernel said {}",
@@ -7023,6 +7236,7 @@ mod tests {
             // The distance test PASSED this row by 0.32 mm. Reporting the
             // verdict as a gap would invert the physics.
             distance_clearance_mm: 0.32,
+            distance_evidence: ClearanceEvidence::Measured,
             axis_transit_illegal: true,
             terminal_radius_mm: 0.372_135_701_026_434_6,
             rootward_radius_mm: 0.372_135_701_026_434_6,
@@ -7032,6 +7246,7 @@ mod tests {
             member: MemberKey::transit_test_fixture(377, 2),
             gap_mm: -0.040_503,
             distance_clearance_mm: -0.040_503,
+            distance_evidence: ClearanceEvidence::Measured,
             axis_transit_illegal: false,
             terminal_radius_mm: 1.409_608,
             rootward_radius_mm: 1.409_608,
@@ -7660,5 +7875,279 @@ mod tests {
             digests.push(digest.to_owned());
         }
         assert!(digests.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    // ---------------------------------------------------------------------
+    // `docs/specs/geometry-adjudication.md` §EXT — the near-parallel
+    // dispositions this module owns, each with a PLANTED configuration that
+    // makes the uncertain classification actually fire.
+    //
+    // The plant is the §O4 counterexample triangle `(0,0,0) (2,0,0) (0,2,0)`
+    // with a probe whose direction is almost in its plane. For that triangle
+    // `e1 = (2,0,0)` and `e2 = (0,2,0)`, so `det = -4 * dv_z` exactly, and
+    // `dv_z = 2e-15` puts `det = -8e-15` inside the `DET_EPS = 1e-14` band
+    // while leaving it nonzero — `NearParallel`, not `ExactParallel`.
+    // MEASURED on this tree, not assumed: the assertions below read the
+    // kernel's own classification rather than trusting the arithmetic above.
+    // ---------------------------------------------------------------------
+
+    /// The §O4 counterexample triangle, alone on a surface.
+    fn near_parallel_face() -> NativeSurface {
+        geom_kernel::testkit::build_from_tris(vec![
+            0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, //
+        ])
+    }
+
+    /// A segment along the §O4 ray: `b - a` is `(1, 0, 2e-15)` to within one
+    /// ulp, which is all `det = -4 * dv_z` needs to land in the band.
+    const NP_P0: [f64; 3] = [0.4, 0.5, -1.0e-16];
+    const NP_P1: [f64; 3] = [1.4, 0.5, 1.9e-15];
+
+    /// **§EXT-1 site 7/9 — an `UpperBound` row does NOT clear, and the input
+    /// class that changes is a row whose bound is NON-NEGATIVE.**
+    ///
+    /// The row planted here has `clearance_mm = +1e-16`: under the retired
+    /// `segment_clearance_excluding` float shim it was an ordinary positive
+    /// clearance and passed every `>= 0.0` screen in this module. It is
+    /// one-sided — the walk skipped an undecidable pierce candidate, so the
+    /// true clearance may be anywhere at or below it, including negative — and
+    /// both consumers of this number can end in an emitted brace.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the point of the pin is BIT equality: the planted row and its clean twin \
+              must carry the same f64, and the strict sentinel must be exactly the value \
+              every `>= threshold` screen in the module fails against. A tolerance here \
+              would let the distinction this test exists to measure slip through."
+    )]
+    fn a_non_negative_upper_bound_clearance_does_not_clear_the_brace_screens() {
+        let surface = near_parallel_face();
+        let rows = surface
+            .segment_clearance_classified(
+                &[NP_P0],
+                &[NP_P1],
+                &[0.0],
+                &[0.0],
+                0.0,
+                &[0.0],
+                &[0.0],
+            )
+            .expect("planted clearance row");
+
+        // NON-VACUITY, from the kernel: the plant really did reach the
+        // undecidable band, and it reached it on exactly one face.
+        let geom_kernel::SegmentClearanceClassified::UpperBound {
+            clearance_mm,
+            near_parallel_faces,
+            ..
+        } = rows[0]
+        else {
+            panic!("the planted row must be one-sided, not {:?}", rows[0]);
+        };
+        assert_eq!(near_parallel_faces, 1, "one undecidable face was planted");
+        assert!(
+            clearance_mm >= 0.0,
+            "the input class this test exists for is a bound that LOOKS like a \
+             pass; the kernel bounded it at {clearance_mm}"
+        );
+
+        assert_eq!(
+            brace_decision_clearance_mm(rows[0]),
+            f64::NEG_INFINITY,
+            "an unaffirmable row must fail every `>= threshold` screen in this \
+             module, not satisfy them"
+        );
+        assert!(
+            !rows[0].clears(false, false),
+            "and the kernel's own refusing predicate must agree"
+        );
+        assert_eq!(
+            ClearanceEvidence::of(rows[0]),
+            ClearanceEvidence::UpperBound,
+            "the disclosure must be able to NAME the state instead of printing \
+             the sentinel as a shortfall"
+        );
+    }
+
+    /// **§EXT-1 site 7/9 — an `Unmeasured` row does NOT clear either.**
+    ///
+    /// This is the half of the migration the shim got backwards on its own,
+    /// before near-parallel was ever raised: erasure by exemption. The row's
+    /// exclusion set removes every face the walk can reach, the walk's
+    /// "nothing found" marker is `f64::INFINITY`, and `INFINITY - demand` is
+    /// still `INFINITY` — a finite-LOOKING result that satisfies every
+    /// threshold ever written against it.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the point of the pin is BIT equality: the planted row and its clean twin \
+              must carry the same f64, and the strict sentinel must be exactly the value \
+              every `>= threshold` screen in the module fails against. A tolerance here \
+              would let the distinction this test exists to measure slip through."
+    )]
+    fn a_row_whose_exclusion_set_erased_every_face_does_not_clear() {
+        let surface = near_parallel_face();
+        let all_faces: &[u32] = &[0];
+        let rows = surface
+            .segment_clearance_excluding_classified(
+                &[NP_P0],
+                &[NP_P1],
+                &[0.0],
+                &[0.0],
+                0.0,
+                &[0.0],
+                &[0.0],
+                &[all_faces],
+            )
+            .expect("planted exclusion row");
+
+        assert_eq!(
+            rows[0],
+            geom_kernel::SegmentClearanceClassified::Unmeasured(
+                geom_kernel::UnmeasuredSegment::AllFacesExcluded
+            ),
+            "NON-VACUITY: the plant must actually erase the walk's candidates"
+        );
+        assert_eq!(
+            brace_decision_clearance_mm(rows[0]),
+            f64::NEG_INFINITY,
+            "an untested row has earned nothing"
+        );
+        assert_eq!(
+            ClearanceEvidence::of(rows[0]),
+            ClearanceEvidence::Unmeasured
+        );
+    }
+
+    /// **§EXT-1 site 6 — an undecidable sphere is treated as BREACHED.**
+    ///
+    /// `cone_thickness` minimises over the cone rays, so a skipped crossing
+    /// can only report the wall as THICKER than it is, and a too-thick wall is
+    /// what admits a foot standing inside the model. The candidate is dropped.
+    #[test]
+    fn an_undecidable_foot_ball_is_treated_as_breached_and_the_candidate_is_dropped() {
+        let surface = near_parallel_face();
+        // A cone that opens to the full 90 degrees puts its rim rays in the
+        // triangle's own plane, which is the geometry the §O4 band describes.
+        let planted = surface
+            .sphere_breach_classified(&[[0.4, 0.5, 0.0]], &[0.2], 1.0e-9, 90.0, 16)
+            .expect("planted sphere batch");
+
+        // NON-VACUITY: the plant fires, and it fires on a sphere the breach
+        // test itself calls CLEAN — which is exactly the dangerous shape.
+        assert!(
+            planted.near_parallel[0] > 0,
+            "the planted cone must reach the undecidable band; tally was {}",
+            planted.near_parallel[0]
+        );
+        assert!(
+            !planted.breached[0],
+            "and the breach test must not already be refusing it, or this test \
+             proves nothing about the tally"
+        );
+        assert_eq!(
+            breached_or_uncertain(&planted),
+            vec![true],
+            "an undecidable sphere is dropped"
+        );
+
+        // NOT SIMPLY ALWAYS ON: a sphere far from the plane decides cleanly and
+        // is kept.
+        let clean = surface
+            .sphere_breach_classified(&[[0.4, 0.5, 5.0]], &[0.2], 1.0e-9, 90.0, 16)
+            .expect("clean sphere batch");
+        assert_eq!(clean.near_parallel[0], 0);
+        assert_eq!(breached_or_uncertain(&clean), vec![false]);
+    }
+
+    /// **§EXT-1 site 8 — an undecidable penetration row is ILLEGAL.**
+    ///
+    /// A skipped crossing UNDERSTATES the interval set, and this screen
+    /// condemns on a long enough interval, so an understated set moves a rod
+    /// from illegal to legal: the direction that ships a brace transiting the
+    /// model. The row is condemned outright instead.
+    #[test]
+    fn an_undecidable_axis_row_is_condemned_by_the_transit_screen() {
+        let surface = near_parallel_face();
+        let config = BraceConfig::current(0.05).unwrap();
+
+        // NON-VACUITY, from the kernel: the plant reaches the band AND the
+        // interval set it produces is EMPTY, so on the arithmetic alone this
+        // rod reads as perfectly legal.
+        let limits = surface
+            .penetration_intervals_batch_worst_case_limits(1, 8, 80, false)
+            .unwrap();
+        let planted = surface
+            .penetration_intervals_batch_bounded_classified(
+                &[NP_P0],
+                &[NP_P1],
+                &[0.0],
+                &[0.0],
+                8,
+                config.standoff_mm / 5.0,
+                80,
+                config.min_illegal_len_mm,
+                false,
+                limits,
+            )
+            .unwrap();
+        assert_eq!(planted.near_parallel[0], 1, "the plant must fire");
+        assert!(
+            planted.rows[0].is_empty(),
+            "and it must leave NO interval, so only the tally can condemn"
+        );
+
+        // `clearances` must admit the row into the interval walk at all: a
+        // value in `[0, midpoint_trusted)` routes it there without needing the
+        // midpoint-inside branch.
+        let illegal = axis_illegal_rows(
+            &surface,
+            &[NP_P0],
+            &[NP_P1],
+            &[0.0],
+            &[0.0],
+            &[0.0],
+            &[0.0],
+            &[0.0],
+            &config,
+            test_penetration_limits(),
+        )
+        .expect("the transit screen runs");
+        assert!(
+            illegal.contains(&0),
+            "an undecidable row must be condemned even though its measured \
+             interval set is empty"
+        );
+    }
+
+    /// **The disclosure must not present the strict sentinel as a shortfall.**
+    ///
+    /// `RefusalGapRow` already exists to stop the axis-transit sentinel being
+    /// read as a measured gap. The same rule covers the two non-affirming
+    /// clearance states: their `distance_clearance_mm` is `-inf`, which is not
+    /// a distance anybody measured.
+    #[test]
+    fn an_unaffirmable_clearance_refusal_is_disclosed_by_name_and_never_as_a_gap() {
+        for evidence in [ClearanceEvidence::UpperBound, ClearanceEvidence::Unmeasured] {
+            let row = RefusalGapRow {
+                member: MemberKey::transit_test_fixture(509, 1),
+                gap_mm: f64::NEG_INFINITY,
+                distance_clearance_mm: f64::NEG_INFINITY,
+                axis_transit_illegal: false,
+                distance_evidence: evidence,
+                terminal_radius_mm: 0.5,
+                rootward_radius_mm: 0.5,
+                refusable: true,
+            };
+            let rendered = row.render();
+            assert!(
+                rendered.contains(evidence.label()),
+                "the refusal must name the state it saw: {rendered}"
+            );
+            assert!(
+                !rendered.contains("inf"),
+                "and it must never print the sentinel as a magnitude: {rendered}"
+            );
+        }
     }
 }

@@ -196,15 +196,23 @@ fn a17_segment_pruning_matches_brute_force() {
     // pair consecutive sample points into segments
     for w in pts.chunks_exact(2) {
         let (a, b) = (w[0], w[1]);
-        let (dk, _) = surf_seg_min(&surf, a, b);
-        let (db, _) = brute_seg_min(&surf, a, b);
+        let (dk, _, np_k) = surf_seg_min(&surf, a, b);
+        let (db, _, np_b) = brute_seg_min(&surf, a, b);
         // same per-triangle primitive => the BVH's axis-gap lower bound must
         // never prune the true nearest triangle: identical minimum distance.
         assert!(
             (dk - db).abs() <= 1e-12 * db.max(1.0),
-            "A17 segment lower bound unsound: pruned {} vs brute {}",
-            dk,
-            db
+            "A17 segment lower bound unsound: pruned {dk} vs brute {db}"
+        );
+        // The pruned walk visits a SUBSET of the faces the brute walk visits,
+        // so its uncertainty tally can never exceed the brute one. On a clean
+        // probe mesh both are zero; the assertion is the relation, not the
+        // zero, so it still says something if a mesh ever plants an
+        // undecidable face here.
+        assert!(
+            np_k <= np_b,
+            "pruned walk reported more near-parallel faces ({np_k}) than the \
+             brute walk over every face ({np_b})"
         );
     }
 }

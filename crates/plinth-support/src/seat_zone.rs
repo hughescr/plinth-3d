@@ -89,8 +89,8 @@
 //!
 //! # Batch-first
 //!
-//! One `faces_near_segments_batch` call for a whole row set gathers every band;
-//! the flood fills then run in parallel over rows against the crate's one
+//! One `faces_near_segments_batch_classified` call for a whole row set gathers
+//! every band; the flood fills then run in parallel over rows against the one
 //! `FaceTopology`. There is no per-item native call.
 
 use std::collections::BTreeSet;
@@ -455,7 +455,8 @@ where
 /// fill per row.
 ///
 /// Each returned slice is SORTED ascending and deduplicated, which is the order
-/// `NativeSurface::segment_clearance_excluding` requires of an exclusion set.
+/// `NativeSurface::segment_clearance_excluding_classified` requires of an
+/// exclusion set.
 ///
 /// An empty zone is a legal answer and means "exempt nothing, grade the whole
 /// surface". It arises when the seat face is not itself inside the band, which
@@ -488,9 +489,31 @@ pub(crate) fn freeze_seat_zones(
         .map(|row| row.band_radius_mm)
         .collect::<Vec<_>>();
     // THE one batched native call for the whole row set.
-    let bands = surface.faces_near_segments_batch(&p0, &p1, &radii, limits)?;
+    //
+    // `docs/specs/geometry-adjudication.md` §EXT-1 site 12
+    // (`support.seat_zone.bands`), justification 12. These bands are
+    // EXEMPTIONS: a face in a band is excluded from every later clearance walk.
+    // So membership is PROOF-ONLY — a face is admitted only when it was
+    // MEASURED within the band radius — and the classified entry point enforces
+    // that at the kernel: a face whose pierce candidate was undecidable is NOT
+    // admitted, and the omission is reported in `bands.near_parallel` per row
+    // instead of being silent.
+    //
+    // Omitting is the refusal direction, not the permissive one: the omitted
+    // face stays IN the later clearance tests, where a genuine touch fails the
+    // row. Admitting it on an unproven pierce would grow an exemption on
+    // uncertainty. Note the deliberate asymmetry with the clearance sites
+    // (§EXT-1 7/9/10/11): the SAME `seg_tri_dist` uncertainty is band-tolerable
+    // and clearance-intolerable, because the two consumers sit on opposite
+    // sides of the exemption.
+    //
+    // Per-row tallies are `bands.near_parallel`; the run-rate question is
+    // answered by `geom_kernel::telemetry` (`kernel.seg_tri.pierce`) per the
+    // owner ruling that replaced the §EXT-4 per-model ledger.
+    let bands = surface.faces_near_segments_batch_classified(&p0, &p1, &radii, limits)?;
 
     Ok(bands
+        .rows
         .into_par_iter()
         .zip(requests.into_par_iter())
         .map(|(band, request)| flood_fill(topology, &band, request.seat_face_id))
@@ -1056,8 +1079,9 @@ mod tests {
         let p1_mm = [0.5, 5.0, 7.5];
         let band_radius_mm = 1.0;
         let band = surface
-            .faces_near_segments_batch(&[p0_mm], &[p1_mm], &[band_radius_mm], uncapped())
-            .expect("band");
+            .faces_near_segments_batch_classified(&[p0_mm], &[p1_mm], &[band_radius_mm], uncapped())
+            .expect("band")
+            .rows;
         assert!(
             band[0]
                 .iter()
@@ -1132,8 +1156,9 @@ mod tests {
         let p0_mm = [-0.35, 5.0, 0.3];
         let p1_mm = [0.65, 5.0, 0.45];
         let band = surface
-            .faces_near_segments_batch(&[p0_mm], &[p1_mm], &[1.0], uncapped())
-            .expect("band");
+            .faces_near_segments_batch_classified(&[p0_mm], &[p1_mm], &[1.0], uncapped())
+            .expect("band")
+            .rows;
         assert!(
             band[0]
                 .iter()
@@ -1168,5 +1193,70 @@ mod tests {
             .filter(|face| on_far_wall(&centroids[**face as usize]))
             .count();
         assert_eq!(far, 11, "and the far wall is 11 of those faces");
+    }
+
+    /// **`docs/specs/geometry-adjudication.md` §EXT-1 site 12, justification
+    /// 12 — band membership is PROOF-ONLY, and the omission is counted rather
+    /// than silent.**
+    ///
+    /// These bands are EXEMPTIONS: a face in a band is excluded from every
+    /// later clearance walk. So a face may enter only on a MEASURED distance,
+    /// never on an unproven pierce — an exemption grows only on proof. Omitting
+    /// the face is the refusal direction, because the omitted face stays in the
+    /// later clearance tests where a genuine touch fails the row.
+    ///
+    /// The plant is the §O4 counterexample triangle, whose determinant against
+    /// a nearly in-plane segment is `-8e-15` — inside `DET_EPS = 1e-14` and
+    /// nonzero.
+    ///
+    /// Note the deliberate asymmetry this pins: the SAME `seg_tri_dist`
+    /// uncertainty that refuses a clearance row is merely COUNTED here, because
+    /// the two consumers sit on opposite sides of the exemption.
+    #[test]
+    fn an_unproven_pierce_is_counted_and_never_grows_the_exemption() {
+        let surface = geom_kernel::testkit::build_from_tris(vec![
+            0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, //
+        ]);
+        let p0 = [0.4, 0.5, -1.0e-16];
+        let p1 = [1.4, 0.5, 1.9e-15];
+
+        // A band wide enough to reach the face on MEASURED evidence: the
+        // endpoint and edge candidates alone put it inside, so it is admitted
+        // by proof and the tally rides alongside rather than deciding.
+        let wide = surface
+            .faces_near_segments_batch_classified(&[p0], &[p1], &[0.5], uncapped())
+            .expect("the planted band runs");
+        assert_eq!(
+            wide.near_parallel[0], 1,
+            "NON-VACUITY: the plant must reach the undecidable band"
+        );
+        assert_eq!(
+            wide.rows[0],
+            vec![0],
+            "a face within a MEASURED distance is admitted, tally or no tally"
+        );
+
+        // The same row with a band radius the measured distance cannot reach.
+        // The pierce candidate is still undecidable, and if an unproven pierce
+        // could admit a face it would admit this one at distance zero. It must
+        // not: the row comes back EMPTY, with the omission counted.
+        let narrow = surface
+            .faces_near_segments_batch_classified(&[[0.4, 0.5, -0.9]], &[[1.4, 0.5, -0.9]], &[0.5], uncapped())
+            .expect("the far band runs");
+        assert!(
+            narrow.rows[0].is_empty(),
+            "a face 0.9 mm away must stay OUT of a 0.5 mm band: {:?}",
+            narrow.rows[0]
+        );
+
+        // And the whole point of proof-only membership: `freeze_seat_zones`
+        // consumes exactly `rows`, so a zone can never contain a face the walk
+        // did not measure into the band.
+        assert!(
+            wide.rows[0]
+                .iter()
+                .all(|face| *face < 1),
+            "the fixture has one face; every admitted ID must address it"
+        );
     }
 }

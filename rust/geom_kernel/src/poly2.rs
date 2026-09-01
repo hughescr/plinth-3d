@@ -58,40 +58,59 @@ pub const SLICE_QUANTUM_MM: f64 = 1.0e-8;
 /// An edge shorter than HALF a lattice quantum cannot have come from two
 /// distinct lattice points; it is a point to the data that produced it.
 ///
-/// # Why half a quantum, and why no other value works
+/// # The justification, rewritten (§O3 of `docs/specs/geometry-adjudication.md`)
 ///
-/// The three incumbent rules were `< 1.0e-15` (perception, i.e. |ab| < 3.162e-8
-/// mm), `== 0.0` (specialized), and `< 1e-18` (joints). No printer-physics
-/// scale can choose between them: the finest feature the machine resolves is
-/// the 14 µm pixel / 50 µm layer, six or more orders of magnitude above all
-/// three. The ruling comes instead from what the DATA can represent:
+/// **The lattice premise this constant used to be derived from is false, and
+/// it was tested, not argued.** The old text claimed every input is a
+/// dequantised lattice point, so two distinct inputs are at least one quantum
+/// apart and "no representable input sits near" the threshold. That is not
+/// true of the PASS-THROUGH path: the stitcher welds by quantised KEY but
+/// stores the first ORIGINAL coordinate per key
+/// (`plinth-support::perception`, `points.entry(ka).or_insert(a)` — slicer
+/// output, not lattice values), and the normalizer's pass-through arm emits
+/// those originals verbatim. Non-lattice coordinates are the NORM on clean
+/// layers, not an upstream defect. Measured witness (§O3, and
+/// `plinth-layers/tests/passthrough_verbatim.rs`): two vertices in adjacent
+/// rounding cells `2.0000000000006135e-12` mm apart survive normalization
+/// bit-identical and form a real edge whose `l2 = 4.000000000002454e-24` fires
+/// this branch. Pass-through edges can sit ANYWHERE in `(0, one quantum)`,
+/// including at the threshold.
 ///
-/// 1. Two distinct lattice points are at least one quantum apart; two
-///    coincident lattice points subtract to exactly `0.0`. **There are no
-///    representable inputs in between.**
-/// 2. So exact-zero is the semantically right test — `specialized` was right
-///    and `perception` was wrong. A 1–3-quantum edge is a REAL edge to the
-///    union normalizer that emitted it, and the consumer must agree: for a
-///    query at `(1, 0)` against the 3-quantum edge `(0,0) → (3e-8, 0)`, the
-///    correct answer is the projection `0.99999997…`, not the endpoint
-///    distance `1.0`. Perception's 3.162e-8 threshold called edges the producer
-///    asserts exist "points", so two stages disagreed about whether a thing
-///    exists.
-/// 3. Exact-zero is not the ROBUST form of that test. On any non-lattice input
-///    — an upstream defect, or future non-slice data routed here — a subnormal
-///    `l2` survives `== 0.0`, and then `t = dot / l2` can produce `inf` or
-///    `NaN`. A `NaN` distance is silently dropped by the `f64::min` reach-fold:
-///    a value meaning "measured nothing" read as "nothing nearby", the exact
-///    failure class this project keeps reproducing.
+/// **The behaviour nevertheless stays, on a bound rather than on
+/// representability.** Two facts justify it, and both are properties of the
+/// branch itself:
 ///
-/// `(Q/2)² = 2.5e-17` closes that hole while agreeing with exact-zero on every
-/// representable input. A threshold at one whole quantum (`l2 = 1e-16`) would
-/// not: a true 1-quantum edge dequantizes with `f64` rounding, so its `l2`
-/// lands within a few ULP of `1e-16` on EITHER side, putting every legitimate
-/// 1-quantum edge on a rounding knife-edge. At `2.5e-17` the threshold is 4×
-/// below the smallest representable real edge and infinitely above the only
-/// representable degenerate one (exactly zero), so **no representable input
-/// sits near it.** That is the property a degeneracy threshold must have.
+/// 1. **Bounded error.** Taking the point fallback answers `dist(p, a)` where
+///    the truth is `dist(p, segment ab)`, and those differ by at most `|ab|`.
+///    Every edge that can reach this branch has `|ab| < 5e-9` mm — six orders
+///    of magnitude below the 14 µm pixel, at the scale of ordinary `f64`
+///    rounding in the consumers. Measured on the witness edge: predicate
+///    answer `0.49999999500100001` vs true minimum `0.49999999499900000`,
+///    error `2.00001e-12` mm, bounded by `|ab| = 2.00000e-12` mm plus
+///    ULP-scale rounding of the two distances.
+/// 2. **No division occurs on the branch**, so no `inf` and no `NaN` can
+///    escape it. On any non-lattice input a subnormal `l2` would survive an
+///    `== 0.0` test and then `t = dot / l2` could produce one; a `NaN`
+///    distance is silently dropped by the `f64::min` reach-fold — a value
+///    meaning "measured nothing" read as "nothing nearby", the exact failure
+///    class this project keeps reproducing. That robustness property is real;
+///    it just holds for a different reason than the one written down.
+///
+/// So the threshold is a KNIFE EDGE, and that is harmless rather than absent:
+/// both branches agree to within `5e-9` mm wherever an input lands near it.
+/// The value is a **chosen behavior pin** at `(Q/2)² = 2.5e-17` — half a
+/// quantum squared, four times below the smallest LATTICE edge, which is why
+/// a lattice-only producer never reaches the branch at all. What is derived is
+/// the error BOUND, not the number.
+///
+/// For context on the three incumbent rules this replaced — `< 1.0e-15`
+/// (perception, i.e. `|ab| < 3.162e-8` mm), `== 0.0` (specialized), and
+/// `< 1e-18` (joints): no printer-physics scale can choose between them, since
+/// the finest feature the machine resolves is the 14 µm pixel / 50 µm layer,
+/// six or more orders of magnitude above all three. Perception's `3.162e-8`
+/// threshold called edges the producer asserts exist "points", so two stages
+/// disagreed about whether a thing exists; at `2.5e-17` a 1-quantum edge is a
+/// real edge and is projected onto.
 pub const DEGENERATE_EDGE_L2_MM2: f64 = 0.25 * SLICE_QUANTUM_MM * SLICE_QUANTUM_MM;
 
 /// Distance in mm from `point` to the segment `a`–`b`, by project-and-clamp.
@@ -259,4 +278,37 @@ pub fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) ->
         (r[1] - p[1]) * (q[0] - p[0]) > (q[1] - p[1]) * (r[0] - p[0])
     };
     ccw(a, c, d) != ccw(b, c, d) && ccw(a, b, c) != ccw(a, b, d)
+}
+
+/// 2-D dot product, `a[0]*b[0] + a[1]*b[1]` — IN EXACTLY THAT OPERAND AND TERM
+/// ORDER.
+///
+/// **The order is the contract.** Call sites consolidated onto this function
+/// were measured bit-identical only under this order; regrouping or swapping
+/// operands is a spec violation here even when algebraically neutral, exactly
+/// as it is in `closest.rs` (Amendments A6/A21).
+///
+/// This closes the "missing 2-D home" open item (`docs/specs/
+/// geometry-adjudication.md` §O6, evidence doc §8.1): the verdict-feeding 2-D
+/// algebra in `plinth-support::perception` and `plinth-orient::section` had no
+/// kernel home, and under the ratified precedence rule a verdict-feeding site
+/// with no kernel home gets a kernel home BUILT, not an exemption marker.
+///
+/// mm in, mm² out (or whatever the operands' units square to — this is
+/// arithmetic, not a length).
+#[inline]
+#[must_use]
+pub fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+/// 2-D perp-dot (scalar cross), `a[0]*b[1] - a[1]*b[0]` — same operand and term
+/// order contract as [`dot`], for the same reason.
+///
+/// Sign convention: positive when `b` is counter-clockwise from `a`. Twice the
+/// signed area of the triangle `(0, a, b)`.
+#[inline]
+#[must_use]
+pub fn perp_dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[1] - a[1] * b[0]
 }
