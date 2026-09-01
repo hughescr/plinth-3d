@@ -1386,8 +1386,9 @@ fn ray_triangle_distance(
     let class = ray_triangle_classified(origin, direction, a, e1, e2, f64::INFINITY);
     let hit = match class {
         RayTriangleClass::Hit(hit) => hit,
-        // A definite miss: the determinant is well clear of the band, so the
-        // arithmetic decided this.
+        // A definite miss, either because the determinant is well clear of the
+        // band or because the ray provably does not reach this triangle at all.
+        // Both are decided answers; see `RayTriangleClass::Miss`.
         RayTriangleClass::Miss => return Ok(RayHit::Miss),
         // `det == 0.0` exactly. A genuine prune, per the kernel's corrected
         // degenerate-input contract: no interior crossing exists, and the

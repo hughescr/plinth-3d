@@ -154,13 +154,24 @@ pub enum RayTriangleClass {
     /// the pinned function's own result, `hit == true`, carrying the
     /// barycentrics the sequence already computed.
     Hit(RayTriangleHit),
-    /// `|det| > DET_EPS` and acceptance failed: a definite miss. The
-    /// determinant is well clear of the band, so the arithmetic decided this.
+    /// A definite miss, decided one of two ways.
+    ///
+    /// Either `|det| > DET_EPS` and acceptance failed — the determinant is well
+    /// clear of the band, so the arithmetic decided it — **or** the determinant
+    /// is inside the band and the ray provably does not reach the triangle at
+    /// all. The band says the ray is nearly parallel to the triangle's plane
+    /// and says nothing whatever about whether the ray goes near the triangle,
+    /// so a ray passing far to one side of a wall it runs alongside is a miss
+    /// on the geometry no matter what its determinant does. See
+    /// `ray_clears_triangle`, which decides that second case and which declines
+    /// — leaving [`Self::NearParallel`] — whenever its own arithmetic cannot
+    /// settle the question.
     Miss,
-    /// `0.0 < |det| <= DET_EPS`: the determinant is nonzero but inside the
-    /// uncertainty band. Whether the ray crosses this face is **undecidable at
-    /// this scale** — the caller chooses the conservative side, and counts the
-    /// event.
+    /// `0.0 < |det| <= DET_EPS`, AND the ray is not shown to clear the triangle:
+    /// the determinant is nonzero but inside the uncertainty band, and the
+    /// triangle is within reach. Whether the ray crosses this face is
+    /// **undecidable at this scale** — the caller chooses the conservative side,
+    /// and counts the event.
     ///
     /// A non-finite determinant (`NaN`, from non-finite input this kernel does
     /// not guard) lands here too: every band comparison is false for `NaN`, and
@@ -252,6 +263,10 @@ pub fn ray_triangle_classified(
         RayTriangleClass::Miss
     } else if det == 0.0 {
         RayTriangleClass::ExactParallel
+    } else if ray_clears_triangle(tvec, dv, e1, e2, t_max) {
+        // Nearly parallel, and never within reach of this triangle at all:
+        // there is nothing here to be uncertain about.
+        RayTriangleClass::Miss
     } else {
         // 0 < |det| <= DET_EPS, or a non-finite determinant: undecidable.
         RayTriangleClass::NearParallel
@@ -271,4 +286,112 @@ pub fn dedup_loc_into(ts: &[f64], dt: f64, keep: &mut Vec<f64>) {
             }
         }
     }
+}
+
+/// Does this ray provably not reach this triangle at all?
+///
+/// The determinant band says the ray runs nearly parallel to the triangle's
+/// plane. It says NOTHING about whether the ray goes anywhere near the
+/// triangle. A ray running twenty millimetres to one side of a wall it happens
+/// to be parallel to lands in the band exactly as a ray grazing that wall's
+/// edge does, and calling both undecidable turns a clear miss into a refusal.
+/// On a finely tessellated round base — a vertical support ray alongside a
+/// vertical wall of many small facets — that is most of the traffic.
+///
+/// So bound the triangle by the sphere through its own vertices and ask whether
+/// the ray's closest approach clears it. If it does, the ray cannot meet the
+/// triangle whatever the determinant is doing, and the honest answer is a
+/// definite miss. **This can only ever move `NearParallel` to `Miss`**, so the
+/// agreement contract with the pinned [`ray_triangle`] — which partitions
+/// `Hit` against everything else — is untouched.
+///
+/// Everything is in the `v0`-local frame the caller already computed: `p` is
+/// `o - v0`, and the vertices are `0`, `e1`, `e2`.
+///
+/// # Why there is no tolerance to choose here
+///
+/// The comparison is `d - r > slack`, and `slack` bounds the ERROR in `d` and
+/// `r`, rather than expressing anyone's opinion about closeness. Each
+/// coordinate of the closest-approach vector is a short signed sum over
+/// intermediates no larger than `mag`, so its rounding error is under
+/// `8 * f64::EPSILON * mag` — a generous multiple of the standard `n * u` bound
+/// for a sum this length — and `d` and `r` inherit it. Doubling covers both
+/// sides of the comparison, and it covers the error in `t` as well: a relative
+/// error in `t` displaces the sample point along the ray by about
+/// `f64::EPSILON * |t * dv|`, which is one of the magnitudes `mag` is taken
+/// over.
+///
+/// # The arithmetic must be sound before its answer is used
+///
+/// **These guards are load-bearing, and the first version of this function
+/// lacked them while asserting it could never manufacture a miss.** It could.
+/// Three demonstrated counterexamples, each a genuine intersection reported as
+/// a definite `Miss`:
+///
+/// * `dd` is SUBNORMAL or zero. `dv = (2e-162, 0, 0)` gives the smallest
+///   subnormal, which has one significant bit; `dv = (1e-200, 0, 0)` underflows
+///   to zero outright, although
+///   the direction is not. With `o = (-2, 0.25, 0.25)`, edges `(0, 1, 0)` and
+///   `(0, 0, 1)`, and `t_max = INFINITY` — a value a real caller passes — the
+///   ray crosses at `t = 2e200`.
+/// * `dd` OVERFLOWS. `dv = (1e155, 0, 0)` makes `dot(dv, dv)` infinite, so
+///   `t = finite / INFINITY = 0`. With edges scaled to 1e-100 and `t_max = 1`
+///   the ray crosses at `t = 1e-155`.
+/// * `t_max` is NaN. `f64::max` returns its non-NaN operand, so `t_max.max(0.0)`
+///   quietly reports an EMPTY parameter range rather than an unusable one, and
+///   `t` clamps to a perfectly finite `0.0` that passes every later check.
+///
+/// In all three, `t` came back as `0` — a claim that the closest approach is at
+/// the ray's origin, which is simply untrue — and the distant origin then read
+/// as clearance. The lesson is not the magnitudes, which no miniature produces;
+/// it is that a predicate whose only job is to REFINE an uncertainty must
+/// decline whenever its own arithmetic is unsound. Anything it cannot settle
+/// returns `false` and stays `NearParallel`, which is the correct answer for
+/// "the arithmetic cannot tell".
+fn ray_clears_triangle(p: V3, dv: V3, e1: V3, e2: V3, t_max: f64) -> bool {
+    // Bounding sphere: the centroid, and the vertex furthest from it. Every
+    // vertex lies within that distance of the centre by construction and the
+    // triangle is their convex hull, so the sphere encloses the triangle.
+    let c = [
+        (e1[0] + e2[0]) / 3.0,
+        (e1[1] + e2[1]) / 3.0,
+        (e1[2] + e2[2]) / 3.0,
+    ];
+    let to_e1 = sub(e1, c);
+    let to_e2 = sub(e2, c);
+    let r_sq = dot(c, c).max(dot(to_e1, to_e1)).max(dot(to_e2, to_e2));
+
+    // The parameter range must BE a range. A NaN bound is unusable, not empty.
+    if t_max.is_nan() {
+        return false;
+    }
+
+    // The closest approach is only computable when `dd` is NORMAL. Positive and
+    // finite is not enough: a subnormal `dd` — `dv = (2e-162, 0, 0)` gives the
+    // smallest subnormal, 5e-324 — carries almost no significant bits, so the
+    // `t` divided by it is not the closest approach in any useful sense.
+    // A genuinely zero direction never arrives here — it makes the determinant
+    // exactly zero, which is `ExactParallel` — so this branch is the
+    // pathological one, not the ordinary one.
+    let dd = dot(dv, dv);
+    if !dd.is_normal() {
+        return false;
+    }
+
+    let to_c = sub(c, p);
+    let t = (dot(to_c, dv) / dd).clamp(0.0, t_max.max(0.0));
+    let step = [t * dv[0], t * dv[1], t * dv[2]];
+    let w = sub(to_c, step);
+    let d_sq = dot(w, w);
+
+    let mag = [c, p, step]
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |acc, x| if x.abs() > acc { x.abs() } else { acc });
+
+    // Every quantity the comparison rests on, checked before it is trusted.
+    if !(t.is_finite() && d_sq.is_finite() && r_sq.is_finite() && mag.is_finite()) {
+        return false;
+    }
+    d_sq.sqrt() - r_sq.sqrt() > 16.0 * f64::EPSILON * mag
 }

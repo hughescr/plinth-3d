@@ -108,36 +108,39 @@ fn ball_breaches_wall(wall_mm: f64) -> bool {
         .expect("one centre, one radius");
     assert_eq!(
         result.near_parallel[0], COSINE_ROUNDING_NEAR_PARALLEL,
-        "the near-parallel tally on this fixture is a MEASURED constant, not a \
-         zero: see its definition. If it moves, the classification moved."
+        "the near-parallel tally on this fixture is an ASSERTED zero: see its \
+         definition. If it moves, a computed cardinal angle is back."
     );
     result.breached[0]
 }
 
-/// **A MEASURED FINDING, pinned so it cannot drift unnoticed.**
+/// **A MEASURED FINDING, and the repair that closed it.**
 ///
-/// A plain axis-aligned box, hit by production's foot-breach cone, produces six
-/// `NearParallel` classifications per sphere — on every wall thickness tested
-/// here, and independent of the verdict.
+/// This constant was `6`. A plain axis-aligned box, hit by production's
+/// foot-breach cone, produced six `NearParallel` classifications per sphere —
+/// on every wall thickness tested here, and independent of the verdict.
 ///
-/// The cause is not a sliver face. `cone_dirs` builds its off-axis rays with
-/// `ph.cos()` / `ph.sin()` at `ph` = π/2, π, 3π/2, where the component that
-/// should be exactly `0.0` comes back as an `f64` rounding residue of order
-/// `1e-17`. Those rays are parallel to the box's side walls in intent and
-/// **not** parallel in bits, so their determinants land at a measured
-/// `±5.18e-18` and `±1.04e-17` — three orders of magnitude BELOW
-/// `DET_EPS = 1e-14`, but not zero, which is `NearParallel` by definition and
-/// `ExactParallel` (a genuine prune) in exact arithmetic.
+/// The cause named here was never a sliver face: `cone_dirs` built its
+/// off-axis rays with `ph.cos()` / `ph.sin()` at `ph` = π/2, π, 3π/2, where the
+/// component that should be exactly `0.0` came back as an `f64` rounding
+/// residue of order `1e-17`. Those rays were parallel to the box's side walls
+/// in intent and **not** parallel in bits, so their determinants landed at a
+/// measured `±5.18e-18` and `±1.04e-17` — three orders of magnitude BELOW
+/// `DET_EPS = 1e-14`, but not zero, which is `NearParallel` by definition where
+/// exact arithmetic gives `ExactParallel`, a genuine prune.
 ///
-/// **What this does NOT do is change the verdict.** The accepted-hit set is
-/// bit-identical to the pre-classification walk's, so every `breached` answer in
-/// this file is the answer it always was; the tally is new information, not a
-/// new outcome. What it means for a CALLER is the disclosed risk of §EXT-2 site
-/// 5 landing on its first fixture: a foot-admission stage that maps
-/// `NearParallel` to "breached" would reject every foot on an axis-aligned box.
-/// That is a finding for the caller lane and the owner, not something to tune
-/// away here — a new deciding constant needs a new ruling.
-const COSINE_ROUNDING_NEAR_PARALLEL: u32 = 6;
+/// `cone_dirs` now takes its cardinal cosines and sines from
+/// `queries::turn_cos_sin` and `queries::deg_cos_sin`, which return the exact
+/// value at a quarter turn instead of computing one from an unrepresentable
+/// angle. The rays are parallel in bits as well as in intent, the determinants
+/// are exactly zero, and the tally is **zero**.
+///
+/// The verdicts did not move — they never did, even when the tally was six.
+/// This constant is kept, rather than deleted with its assertion, because a
+/// zero that is ASSERTED is the guard: if anything reintroduces a computed
+/// cardinal angle anywhere in the ray construction, this fixture is where it
+/// shows up first.
+const COSINE_ROUNDING_NEAR_PARALLEL: u32 = 0;
 
 /// The control every test in this file leans on: a wall the ball CANNOT reach
 /// through must not be reported as breached.

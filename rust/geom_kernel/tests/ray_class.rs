@@ -226,7 +226,8 @@ fn the_classified_form_agrees_with_the_pin_on_every_hit_bit_for_bit() {
     assert!(misses >= 100, "and non-hits, got {misses}");
 }
 
-/// The classification is a PARTITION of the non-hit cases by the determinant,
+/// The classification is a PARTITION of the non-hit cases by the determinant
+/// AND, inside the band, by whether the ray reaches the triangle at all,
 /// checked against the determinant recomputed in the test.
 ///
 /// This is the sabotage guard for the test above: agreement with the pin says
@@ -239,6 +240,7 @@ fn every_non_hit_lands_in_the_class_its_determinant_selects() {
     let mut near_parallel = 0_u32;
     let mut exact_parallel = 0_u32;
     let mut definite_miss = 0_u32;
+    let mut cleared_miss = 0_u32;
     for (o, dv, v0, e1, e2, t_max) in battery() {
         let pvec = [
             dv[1] * e2[2] - dv[2] * e2[1],
@@ -250,7 +252,15 @@ fn every_non_hit_lands_in_the_class_its_determinant_selects() {
             RayTriangleClass::Hit(_) => assert!(det.abs() > 1.0e-14),
             RayTriangleClass::Miss => {
                 definite_miss += 1;
-                assert!(det.abs() > 1.0e-14, "Miss demands a decided determinant");
+                if det.abs() <= 1.0e-14 {
+                    // The proximity arm: a ray inside the band that provably cannot
+                    // reach this triangle at all. Pinned by the two dedicated
+                    // tests below, which hold the determinant FIXED and move
+                    // only the origin — this battery cannot check the predicate
+                    // here without re-implementing it, which would prove
+                    // nothing.
+                    cleared_miss += 1;
+                }
             }
             RayTriangleClass::NearParallel => {
                 near_parallel += 1;
@@ -277,11 +287,178 @@ fn every_non_hit_lands_in_the_class_its_determinant_selects() {
          arm, got {near_parallel}"
     );
     assert!(
-        definite_miss >= 100,
-        "and the definite-miss arm must be exercised too, got {definite_miss}"
+        definite_miss - cleared_miss >= 100,
+        "and the well-conditioned miss arm must be exercised too, got \
+         {definite_miss} miss(es), {cleared_miss} of them decided by proximity"
     );
     // `exact_parallel` is allowed to be zero on this battery: exact zeros need
     // exactly-coplanar inputs, which the random arm does not produce. The
     // dedicated test above covers it, so this is recorded rather than asserted.
-    println!("battery classes: near_parallel={near_parallel} exact_parallel={exact_parallel} definite_miss={definite_miss}");
+    println!("battery classes: near_parallel={near_parallel} exact_parallel={exact_parallel} definite_miss={definite_miss} cleared_miss={cleared_miss}");
+}
+
+/// **THE PROXIMITY PAIR.** Same triangle, same direction, therefore the SAME
+/// determinant — and two different classifications, decided by geometry rather
+/// than by a tolerance.
+///
+/// The determinant is a function of `dv`, `e1` and `e2` alone; the ray's origin
+/// does not enter it. So translating the counterexample's origin sideways
+/// leaves it at exactly `-8e-15`, inside `DET_EPS`, while moving the ray to
+/// where it demonstrably cannot touch the triangle. Before the proximity
+/// qualification both rows answered `NearParallel`, and the second one had
+/// nothing to be uncertain about: it passes 49 mm from a triangle 2 mm across.
+///
+/// This is the pair the corpus behaviour turns on. A vertical support ray
+/// running alongside a vertical wall is parallel to every facet of that wall,
+/// including the facets on the far side of the model, and answering
+/// `NearParallel` for all of them is what made a refusal out of empty space.
+#[test]
+fn the_determinant_alone_does_not_decide_a_ray_that_never_reaches_the_triangle() {
+    // Held fixed across both rows, computed here rather than taken from the
+    // function under test.
+    let pvec = [
+        DIRECTION[1] * E2[2] - DIRECTION[2] * E2[1],
+        DIRECTION[2] * E2[0] - DIRECTION[0] * E2[2],
+        DIRECTION[0] * E2[1] - DIRECTION[1] * E2[0],
+    ];
+    let det = E1[0] * pvec[0] + E1[1] * pvec[1] + E1[2] * pvec[2];
+    assert!(
+        det != 0.0 && det.abs() <= 1.0e-14,
+        "both rows must sit INSIDE the undecidable band, got {det:e}"
+    );
+
+    // Row 1: the counterexample itself — through the interior. Undecidable.
+    assert_eq!(
+        ray_triangle_classified(ORIGIN, DIRECTION, V0, E1, E2, 1.0),
+        RayTriangleClass::NearParallel,
+        "a ray that pierces the interior is genuinely undecidable in this band"
+    );
+
+    // Row 2: the same ray, started 50 mm away across the triangle's own plane.
+    // The triangle spans y in [0, 2]; this ray holds y = 50.5 for its whole
+    // length, so no rounding of any determinant can bring the two together.
+    let far = [ORIGIN[0], ORIGIN[1] + 50.0, ORIGIN[2]];
+    assert_eq!(
+        ray_triangle_classified(far, DIRECTION, V0, E1, E2, 1.0),
+        RayTriangleClass::Miss,
+        "a ray 49 mm clear of a 2 mm triangle is a MISS, whatever its \
+         determinant is doing"
+    );
+}
+
+/// The proximity qualification must not reach past the triangle's own extent.
+///
+/// A ray inside the band that clears the bounding sphere by a hair is still a
+/// miss, but one that enters it is still undecidable — the predicate is allowed
+/// to be conservative and is not allowed to be generous. Without this, widening
+/// the bound until the corpus went quiet would pass every other test in this
+/// file.
+#[test]
+fn the_proximity_qualification_is_conservative_at_its_own_boundary() {
+    // The bounding sphere of V0/E1/E2 is centred on the centroid (2/3, 2/3, 0)
+    // with radius |E1 - centroid| = sqrt((4/3)^2 + (2/3)^2) = 1.4907...
+    let radius = ((4.0_f64 / 3.0).powi(2) + (2.0_f64 / 3.0).powi(2)).sqrt();
+
+    // Just inside the sphere in y, running along x: undecidable, because the
+    // ray really does pass through the region the triangle occupies.
+    let inside = [0.4, 2.0 / 3.0 + radius * 0.99, -1.0e-16];
+    assert_eq!(
+        ray_triangle_classified(inside, DIRECTION, V0, E1, E2, 1.0),
+        RayTriangleClass::NearParallel,
+        "inside the triangle's own reach, the band stays undecidable"
+    );
+
+    // Comfortably outside it: a decided miss.
+    let outside = [0.4, 2.0 / 3.0 + radius * 4.0, -1.0e-16];
+    assert_eq!(
+        ray_triangle_classified(outside, DIRECTION, V0, E1, E2, 1.0),
+        RayTriangleClass::Miss,
+        "well outside it, the band is decided"
+    );
+}
+
+/// **THE PREDICATE MUST DECLINE WHEN ITS OWN ARITHMETIC IS UNSOUND.**
+///
+/// Four counterexamples found by adversarial review of the first version of
+/// the proximity qualification, which asserted in its own doc comment that it
+/// could never manufacture a miss. Each is a GENUINE intersection that the
+/// first version reported as a definite `Miss`, and each has the same shape:
+/// the closest-approach parameter `t` could not be computed, came back as
+/// `0.0`, and the ray's distant origin was then read as clearance.
+///
+/// The magnitudes are absurd and no miniature produces them. That is not the
+/// point. A predicate whose only job is to refine an uncertainty into a
+/// certainty has exactly one way to be dangerous, and this is it.
+#[test]
+fn the_proximity_qualification_declines_rather_than_guesses() {
+    // 1. `dot(dv, dv)` UNDERFLOWS to zero although the direction is not zero.
+    //    The triangle lies in the x = 0 plane; the ray starts at x = -2 and
+    //    crosses at t = 2 / 1e-200 = 2e200, inside an infinite t_max — which is
+    //    what `plinth-mesh`'s triage actually passes.
+    let underflow = ray_triangle_classified(
+        [-2.0, 0.25, 0.25],
+        [1.0e-200, 0.0, 0.0],
+        V0,
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        f64::INFINITY,
+    );
+    assert_eq!(
+        underflow,
+        RayTriangleClass::NearParallel,
+        "a direction whose squared norm underflows leaves the closest approach \
+         uncomputable, and uncomputable is NOT clearance"
+    );
+
+    // 2. `dot(dv, dv)` OVERFLOWS to infinity, so `t = finite / INFINITY = 0`.
+    //    A triangle scaled to 1e-100 in the same plane, crossed at t = 1e-155.
+    let overflow = ray_triangle_classified(
+        [-1.0, 2.5e-101, 2.5e-101],
+        [1.0e155, 0.0, 0.0],
+        V0,
+        [0.0, 1.0e-100, 0.0],
+        [0.0, 0.0, 1.0e-100],
+        1.0,
+    );
+    assert_eq!(
+        overflow,
+        RayTriangleClass::NearParallel,
+        "and neither is an overflowing squared norm"
+    );
+
+    // 3. A NaN `t_max`. `f64::max` returns its non-NaN operand, so the old
+    //    `t_max.max(0.0)` reported an EMPTY parameter range where the truth is
+    //    an unusable one, and `t` clamped to a perfectly finite 0.0 that passed
+    //    every other check. The control below is the same ray with a usable
+    //    bound: identical determinant, identical geometry, and a real answer.
+    let far = [ORIGIN[0], ORIGIN[1] + 50.0, ORIGIN[2]];
+    assert_eq!(
+        ray_triangle_classified(far, DIRECTION, V0, E1, E2, 1.0),
+        RayTriangleClass::Miss,
+        "control: with a usable bound this ray is a decided miss"
+    );
+    assert_eq!(
+        ray_triangle_classified(far, DIRECTION, V0, E1, E2, f64::NAN),
+        RayTriangleClass::NearParallel,
+        "an unusable bound is not an empty range, and must not decide anything"
+    );
+
+    // 4. `dot(dv, dv)` is SUBNORMAL: positive and finite, and therefore past a
+    //    guard that only checked those two things, but carrying almost no
+    //    significant bits. `dv = (2e-162, 0, 0)` gives 5e-324, the smallest
+    //    subnormal there is. The interior crossing is at t = 5e163.
+    let subnormal = ray_triangle_classified(
+        [-100.0, 0.25, 0.25],
+        [2.0e-162, 0.0, 0.0],
+        V0,
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        f64::INFINITY,
+    );
+    assert_eq!(
+        subnormal,
+        RayTriangleClass::NearParallel,
+        "a subnormal squared norm has no significant bits to divide by, so the \
+         closest approach it yields is not one"
+    );
 }

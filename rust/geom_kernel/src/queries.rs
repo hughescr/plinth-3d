@@ -150,8 +150,8 @@ impl Iterator for CapsuleRays {
             return None;
         }
         self.next += 1;
-        let th = 2.0 * std::f64::consts::PI * (offset as f64) / (self.offset_count as f64);
-        let unit = add(scale(self.e1, th.cos()), scale(self.e2, th.sin()));
+        let (cos_th, sin_th) = turn_cos_sin(offset, self.offset_count);
+        let unit = add(scale(self.e1, cos_th), scale(self.e2, sin_th));
         let origin = add(self.p0, scale(unit, self.r0));
         let direction = sub(add(self.p1, scale(unit, self.r1)), origin);
         Some(CapsuleRay {
@@ -3897,16 +3897,187 @@ fn cone_dirs(axis: V3, half_deg: f64, n: usize) -> Vec<V3> {
     let axis = scale(axis, 1.0 / sa);
     let e1 = perp_basis(axis).0;
     let e2 = cross(axis, e1);
-    let th = half_deg.to_radians();
+    let (cos_th, sin_th) = deg_cos_sin(half_deg);
     let mut dirs = vec![axis];
     for k in 0..n {
-        let ph = 2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+        let (cos_ph, sin_ph) = turn_cos_sin(k, n);
         let d = add(
-            scale(axis, th.cos()),
-            scale(add(scale(e1, ph.cos()), scale(e2, ph.sin())), th.sin()),
+            scale(axis, cos_th),
+            scale(add(scale(e1, cos_ph), scale(e2, sin_ph)), sin_th),
         );
         let nd = norm(d);
         dirs.push(scale(d, 1.0 / nd));
     }
     dirs
+}
+
+// ---- exact trig at the cardinal angles ------------------------------------
+
+/// Cosine and sine of the azimuth `2*PI*k/n`, EXACT at the four quarter turns.
+///
+/// `f64::cos(std::f64::consts::PI / 2.0)` is `6.123233995736766e-17`, not zero,
+/// and the library is not wrong: `PI / 2.0` is not the real quarter turn, so
+/// the answer is the correct cosine of a slightly different angle. The residue
+/// is ours, introduced by asking the question in radians.
+///
+/// It matters because a ring of rays built this way is never exactly axis
+/// aligned, and a ray that should be EXACTLY parallel to an axis-aligned face
+/// instead meets it at an angle of about 1e-17 radians. That lands in
+/// `ray_triangle_classified`'s undecidable band — `docs/specs/geometry-canon.md`
+/// §1 OP-2 wants a prune there, and gets a manufactured uncertainty instead.
+/// `tests/near_wall_thin_feature.rs` measured six such rays on a plain
+/// axis-aligned box and asserts zero of them now.
+///
+/// The quarter turn is selected by INTEGER arithmetic on `k` and `n`, never by
+/// dividing first and asking whether the quotient came out whole — see
+/// [`deg_cos_sin`], where that shortcut is wrong. Away from the cardinals
+/// nothing is representable anyway and the library function is used unchanged,
+/// so no non-cardinal direction moves.
+fn turn_cos_sin(k: usize, n: usize) -> (f64, f64) {
+    // `k` is a cardinal azimuth exactly when `n` divides `4 * k` — but forming
+    // `4 * k` is what makes that test fail for large `n`, so divide instead.
+    // With `d = gcd(n, 4)`, write `n = d * n2` and `4 = d * m`; then
+    // `n | 4k  <=>  n2 | m * k  <=>  n2 | k`, because `gcd(n2, m) = 1`. The
+    // quotient `4k/n` is `m * (k / n2)`, and only its residue mod 4 is wanted,
+    // so it is reduced before multiplying and nothing can overflow.
+    if n != 0 {
+        let d = if n.is_multiple_of(4) {
+            4
+        } else if n.is_multiple_of(2) {
+            2
+        } else {
+            1
+        };
+        let n2 = n / d;
+        if k.is_multiple_of(n2) {
+            let quarters = ((4 / d) % 4) * ((k / n2) % 4) % 4;
+            return match quarters {
+                0 => (1.0, 0.0),
+                1 => (0.0, 1.0),
+                2 => (-1.0, 0.0),
+                _ => (0.0, -1.0),
+            };
+        }
+    }
+    let ph = 2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+    (ph.cos(), ph.sin())
+}
+
+/// Cosine and sine of an angle given in DEGREES, exact at every multiple of 90.
+///
+/// Same defect and same remedy as [`turn_cos_sin`], reached from the other
+/// direction: a half-angle of exactly 90 degrees is a right angle whose cosine
+/// is zero, and `90.0_f64.to_radians().cos()` is `6.123233995736766e-17`.
+///
+/// # The test is divisibility in DEGREES, not a whole quotient
+///
+/// Asking whether `deg / 90.0` came out whole is a DIFFERENT question, and at
+/// large magnitudes it answers yes for angles that are nothing like a right
+/// angle: `deg = 39999999992000128.0` leaves a remainder of 88 degrees, yet the
+/// quotient rounds to an exact integer and a `fract() == 0.0` test on it passes.
+/// That would return an exact cardinal direction for a non-cardinal angle —
+/// the opposite of this function's purpose, and a wrong answer rather than an
+/// imprecise one.
+///
+/// So the whole-number and range checks come first, on `deg` itself, and the
+/// divisibility is then decided in `i64` where it is exact. Below `1e15` every
+/// integer is exactly representable in an `f64`, so the cast cannot lose a
+/// digit; above it, the fallback is taken and nothing is claimed.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "guarded: the cast runs only when `deg` is a whole number below 1e15, where every \
+              integer is exactly representable in f64 and the truncation cannot lose a digit"
+)]
+fn deg_cos_sin(deg: f64) -> (f64, f64) {
+    if deg.fract() == 0.0 && deg.abs() < 1e15 {
+        let whole = deg as i64;
+        if whole % 90 == 0 {
+            return match (whole / 90).rem_euclid(4) {
+                0 => (1.0, 0.0),
+                1 => (0.0, 1.0),
+                2 => (-1.0, 0.0),
+                _ => (0.0, -1.0),
+            };
+        }
+    }
+    let rad = deg.to_radians();
+    (rad.cos(), rad.sin())
+}
+
+#[cfg(test)]
+mod cardinal_trig_tests {
+    use super::{deg_cos_sin, turn_cos_sin};
+
+    /// The quarter turns are EXACT, which is the whole reason these helpers
+    /// exist: `(2.0 * PI * 1.0 / 4.0).cos()` is `6.123233995736766e-17`.
+    #[test]
+    fn every_quarter_turn_is_exact_and_the_rest_is_unchanged() {
+        assert_eq!(turn_cos_sin(0, 4), (1.0, 0.0));
+        assert_eq!(turn_cos_sin(1, 4), (0.0, 1.0));
+        assert_eq!(turn_cos_sin(2, 4), (-1.0, 0.0));
+        assert_eq!(turn_cos_sin(3, 4), (0.0, -1.0));
+        // A ring of 12 hits the cardinals at k = 0, 3, 6, 9 and nowhere else.
+        assert_eq!(turn_cos_sin(3, 12), (0.0, 1.0));
+        assert_eq!(turn_cos_sin(9, 12), (0.0, -1.0));
+
+        // Everything OFF a cardinal must be bit-identical to the library call
+        // the code made before, so no non-cardinal ray moves.
+        for (k, n) in [(1_usize, 12_usize), (5, 12), (1, 5), (3, 7), (17, 360)] {
+            let ph = 2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+            assert_eq!(turn_cos_sin(k, n), (ph.cos(), ph.sin()), "k={k} n={n}");
+        }
+
+        // A true cardinal must be found even when `4 * k` would overflow: with
+        // n = 2^63 and k = 3 * 2^61 the angle is exactly three quarter turns.
+        assert_eq!(turn_cos_sin(3 << 61, 1 << 63), (0.0, -1.0));
+        assert_eq!(turn_cos_sin(1 << 61, 1 << 63), (0.0, 1.0));
+        assert_eq!(turn_cos_sin(1 << 62, 1 << 63), (-1.0, 0.0));
+        // A half turn on a ring whose size is not divisible by four.
+        assert_eq!(turn_cos_sin(3, 6), (-1.0, 0.0));
+        assert_eq!(turn_cos_sin(5, 10), (-1.0, 0.0));
+        // And a non-cardinal at a magnitude that would overflow must NOT be
+        // claimed as exact.
+        // n = 5 is chosen because (2^63 - 1) mod 5 = 2: this k is genuinely NOT a
+        // cardinal. With n = 7 it would be, since 2^63 = 1 (mod 7).
+        let huge = usize::MAX / 2;
+        let ph = 2.0 * std::f64::consts::PI * (huge as f64) / (5.0_f64);
+        assert_eq!(turn_cos_sin(huge, 5), (ph.cos(), ph.sin()));
+        // ...and where it IS a cardinal, it must be claimed: (2^63 - 1) is a
+        // multiple of 7, so that angle is a whole number of turns.
+        assert_eq!(turn_cos_sin(huge, 7), (1.0, 0.0));
+    }
+
+    /// Divisibility is decided in DEGREES. Dividing first and asking whether
+    /// the quotient came out whole is a different question that answers YES for
+    /// angles nowhere near a right angle.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the exactness IS the assertion: these two lines pin that the counterexample is \
+                  88 degrees off a cardinal AND that dividing by 90 nevertheless yields a whole \
+                  quotient, which is the whole reason the divisibility test cannot be written that \
+                  way. An approximate comparison here would assert nothing."
+    )]
+    fn the_cardinal_test_is_divisibility_and_not_a_whole_quotient() {
+        assert_eq!(deg_cos_sin(0.0), (1.0, 0.0));
+        assert_eq!(deg_cos_sin(90.0), (0.0, 1.0));
+        assert_eq!(deg_cos_sin(180.0), (-1.0, 0.0));
+        assert_eq!(deg_cos_sin(270.0), (0.0, -1.0));
+        assert_eq!(deg_cos_sin(-90.0), (0.0, -1.0));
+        assert_eq!(deg_cos_sin(360.0), (1.0, 0.0));
+
+        // THE COUNTEREXAMPLE. `deg / 90.0` is an exact integer here, and the
+        // angle is 88 degrees away from a cardinal. It must take the fallback.
+        let liar = 39_999_999_992_000_128.0_f64;
+        assert_eq!(liar % 360.0, 88.0, "the fixture is 88 degrees off cardinal");
+        assert_eq!((liar / 90.0).fract(), 0.0, "and the quotient reads whole");
+        let rad = liar.to_radians();
+        assert_eq!(deg_cos_sin(liar), (rad.cos(), rad.sin()));
+
+        // Ordinary non-cardinal angles are untouched.
+        for deg in [1.0_f64, 30.0, 45.0, 89.9, 91.0, 137.5] {
+            let rad = deg.to_radians();
+            assert_eq!(deg_cos_sin(deg), (rad.cos(), rad.sin()), "deg={deg}");
+        }
+    }
 }
